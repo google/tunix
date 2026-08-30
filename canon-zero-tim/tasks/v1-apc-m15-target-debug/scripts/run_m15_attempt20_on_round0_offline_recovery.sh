@@ -168,6 +168,18 @@ recover_core() {
     printf '%s\n' INVALID_OR_CLASSIFIER_FAILED > "$status_file"
     return 3
   fi
+  read -r review_status classification_available < <(python3 - \
+      "$output/ATTEMPT20_ON_R0_RECOVERY.json" <<'PY'
+import json
+import sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(value["status"], int(value["classification_available"]))
+PY
+  )
+  if [ "$classification_available" -ne 1 ]; then
+    printf '%s\n' "$review_status" > "$status_file"
+    return 3
+  fi
   printf '%s\n' RECOVERY_COMPLETE > "$status_file"
   return 0
 }

@@ -79,6 +79,7 @@ set +a
 # Only the exact optimized M15/main concept run may demote finite A-B drift.
 # Every neighboring FrozenLake lane, including P45 Zero, remains strict.
 P57_ZERO_ALIGNMENT_WARNING_EXPECTED=0
+M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED=0
 if [ "${CANON_PROFILE_FILE:-}" = \
        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
    [ "${CANON_PROFILE:-}" = \
@@ -96,6 +97,32 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
    [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "disabled" ]; then
   P57_ZERO_ALIGNMENT_WARNING_EXPECTED=1
+fi
+if [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ] && \
+   [ "${CANON_PROFILE:-}" = \
+       "qwen3-8b-dp8-tp8-frozenlake-apc-debug" ] && \
+   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+   { [ "${CANON_APC_M15_TARGET_DEBUG:-}" = "off" ] || \
+     [ "${CANON_APC_M15_TARGET_DEBUG:-}" = "on" ]; } && \
+   [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+   [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
+   [ "${CANON_P57_DATA_SPLIT:-}" = "main" ] && \
+   [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+   [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+   [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] && \
+   [ "${CANON_P38_CONTROLLED_EXIT:-}" = "1" ] && \
+   [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "3" ] && \
+   [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ] && \
+   [ "${CANON_P38_SEAM_OBSERVER:-}" = "layer" ] && \
+   [ "${CANON_P38_TAIL_OBSERVER:-}" = "1" ] && \
+   [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-}" = "0" ] && \
+   [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
+   [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
+   [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
+   [ "${CANON_DP_SIZE:-}" = "8" ] && \
+   [ "${CANON_TP_SIZE:-}" = "8" ]; then
+  M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED=1
 fi
 
 P57_STOCK_FAST=0
@@ -174,8 +201,14 @@ echo "[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to S
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0
 req() { [ -n "${!1:-}" ] || { echo "[env] MISSING: $1" >&2; fail=1; }; }
-if [[ -v CANON_M15_TOKEN_CONTINUITY ]]; then
-  echo "[env] CANON_M15_TOKEN_CONTINUITY is disabled in production profiles" >&2
+if [ "$M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED" = "1" ]; then
+  [ "${CANON_M15_TOKEN_CONTINUITY:-}" = "exact" ] || {
+    echo "[env] M15 APC layer re-baseline requires CANON_M15_TOKEN_CONTINUITY=exact" >&2
+    fail=1
+  }
+  echo "[env] M15 APC debug exact TITO enabled mode=${CANON_M15_TOKEN_CONTINUITY:-missing} arm=${CANON_APC_M15_TARGET_DEBUG:-missing} observer=layer rounds=3"
+elif [[ -v CANON_M15_TOKEN_CONTINUITY ]]; then
+  echo "[env] CANON_M15_TOKEN_CONTINUITY is outside its registered APC debug identity" >&2
   fail=1
 fi
 case "${CANON_APC_M15_TARGET_DEBUG:-}" in

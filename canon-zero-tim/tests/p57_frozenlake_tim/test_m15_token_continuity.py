@@ -49,6 +49,61 @@ def _environment(mode: str = "verify") -> dict[str, str]:
   }
 
 
+def _debug_environment(
+    mode: str = "exact", arm: str = "on"
+) -> dict[str, str]:
+  return {
+      token_continuity.M15_TOKEN_CONTINUITY_ENV: mode,
+      "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+      "CANON_PROFILE_FILE": (
+          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env"
+      ),
+      "CANON_PROFILE": "qwen3-8b-dp8-tp8-frozenlake-apc-debug",
+      "CANON_APC_M15_TARGET_DEBUG": arm,
+      "CANON_V1_HP_FULL": "0",
+      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+      "CANON_P57_DATA_SPLIT": "main",
+      "CANON_P33_RUN_STAGE": "backward-no-commit",
+      "CANON_P33_NO_COMMIT": "1",
+      "CANON_P38_PRECHECK_ONLY": "1",
+      "CANON_P38_CONTROLLED_EXIT": "1",
+      "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
+      "CANON_P38_DURABILITY_PROFILE": "m15-wide-v1",
+      "CANON_P38_SEAM_OBSERVER": "layer",
+      "CANON_P38_TAIL_OBSERVER": "1",
+      "CANON_P33_ENABLE_EVAL": "0",
+      "CANON_P33_DISABLE_EVAL": "1",
+      "CANON_P31_ENABLE_EVAL": "0",
+      "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_DP_SIZE": "8",
+      "CANON_TP_SIZE": "8",
+  }
+
+
+def _onehost_environment(
+    mode: str = "exact", apc: str = "1"
+) -> dict[str, str]:
+  return {
+      token_continuity.M15_TOKEN_CONTINUITY_ENV: mode,
+      "CANON_V1_HP_FULL": "0",
+      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+      "CANON_P57_DATA_SPLIT": "main",
+      "CANON_P33_RUN_STAGE": "backward-no-commit",
+      "CANON_P33_NO_COMMIT": "1",
+      "CANON_P38_PRECHECK_ONLY": "1",
+      "CANON_P38_CONTROLLED_EXIT": "1",
+      "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
+      "CANON_P38_ONEHOST_REHEARSAL": "1",
+      "CANON_P33_ENABLE_EVAL": "0",
+      "CANON_P33_DISABLE_EVAL": "1",
+      "CANON_P31_ENABLE_EVAL": "0",
+      "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_DP_SIZE": "1",
+      "CANON_TP_SIZE": "4",
+      "CANON_VLLM_ENABLE_PREFIX_CACHING": apc,
+  }
+
+
 def _trajectory(*, env_tokens=np.asarray([301, 302], dtype=np.int32)):
   return types.SimpleNamespace(
       prompt_tokens=np.asarray([0, 0, 101], dtype=np.int32),
@@ -83,6 +138,51 @@ class M15TokenContinuityTest(unittest.TestCase):
         ("CANON_DP_SIZE", "16"),
     ):
       values = _environment()
+      values[field] = value
+      with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+        token_continuity.m15_token_continuity_mode(values)
+
+  def test_exact_selector_admits_only_registered_apc_layer_rebaseline(self):
+    for arm in ("off", "on"):
+      self.assertEqual(
+          token_continuity.m15_token_continuity_mode(
+              _debug_environment(arm=arm)
+          ),
+          "exact",
+      )
+    for field, value in (
+        (token_continuity.M15_TOKEN_CONTINUITY_ENV, "verify"),
+        ("CANON_APC_M15_TARGET_DEBUG", ""),
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "1"),
+        ("CANON_P38_DURABILITY_PROFILE", "m15-e0-kv-v1"),
+        ("CANON_P38_SEAM_OBSERVER", "full"),
+        ("CANON_P57_TIM_ARM", "zero"),
+        ("CANON_DP_SIZE", "16"),
+    ):
+      values = _debug_environment()
+      values[field] = value
+      with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+        token_continuity.m15_token_continuity_mode(values)
+
+  def test_exact_selector_admits_only_bounded_onehost_rehearsal(self):
+    for apc in ("0", "1"):
+      self.assertEqual(
+          token_continuity.m15_token_continuity_mode(
+              _onehost_environment(apc=apc)
+          ),
+          "exact",
+      )
+    for field, value in (
+        (token_continuity.M15_TOKEN_CONTINUITY_ENV, "verify"),
+        ("CANON_VLLM_ENABLE_PREFIX_CACHING", ""),
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "1"),
+        ("CANON_P38_ONEHOST_REHEARSAL", "0"),
+        ("CANON_APC_M15_TARGET_DEBUG", "on"),
+        ("CANON_P32_WORKLOAD", "frozenlake"),
+        ("CANON_PROFILE_FILE", "unexpected.env"),
+        ("CANON_DP_SIZE", "8"),
+    ):
+      values = _onehost_environment()
       values[field] = value
       with self.subTest(field=field, value=value), self.assertRaises(ValueError):
         token_continuity.m15_token_continuity_mode(values)

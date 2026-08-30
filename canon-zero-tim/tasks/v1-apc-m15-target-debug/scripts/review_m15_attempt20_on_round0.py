@@ -15,6 +15,8 @@ import subprocess
 import sys
 from typing import Any
 
+import numpy as np
+
 
 class Attempt20Round0RecoveryError(RuntimeError):
   """Raised when the recovered checkpoint cannot support a classification."""
@@ -61,6 +63,208 @@ def _copy(source: Path, destination: Path) -> None:
   _require(source.is_file() and source.stat().st_size > 0,
            f"recovered output is absent: {source.name}")
   shutil.copyfile(source, destination)
+
+
+def _load_source_classifier(path: Path):
+  spec = importlib.util.spec_from_file_location(
+      "attempt20_archived_kv_classifier", path
+  )
+  _require(spec is not None and spec.loader is not None,
+           "archived classifier cannot be loaded for failure audit")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def _request_sha256(value: Any) -> str:
+  return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _safe_comparison(value: dict[str, Any]) -> dict[str, Any]:
+  result = dict(value)
+  for field in ("source_a_request_id", "clean_b_request_id"):
+    raw = result.pop(field, "")
+    result[f"{field}_sha256"] = _request_sha256(raw)
+  return result
+
+
+def _prefix_audit(
+    target: np.ndarray, history: np.ndarray
+) -> dict[str, Any]:
+  target = np.asarray(target, dtype=np.int32).reshape(-1)
+  history = np.asarray(history, dtype=np.int32).reshape(-1)
+  common = min(target.size, history.size)
+  unequal = np.flatnonzero(target[:common] != history[:common])
+  if unequal.size:
+    first = int(unequal[0])
+    target_token = int(target[first])
+    history_token = int(history[first])
+  elif target.size != history.size:
+    first = common
+    target_token = int(target[first]) if first < target.size else None
+    history_token = int(history[first]) if first < history.size else None
+  else:
+    first = -1
+    target_token = None
+    history_token = None
+  return {
+      "target_tokens": int(target.size),
+      "history_tokens": int(history.size),
+      "longest_common_prefix_tokens": (
+          int(first) if first >= 0 else int(target.size)
+      ),
+      "first_mismatch_index": first,
+      "target_token_at_first_mismatch": target_token,
+      "history_token_at_first_mismatch": history_token,
+      "target_prefix_equal": bool(
+          target.size <= history.size
+          and np.array_equal(target, history[:target.size])
+      ),
+      "target_token_sha256": hashlib.sha256(
+          np.ascontiguousarray(target, dtype="<i8").tobytes()
+      ).hexdigest(),
+      "history_token_sha256": hashlib.sha256(
+          np.ascontiguousarray(history, dtype="<i8").tobytes()
+      ).hexdigest(),
+  }
+
+
+def _classifier_failure_audit(
+    *, extracted: Path, classifier_path: Path, capsule: Path
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+  """Builds a bounded receipt without treating unjoined KV data as red."""
+  classifier = _load_source_classifier(classifier_path)
+  try:
+    records = classifier._load_records(extracted)  # pylint: disable=protected-access
+    pairs = classifier._pair_records(records)  # pylint: disable=protected-access
+    diagnostic_round, histories = classifier._load_capsule_histories(  # pylint: disable=protected-access
+        capsule
+    )
+    comparisons = [
+        _safe_comparison(classifier._compare_pair(live, clean))  # pylint: disable=protected-access
+        for live, clean in pairs
+    ]
+  except Exception as error:  # The archived module owns its exception type.
+    raise Attempt20Round0RecoveryError(
+        "archived classifier inputs cannot support a bounded failure audit"
+    ) from error
+
+  matrix = []
+  exact_prefixes = 0
+  red_joins = 0
+  for live, _clean in pairs:
+    target = np.asarray(live["arrays"]["token_ids"], dtype=np.int32)
+    for history in histories:
+      row = _prefix_audit(target, history["tokens"])
+      row.update({
+          "diagnostic_round": int(live["diagnostic_round"]),
+          "source_a_record_index": int(live["record_index"]),
+          "source_a_request_id_sha256": _request_sha256(
+              live["request_id"]
+          ),
+          "capsule_source_row": int(history["source_row"]),
+          "capsule": str(history["capsule"]),
+      })
+      mismatch_at_or_before_target = any(
+          int(history["prompt_length"]) + int(position) <= target.size
+          for position in history["mismatch_positions"]
+      )
+      row["red_position_at_or_before_target"] = bool(
+          mismatch_at_or_before_target
+      )
+      exact_prefixes += int(row["target_prefix_equal"])
+      red_joins += int(
+          row["target_prefix_equal"] and mismatch_at_or_before_target
+      )
+      matrix.append(row)
+
+  status = (
+      "TOKEN_HISTORY_JOIN_MISMATCH"
+      if exact_prefixes == 0
+      else "INVALID_OR_CLASSIFIER_FAILED"
+  )
+  audit = {
+      "schema": "m15-attempt20-token-join-audit-v1",
+      "status": status,
+      "diagnostic_round": diagnostic_round,
+      "observer_pairs": len(pairs),
+      "capsule_histories": len(histories),
+      "matrix_rows": len(matrix),
+      "exact_target_prefix_candidates": exact_prefixes,
+      "red_join_candidates": red_joins,
+      "minimum_longest_common_prefix_tokens": min(
+          row["longest_common_prefix_tokens"] for row in matrix
+      ),
+      "maximum_longest_common_prefix_tokens": max(
+          row["longest_common_prefix_tokens"] for row in matrix
+      ),
+      "rows": matrix,
+  }
+  return status, audit, comparisons
+
+
+def _write_failure_output(
+    *, output: Path, analysis_source: str, expected_source: str,
+    receipt_path: Path, manifest: Path, receipt: dict[str, Any],
+    round_input: dict[str, Any], classifier_log: Path, classifier_rc: int,
+    status: str, token_join_audit: dict[str, Any],
+    comparisons: list[dict[str, Any]],
+) -> dict[str, Any]:
+  report = {
+      "schema": "m15-attempt20-on-round0-offline-recovery-v1",
+      "status": status,
+      "analysis_source_commit": analysis_source,
+      "target_source_commit": expected_source,
+      "arm": "on",
+      "diagnostic_round": 0,
+      "failure_stage": "source-bound-classifier",
+      "classifier_returncode": classifier_rc,
+      "classifier_log_sha256": _sha256(classifier_log),
+      "a_b_differing_bytes": round_input["a_b_differing_bytes"],
+      "a_b_differing_elements": round_input["a_b_differing_elements"],
+      "b_c_differing_bytes": round_input["b_c_differing_bytes"],
+      "b_c_differing_elements": round_input["b_c_differing_elements"],
+      "classifier_input_archive_sha256": receipt["archive_sha256"],
+      "classifier_input_manifest_sha256": receipt["manifest_sha256"],
+      "classification": None,
+      "classification_available": False,
+      "round_input_recovered": True,
+      "unbound_observer_comparisons": comparisons,
+      "token_join_audit": token_join_audit,
+      "b_full_reset_runtime_receipt_available": False,
+      "all_num_cached_tokens_zero_runtime_receipt_available": False,
+      "rounds_recovered": [],
+      "three_round_verdict": False,
+      "terminal_pair_complete": False,
+      "target_rerun": False,
+      "numerical_repair_authorized": False,
+      "remote_mutation": False,
+      "claim_ceiling": (
+          "NO_CLASSIFICATION / INCONCLUSIVE / NO_TARGET_PASS / "
+          "B_RESET_RUNTIME_RECEIPT_UNAVAILABLE / "
+          "NO_NUMERICAL_REPAIR_AUTHORIZATION"
+      ),
+  }
+  output.mkdir(mode=0o700)
+  _copy(classifier_log, output / "raw_classifier_error.log")
+  _copy(
+      receipt_path,
+      output / "on.round-000000.classifier-input-receipt.json",
+  )
+  _copy(
+      manifest,
+      output / "on.round-000000.classifier-input-sha256sums",
+  )
+  report_path = output / "ATTEMPT20_ON_R0_RECOVERY.json"
+  report_path.write_text(
+      json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+  )
+  names = sorted(path.name for path in output.iterdir() if path.is_file())
+  (output / "SHA256SUMS").write_text(
+      "".join(f"{_sha256(output / name)}  {name}\n" for name in names),
+      encoding="ascii",
+  )
+  return report
 
 
 def recover(
@@ -197,8 +401,26 @@ def recover(
         stderr=subprocess.STDOUT,
         check=False,
     )
-  _require(completed.returncode == 0,
-           "archived source-bound classifier failed")
+  if completed.returncode != 0:
+    status, token_join_audit, comparisons = _classifier_failure_audit(
+        extracted=extracted,
+        classifier_path=classifier_path,
+        capsule=capsule,
+    )
+    return _write_failure_output(
+        output=output,
+        analysis_source=analysis_source,
+        expected_source=expected_source,
+        receipt_path=receipt_path,
+        manifest=manifest,
+        receipt=receipt,
+        round_input=round_input,
+        classifier_log=classifier_log,
+        classifier_rc=completed.returncode,
+        status=status,
+        token_join_audit=token_join_audit,
+        comparisons=comparisons,
+    )
 
   classification = _json(classification_path, "offline classification")
   comparisons = classification.get("comparisons", [])
@@ -353,9 +575,16 @@ def main() -> int:
     print(f"[M15.E0U.ON-R0] INVALID {error}", file=sys.stderr)
     return 2
   print(
-      "[M15.E0U.ON-R0] LOCAL_CLASSIFICATION_COMPLETE "
-      f"status={report['status']} classification={report['classification']} "
-      "rounds=1 three_round_verdict=0 numerical_repair_authorized=0"
+      (
+          "[M15.E0U.ON-R0] LOCAL_CLASSIFICATION_COMPLETE "
+          if report["classification_available"]
+          else "[M15.E0U.ON-R0] FAILURE_AUDIT_COMPLETE "
+      )
+      + f"status={report['status']} "
+      + f"classification={report['classification'] or 'NONE'} "
+      + "rounds="
+      + ("1 " if report["classification_available"] else "0 ")
+      + "three_round_verdict=0 numerical_repair_authorized=0"
   )
   return 0
 

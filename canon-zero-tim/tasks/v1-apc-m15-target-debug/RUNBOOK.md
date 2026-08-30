@@ -5,7 +5,122 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: recover Attempt-20 treatment round 0, no target launch
+## Current operation: prepare published E0w source, then separately approve DP8xTP8 debug
+
+Do not rerun one-host labels `e0w1` through `e0w4`. Do not launch M15 full.
+E0w has passed the bounded four-chip v5p gate on its pre-rebase source, and
+the rebased publication source has passed canonical host plus the complete
+pinned image while preserving `m15_tito_default=off`. A bucket/target agent
+must fetch `origin/yuxzhang/canon-zero-tim`, create a new clean `local/*`
+worktree at the exact full remote-read SHA containing this runbook, and reject
+historical base `cd32949e...`, abbreviated SHAs, or inherited worktrees.
+
+The post-rebase canonical E0w host aggregate is PASS:
+
+```text
+M15_E0W_HOST_PASS task_discovery=225 return=1 round0_recovery=8 tito_postflight=7 onehost_arm=5 onehost_pair=5 onehost_runner=3 token_continuity=7 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 onehost_v5p=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0
+```
+
+Latest post-rebase raw log:
+`/home/yuxuan/code_rl_repro/m15-e0w-host-gate-postrebase-r1.log`, SHA256
+`fcf24a07c0ab7f6199fa0555ac583968568f58e9ed51bd59144e94eaf8140f05`.
+At handoff time the root filesystem reports 100% use with about 488 MiB
+available. Do not delete evidence; check capacity before another local gate.
+
+Latest complete post-rebase pinned-image raw log:
+`/home/yuxuan/code_rl_repro/m15-e0w-exact-image-postrebase-r1.log`, SHA256
+`7f4b2dc4703ce4713b5ed2a6802f279481f27a7cd60eec301678a3b114984b49`.
+It exited zero with `V1_HP_EXACT_IMAGE_PASS`, `m15_tito_impl=1`,
+`m15_tito_default=off`, TiTO `7`, arm `5`, pair `5`, runner `3`, durability
+`1`, round provenance `1`, and `manifests=3`.
+
+One-host label `e0w4` completed `ONEHOST_PAIR_EXACT`: both APC-off and APC-on
+have A-B `[0,0,0]`, B-C `[0,0,0]`, three B full-reset receipts, and TiTO
+receipt counts `[4,7,6]`; APC-on reached 91.5% cache hits. Root manifest
+SHA256 is
+`b52fe75af56f5c66c2ba352d25163a18ab854c823b17c71d91a555fc02155589`.
+This pre-rebase result is DP1xTP4 carrier evidence only; it is not inherited
+by the rebased source. `target_executed=false` and numerical repair remains
+unauthorized. The immutable `e0w1/e0w2/e0w3` failures are
+documented at the top of `HANDOFF.md` and must not be deleted or reused.
+
+The next command is prepare-only on the bucket-capable machine after its clean
+worktree preflight:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_e0v_tito_layer_pair.sh \
+  <full-published-SHA> <fresh-label> <new-local-output-directory>
+```
+
+Preparation and target launch are distinct. Return the prepared contract and
+ask for explicit DP8xTP8 apply/launch approval. If approved, run only the fresh
+matched three-round E0v debug pair. DP8xTP8 remains NOT RUN; no FIRST_RED and
+no APC numerical fix have been obtained.
+
+## Superseded by E0w: audit preserved E0u scratch; prepare TiTO layer only
+
+E0u already performed the read-only GCS recovery. Do not run it again. It
+retrieved and verified the treatment round-0 archive/manifest/receipt, but the
+archived classifier failed with
+`no paired observer candidate joined a red capsule row`. The incident bundle
+is `evidence/v1_apc_m15_attempt20_e0u_r0_recovery_20260830/`; its
+`SHA256SUMS` SHA256 is
+`827b4038d269870d5b72e4f432b9680c89d79923d8bb2952163daca0e60ea093`.
+
+On the same bucket-capable machine, check the already preserved scratch and
+run the local-only auditor exactly as specified in the first section of
+`HANDOFF.md`. The entrypoint is:
+
+```text
+scripts/run_m15_attempt20_on_round0_preserved_scratch_audit.sh
+```
+
+It must use the preserved `remote/` trio and `classifier.log`; it does not
+call GCS. It returns A-B/B-C, object hashes, eight unbound A/B KV comparisons,
+and a bounded token-prefix matrix. A result of
+`TOKEN_HISTORY_JOIN_MISMATCH` remains `classification=NONE`; do not interpret
+unbound fingerprints as a live-KV mechanism verdict.
+
+The new target program is a three-round exact-TiTO layer re-baseline, not the
+historical KV3 selector. After publication, prepare it only with:
+
+```text
+scripts/prepare_m15_e0v_tito_layer_pair.sh
+```
+
+The wrapper requires a clean exact-SHA local branch, a fresh label, and a new
+output path. Both APC arms receive `CANON_M15_TOKEN_CONTINUITY=exact`; only
+APC remains different. `kv`, `kv3`, `full`, `none`, one-round, wrong topology,
+or training-identity leakage fails closed. The output must attest
+`historical_1226_prefix_reused=false`, `historical_first_red_inherited=false`,
+zero backward/optimizer commit, `launch_authorized=false`, and
+`target_executed=false`.
+
+Runtime postflight parses the real log and requires exact-equal bounded TiTO
+receipts in each of rounds 1/3, 2/3, and 3/3 before accepting the diagnostic.
+Any different/malformed/missing receipt voids the target before A/B/C is
+interpreted.
+
+Current ladder:
+
+```text
+focused CPU -> canonical host -> separately approved pinned exact-image
+-> separately approved fresh matched DP8xTP8 pair
+```
+
+Canonical host is now PASS:
+
+```text
+M15_E0V_HOST_PASS task_discovery=210 return=1 round0_recovery=8 tito_postflight=5 token_continuity=6 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0
+```
+
+Preserved-scratch execution and official pinned image remain NOT RUN.
+
+No command in this superseded section authorizes Docker, GCS, Kubernetes, or
+TPU. See the current operation and `HANDOFF.md` for exact commands, response
+schema, and decisions.
+
+## Superseded operation: E0u GCS recovery already executed; do not rerun
 
 Attempt 20 already ran on DP8×TP8. Do not render or apply another pair. Its
 committed return is `ROUND_EVIDENCE_PARTIAL`: APC-off rounds 0/1/2 are exact,

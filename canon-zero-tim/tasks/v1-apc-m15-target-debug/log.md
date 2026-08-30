@@ -1593,3 +1593,190 @@ is not a current fact or launch authority.
   RERUN. No commit, push, Docker, GCS, Kubernetes, TPU, or other external
   mutation occurred. Commit/push, exact-image, GCS read, and any future target
   launch remain separate user approvals.
+
+## 2026-08-30 — E0u join failure preserved; exact-TiTO layer re-baseline HOST PASS
+
+- Pulled published commit
+  `cd32949e9b63b927e99f3cfba724f4f5f6d03cda` and verified the new E0u
+  incident bundle. Its manifest SHA256 is
+  `827b4038d269870d5b72e4f432b9680c89d79923d8bb2952163daca0e60ea093`.
+  The archived classifier failed at the exact token-prefix red join and
+  returned `classification=NONE`; the report records a first token divergence
+  at index 913 in a 1226-token observer vector. The compact return omits the
+  input hashes/counters and a machine-replayable join audit, so the reported
+  pre-TiTO explanation remains carrier evidence rather than an APC mechanism
+  verdict.
+- Changed E0u failure handling so a source-bound classifier failure preserves
+  archive/manifest hashes, A-B/B-C counters, eight unbound A/B KV comparisons,
+  and a bounded observer-by-capsule LCP matrix with hashed request IDs. Zero
+  exact prefixes returns `TOKEN_HISTORY_JOIN_MISMATCH`; every failure retains
+  `classification=NONE`, no completed rounds, unavailable B-reset receipts,
+  and no numerical repair authority.
+- Added a local-only preserved-scratch wrapper. It requires the existing
+  downloaded trio and original classifier log, reruns the archived classifier
+  on CPU, and emits a self-hashed compact audit. It has no GCS/Kubernetes/TPU
+  command and preserves new scratch/logs on failure.
+- Admitted `CANON_M15_TOKEN_CONTINUITY=exact` for one new diagnostic identity
+  only: M15 APC debug DP8xTP8 off/on, strict backward-no-commit,
+  `observer=layer`, `m15-wide-v1`, three rounds. Renderer, debug profile,
+  `00_env.sh`, resolved-env reload, exact reader, and postflight all bind the
+  same tuple. `kv`, `kv3`, `full`, `none`, one round, verify mode, foreign arm,
+  training identity, or other topology fails closed.
+- Added a runtime TiTO postflight requiring at least one exact-equal bounded
+  receipt in each ordered diagnostic round, no different/malformed receipt,
+  zero backward, and zero optimizer commits. Added a prepare-only matched-pair
+  wrapper that refuses historical KV selectors and records
+  `historical_1226_prefix_reused=false` and
+  `historical_first_red_inherited=false`.
+- Canonical host aggregate PASS:
+  `M15_E0V_HOST_PASS task_discovery=210 return=1 round0_recovery=8
+  tito_postflight=5 token_continuity=6 v1_cpu=92 p3_prefix_cache=31
+  persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1
+  exact_image=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0`.
+  Raw log `/tmp/m15-e0v-host-gate-20260830-r1.log`, SHA256
+  `75f7263daea0768ef74dc7c27cbabeae35c438045a4d0ec1d7be7928ef697e69`.
+- Claim boundary: exact TiTO changes later-turn input, so historical D3e Layer
+  0 `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, and prefix 1226 are
+  retained as history but not inherited by a fresh target. Numerical code and
+  production APC defaults are unchanged; Phase E remains closed.
+- External status: preserved-scratch execution NOT RUN; pinned exact-image NOT
+  RUN; target NOT RERUN. No commit, push, Docker, real GCS, Kubernetes, TPU, or
+  other external mutation occurred. Next gates require separate publication,
+  pinned-image, and target approvals.
+
+## 2026-08-30 — E0w exact-TiTO one-host carrier implemented; HOST PASS
+
+- User clarified that any future launch is only the fresh three-round debug
+  pair, not M15 full, and approved a one-host v5p preflight before that target.
+  Repository gate order still requires the updated pinned exact-image first.
+- Added an exact-only one-host token identity using the existing
+  `CANON_P38_ONEHOST_REHEARSAL=1`: DP1xTP4, M15/main, APC exactly 0/1, three
+  rounds, strict no-commit, no target selector/profile. The DP8xTP8 target
+  identity continues to reject one-host masquerading.
+- Added one-host arm and pair runners plus fail-closed classifiers. The pair
+  runs APC-off before APC-on, binds source/diff/image, and preserves both
+  `ONEHOST_PAIR_EXACT` and `ONEHOST_RED_REPRODUCED` as complete one-host
+  outcomes. Control red, B-C red, token drift, missing receipt, hash drift, or
+  infrastructure failure stops without a target claim.
+- Extended the existing M15 B provenance gate to the signed exact-TiTO
+  one-host identity. Every diagnostic round must now contain runtime proof of
+  `reset_prefix_cache=True` and all cached-token counts zero. This adds a
+  fatal check and receipt only; B still performs the same full recomputation.
+- Focused CPU PASS: token identity 7/7, TiTO postflight 7/7, one-host arm
+  classifier 5/5, pair classifier 5/5, runner contract 3/3. Task discovery is
+  225/225.
+- Canonical command:
+  `bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0_kv3_host_gate.sh`.
+  Terminal:
+  `M15_E0W_HOST_PASS task_discovery=225 return=1 round0_recovery=8
+  tito_postflight=7 onehost_arm=5 onehost_pair=5 onehost_runner=3
+  token_continuity=7 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409
+  manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 onehost_v5p=0
+  target_rerun=0 gcs=0 kubernetes=0 tpu=0`.
+- Raw host log `/tmp/m15-e0w-host-gate-20260830-r2.log`, SHA256
+  `6936864c8b4173d89003702a18f974d18cb9752bf70f8523f27137d4bb6cd22d`,
+  220 lines / 27,891 bytes.
+- The local pinned image resolved read-only to
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+  The TPU lane was checked read-only and was idle after another short-lived
+  container exited. No container was stopped or modified.
+- External status: updated pinned exact-image NOT RUN; one-host v5p NOT RUN;
+  DP8xTP8 target NOT RUN. No commit, push, real GCS, Kubernetes, or TPU action
+  occurred. Read-only Docker inventory/image inspection occurred; exact-image
+  still requires explicit approval.
+
+## 2026-08-30 — E0w pinned image and DP1xTP4 exact-TiTO pair PASS
+
+- User explicitly approved both the official pinned exact-image aggregate and
+  the bounded one-host v5p pair. No DP8xTP8, GCS, or Kubernetes operation was
+  approved or executed.
+- Four complete pinned-image aggregates were preserved while carrier defects
+  were repaired. The latest source-matched gate is r4:
+  `/tmp/m15-e0w-exact-image-20260830-r4.log`, SHA256
+  `65a1c193887601db845aada30532bddce1b6b69b5d79c266b1357f4d0414c105`,
+  1,194 lines / 246,198 bytes, exit zero. Terminal includes
+  `V1_HP_EXACT_IMAGE_PASS`, `m15_e0v_tito=7`, arm/pair/runner `5/5/3`,
+  durability and round provenance `1/1`, and `manifests=3`.
+- `e0w1` stopped before model execution because the M15/main CLI values did
+  not match their signed environment fields. Its raw SHA256 is
+  `7972c983a98dd108b119f291fe5a8325d2f2141ba9da2673127d72384700edbb`;
+  root manifest SHA256 is
+  `1e528e853f2a5daa3c0189ca51f4ccda69fe832e91c43328911e363e16d73f75`.
+- `e0w2` passed that gate but stopped because materialized P57 workloads only
+  admitted a production profile. Its raw SHA256 is
+  `692fd07e2f644d56eaf3206549965d619af16d3140ae3f5b2eaeb617e3ba8f64`;
+  root manifest SHA256 is
+  `ee002aaaed4408ebc16d45e8836de246783fd70817edbb09f9f5f34cb2120a0d`.
+  The entrypoint now accepts profile absent only after the exact one-host M15
+  token selector validates every registered identity field; M15 max turns is
+  explicitly 15. Production profile admission is unchanged.
+- `e0w3` initialized the real Qwen3-8B engine and KV cache, then stopped before
+  rollout because the trainer state used `('fsdp','tp')` while the canonical
+  adapter requires replicated `('dp','tp')` or `('data','model')`. Its raw
+  SHA256 is
+  `c145a6a57018ad81bbbfd5e94c9b2b1ad351ea748f491989555a3337b24fd634`;
+  root manifest SHA256 is
+  `df2571fab48ed21c77c7c25536528cbd344bec4f0a4760898e3fc4f0d253a96f`.
+  The runner now passes `--mesh_dp=1 --mesh_tp=4`; the adapter was not relaxed.
+- Fresh label `e0w4` completed in about sixteen minutes with terminal
+  `ONEHOST_PAIR_EXACT`. APC-off and APC-on each completed three strict rounds;
+  A-B and B-C differing-byte vectors are `[0,0,0]`; APC-on maximum prefix-cache
+  hit rate is 91.5%. Exact TiTO receipt counts are `[4,7,6]` per arm and B
+  full-reset/all-cached-token-zero receipt counts are `[1,1,1]` per arm.
+  Backward and optimizer commits are zero.
+- Successful evidence root:
+  `/mnt/disks/tunix-data/logp_probe_1host/m15_e0v_tito_e0w4_pair`. Root/off/on
+  manifests all verify. Root manifest SHA256 is
+  `b52fe75af56f5c66c2ba352d25163a18ab854c823b17c71d91a555fc02155589`;
+  pair classification SHA256 is
+  `0bb73f87e55eb7aa15e1f8298fd213dce33d67c39ee388c267ceafc52f6043af`.
+- Claim boundary: this is a DP1xTP4 carrier/mechanism PASS, not DP8xTP8 target
+  evidence. It does not inherit the historical Layer-0 interval and does not
+  authorize numerical repair. The first failure boundary for the target
+  remains unknown under exact TiTO; target shape is therefore `NONE`.
+- Current mutation state: local Docker CPU gates and one-host TPU execution
+  occurred. No commit, push, GCS, Kubernetes, or DP8xTP8 target mutation
+  occurred. The dirty E0v/E0w delta remains unpublished on base
+  `cd32949e9b63b927e99f3cfba724f4f5f6d03cda`; publication and target launch
+  each require separate explicit approval.
+- Final post-ledger canonical host aggregate also exits zero with
+  `M15_E0W_HOST_PASS`. Raw log
+  `/tmp/m15-e0w-host-gate-20260830-r3.log`, SHA256
+  `4a159cbed02337b4c878de582e06f319d991e1609f04da2b9de3f8d3c8af9762`,
+  220 lines / 27,891 bytes. The root filesystem then reports 100% use with
+  about 488 MiB available. No evidence was deleted; capacity must be checked
+  before another expensive local gate.
+
+## 2026-08-30 — E0w rebased publication admission PASS
+
+- User explicitly approved commit and push. The local E0v/E0w commit was
+  first rebased in a straight line onto fetched remote tip
+  `29c923dc042654a59968f9b062a72c3d30646230`; four documentation/admission
+  conflicts were resolved by preserving production M15 rendered-text and
+  `m15_tito_default=off`, while exact TiTO remains limited to the APC debug
+  and signed one-host identities.
+- Before push, remote advanced once more to
+  `89ef0ad567d5abe33074a53c6655a6b8bc80cf6e`. That commit adds only nine
+  incident evidence files; it changes no executable, profile, test, M15
+  handoff, or exact-image runner. The final straight-line rebase therefore
+  preserves the exact execution tree exercised by the recorded gates.
+- Canonical flag audit initially failed because an added log marker and a
+  non-settable prefix looked like flags. The B-contract marker is now listed
+  in the marker registry, and the historical-KV exclusion uses the closed set
+  of nine registered flag names. Final audit is 409/409 PASS.
+- Post-rebase canonical host raw log:
+  `/home/yuxuan/code_rl_repro/m15-e0w-host-gate-postrebase-r1.log`, SHA256
+  `fcf24a07c0ab7f6199fa0555ac583968568f58e9ed51bd59144e94eaf8140f05`,
+  220 lines / 27,857 bytes, terminal `M15_E0W_HOST_PASS`.
+- Post-rebase official pinned-image raw log:
+  `/home/yuxuan/code_rl_repro/m15-e0w-exact-image-postrebase-r1.log`, SHA256
+  `7f4b2dc4703ce4713b5ed2a6802f279481f27a7cd60eec301678a3b114984b49`,
+  1,194 lines / 246,183 bytes, exit zero. Its unique terminal contains
+  `m15_tito_impl=1 m15_tito_default=off`, E0w `7/5/5/3`,
+  durability/provenance `1/1`, and `manifests=3`.
+- The old `e0w4` DP1xTP4 result remains valid only for its bound pre-rebase
+  source/diff. No rebased-source TPU, GCS, Kubernetes, or DP8xTP8 target ran.
+  Target first-red shape remains `NONE`; Phase E stays closed.
+- Next: publish, remote-read the exact full SHA, then let the bucket-capable
+  agent create a clean worktree and run prepare-only. Applying the matched
+  three-round DP8xTP8 pair remains a separate explicit approval.

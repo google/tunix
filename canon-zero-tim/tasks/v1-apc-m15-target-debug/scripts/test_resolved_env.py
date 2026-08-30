@@ -7,6 +7,7 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,15 @@ renderer = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = renderer
 SPEC.loader.exec_module(renderer)
 
+TOKEN_PATH = ROOT / "tunix/rl/agentic/token_continuity.py"
+TOKEN_SPEC = importlib.util.spec_from_file_location(
+    "m15_debug_token_continuity", TOKEN_PATH
+)
+assert TOKEN_SPEC and TOKEN_SPEC.loader
+token_continuity = importlib.util.module_from_spec(TOKEN_SPEC)
+sys.modules[TOKEN_SPEC.name] = token_continuity
+TOKEN_SPEC.loader.exec_module(token_continuity)
+
 
 def _literal_env(document: dict) -> dict[str, str]:
   container = renderer._container(document)  # pylint: disable=protected-access
@@ -35,6 +45,17 @@ def _literal_env(document: dict) -> dict[str, str]:
       for item in container["env"]
       if "value" in item
   }
+
+
+def _resolved_exports(text: str) -> dict[str, str]:
+  values = {}
+  for line in text.splitlines():
+    if not line.startswith("export "):
+      continue
+    name, raw = line.removeprefix("export ").split("=", 1)
+    parsed = shlex.split(raw)
+    values[name] = parsed[0] if parsed else ""
+  return values
 
 
 class ResolvedEnvironmentTest(unittest.TestCase):
@@ -51,6 +72,8 @@ class ResolvedEnvironmentTest(unittest.TestCase):
       wrong_seam_bound: bool = False,
       wrong_workload_identity: bool = False,
       wrong_entrypoint: bool = False,
+      drop_tito: bool = False,
+      leak_tito: bool = False,
   ):
     run_id = f"cpu-{uuid.uuid4().hex[:10]}"
     with tempfile.TemporaryDirectory(prefix="v1-apc-render-", dir="/tmp") as output:
@@ -67,6 +90,10 @@ class ResolvedEnvironmentTest(unittest.TestCase):
       document = yaml.safe_load(path.read_text(encoding="utf-8"))
       env = os.environ.copy()
       env.update(_literal_env(document))
+      if drop_tito:
+        env.pop("CANON_M15_TOKEN_CONTINUITY", None)
+      if leak_tito:
+        env["CANON_M15_TOKEN_CONTINUITY"] = "exact"
       state = Path(env["CANON_STATE"])
       state.mkdir(parents=True, exist_ok=False)
       self.addCleanup(shutil.rmtree, state)
@@ -139,6 +166,18 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_TAIL_OBSERVER=1", resolved)
     self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-wide-v1", resolved)
     self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
+    self.assertIn("export CANON_M15_TOKEN_CONTINUITY=exact", resolved)
+    self.assertIn(
+        "[env] M15 APC debug exact TITO enabled mode=exact arm=on "
+        "observer=layer rounds=3",
+        result.stdout,
+    )
+    self.assertEqual(
+        token_continuity.m15_token_continuity_mode(
+            _resolved_exports(resolved)
+        ),
+        "exact",
+    )
 
   def test_full_observer_resolves_with_exact_layer(self):
     result, resolved = self._resolve("off", observer="full", seam_layer=17)
@@ -148,6 +187,7 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertNotIn("export CANON_P38_TAIL_OBSERVER=", resolved)
     self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-wide-v1", resolved)
     self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
+    self.assertNotIn("export CANON_M15_TOKEN_CONTINUITY=", resolved)
 
   def test_targeted_kv_observer_resolves_with_exact_alias_contract(self):
     result, resolved = self._resolve("on", observer="kv")
@@ -169,7 +209,24 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_KV_OBSERVER_MAX_CANDIDATES=8", resolved)
     self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-e0-kv-v1", resolved)
     self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
+    self.assertNotIn("export CANON_M15_TOKEN_CONTINUITY=", resolved)
     self.assertNotIn("export CANON_P38_SEAM_OBSERVER=", resolved)
+
+  def test_layer_rebaseline_rejects_missing_exact_tito(self):
+    result, resolved = self._resolve(
+        "on", observer="layer", drop_tito=True
+    )
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    self.assertFalse(resolved)
+    self.assertIn("requires exact token continuity", result.stdout)
+
+  def test_kv3_rejects_exact_tito_leak(self):
+    result, resolved = self._resolve(
+        "on", observer="kv3", leak_tito=True
+    )
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    self.assertFalse(resolved)
+    self.assertIn("restricted to layer re-baseline", result.stdout)
 
   def test_wrong_profile_is_rejected_before_runtime(self):
     result, resolved = self._resolve("on", wrong_profile=True)

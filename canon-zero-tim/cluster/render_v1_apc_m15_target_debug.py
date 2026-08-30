@@ -204,6 +204,7 @@ def _capture_values(
     })
     if observer == "layer":
       values.update({
+          "CANON_M15_TOKEN_CONTINUITY": "exact",
           "CANON_P38_TAIL_OBSERVER": "1",
           "CANON_P38_TAIL_MAX_BYTES": str(_TAIL_MAX_BYTES),
       })
@@ -283,6 +284,7 @@ def validate(
       raise ValueError("M15 wide seam runs must not attach the KV observer")
     if env.get("CANON_P38_SEAM_OBSERVER") != "layer" or \
        env.get("CANON_P38_TAIL_OBSERVER") != "1" or \
+       env.get("CANON_M15_TOKEN_CONTINUITY") != "exact" or \
        "CANON_P38_SEAM_LAYER" in env:
       raise ValueError("M15 layer observer contract drifted")
   elif observer == "full":
@@ -296,6 +298,15 @@ def validate(
       raise ValueError("M15 full observer contract drifted")
   else:
     raise ValueError("observer must be none, kv, kv3, layer, or full")
+  if observer != "layer" and "CANON_M15_TOKEN_CONTINUITY" in env:
+    raise ValueError(
+        "M15 APC exact token continuity leaked outside layer re-baseline"
+    )
+  expected_tito_label = "exact" if observer == "layer" else "absent"
+  if document.get("metadata", {}).get("labels", {}).get(
+      "canon.zero-tim/m15-token-continuity"
+  ) != expected_tito_label:
+    raise ValueError("M15 APC token-continuity label drifted")
   command = shlex.split(env["CANON_RUN_CMD"])
   if tuple(command[:4]) != (
       "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
@@ -360,6 +371,9 @@ def render_all(
             "layer0-target-prefix" if observer in ("kv", "kv3") else "none"
         ),
         "canon.zero-tim/terminal-tail": "1" if observer == "layer" else "0",
+        "canon.zero-tim/m15-token-continuity": (
+            "exact" if observer == "layer" else "absent"
+        ),
         "canon.zero-tim/terminal-discriminator": "0",
         "canon.zero-tim/lm-head-algo": "0",
         "canon.zero-tim/fixed-lm-head": "1",

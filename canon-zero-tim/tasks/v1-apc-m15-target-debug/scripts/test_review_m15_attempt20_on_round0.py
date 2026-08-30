@@ -43,6 +43,9 @@ CLASSIFIER = (
 WRAPPER = Path(__file__).with_name(
     "run_m15_attempt20_on_round0_offline_recovery.sh"
 )
+SCRATCH_WRAPPER = Path(__file__).with_name(
+    "run_m15_attempt20_on_round0_preserved_scratch_audit.sh"
+)
 TARGET_SOURCE = "97e813de84f6c8b3e2ba911fc96ff8397b199603"
 ANALYSIS_SOURCE = "18f29c56daf471cc0ac011396d7c7a09f35d695b"
 
@@ -60,10 +63,13 @@ class Attempt20Round0RecoveryTest(unittest.TestCase):
       arm: str,
       *,
       changed: bool,
+      token_mismatch: bool = False,
   ) -> None:
     a_index = alias * 2
     index = a_index if arm == "A" else a_index + 1
-    token_ids = np.array([1, 2, 3], dtype=np.int32)
+    token_ids = np.array(
+        [1, 2, 8] if token_mismatch else [1, 2, 3], dtype=np.int32
+    )
     aggregates = np.zeros((1, 2, 4, 4), dtype=np.uint32)
     samples = np.zeros((1, 2, 4, 3, 2), dtype=np.uint16)
     if changed:
@@ -133,6 +139,7 @@ class Attempt20Round0RecoveryTest(unittest.TestCase):
       red: bool = True,
       fingerprint_differs: bool = True,
       ambiguous_binding: bool = False,
+      token_mismatch: bool = False,
   ) -> tuple[Path, Path, Path]:
     stage = root / "stage"
     stage.mkdir()
@@ -142,8 +149,11 @@ class Attempt20Round0RecoveryTest(unittest.TestCase):
           alias,
           "A",
           changed=red and fingerprint_differs and alias == 3,
+          token_mismatch=token_mismatch,
       )
-      self._record(stage, alias, "B", changed=False)
+      self._record(
+          stage, alias, "B", changed=False, token_mismatch=token_mismatch
+      )
 
     if red:
       self._capsule(stage)
@@ -320,19 +330,45 @@ class Attempt20Round0RecoveryTest(unittest.TestCase):
       scratch = root / "scratch"
       scratch.mkdir()
       output = root / "output"
-      with self.assertRaisesRegex(
-          review.Attempt20Round0RecoveryError, "classifier failed"
-      ):
-        review.recover(
-            archive=archive,
-            manifest=manifest,
-            receipt_path=receipt,
-            expected_source=TARGET_SOURCE,
-            analysis_source=ANALYSIS_SOURCE,
-            scratch=scratch,
-            output=output,
-        )
-      self.assertFalse(output.exists())
+      report = review.recover(
+          archive=archive,
+          manifest=manifest,
+          receipt_path=receipt,
+          expected_source=TARGET_SOURCE,
+          analysis_source=ANALYSIS_SOURCE,
+          scratch=scratch,
+          output=output,
+      )
+      self.assertEqual(report["status"], "INVALID_OR_CLASSIFIER_FAILED")
+      self.assertFalse(report["classification_available"])
+      self.assertEqual(
+          report["token_join_audit"]["exact_target_prefix_candidates"], 8
+      )
+      self.assertTrue((output / "raw_classifier_error.log").is_file())
+      self.assertEqual(len((output / "SHA256SUMS").read_text().splitlines()), 4)
+
+  def test_token_history_mismatch_preserves_bounded_failure_audit(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      report, output = self._recover(Path(tmp), token_mismatch=True)
+      self.assertEqual(report["status"], "TOKEN_HISTORY_JOIN_MISMATCH")
+      self.assertFalse(report["classification_available"])
+      self.assertEqual(report["a_b_differing_bytes"], 7)
+      self.assertEqual(report["b_c_differing_bytes"], 0)
+      self.assertEqual(
+          report["token_join_audit"]["exact_target_prefix_candidates"], 0
+      )
+      self.assertEqual(
+          report["token_join_audit"]["maximum_longest_common_prefix_tokens"],
+          2,
+      )
+      first = report["token_join_audit"]["rows"][0]
+      self.assertEqual(first["first_mismatch_index"], 2)
+      self.assertEqual(first["target_token_at_first_mismatch"], 8)
+      self.assertEqual(first["history_token_at_first_mismatch"], 3)
+      self.assertEqual(len(first["source_a_request_id_sha256"]), 64)
+      self.assertNotIn("source_a_request_id", first)
+      self.assertTrue((output / "raw_classifier_error.log").is_file())
+      self.assertEqual(len((output / "SHA256SUMS").read_text().splitlines()), 4)
 
   def test_missing_original_render_refuses_without_reconstruction(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -354,6 +390,15 @@ class Attempt20Round0RecoveryTest(unittest.TestCase):
           completed.stdout,
       )
       self.assertFalse(output.exists())
+
+  def test_preserved_scratch_wrapper_is_local_only_and_fail_closed(self):
+    text = SCRATCH_WRAPPER.read_text(encoding="utf-8")
+    self.assertIn("preserved/classifier.log", text)
+    self.assertIn("classification_available", text)
+    self.assertIn("preserved_scratch_reaudit", text)
+    self.assertIn("gcs_read=0 gcs_write=0 kubernetes=0 tpu=0", text)
+    self.assertNotIn("gcloud", text)
+    self.assertNotIn("gsutil", text)
 
 
 if __name__ == "__main__":

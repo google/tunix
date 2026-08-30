@@ -44,6 +44,7 @@ from tunix.models.qwen3 import model as model_lib
 from tunix.oss import utils as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
+from tunix.rl.agentic import token_continuity as token_continuity_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import dp_workloads
@@ -386,12 +387,17 @@ if CANON_P57_CALIBRATION:
     )
 elif args.p57_calibration_mode or args.p57_calibration_recipes:
   raise ValueError("P57 calibration CLI arguments require run kind calibration")
+_M15_ONEHOST_EXACT = (
+    token_continuity_lib.m15_token_continuity_mode(os.environ) == "exact"
+    if os.getenv("CANON_P38_ONEHOST_REHEARSAL", "") == "1"
+    else False
+)
 if CANON_P57_WORKLOAD_CANDIDATE:
   if os.getenv("CANON_PROFILE_FILE", "") not in (
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
-  ):
+  ) and not _M15_ONEHOST_EXACT:
     raise ValueError("materialized P57 workloads require the P57 profile")
   p57_workload_spec = p57_workloads.candidate(
       CANON_P57_WORKLOAD_CANDIDATE

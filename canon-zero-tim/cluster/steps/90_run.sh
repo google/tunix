@@ -1590,6 +1590,32 @@ PY
     echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset} kv_observer_rc=${p38_kv_observer_rc:-unset} seam_rc=${p38_seam_rc:-unset} terminal_rc=${p38_terminal_rc:-unset}" >&2
     exit 1
   fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     [ "${CANON_M15_TOKEN_CONTINUITY:-}" = "exact" ]; then
+    if [ "${CANON_P38_SEAM_OBSERVER:-}" != "layer" ] || \
+       [ "${CANON_P38_DURABILITY_PROFILE:-}" != "m15-wide-v1" ] || \
+       [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" != "3" ]; then
+      echo "[run] FATAL: M15 APC exact TiTO escaped its layer re-baseline identity" >&2
+      exit 1
+    fi
+    m15_tito_classification="$CANON_STATE/m15_apc_debug_tito.classification.json"
+    if [ -e "$m15_tito_classification" ]; then
+      echo "[run] FATAL: M15 APC TiTO classification already exists" >&2
+      exit 1
+    fi
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_debug_tito.py" \
+        --run-log "$LOG" \
+        --arm "$CANON_APC_M15_TARGET_DEBUG" \
+        --expected-rounds 3 \
+        --output "$m15_tito_classification" || exit 1
+    m15_tito_classification_sha="$(sha256sum "$m15_tito_classification" | awk '{print $1}')"
+    echo "[M15.E0V.TITO] EVIDENCE classification=$m15_tito_classification classification_sha256=$m15_tito_classification_sha"
+    if [ -n "${attempt_evidence_dir:-}" ]; then
+      cp -- "$m15_tito_classification" \
+        "$attempt_evidence_dir/m15_apc_debug_tito.classification.json"
+    fi
+  fi
   p38_request_live_action complete || {
       echo "[run] FATAL: P38 GCS completion marker failed" >&2
       exit 1

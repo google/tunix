@@ -1,6 +1,273 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 20 already ran; recover treatment round 0 only
+## START HERE — E0w publication admission PASS; target still approval-gated
+
+Do not rerun `e0w1`, `e0w2`, `e0w3`, or `e0w4`. Do not launch M15 full. Do
+not render/apply a DP8xTP8 target from an inherited worktree. The E0v/E0w
+implementation has been rebased directly onto
+`89ef0ad567d5abe33074a53c6655a6b8bc80cf6e`, preserving the remote production
+M15 rendered-text/default-off contract. Its authoritative publication identity
+is the exact remote-read full SHA at `origin/yuxzhang/canon-zero-tim` that
+contains this handoff. Fetch it, create a new clean `local/*` worktree at that
+full SHA, and verify clean/HEAD equality before prepare-only rendering. Never
+use historical base `cd32949e...` or the transient pre-amend rebase candidate.
+
+Current result:
+
+```text
+rebased canonical host: PASS (M15_E0W_HOST_PASS)
+rebased pinned exact-image: PASS (production TiTO default off)
+pre-rebase one-host DP1xTP4: ONEHOST_PAIR_EXACT (source-bound; not inherited)
+rebased-source one-host/TPU: NOT RUN
+DP8xTP8 target: NOT RUN
+FIRST_RED_LOCALIZED: false
+numerical repair authorized: false
+```
+
+The post-rebase host aggregate passes. Raw log
+`/home/yuxuan/code_rl_repro/m15-e0w-host-gate-postrebase-r1.log`, SHA256
+`fcf24a07c0ab7f6199fa0555ac583968568f58e9ed51bd59144e94eaf8140f05`,
+220 lines / 27,857 bytes; terminal is `M15_E0W_HOST_PASS` with task discovery
+225, TiTO 7, arm/pair/runner 5/5/3, token 7, flags 409, syntax and diff check
+PASS. At handoff time `/tmp` shares a root filesystem reporting 100% use with
+about 488 MiB available; no evidence was deleted. A later agent must check
+free space before another expensive local gate.
+
+After those gates, the remote moved from `29c923dc...` to `89ef0ad5...` by a
+single metadata-only commit that adds nine incident evidence files. No
+executable, profile, test, M15 handoff, or exact-image runner byte changed, so
+the final rebase does not invalidate the source-tested CPU/Docker result.
+
+The latest complete pinned-image command was:
+
+```bash
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  > /home/yuxuan/code_rl_repro/m15-e0w-exact-image-postrebase-r1.log 2>&1
+```
+
+It exited zero. Raw log SHA256 is
+`7f4b2dc4703ce4713b5ed2a6802f279481f27a7cd60eec301678a3b114984b49`
+(1,194 lines / 246,183 bytes). Terminal:
+
+```text
+V1_HP_EXACT_IMAGE_PASS ... m15_tito_impl=1 m15_tito_default=off apc_m15_carrier=74 ... m15_e0v_tito=7 m15_e0v_onehost_arm=5 m15_e0v_onehost_pair=5 m15_e0v_onehost_runner=3 m15_durability=1 m15_round_provenance=1 ... manifests=3
+```
+
+The successful one-host command was run without a pipe:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0v_tito_onehost_pair.sh \
+  e0w4
+```
+
+Terminal:
+
+```text
+[M15.E0V.ONEHOST] ONEHOST_PAIR_EXACT label=e0w4 topology=DP1xTP4 off_rounds=3 on_rounds=3 B-C=0/0 tito_exact=1 target_executed=0
+```
+
+Bounded classification:
+
+```text
+control A-B bytes=[0,0,0]; B-C bytes=[0,0,0]; max APC hit rate=0.0%
+treatment A-B bytes=[0,0,0]; B-C bytes=[0,0,0]; max APC hit rate=91.5%
+TiTO exact receipt counts per arm/round=[4,7,6]
+B full-reset/all-cached-token-zero receipt counts per arm/round=[1,1,1]
+backward=0; optimizer_commits=0; target_executed=false; target_pass=false
+```
+
+Local evidence root:
+`/mnt/disks/tunix-data/logp_probe_1host/m15_e0v_tito_e0w4_pair`.
+All root/off/on manifests verify. Root `SHA256SUMS` SHA256 is
+`b52fe75af56f5c66c2ba352d25163a18ab854c823b17c71d91a555fc02155589`;
+pair classification SHA256 is
+`0bb73f87e55eb7aa15e1f8298fd213dce33d67c39ee388c267ceafc52f6043af`.
+The result binds source diff SHA256
+`bf2b6dd9fa5c0b8147b701353ad6f381b742caf70edd5da30f630c7875ee5db0`
+and pinned image ID
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+
+Three immutable carrier failures preceded the PASS and must remain preserved:
+
+- `e0w1`: pre-model P57 CLI/signed-env mismatch; raw SHA256
+  `7972c983a98dd108b119f291fe5a8325d2f2141ba9da2673127d72384700edbb`;
+- `e0w2`: exact one-host M15 workload rejected for lacking a registered narrow
+  profile exception; raw SHA256
+  `692fd07e2f644d56eaf3206549965d619af16d3140ae3f5b2eaeb617e3ba8f64`;
+- `e0w3`: trainer used `('fsdp','tp')`; canonical adapter required replicated
+  `('dp','tp')` or `('data','model')`; raw SHA256
+  `c145a6a57018ad81bbbfd5e94c9b2b1ad351ea748f491989555a3337b24fd634`.
+
+The fixes are carrier/admission only: one-host P32 production workload is
+required absent; M15/main CLI identity and max-turn 15 are explicit; the
+entrypoint admits profile-less P57 materialization only after the exact
+one-host token selector validates every identity field; and the runner passes
+`--mesh_dp=1 --mesh_tp=4`. A/B/C, B full reset, APC cache reads, RoPE,
+attention/RPA, KV values, LM head, loss, backward, optimizer, production
+profile, and production APC defaults did not change.
+
+### Next operation — clean prepare-only, then separately approve fresh DP8xTP8 debug
+
+1. Fetch `origin/yuxzhang/canon-zero-tim`, record its exact full remote-read
+   SHA, and create a clean `local/*` worktree at that SHA. Require that the
+   tip contains this `START HERE` section and commit title
+   `Rebaseline M15 APC debugging on exact token identity`; otherwise stop as
+   `STALE_OR_WRONG_SOURCE`. Do not use base SHA `cd32949e...`.
+2. On the bucket-capable execution machine, run the existing prepare-only wrapper with
+   a fresh never-reused label. Preparation does not launch:
+
+   ```bash
+   bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_e0v_tito_layer_pair.sh \
+     <full-published-SHA> <fresh-label> <new-local-output-directory>
+   ```
+
+3. Return the render/classifier contract to the user. The DP8xTP8 apply/launch
+   is a separate approval. If approved, launch only the matched three-round
+   E0v debug pair, never M15 full. Keep large shard/capsule payloads in the
+   registered remote evidence root and return only bounded receipts/hashes.
+
+One-host exact is a carrier/mechanism PASS only. It does not show that the
+DP8xTP8 red disappeared, does not inherit the historical Layer-0 interval,
+and does not authorize any numerical repair. Phase contract:
+`phases/phase-e0w-onehost-tito-carrier.md`.
+
+## SUPERSEDED BY E0w — E0u failure audit and target re-baseline preparation
+
+Do not rerun Attempt 20, its GCS recovery, or any historical `kv/kv3` prepare
+script. Do not render/apply/restart/launch a target from this section. The E0u
+read already happened and returned:
+
+```text
+[M15.E0U.ON-R0] INCONCLUSIVE status=INVALID_OR_CLASSIFIER_FAILED classification=NONE three_round_verdict=0 numerical_repair_authorized=0
+```
+
+The archived source-bound classifier rejected the treatment checkpoint because
+no 1226-token observer vector exactly prefixed a red capsule history. The
+committed incident reports first divergence at token index 913. This is a
+token-identity/carrier failure, not a live-KV classification and not an APC
+repair result. Attempt 20 predates native M15 exact TiTO; that chronology
+supports the carrier explanation but does not prove the APC numerical root
+cause.
+
+Current evidence:
+
+- `evidence/v1_apc_m15_attempt20_e0u_r0_recovery_20260830/`;
+- its `SHA256SUMS` SHA256 is
+  `827b4038d269870d5b72e4f432b9680c89d79923d8bb2952163daca0e60ea093`;
+- classification is `NONE`; B full-reset and all-cached-token-zero runtime
+  receipts remain unavailable;
+- the last historical numerical interval is D3e Layer 0
+  `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, but exact TiTO changes
+  program input, so a fresh target may not inherit that interval or the old
+  1226-token prefix;
+- Phase E remains closed.
+
+Current local implementation passed the canonical host aggregate:
+
+```text
+M15_E0V_HOST_PASS task_discovery=210 return=1 round0_recovery=8 tito_postflight=5 token_continuity=6 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0
+```
+
+Raw log: `/tmp/m15-e0v-host-gate-20260830-r1.log`, SHA256
+`75f7263daea0768ef74dc7c27cbabeae35c438045a4d0ec1d7be7928ef697e69`.
+This is HOST PASS only. Preserved-scratch execution, official pinned image,
+and fresh target are NOT RUN.
+
+### Operation A — bucket machine, existing scratch only, no GCS
+
+Use a new clean `local/*` worktree at the full published SHA containing E0v.
+First check the scratch named by the preserved classifier traceback:
+
+```bash
+PRESERVED=/tmp/m15-attempt20-on-r0-recovery.So5Clr
+test -d "$PRESERVED/remote"
+test -s "$PRESERVED/classifier.log"
+```
+
+If either check fails, stop and answer
+`status=PRESERVED_SCRATCH_UNAVAILABLE classification=NONE`. Do not retry GCS,
+reconstruct a root, or launch a target. If both pass, run exactly:
+
+```bash
+RETURN=/mnt/disks/tunix-data/m15-attempt20-r0-e0v-audit-k02
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_on_round0_preserved_scratch_audit.sh \
+  "$PRESERVED" "$RETURN" /mnt/disks/tunix-data
+```
+
+This command reuses already downloaded objects, reruns the archived classifier
+on CPU, and returns a bounded token-prefix matrix plus unbound A/B KV
+comparisons. It performs no GCS read/write, Kubernetes operation, or TPU work.
+It must retain `classification=NONE` and cannot authorize a repair.
+
+Return exactly:
+
+```text
+branch=<local/*>
+HEAD=<full analysis SHA>
+dirty=0
+gate=E0V_ATTEMPT20_PRESERVED_SCRATCH_AUDIT
+terminal=<complete M15.E0V.SCRATCH marker>
+status=<returned status>
+classification=NONE
+A-B=<returned bytes/elements or NONE>
+B-C=<returned bytes/elements or NONE>
+exact_target_prefix_candidates=<integer or NONE>
+maximum_longest_common_prefix_tokens=<integer or NONE>
+B_full_reset_runtime_receipt=NONE
+all_num_cached_tokens_zero_runtime_receipt=NONE
+three_round_verdict=false
+terminal_pair_complete=false
+target_pass=false
+numerical_repair_authorized=false
+local_output=<local path>
+manifest_sha256=<sha or NONE>
+raw_log=<local path>
+raw_log_sha256=<sha or NONE>
+TARGET_RERUN=NO
+external_mutation=gcs_read=0;gcs_write=0;kubernetes=0;tpu=0;commit=0;push=0
+next_action=return artifacts to the evaluator; do not launch
+next_action_requires_user_approval=no
+```
+
+### Operation B — prepare the new TiTO program, never launch
+
+After E0v is published, a clean exact-SHA executor may prepare a new matched
+pair with a fresh 1-16 character label:
+
+```bash
+SOURCE=<full-published-E0v-SHA>
+RUN_ID=<fresh-never-reused-label>
+OUT=/mnt/disks/tunix-data/m15-e0v-${RUN_ID}
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_e0v_tito_layer_pair.sh \
+  "$SOURCE" "$RUN_ID" "$OUT"
+```
+
+The prepare wrapper renders `observer=layer`, exact TiTO in both APC-off/on
+arms, three independently durable rounds, zero backward, and zero optimizer
+commits. It rejects every historical KV target field and verifies that the two
+arms differ only at APC. Its terminal must include
+`[M15.E0V.PREPARE] RENDER_PASS ... historical_prefix_reused=0` and
+`TARGET_NOT_RUN`.
+
+Official pinned exact-image is a separate approval after host PASS. A fresh
+DP8xTP8 launch is another separate approval after exact-image PASS. Never apply
+the rendered YAML merely because preparation succeeded.
+
+### Current decision table
+
+| Result | Honest next step |
+|---|---|
+| scratch audit `TOKEN_HISTORY_JOIN_MISMATCH` | preserve it as historical carrier evidence; no classifier relaxation |
+| scratch unavailable | report `classification=NONE`; ask before any read-only GCS retry |
+| TiTO control A-B nonzero | hard stop; carrier/shared path invalid |
+| either B-C nonzero | hard stop; not APC-specific |
+| TiTO treatment exact | target non-reproduction under the new program, not “fixed” |
+| TiTO treatment red | localize from its new token/source identity; do not reuse old prefix 1226 |
+| any TiTO receipt differs/missing | target result void before A/B/C interpretation |
+
+## SUPERSEDED — E0u GCS recovery command already executed; do not rerun
 
 Do **not** prepare, render, apply, restart, delete, or launch anything. Attempt
 20 has already executed on DP8×TP8 and its compact salvage return is committed.

@@ -89,6 +89,21 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
+  def test_e0v_prepare_is_tito_layer_only_and_never_launches(self):
+    prepare = (
+        ROOT
+        / "canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/"
+        "prepare_m15_e0v_tito_layer_pair.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn("--observer layer", prepare)
+    self.assertIn('"CANON_M15_TOKEN_CONTINUITY": "exact"', prepare)
+    self.assertIn('"historical_1226_prefix_reused": False', prepare)
+    self.assertIn('"historical_first_red_inherited": False', prepare)
+    self.assertIn('"launch_authorized": False', prepare)
+    self.assertIn("TARGET_NOT_RUN", prepare)
+    self.assertNotIn("kubectl", prepare)
+    self.assertNotIn("gcloud storage", prepare)
+
   def test_m15_targeted_kv_patch_is_append_only_and_default_off(self):
     patch = (
         CANON / "patches/tpu_inference/35-tpu-runner-m15-layer0-kv-prefix.patch"
@@ -511,6 +526,13 @@ def _p38_m15_replay_ledger():
         self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
         self.assertEqual(env["CANON_P38_TAIL_MAX_BYTES"], "268435456")
         self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
+        self.assertEqual(env["CANON_M15_TOKEN_CONTINUITY"], "exact")
+        self.assertEqual(
+            document["metadata"]["labels"][
+                "canon.zero-tim/m15-token-continuity"
+            ],
+            "exact",
+        )
         self.assertNotIn("CANON_P38_SEAM_LAYER", env)
 
   def test_full_observer_requires_and_pins_one_layer(self):
@@ -565,9 +587,16 @@ def _p38_m15_replay_ledger():
         )
         self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_CANDIDATES"], "8")
         self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_PAGES"], "96")
+        self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", env)
         self.assertEqual(
             document["metadata"]["labels"]["canon.zero-tim/kv-observer"],
             "layer0-target-prefix",
+        )
+        self.assertEqual(
+            document["metadata"]["labels"][
+                "canon.zero-tim/m15-token-continuity"
+            ],
+            "absent",
         )
         self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
         self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
@@ -594,7 +623,34 @@ def _p38_m15_replay_ledger():
         )
         self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_CANDIDATES"], "8")
         self.assertEqual(env["CANON_P38_KV_OBSERVER_LAYER"], "0")
+        self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", env)
         self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
+
+  def test_exact_tito_cannot_leak_into_historical_kv3_carrier(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = renderer.render_all(
+          base_path=BASE,
+          output_dir=Path(directory),
+          source_commit=SOURCE,
+          run_id="kv3-tito-neg",
+          observer="kv3",
+      )[0]
+      document = yaml.safe_load(path.read_text(encoding="utf-8"))
+      renderer.p33._set_named_env(
+          renderer._container(document)["env"],
+          {"CANON_M15_TOKEN_CONTINUITY": "exact"},
+          remove=(),
+      )
+      with self.assertRaisesRegex(
+          ValueError, "leaked outside layer re-baseline"
+      ):
+        renderer.validate(
+            document,
+            arm="off",
+            source_commit=SOURCE,
+            run_id="kv3-tito-neg",
+            observer="kv3",
+        )
 
   def test_m15_coverage_contract_uses_one_full_producer_unit(self):
     self.assertEqual(
@@ -735,6 +791,9 @@ def _p38_m15_replay_ledger():
     self.assertIn("M15 APC target classification failed", run)
     self.assertIn("M15 first-red replay bundle failed", run)
     self.assertIn("M15 full replay carrier failed", run)
+    self.assertIn("classify_m15_apc_debug_tito.py", run)
+    self.assertIn("M15 APC exact TiTO escaped its layer re-baseline identity", run)
+    self.assertIn("m15_apc_debug_tito.classification.json", run)
     grpo_learner = GRPO_LEARNER_PATH.read_text(encoding="utf-8").replace(
         '" "', ""
     )

@@ -570,7 +570,15 @@ class VllmRollout(base_rollout.BaseRollout):
             int(output.num_cached_tokens or 0) for output in outputs
         ),
     }
-    if os.environ.get("CANON_APC_M15_TARGET_DEBUG", "") in ("off", "on"):
+    m15_b_contract = (
+        os.environ.get("CANON_APC_M15_TARGET_DEBUG", "") in ("off", "on")
+        or (
+            os.environ.get("CANON_M15_TOKEN_CONTINUITY", "") == "exact"
+            and os.environ.get("CANON_P38_ONEHOST_REHEARSAL", "0") == "1"
+            and os.environ.get("CANON_P57_WORKLOAD_CANDIDATE", "") == "m15"
+        )
+    )
+    if m15_b_contract:
       cached_tokens = self._last_prefill_rescore_provenance[
           "num_cached_tokens"
       ]
