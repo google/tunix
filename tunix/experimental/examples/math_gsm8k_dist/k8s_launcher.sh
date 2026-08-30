@@ -15,6 +15,13 @@
 
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
+TARGET_CLUSTER=""
+
+export PROJECT=${PROJECT:-cloud-tpu-multipod-dev}
+export REGION=${REGION:-us-central1}
+export ZONE=${ZONE:-us-central1-a}
+export CLUSTER=${CLUSTER:-trellis-demo-0810}
+export CLUSTER_LOCATION=${CLUSTER_LOCATION:-${REGION}}
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
@@ -68,6 +75,7 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export WEIGHT_SYNC_BACKEND=${WEIGHT_SYNC_BACKEND:-none}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -86,11 +94,67 @@ export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 
+apply_cluster_target() {
+  case "$1" in
+    multipod-rl-scaffolding)
+      PROJECT=cloud-tpu-multipod-dev
+      REGION=us-central1
+      ZONE=us-central1-a
+      CLUSTER_LOCATION=us-central1
+      CLUSTER=rl-scaffolding
+      TRAINER_TPU_SLICE=tpuv5e:4x4
+      TRAINER_MESH_FSDP=16
+      ROLLOUT_TPU_SLICE=tpuv5e:4x4
+      ;;
+    multipod-rl-v5e)
+      PROJECT=cloud-tpu-multipod-dev
+      REGION=us-central1
+      ZONE=us-central1-a
+      CLUSTER_LOCATION=us-central1
+      CLUSTER=rl-v5e-16-cluster-v2
+      TRAINER_TPU_SLICE=tpuv5e:4x4
+      TRAINER_MESH_FSDP=16
+      ROLLOUT_TPU_SLICE=tpuv5e:4x4
+      ;;
+    inference-v5e)
+      PROJECT=cloud-tpu-inference-test
+      REGION=us-west1
+      ZONE=us-west1-c
+      CLUSTER_LOCATION=us-west1-c
+      CLUSTER=lancewang-pw-v5e-4slice
+      TRAINER_TPU_SLICE=tpuv5e:4x4
+      TRAINER_MESH_FSDP=16
+      ROLLOUT_TPU_SLICE=tpuv5e:4x4
+      ;;
+    "")
+      ;;
+    *)
+      echo "Error: Unknown cluster target '$1'. Available targets: multipod-rl-scaffolding, multipod-rl-v5e, inference-v5e." >&2
+      exit 1
+      ;;
+  esac
+}
+
+print_selected_cluster() {
+  echo "Cluster target: project=${PROJECT} location=${CLUSTER_LOCATION} region=${REGION} zone=${ZONE} cluster=${CLUSTER}"
+}
+
+print_status() {
+  print_selected_cluster
+  kubectl get jobset "${ORCHESTRATOR_ID}" "${TRAINER_ID}" "${ROLLOUT_ID}" 2>/dev/null || true
+  kubectl get pods -n default | grep -E "${ORCHESTRATOR_ID}|${TRAINER_ID}|${ROLLOUT_ID}" || true
+}
+
 stop_orchestrator() {
   kubectl delete jobset "${ORCHESTRATOR_ID}"
 }
 
 start_orchestrator() {
+  local weight_sync_arg=""
+  if [[ "${WEIGHT_SYNC_BACKEND}" != "none" ]]; then
+    weight_sync_arg="--weight_sync_backend=${WEIGHT_SYNC_BACKEND}"
+  fi
+
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
@@ -178,6 +242,8 @@ stop_rollout() {
 
 start_rollout() {
   local maxtext_args=""                                                                                                                                                                             
+  local rollout_mesh_fsdp=1
+  local rollout_mesh_tp=4
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then                                                                                                                               
     maxtext_args=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
@@ -203,6 +269,8 @@ start_rollout() {
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
         --worker_id=${ROLLOUT_ID} \
         --port=${ROLLOUT_PORT} \
+        --mesh_fsdp=${rollout_mesh_fsdp} \
+        --mesh_tp=${rollout_mesh_tp} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \
@@ -217,8 +285,6 @@ start_rollout() {
     " \
     | kubectl apply -f -
 }
-
-source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -238,13 +304,69 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
+    --project)
+      PROJECT="$2"
+      shift 2
+      ;;
+    --project=*)
+      PROJECT="${1#*=}"
+      shift
+      ;;
+    --region)
+      REGION="$2"
+      shift 2
+      ;;
+    --region=*)
+      REGION="${1#*=}"
+      shift
+      ;;
+    --zone)
+      ZONE="$2"
+      shift 2
+      ;;
+    --zone=*)
+      ZONE="${1#*=}"
+      shift
+      ;;
+    --cluster)
+      CLUSTER="$2"
+      shift 2
+      ;;
+    --cluster=*)
+      CLUSTER="${1#*=}"
+      shift
+      ;;
+    --location)
+      CLUSTER_LOCATION="$2"
+      shift 2
+      ;;
+    --location=*)
+      CLUSTER_LOCATION="${1#*=}"
+      shift
+      ;;
+    --target)
+      TARGET_CLUSTER="$2"
+      shift 2
+      ;;
+    --target=*)
+      TARGET_CLUSTER="${1#*=}"
+      shift
+      ;;
+    --print-target)
+      COMMAND="print-target"
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+apply_cluster_target "$TARGET_CLUSTER"
+
+source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
+
+if [[ "$COMMAND" =~ ^(start|orchestrator|trainer|rollout)$ ]] && [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -268,7 +390,11 @@ elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "status" ]]; then
+  print_status
+elif [[ "$COMMAND" == "print-target" ]]; then
+  print_selected_cluster
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'status', 'print-target'."
   exit 1
 fi
