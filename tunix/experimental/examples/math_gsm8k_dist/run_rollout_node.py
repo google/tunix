@@ -124,10 +124,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--weight_sync_mode",
       type=weight_sync_lib.WeightSyncMode,
       default=weight_sync_lib.WeightSyncMode(
-          os.getenv("WEIGHT_SYNC_MODE", "raiden")
+          os.getenv("WEIGHT_SYNC_MODE", "none")
       ),
       choices=list(weight_sync_lib.WeightSyncMode),
-      help="Weight sync mode.",
+      help="Weight sync mode (none, fallback, or raiden).",
   )
   return parser.parse_args(argv)
 

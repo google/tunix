@@ -105,7 +105,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(
-        registry=registry, weight_sync_backend="noop"
+        registry=registry, weight_sync_mode="fallback"
     )
     orch.register_worker_handle(
         "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout

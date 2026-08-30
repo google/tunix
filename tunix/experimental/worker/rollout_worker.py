@@ -33,7 +33,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   Attributes:
     sampler_type: Type of sampler adapter to construct ("vanilla",
       "inprocess_vllm", "vllm").
-    weight_sync_mode: Mode of weight synchronization ("default", "fallback",
+    weight_sync_mode: Mode of weight synchronization ("none", "fallback",
       "raiden").
     env_name: Registered name of environment class in ENV_REGISTRY.
     agent_name: Registered name of agent class in AGENT_REGISTRY.
@@ -42,9 +42,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   """
 
   sampler_type: str = "vanilla"
-  weight_sync_mode: weight_sync.WeightSyncMode = (
-      weight_sync.WeightSyncMode.FALLBACK
-  )
+  weight_sync_mode: weight_sync.WeightSyncMode = weight_sync.WeightSyncMode.NONE
   env_name: str = ""
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)

@@ -66,6 +66,17 @@ from tunix.experimental.worker import remote_execution  # pylint: disable=g-impo
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
 
+def _parse_weight_sync_mode(value: str) -> str:
+  mode = value.lower()
+  if mode in ("noop", "no-op"):
+    return "fallback"
+  if mode not in ("none", "fallback", "raiden"):
+    raise argparse.ArgumentTypeError(
+        "weight_sync_mode must be one of: none, fallback, raiden"
+    )
+  return mode
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description="Orchestrator V2 Qwen3 GSM8K GRPO demo."
@@ -108,12 +119,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--weight_sync_backend",
-      choices=("raiden", "no-op", "none"),
-      default="none",
+      "--weight_sync_mode",
+      type=_parse_weight_sync_mode,
+      default=_parse_weight_sync_mode(os.getenv("WEIGHT_SYNC_MODE", "none")),
       help=(
-          "Enable post-update weight sync coordinator using the given backend. "
-          "'none' disables weight synchronization."
+          "Weight synchronization mode. 'none' disables post-update sync, "
+          "'raiden' uses Raiden, and 'fallback' runs protocol-only sync."
       ),
   )
   parser.add_argument(
@@ -445,7 +456,7 @@ def main(argv: list[str], context: Any = None) -> None:
       "Configuration: model_id=%s, batch_size=%d (prompt groups), "
       "num_generations=%d (%d rollouts/step), max_steps=%d, "
       "train_micro_batch_size=%d, beta=%.4f, epsilon=%.2f, reward_mode=%s, "
-      "max_staleness=%d, weight_sync_backend=%s.",
+      "max_staleness=%d, weight_sync_mode=%s.",
       args.model_id,
       args.batch_size,
       args.num_generations,
@@ -456,7 +467,7 @@ def main(argv: list[str], context: Any = None) -> None:
       args.epsilon,
       args.reward_mode,
       args.max_staleness,
-      args.weight_sync_backend,
+      args.weight_sync_mode,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
   logging.info(
@@ -546,11 +557,8 @@ def main(argv: list[str], context: Any = None) -> None:
       eos_id=eos_id,
   )
 
-  weight_sync_backend = (
-      None if args.weight_sync_backend == "none" else args.weight_sync_backend
-  )
   cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_backend=weight_sync_backend
+      weight_sync_mode=args.weight_sync_mode
   )
 
   _register_workers(
@@ -592,7 +600,7 @@ def main(argv: list[str], context: Any = None) -> None:
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,
-      sync_weights=(weight_sync_backend is not None),
+      sync_weights=(args.weight_sync_mode != "none"),
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",
           step,

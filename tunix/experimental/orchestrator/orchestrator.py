@@ -49,7 +49,7 @@ class ClusterOrchestrator:
       registry: worker_registry.WorkerRegistry | None = None,
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
-      weight_sync_backend: str | None = None,
+      weight_sync_mode: str | None = None,
   ):
     """Initializes ClusterOrchestrator."""
     self.config = config
@@ -66,7 +66,8 @@ class ClusterOrchestrator:
     ] = {}
     self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
-    self._weight_sync_backend = weight_sync_backend
+    mode = getattr(weight_sync_mode, "value", weight_sync_mode)
+    self._weight_sync_mode = str(mode).lower() if mode is not None else None
 
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
@@ -241,11 +242,11 @@ class ClusterOrchestrator:
       inference_workers[datatypes.Role.REFERENCE] = reference_workers[0]
 
     coordinator = None
-    if self._weight_sync_backend is not None:
+    if self._weight_sync_mode not in (None, "none"):
       from tunix.experimental.weight_sync import weight_sync_coordinator
 
       handler = weight_sync_coordinator.create_default_handler(
-          backend=self._weight_sync_backend
+          mode=self._weight_sync_mode
       )
 
       handle_to_id = {

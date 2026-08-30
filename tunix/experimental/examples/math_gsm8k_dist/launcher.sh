@@ -54,6 +54,7 @@ WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -330,6 +331,7 @@ echo "  tfds data dir:  $TFDS_DATA_DIR"
 echo "  shuffle:        $SHUFFLE"
 echo "  use lora:       $USE_LORA"
 echo "  sampler:        $SAMPLER"
+echo "  weight sync:    $WEIGHT_SYNC_MODE"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -451,6 +453,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --weight_sync_mode="$WEIGHT_SYNC_MODE"
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
@@ -633,6 +636,7 @@ echo "Launching CPU orchestrator..."
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
     --seed="$SEED"
+    --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then

@@ -153,12 +153,14 @@ class NullHandler(weight_sync.WeightSyncHandler):
 
 
 def create_default_handler(
-    backend: str | None = None,
+    mode: str | weight_sync.WeightSyncMode | None = None,
 ) -> weight_sync.WeightSyncHandler:
   """Creates the default weight sync handler based on options or env vars."""
-  backend_name = backend or os.getenv("WEIGHT_SYNC_BACKEND", "raiden")
-  backend_name = backend_name.lower()
-  if backend_name == "raiden":
+  mode_name = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
+  if isinstance(mode_name, weight_sync.WeightSyncMode):
+    mode_name = mode_name.value
+  mode_name = str(mode_name).lower()
+  if mode_name == weight_sync.WeightSyncMode.RAIDEN.value:
     from tunix.experimental.weight_sync import raiden_handler
 
     handler = raiden_handler.RaidenHandler(
@@ -166,13 +168,18 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  elif backend_name in ("noop", "no-op"):
+  elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
     logging.info(
         "Built fallback NullHandler; weight sync running protocol-only."
     )
     return NullHandler()
+  elif mode_name == weight_sync.WeightSyncMode.NONE.value:
+    raise ValueError(
+        "WEIGHT_SYNC_MODE=none disables weight sync; no handler should be"
+        " constructed."
+    )
   else:
-    raise ValueError(f"Unknown weight sync backend: {backend_name!r}")
+    raise ValueError(f"Unknown weight sync mode: {mode_name!r}")
 
 
 class RemoteWorkerShim:

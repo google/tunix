@@ -34,6 +34,7 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 class WeightSyncMode(str, enum.Enum):
   """Modes for weight synchronization across workers."""
 
+  NONE = "none"
   FALLBACK = "fallback"
   RAIDEN = "raiden"
 
