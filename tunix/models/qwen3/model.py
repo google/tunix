@@ -332,13 +332,33 @@ def _activation_out_sharding(
   return shd.NamedSharding(mesh, shd.PartitionSpec(*s))
 
 
+def _mesh_has_explicit_axes(mesh) -> bool:
+  """Returns whether any of the mesh's axes carries the Explicit type.
+
+  Sharding-in-types meshes declare per-axis types.  Explicit axes carry their
+  sharding in the avals themselves, so `with_sharding_constraint` -- which
+  only speaks about Auto axes -- rejects a spec naming them and asks for the
+  resharding API instead.
+  """
+  axis_types = getattr(mesh, 'axis_types', ())
+  explicit = getattr(shd.AxisType, 'Explicit', None)
+  if explicit is None:
+    return False
+  return any(axis_type is explicit for axis_type in axis_types)
+
+
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
     return x
-  return jax.lax.with_sharding_constraint(
-      x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
-  )
+  sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*s))
+  if _mesh_has_explicit_axes(mesh):
+    # On an Explicit-axis mesh the constraint form is rejected outright; the
+    # reshard form states the same intent and is a no-op whenever the value
+    # already carries this sharding, which is the common case here because
+    # producers are asked for it directly.
+    return jax.sharding.reshard(x, sharding)
+  return jax.lax.with_sharding_constraint(x, sharding)
 
 
 class Einsum(nnx.Module):

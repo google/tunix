@@ -110,3 +110,62 @@ class EmbedderGatherOutShardingTest(absltest.TestCase):
     np.testing.assert_array_equal(
         table.at[(ids,)].get(out_sharding=spec), table[(ids,)]
     )
+
+
+class ExplicitAxisShardTest(absltest.TestCase):
+  """`shard` must speak the resharding API on an Explicit-axis mesh.
+
+  Sharding-in-types meshes carry the sharding in the avals, so
+  `with_sharding_constraint` degenerates to an assert there and rejects a
+  spec naming those axes outright; the DP x TP recipe therefore has to state
+  the same intent through `reshard`.
+  """
+
+  def _explicit_mesh(self):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest(
+          'needs >= 2 devices; run with '
+          'XLA_FLAGS=--xla_force_host_platform_device_count=8'
+      )
+    grid = np.asarray(devices[:2]).reshape(2, 1)
+    return shd.Mesh(
+        grid, ('data', 'model'), axis_types=(shd.AxisType.Explicit,) * 2
+    )
+
+  def test_detects_explicit_axes(self):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    explicit = self._explicit_mesh()
+    self.assertTrue(model._mesh_has_explicit_axes(explicit))
+    auto = shd.Mesh(
+        np.asarray(jax.devices()[:2]).reshape(2, 1), ('data', 'model')
+    )
+    self.assertFalse(model._mesh_has_explicit_axes(auto))
+
+  def test_reshard_replaces_the_rejected_constraint(self):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    mesh = self._explicit_mesh()
+    spec = shd.NamedSharding(mesh, shd.PartitionSpec('data', None, 'model'))
+    x = jnp.arange(2 * 3 * 1, dtype=jnp.float32).reshape(2, 3, 1)
+    jax.sharding.set_mesh(mesh)
+    try:
+      # The rejection is an AssertionError when every axis is Explicit and a
+      # ValueError when the mesh mixes types (the shape seen in the failing
+      # cluster run); both mean the constraint form is unusable here.
+      with self.assertRaises((AssertionError, ValueError)):
+        jax.lax.with_sharding_constraint(x, spec)
+      resharded = jax.sharding.reshard(x, spec)
+      self.assertEqual(resharded.sharding.spec, spec.spec)
+      np.testing.assert_array_equal(np.asarray(resharded), np.asarray(x))
+    finally:
+      # Clearing is the documented way back to no bound mesh; passing the
+      # abstract mesh that get_abstract_mesh returns is rejected.
+      jax.sharding.set_mesh(None)
