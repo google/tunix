@@ -1,0 +1,36 @@
+wandb: Find logs at: ./wandb/run-20260830_082607-lix0pg65/logs
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1353, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1316, in main
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3771, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3071, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 862, in _process_results
+[rank0]:     trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+[rank0]:                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1350, in get_actor_per_token_logps
+[rank0]:     common.compute_per_token_logps(
+[rank0]:   File "/app/tunix/rl/common.py", line 455, in compute_per_token_logps
+[rank0]:     outputs, _ = model(input_tokens, **model_kwargs)
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1318, in __call__
+[rank0]:     layer_cache, x = layer(
+[rank0]:                      ^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1219, in __call__
+[rank0]:     return self.block(
+[rank0]:            ^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1183, in block
+[rank0]:     cache, attn_output = self.attn(
+[rank0]:                          ^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 754, in __call__
+[rank0]:     return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 678, in block
+[rank0]:     qkv = sharded_splash_attn(
+[rank0]:           ^^^^^^^^^^^^^^^^^^^^
+[rank0]: ValueError: in_specs passed to shard_map: P('model', None, None) does not match the specs of the input: P(None, None, None) for arg: int8[4,8,8]. `in_specs` is an optional argument so you can omit specifying it and shard_map will infer the in_specs from the arguments. If you want to reshard your inputs, you can use `jax.reshard` on the arguments and then pass those args to shard_map.
