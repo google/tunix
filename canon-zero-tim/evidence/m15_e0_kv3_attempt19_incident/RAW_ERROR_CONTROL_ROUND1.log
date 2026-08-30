@@ -1,0 +1,120 @@
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+INFO 08-30 02:57:59 [loggers.py:273] Engine 000: Avg prompt throughput: 2569.1 tokens/s, Avg generation throughput: 1.2 tokens/s, Running: 8 reqs, Waiting: 1 reqs, GPU KV cache usage: 0.4%, Prefix cache hit rate: 0.0%
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1985
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1792
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1792
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1792
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1792
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1792
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1740
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1536
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1401
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1024
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1024
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=873
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=297
+INFO 08-30 02:58:07 [loggers.py:273] Engine 000: Avg prompt throughput: 4604.0 tokens/s, Avg generation throughput: 0.9 tokens/s, Running: 2 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=160
+[CANON_APC_M15_B_CONTRACT] reset_prefix_cache=True all_num_cached_tokens_zero=True
+[PERF] step=0 stage=rescore_b seconds=114.411 rows=256
+2026-08-30 02:58:08 - INFO - [absl] [CANON_ALIGN] attached host sidecar rows=256 completion_width=8192
+[CANON_APC_M15_PRODUCER_CARRIER] arm=off path=/tmp/canon-state/canon-v1-apc-m15-off-k01-d93d2729/p38_serving_capture/m15_producer_unit.round-000001.npz sha256=eaabccf24ddb00ec8239c41fdf21186991012cb8923a4d795ae0174460bca21f rows=256 logical_bytes=42995712
+[CANON_ALIGN_PRE_JSON] {"N_action":104742,"action_geometry":{"max_logical_kv_prefix_length":7080,"min_logical_kv_prefix_length":988,"rows_reaching_1686":166,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"backward-no-commit","warning_boundaries":null,"warning_only":false,"workload":"frozenlake-dp8-tp8"},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":418968,"total_elements":104742,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":418968,"total_elements":104742,"valid":true}},"context":{"bucket":"2048","mesh":"8,8","run_stage":"backward-no-commit","source":"VllmRollout.get_prefill_rescore_logps"},"diagnostic_round":1,"hashes":{"S_decode":"de0ff0d5cd195b4bb9020e6f982e50649f133644401dec12bdba182b18483aa3","S_prefill":"4c044597103c4029a0623319a9aa40057196ff354bfd9f2873e5d13f515a543d","T_old":"4c044597103c4029a0623319a9aa40057196ff354bfd9f2873e5d13f515a543d","action_mask":"910a029fe39c8c89685aae9c090c2e338d9905c8bd35c45b72a09f5617b69c21","policy_version":"5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef","tokens":"eb4e8b64059282b5f324bcf3e2cd1a32ab7ba9e14910d7aa42ed29f50f0ad5b4"},"m15_producer_unit":{"logical_bytes":42995712,"path":"/tmp/canon-state/canon-v1-apc-m15-off-k01-d93d2729/p38_serving_capture/m15_producer_unit.round-000001.npz","rows":256,"sha256":"eaabccf24ddb00ec8239c41fdf21186991012cb8923a4d795ae0174460bca21f"},"masked_hashes":{"S_decode":"cc2e930d3b28e46b1a063d3f70a58872a70bc3e6e3a25297dd3f762635056190","S_prefill":"cc2e930d3b28e46b1a063d3f70a58872a70bc3e6e3a25297dd3f762635056190","T_old":"cc2e930d3b28e46b1a063d3f70a58872a70bc3e6e3a25297dd3f762635056190"},"no_signal_admitted":false,"reds":[],"reported_reds":[],"step":1,"timestamp":1788058688.854621,"verdict":"PASS","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/canon-state/canon-v1-apc-m15-off-k01-d93d2729/pre_alignment.jsonl sha256=b5ad970630b550dc130ef8b1a3f06db849653f6adf00b01c69072169808537a9
+[CANON_ALIGN_PRE] step=1 verdict=PASS N_action=104742 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]
+[CANON_P38] PRECHECK_ROUND_COMPLETE round=2/3 step=1 N_action=104742 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0
+[CANON_P38] ROUND_SEAL_REQUESTED round=1 request=/tmp/canon-state/canon-v1-apc-m15-off-k01-d93d2729/p38_round_seal_requests/round-000001.request
+INFO 08-30 02:58:17 [loggers.py:273] Engine 000: Avg prompt throughput: 1166.5 tokens/s, Avg generation throughput: 0.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 2129, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3509, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2878, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1955, in _process_results
+[rank0]:     alignment.stop_after_diagnostic_precheck(precheck_record)
+[rank0]:   File "/app/tunix/rl/alignment.py", line 379, in stop_after_diagnostic_precheck
+[rank0]:     _seal_p38_diagnostic_round(round_index)
+[rank0]:   File "/app/tunix/rl/alignment.py", line 205, in _seal_p38_diagnostic_round
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: P38 round-seal worker failed before acknowledgement: round=1 stage=stage-e0-kv-input exit_code=1
+INFO 08-30 02:58:27 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
