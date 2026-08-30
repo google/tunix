@@ -6,12 +6,13 @@ This section is the authoritative launch preparation for the two optimized
 FrozenLake Zero full recipes. It supersedes older P45/M15 render commands in
 this historical handoff, but does not erase their incident evidence.
 
-Status is `M15 A-B WARNING LANE LOCAL IMPLEMENTED / HOST PASS /
-PINNED-IMAGE PASS / SOURCE NOT COMMITTED / TARGET NOT RUN`. The implementation
-CL must first be reviewed, explicitly
-approved for commit/push, published, read back at one exact 40-character SHA,
-and checked out clean. Do not render the next wave from the older published
-`a8449b3d...` source or from this dirty development worktree.
+Status is `M15 A-B WARNING LANE PUBLISHED / HOST PASS / PINNED-IMAGE PASS /
+TARGET NOT RUN`. Runtime commit
+`ae8d4721d74634492f2c722b6fe4236ac5da3d8c` was pushed and independently read
+back from `yuxzhang/canon-zero-tim`. Render only from that exact 40-character
+source or a later explicitly reviewed ledger-only descendant checked out
+clean. Do not render the next wave from the older `a8449b3d...` source or from
+a dirty development worktree.
 
 Run the exact-image admission and then the render-only wrapper from the
 physical repository root:
@@ -53,18 +54,19 @@ identities. M15 output is `convergence-only / alignment-degraded`, never a
 Zero-TIM pass. Native, IS, diagnostic, legacy resident, and evaluation
 carriers do not inherit this exact-arm policy.
 
-The M15 warning-lane changes are local and have not yet produced target
+The M15 warning-lane changes are published but have not yet produced target
 evidence. Host admission passed, and pinned image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... m15_ab_warning=1 ...
 manifests=3`; the terminal is an admission receipt, not a durably saved raw
-log. Commit, push, and launch still require separate approvals. Offline P74
-admission is recorded under
+log. Launch still requires separate approval. Offline P74 admission is
+recorded under
 `../v1-system-optimization-workload-rollout/validation.log`. It does not
 certify DP8xTP8 performance or convergence. Each target run must independently
-return strict alignment, checked-VMA/P67 receipts, the first-update gate,
-complete `p32_vag_reverse` timing, 300 committed updates, and its own final
-classification.
+return its registered alignment policy receipts—strict zero for P45, and zero
+fatal FAIL plus a complete warning count for M15—checked-VMA/P67 receipts, the
+first-update gate, complete `p32_vag_reverse` timing, 300 committed updates,
+and its own final classification.
 
 ## START HERE — GSM8K Native/mismatch and Zero full now have matched controls
 

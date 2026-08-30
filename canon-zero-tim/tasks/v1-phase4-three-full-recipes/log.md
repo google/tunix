@@ -997,3 +997,18 @@
   is `convergence-only / alignment-degraded`; it is not a Zero-TIM pass. No
   commit, push, render, launch, JobSet, TPU target, or optimizer update was
   performed in this change.
+
+## 2026-08-30T05:07:56Z — M15 A-B warning lane published and read back
+
+- Latest publication baseline `fcd7a2520e02915b4adc444e16243fd03371bb7b`
+  added only immutable DeepSWE incident evidence. The M15 diff was restored on
+  that baseline without conflict; P57 176/176, V1 91/91, flag audit 408/408,
+  syntax, and diff hygiene passed again. Runtime bytes admitted by the pinned
+  image were unchanged by the baseline evidence commit.
+- Runtime commit `ae8d4721d74634492f2c722b6fe4236ac5da3d8c` (`Permit finite
+  M15 A-B alignment warnings`) was fast-forward pushed to
+  `yuxzhang/canon-zero-tim`; independent remote read-back returned that exact
+  40-character SHA.
+- Result: `PUBLISHED / HOST PASS / PINNED-IMAGE PASS / TPU TARGET NOT RUN`.
+  No render, launch, JobSet, TPU target, or optimizer update occurred. M15
+  remains `convergence-only / alignment-degraded`; P45 remains strict.
