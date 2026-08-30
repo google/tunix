@@ -17,6 +17,7 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_provenance_derivation.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_jobset_log_collector.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_m15_alignment_warning.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_runtime_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py \

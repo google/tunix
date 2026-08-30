@@ -2,10 +2,12 @@
 
 ## Outcome
 
-Prepare the optimized P45 and M15/main 64-chip Zero-TIM full trains as direct
-300-update efficiency-first concept runs. Both remain strict and retain
-backward-health, optimizer, timing, W&B, JAX-cache, XProf, and Perfetto gates,
-but deliberately omit in-process held-out evaluation and all checkpoint I/O.
+Prepare the optimized P45 and M15/main 64-chip full trains as direct
+300-update efficiency-first concept runs. P45 remains strict. M15 temporarily
+uses its registered finite A-B warning lane and is alignment-degraded, while
+retaining hard token-continuity, B-C, nonfinite, backward-health, optimizer,
+timing, W&B, JAX-cache, XProf, and Perfetto gates. Both deliberately omit
+in-process held-out evaluation and all checkpoint I/O.
 
 ## Phases
 
@@ -25,6 +27,7 @@ but deliberately omit in-process held-out evaluation and all checkpoint I/O.
 | V1.P4.12 | Repair the stale G6 checkpoint admission exposed by Attempt 10 | one checkpoint source of truth; legacy-10 and primary-300 positives; wrong identity/cadence negatives; host and immutable-image gates; then fresh target first update | source published by current CL; host and immutable image PASS; target first gradient sink/AdamW not rerun |
 | V1.P4.13 | Repair the missing FrozenLake effective-learning-rate observation exposed by P45 Wave 02 | keep scalar AdamW unchanged; register the same constant only for receipts; pin entrypoint structure; host and P45 immutable-image gates; then fresh target weight sync | source published by current CL; P57 147/147, Phase4 89/89, P45 exact image PASS; post-fix target not run |
 | V1.P4.14 | Admit exact no-eval/no-checkpoint P45+M15 Zero fast concept runs after f45w09 | both manifests fail closed on eval disabled, checkpoint mode disabled, and empty residual fields; host plus immutable-image gates; then two fresh 300-update targets | active; runtime `a8449b3d` published and exactly read back, host/exact-image PASS; TPU target not run |
+| V1.P4.15 | Prove and, only if warranted, repair M15 cross-turn token continuity with TITO while retaining the finite A-B concept lane | observer neutrality and first token-drift receipt; exact-M15 selector with neighboring negatives; host/pinned-image; one-host mechanism; then DP8xTP8 full target | active; T0 observer host+pinned-image PASS, real M15 observation/exact input/target not run |
 
 ## Decisions
 
@@ -96,3 +99,9 @@ but deliberately omit in-process held-out evaluation and all checkpoint I/O.
   Perfetto gates. Native/IS and historical/evaluation carriers keep their
   existing contracts. A failed fast run has no resume point and must restart
   at step 0 with a fresh identity.
+- Decision (2026-08-30 V1.P4.15): DeepSWE TP4 proves that later-turn text
+  retokenization can break A/B input identity, but that evidence does not
+  transfer to M15. First add an observer-neutral M15 prompt-token verifier. An
+  exact-token input path is admitted only after M15 token drift is observed.
+  Finite A-B remains warning-only for the concept run; token mismatch, B-C,
+  nonfinite, backward, replica, and optimizer faults remain fatal.

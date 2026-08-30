@@ -1012,3 +1012,46 @@
 - Result: `PUBLISHED / HOST PASS / PINNED-IMAGE PASS / TPU TARGET NOT RUN`.
   No render, launch, JobSet, TPU target, or optimizer update occurred. M15
   remains `convergence-only / alignment-degraded`; P45 remains strict.
+
+## 2026-08-30T05:20:47Z — V1.P4.15 M15 TITO phase opened
+
+- User decision: investigate and, if the M15 observer proves it, repair
+  cross-turn retokenization with TITO while keeping the finite A-B concept
+  lane relaxed.
+- Pre-registration: `phases/v1-p4-15-m15-exact-token-continuity.md` separates
+  observer-only verification, generic-helper extraction, exact-M15 input,
+  host/image admission, one-host mechanism, and DP8xTP8 target gates. Exact
+  input cannot be enabled unless the observer first records M15 token drift.
+- Hard boundary: finite A-B plus direct w/wr/clip/TIS consequences remain
+  warnings only. Prompt-token inequality in exact mode, B-C, T-current/r,
+  nonfinite, backward, replica, and optimizer faults remain fatal. P45 remains
+  strict and every non-M15 workload is a negative control.
+- Result: `DESIGN REGISTERED / OBSERVER NOT IMPLEMENTED / TARGET NOT RUN`.
+  No runtime code, commit, push, render, Kubernetes object, TPU run, or
+  optimizer update occurred.
+
+## 2026-08-30T05:35:59Z — V1.P4.15 T0 observer construction admitted
+
+- Added a default-absent M15 `verify` selector admitted only for the exact
+  Zero v1-hp DP8xTP8 M15/main 300-update, no-eval/no-checkpoint concept
+  identity. It compares the rollout worker's actual unpadded later-turn prompt
+  IDs against the exact initial prompt tail plus sampled assistant and
+  nonterminal environment IDs after the rendered-text model call returns.
+  Therefore verify does not inject `prompt_token_ids`, re-tokenize, change the
+  sampler request, or relax an alignment verdict.
+- The receipt contains only turn, lengths, SHA256 values, first mismatch
+  position, and the two token IDs at that position. Missing, noninteger,
+  negative, out-of-int32, wrong-length, wrong-identity, caller-overridden, and
+  `exact`-before-evidence inputs fail closed. P58 now shares the pure
+  reconstruction helper while retaining its existing exact input and marker.
+- Validation: focused M15 host 5/5, P57 181/181, V1 91/91, flag registry
+  409/409, Python syntax, and diff hygiene pass. The complete immutable-image
+  gate for `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exited zero with `V1_HP_EXACT_IMAGE_PASS ... m15_token=1 ... manifests=3`;
+  after the final caller-override/int32 guard, the affected image tests passed
+  M15 5/5 and engine integration 3/3.
+- Claim boundary: `T0 IMPLEMENTED / HOST PASS / PINNED-IMAGE PASS / REAL M15
+  NOT OBSERVED / EXACT INPUT BLOCKED / ONEHOST NOT RUN / TARGET NOT RUN /
+  UNCOMMITTED / UNPUBLISHED`. No production profile, renderer, model input,
+  alignment policy, commit, push, render, Kubernetes object, TPU use, or
+  optimizer update changed.

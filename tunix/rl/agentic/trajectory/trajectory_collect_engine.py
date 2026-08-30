@@ -30,6 +30,7 @@ import numpy as np
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import deepswe_debug
+from tunix.rl.agentic import token_continuity
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -108,6 +109,9 @@ class TrajectoryCollectEngine:
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     self._p58_exact_token_continuity = deepswe_debug.q4_tp4_zero_admission()
+    self._m15_token_continuity_mode = (
+        token_continuity.m15_token_continuity_mode()
+    )
     if (
         self._p58_exact_token_continuity
         and "prompt_token_ids" in self.model_call_kwargs
@@ -115,6 +119,14 @@ class TrajectoryCollectEngine:
       raise ValueError(
           "P58 exact token continuity owns prompt_token_ids; refusing a "
           "caller-supplied override"
+      )
+    if (
+        self._m15_token_continuity_mode == "verify"
+        and "prompt_token_ids" in self.model_call_kwargs
+    ):
+      raise ValueError(
+          "M15 token-continuity verify requires the rendered-text path; "
+          "refusing a caller-supplied prompt_token_ids override"
       )
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
@@ -648,59 +660,11 @@ class TrajectoryCollectEngine:
     """Reconstructs the exact token stream sampled across completed turns."""
     if not self._p58_exact_token_continuity:
       raise RuntimeError("P58 exact token continuity is not enabled")
-    if not self.agent.trajectory.steps:
-      raise RuntimeError("P58 token continuity requires a completed turn")
-
-    raw_prompt = np.asarray(
-        getattr(self.agent.trajectory, "prompt_tokens", None)
+    return token_continuity.reconstruct_continuation_prompt_tokens(
+        self.agent.trajectory,
+        self._response_token_count,
+        contract="P58",
     )
-    prompt_length = getattr(self.agent.trajectory, "prompt_length", None)
-    if raw_prompt.ndim != 1 or raw_prompt.dtype.kind not in "iu":
-      raise TypeError("P58 trajectory prompt tokens must be a 1-D integer array")
-    if (
-        not isinstance(prompt_length, (int, np.integer))
-        or not 0 < int(prompt_length) <= raw_prompt.size
-    ):
-      raise ValueError(
-          "P58 trajectory prompt length is absent or outside its token width"
-      )
-    parts = [np.asarray(raw_prompt[-int(prompt_length):], dtype=np.int32)]
-
-    for step_index, step in enumerate(self.agent.trajectory.steps):
-      assistant_tokens = getattr(step, "assistant_tokens", None)
-      if assistant_tokens is None:
-        raise ValueError(
-            f"P58 turn {step_index} has no exact sampled assistant tokens"
-        )
-      assistant = np.asarray(assistant_tokens)
-      if assistant.ndim != 1 or assistant.dtype.kind not in "iu":
-        raise TypeError(
-            f"P58 turn {step_index} assistant tokens are not 1-D integers"
-        )
-      parts.append(np.asarray(assistant, dtype=np.int32))
-
-      env_tokens = getattr(step, "env_tokens", None)
-      if env_tokens is None:
-        if not bool(getattr(step, "done", False)):
-          raise ValueError(
-              f"P58 nonterminal turn {step_index} has no environment tokens"
-          )
-        continue
-      environment = np.asarray(env_tokens)
-      if environment.ndim != 1 or environment.dtype.kind not in "iu":
-        raise TypeError(
-            f"P58 turn {step_index} environment tokens are not 1-D integers"
-        )
-      parts.append(np.asarray(environment, dtype=np.int32))
-
-    prompt_token_ids = np.concatenate(parts, axis=0)
-    expected = int(prompt_length) + int(self._response_token_count)
-    if prompt_token_ids.size != expected:
-      raise ValueError(
-          "P58 exact prompt width differs from the trajectory response "
-          f"counter: {prompt_token_ids.size} vs {expected}"
-      )
-    return prompt_token_ids
 
   def _check_and_set_context_limit_reached(self) -> bool:
     """Returns True and updates trajectory status if response budget is exhausted."""
@@ -790,6 +754,31 @@ class TrajectoryCollectEngine:
       )
       return True
     logging.debug("%s model_call done", self._debug_prefix)
+
+    # Observer-only M15 verification runs after serving has consumed the text
+    # prompt. It does not add prompt_token_ids or otherwise change sampling.
+    if (
+        self._m15_token_continuity_mode == "verify"
+        and self.agent.trajectory.steps
+    ):
+      expected_prompt = (
+          token_continuity.reconstruct_continuation_prompt_tokens(
+              self.agent.trajectory,
+              self._response_token_count,
+              contract="M15",
+          )
+      )
+      actual_prompt = token_continuity.unpadded_rollout_prompt_tokens(
+          rollout_output
+      )
+      print(
+          token_continuity.continuity_receipt(
+              actual_prompt,
+              expected_prompt,
+              turn=len(self.agent.trajectory.steps),
+          ),
+          flush=True,
+      )
 
     # Align trajectory prompt tokens with the rollout worker's actual
     # tokenization on the first turn to prevent prompt token desync.

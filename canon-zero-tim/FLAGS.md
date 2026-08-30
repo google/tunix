@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 398 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 409 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -20,6 +20,7 @@
 | CANON_PROMPT_DIRECT_LOGPROBS / ABSOLUTE_TARGET_IDS | R5 同族实现细节开关 | off | 已认证 | 随 R5 同批焊死 |
 | CANON_VLLM_ENABLE_PREFIX_CACHING | Phase3 APC:仅改变 A rollout 的 vLLM prefix-cache 读取路径；B rescore 继续固定 `reset_prefix_cache=True` 全量重算 | off；缺省/空/0 均关，仅 1 开；三个 production full recipes 当前统一 off | 试验；Qwen3-8B DP1×TP4 G-A/G-B/G-C/G-D、脏页阴性与匹配性能/XProf 已绿；M15 DP8×TP8 `m15i` G-E 在 A−B 红 1389 bytes/760 elements、B−C exact，故 target 修复前禁止 production APC | fresh target carrier 完成复现/首红定位/最小修复，随后对应 workload G-E 与脏页负控全绿后逐项转正；认证不可跨 workload 继承 |
 | CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY | FrozenLake有限差异的可观测训练策略。历史 Native/IS full 继续保留 broad warning；优化 Zero 仅精确 M15/main v1-hp、DP8×TP8、300-update、no-eval/no-checkpoint concept run 可开，且只将 `S_decode_vs_S_prefill` 与由其直接派生的 `w`/`wr`/clip/TIS 差异降为 warning。`S_prefill_vs_T_old`、`T_old_vs_T_current`、`r`、任意 nonfinite、梯度、副本与 optimizer transaction 始终 fatal；P45 Zero 始终为 0 | off；renderer 对精确 M15 Zero concept arm 写 1 | 临时收敛曲线逃生阀；host 正负控覆盖 A-B warning、B-C/nonfinite fatal 与 P45 邻臂拒绝；target 未跑，开启后只能声明 `convergence-only / alignment-degraded`，不得声明 Zero-TIM | M15 carrier 修复并完成 strict 300-update target 后恢复 0；失败与 warning 剂量证据永久保留 |
+| CANON_M15_TOKEN_CONTINUITY | M15 later-turn token continuity selector。缺省必须 absent；T0 仅登记 `verify`：保持 rendered-text model call 原样，在 serving 返回后对比其实际 unpadded prompt IDs 与 initial serving prompt tail + exact sampled assistant IDs + exact nonterminal environment IDs，并只打印长度、SHA、首 mismatch 位置/两 token 的 bounded receipt。只准精确 M15/main Zero v1-hp DP8×TP8、300-update、no-eval/no-checkpoint、alignment-warning concept 身份；malformed/missing/negative token arrays hard-fail。预注册值 `exact` 在真实 M15 verify 证明 token drift 前显式拒绝，不能由 DeepSWE TP4 证据跨负载继承 | absent；任何空值、未知值、P45/Native/IS/eval/其他拓扑均 fatal | T0 observer implementation；host 5/5、P57 181/181、V1 91/91、完整 pinned-image 与 affected-image 8/8 PASS；real M15/one-host/target 未跑，不改变 sampling input，也不恢复 Zero-TIM claim | 若 M15 在首个 A-B red 前始终 `TOKEN_STREAM_EQUAL`，以 `TITO_EXONERATED_FOR_INCIDENT` 退役；若证明 drift，另经 exact 输入实现、one-host 与 DP8×TP8 target 后决定转正；失败 evidence 永存 |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向；默认 production clipping 继续使用 stock `optax.clip_by_global_norm`。Attempt-7 P62 no-commit 载具额外打印 element-finiteness、naive/max-scaled L2、DP/TP reduction 与 accumulator receipt；G5b 已证明 16/16 groups 与最终 accumulator 全 finite，旧 `norm=inf` 是 FP32 sum-of-squares overflow | off | 历史 segmented 路径已认证；P62 DP16×TP4 G5b target 仅认证 finite backward 与零 commit，未认证 optimizer transaction | 默认路径不变；仅精确 P63 full profiles 可启用 hybrid clip，首次真实 commit 与完整 horizon 仍是 target gate |
 | CANON_P59_RANK_PARALLEL_BACKWARD | 每个 trajectory group 的 DP rank-local VJP 从 host 逐-rank 串行改为一次手动 `shard_map`;TP1 保留 DP-manual/unit-TP carrier，TP>1 在同一物理设备上改用 engine `data/model` 二轴词汇并令 DP+TP 均 manual，使 inner engine shard_map 复用已绑定 TP collective；processed-logprob VJP 产出的 full logical-vocab cotangent 在 head VJP 入口显式约束为 `P(data,model)`，随后 fixed-head 只消费 TP-local vocab；projection 与 attention 的 P59-local 边界均只由精确的双 manual-axis context 选择，RPA 不再二次扩展已经 TP-local 的 GQA K/V；replicated-input TP hidden cotangent以 FP32、升序 rank、逐项 operand barrier 累加后只在边界 cast 一次；leading-DP 暂存后仍走原 fixed reduction，group 顺序不变 | off；仅显式 V1/P58.7 high-performance full profile 开 | **gradient-correctness KEEP / DP4 PERF KEEP / Attempt-3 repair one-host mechanism PASS / exact-image+target pending**:ordinary-JAX FP64 oracle relL2 `3.91e-16`，真实 Qwen 梯度 relL2 `1.582%` 过冻结梯度门，DP4 reverse 3.605x；串行与并行 AdamW 首步 delta relL2 `9.976%` 是已披露 trajectory difference。Attempt 3 的 GSM8K `g64m` 与 P45 `f45m` 均在 step-0 strict pre-alignment 逐字节全同且 0 FAIL，随后分别在 TP4/TP8 证明 attention 入口重复扩展已 local 的 KV；追加 patch 25 只在精确 P59 manual DP×TP context 跳过该扩展并强校验 local Q/K/V/cache。M15 `m15m` 在更早的独立 token-contract 门停止，不构成 P59 数值判决。host V1 21/21、P57 144/144、P59 34/34、APC 31/31、flags 366/366 通过；真实 v5p `DP2xTP2` RPA forward+VJP2、wrong-cache negative 与普通 `DP1xTP4` GQA control 通过且零 optimizer commit。installed-attention DP2×TP4/TP8 pinned-image 正负控与真实 DP16×TP4/DP8×TP8 optimizer commit 仍未验证 | Phase4 三个 full target 与 P58.7 full 归档后按 workload 转正；任一 real ALIGN FAIL 立即退役；全局默认仍 off |
@@ -220,6 +221,7 @@ CANON_LOCAL_PROMPTS
 CANON_LOCAL_TRAJECTORIES
 CANON_LOGPROB_M
 CANON_LOGPROB_STEP_FUSION
+CANON_M15_TOKEN_CONTINUITY
 CANON_MAX_BATCHED
 CANON_MESH_SHAPE
 CANON_MINREPRO_N
@@ -545,4 +547,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 408 settable names (appendix inventory above; exclusions: none).
+Count: 409 settable names (appendix inventory above; exclusions: none).

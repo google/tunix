@@ -82,6 +82,11 @@ $docker run --rm \
       python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/probe_gsm_fixed_replay_scale.py
     python3 tests/perf/profile_window_test.py
     python3 canon-zero-tim/tests/p57_frozenlake_tim/test_m15_alignment_warning.py
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py
+    python3 tests/rl/agentic/trajectory/trajectory_collect_engine_test.py \
+      TrajectoryCollectEngineTest.test_m15_verify_observes_drift_without_replacing_text_prompt \
+      TrajectoryCollectEngineTest.test_m15_verify_reports_exact_later_turn_prompt \
+      TrajectoryCollectEngineTest.test_m15_verify_rejects_caller_prompt_token_override
     bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_analyze_m15i_evidence.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_target_run.py

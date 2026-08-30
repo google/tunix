@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
+import io
 import time
 from unittest import mock
 
@@ -404,6 +406,97 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     engine._response_token_count = 1
     with self.assertRaisesRegex(ValueError, 'has no environment tokens'):
       engine._p58_continuation_prompt_token_ids()
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_m15_verify_observes_drift_without_replacing_text_prompt(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101], [0]),
+        ([301, 302], [0, 0]),
+    ]
+    with mock.patch.object(
+        trajectory_collect_engine.token_continuity,
+        'm15_token_continuity_mode',
+        return_value='verify',
+    ):
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          tokenizer=self.mock_tokenizer,
+          chat_parser=self.mock_chat_parser,
+          max_response_length=1024,
+      )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+      asyncio.run(self._run_collect(engine, mode='Token'))
+
+    self.assertIn('verdict=TOKEN_STREAM_DIFFERENT', output.getvalue())
+    self.assertIn('first_mismatch=1', output.getvalue())
+    for model_call in self.mock_model_call.call_args_list:
+      self.assertNotIn('prompt_token_ids', model_call.kwargs)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_m15_verify_reports_exact_later_turn_prompt(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [0]),
+        ([301, 302], [0, 0]),
+    ]
+
+    def _rollout(text, tokens, prompt_tokens, prompt_length):
+      return RolloutOutput(
+          text=[text],
+          logits=[jnp.zeros_like(tokens)],
+          tokens=[tokens],
+          left_padded_prompt_tokens=np.asarray([prompt_tokens]),
+          logprobs=[np.ones_like(tokens)],
+          prompt_lengths=np.asarray([prompt_length], dtype=np.int32),
+      )
+
+    self.mock_model_call.side_effect = [
+        _rollout('response1', np.asarray([201, 202]), [0, 0, 101], 1),
+        _rollout(
+            'response2',
+            np.asarray([203, 204]),
+            [0, 101, 201, 202, 301, 302],
+            5,
+        ),
+    ]
+    with mock.patch.object(
+        trajectory_collect_engine.token_continuity,
+        'm15_token_continuity_mode',
+        return_value='verify',
+    ):
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          tokenizer=self.mock_tokenizer,
+          chat_parser=self.mock_chat_parser,
+          max_response_length=1024,
+      )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+      asyncio.run(self._run_collect(engine, mode='Token'))
+
+    self.assertIn('verdict=TOKEN_STREAM_EQUAL', output.getvalue())
+    self.assertIn('first_mismatch=-1', output.getvalue())
+    for model_call in self.mock_model_call.call_args_list:
+      self.assertNotIn('prompt_token_ids', model_call.kwargs)
+
+  def test_m15_verify_rejects_caller_prompt_token_override(self):
+    with mock.patch.object(
+        trajectory_collect_engine.token_continuity,
+        'm15_token_continuity_mode',
+        return_value='verify',
+    ), self.assertRaisesRegex(ValueError, 'rendered-text path'):
+      trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          model_call_kwargs={'prompt_token_ids': np.asarray([101])},
+      )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_token_mode_empty_steps(self, mock_convert):
