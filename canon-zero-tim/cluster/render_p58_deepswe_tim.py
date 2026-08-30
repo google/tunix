@@ -45,6 +45,9 @@ _KUEUE_MANAGED_WORKER_POOLS = frozenset({
     "tpu-v5p-slice",
     "any",
 })
+_EXCLUSIVE_TOPOLOGY_ANNOTATION = (
+    "alpha.jobset.sigs.k8s.io/exclusive-topology"
+)
 _KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 _CPU_NODEPOOL = "cpu-np"
 _JOBSET_REPLICATEDJOB_LABEL = "jobset.sigs.k8s.io/replicatedjob-name"
@@ -214,6 +217,9 @@ def render(
       whitelist_sha256=whitelist_sha256,
       fixed_lm_head=False,
   )
+  document["metadata"].setdefault("annotations", {})[
+      _EXCLUSIVE_TOPOLOGY_ANNOTATION
+  ] = "cloud.google.com/gke-nodepool"
 
   hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
       seam_localization
@@ -470,12 +476,21 @@ def render(
   worker = p34._worker(document)
   worker["completions"] = WORKERS
   worker["parallelism"] = WORKERS
+  worker_template_metadata = worker["template"].setdefault("metadata", {})
+  worker_template_annotations = worker_template_metadata.get("annotations", {})
+  worker_template_annotations.pop(_EXCLUSIVE_TOPOLOGY_ANNOTATION, None)
+  if not worker_template_annotations:
+    worker_template_metadata.pop("annotations", None)
   worker_pod = worker["template"]["spec"]
   if worker_nodepool in _KUEUE_MANAGED_WORKER_POOLS:
-    # These values mean that Kueue's selected ResourceFlavor owns the concrete
-    # node-pool affinity.  Serializing the sentinel as a literal nodeSelector
-    # made p58c05 incompatible with every available flavor.
+    # JobSet-level exclusive topology coordinates the selected/NAP-created
+    # node pool across all indexed followers.  A Pod-template annotation does
+    # not provide that context and caused K03's follower webhook rejection.
     worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
+  else:
+    worker_pod["nodeSelector"][
+        "cloud.google.com/gke-nodepool"
+    ] = worker_nodepool
   worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = TOPOLOGY
   worker_container = p34._container(worker_pod["containers"], "pathways-worker")
   p34._replace_arg(
@@ -824,6 +839,18 @@ def validate(
   if f"--instance_type=tpuv5:{TOPOLOGY}" not in manager["args"]:
     raise ValueError("P58 resource-manager topology drifted")
   worker_pod = worker["template"]["spec"]
+  annotations = document.get("metadata", {}).get("annotations", {})
+  if annotations.get(_EXCLUSIVE_TOPOLOGY_ANNOTATION) != (
+      "cloud.google.com/gke-nodepool"
+  ):
+    raise ValueError("P58 JobSet lost its exclusive-topology annotation")
+  worker_template_annotations = worker["template"].get(
+      "metadata", {}
+  ).get("annotations", {})
+  if _EXCLUSIVE_TOPOLOGY_ANNOTATION in worker_template_annotations:
+    raise ValueError(
+        "P58 exclusive-topology annotation must not be on the Pod template"
+    )
   if (
       worker_pod.get("hostNetwork") is not True
       or worker_pod.get("dnsPolicy") != "ClusterFirstWithHostNet"

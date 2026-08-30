@@ -1814,3 +1814,29 @@
 - No image was published and the rendered YAML was not applied. DP8xTP8
   strict Zero-TIM/performance and optimizer-commit certification remain target
   work under separate launch approval.
+
+## 2026-08-30 UTC — P58.24 K03 worker-admission repair
+
+- Fast-forwarded the clean isolated P58 worktree from publication checkpoint
+  `501b9b8ad9e0295348c43f1f991c303d02cd9f2f` to operator tip
+  `ae1e92f7660eb0ad73b20b47b8a4d7703aaea57c`. The new immutable K03 package
+  shows Kueue admission and CPU-head startup followed by the first failure:
+  `vpod.kb.io` rejected indexed worker followers because
+  `cloud.google.com/gke-nodepool` was absent.
+- Root cause: the base manifest placed JobSet's exclusive-topology annotation
+  on the worker Pod template. That activated follower admission without the
+  JobSet-level context needed to coordinate the Kueue-selected or NAP-created
+  nodepool. No model or numerical path ran in K03.
+- Local repair: move the annotation to `JobSet.metadata.annotations`, reject a
+  Pod-template copy, preserve Kueue sentinels as selector-absent, and preserve
+  explicit real nodepools exactly. Accelerator `tpu-v5p-slice` and topology
+  `4x4x8` remain fixed.
+- Validation so far: renderer 32/32, system-optimization workload 4/4,
+  Bash/Python syntax, and a sentinel full Zero-HP CLI render PASS with
+  JobSet-only exclusive topology, 32 workers, B8xG16, DP8xTP8 and exact
+  `4x4x8`. Annotation-scope negatives reject missing top-level or Pod-level
+  duplicate placement. The digest-pinned complete gate emits
+  `P58_EXACT_IMAGE_CPU_PASS` with `system_optimization=1`,
+  `trajectory_replay_b2g2=1`, and `regressions=1`.
+- No numerical flag or recipe changed. No commit, push, image publication,
+  Kubernetes mutation, Pathways run, or TPU launch occurred.

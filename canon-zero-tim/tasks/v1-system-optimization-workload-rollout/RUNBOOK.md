@@ -35,14 +35,17 @@ bash canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepsw
   <registry/image@sha256:digest> \
   <fresh-output.yaml> \
   <fresh-run-id> \
-  <worker-nodepool> \
+  <worker-nodepool-or-kueue-sentinel> \
   <model-pvc>
 ```
 
 The preparation receipt must say
 `V1_DEEPSWE_ZERO_HP_RFULL_READY ... launch=not-executed`. Inspect the YAML and
 confirm the same exact tuple, the DeepSWE P67 selector, and collective-reducer
-absence.
+absence. Confirm exclusive topology exists only on JobSet metadata. A Kueue
+sentinel must omit literal worker-nodepool affinity; an explicit real pool
+must remain exact. In both cases require accelerator `tpu-v5p-slice`, topology
+`4x4x8`, and server-side dry-run before any separately approved apply.
 
 ## Target receipts required after separately approved launches
 

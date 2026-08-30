@@ -1,5 +1,26 @@
 # State
 
+## P58.24 K03 JobSet exclusive-topology repair (2026-08-30)
+
+- Operator tip `ae1e92f7660eb0ad73b20b47b8a4d7703aaea57c` preserves the K03
+  incident package. K03 reached Kueue admission and CPU-head startup, then
+  `vpod.kb.io` rejected indexed worker followers because their Pod template
+  lacked `cloud.google.com/gke-nodepool`. Nothing numerical ran; K03 is
+  infrastructure `INCONCLUSIVE` with no resumable state.
+- Root cause is annotation scope, not a missing hard-coded pool: the manifest
+  put JobSet's exclusive-topology annotation on the worker Pod template.
+  P58.24 moves it to `JobSet.metadata.annotations` and forbids the Pod-level
+  copy. Kueue-managed sentinels again omit literal nodepool affinity; explicit
+  real pools remain exact.
+- Host construction passes: renderer and annotation-scope negatives,
+  system-optimization workload tests, Bash/Python syntax, and a full CLI
+  sentinel render with top-level exclusive topology. The digest-pinned
+  complete gate also passes with
+  `P58_EXACT_IMAGE_CPU_PASS ... system_optimization=1 ... regressions=1`.
+- Model, data, B8xG16, DP8xTP8 roles, 1,000 updates, device optimizer, strict
+  alignment, and the P59/P67/P63/P70/P71 system tuple are unchanged. No flag
+  was added or modified. No image publication or target launch occurred.
+
 ## Publication checkpoint for P58.23 (2026-08-30)
 
 - User approval for commit/push was granted for this delivery. Implementation

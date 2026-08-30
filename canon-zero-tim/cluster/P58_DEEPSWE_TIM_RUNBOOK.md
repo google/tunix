@@ -18,6 +18,29 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## K03 correction: exclusive topology belongs on the JobSet
+
+K03 failed before rollout when `vpod.kb.io` rejected indexed worker followers.
+The manifest placed
+`alpha.jobset.sigs.k8s.io/exclusive-topology=cloud.google.com/gke-nodepool`
+on the worker Pod template instead of JobSet metadata, so follower admission
+lacked the JobSet-level placement context.
+
+P58 now requires that annotation exactly once on JobSet metadata and forbids
+the worker-Pod copy. Kueue-managed values `auto`, `none`, `any`, and
+`tpu-v5p-slice` omit literal nodepool affinity and let the selected flavor or
+NAP pool satisfy the JobSet placement contract. A concrete pool remains legal
+and exact. Every render retains:
+
+```text
+cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+cloud.google.com/gke-tpu-topology: 4x4x8
+```
+
+Before apply, verify the selected ResourceFlavor or explicit pool read-only,
+then require a server-side dry-run. Never hand-edit K03 YAML. K03 produced no
+trajectory or checkpoint and is not resumable.
+
 ## Publication/readback gate for the optimized Zero/full profile
 
 Implementation commit `fb178803d53ff562cefdfdc8e7b3fac3563d9d6e` contains
@@ -105,7 +128,7 @@ bash canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepsw
   <matching-registry-image@sha256:digest> \
   <fresh-output.yaml> \
   <fresh-run-id> \
-  <worker-nodepool> \
+  <worker-nodepool-or-kueue-sentinel> \
   <model-pvc>
 ```
 

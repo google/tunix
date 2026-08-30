@@ -1,5 +1,40 @@
 # P58 DeepSWE native-first training handoff
 
+## K04 START HERE — use JobSet-level exclusive topology
+
+K03 is immutable infrastructure `INCONCLUSIVE`. Kueue admitted the JobSet and
+the CPU head started, but `vpod.kb.io` rejected indexed TPU worker followers
+because the worker Pod template had no
+`cloud.google.com/gke-nodepool`. No rollout, trajectory, trainer program,
+backward, optimizer commit, or checkpoint was produced.
+
+K03 put JobSet's exclusive-topology annotation on the worker Pod template.
+That is the wrong scope: the controller needs it at JobSet metadata to bind
+the indexed Job and its followers to the Kueue-selected or NAP-created pool.
+For K04 use either the existing Kueue sentinel `tpu-v5p-slice` or an actual
+pool verified against the selected flavor, and render only through:
+
+```bash
+bash canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepswe_zero_hp_full.sh \
+  <approved-40-character-sha> \
+  <matching-registry-image@sha256:digest> \
+  <fresh-output.yaml> \
+  <fresh-run-id> \
+  <worker-nodepool-or-kueue-sentinel> \
+  <model-pvc>
+```
+
+The wrapper is render-only and must emit
+`V1_DEEPSWE_ZERO_HP_RFULL_READY ... launch=not-executed`. Require exactly one
+top-level `alpha.jobset.sigs.k8s.io/exclusive-topology` annotation whose value
+is `cloud.google.com/gke-nodepool`, and no copy on the worker Pod template.
+Sentinel renders must omit a literal nodepool selector while retaining
+accelerator `tpu-v5p-slice` and topology `4x4x8`; explicit-pool renders must
+retain that real value exactly. Require server-side dry-run before a
+separately approved apply. Do not hand-edit K03 YAML. Dynamic inference-package
+discovery remains for image-layout drift, but the client image must still be
+immutable and source-matched.
+
 ## PUBLICATION CHECKPOINT — optimized Qwen3-4B Zero/full wiring
 
 The implementation commit is

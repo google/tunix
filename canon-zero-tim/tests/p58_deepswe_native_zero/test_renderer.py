@@ -522,19 +522,27 @@ class P58RendererTest(unittest.TestCase):
           worker_nodepool="tpu-pool",
       )
 
-  def test_kueue_managed_worker_pool_does_not_become_literal_affinity(self):
+  def test_kueue_managed_pool_uses_jobset_level_exclusive_topology(self):
     for worker_nodepool in ("auto", "none", "tpu-v5p-slice", "any"):
       with self.subTest(worker_nodepool=worker_nodepool):
         document = self._render(
             "native", "full", worker_nodepool=worker_nodepool
         )
-        worker_pod = renderer.p34._worker(document)["template"]["spec"]
-        self.assertNotIn(
-            "cloud.google.com/gke-nodepool", worker_pod["nodeSelector"]
-        )
         self.assertEqual(
-            worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"],
-            "4x4x8",
+            document["metadata"]["annotations"][
+                renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION
+            ],
+            "cloud.google.com/gke-nodepool",
+        )
+        worker = renderer.p34._worker(document)
+        worker_metadata = worker["template"].get("metadata", {})
+        self.assertNotIn(
+            renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION,
+            worker_metadata.get("annotations", {}),
+        )
+        self.assertNotIn(
+            "cloud.google.com/gke-nodepool",
+            worker["template"]["spec"]["nodeSelector"],
         )
 
   def test_explicit_worker_pool_remains_exact(self):
@@ -546,6 +554,38 @@ class P58RendererTest(unittest.TestCase):
         worker_pod["nodeSelector"]["cloud.google.com/gke-nodepool"],
         "mlperf-v5p-128-np-0",
     )
+
+  def test_exclusive_topology_annotation_scope_is_fail_closed(self):
+    document = self._render("native", "full", worker_nodepool="auto")
+    document["metadata"]["annotations"].pop(
+        renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION
+    )
+    with self.assertRaisesRegex(ValueError, "lost its exclusive-topology"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="auto",
+      )
+
+    document = self._render("native", "full", worker_nodepool="auto")
+    worker = renderer.p34._worker(document)
+    worker["template"].setdefault("metadata", {}).setdefault(
+        "annotations", {}
+    )[renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION] = (
+        "cloud.google.com/gke-nodepool"
+    )
+    with self.assertRaisesRegex(ValueError, "must not be on the Pod template"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="auto",
+      )
 
   def test_unregistered_data_arm_and_stage_are_rejected(self):
     with self.assertRaisesRegex(ValueError, "native or zero"):

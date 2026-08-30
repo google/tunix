@@ -122,9 +122,10 @@ commit remain unreachable.
 | P58.21 | Qwen3-4B one-host environment-seam discriminator | Rerun the P58.20 carrier with one derived change only: empty `CANON_CONTINUE_DECODE` instead of baseline `8`; preserve all seven canonical targets, fixed TP4 head, prefix-cache off, sampling, data, strict gate, and durable provenance | complete causal control — `p58s21std_20260829t0357z` is A=B=C over 2,553 action tokens; full 8,192-token backward compile hit the 7,200-second bound and remains unproved |
 | P58.22 | Qwen3-4B continue-decode cross-turn token/KV repair | Keep value `8`; preserve exact sampled/environment token IDs across agent turns, require an identical-prefix A/B join, then pass controlled strict alignment and finite nonzero backward-no-commit on the attested 1792+2880 one-host carrier with signed persistent compilation cache | completed alignment prerequisite — real rollout and A=B=C PASS over 2,413 action tokens; serial backward carriers remained incomplete and are superseded by P58.23 |
 | P58.23 | Qwen3-4B optimized B2xG2 one-host backward | Repeat one strict-exact immutable real mixed-reward prompt pair as two physical groups at B2xG2/K2560 through P28/P30/P71-forward; require strict A=B=C, four nonzero advantages, finite nonzero backward, unchanged TPU state, and zero commits inside 1,800 seconds | completed — `p58s23optb2g2g_20260830t0132z` returned A=B=C over 1,254 action tokens, exact finite nonzero repeated gradients, device-resident unchanged optimizer state, and zero commits; profiled repeat 12.418 seconds; TP8 and optimizer-update promotion remain unproved |
+| P58.24 | JobSet-level exclusive-topology contract | Put the nodepool topology key exactly once on JobSet metadata, forbid its worker-Pod copy, preserve Kueue/NAP sentinel resolution and explicit-pool exactness, and require server dry-run before launch | implemented locally; host and pinned-image construction PASS; target not run |
 
-At most one phase may be active. P58.23 is complete and no target launch is
-active. Commit, push, image publication, Kubernetes render/application, and
+At most one phase may be active. P58.24 is the active construction repair and
+no target launch is active. Commit, push, image publication, Kubernetes render/application, and
 each later TPU execution remain separately user-gated.
 
 P58.1 and P58.2 are closed by the pinned-image marker recorded in `state.md`.

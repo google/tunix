@@ -55,7 +55,10 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --high-performance
 ```
 
-Before apply, require renderer PASS, exact `4x4x8`, DP8 x TP8 role meshes,
+Require the exclusive-topology annotation exactly once on JobSet metadata and
+never on the worker Pod template. The Kueue sentinel omits literal nodepool
+affinity; a separately supplied real pool remains exact. Before apply,
+require renderer PASS, server-side dry-run, exact `4x4x8`, DP8 x TP8 role meshes,
 `CANON_V1_HP_FULL=1`, the P58 HP profile, APC off, P59 on, and a server-side
 dry run. Monitor updates 1–3 inside the same full job. Any real alignment FAIL
 stops the run. A healthy job continues to 1,000 commits.
