@@ -297,8 +297,16 @@ def canonical_overflow_safe_clip_max_norm(
       environ.get("CANON_P57_TIM_ARM") == "zero",
       environ.get("CANON_P57_EXPECTED_UPDATES") == "300",
       environ.get("CANON_P57_STOP_AFTER_STEP") == "300",
-      environ.get("CANON_P57_WORKLOAD_CANDIDATE") == "m15",
-      environ.get("CANON_P57_DATA_SPLIT") == "main",
+      (
+          (
+              not environ.get("CANON_P57_WORKLOAD_CANDIDATE")
+              and not environ.get("CANON_P57_DATA_SPLIT")
+          )
+          or (
+              environ.get("CANON_P57_WORKLOAD_CANDIDATE") == "m15"
+              and environ.get("CANON_P57_DATA_SPLIT") == "main"
+          )
+      ),
       environ.get("CANON_P33_ENABLE_EVAL") == "0",
       environ.get("CANON_P33_DISABLE_EVAL") == "1",
       environ.get("CANON_P31_ENABLE_EVAL") == "0",
