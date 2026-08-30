@@ -27,6 +27,7 @@ from typing import Any
 
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
+from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
 REPO_ROOT = os.path.abspath(
@@ -118,6 +119,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action="store_true",
       help="Enable debug logging for rollout worker.",
   )
+
+  parser.add_argument(
+      "--weight_sync_mode",
+      type=weight_sync_lib.WeightSyncMode,
+      default=weight_sync_lib.WeightSyncMode(
+          os.getenv("WEIGHT_SYNC_MODE", "raiden")
+      ),
+      choices=list(weight_sync_lib.WeightSyncMode),
+      help="Weight sync mode.",
+  )
   return parser.parse_args(argv)
 
 
@@ -201,7 +212,9 @@ def _create_vllm_worker(args, tokenizer):
   if args.sampler == "vllm":
     sampler_adapter, rollout_config = _create_vllm_sampler(args)
   else:
-    sampler_adapter, rollout_config = _create_inprocess_vllm_sampler(args, tokenizer)
+    sampler_adapter, rollout_config = _create_inprocess_vllm_sampler(
+        args, tokenizer
+    )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
@@ -274,9 +287,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
+      weight_sync_mode=args.weight_sync_mode,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
+      weight_sync_mode=args.weight_sync_mode,
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
       temperature=1.0,
