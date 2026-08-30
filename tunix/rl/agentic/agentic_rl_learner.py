@@ -198,6 +198,7 @@ def _p38_diagnostic_consumer_contract(
     v1_fl_tp8_ab: bool = False,
     p58_vma_diagnostic: bool = False,
     p58_seam_localization: bool = False,
+    p58_q4_tp4_continue_kv: bool = False,
 ) -> tuple[int, bool, int]:
   """Return the P38 full-coverage consumer geometry.
 
@@ -217,8 +218,12 @@ def _p38_diagnostic_consumer_contract(
     raise ValueError("P58 VMA diagnostic is not a one-host rehearsal")
   if onehost_rehearsal and p58_seam_localization:
     raise ValueError("P58 seam localization is not a one-host rehearsal")
+  if onehost_rehearsal and p58_q4_tp4_continue_kv:
+    raise ValueError("P58 Qwen3-4B continue-KV is not a P38 rehearsal")
   expected = (
-      (2, 2, 2)
+      (1, 1, 2)
+      if p58_q4_tp4_continue_kv
+      else (2, 2, 2)
       if onehost_rehearsal
       else (8, 8, 16)
       if (p58_vma_diagnostic or p58_seam_localization)
@@ -232,7 +237,7 @@ def _p38_diagnostic_consumer_contract(
         "P38 diagnostic coverage geometry changed: "
         f"observed={observed} expected={expected}"
     )
-  if not process_in_consumer:
+  if not process_in_consumer and not p58_q4_tp4_continue_kv:
     raise ValueError(
         "P38 diagnostic coverage requires raw trajectories to be processed "
         "in the consumer"
@@ -303,6 +308,11 @@ def _segmented_update_geometry(environ) -> tuple[int, int, str, bool]:
     )
   if p41_optimizer_bench:
     return 2, 2, "[P41.OPTIMIZER]", False
+  if environ.get("CANON_P58_Q4_TP4_TRAJECTORY_REPLAY", "0") == "1":
+    total, micro = deepswe_debug.q4_tp4_trajectory_replay_update_geometry(
+        environ
+    )
+    return total, micro, "[P58.23.REPLAY]", False
   if environ.get("CANON_GSM8K_TRAIN", "") == "1":
     # One-host real-geometry GSM8K training (P51): 32 trajectories per
     # update chunked 16x2. The P33/P34 cluster branches return earlier.
@@ -470,6 +480,46 @@ def _split_train_example_by_trajectory(
       )
       for i in range(0, total_trajectories, trajectory_micro_batch_size)
   ]
+
+
+def _p58_onehost_work_hashes(train_example) -> dict[str, Any]:
+  """Returns immutable work hashes for the two P58.23 backward repeats."""
+
+  def hash_array(value):
+    array = np.asarray(jax.device_get(value))
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(json.dumps(array.shape).encode("ascii"))
+    digest.update(np.ascontiguousarray(array).tobytes())
+    return digest.hexdigest()
+
+  fields = (
+      "prompt_ids",
+      "prompt_mask",
+      "completion_ids",
+      "completion_mask",
+      "completion_valid_mask",
+      "advantages",
+      "policy_version",
+  )
+  hashes = {
+      name: hash_array(getattr(train_example, name))
+      for name in fields
+      if getattr(train_example, name, None) is not None
+  }
+  hashes["shape_signature"] = hashlib.sha256(
+      json.dumps(
+          {
+              name: list(np.shape(getattr(train_example, name)))
+              for name in fields
+              if getattr(train_example, name, None) is not None
+          },
+          sort_keys=True,
+          separators=(",", ":"),
+      ).encode("utf-8")
+  ).hexdigest()
+  hashes["actor_update_calls"] = 2
+  return hashes
 
 
 def _advance_unpacked_microsteps(
@@ -1098,14 +1148,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             else os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
         )
     )
-    run_stage = os.environ.get(
-        "CANON_P34_RUN_STAGE" if p34_workload else "CANON_P33_RUN_STAGE",
-        "",
+    p58_onehost_replay_no_commit = (
+        deepswe_debug.q4_tp4_trajectory_replay(os.environ)
+        and deepswe_debug.no_commit(os.environ)
+    )
+    segmented_no_commit = p33_no_commit or p58_onehost_replay_no_commit
+    run_stage = (
+        os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        if p58_onehost_replay_no_commit
+        else os.environ.get(
+            "CANON_P34_RUN_STAGE" if p34_workload else "CANON_P33_RUN_STAGE",
+            "",
+        )
     )
     gsm8k_train = os.environ.get("CANON_GSM8K_TRAIN", "") == "1"
     expected_mode = (
         "train"
-        if p31_convergence or canonical_workload or gsm8k_train
+        if (
+            p31_convergence
+            or canonical_workload
+            or gsm8k_train
+            or p58_onehost_replay_no_commit
+        )
         else "update-canary"
     )
     if alignment.execution_mode() != expected_mode:
@@ -1355,9 +1419,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
 
     def consume_microbatch(index, gradients):
-      norm = actor_trainer.accumulate_precomputed_gradient_microbatch(
-          gradients, microbatch_index=index
-      )
+      if segmented_no_commit:
+        norm = jnp.sqrt(sum(
+            jnp.sum(jnp.square(value.astype(jnp.float32)))
+            for value in jax.tree.leaves(gradients)
+        ))
+        norm.block_until_ready()
+      else:
+        norm = actor_trainer.accumulate_precomputed_gradient_microbatch(
+            gradients, microbatch_index=index
+        )
       micro_norms.append(norm)
       if index < expected_microbatches - 1:
         print(
@@ -1655,7 +1726,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           ],
           gradient_norm=micro_norms[index],
           optimizer_skipped=jnp.asarray(
-              1 if p33_no_commit else 0, jnp.int32
+              1 if segmented_no_commit else 0, jnp.int32
           ),
           step=(
               before["train_steps"] * expected_microbatches + index
@@ -1665,7 +1736,33 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           fail_closed=True,
       )
       records.append(record)
-    if not any(activity) and (not full_train or p33_no_commit):
+    if p58_onehost_replay_no_commit:
+      # The two segmented receipts above each cover one B1xG2 gradient
+      # microstep (627 admitted action tokens).  Durable trajectory evidence
+      # and the pre-alignment receipt are batch-level (1,254 tokens), so end
+      # the repeat with one batch-level post-backward receipt rather than
+      # making a classifier infer aggregation from record ordering.
+      aggregate_gradient_norm = jnp.sqrt(sum(
+          jnp.square(jnp.asarray(value, jnp.float32))
+          for value in micro_norms
+      ))
+      aggregate_gradient_norm.block_until_ready()
+      records.append(alignment.check_batch(
+          sidecar,
+          t_current=result["per_token_logps"],
+          gradient_norm=aggregate_gradient_norm,
+          optimizer_skipped=jnp.asarray(1, jnp.int32),
+          step=expected_microbatches,
+          fail_closed=True,
+      ))
+      print(
+          "[P58.23.REPLAY] POST_BACKWARD_BATCH_PASS "
+          f"trajectories={num_trajectories} "
+          f"microsteps={expected_microbatches} "
+          f"N_action={int(np.asarray(jnp.sum(sidecar.action_mask)))}",
+          flush=True,
+      )
+    if not any(activity) and (not full_train or segmented_no_commit):
       raise alignment.AlignmentGateError(
           "INCONCLUSIVE_NO_SIGNAL: all four G6 microgradients are zero"
       )
@@ -1823,7 +1920,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       return skip_record
 
-    if p33_no_commit:
+    if segmented_no_commit:
       after_no_commit = {
           "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
           "optimizer": fingerprint(
@@ -1860,6 +1957,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               if p34_workload
               else workload.name
               if p33_workload
+              else "p58-qwen4b-tp4-onehost-replay"
+              if p58_onehost_replay_no_commit
               else "legacy-segmented"
           ),
           "dp_size": workload.dp_size if canonical_workload else 1,
@@ -1924,7 +2023,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       if not unchanged:
         raise alignment.AlignmentGateError(
-            f"P33 backward no-commit mutated training state: {no_commit_record}"
+            "segmented backward no-commit mutated training state: "
+            f"{no_commit_record}"
         )
       return no_commit_record
 
@@ -2663,17 +2763,39 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       env: Any = None,
       max_generation_steps: int | None = None,
       request_timeout_s: float | None = None,
+      prompt_token_ids: Sequence[int] | np.ndarray | None = None,
   ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
     if env:
       env.task["policy_version"] = self.policy_version
 
-    if self.chat_parser:
-      chat_lists = self.chat_parser.parse(
-          messages=chat_lists,
-          add_generation_prompt=True,
-          is_first_msg=True,  # no op if system msg is populated in reset
-      )
+    if prompt_token_ids is not None:
+      if not deepswe_debug.q4_tp4_zero_admission():
+        raise ValueError(
+            "pre-tokenized agentic prompts are restricted to the signed "
+            "P58 Qwen3-4B TP4 Zero admission"
+        )
+      exact_prompt = np.asarray(prompt_token_ids)
+      if (
+          exact_prompt.ndim != 1
+          or exact_prompt.dtype.kind not in "iu"
+          or exact_prompt.size == 0
+      ):
+        raise ValueError(
+            "P58 pre-tokenized agentic prompt must be a nonempty 1-D "
+            "integer array"
+        )
+      prompts = [np.asarray(exact_prompt, dtype=np.int32).tolist()]
+      apply_chat_template = False
+    else:
+      if self.chat_parser:
+        chat_lists = self.chat_parser.parse(
+            messages=chat_lists,
+            add_generation_prompt=True,
+            is_first_msg=True,  # no op if system msg is populated in reset
+        )
+      prompts = [chat_lists]
+      apply_chat_template = False if self.chat_parser else True
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:
@@ -2685,10 +2807,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
-    prompts = [chat_lists]
     result = self.rl_cluster.generate(
         prompts=prompts,
-        apply_chat_template=False if self.chat_parser else True,
+        apply_chat_template=apply_chat_template,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
@@ -3336,10 +3457,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    # 1. Start the rollout producer, except for the explicitly hash-bound P64
-    # diagnostic replay. Replay loads the already certified train batch and
-    # must never regenerate environment or serving work.
+    # 1. Start the rollout producer, except for explicitly hash-bound
+    # diagnostic replays.  Replays must never regenerate environment or
+    # serving decode work.
     p64_replay = p64_training_capsule.is_replay()
+    p58_trajectory_replay = deepswe_debug.q4_tp4_trajectory_replay(os.environ)
+    if p64_replay and p58_trajectory_replay:
+      raise alignment.AlignmentGateError(
+          "P64 and P58 diagnostic replays are mutually exclusive"
+      )
+    diagnostic_replay = p64_replay or p58_trajectory_replay
     prompt_queue = queue.Queue()
     replay_train_example = None
     if p64_replay:
@@ -3365,6 +3492,34 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       print(
           "[P64.CAPSULE] producer_bypass verdict=PASS "
           "environment=0 rollout=0 rescore_b=0",
+          flush=True,
+      )
+    elif p58_trajectory_replay:
+      if eval_dataset is not None or all_eval_prompts:
+        raise alignment.AlignmentGateError(
+            "P58 recorded-trajectory replay forbids evaluation inputs"
+        )
+      replay_items = deepswe_debug.load_q4_tp4_trajectory_replay(os.environ)
+      replay_sampling = deepswe_debug.q4_tp4_replay_sampling_contract()
+      replay_sampling_source = replay_sampling.pop("source_identity")
+      self.rl_cluster.set_recorded_rollout_sampling_transforms(
+          replay_sampling, source_identity=replay_sampling_source
+      )
+      replay_examples = self._process_results(
+          trajectories=replay_items,
+          mode=rl_cluster_lib.Mode.TRAIN,
+          expected_step=0,
+      )
+      if len(replay_examples) != 1:
+        raise alignment.AlignmentGateError(
+            "P58 recorded-trajectory replay must build exactly one train batch"
+        )
+      replay_train_example = replay_examples[0]
+      producer_future = Future()
+      producer_future.set_result(None)
+      print(
+          "[P58.23.REPLAY] PRODUCER_BYPASS verdict=PASS "
+          "environment=0 rollout_decode=0 rescore_b=1 trainer_old=1",
           flush=True,
       )
     else:
@@ -3418,6 +3573,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         v1_fl_tp8_ab=v1_fl_tp8_ab,
         p58_vma_diagnostic=p58_vma_diagnostic,
         p58_seam_localization=p58_seam_localization,
+        p58_q4_tp4_continue_kv=(
+            deepswe_debug.q4_tp4_continue_kv_diagnostic(os.environ)
+        ),
     )
     if p38_precheck_only:
       m15_debug_arm = os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
@@ -3441,10 +3599,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           f"unit_prompts={mini_batch_size} units={diagnostic_units} "
           f"generations={self._num_generations()} "
           f"trajectories={full_batch_size * self._num_generations()} "
+          f"processing={'consumer' if self._process_in_consumer else 'producer'} "
           "partial_tail=reject verdict=PASS",
           flush=True,
       )
-    if p64_replay:
+    if diagnostic_replay:
       train_data_gen = iter([[replay_train_example]])
     else:
       train_data_gen = self._data_consumer_batch_generator(
@@ -3453,9 +3612,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           require_full_batch=require_full_consumer_batch,
       )
     is_packed = self._training_config.max_seq_token_per_tpu is not None
-    if p64_replay and is_packed:
+    if diagnostic_replay and is_packed:
       raise alignment.AlignmentGateError(
-          "P64 diagnostic replay requires the original unpacked P45 batch"
+          "diagnostic replay requires an unpacked train batch"
       )
     if is_packed:
       logging.info(
@@ -3496,10 +3655,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       #   continue
       # train_micro_batch = filtered_train_micro_batch
 
-      if p64_replay:
+      if diagnostic_replay:
         if len(train_micro_batch) != 1:
           raise alignment.AlignmentGateError(
-              "P64 replay must contain exactly one frozen train batch"
+              "diagnostic replay must contain exactly one frozen train batch"
           )
         merged_train_micro_batch = train_micro_batch[0]
       elif self._process_in_consumer:
@@ -3633,7 +3792,47 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"grad_acc={expected_grad_acc} segmented=1",
             flush=True,
         )
-        _canon_xprof_update_entry()
+        p58_replay_profiled_repeat = (
+            p58_trajectory_replay and deepswe_debug.no_commit(os.environ)
+        )
+        replay_warmup_result = None
+        replay_xprof_arm = ""
+        if p58_replay_profiled_repeat:
+          # Compile and execute the exact optimized segmented backward before
+          # tracing.  The no-commit path computes finite gradient norms but
+          # never writes the accumulator, model, optimizer, reference, or
+          # train step, so the profiled repeat consumes identical state.
+          replay_warmup_result = self._run_p28_g6_update(
+              merged_train_micro_batch, xprof_train_schedule=None
+          )
+          if (
+              replay_warmup_result.get("verdict") != "PASS"
+              or replay_warmup_result.get("commits") != 0
+          ):
+            raise RuntimeError(
+                "P58.23 optimized warmup did not preserve no-commit state"
+            )
+          replay_xprof_arm = deepswe_debug.onehost_xprof_arm(os.environ)
+          print(
+              "[P58.ONEHOST.XPROF] warmup_complete "
+              f"arm={replay_xprof_arm} commits=0 state_unchanged=1 "
+              "carrier=P28+P30+P71-fwd",
+              flush=True,
+          )
+          perf_v2 = self.rl_cluster.perf_v2
+          if not hasattr(perf_v2, "process_and_commit_timelines"):
+            raise RuntimeError(
+                "P58.23 optimized replay requires the PerfMetrics v2 tracer"
+            )
+          perf_v2.process_and_commit_timelines()
+          print(
+              "[P58.ONEHOST.XPROF] semantic_warmup_discarded "
+              f"arm={replay_xprof_arm} next_export=profiled-repeat-only",
+              flush=True,
+          )
+          _canon_xprof_onehost_update_entry(replay_xprof_arm)
+        else:
+          _canon_xprof_update_entry()
         # TraceAnnotation starts its TraceMe interval at construction time,
         # not at __enter__. Construct both parents only after the update-only
         # profiler window is open; otherwise their children are captured but
@@ -3687,6 +3886,106 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                       merged_train_micro_batch,
                       xprof_train_schedule=xprof_train_schedule,
                   )
+        if p58_replay_profiled_repeat:
+          _canon_xprof_onehost_update_complete(replay_xprof_arm)
+          self.rl_cluster.perf_v2.export()
+          warmup_norms = [
+              float(value)
+              for value in replay_warmup_result["micro_gradient_norms"]
+          ]
+          gradient_norms = [
+              float(value) for value in segmented_result["micro_gradient_norms"]
+          ]
+          gradient_finite = bool(
+              gradient_norms and np.all(np.isfinite(gradient_norms))
+          )
+          gradient_nonzero = bool(
+              gradient_finite and any(value > 0.0 for value in gradient_norms)
+          )
+          gradient_repeat_exact = gradient_norms == warmup_norms
+          verdict = (
+              "PASS"
+              if (
+                  segmented_result.get("verdict") == "PASS"
+                  and segmented_result.get("commits") == 0
+                  and gradient_finite
+                  and gradient_nonzero
+                  and gradient_repeat_exact
+              )
+              else "FAIL"
+          )
+          replay_report = {
+              "schema": "canon.local.deepswe.backward-no-commit.v1",
+              "verdict": verdict,
+              "commits": 0,
+              "gradient_finite": gradient_finite,
+              "gradient_nonzero": gradient_nonzero,
+              "gradient_norms": gradient_norms,
+              "gradient_warmup_norms": warmup_norms,
+              "gradient_repeat_exact": gradient_repeat_exact,
+              "repeat_count": 2,
+              "xprof_arm": replay_xprof_arm,
+              "work_hashes": _p58_onehost_work_hashes(
+                  merged_train_micro_batch
+              ),
+              "model_changed_paths": segmented_result[
+                  "model_changed_paths"
+              ],
+              "optimizer_changed_paths": segmented_result[
+                  "optimizer_changed_paths"
+              ],
+              "accumulator_changed_paths": segmented_result[
+                  "accumulator_changed_paths"
+              ],
+              "reference_changed_paths": segmented_result[
+                  "reference_changed_paths"
+              ],
+              "train_steps_before": segmented_result["train_steps_before"],
+              "train_steps_after": segmented_result["train_steps_after"],
+              "optimizer_memory_kinds": segmented_result[
+                  "optimizer_memory_kinds_before"
+              ],
+              "hbm_before_backward": segmented_result["hbm_before"],
+              "hbm_after_backward": segmented_result["hbm_after_reverse"],
+              "state_fingerprints_before": segmented_result[
+                  "state_fingerprints_before"
+              ],
+              "state_fingerprints_after": segmented_result[
+                  "state_fingerprints_after"
+              ],
+          }
+          report_path = os.environ.get("CANON_DEEPSWE_ONEHOST_REPORT", "")
+          if not report_path or not os.path.isabs(report_path):
+            raise RuntimeError(
+                "CANON_DEEPSWE_ONEHOST_REPORT must be an absolute path"
+            )
+          if os.path.exists(report_path):
+            raise FileExistsError(
+                f"refusing to overwrite one-host report: {report_path}"
+            )
+          os.makedirs(os.path.dirname(report_path), exist_ok=True)
+          with open(report_path, "x", encoding="utf-8") as report_file:
+            json.dump(replay_report, report_file, indent=2, sort_keys=True)
+            report_file.write("\n")
+          print(
+              "[DEEPSWE.ONEHOST] backward_no_commit "
+              f"verdict={verdict} commits=0 "
+              f"gradient_norms={gradient_norms} "
+              "carrier=P28+P30+P71-fwd",
+              flush=True,
+          )
+          print(
+              "[DEEPSWE.ONEHOST] optimizer_boundary_skipped commits=0",
+              flush=True,
+          )
+          if verdict != "PASS":
+            raise RuntimeError(
+                f"P58.23 optimized backward no-commit failed: {replay_report}"
+            )
+          prompt_queue.put(None)
+          _ = producer_future.result()
+          self.rl_cluster.close()
+          return
         if (
             canonical_workload
             and (

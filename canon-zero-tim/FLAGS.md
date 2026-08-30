@@ -62,6 +62,11 @@
 | CANON_P59_XPROF_BACKWARD_DIR / CANON_P59_DP4_TAIL8 / CANON_P60_DETERMINISTIC_AB | P59/P60 DP4 专用 profile、tail 与跨臂载具 | off | 历史载具完成，不进入 V1 full | 证据交付后退役 |
 | CANON_V1_GSM8K_XPROF_ARM | `native|zero-hp` 的 one-host GSM8K matched-work/XProf 观测 selector；固定 DP4×TP1、3 commits、warm update 2→3 capture，打印 profiled batch token/advantage hashes；Native 必须 vanilla stock trainer，Zero-HP 必须 strict V1/P59 bundle；P60-2G 只重跑 Zero-HP | 空/off；仅两条薄 wrapper 设置；P60-2G local，TARGET NOT RUN | pair XProf 归档后退役；不得进入 full recipe |
 | CANON_P58_ONEHOST_XPROF_ARM / CANON_P58_ONEHOST_SEAM_PROBE | P58 Qwen3-4B one-host mutation-free 诊断载具。`XPROF_ARM=native\|zero-hp` 固定 DP1×TP4/backward-no-commit；`SEAM_PROBE=1` 只允许 Zero-HP arm，并把同一载具扩展为单个已签名 Pillow task、G2、8K response、16 turns、serial scheduler。它保留真实 rollout/durable trajectory/strict decode-vs-prefill gate；有限 RED 与 exact 都只描述该 TP4 carrier，绝不认证 DP8×TP8/TP8 | 空/0；仅 tracked thin wrapper 设置；生产 P58 selector 必须 0 | TP4 首差分类和必要的 DP8×TP8 exact-geometry follow-up 结案后整体退役；不得进入 full recipe |
+| CANON_P58_Q4_TP4_ZERO_ADMISSION / CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC | P58.20/21 Qwen3-4B-Instruct-2507 direct-v5p DP1×TP4 full-overlay Zero admission 及其唯一 `standard-decode` 因果控制。主 selector 仅接受 `0\|1`；诊断仅接受空/`standard-decode`，且只替换 continue-decode，模型、采样、fixed head、prefix-cache-off 与 strict A=B=C 不变 | 试验、默认 `0`/空；只由 P58 one-host tracked wrapper 设置，production P58/P59 必须拒绝 | TP4 admission 和后续 TP8 promotion 归档后退役 |
+| CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC / CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX / CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX | P58.22 continue-decode KV discriminator 及其不可调窗口 `2280/3072`；只允许 baseline continue=8、strict precheck-only、bounded integer fingerprint，禁止进入 backward/optimizer | 诊断、默认 `0`/absent；tracked wrapper 原子派生 | 一次因果分类与修复复验归档后整体退役 |
+| CANON_P58_Q4_TP4_SHORT_BACKWARD / CANON_P58_Q4_TP4_CARRIER_SCREEN | P58.22 one-host 短宽度 backward-no-commit 与 rollout-only carrier 筛选。short arm 保留真实数据、strict gate、TPU-resident optimizer/zero commit；screen 必须依赖 short 且不得进入 trainer | 诊断、默认 `0`；仅 P58 tracked wrappers | P58.23 optimized replay 完成并由真实 TP8 promotion 取代后退役 |
+| CANON_P58_Q4_TP4_TRAJECTORY_REPLAY | P58.23 单一事实源：启用受哈希约束的两个真实 task group、每组 reward `[1,0]` 的 B2×G2 replay；全局 `batch_size=2`，prompt/response=`2048/512`、K=2560，严格禁止 B1。它原子要求 P28 segmented forward/train + P30 sparse/reuse/release/reshard + hardware-certified `CANON_P71_SCAN=fwd`；DP1 明确保持 P59 rank-parallel off。只跑 re-score/alignment/repeat-exact backward-no-commit，不调用 sandbox/decode，不声称 fresh rollout 或 TP8 | 诊断、默认 `0`；仅 tracked P58.23 wrapper 设置 | bounded one-host compile/backward 结论与 TP8 follow-up 归档后退役 |
+| CANON_P58_REPLAY_JOURNAL / CANON_P58_REPLAY_JOURNAL_SHA256 | P58.23 replay source 的绝对路径与 SHA-256 receipt；只能与 trajectory-replay selector 成对出现，指向 deterministic B2×G2 merged journal，任何缺失/漂移 fail-closed | 默认 absent；由 wrapper 从已签名本地 artifact 派生 | 与 P58.23 selector 同时退役；不得进入 production profile |
 | CANON_P58_CHECKED_VMA_DIAGNOSTIC | P58.18 exact-geometry matched-control selector；合法值仅 `off\|on`。只准入 Qwen3-4B Zero-HP/full 的 128-chip disaggregated DP8×TP8+DP8×TP8 Step-0 carrier。`off` 原子派生 checked-VMA/P66 alias/P67 scoping=`0/0/0`；`on` 派生 `1/1/1`。两者都把 first-update gate/P63 clip 固定为 `0/0`，保留 fixed-head/continue-decode/Fixed-AR/serving HP、完整 trajectory + pre-alignment，并在 backward/optimizer 前受控退出。生产 selector 缺省 absent 时仍是完整 `1/1/1/1/1`，不受诊断影响 | 缺省 absent；仅 P58.18 ON-A/OFF/ON-B 三臂诊断可设；不得与 normal Zero-HP、native recipe 或 subordinate 手工 override 混用 | 三臂因果裁决与 fresh checked-VMA-on strict Step-0 修复复验归档后退役；不得成为 full-training 默认值 |
 | CANON_P58_SEAM_LOCALIZATION | P58.19 exact-geometry coarse seam selector；合法值仅 `coarse`。只准入 Qwen3-4B Zero-HP/full 的 128-chip disaggregated DP8×TP8+DP8×TP8 frozen Step-0 carrier；单一 selector 派生 P38 layer seam + terminal-tail、位置窗 `[1686,4096)`、三轮 per-round seal/classify/ACK 与 `p58-seam-v1` durability。每轮 seam/tail 各自使用独立 4 GiB byte budget，轮次只能单调 `0→1→2`，record index 不复用；这是 p58s19d 在累计 1 GiB 自停后的诊断容量修复，不改变 tensor 内容。该窗口覆盖 p58z07/P58.18 已观测的 2,513/3,438/3,715/3,880/4,032 first-red prefixes，同时避免 p58s19b 的 `[3072,4608)` 零记录载具失败。保留 production `CANON_CONTINUE_DECODE=8`：`standard` 是唯一 tensor-strata 来源；`continue_decode` 只允许保留 scheduler chronology，跳过 incident/tensor payload并回显 `CANON_P58_CONTINUE_DECODE_OBSERVER_BYPASS ... tensor_capture=0`。任何非 P58 profile 或未知 program path 仍 fail-closed。保留 production checked-VMA/P67/first-update/clip tuple，backward 与 optimizer commit 均不可达 | 缺省 absent；仅 P58.19 三轮粗定位可设；与 checked-VMA diagnostic、native、普通 Zero-HP full、M15 wide 及 subordinate 手工 override 互斥 | 三轮给出可重复 coarse first-red signature 并完成后续 fine localization 后退役；任何无 join、B-C red、非重复 boundary 或 observer-neutrality red 均只得 INCONCLUSIVE/FAIL，不得转为训练开关 |
 | CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward)/ diagnostic=冻结权重 precheck 的一个完整 A-rollout/B-full-rescore/C-old-forward round | 仪器;载具旋钮 P51_XPROF_PHASE;Phase3 profile 固定 diagnostic skip=1 steps=1 | 长期保留 |
@@ -110,6 +115,8 @@
 `[PERF]`、`[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT / PRECHECK_COMPLETE`、
 `[CANON_P38_SERVING_CAPTURE*]`、`[CANON_P38_INCIDENT_LEDGER_BYPASS]`、
 `[CANON_P58_CONTINUE_DECODE_OBSERVER_BYPASS]`、
+`[CANON_P58_CONTINUE_KV_CANDIDATE]`、`[CANON_P58_CONTINUE_KV_CLEAN_EMPTY]`、
+`[CANON_P58_CONTINUE_KV_CLEAN_PREFIX]`、`[CANON_P58_CONTINUE_KV_CLEAN_READY]`、
 `[CANON_P38_DURABLE_COLLECTION]`、`[CANON_P38_SEAM_CLASSIFICATION_JSON]`、
 PATHTRACE 族(固定树行数 =2×层+1)。
 Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按合同类文档对待。
@@ -416,7 +423,17 @@ CANON_P58_MODEL_SNAPSHOT
 CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER
 CANON_P58_ONEHOST_SEAM_PROBE
 CANON_P58_ONEHOST_XPROF_ARM
+CANON_P58_Q4_TP4_CARRIER_SCREEN
+CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC
+CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX
+CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX
+CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC
+CANON_P58_Q4_TP4_SHORT_BACKWARD
+CANON_P58_Q4_TP4_TRAJECTORY_REPLAY
+CANON_P58_Q4_TP4_ZERO_ADMISSION
 CANON_P58_R2EGYM_COMMIT
+CANON_P58_REPLAY_JOURNAL
+CANON_P58_REPLAY_JOURNAL_SHA256
 CANON_P58_RUNNER_SHA256
 CANON_P58_SEAM_LOCALIZATION
 CANON_P58_SOURCE_DIFF_SHA256
@@ -527,4 +544,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 398 settable names (appendix inventory above; exclusions: none).
+Count: 408 settable names (appendix inventory above; exclusions: none).

@@ -1,0 +1,314 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1144,6 +1144,23 @@
+ _P38_DURABILITY_PROFILE = os.environ.get(
+     "CANON_P38_DURABILITY_PROFILE", "")
+ _P38_P58_CONTINUE_BYPASS_STATE = {"calls": 0, "reported": False}
++_P58_CONTINUE_KV_DIAGNOSTIC = os.environ.get(
++    "CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC", "0")
++_P58_CONTINUE_KV_MIN_PREFIX = int(os.environ.get(
++    "CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX", "2280") or "2280")
++_P58_CONTINUE_KV_MAX_PREFIX = int(os.environ.get(
++    "CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX", "3072") or "3072")
++_P58_CONTINUE_KV_STATE = {
++    "bursts": 0,
++    "candidates": 0,
++    "clean_empty_reported": set(),
++    "clean_prefix_reported": set(),
++}
++if _P58_CONTINUE_KV_DIAGNOSTIC not in ("0", "1"):
++    raise RuntimeError(
++        "CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC must be 0 or 1")
++if not 0 <= _P58_CONTINUE_KV_MIN_PREFIX < _P58_CONTINUE_KV_MAX_PREFIX:
++    raise RuntimeError("P58 continue-KV prefix bounds are invalid")
+ _P38_M15_REPLAY_LEDGER = os.environ.get(
+     "CANON_APC_M15_REPLAY_LEDGER", "")
+ _P38_M15_REPLAY_STATE = {"records": 0, "bytes": 0}
+@@ -1348,12 +1365,17 @@
+-
++
+ _P38_KV_OBSERVER_LAYER = None
+ if _P38_KV_OBSERVER_DIR:
+-    if not _P38_SERVING_CAPTURE_DIR:
+-        raise RuntimeError("P38 KV observer requires serving capture")
+-    if os.path.realpath(_P38_KV_OBSERVER_DIR) != os.path.realpath(
+-            _P38_SERVING_CAPTURE_DIR):
+-        raise RuntimeError(
+-            "P38 KV observer must write into the serving capture directory")
++    if _P58_CONTINUE_KV_DIAGNOSTIC == "1":
++        if _P38_SERVING_CAPTURE_DIR:
++            raise RuntimeError(
++                "P58 continue-KV diagnostic forbids generic serving capture")
++    else:
++        if not _P38_SERVING_CAPTURE_DIR:
++            raise RuntimeError("P38 KV observer requires serving capture")
++        if os.path.realpath(_P38_KV_OBSERVER_DIR) != os.path.realpath(
++                _P38_SERVING_CAPTURE_DIR):
++            raise RuntimeError(
++                "P38 KV observer must write into the serving capture directory")
+     if _P38_SERVING_CAPTURE_EXPECTED_PATH != "standard":
+         raise RuntimeError("P38 KV observer requires the standard path")
+     if not (1 <= _P38_KV_OBSERVER_MAX_CANDIDATES <= 8):
+@@ -1366,7 +1388,17 @@
+     if any(target_fields) != all(target_fields):
+         raise RuntimeError(
+             "P38 KV observer layer/target-prefix fields must be set together")
+-    if all(target_fields):
++    if _P58_CONTINUE_KV_DIAGNOSTIC == "1":
++        if any(target_fields):
++            raise RuntimeError(
++                "P58 continue-KV diagnostic forbids M15 target fields")
++        if _P38_KV_OBSERVER_MAX_CANDIDATES != 1:
++            raise RuntimeError(
++                "P58 continue-KV diagnostic requires one candidate")
++        if _P38_KV_OBSERVER_MAX_PAGES != 192:
++            raise RuntimeError(
++                "P58 continue-KV diagnostic requires a 192-page bound")
++    elif all(target_fields):
+         if not _P38_KV_OBSERVER_LAYER_TEXT.isdigit():
+             raise RuntimeError("P38 KV observer layer must be an integer")
+         _P38_KV_OBSERVER_LAYER = int(_P38_KV_OBSERVER_LAYER_TEXT)
+@@ -2406,6 +2438,9 @@
+         "elapsed_seconds": float(elapsed),
+         "fingerprint_claim": "diagnostic_non_cryptographic",
+     }
++    if _P58_CONTINUE_KV_DIAGNOSTIC == "1":
++        meta["cache_effective_sharding"] = (
++            _p38_kv_observer_effective_sharding(runner.kv_caches[0]))
+     record_index, npz_sha256 = _p38_kv_observer_write(arm, arrays, meta)
+     return {
+         **candidate,
+@@ -2562,6 +2597,10 @@
+                 int(request_state.num_computed_tokens) +
+                 scheduled_tokens
+             )
++            if (_P58_CONTINUE_KV_DIAGNOSTIC == "1" and
++                    seq_len > _P58_CONTINUE_KV_MAX_PREFIX):
++                raise RuntimeError(
++                    "P58 continue-KV target sequence exceeded its prefix bound")
+             if not _p38_kv_observer_request_finished(
+                     request_state, sampled_ids, seq_len,
+                     runner.max_model_len):
+@@ -2597,13 +2636,30 @@
+             int(request_state.num_computed_tokens) +
+             scheduled_tokens
+         )
+-        if seq_len < int(request_state.num_tokens):
++        if (_P58_CONTINUE_KV_DIAGNOSTIC != "1" and
++                seq_len < int(request_state.num_tokens)):
+             continue
+         request_index = int(runner.input_batch.req_id_to_index[request_id])
+         full_token_ids = np.asarray(
+             runner.input_batch.token_ids_cpu[
+                 request_index, :int(request_state.num_tokens)],
+             dtype=np.int32)
+-        diagnostic_round = int(_p38_seam_round())
+-        _p38_kv_observer_begin_target_round(diagnostic_round)
++        if (_P58_CONTINUE_KV_DIAGNOSTIC == "1" and
++                not _P38_KV_OBSERVER_A_RECORDS):
++            reported = _P58_CONTINUE_KV_STATE["clean_empty_reported"]
++            if request_id not in reported:
++                print(
++                    "[CANON_P58_CONTINUE_KV_CLEAN_EMPTY] "
++                    f"request={request_id} seq_len={seq_len} a_records=0",
++                    flush=True,
++                )
++                reported.add(request_id)
++        if _P58_CONTINUE_KV_DIAGNOSTIC == "1":
++            # P58 is a single-shot continue-decode observer.  Unlike the M15
++            # multiround target contract it intentionally has no external
++            # round file, so its append-only records stay in round zero.
++            diagnostic_round = 0
++        else:
++            diagnostic_round = int(_p38_seam_round())
++            _p38_kv_observer_begin_target_round(diagnostic_round)
+         for candidate in _P38_KV_OBSERVER_A_RECORDS:
+@@ -2613,11 +2669,50 @@
+             if candidate_index in _P38_KV_OBSERVER_MATCHED_A:
+                 continue
+             target_token_ids = candidate["target_token_ids"]
+-            if not _p38_kv_observer_prefix_matches(
+-                    full_token_ids, target_token_ids):
++            if (_P58_CONTINUE_KV_DIAGNOSTIC == "1" and
++                    seq_len < int(candidate["target_seq_len"])):
++                continue
++            prefix_equal = _p38_kv_observer_prefix_matches(
++                full_token_ids, target_token_ids)
++            if _P58_CONTINUE_KV_DIAGNOSTIC == "1":
++                reported = _P58_CONTINUE_KV_STATE["clean_prefix_reported"]
++                if request_id not in reported:
++                    compared = min(
++                        int(full_token_ids.size), int(target_token_ids.size))
++                    mismatch = np.flatnonzero(
++                        full_token_ids[:compared] !=
++                        target_token_ids[:compared])
++                    first_mismatch = (
++                        int(mismatch[0]) if mismatch.size else
++                        (-1 if prefix_equal else compared))
++                    a_token = (
++                        int(target_token_ids[first_mismatch])
++                        if 0 <= first_mismatch < target_token_ids.size else -1)
++                    b_token = (
++                        int(full_token_ids[first_mismatch])
++                        if 0 <= first_mismatch < full_token_ids.size else -1)
++                    print(
++                        "[CANON_P58_CONTINUE_KV_CLEAN_PREFIX] "
++                        f"request={request_id} seq_len={seq_len} "
++                        f"target={int(candidate['target_seq_len'])} "
++                        f"a_records={len(_P38_KV_OBSERVER_A_RECORDS)} "
++                        f"prefix_equal={int(prefix_equal)} "
++                        f"first_mismatch={first_mismatch} "
++                        f"a_token={a_token} b_token={b_token}",
++                        flush=True,
++                    )
++                    reported.add(request_id)
++            if not prefix_equal:
+                 continue
+             dp_rank = _p38_kv_observer_dp_rank(req_ids_dp, request_id)
+             pages = _p38_primary_pages(request_state.block_ids)
++            if _P58_CONTINUE_KV_DIAGNOSTIC == "1":
++                print(
++                    "[CANON_P58_CONTINUE_KV_CLEAN_READY] "
++                    f"request={request_id} seq_len={seq_len} "
++                    f"target={int(candidate['target_seq_len'])}",
++                    flush=True,
++                )
+             clean_candidate = {
+                 **candidate,
+                 "request_id": request_id,
+@@ -2630,6 +2719,120 @@
+             _P38_KV_OBSERVER_MATCHED_A.add(candidate_index)
+-
++
+-
++
++def _p38_kv_observer_effective_sharding(array):
++    """Return a repr-independent device-to-slice sharding contract."""
++    sharding = getattr(array, "sharding", None)
++    if sharding is None or not hasattr(sharding, "devices_indices_map"):
++        raise RuntimeError(
++            "P38 KV observer cache has no inspectable effective sharding")
++    shape = tuple(int(value) for value in array.shape)
++    mapping = sharding.devices_indices_map(shape)
++    devices = []
++    for device, index in mapping.items():
++        normalized_index = []
++        if len(index) != len(shape):
++            raise RuntimeError(
++                "P38 KV observer sharding index rank differs from cache rank")
++        for extent, component in zip(shape, index, strict=True):
++            if isinstance(component, slice):
++                start, stop, step = component.indices(extent)
++                normalized_index.append({
++                    "kind": "slice",
++                    "start": int(start),
++                    "stop": int(stop),
++                    "step": int(step),
++                })
++            else:
++                normalized_index.append({
++                    "kind": "index",
++                    "value": int(component),
++                })
++        coords = getattr(device, "coords", ()) or ()
++        devices.append({
++            "platform": str(getattr(device, "platform", "")),
++            "process_index": int(getattr(device, "process_index", -1)),
++            "id": int(getattr(device, "id", -1)),
++            "coords": [int(value) for value in coords],
++            "core_on_chip": int(getattr(device, "core_on_chip", -1)),
++            "index": normalized_index,
++        })
++    devices.sort(key=lambda item: (
++        item["platform"], item["process_index"], item["id"],
++        item["coords"], item["core_on_chip"]))
++    if not devices:
++        raise RuntimeError("P38 KV observer effective sharding is empty")
++    return {
++        "schema": "p38-effective-device-sharding-v1",
++        "global_shape": list(shape),
++        "devices": devices,
++    }
++
++
++def _p58_continue_kv_after_burst(
++        runner, scheduler_output, req_ids_dp, output):
++    """Fingerprint one live continue-decode request and its clean rescore.
++
++    This hook is deliberately outside the donated while-loop.  It selects the
++    first serial request whose pre-burst logical prefix is inside the signed
++    environment-seam window, then delegates both A and B capture to the
++    existing bounded P38 integer fingerprint implementation.
++    """
++    if _P58_CONTINUE_KV_DIAGNOSTIC != "1":
++        return
++    if not _P38_KV_OBSERVER_DIR:
++        raise RuntimeError("P58 continue-KV diagnostic has no output directory")
++    if _P38_KV_OBSERVER_MAX_CANDIDATES != 1:
++        raise RuntimeError("P58 continue-KV diagnostic requires one candidate")
++    if isinstance(output, AsyncTPUModelRunnerOutput):
++        raise RuntimeError("P58 continue-KV diagnostic forbids async scheduling")
++
++    _P58_CONTINUE_KV_STATE["bursts"] += 1
++    request_ids = [str(value) for value in output.req_ids]
++    if len(request_ids) != 1:
++        raise RuntimeError(
++            "P58 continue-KV diagnostic requires exactly one active request")
++    request_id = request_ids[0]
++    request_state = runner.requests.get(request_id)
++    if request_state is None:
++        raise RuntimeError(
++            f"P58 continue-KV request disappeared: {request_id}")
++    scheduled_tokens = int(
++        scheduler_output.num_scheduled_tokens.get(request_id, 0))
++    if scheduled_tokens <= 0:
++        raise RuntimeError("P58 continue-KV burst has no scheduled tokens")
++    pre_burst_prefix = int(request_state.num_computed_tokens)
++
++    if (not _P38_KV_OBSERVER_CANDIDATES and
++            _P58_CONTINUE_KV_MIN_PREFIX <= pre_burst_prefix <
++            _P58_CONTINUE_KV_MAX_PREFIX):
++        dp_rank = _p38_kv_observer_dp_rank(req_ids_dp, request_id)
++        pages = _p38_primary_pages(request_state.block_ids)
++        if not pages:
++            raise RuntimeError("P58 continue-KV candidate has no cache pages")
++        candidate = {
++            "request_id": request_id,
++            "diagnostic_round": 0,
++            "tag_call_index": int(_P58_CONTINUE_KV_STATE["bursts"]),
++            "tag_prefix": pre_burst_prefix,
++            "tag_dp_rank": int(dp_rank),
++            "tag_physical_pages": [int(value) for value in pages],
++        }
++        _P38_KV_OBSERVER_CANDIDATES[request_id] = candidate
++        _P58_CONTINUE_KV_STATE["candidates"] += 1
++        print(
++            "[CANON_P58_CONTINUE_KV_CANDIDATE] "
++            f"request={request_id} prefix={pre_burst_prefix} "
++            f"burst={_P58_CONTINUE_KV_STATE['bursts']} pages={len(pages)}",
++            flush=True,
++        )
++
++    # The shared helper captures A only when this action request has reached a
++    # host-visible EOS/max-token end.  A later prompt-logprob-only rescore takes
++    # B through the pre-existing clean hook, with exact token-prefix matching.
++    _p38_kv_observer_after_standard(
++        runner, scheduler_output, req_ids_dp, frozenset(), output)
++
++
+ def _p38_seam_round():
+     from pathlib import Path as _Path
+-
++
+@@ -5206,6 +5409,9 @@
+         if routed_experts is not None:
+             output.routed_experts = routed_experts
+-
++
++        _p58_continue_kv_after_burst(
++            self, scheduler_output, req_ids_dp, output)
++
+         self._continue_decode_output = output
+         return None
+-
++

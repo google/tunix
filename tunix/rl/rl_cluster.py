@@ -909,7 +909,11 @@ class RLCluster:
 
   def generate(
       self,
-      prompts: list[str] | list[list[dict[str, str]]],
+      prompts: (
+          list[str]
+          | list[list[dict[str, str]]]
+          | list[list[int]]
+      ),
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
@@ -923,7 +927,7 @@ class RLCluster:
       prompts: A list of prompts to generate text from. If `apply_chat_template`
         is True, this should be a list of conversations (each a list of
         dictionaries with 'role' and 'content'). Otherwise, it should be a list
-        of strings.
+        of strings or already-tokenized integer ID lists.
       apply_chat_template: Whether to apply chat template to the prompts.
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
@@ -1169,6 +1173,17 @@ class RLCluster:
               diagnostic_arm=diagnostic_arm,
           )
       )
+
+  def set_recorded_rollout_sampling_transforms(
+      self, transforms: dict[str, Any], *, source_identity: str
+  ) -> None:
+    """Primes one fail-closed recorded-rollout sampling contract."""
+    setter = getattr(self.rollout, "set_recorded_sampling_transforms", None)
+    if setter is None:
+      raise RuntimeError(
+          "rollout engine cannot accept recorded sampling provenance"
+      )
+    setter(dict(transforms), source_identity=source_identity)
 
   def get_grouped_prefill_rescore_logps(
       self,

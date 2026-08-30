@@ -91,6 +91,53 @@ _SECRET_VALUE = re.compile(
     r"(?:(?:ghp|github_pat|hf|sk)-[A-Za-z0-9_-]{12,})"
 )
 
+_P58_REPLAY_JOURNAL_SHA256 = (
+    "091a9273c2067876fbee1996ee853e3c8e861352e307cd5fb94fea2563aec456"
+)
+_P58_REPLAY_SOURCE_MANIFEST_SHA256 = (
+    "482d7934a95207d0d77bb4857fbb200d7b367cbf437dda6585937b20909afa8f"
+)
+_P58_REPLAY_SOURCE_COMMIT = "16c224aa80eb6b3a544be19f693c0542ab4b0dcb"
+_P58_REPLAY_TASK_IMAGES = (
+    "namanjain12/scrapy_final:439a3e59b8e858441f8d97dbc32f398db392330d",
+    "namanjain12/scrapy_final:439a3e59b8e858441f8d97dbc32f398db392330d",
+)
+_P58_REPLAY_SOURCE_GROUPS = (0, 0, 1, 1)
+_P58_REPLAY_SOURCE_ROWS = (0, 1, 2, 3)
+_P58_REPLAY_SOURCE_PAIRS = (0, 1, 0, 1)
+_P58_REPLAY_PREFIX_LENGTHS = (432, 333, 432, 333)
+_P58_REPLAY_ACTION_COUNTS = (363, 264, 363, 264)
+_P58_REPLAY_PROMPT_LENGTHS = (1745, 1745, 1745, 1745)
+_P58_REPLAY_PROMPT_WIDTH = 2048
+_P58_REPLAY_SAMPLING_CONTRACT = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 0,
+}
+_P58_REPLAY_SAMPLING_SOURCE = (
+    "p58s22lr3_20260829t2256z@"
+    "16c224aa80eb6b3a544be19f693c0542ab4b0dcb:rows7,0x2:B2G2"
+)
+
+
+class RecordedTrajectoryReplayItem:
+  """One immutable recorded DeepSWE trajectory-prefix replay row."""
+
+  __slots__ = ("group_id", "pair_index", "traj", "metadata")
+
+  def __init__(
+      self,
+      *,
+      group_id: int,
+      pair_index: int,
+      traj: Mapping[str, Any],
+      metadata: Mapping[str, Any],
+  ):
+    self.group_id = group_id
+    self.pair_index = pair_index
+    self.traj = traj
+    self.metadata = metadata
+
 
 def _mode(values: Mapping[str, str]) -> str:
   p43 = values.get("CANON_P43_DEEPSWE_DEBUG", "0")
@@ -159,8 +206,9 @@ def onehost_xprof_arm(
   """Returns the signed P58 one-host profiling arm, or an empty string.
 
   The selector is deliberately narrower than the general one-host smoke. It
-  admits only the mutation-free backward carrier so a profile cannot silently
-  commit an optimizer update or overlap a production P58 arm.
+  admits only the mutation-free backward carrier or its explicitly signed
+  rollout-only carrier screen, so a profile cannot silently commit an
+  optimizer update or overlap a production P58 arm.
   """
   environ = os.environ if values is None else values
   arm = environ.get("CANON_P58_ONEHOST_XPROF_ARM", "")
@@ -170,18 +218,35 @@ def onehost_xprof_arm(
     )
   if not arm:
     return ""
-  exact = (
-      onehost(environ)
-      and no_commit(environ)
-      and environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
-      == "backward-no-commit"
-      and environ.get("CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY", "0") == "0"
-      and environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
+  carrier_screen = environ.get(
+      "CANON_P58_Q4_TP4_CARRIER_SCREEN", "0"
   )
+  if carrier_screen not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_CARRIER_SCREEN must be exactly 0 or 1"
+    )
+  if carrier_screen == "1":
+    exact = (
+        onehost(environ)
+        and not no_commit(environ)
+        and environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        == "rollout-only"
+        and environ.get("CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY", "0") == "1"
+        and environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
+    )
+  else:
+    exact = (
+        onehost(environ)
+        and no_commit(environ)
+        and environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        == "backward-no-commit"
+        and environ.get("CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY", "0") == "0"
+        and environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
+    )
   if not exact:
     raise ValueError(
-        "P58 one-host XProf requires the exclusive backward-no-commit "
-        "DP1xTP4 carrier"
+        "P58 one-host XProf requires the exclusive backward-no-commit or "
+        "signed rollout-only DP1xTP4 carrier"
     )
   return arm
 
@@ -209,6 +274,562 @@ def onehost_seam_probe(
         "backward-no-commit carrier"
     )
   return True
+
+
+def q4_tp4_zero_admission(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns the exclusive P58.20 Qwen3-4B TP4 full-stack selector."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_Q4_TP4_ZERO_ADMISSION", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_ZERO_ADMISSION must be exactly 0 or 1"
+    )
+  if raw == "0":
+    return False
+  seam_diagnostic = environ.get("CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC", "")
+  if seam_diagnostic not in ("", "standard-decode"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC must be empty or "
+        "standard-decode"
+    )
+  expected_continue_decode = "" if seam_diagnostic else "8"
+  continue_kv_diagnostic = environ.get(
+      "CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC", "0"
+  )
+  if continue_kv_diagnostic not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC must be 0 or 1"
+    )
+  if continue_kv_diagnostic == "1" and seam_diagnostic:
+    raise ValueError(
+        "P58.22 continue-KV diagnostic cannot use standard decode"
+    )
+  exact = (
+      onehost_xprof_arm(environ) == "zero-hp"
+      and onehost_seam_probe(environ)
+      and environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
+      and environ.get("CANON_P58_TIM_ADMITTED", "0") == "0"
+      and environ.get("CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER", "0") == "0"
+      and environ.get("CANON_PROFILE", "")
+      == "qwen3-4b-dp1-tp4-deepswe-zero"
+      and environ.get("CANON_MODEL_DIR_NAME", "") == "qwen4b_tp4"
+      and environ.get("CANON_QWEN3_HIDDEN_SIZE", "") == "2560"
+      and environ.get("CANON_QWEN3_TP_SIZE", "") == "4"
+      and environ.get("CANON_P38_FIXED_LM_HEAD", "") == "1"
+      and environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "0") == "0"
+      and environ.get("CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "0") == "0"
+      and environ.get("CANON_CONTINUE_DECODE", "")
+      == expected_continue_decode
+  )
+  if not exact:
+    raise ValueError(
+        "P58.20 requires the exclusive Qwen3-4B DP1xTP4 full-stack "
+        "Zero-TIM seam carrier"
+    )
+  return True
+
+
+def q4_tp4_seam_diagnostic(
+    values: Mapping[str, str] | None = None,
+) -> str:
+  """Returns the P58.21 one-variable environment-seam control."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC", "")
+  if raw not in ("", "standard-decode"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC must be empty or "
+        "standard-decode"
+    )
+  if raw and not q4_tp4_zero_admission(environ):
+    raise ValueError(
+        "P58.21 standard-decode control requires exact P58.20 admission"
+    )
+  return raw
+
+
+def q4_tp4_continue_kv_diagnostic(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns the exclusive P58.22 continue-decode KV fingerprint arm."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC must be 0 or 1"
+    )
+  if raw == "0":
+    return False
+  if q4_tp4_seam_diagnostic(environ):
+    raise ValueError(
+        "P58.22 continue-KV diagnostic cannot use standard decode"
+    )
+  if not q4_tp4_zero_admission(environ):
+    raise ValueError(
+        "P58.22 continue-KV diagnostic requires exact P58.20 admission"
+    )
+  exact = (
+      bool(environ.get("CANON_P38_KV_OBSERVER_DIR", ""))
+      and environ.get("CANON_P38_PRECHECK_ONLY", "") == "1"
+      and environ.get("CANON_P38_CONTROLLED_EXIT", "") == "1"
+      and environ.get("CANON_P38_DIAGNOSTIC_ROUNDS", "") == "1"
+      and environ.get("CANON_P38_KV_OBSERVER_MAX_CANDIDATES", "") == "1"
+      and environ.get("CANON_P38_KV_OBSERVER_MAX_PAGES", "") == "192"
+      and environ.get("CANON_P38_KV_OBSERVER_MAX_BYTES", "") == "134217728"
+      and environ.get("CANON_P38_KV_OBSERVER_MAX_READ_BYTES", "")
+      == "671088640"
+      and environ.get("CANON_P38_SERVING_CAPTURE_EXPECTED_PATH", "")
+      == "standard"
+      and environ.get("CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX", "")
+      == "2280"
+      and environ.get("CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX", "")
+      == "3072"
+      and not environ.get("CANON_P38_SERVING_CAPTURE_DIR", "")
+  )
+  if not exact:
+    raise ValueError("P58.22 continue-KV observer contract drifted")
+  return True
+
+
+def q4_tp4_short_backward(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns the exclusive P58.22 short backward-no-commit carrier."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_Q4_TP4_SHORT_BACKWARD", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_SHORT_BACKWARD must be exactly 0 or 1"
+    )
+  if raw == "0":
+    return False
+  if q4_tp4_seam_diagnostic(environ):
+    raise ValueError("P58.22 short backward cannot use standard decode")
+  if environ.get("CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC", "0") != "0":
+    raise ValueError("P58.22 short backward cannot enable the KV diagnostic")
+  if not q4_tp4_zero_admission(environ):
+    raise ValueError(
+        "P58.22 short backward requires exact P58.20 admission"
+    )
+  for key in (
+      "CANON_P38_PRECHECK_ONLY",
+      "CANON_P38_CONTROLLED_EXIT",
+      "CANON_P38_DIAGNOSTIC_ROUNDS",
+      "CANON_P38_KV_OBSERVER_DIR",
+      "CANON_P38_SERVING_CAPTURE_DIR",
+  ):
+    if environ.get(key, "") not in ("", "0"):
+      raise ValueError(
+          f"P58.22 short backward forbids diagnostic override {key}"
+      )
+  return True
+
+
+def q4_tp4_carrier_screen(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns the exclusive rollout-only screen for a short Q4 carrier."""
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_Q4_TP4_CARRIER_SCREEN", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_CARRIER_SCREEN must be exactly 0 or 1"
+    )
+  if raw == "0":
+    return False
+  if not q4_tp4_short_backward(environ):
+    raise ValueError(
+        "P58.22 carrier screen requires the signed short carrier"
+    )
+  exact = (
+      environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "") == "rollout-only"
+      and environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0") == "0"
+      and environ.get("CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY", "0") == "1"
+  )
+  if not exact:
+    raise ValueError(
+        "P58.22 carrier screen requires exact rollout-only stage identity"
+    )
+  return True
+
+
+def q4_tp4_trajectory_replay(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns the immutable local P58.22 recorded-trajectory replay selector.
+
+  Replay is a backward-localization vehicle.  It bypasses the environment and
+  sampler, re-scores an immutable pair of real DP1xTP4 trajectory prefixes,
+  and can therefore never certify a fresh end-to-end rollout or production
+  TP8.
+  """
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_Q4_TP4_TRAJECTORY_REPLAY", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY must be exactly 0 or 1"
+    )
+  if raw == "0":
+    return False
+  if not q4_tp4_short_backward(environ):
+    raise ValueError(
+        "P58.22 trajectory replay requires the signed short-backward carrier"
+    )
+  if q4_tp4_carrier_screen(environ):
+    raise ValueError("P58.22 trajectory replay cannot be a carrier screen")
+  exact = {
+      "CANON_DEEPSWE_ONEHOST_STAGE": "backward-no-commit",
+      "CANON_DEEPSWE_ONEHOST_NO_COMMIT": "1",
+      "CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY": "0",
+      "CANON_P58_REPLAY_JOURNAL_SHA256": _P58_REPLAY_JOURNAL_SHA256,
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "0",
+      "CANON_P28_SEGMENTED_FORWARD": "1",
+      "CANON_P28_SEGMENTED_VJP": "0",
+      "CANON_P28_SEGMENTED_TRAIN": "1",
+      "CANON_P28_G6_UPDATE": "1",
+      "CANON_P29_FULL_TRAIN": "1",
+      "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
+      "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
+      "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
+      "CANON_P30_RELEASE_CAPTURED_STATE": "1",
+      "CANON_P30_RESHARD_ACCUMULATOR": "1",
+      "CANON_P28_BATCHED_REPORT": "1",
+      "CANON_P28_BATCHED_REVERSE": "0",
+      "CANON_BATCHED_EVIDENCE": "0",
+      "CANON_P71_SCAN": "fwd",
+  }
+  changed = {
+      key: environ.get(key)
+      for key, expected in exact.items()
+      if environ.get(key) != expected
+  }
+  journal = environ.get("CANON_P58_REPLAY_JOURNAL", "")
+  if not journal or not os.path.isabs(journal):
+    changed["CANON_P58_REPLAY_JOURNAL"] = journal
+  if changed:
+    raise ValueError(f"P58.22 trajectory replay contract drifted: {changed}")
+  return True
+
+
+def q4_tp4_trajectory_replay_update_geometry(
+    values: Mapping[str, str] | None = None,
+) -> tuple[int, int]:
+  """Returns the signed global/micro trajectory geometry for P58.23.
+
+  The replay deliberately uses two physical prompt rows and two generations,
+  so the global learner batch is four trajectories.  One train microstep owns
+  both generations of one prompt; the two prompt groups are accumulated in
+  two microsteps.  Keeping this contract next to the replay selector prevents
+  a caller from falling back to the legacy FrozenLake 8->4x2 geometry or a
+  global batch-size-one shortcut.
+  """
+  environ = os.environ if values is None else values
+  if not q4_tp4_trajectory_replay(environ):
+    raise ValueError("P58.23 replay update geometry requires active replay")
+  return 4, 2
+
+
+def q4_tp4_trajectory_replay_task_images() -> tuple[str, str]:
+  """Returns the repeated strict-exact prompt identity for both B2 groups."""
+  return _P58_REPLAY_TASK_IMAGES
+
+
+def q4_tp4_replay_sampling_contract() -> dict[str, Any]:
+  """Returns the immutable sampling contract of the local source rows."""
+  return {
+      **_P58_REPLAY_SAMPLING_CONTRACT,
+      "source_identity": _P58_REPLAY_SAMPLING_SOURCE,
+  }
+
+
+def _file_sha256(path: Path) -> str:
+  digest = hashlib.sha256()
+  with path.open("rb") as source:
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+      digest.update(chunk)
+  return digest.hexdigest()
+
+
+def _array_sha256(value: np.ndarray) -> str:
+  array = np.ascontiguousarray(value)
+  digest = hashlib.sha256()
+  digest.update(str(array.dtype).encode("ascii"))
+  digest.update(json.dumps(array.shape).encode("ascii"))
+  digest.update(array.tobytes())
+  return digest.hexdigest()
+
+
+def load_q4_tp4_trajectory_replay(
+    values: Mapping[str, str] | None = None,
+) -> list[RecordedTrajectoryReplayItem]:
+  """Loads and attests two fixed mixed-reward local DP1xTP4 groups."""
+  environ = os.environ if values is None else values
+  if not q4_tp4_trajectory_replay(environ):
+    raise ValueError("P58.22 trajectory replay is not active")
+  journal = Path(environ["CANON_P58_REPLAY_JOURNAL"])
+  if not journal.is_file() or journal.name != (
+      "batch-000000.trajectories.jsonl.gz"
+  ):
+    raise ValueError(f"P58.22 replay journal is absent or misnamed: {journal}")
+  journal_sha256 = _file_sha256(journal)
+  if journal_sha256 != _P58_REPLAY_JOURNAL_SHA256:
+    raise ValueError(
+        "P58.22 replay journal SHA-256 changed: "
+        f"{journal_sha256}"
+    )
+  source_manifest_path = journal.parent / "run_manifest.json"
+  if (
+      not source_manifest_path.is_file()
+      or _file_sha256(source_manifest_path)
+      != _P58_REPLAY_SOURCE_MANIFEST_SHA256
+  ):
+    raise ValueError("P58.22 replay source manifest is absent or changed")
+  source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+  expected_manifest = {
+      "schema": "canon.p58.b2g2-replay-source.v1",
+      "source_commit": _P58_REPLAY_SOURCE_COMMIT,
+      "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+      "prompt_groups": 2,
+      "generations": 2,
+      "global_trajectories": 4,
+      "prompt_identity": "same-strict-exact-real-prompt-repeated-twice",
+      "sampling_contract": {"source": "explicit-cli", **_P58_REPLAY_SAMPLING_CONTRACT},
+  }
+  changed = {
+      key: source_manifest.get(key)
+      for key, expected in expected_manifest.items()
+      if source_manifest.get(key) != expected
+  }
+  if changed:
+    raise ValueError(
+        f"P58.22 replay source manifest identity drifted: {changed}"
+    )
+  sources = source_manifest.get("sources")
+  expected_sources = (
+      (
+          "p58-onehost-xprof-zero-hp-p58s22lr3_20260829t2256z",
+          "bffb324f097f959ee16593bc741b8c83e940cc556665c1d051d3f480a8657fc0",
+          "96f1ff1e9db641e7d0735c593176d4dbc9ab8799cfe1a7a010bcf8634502201e",
+          _P58_REPLAY_TASK_IMAGES[0],
+      ),
+      (
+          "p58-onehost-xprof-zero-hp-p58s22lr3_20260829t2256z",
+          "bffb324f097f959ee16593bc741b8c83e940cc556665c1d051d3f480a8657fc0",
+          "96f1ff1e9db641e7d0735c593176d4dbc9ab8799cfe1a7a010bcf8634502201e",
+          _P58_REPLAY_TASK_IMAGES[1],
+      ),
+  )
+  if not isinstance(sources, list) or len(sources) != 2:
+    raise ValueError("P58.23 replay source must attest two prompt groups")
+  for source, expected in zip(sources, expected_sources):
+    observed = (
+        source.get("run_id"),
+        source.get("journal_sha256"),
+        source.get("manifest_sha256"),
+        source.get("task_image"),
+    )
+    if observed != expected:
+      raise ValueError(f"P58.23 replay source receipt drifted: {observed}")
+
+  source_rows = []
+  with gzip.open(journal, "rt", encoding="utf-8") as source:
+    for line_number, line in enumerate(source, 1):
+      record = json.loads(line)
+      if not isinstance(record, dict):
+        raise ValueError(
+            f"P58.22 replay journal row {line_number} is not an object"
+        )
+      source_rows.append(record)
+  if len(source_rows) != 4:
+    raise ValueError(
+        f"P58.23 replay source requires 4 rows, got {len(source_rows)}"
+    )
+
+  items = []
+  provenance_rows = []
+  expected_rewards = (1.0, 0.0, 1.0, 0.0)
+  for (
+      source_group,
+      source_index,
+      source_pair,
+      prefix_length,
+      action_count,
+      prompt_length,
+      expected_reward,
+  ) in zip(
+      _P58_REPLAY_SOURCE_GROUPS,
+      _P58_REPLAY_SOURCE_ROWS,
+      _P58_REPLAY_SOURCE_PAIRS,
+      _P58_REPLAY_PREFIX_LENGTHS,
+      _P58_REPLAY_ACTION_COUNTS,
+      _P58_REPLAY_PROMPT_LENGTHS,
+      expected_rewards,
+  ):
+    record = source_rows[source_index]
+    identity = record.get("task_identity")
+    trajectory = record.get("trajectory")
+    if not isinstance(identity, dict) or not isinstance(trajectory, dict):
+      raise ValueError(
+          f"P58.22 replay source row {source_index} lacks trajectory identity"
+      )
+    exact_top = {
+        "schema": ONEHOST_TRAJECTORY_SCHEMA,
+        "group_id": str(source_group),
+        "pair_index": source_pair,
+        "status": "SUCCEEDED",
+        "complete": True,
+        "compact_filtered": False,
+        "raw_final_reward": expected_reward,
+        "training_reward": expected_reward,
+    }
+    changed = {
+        key: record.get(key)
+        for key, expected in exact_top.items()
+        if record.get(key) != expected
+    }
+    if changed:
+      raise ValueError(
+          f"P58.22 replay source row {source_index} drifted: {changed}"
+      )
+    if identity.get("docker_image") != _P58_REPLAY_TASK_IMAGES[source_group]:
+      raise ValueError(
+          f"P58.22 replay source row {source_index} changed task image"
+      )
+    prompt_tokens = np.asarray(trajectory.get("prompt_tokens"), dtype=np.int32)
+    completion_tokens = np.asarray(
+        trajectory.get("conversation_tokens"), dtype=np.int32
+    )
+    completion_masks = np.asarray(
+        trajectory.get("conversation_masks"), dtype=np.int32
+    )
+    old_logprobs = np.asarray(
+        trajectory.get("old_logprobs"), dtype=np.float32
+    )
+    if (
+        prompt_tokens.ndim != 1
+        or prompt_tokens.size < prompt_length
+        or int(trajectory.get("prompt_length", -1)) != prompt_length
+        or completion_tokens.ndim != 1
+        or completion_tokens.shape != completion_masks.shape
+        or completion_tokens.shape != old_logprobs.shape
+        or completion_tokens.size <= prefix_length
+        or not np.all(np.isfinite(old_logprobs))
+        or not np.all(np.isin(completion_masks, (0, 1)))
+    ):
+      raise ValueError(
+          f"P58.22 replay source row {source_index} has invalid arrays"
+      )
+    source_padding = prompt_tokens.size - prompt_length
+    if (
+        source_padding < 0
+        or not np.all(prompt_tokens[:source_padding] == 151643)
+    ):
+      raise ValueError(
+          f"P58.23 replay source row {source_index} prompt padding drifted"
+      )
+    normalized_prompt = np.full(
+        (_P58_REPLAY_PROMPT_WIDTH,), 151643, dtype=np.int32
+    )
+    normalized_prompt[-prompt_length:] = prompt_tokens[-prompt_length:]
+    # Each prefix ends after a complete assistant action and before the next
+    # environment span.  A half action is never assigned a terminal reward.
+    if not (
+        completion_masks[prefix_length - 1] == 1
+        and completion_masks[prefix_length] == 0
+        and int(completion_masks[:prefix_length].sum()) == action_count
+    ):
+      raise ValueError(
+          f"P58.22 replay source row {source_index} prefix boundary drifted"
+      )
+    prefix_tokens = np.ascontiguousarray(
+        completion_tokens[:prefix_length], dtype=np.int32
+    )
+    prefix_masks = np.ascontiguousarray(
+        completion_masks[:prefix_length], dtype=np.int32
+    )
+    prefix_logprobs = np.ascontiguousarray(
+        old_logprobs[:prefix_length], dtype=np.float32
+    )
+    replay_identity = {
+        "source_run_id": expected_sources[source_group][0],
+        "source_commit": _P58_REPLAY_SOURCE_COMMIT,
+        "source_row": source_index,
+        "source_group_id": source_group,
+        "source_pair_index": source_pair,
+        "replay_group_id": source_group,
+        "replay_pair_index": source_pair,
+        "source_completion_length": int(completion_tokens.size),
+        "source_prompt_width": int(prompt_tokens.size),
+        "normalized_prompt_width": _P58_REPLAY_PROMPT_WIDTH,
+        "prefix_length": prefix_length,
+        "prefix_action_tokens": action_count,
+        "terminal_reward": expected_reward,
+        "prefix_boundary": "complete-assistant-action-before-environment",
+    }
+    replay_trajectory = dict(trajectory)
+    replay_trajectory.update({
+        "prompt_tokens": normalized_prompt,
+        "conversation_tokens": prefix_tokens,
+        "conversation_masks": prefix_masks,
+        "old_logprobs": prefix_logprobs,
+        "conversation_text": [],
+        "group_id": source_group,
+        "trajectory_reward": expected_reward,
+        "replay_provenance": replay_identity,
+    })
+    items.append(RecordedTrajectoryReplayItem(
+        group_id=source_group,
+        pair_index=source_pair,
+        traj=replay_trajectory,
+        metadata={"task_identity": identity, "replay": replay_identity},
+    ))
+    provenance_rows.append({
+        **replay_identity,
+        "source_prompt_tokens_sha256": _array_sha256(prompt_tokens),
+        "prompt_tokens_sha256": _array_sha256(normalized_prompt),
+        "prefix_tokens_sha256": _array_sha256(prefix_tokens),
+        "prefix_action_mask_sha256": _array_sha256(prefix_masks),
+        "prefix_old_logprobs_sha256": _array_sha256(prefix_logprobs),
+    })
+
+  output_dir = Path(artifact_directory(environ))
+  if not output_dir.is_absolute():
+    raise ValueError("P58.22 replay artifact directory must be absolute")
+  provenance = {
+      "schema": "canon.p58.recorded-trajectory-replay.v1",
+      "evidence_kind": "recorded-trajectory-prefix-backward-diagnostic",
+      "claim_ceiling": (
+          "This replay proves only local A/B/C and backward-no-commit over "
+          "immutable prefixes of real DP1xTP4 trajectories. It is not a fresh "
+          "rollout, does not re-run terminal rewards, and does not certify TP8."
+      ),
+      "journal": str(journal),
+      "journal_sha256": journal_sha256,
+      "source_manifest": str(source_manifest_path),
+      "source_manifest_sha256": _P58_REPLAY_SOURCE_MANIFEST_SHA256,
+      "source_model_id": source_manifest["model_id"],
+      "prompt_identity": source_manifest["prompt_identity"],
+      "source_role_topology": {"dp": 1, "tp": 4, "devices": 4},
+      "source_sampling_contract": _P58_REPLAY_SAMPLING_CONTRACT,
+      "source_sampling_identity": _P58_REPLAY_SAMPLING_SOURCE,
+      "environment_calls": 0,
+      "rollout_decode_calls": 0,
+      "rows": provenance_rows,
+  }
+  _atomic_write_new(
+      output_dir / "replay_provenance.json",
+      json.dumps(provenance, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+  )
+  print(
+      "[P58.23.REPLAY] LOAD_PASS groups=2 generations=2 trajectories=4 "
+      "source_rows=0,1,2,3 source_rewards=1,0,1,0 "
+      "prefixes=432,333,432,333 action_tokens=363,264,363,264 "
+      "prompt_identity=repeated-strict-exact "
+      "environment=0 rollout_decode=0",
+      flush=True,
+  )
+  return items
 
 
 def artifact_directory(values: Mapping[str, str] | None = None) -> str:
@@ -427,20 +1048,62 @@ def _manifest(
           "Qwen/Qwen3-4B-Instruct-2507"
       )
     seam_probe = onehost_seam_probe(values)
+    q4_tp4_admission = q4_tp4_zero_admission(values)
+    q4_tp4_seam_arm = q4_tp4_seam_diagnostic(values)
+    q4_tp4_continue_kv = q4_tp4_continue_kv_diagnostic(values)
+    q4_tp4_short = q4_tp4_short_backward(values)
+    q4_tp4_screen = q4_tp4_carrier_screen(values)
+    q4_tp4_replay = q4_tp4_trajectory_replay(values)
     contract_name = (
-        "local-qwen4b-dp1-tp4-seam-probe"
+        "local-qwen4b-dp1-tp4-zero-admission"
+        if q4_tp4_admission
+        else "local-qwen4b-dp1-tp4-seam-probe"
         if seam_probe
         else "local-qwen4b-dp1-tp4"
     )
     slice_topology = "direct-attached-v5p-4"
     role_topology = {"dp": 1, "tp": 4, "devices": 4}
-    global_prompts = 1
-    generations = 2
+    global_prompts = 2 if q4_tp4_replay else 1
+    generations = 16 if q4_tp4_screen else 2
     max_turns = 16 if seam_probe else 2
-    max_response_length = 4096 if seam_probe else 512
+    max_prompt_length = (
+        2048
+        if q4_tp4_replay
+        else 1792
+        if q4_tp4_short
+        else 4096
+        if seam_probe
+        else 3584
+    )
+    max_response_length = (
+        8192
+        if q4_tp4_screen
+        else 512
+        if q4_tp4_replay
+        else 2880
+        if q4_tp4_short
+        else 4096
+        if seam_probe
+        else 512
+    )
     stage = values.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
     xprof_arm = onehost_xprof_arm(values)
+    sampling_contract = None
+    if xprof_arm:
+      sampling_contract = {
+          "temperature": 1.0 if q4_tp4_screen or q4_tp4_replay else 0.7,
+          "top_k": 0,
+          "top_p": 1.0,
+          "source": "explicit-cli",
+      }
   elif mode == "p34":
+    q4_tp4_admission = False
+    q4_tp4_seam_arm = ""
+    q4_tp4_continue_kv = False
+    q4_tp4_short = False
+    q4_tp4_screen = False
+    q4_tp4_replay = False
+    sampling_contract = None
     if model_id != "Qwen/Qwen3-32B":
       raise ValueError("P34 production artifacts require Qwen/Qwen3-32B")
     p46_train = values.get("CANON_P46_DEEPSWE_TRAIN", "0") == "1"
@@ -462,11 +1125,19 @@ def _manifest(
     global_prompts = 8
     generations = 8
     max_turns = 50
+    max_prompt_length = 4096
     max_response_length = 16384
     stage = values.get("CANON_P34_RUN_STAGE", "")
     if stage != "full":
       raise ValueError("P34 production artifacts require the full stage")
   elif mode == "p58":
+    q4_tp4_admission = False
+    q4_tp4_seam_arm = ""
+    q4_tp4_continue_kv = False
+    q4_tp4_short = False
+    q4_tp4_screen = False
+    q4_tp4_replay = False
+    sampling_contract = None
     if model_id != "Qwen/Qwen3-4B-Instruct-2507":
       raise ValueError(
           "P58 artifacts require Qwen/Qwen3-4B-Instruct-2507"
@@ -480,9 +1151,17 @@ def _manifest(
     global_prompts = 8
     generations = 16
     max_turns = 50
+    max_prompt_length = 4096
     max_response_length = 16384
     stage = values.get("CANON_P34_RUN_STAGE", "")
   elif mode == "p44":
+    q4_tp4_admission = False
+    q4_tp4_seam_arm = ""
+    q4_tp4_continue_kv = False
+    q4_tp4_short = False
+    q4_tp4_screen = False
+    q4_tp4_replay = False
+    sampling_contract = None
     topology = values.get("CANON_P44_TOPOLOGY", "")
     if topology == "64":
       contract_name = "p44-qwen4b-parity-64"
@@ -501,15 +1180,24 @@ def _manifest(
     global_prompts = 4
     generations = 4
     max_turns = 50
+    max_prompt_length = 4096
     max_response_length = 16384
     stage = values.get("CANON_P34_RUN_STAGE", "")
   else:
+    q4_tp4_admission = False
+    q4_tp4_seam_arm = ""
+    q4_tp4_continue_kv = False
+    q4_tp4_short = False
+    q4_tp4_screen = False
+    q4_tp4_replay = False
+    sampling_contract = None
     contract_name = "p43-64chip-debug"
     slice_topology = "4x4x4"
     role_topology = {"dp": 4, "tp": 8, "devices": 32}
     global_prompts = 4
     generations = 4
     max_turns = 5
+    max_prompt_length = 4096
     max_response_length = 4096
     stage = values.get("CANON_P34_RUN_STAGE", "")
   return {
@@ -525,6 +1213,11 @@ def _manifest(
       "model_snapshot": values.get("CANON_P58_MODEL_SNAPSHOT", ""),
       "r2egym_commit": values.get("CANON_P58_R2EGYM_COMMIT", ""),
       "task_image": values.get("CANON_DEEPSWE_ONEHOST_TASK_IMAGE", ""),
+      "task_images": (
+          list(_P58_REPLAY_TASK_IMAGES)
+          if q4_tp4_replay
+          else [values.get("CANON_DEEPSWE_ONEHOST_TASK_IMAGE", "")]
+      ),
       "task_image_id": values.get("CANON_P58_TASK_IMAGE_ID", ""),
       "runner_sha256": values.get("CANON_P58_RUNNER_SHA256", ""),
       "stage": stage,
@@ -538,12 +1231,54 @@ def _manifest(
       "onehost_seam_probe": (
           onehost_seam_probe(values) if mode == "onehost" else False
       ),
+      "q4_tp4_zero_admission": q4_tp4_admission,
+      "q4_tp4_seam_diagnostic": q4_tp4_seam_arm,
+      "q4_tp4_continue_kv_diagnostic": q4_tp4_continue_kv,
+      "q4_tp4_short_backward": q4_tp4_short,
+      "q4_tp4_carrier_screen": q4_tp4_screen,
+      "q4_tp4_trajectory_replay": q4_tp4_replay,
+      "system_optimization": (
+          {
+              "carrier": "P28+P30+P71-fwd",
+              "p59_rank_parallel_backward": False,
+              "p59_reason": "DP1 one-host cannot execute rank-parallel backward",
+              "p28_segmented_forward": True,
+              "p28_segmented_train": True,
+              "p30_sparse_grad_assembly": True,
+              "p30_reuse_segmented_engine": True,
+              "p71_scan": "fwd",
+          }
+          if q4_tp4_replay
+          else None
+      ),
+      "replay_journal_sha256": (
+          values.get("CANON_P58_REPLAY_JOURNAL_SHA256", "")
+          if q4_tp4_replay
+          else ""
+      ),
+      "compilation_cache_dir": (
+          values.get("JAX_COMPILATION_CACHE_DIR", "")
+          if q4_tp4_short
+          else ""
+      ),
+      "alignment_precheck_only": (
+          values.get("CANON_P38_PRECHECK_ONLY", "0") == "1"
+      ),
+      "alignment_controlled_exit": (
+          values.get("CANON_P38_CONTROLLED_EXIT", "0") == "1"
+      ),
+      "continue_decode_steps": (
+          values.get("CANON_CONTINUE_DECODE", "")
+          if mode == "onehost"
+          else ""
+      ),
       "slice_topology": slice_topology,
       "role_topology": role_topology,
       "global_prompts": global_prompts,
       "generations": generations,
       "global_trajectories": global_prompts * generations,
       "max_turns": max_turns,
+      "max_prompt_length": max_prompt_length,
       "max_response_length": max_response_length,
       "dataset_seed": 42,
       "rollout_seed": (
@@ -554,6 +1289,7 @@ def _manifest(
           if mode == "p58" or bool(xprof_arm)
           else "dataset-only"
       ),
+      "sampling_contract": sampling_contract,
       "dataset_name": values.get("CANON_P34_DATASET_NAME", ""),
       "dataset_revision": values.get("CANON_P34_DATASET_REVISION", ""),
       "dataset_split": values.get("CANON_P34_DATASET_SPLIT", ""),

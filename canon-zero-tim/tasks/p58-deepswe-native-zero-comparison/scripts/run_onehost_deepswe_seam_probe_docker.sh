@@ -20,6 +20,8 @@ image="${P58_ONEHOST_IMAGE:-tunix_frozenlake_image:vllm-tpu0.25.0}"
 expected_hostname="${P58_ONEHOST_EXPECT_HOSTNAME:-t1v-n-4a77ebd0-w-0}"
 evidence_root="${P58_ONEHOST_EVIDENCE_ROOT:-/mnt/disks/tunix-data/deepswe-onehost-xprof}"
 artifact_dir="${P58_ONEHOST_ARTIFACT_DIR:-$evidence_root/p58_zero-hp_${label}}"
+timeout_seconds="${P58_ONEHOST_TIMEOUT_SECONDS:-7200}"
+compilation_cache_dir="${P58_ONEHOST_COMPILATION_CACHE_DIR:-}"
 container="p58_seam_${label//-/_}"
 
 if [ "$(hostname)" != "$expected_hostname" ]; then
@@ -63,9 +65,19 @@ sudo docker run --rm --privileged --net=host --ipc=host --uts=host \
   -e PYTHONPATH=/opt/p58-deps \
   -e DEEPSWE_TRAIN_PYTHON=/usr/local/bin/python3 \
   -e DEEPSWE_R2EGYM_ROOT="$r2egym_root" \
+  -e DEEPSWE_ONEHOST_WHITELIST="${DEEPSWE_ONEHOST_WHITELIST:-}" \
+  -e DEEPSWE_ONEHOST_TASK_IMAGE="${DEEPSWE_ONEHOST_TASK_IMAGE:-}" \
   -e P58_ONEHOST_EXPECT_HOSTNAME="$expected_hostname" \
   -e P58_ONEHOST_ARTIFACT_DIR="$artifact_dir" \
+  -e P58_ONEHOST_TIMEOUT_SECONDS="$timeout_seconds" \
+  -e P58_ONEHOST_COMPILATION_CACHE_DIR="$compilation_cache_dir" \
   -e P58_ONEHOST_ALLOW_DIRTY="${P58_ONEHOST_ALLOW_DIRTY:-0}" \
+  -e CANON_P58_Q4_TP4_ZERO_ADMISSION="${CANON_P58_Q4_TP4_ZERO_ADMISSION:-0}" \
+  -e CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC="${CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC:-}" \
+  -e CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC="${CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC:-0}" \
+  -e CANON_P58_Q4_TP4_SHORT_BACKWARD="${CANON_P58_Q4_TP4_SHORT_BACKWARD:-0}" \
+  -e CANON_P58_Q4_TP4_CARRIER_SCREEN="${CANON_P58_Q4_TP4_CARRIER_SCREEN:-0}" \
+  -e CANON_P58_Q4_TP4_TRAJECTORY_REPLAY="${CANON_P58_Q4_TP4_TRAJECTORY_REPLAY:-0}" \
   "$image" \
   bash -euo pipefail -c '
     git config --global --add safe.directory "$1"

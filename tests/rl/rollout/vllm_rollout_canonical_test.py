@@ -71,6 +71,26 @@ class _RescoreSampler:
 
 class VllmRolloutCanonicalTest(absltest.TestCase):
 
+  def test_sampler_preserves_pre_tokenized_prompt_without_reencoding(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.tokenizer = mock.Mock()
+    prompt = np.asarray([151644, 28, 1725], dtype=np.int64)
+
+    actual = sampler.tokenize(prompt)
+
+    sampler.tokenizer.encode.assert_not_called()
+    np.testing.assert_array_equal(
+        actual, np.asarray([151644, 28, 1725], dtype=np.int32)
+    )
+
+  def test_sampler_rejects_malformed_pre_tokenized_prompt(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.tokenizer = mock.Mock()
+    for prompt in ([], [[1, 2]], [1, -1], [1.5, 2.5]):
+      with self.subTest(prompt=prompt):
+        with self.assertRaisesRegex(ValueError, "pre-tokenized vLLM prompt"):
+          sampler.tokenize(prompt)
+
   def test_canonical_adapter_registration_passes_live_trainer_state(self):
     constructor = inspect.getsource(vllm_rollout.VllmRollout.__init__)
     adapter_registration = constructor.split(
@@ -290,6 +310,76 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
           completion_lengths=np.asarray([0, 1], np.int32),
           processed=True,
       )
+
+  def test_p58_replay_primes_exact_recorded_sampling_provenance(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = None
+    rollout._recorded_sampling_transforms = None
+    rollout._recorded_sampling_source = None
+    replay_env = {
+        "CANON_DEEPSWE_ONEHOST_SMOKE": "1",
+        "CANON_P58_Q4_TP4_ZERO_ADMISSION": "1",
+        "CANON_P58_Q4_TP4_SHORT_BACKWARD": "1",
+        "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY": "1",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+    }
+    source = (
+        "p58s22lr3_20260829t2256z@"
+        "16c224aa80eb6b3a544be19f693c0542ab4b0dcb:rows7,0x2:B2G2"
+    )
+    with mock.patch.dict(os.environ, replay_env, clear=True):
+      rollout.set_recorded_sampling_transforms(
+          {"temperature": 1.0, "top_p": 1.0, "top_k": 0},
+          source_identity=source,
+      )
+      result = rollout.get_prefill_rescore_logps(
+          prompt_tokens=np.asarray([[1, 2]], np.int32),
+          completion_tokens=np.asarray([[3, 0]], np.int32),
+          completion_lengths=np.asarray([1], np.int32),
+          processed=True,
+      )
+
+    np.testing.assert_array_equal(
+        result, np.asarray([[-3.0, 0.0]], np.float32)
+    )
+    self.assertEqual(
+        rollout._last_prefill_rescore_provenance["sampling_provenance"],
+        "recorded-replay",
+    )
+    self.assertEqual(
+        rollout._last_prefill_rescore_provenance[
+            "recorded_sampling_source"
+        ],
+        source,
+    )
+
+  def test_p58_replay_sampling_provenance_is_fail_closed(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._last_sampling_transforms = None
+    rollout._recorded_sampling_transforms = None
+    source = (
+        "p58s22lr3_20260829t2256z@"
+        "16c224aa80eb6b3a544be19f693c0542ab4b0dcb:rows7,0x2:B2G2"
+    )
+    with mock.patch.dict(os.environ, {}, clear=True):
+      with self.assertRaisesRegex(RuntimeError, "outside signed replay"):
+        rollout.set_recorded_sampling_transforms(
+            {"temperature": 1.0, "top_p": 1.0, "top_k": 0},
+            source_identity=source,
+        )
+    replay_env = {
+        "CANON_DEEPSWE_ONEHOST_SMOKE": "1",
+        "CANON_P58_Q4_TP4_ZERO_ADMISSION": "1",
+        "CANON_P58_Q4_TP4_SHORT_BACKWARD": "1",
+        "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY": "1",
+    }
+    with mock.patch.dict(os.environ, replay_env, clear=True):
+      with self.assertRaisesRegex(ValueError, "transforms changed"):
+        rollout.set_recorded_sampling_transforms(
+            {"temperature": 0.7, "top_p": 1.0, "top_k": 0},
+            source_identity=source,
+        )
 
   def test_p58_native_processed_rescore_uses_only_signed_stock_observer(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)

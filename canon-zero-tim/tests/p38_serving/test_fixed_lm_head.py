@@ -50,6 +50,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
         (2048, 4): ("qwen3-1p7b", "tied_embed", 37984, 38144),
         (4096, 4): ("qwen3-8b", "untied_lm_head", 37984, 38144),
         (4096, 8): ("qwen3-8b-tp8", "untied_lm_head", 18992, 19200),
+        (2560, 4): ("qwen3-4b-tp4", "tied_embed", 37984, 38144),
         (2560, 8): ("qwen3-4b", "tied_embed", 18992, 19200),
         (5120, 8): ("qwen3-32b", "untied_lm_head", 18992, 19200),
     }
@@ -117,7 +118,6 @@ class FixedLmHeadContractTest(unittest.TestCase):
         (base[0], base[1], "float32", base[3], 4),
         (base[0], base[1], base[2], "float32", 4),
         (base[0], base[1], base[2], base[3], 2),
-        ((16, 2560), (2560, 151936), base[2], base[3], 4),
         ((16, 5120), (5120, 151936), base[2], base[3], 4),
     )
     for xshape, wshape, xdtype, wdtype, tp in cases:

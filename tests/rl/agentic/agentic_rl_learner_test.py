@@ -302,6 +302,31 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         (8, True, 1),
     )
 
+  def test_p38_diagnostic_consumer_admits_p58_q4_continue_kv(self):
+    self.assertEqual(
+        agentic_rl_learner._p38_diagnostic_consumer_contract(
+            enabled=True,
+            full_batch_size=1,
+            mini_batch_size=1,
+            train_micro_batch_size=1,
+            num_generations=2,
+            process_in_consumer=False,
+            p58_q4_tp4_continue_kv=True,
+        ),
+        (1, True, 1),
+    )
+
+  def test_p38_diagnostic_consumer_keeps_legacy_producer_rejection(self):
+    with self.assertRaisesRegex(ValueError, "raw trajectories"):
+      agentic_rl_learner._p38_diagnostic_consumer_contract(
+          enabled=True,
+          full_batch_size=32,
+          mini_batch_size=4,
+          train_micro_batch_size=4,
+          num_generations=8,
+          process_in_consumer=False,
+      )
+
   def test_p38_diagnostic_consumer_rejects_subset_geometry(self):
     with self.assertRaisesRegex(ValueError, "coverage geometry changed"):
       agentic_rl_learner._p38_diagnostic_consumer_contract(
@@ -348,6 +373,49 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         learner.rl_cluster.generate.call_args.kwargs["prompts"],
         [conversation],
     )
+
+  def test_model_call_routes_signed_p58_pre_tokenized_prompt_exactly(self):
+    learner = object.__new__(DummyLearner)
+    learner.chat_parser = mock.Mock()
+    learner.rl_cluster = mock.Mock()
+    learner.rl_cluster.generate.return_value = mock.sentinel.rollout
+    prompt_ids = np.asarray([151644, 28, 1725], dtype=np.int32)
+
+    with mock.patch.object(
+        agentic_rl_learner.deepswe_debug,
+        "q4_tp4_zero_admission",
+        return_value=True,
+    ):
+      result = learner._model_call(
+          [{"role": "user", "content": "ignored"}],
+          prompt_token_ids=prompt_ids,
+      )
+
+    self.assertIs(result, mock.sentinel.rollout)
+    learner.chat_parser.parse.assert_not_called()
+    self.assertEqual(
+        learner.rl_cluster.generate.call_args.kwargs["prompts"],
+        [[151644, 28, 1725]],
+    )
+    self.assertFalse(
+        learner.rl_cluster.generate.call_args.kwargs["apply_chat_template"]
+    )
+
+  def test_model_call_rejects_unsigned_pre_tokenized_prompt(self):
+    learner = object.__new__(DummyLearner)
+    learner.chat_parser = mock.Mock()
+    learner.rl_cluster = mock.Mock()
+    with mock.patch.object(
+        agentic_rl_learner.deepswe_debug,
+        "q4_tp4_zero_admission",
+        return_value=False,
+    ):
+      with self.assertRaisesRegex(ValueError, "restricted to the signed P58"):
+        learner._model_call(
+            [{"role": "user", "content": "ignored"}],
+            prompt_token_ids=[1, 2, 3],
+        )
+    learner.rl_cluster.generate.assert_not_called()
 
   def test_frozenlake_evaluation_metrics_are_finite_and_complete(self):
     metrics = agentic_rl_learner._frozenlake_evaluation_metrics(

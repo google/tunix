@@ -32,13 +32,26 @@ $DOCKER run --rm \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_zero_hp.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_seam_probe.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_seam_probe_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_admission.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_admission_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_standard_decode.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_standard_decode_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_continue_kv.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_continue_kv_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_short_backward.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_short_backward_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_carrier_screen.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_carrier_screen_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_trajectory_replay.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_trajectory_replay_docker.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_off_diagnostic.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_aba_wave.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_coarse_seam_localization.sh \
       canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepswe_zero_hp_full.sh \
       canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
       canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
-      canon-zero-tim/cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env
+      canon-zero-tim/cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env \
+      canon-zero-tim/cluster/profiles/qwen3-4b-dp1-tp4-deepswe-zero.env
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_loss_contract.py
     PYTHONPATH=/workspace python3 \
@@ -68,6 +81,14 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_decode_prefill_probe.py
     PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_qwen4b_tp4_zero_contract.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_continue_kv_probe.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_short_carrier_screen.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_trajectory_replay.py
+    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_checked_vma_diagnostic.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_checked_vma_aba_wave.py
@@ -89,6 +110,8 @@ $DOCKER run --rm \
     (
       cd tests/rl/rollout
       PYTHONPATH=/workspace python3 -m unittest \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_sampler_preserves_pre_tokenized_prompt_without_reencoding \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_sampler_rejects_malformed_pre_tokenized_prompt \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_selected_engine_weight_attestation_uses_registered_adapter \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_native_uses_observer_without_registering_adapter \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_stock_weight_observer_rejects_unsigned_or_zero_arm \
@@ -99,6 +122,8 @@ $DOCKER run --rm \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_keeps_canonical_processor \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_skips_engine_for_empty_completion_batch \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_still_requires_provenance_for_any_target \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_replay_primes_exact_recorded_sampling_provenance \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_replay_sampling_provenance_is_fail_closed \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_canonical_adapter_registration_passes_live_trainer_state \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_jax_seed_route_uses_engine_global_and_rejects_per_request
     )
@@ -106,7 +131,8 @@ $DOCKER run --rm \
       cd tests/rl
       PYTHONPATH=/workspace python3 -m unittest \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_observer_only_attestation_compares_stock_live_state_exactly \
-        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_deepswe_weight_report_normalizes_and_validates_logical_mesh
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_deepswe_weight_report_normalizes_and_validates_logical_mesh \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p58_replay_segmented_loss_geometry_is_b2g2
     )
     (
       cd tests/rl
@@ -156,8 +182,14 @@ $DOCKER run --rm \
     (
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_p58_continuation_reuses_exact_sampled_and_environment_tokens \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_p58_continuation_rejects_missing_environment_tokens \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_routes_signed_p58_pre_tokenized_prompt_exactly \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_seam_localization \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_q4_continue_kv \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_environment_is_seeded_with_policy_version_before_reset \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_replay_segmented_geometry_is_b2g2_not_batch_one \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_sandbox_timeout_blocks_after_durable_journal \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_non_infrastructure_all_filtered_batch_does_not_capacity_block \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_sandbox_capacity_evidence_is_fail_closed \
@@ -175,9 +207,34 @@ $DOCKER run --rm \
     bash canon-zero-tim/install.sh /tmp/p58-continue-overlay \
       --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
       --model qwen4b
+    bash canon-zero-tim/install.sh /tmp/p58-qwen4b-tp4-overlay \
+      --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
+      --model qwen4b_tp4
+    CANON_QWEN3_HIDDEN_SIZE=2560 \
+      CANON_QWEN3_INTERMEDIATE_SIZE=9728 \
+      CANON_QWEN3_NUM_ATTENTION_HEADS=32 \
+      CANON_QWEN3_NUM_KV_HEADS=8 \
+      CANON_QWEN3_HEAD_DIM=128 \
+      CANON_QWEN3_TP_SIZE=4 \
+      CANON_FIXED_AR=1 \
+      CANON_PALLAS_ALL_PROJ=1 \
+      PYTHONPATH=/tmp/p58-qwen4b-tp4-overlay \
+      python3 /tmp/p58-qwen4b-tp4-overlay/p22xf_contract.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_continue_decode_observer_overlay.py \
       --runner /tmp/p58-continue-overlay/tpu_runner_p21_l30.py
+    CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC=1 \
+      CANON_P38_KV_OBSERVER_DIR=/tmp/p58-continue-kv-contract \
+      CANON_P38_KV_OBSERVER_MAX_CANDIDATES=1 \
+      CANON_P38_KV_OBSERVER_MAX_PAGES=192 \
+      CANON_P38_KV_OBSERVER_MAX_BYTES=134217728 \
+      CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640 \
+      CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard \
+      CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX=2280 \
+      CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX=3072 \
+      PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/probe_continue_kv_overlay.py \
+      --runner /tmp/p58-qwen4b-tp4-overlay/tpu_runner_p21_l30.py
     observer_state="$(mktemp -d /tmp/p58-stock-observer-state.XXXXXX)"
     printf "%s\n" \
       "export CANON_PROFILE_FILE=cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" \
@@ -197,5 +254,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 onehost_xprof=1 zero_hp_full=1 system_optimization=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 continue_kv_observer=1 onehost_xprof=1 zero_hp_full=1 system_optimization=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 qwen4b_tp4=1 trajectory_replay_b2g2=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
   '

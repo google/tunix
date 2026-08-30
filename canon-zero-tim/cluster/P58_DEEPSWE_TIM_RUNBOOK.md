@@ -18,13 +18,65 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## P58.23 direct-v5p optimized backward — completed
+
+Do not use global batch size one.  The accepted one-host backward carrier is
+Qwen3-4B-Instruct-2507 DP1xTP4 with global B2xG2, four immutable real
+trajectory rows, prompt/response `2048/512`, and K=2560.  One strict-exact
+real Scrapy prompt pair is repeated as two physical groups; both groups are
+mixed `[1,0]`; the classifier requires four finite nonzero advantages and
+zero per-group sums.  Global batch and mini-batch are 2.  Trainer/logprob
+microbatches stay 1 only to bound HBM.
+
+The treatment is the current optimized trainer route: P28 segmented
+forward/train plus G6, P29 full train, P30 sparse/reuse/release/reshard, and
+P71 forward scan.  P59 is off because DP1 cannot exercise rank-parallel
+backward.  Do not launch a serial-reference arm.
+
+The replay source directory and required manifest/journal hashes are:
+
+```text
+/mnt/disks/tunix-data/deepswe-replay-sources/p58-q4-b2g2-k2560-v2
+482d7934a95207d0d77bb4857fbb200d7b367cbf437dda6585937b20909afa8f
+091a9273c2067876fbee1996ee853e3c8e861352e307cd5fb94fea2563aec456
+```
+
+Run with a fresh label:
+
+```bash
+P58_ONEHOST_ALLOW_DIRTY=1 \
+  bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_trajectory_replay_docker.sh \
+  <fresh-label>
+```
+
+The wrapper enforces 1,800 seconds and compilation cache
+`/mnt/disks/tunix-data/jax-compilation-cache/p58-q4-tp4-systemopt-b2g2-k2560`.
+A valid return has strict A=B=C, finite nonzero backward, unchanged model and
+TPU optimizer state, zero commits, and a verified package.  Timeout or a
+missing terminal marker is incomplete.  This replay does not execute a fresh
+sandbox/rollout and cannot certify TP8, Pathways, P59, 128-chip behavior, an
+optimizer update, prompt diversity, or production readiness.  Replay v1 is
+preserved failure evidence only; its Coverage rows were alignment-red and are
+forbidden in the acceptance carrier.
+
+Accepted target `p58s23optb2g2g_20260830t0132z` returned all required markers:
+strict A=B=C over 1,254 action tokens, four finite nonzero advantages, two
+trajectory microsteps, repeat-exact gradient norm `8.544539451599121`, device
+optimizer state unchanged, and zero commits.  Its profiled repeat took 12.418
+seconds and peak HBM was 52.5 GiB.  Artifact root:
+`/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s23optb2g2g_20260830t0132z`;
+return-bundle SHA-256:
+`7d33ee791146d2309c16866d8e30f15f0f012e05e88f6c795b587938f973f795`.
+Do not rerun this gate merely to obtain a new label.  Publication and TP8
+promotion are separate approvals, and global batch size one remains forbidden.
+
 ## Production Zero-HP full system-optimization route
 
 The production Qwen3-4B Zero/full/HP renderer now consumes the P74-era system
-bundle. This is wiring readiness, not launch readiness: P58.19 seam
-localization remains the active numerical queue, and no selector-absent
-1,000-update full run may launch until strict prealignment is unblocked and
-the user separately approves that exact launch.
+bundle. This is wiring readiness, not launch readiness: P58.23 has completed
+only the local DP1xTP4 replay gate, and no selector-absent 1,000-update full
+run may launch until the TP8 promotion is separately defined, constructed,
+and explicitly approved by the user.
 
 After the implementation is committed, published, paired with a digest-pinned
 image, and checked out clean at the approved SHA, render only with:

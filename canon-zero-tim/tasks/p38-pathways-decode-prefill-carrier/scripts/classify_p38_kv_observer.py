@@ -158,10 +158,34 @@ def _pair_records(records: list[dict[str, Any]]) -> list[tuple[dict, dict]]:
     for key in (
         "diagnostic_round", "target_seq_len", "token_history_sha256",
         "block_size", "logical_pages", "observer_pages", "layer_count",
-        "layer_indices", "cache_shape", "cache_dtype", "cache_sharding",
+        "layer_indices", "cache_shape", "cache_dtype",
     ):
       _require(clean.get(key) == live.get(key),
                f"observer A/B contract differs at {key}")
+    live_effective = live.get("cache_effective_sharding")
+    clean_effective = clean.get("cache_effective_sharding")
+    if live_effective is None and clean_effective is None:
+      # Backward compatibility for archived P38 evidence produced before the
+      # effective device-to-slice contract was recorded.
+      _require(clean.get("cache_sharding") == live.get("cache_sharding"),
+               "observer A/B contract differs at cache_sharding")
+    else:
+      _require(
+          isinstance(live_effective, dict)
+          and live_effective.get("schema") ==
+          "p38-effective-device-sharding-v1",
+          "live observer effective sharding is absent or malformed",
+      )
+      _require(
+          isinstance(clean_effective, dict)
+          and clean_effective.get("schema") ==
+          "p38-effective-device-sharding-v1",
+          "clean observer effective sharding is absent or malformed",
+      )
+      _require(
+          clean_effective == live_effective,
+          "observer A/B contract differs at cache_effective_sharding",
+      )
     for key in ("token_ids", "valid_tokens"):
       _require(np.array_equal(live["arrays"][key], clean["arrays"][key]),
                f"observer A/B arrays differ at {key}")
@@ -218,6 +242,13 @@ def _compare_pair(live: dict[str, Any], clean: dict[str, Any]) -> dict[str, Any]
       "differing_logical_pages": sorted(differing_pages),
       "first_difference": first,
       "fingerprint_equal": first is None,
+      "cache_sharding_repr_equal": (
+          live.get("cache_sharding") == clean.get("cache_sharding")
+      ),
+      "cache_effective_sharding_equal": (
+          live.get("cache_effective_sharding") ==
+          clean.get("cache_effective_sharding")
+      ),
   }
 
 

@@ -1,5 +1,190 @@
 # State
 
+## Completed P58.23 optimized B2xG2 one-host backward (2026-08-30)
+
+- P58.22 real-R2E evidence remains valid: Qwen3-4B-Instruct-2507 DP1xTP4,
+  continue-decode 8, prefix cache off, and strict A=B=C over 2,413 action
+  tokens.  Its missing receipt was backward rather than rollout/alignment;
+  P58.23 closes that local trainer receipt with immutable replay evidence.
+- P58.23 replaces the hours-long serial compilation carrier with the current
+  P28/P30/P71-forward optimized train path.  It uses global B2xG2 (four real
+  trajectory rows), K=2,560, two mixed `[1,0]` groups, TPU-resident optimizer,
+  and backward-no-commit.  `batch_size` and `mini_batch_size` are both 2;
+  batch size one is forbidden for this replay.
+- The deterministic combined replay source is
+  `/mnt/disks/tunix-data/deepswe-replay-sources/p58-q4-b2g2-k2560-v2`.
+  Manifest/journal SHA-256 are `482d7934a95207d0d77bb4857fbb200d7b367cbf437dda6585937b20909afa8f`
+  and `091a9273c2067876fbee1996ee853e3c8e861352e307cd5fb94fea2563aec456`.
+  It repeats the strict-exact Scrapy `[1,0]` pair as two physical groups.  This
+  validates B=2 shape/math, not prompt diversity.  v1 is rejected and retained
+  only as evidence because its Coverage group was historically alignment-red.
+- Construction is green on base `07a427612bf34c1910436cecb3d4deafdaa71015`:
+  exact-image installation matches 37/37, P34 static passes 10 suites, the
+  flag audit passes 408/408, Python compilation passes, and the combined
+  replay loader contract returns exactly B2xG2.  The operator ref later gained one
+  unrelated APC status-document commit; it has not been merged into this
+  dirty local worktree.
+- The one-host cold bound is 1,800 seconds with cache namespace
+  `/mnt/disks/tunix-data/jax-compilation-cache/p58-q4-tp4-systemopt-b2g2-k2560`.
+  P59 remains off on DP1; no serial-reference run is allowed.
+- Target `p58s23optb2g2g_20260830t0132z` is PASS.  It admitted four replay
+  rows and 1,254 action tokens with byte-exact A=B=C, then ran the current
+  P28/P30/P71-forward optimized backward as two trajectory microsteps.  Both
+  warmup and profiled repeat produced gradient norm `8.544539451599121` on
+  each microstep; the repeat was exact, finite, and nonzero.  The profiled
+  repeat took 12.418 seconds (`forward=1.462`, `reverse=10.790`).
+- Model, reference, optimizer, accumulator, and train step were unchanged;
+  optimizer commits were zero and optimizer memory was device-resident.  Peak
+  HBM was 56,370,843,648 bytes (52.5 GiB) per device at the observed maximum.
+  The classifier outcome is
+  `ZERO_TIM_RECORDED_TRAJECTORY_BACKWARD_NO_COMMIT_PASS`.
+- Immutable artifact root:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s23optb2g2g_20260830t0132z`.
+  Return bundle SHA-256 is
+  `7d33ee791146d2309c16866d8e30f15f0f012e05e88f6c795b587938f973f795`.
+- Final construction rerun passes the digest-pinned exact-image terminal
+  (`trajectory_replay_b2g2=1`, `system_optimization=1`, `regressions=1`), P34
+  static 10 suites, flag registry 408/408 with `FLAG_AUDIT_PASS`, focused
+  replay/one-host 7/7, Python/Bash syntax, and `git diff --check`.
+- P58.23 is complete.  There is no active target launch while publication and
+  the later TP8 promotion remain separately user-gated.  No commit or push is
+  authorized.
+
+## Completed P58.22 Qwen3-4B continue-decode repair (2026-08-29)
+
+- `p58s22kv9d_20260829t0846z` proves the repaired one-host forward path:
+  continue-decode remains `8`, prefix cache remains off, and both strict
+  boundaries are byte-exact over 2,413 real action tokens.  Its controlled
+  alignment-only exit has no backward and no commits.
+- `p58s22bw3_20260829t0931z` has one usable real trajectory, one official
+  max-context/compact-filtered trajectory, and strict A=B=C over 2,413 action
+  tokens.  Its 5,120-token backward compile exceeded 7,200 seconds; it is
+  incomplete, not a numerical failure.  Three later 4,096-width clean-census
+  candidates each clipped both fixed-seed rows and were rejected before
+  backward by the new rollout-only carrier screen.
+- The active short backward carrier is now 1,792 prompt plus 2,880 response
+  tokens (train width 4,672), the minimal signed padding over the observed
+  Pillow prompt/completion lengths 1,737/2,862.  Target
+  `p58s22bw6_20260829T123125Z` adds a 21,600-second process bound and exact
+  persistent JAX cache path solely for compile completion.  No backward PASS
+  or TP8 promotion is claimed until its classifier succeeds.
+
+- `p58s22kv6_20260829t0802z` ruled out an immediate KV comparison.  Live A
+  and the durable trainer sequence encode identical tool-call text with
+  different BPE tokenizations beginning at position 2242 (`97183` versus
+  `28,1725`).  The exact-prefix observer correctly refused clean B.  This
+  explains why prefix cache off was still RED: the fault is cross-turn token
+  continuity before cache comparison, not cached-prefix reuse.
+- The local, uncommitted repair keeps exact sampled/environment token IDs
+  across later agent turns and passes them to vLLM without re-tokenizing.
+  Scope is the existing P58 Qwen3-4B DP1xTP4 Zero-admission selector only; no
+  new independent flag exists.  Focused agentic/sampler contracts and the
+  continue-KV 8/8 overlay probe pass.  Full pinned-image and fresh real strict
+  alignment evidence are the next gates.
+- The real discriminator now atomically derives the existing P38
+  precheck-only/controlled-exit pair.  A green run must exit 42 before
+  backward and is alignment-only evidence, not backward admission.
+
+- The one-host discriminator has passed its final construction rerun.  Runner patch
+  35 and `CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC=1` select one bounded
+  serial request in `[2280,3072)`, join live-A and clean-B integer KV
+  fingerprints at the exact same token prefix, and classify cache write/state
+  versus read/program without changing sampling or alignment.
+- Four target attempts remain preserved and inconclusive: the first exposed
+  P38 serving-capture coupling, the second exposed the 16-page inherited
+  instrumentation bound, and `p58s22kv3_20260829t0647z` produced an A/B pair
+  at target prefix 2270 but stopped on raw sharding-repr drift.  Read-only
+  comparison found that pair's KV fingerprints equal, but 2270 precedes the
+  actual first RED at 2286, so it cannot classify the defect.  The active
+  repair records canonical device-to-slice sharding and moves the lower bound
+  to 2280 so the next pair must span the RED seam.
+- `p58s22kv4_20260829t071538z` selected the intended prefix 2285 and captured
+  A through 2472, beyond first RED 2286, but wrote no B because the inherited
+  B hook required full prompt completion.  Prompt-logprob rescore can stop one
+  input token short.  P58 now captures the first exact-prefix clean chunk that
+  covers `A.target_seq_len`; ordinary P38 remains unchanged.
+- Focused static evidence is green: all 37 Qwen3-4B TP4 overlay files match
+  the new runner digest, and the partial-rescore positive plus generic P38
+  negative probe passes 8/8.  The complete pinned-image terminal marker has
+  `continue_kv_observer=1` and `regressions=1`; a fresh real A/B pair remains
+  pending.  This does not yet prove a target fingerprint or a numerical
+  repair.
+
+- P58.21 target `p58s21std_20260829t0357z` is a valid single-variable causal
+  control.  With standard decode it admitted 2,553 action tokens and returned
+  exact A-B and B-C: zero differing elements/bytes and `max_abs=0.0` on both
+  boundaries.  This makes `CANON_CONTINUE_DECODE=8` a necessary cause of the
+  P58.20 environment-seam RED on the one-host carrier.
+- Immutable control artifact:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s21std_20260829t0357z`.
+  The process hit its 7,200-second bound while compiling the first complete
+  8,192-token backward, so `backward_no_commit` is absent and the classifier
+  correctly reports `ZERO_TIM_BACKWARD_INCOMPLETE`.  This is not a backward
+  PASS and not a backward numerical RED.
+- P58.22 kept continue-decode value `8`,
+  joins bounded integer KV fingerprints for the live A cache and clean B
+  cache at an identical environment seam, repairs the identified cache/state
+  path, then reruns strict alignment plus backward-no-commit.
+- The backward rerun uses a separately attested direct-host-only 1792+2880
+  sequence carrier.  The actual prompt/completion lengths are 1,737/2,862 and
+  the historical first RED at logical prefix 2,286 remains covered.
+  Production 16K/50-turn geometry and all TP8 profiles remain unchanged.
+- No commit or push is authorized.  TP8 remains blocked until repaired
+  continue-decode=8 passes one-host A=B=C and finite nonzero repeat-exact
+  backward with zero commits.
+
+## Completed P58.21 Qwen3-4B environment-seam discriminator (2026-08-29)
+
+- P58.20 construction passed the complete digest-pinned image gate, including
+  `qwen4b_tp4` 37/37 installation, five TP4 shape self-tests, and terminal
+  `P58_EXACT_IMAGE_CPU_PASS`.
+- Direct-v5p target `p58s20dev_20260829t0330z` then ran two real Pillow/R2E
+  trajectories with the full seven-target overlay. It admitted 3,300 action
+  tokens and returned exact `S_prefill=T_old` (0 elements/0 bytes), but
+  `S_decode` differed in 1,307 elements/2,694 bytes. The first mismatch was
+  the first action token after an environment result at logical prefix 2,286
+  (`abs_delta=0.009761810302734375`); initial action tokens were exact and the
+  +/-1 token shift controls were substantially worse. The strict gate stopped
+  before backward; optimizer commits remained zero.
+- Immutable development artifact:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s20dev_20260829t0330z`.
+  The classifier outcome is `ZERO_TIM_ALIGNMENT_RED`; trajectory,
+  pre-alignment, batch metrics, and manifest SHA-256 values are recorded in
+  its classification output.
+- P58.21 added one default-off matched-control
+  selector whose sole numerical change is baseline `CANON_CONTINUE_DECODE=8`
+  versus an empty value (`standard-decode`). All model/data/sampling/overlay/
+  fixed-head/prefix-cache/alignment contracts stay identical. A green control
+  does not certify the high-performance arm; it promotes a continue-decode
+  cache repair and a fresh baseline=8 rerun.  The target was exact, so P58.22
+  owns the bounded KV/state repair; no TP8 promotion occurred.
+- No commit or push is authorized.
+
+## P58.20 construction checkpoint (2026-08-29)
+
+- User decision: one-host Qwen3-4B strict Zero-TIM is now a hard prerequisite
+  for any further TP8 or 128-chip P58 work.  P58.19 is preserved but deferred;
+  P58.20 was the only active phase at this checkpoint.
+- Work proceeds in clean named worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_q4_tp4_onehost_0829`, branch
+  `local/p58-q4-tp4-onehost-0829`, source base
+  `16c224aa80eb6b3a544be19f693c0542ab4b0dcb`.  The older P58.19f dirty
+  worktree is untouched.
+- Confirmed construction gap: the existing one-host Zero-HP carrier installs
+  only the topology-generic TPU runner.  The existing Qwen3-4B projection and
+  fixed-head registrations are TP8-only, so its finite B-C RED is not evidence
+  that Qwen3-4B cannot reach Zero-TIM on TP4.
+- Active deliverable: an additive `qwen4b_tp4` model variant and single
+  `CANON_P58_Q4_TP4_ZERO_ADMISSION=1` selector install all seven engine
+  targets, retain explicit sampling `0.7/0/1.0`, and require strict byte-exact
+  A=B=C before backward.  P59 and every production/TP8 selector stay off.
+- Target exit gate: one direct-attached v5p-4 real-R2E G2 package with exact
+  A=B=C over all valid action tokens, finite nonzero repeat-exact backward,
+  TPU-resident unchanged optimizer/model state, zero commits, and a verified
+  immutable artifact checksum.  Until that target passes, TP8 is not run.
+- Publication status: no commit or push is authorized.  Direct one-host
+  execution is authorized only after the construction ladder passes.
+
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
 - Current status: target incident `canon-p58-seamcoarse-full-p58s19d` (128 TPU

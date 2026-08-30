@@ -54,6 +54,66 @@ is construction evidence only. A future target must still pass strict A=B=C,
 performance/XProf receipts, and the P58 final classifier. Do not reuse a
 previous P58 YAML, run ID, image tag, or evidence root.
 
+## COMPLETED LOCAL DIAGNOSTIC — P58.23 B2xG2 optimized one-host backward
+
+P58.23 is complete.  P58.22 already proved a real R2E
+rollout and strict A=B=C for Qwen3-4B-Instruct-2507 on direct DP1xTP4.  Do not
+spend another 1–2 hours compiling the serial reference.  The accepted carrier
+replays one immutable strict-exact real prompt repeated as two physical
+groups, with two generations per group, through the current
+P28/P30/P71-forward optimized trainer path.
+
+Hard geometry: global `B=2`, `G=2`, four trajectories, K=`2048+512=2560`,
+`batch_size=2`, `mini_batch_size=2`.  Memory microbatches may remain 1; they
+do not make this a batch-size-one run.  Both groups have rewards `[1,0]`.
+P59 is intentionally off on DP1 and remains a DP8 target-only claim.
+
+Replay source:
+
+```text
+/mnt/disks/tunix-data/deepswe-replay-sources/p58-q4-b2g2-k2560-v2
+manifest 482d7934a95207d0d77bb4857fbb200d7b367cbf437dda6585937b20909afa8f
+journal  091a9273c2067876fbee1996ee853e3c8e861352e307cd5fb94fea2563aec456
+```
+
+The successful fresh label was:
+
+```text
+p58s23optb2g2g_20260830t0132z
+```
+
+Its immutable artifact root is
+`/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s23optb2g2g_20260830t0132z`;
+the return-bundle SHA-256 is
+`7d33ee791146d2309c16866d8e30f15f0f012e05e88f6c795b587938f973f795`.
+The classifier returned strict A=B=C over 1,254 action tokens, exact finite
+nonzero repeated gradients, device-resident unchanged optimizer state, and
+zero commits.  Its compiled profiled repeat took 12.418 seconds and peak HBM
+was 52.5 GiB.  This is the accepted P58.23 receipt; do not rerun merely to
+replace the label.
+
+If a deliberate reproduction is separately approved, use a fresh label only:
+
+```bash
+P58_ONEHOST_ALLOW_DIRTY=1 \
+  bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_trajectory_replay_docker.sh \
+  <fresh-label>
+```
+
+The wrapper enforces a 1,800-second cold bound and compilation cache
+`/mnt/disks/tunix-data/jax-compilation-cache/p58-q4-tp4-systemopt-b2g2-k2560`.
+Require four nonzero advantages, strict A=B=C, finite nonzero backward,
+unchanged parameters/optimizer, zero commits, and a verified return bundle.
+The duplicate prompt is intentional and proves only physical B=2/RLOO/train
+shape; it is not prompt-diversity evidence.  Never substitute replay v1: its
+Coverage group is historical alignment-red evidence.  Timeout is
+`ZERO_TIM_BACKWARD_INCOMPLETE`, not PASS.  Replay validates the trainer path
+but does not itself run R2E/decode, TP8, Pathways, P59, or an optimizer update.
+See `phases/p58-23-qwen4b-systemopt-b2g2.md`.  The next executor action is to
+wait for explicit commit/push approval, fetch and read back the resulting
+operator SHA if published, and only then prepare the separately approved TP8
+promotion.  Do not launch or claim TP8 from this local receipt.
+
 ## 2026-08-28 UTC — DeepSWE P58.19e incident intake (`canon-p58-seamcoarse-full-p58s19e`, 128 TPU)
 
 ### Incident Summary

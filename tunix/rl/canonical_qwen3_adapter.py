@@ -44,6 +44,7 @@ import numpy as np
 
 from tunix.generate import utils as generate_utils
 from tunix.rl import canonical_logsoftmax
+from tunix.rl import deepswe_debug
 from tunix.rl import dp_training
 from tunix.rl import dp_workloads
 from tunix.rl import deepswe_contract
@@ -1725,6 +1726,15 @@ def _segmented_loss_geometry(environ) -> tuple[int, tuple[int, int]]:
           "P41 segmented loss requires the bounded GSM8K L3 update canary"
       )
     return 2, (256, 64)
+  if environ.get("CANON_P58_Q4_TP4_TRAJECTORY_REPLAY", "0") == "1":
+    trajectories, trajectory_micro = (
+        deepswe_debug.q4_tp4_trajectory_replay_update_geometry(environ)
+    )
+    if trajectory_micro != 2:
+      raise FunctionalMappingError(
+          "P58.23 segmented loss trajectory micro-batch changed"
+      )
+    return trajectories, (2048, 512)
   if (
       environ.get("CANON_GSM8K_TRAIN", "") == "1"
       and environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1"
@@ -9473,7 +9483,7 @@ class Qwen3EngineForwardAdapter:
       )
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError(
-          "P28 G5c admits unpacked eight-trajectory input only"
+          "P28 segmented loss admits unpacked trajectory input only"
       )
     prompts = jnp.asarray(train_example.prompt_ids)
     completions = jnp.asarray(train_example.completion_ids)

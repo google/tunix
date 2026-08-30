@@ -1,5 +1,104 @@
 # Log
 
+## 2026-08-29 UTC — P58.22 exact alignment PASS and bounded backward carrier
+
+- `p58s22kv9d_20260829t0846z`: real Qwen3-4B DP1xTP4 continue-decode=`8`,
+  prefix-cache-off alignment returned A=B=C over 2,413 action tokens and the
+  signed alignment-only controlled exit.  Classification:
+  `EXACT_TOKEN_CONTINUITY_ALIGNMENT_PASS`; backward/commits remained zero.
+- `p58s22bw1_20260829t0906z`: 2,048+2,048 carrier yielded two official
+  max-context rows, compact-filtered both, and stopped at `N_action=0` before
+  backward.  No clipped data was admitted.
+- The carrier was changed to 2,048+3,072 (train width 5,120) using the observed
+  completed 2,862-token response as the lower-bound evidence.
+- `p58s22bw2_20260829t0924z`: stopped before rollout because the training
+  fail-closed prompt/response expectations were reversed.  Corrected the
+  directional mapping, added a regression, and reran the complete pinned-image
+  gate to `P58_EXACT_IMAGE_CPU_PASS`.
+- `p58s22bw3_20260829t0931z`: one usable row plus one compact-filtered
+  overlong row and strict A=B=C over 2,413 action tokens.  Its 5,120-token
+  backward entered the real VJP compile but exceeded the 7,200-second bound;
+  classification is incomplete, not PASS or numerical RED.
+- `p58s22bw4_20260829T114504Z`, `p58s22bw5_20260829T115556Z`, and rollout-only
+  screens `cs1/cs2/cs3` established that three independent clean-census tasks
+  each clip both fixed-seed rows at a 2,048-token completion cap.  Every run
+  stopped before backward and recorded zero commits.
+- `p58s22bw6_20260829T123125Z`: active development target.  It returns to the
+  proven Pillow carrier with maxima 1,792/2,880 (train width 4,672), an exact
+  six-hour bound, and a persistent JAX compilation cache.  No terminal claim
+  until the packaged strict classifier returns PASS.
+
+## 2026-08-29 UTC — P58.22 cross-turn token-continuity mechanism and repair
+
+- Real run `p58s22kv6_20260829t0802z` reproduced the P58.20 strict A-B RED and
+  exact B-C, but the clean-B observer refused capture because its token prefix
+  was not identical to A.  Read-only artifact analysis joined live A to
+  trajectory row 0 and found the first token drift at position 2242:
+  live token `97183` versus trainer tokens `28,1725`; both decode to the same
+  `=./` text.  Prefix cache was disabled throughout.
+- Root cause: subsequent agent turns reconstructed the full chat as text and
+  re-tokenized it for serving.  The trainer journal preserved original
+  sampled token IDs plus tokenized environment results.  Qwen3-4B's tokenizer
+  is not guaranteed to preserve token segmentation through decode/re-encode,
+  so serving A and trainer B conditioned on different token sequences despite
+  identical visible text.
+- Local repair: under the existing exclusive P58 Qwen3-4B DP1xTP4 selector,
+  reconstruct each later prompt from the original padded prompt tail plus
+  exact assistant/environment token arrays, pass those IDs through the
+  agentic learner and vLLM sampler, and emit a bounded SHA-256 continuity
+  receipt.  Unsigned callers, malformed token arrays, missing nonterminal
+  environment tokens, and caller overrides fail closed.  Default text paths
+  are unchanged.
+- Validation so far: Python compilation, diff hygiene, 15 classifier tests,
+  five runner/manifest tests, focused agentic and pre-tokenized sampler tests,
+  and the installed overlay 8/8 probe pass.  The continue-KV runner now uses
+  existing P38 precheck-only + controlled-exit as an atomic diagnostic pair;
+  exact A=B=C can be certified as alignment-only with exit 42 and zero
+  backward/commits.  Complete pinned-image and real rerun are pending.  No
+  commit or push is authorized.
+
+## 2026-08-29 UTC — P58.22 correct-seam A capture and B-hook repair
+
+- `p58s22kv4_20260829t071538z` ran the real four-device Qwen3-4B-Instruct-2507
+  DP1xTP4 carrier with prefix cache/P59 off and explicit sampling 0.7/0/1.0.
+  It selected prefix 2285, captured live A through 2472, reproduced the first
+  A-B RED at 2286, and kept B-C exact.  The strict gate stopped before
+  backward and optimizer commit.
+- Only A was durable.  Clean prompt-logprob rescore ran, but the inherited B
+  hook required `seq_len >= request_state.num_tokens`.  Prompt-logprob scoring
+  need not execute the final input token, so that predicate never became true.
+  This was incomplete instrumentation, not a new numerical or sandbox fault.
+- P58 now captures B at the first clean chunk whose computed prefix covers
+  `A.target_seq_len`, while still requiring exact full-host-token prefix join.
+  Ordinary P38 retains its original full-request predicate.  The rebuilt
+  37-file overlay matches its new manifest, and the pinned focused probe emits
+  `CANON_P58_CONTINUE_KV_CLEAN_READY ... seq_len=2560 target=2472` followed by
+  `P58_CONTINUE_KV_OVERLAY_PASS cases=6/6`.  The complete exact-image gate
+  exits zero with `continue_kv_observer=1` and `regressions=1`; a fresh target
+  remains pending.  No commit or push is authorized.
+
+## 2026-08-29 UTC — P58.22 target-derived observer repair, local only
+
+- `p58s22kv_20260829t0624z` failed before model load on an unintended generic
+  P38 serving-capture dependency.  The P58-only observer directory is now
+  explicitly scoped; ordinary P38 fail-closed behavior is unchanged.
+- `p58s22kv2_20260829t0635z` initialized four direct v5p devices and the real
+  Qwen3-4B-Instruct-2507 model, then hit the inherited 16-page observer bound
+  with 142 logical pages.  The P58 exact bound is now 192 pages for the signed
+  maximum prefix 3072 and observed block size 16; ordinary P38 remains
+  independently bounded.
+- `p58s22kv3_20260829t0647z` produced A/B records for one identical 2,270-token
+  prefix.  A read-only compare found zero aggregate or sample cells different.
+  This is not a causal classification: its candidate tag was 2207 and capture
+  end 2270, before the reproduced first A-B RED at 2286.  The old classifier
+  also rejected raw `NamedSharding` repr drift even though the additional mesh
+  axes all had size one.
+- Active repair: record and compare canonical device-to-slice effective
+  sharding, retain the raw repr only as provenance, and use exact selector
+  bounds `[2280,3072)` so the next capture must extend beyond the first RED.
+  All three artifacts are immutable diagnostic failures; none reached
+  backward or optimizer commit.  No commit or push is authorized.
+
 ## 2026-08-28 UTC — DeepSWE P58.19e incident intake sealed
 
 - Workload: `canon-p58-seamcoarse-full-p58s19e` (128 TPU v5p).
@@ -1583,3 +1682,109 @@
   behavior, training, backward, or an optimizer commit.
 - Boundary: no commit, push, image publication, Kubernetes mutation,
   Pathways/TPU execution, credential access, or target rerun occurred.
+## 2026-08-29 UTC — P58.22 bounded continue-KV discriminator construction
+
+- Source remains the uncommitted local worktree on base
+  `16c224aa80eb6b3a544be19f693c0542ab4b0dcb`; no remote branch or main was
+  modified.
+- Added append-only runner patch 35, a single default-off P58.22 selector,
+  thin direct-host wrappers, exact classifier/package logic, and real
+  assembled-overlay positive/multi-request-negative probes.  The observer
+  fixes prefix/candidate/page/output/read limits and changes no model,
+  sampling, KV value, alignment, backward, or optimizer program.
+- Validation: one-host selector 5/5, continue-KV classifier 2/2, TP4 contract
+  3/3, APC 31/31, P34 static 10 suites, flag registry 400/400/400 with
+  `FLAG_AUDIT_PASS`, syntax and diff hygiene.  The complete pinned-image gate
+  installs 37/37 and exits zero with `P58_EXACT_IMAGE_CPU_PASS ...
+  continue_kv_observer=1 ... regressions=1`.
+- Boundary: target KV fingerprint and subsequent repair/backward remain not
+  run at this checkpoint.  No commit, push, image publication, Kubernetes
+  mutation, or optimizer commit occurred.
+## 2026-08-30 UTC — P58.23 optimized B2xG2 construction gate
+
+- Preserved the P58.22 serial evidence and stopped using its hours-long
+  compilation path.  No artifact was deleted or rewritten.
+- Built a deterministic B2xG2 replay from two real DP1xTP4 Qwen3-4B R2E
+  groups, each rewards `[1,0]`; normalized prompts to 2,048 and truncated
+  responses only at complete action boundaries below 512.
+- The active one-host tuple is P28 segmented forward/train+G6, P29 full,
+  P30 sparse/reuse/release/reshard, and P71 forward scan.  P59 remains off on
+  DP1.  Global batch/mini-batch are 2, generations 2, four trajectories;
+  batch size one is forbidden.
+- Reconciled the rebased upstream M15 patch 36 with P58 continue-KV patch 37
+  (the earlier phase used patch numbers 35/36 before the upstream advance). A fresh
+  pinned-image install matches all 37 Qwen3-4B TP4 files, P58 exact-image
+  regressions exit zero, P34 static passes 10 suites, flags pass 408/408, and
+  Python compilation passes.  Four bare-host discovery imports are blocked
+  only by absent optional `metrax`; their pinned-image counterparts pass.
+- TPU target remains bounded to 1,800 seconds and is pending.  No commit,
+  push, image publication, Kubernetes mutation, or remote launch occurred.
+
+## 2026-08-30 UTC — P58.23 B2 correction after bounded target attempts
+
+- `p58s23optb2g2a_20260830t0040z` proved that retaining one dataset row while
+  requesting `mini_batch_size=2` is invalid.  It stopped before trajectory,
+  backward, or commit; global batch size one is now explicitly forbidden.
+- `p58s23optb2g2b_20260830t0041z` correctly stopped at the clean-data contract
+  because the temporary two-task whitelist retained two rows while the
+  launcher still attested one.  It also performed no train or commit.
+- `p58s23optb2g2c_20260830t0043z` proved the repaired runtime geometry:
+  `full_batch_size=2`, `mini_batch_size=2`, two RLOO groups, four trajectories,
+  advantages `[1,-1,1,-1]`, and no injected signal.  Strict prealignment then
+  failed only rows 2/3 from the historical Coverage source; Scrapy rows 0/1
+  remained exact and B=C stayed exact.  The Coverage source was already RED
+  in its own historical run, so this was invalid carrier selection rather
+  than a new optimized-backward regression.  No backward or commit occurred.
+- Replay v2 therefore repeats the already strict-exact real Scrapy `[1,0]`
+  pair as two physical groups.  It preserves global B2xG2 and exercises batch,
+  RLOO, alignment, and optimized-backward shape/math without claiming prompt
+  diversity.  The deterministic v2 manifest/journal hashes are
+  `482d7934a95207d0d77bb4857fbb200d7b367cbf437dda6585937b20909afa8f`
+  and `091a9273c2067876fbee1996ee853e3c8e861352e307cd5fb94fea2563aec456`.
+  The v1 artifact is preserved as failure evidence and must not be accepted.
+- Host regressions pass 18/18 and the real v2 loader attests rows
+  `(group,pair,prefix,actions)=(0,0,432,363),(0,1,333,264),`
+  `(1,0,432,363),(1,1,333,264)`.  The next bounded TPU label must still prove
+  strict A=B=C and a finite nonzero optimized backward with zero commits.
+- Boundary: no commit, push, image publication, Kubernetes mutation, remote
+  launch, credential access, or optimizer commit occurred in this correction.
+
+## 2026-08-30 UTC — P58.23 optimized B2xG2 one-host target PASS
+
+- `p58s23optb2g2f_20260830t0121z` first proved the actual optimized trainer
+  execution: strict A=B=C, two trajectory microsteps, finite nonzero exact
+  gradient norms, unchanged state, and zero commits.  Its final classifier
+  stopped only because it read the last 627-action microstep receipt instead
+  of a full-batch receipt.  This was an evidence-aggregation bug, not a model,
+  numerical, or backward failure.
+- Added an explicit post-backward full-batch receipt and made the classifier
+  require it.  The receipt joins both microsteps and refuses any total other
+  than four trajectories, two microsteps, and 1,254 action tokens.  Global
+  geometry remains B2xG2; no global batch-size-one path was introduced.
+- Final target `p58s23optb2g2g_20260830t0132z` returned PASS on the direct
+  four-device v5p host.  Pre- and post-backward A-B/B-C were byte-exact over
+  1,254 action tokens.  Both mixed groups retained `[1,0]` rewards and all four
+  advantages were finite/nonzero with zero group sums.
+- Optimized warmup used `forward=32.693s`, `reverse=83.017s`, and
+  `segmented=122.657s`.  The same compiled P28/P30/P71-forward program then
+  repeated under XProf in `forward=1.462s`, `reverse=10.790s`, and
+  `segmented=12.418s`.  Both microstep gradient norms were
+  `8.544539451599121` in both passes and were bitwise repeat-exact.
+- Backward-no-commit attested no changed model/reference/optimizer/accumulator
+  paths, train step `0 -> 0`, optimizer commits `0`, and optimizer memory kind
+  `device`.  Peak recorded HBM was 56,370,843,648 bytes (52.5 GiB).  XProf
+  produced a 925,756,796-byte xplane and 42,523,705-byte trace gzip.
+- Immutable artifact root:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s23optb2g2g_20260830t0132z`.
+  Return bundle SHA-256 is
+  `7d33ee791146d2309c16866d8e30f15f0f012e05e88f6c795b587938f973f795`.
+- Final post-target construction rerun passes the complete digest-pinned
+  `P58_EXACT_IMAGE_CPU_PASS` marker with `trajectory_replay_b2g2=1`,
+  `system_optimization=1`, and `regressions=1`; P34 static passes 10 suites,
+  deterministic flag audit is 408/408 with `FLAG_AUDIT_PASS`, focused replay
+  plus one-host tests pass 7/7, and Python/Bash syntax plus diff hygiene pass.
+- Claim ceiling: this proves the optimized Qwen3-4B DP1xTP4 trainer replay and
+  joins it to earlier real-R2E alignment evidence.  It does not perform a new
+  rollout, optimizer commit, TP8/P59/Pathways run, prompt-diversity test, or
+  production certification.  Publication and every later launch remain
+  separately user-gated; no commit or push occurred here.

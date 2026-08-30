@@ -126,6 +126,8 @@ class VllmRollout(base_rollout.BaseRollout):
         rollout_config.rollout_vllm_sampling_kwargs
     )
     self._last_sampling_transforms: dict[str, Any] | None = None
+    self._recorded_sampling_transforms: dict[str, Any] | None = None
+    self._recorded_sampling_source: str | None = None
     self._last_prefill_rescore_provenance: dict[str, Any] | None = None
     self._last_grouped_prefill_rescore_provenance: dict[str, Any] | None = None
     state = nnx.state(model)
@@ -203,12 +205,16 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | list[list[int]],
       rollout_config: base_rollout.RolloutConfig,
       request_timeout_s: float | None = None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    if getattr(self, "_recorded_sampling_transforms", None) is not None:
+      raise RuntimeError(
+          "live generate cannot follow recorded sampling provenance"
+      )
     request_seed, _ = _validated_vllm_seed_route(rollout_config)
     effective_sampling = {
         "temperature": rollout_config.temperature,
@@ -241,6 +247,54 @@ class VllmRollout(base_rollout.BaseRollout):
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,
         prompt_lengths=self.output.prompt_lengths,
+    )
+
+  def set_recorded_sampling_transforms(
+      self, transforms: dict[str, Any], *, source_identity: str
+  ) -> None:
+    """Primes processed re-score from one signed recorded-rollout source."""
+    required_env = {
+        "CANON_DEEPSWE_ONEHOST_SMOKE": "1",
+        "CANON_P58_Q4_TP4_ZERO_ADMISSION": "1",
+        "CANON_P58_Q4_TP4_SHORT_BACKWARD": "1",
+        "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY": "1",
+    }
+    wrong = {
+        key: os.environ.get(key)
+        for key, expected in required_env.items()
+        if os.environ.get(key) != expected
+    }
+    expected_source = (
+        "p58s22lr3_20260829t2256z@"
+        "16c224aa80eb6b3a544be19f693c0542ab4b0dcb:rows7,0x2:B2G2"
+    )
+    expected_transforms = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+    }
+    if wrong:
+      raise RuntimeError(
+          f"recorded sampling provenance used outside signed replay: {wrong}"
+      )
+    if source_identity != expected_source:
+      raise ValueError("recorded sampling source identity changed")
+    if transforms != expected_transforms:
+      raise ValueError(
+          f"recorded sampling transforms changed: {transforms}"
+      )
+    if (
+        getattr(self, "_last_sampling_transforms", None) is not None
+        or getattr(self, "_recorded_sampling_transforms", None) is not None
+    ):
+      raise RuntimeError("sampling provenance was already initialized")
+    self._recorded_sampling_transforms = dict(transforms)
+    self._recorded_sampling_source = source_identity
+    print(
+        "[P58.23.REPLAY] SAMPLING_PROVENANCE_PASS "
+        "temperature=1.0 top_p=1.0 top_k=0 "
+        f"source={source_identity}",
+        flush=True,
     )
 
   def get_per_token_logps(
@@ -417,12 +471,21 @@ class VllmRollout(base_rollout.BaseRollout):
       out = np.zeros(comps.shape, np.float32)
       return out if np.asarray(completion_tokens).ndim > 1 else out[0]
 
+    sampling_source = "unprocessed"
     if processed:
-      if self._last_sampling_transforms is None:
+      live_sampling = getattr(self, "_last_sampling_transforms", None)
+      recorded_sampling = getattr(self, "_recorded_sampling_transforms", None)
+      if live_sampling is not None and recorded_sampling is not None:
+        raise RuntimeError("live and recorded sampling provenance overlap")
+      sampling_transforms = live_sampling or recorded_sampling
+      if sampling_transforms is None:
         raise RuntimeError(
             "processed S_prefill must follow generate(); no rollout sampling provenance "
             "is available"
         )
+      sampling_source = (
+          "live-generate" if live_sampling is not None else "recorded-replay"
+      )
 
       unsupported_defaults = {
           "presence_penalty": 0.0,
@@ -436,7 +499,7 @@ class VllmRollout(base_rollout.BaseRollout):
       }
       active_unsupported = {}
       for key, neutral in unsupported_defaults.items():
-        value = self._last_sampling_transforms.get(key, neutral)
+        value = sampling_transforms.get(key, neutral)
         if value not in (neutral, None, (), [], {}):
           active_unsupported[key] = value
       if active_unsupported:
@@ -445,9 +508,9 @@ class VllmRollout(base_rollout.BaseRollout):
             f"active unsupported transforms: {sorted(active_unsupported)}"
         )
 
-      temperature = float(self._last_sampling_transforms.get("temperature", 1.0))
-      top_p_value = self._last_sampling_transforms.get("top_p", 1.0)
-      top_k_value = self._last_sampling_transforms.get("top_k", 0)
+      temperature = float(sampling_transforms.get("temperature", 1.0))
+      top_p_value = sampling_transforms.get("top_p", 1.0)
+      top_k_value = sampling_transforms.get("top_k", 0)
       top_p = 1.0 if top_p_value is None else float(top_p_value)
       top_k = 0 if top_k_value is None else int(top_k_value)
     else:
@@ -495,6 +558,10 @@ class VllmRollout(base_rollout.BaseRollout):
         "temperature": temperature,
         "top_p": top_p,
         "top_k": top_k,
+        "sampling_provenance": sampling_source,
+        "recorded_sampling_source": getattr(
+            self, "_recorded_sampling_source", None
+        ),
         "batch_size": len(seqs),
         "sequence_lengths": tuple(len(s) for s in seqs),
         "diagnostic_arm": diagnostic_arm,

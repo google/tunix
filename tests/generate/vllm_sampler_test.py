@@ -627,6 +627,26 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(logprobs, [[None]])
     np.testing.assert_array_equal(tokens[0][0], np.asarray([1, 2]))
 
+  def test_tokenize_preserves_pre_tokenized_prompt_without_reencoding(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.tokenizer = mock.MagicMock()
+    prompt = np.asarray([151644, 28, 1725], dtype=np.int64)
+
+    actual = sampler.tokenize(prompt)
+
+    sampler.tokenizer.encode.assert_not_called()
+    np.testing.assert_array_equal(
+        actual, np.asarray([151644, 28, 1725], dtype=np.int32)
+    )
+
+  def test_tokenize_rejects_malformed_pre_tokenized_prompt(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.tokenizer = mock.MagicMock()
+    for prompt in ([], [[1, 2]], [1, -1], [1.5, 2.5]):
+      with self.subTest(prompt=prompt):
+        with self.assertRaisesRegex(ValueError, "pre-tokenized vLLM prompt"):
+          sampler.tokenize(prompt)
+
 
 if __name__ == "__main__":
   absltest.main()

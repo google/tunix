@@ -60,6 +60,7 @@ GEOMETRIES = {
     (2048, 4): _geometry("qwen3-1p7b", 2048, 4, "tied_embed"),
     (4096, 4): _geometry("qwen3-8b", 4096, 4, "untied_lm_head"),
     (4096, 8): _geometry("qwen3-8b-tp8", 4096, 8, "untied_lm_head"),
+    (2560, 4): _geometry("qwen3-4b-tp4", 2560, 4, "tied_embed"),
     (2560, 8): _geometry("qwen3-4b", 2560, 8, "tied_embed"),
     (5120, 8): _geometry("qwen3-32b", 5120, 8, "untied_lm_head"),
 }

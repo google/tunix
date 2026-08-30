@@ -21,7 +21,7 @@ import gc
 from itertools import count
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
 from flax import nnx
@@ -370,14 +370,31 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
-  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
-    """Tokenizes the input string."""
+  def tokenize(
+      self, input_string: str | Sequence[int] | np.ndarray
+  ) -> np.ndarray | list[int]:
+    """Returns text tokenization or validates an exact pre-tokenized prompt."""
+    if not isinstance(input_string, str):
+      prompt_ids = np.asarray(input_string)
+      if (
+          prompt_ids.ndim != 1
+          or prompt_ids.dtype.kind not in "iu"
+          or prompt_ids.size == 0
+          or np.any(prompt_ids < 0)
+      ):
+        raise ValueError(
+            "pre-tokenized vLLM prompt must be a nonempty 1-D array of "
+            "nonnegative integer token IDs"
+        )
+      return np.asarray(prompt_ids, dtype=np.int32)
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
     return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
 
   def detokenize(
-      self, input_strings: List[str], request_outputs: List[RequestOutput]
+      self,
+      input_strings: List[str | Sequence[int]],
+      request_outputs: List[RequestOutput],
   ) -> Tuple[
       List[List[str]], List[List[List[float] | None]], List[List[np.ndarray]]
   ]:
@@ -528,7 +545,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def __call__(
       self,
-      input_strings: str | List[str],
+      input_strings: str | List[str] | List[Sequence[int]],
       max_generation_steps: int,
       max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,

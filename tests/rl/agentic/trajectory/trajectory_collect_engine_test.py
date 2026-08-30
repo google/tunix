@@ -352,6 +352,60 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_p58_continuation_reuses_exact_sampled_and_environment_tokens(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101], [0]),
+        ([301, 302], [0, 0]),
+    ]
+    with mock.patch.object(
+        trajectory_collect_engine.deepswe_debug,
+        'q4_tp4_zero_admission',
+        return_value=True,
+    ):
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          tokenizer=self.mock_tokenizer,
+          chat_parser=self.mock_chat_parser,
+          max_response_length=1024,
+      )
+    asyncio.run(self._run_collect(engine, mode='Token'))
+
+    first_call, second_call = self.mock_model_call.call_args_list
+    self.assertNotIn('prompt_token_ids', first_call.kwargs)
+    np.testing.assert_array_equal(
+        second_call.kwargs['prompt_token_ids'],
+        np.asarray([101, 201, 202, 301, 302], dtype=np.int32),
+    )
+
+  def test_p58_continuation_rejects_missing_environment_tokens(self):
+    with mock.patch.object(
+        trajectory_collect_engine.deepswe_debug,
+        'q4_tp4_zero_admission',
+        return_value=True,
+    ):
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          tokenizer=self.mock_tokenizer,
+          chat_parser=self.mock_chat_parser,
+      )
+    self.trajectory.prompt_tokens = np.asarray([0, 0, 101], dtype=np.int32)
+    self.trajectory.prompt_length = 1
+    self.trajectory.steps.append(
+        agent_types.Step(
+            assistant_tokens=np.asarray([201], dtype=np.int32), done=False
+        )
+    )
+    engine._response_token_count = 1
+    with self.assertRaisesRegex(ValueError, 'has no environment tokens'):
+      engine._p58_continuation_prompt_token_ids()
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_token_mode_empty_steps(self, mock_convert):
     mock_convert.side_effect = [
         ([101], [1]),  # prompt tokens

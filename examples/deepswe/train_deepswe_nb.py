@@ -870,7 +870,26 @@ if ONEHOST_SMOKE:
     raise ValueError("one-host stage selectors are inconsistent")
   P58_ONEHOST_XPROF_ARM = deepswe_debug.onehost_xprof_arm(os.environ)
   P58_ONEHOST_SEAM_PROBE = deepswe_debug.onehost_seam_probe(os.environ)
+  P58_Q4_TP4_ZERO_ADMISSION = deepswe_debug.q4_tp4_zero_admission(
+      os.environ
+  )
+  P58_Q4_TP4_SEAM_DIAGNOSTIC = deepswe_debug.q4_tp4_seam_diagnostic(
+      os.environ
+  )
+  P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC = (
+      deepswe_debug.q4_tp4_continue_kv_diagnostic(os.environ)
+  )
+  P58_Q4_TP4_SHORT_BACKWARD = deepswe_debug.q4_tp4_short_backward(
+      os.environ
+  )
+  P58_Q4_TP4_CARRIER_SCREEN = deepswe_debug.q4_tp4_carrier_screen(
+      os.environ
+  )
+  P58_Q4_TP4_TRAJECTORY_REPLAY = (
+      deepswe_debug.q4_tp4_trajectory_replay(os.environ)
+  )
   if P58_ONEHOST_XPROF_ARM:
+    expected_fixed_head = "1" if P58_Q4_TP4_ZERO_ADMISSION else "0"
     common_xprof = {
         "CANON_XPROF_PHASE": "update",
         "CANON_XPROF_SKIP_STEPS": "0",
@@ -881,7 +900,7 @@ if ONEHOST_SMOKE:
         "CANON_XPROF_LABELS": "1",
         "CANON_PERF_TRACE_EXPORT_STEP": "0",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
-        "CANON_P38_FIXED_LM_HEAD": "0",
+        "CANON_P38_FIXED_LM_HEAD": expected_fixed_head,
         "CANON_P59_RANK_PARALLEL_BACKWARD": "0",
         "CANON_P34_DISABLE_SAMPLER_IS": "1",
         "CANON_P34_DISABLE_TIS": "1",
@@ -900,12 +919,15 @@ if ONEHOST_SMOKE:
     if wrong:
       raise ValueError(f"P58 one-host XProf instrumentation drifted: {wrong}")
     zero_hp = P58_ONEHOST_XPROF_ARM == "zero-hp"
+    expected_continue_decode = "8" if zero_hp else "0"
+    if P58_Q4_TP4_SEAM_DIAGNOSTIC == "standard-decode":
+      expected_continue_decode = ""
     numerical = {
         "CANON_ENGINE_MODULE_C": "1" if zero_hp else "0",
         "CANON_PROMPT_PROCESSED_LOGPROBS": "1" if zero_hp else "0",
         "CANON_RPA_VJP2": "1" if zero_hp else "0",
         "CANON_PALLAS_LOGSOFTMAX": "1" if zero_hp else "0",
-        "CANON_CONTINUE_DECODE": "8" if zero_hp else "0",
+        "CANON_CONTINUE_DECODE": expected_continue_decode,
         "CANON_FIXED_AR_GATHER": "1" if zero_hp else "0",
         "CANON_PALLAS_GATHERED_LOGPROBS": "1" if zero_hp else "0",
         "CANON_LOGPROB_STEP_FUSION": "1" if zero_hp else "0",
@@ -947,28 +969,63 @@ if ONEHOST_SMOKE:
       raise ValueError(
           f"P58 one-host XProf numerical arm drifted: {wrong}"
       )
-  expected_prompt_length = 4096 if P58_ONEHOST_SEAM_PROBE else 3584
-  expected_response_length = 4096 if P58_ONEHOST_SEAM_PROBE else 512
+  expected_prompt_length = (
+      2048
+      if P58_Q4_TP4_TRAJECTORY_REPLAY
+      else 1792
+      if P58_Q4_TP4_SHORT_BACKWARD
+      else 4096
+      if P58_ONEHOST_SEAM_PROBE
+      else 3584
+  )
+  expected_response_length = (
+      8192
+      if P58_Q4_TP4_CARRIER_SCREEN
+      else 512
+      if P58_Q4_TP4_TRAJECTORY_REPLAY
+      else 2880
+      if P58_Q4_TP4_SHORT_BACKWARD
+      else 4096
+      if P58_ONEHOST_SEAM_PROBE
+      else 512
+  )
   expected_turns = 16 if P58_ONEHOST_SEAM_PROBE else 2
   expected_batched_tokens = 256 if P58_ONEHOST_SEAM_PROBE else 512
+  expected_generations = 16 if P58_Q4_TP4_CARRIER_SCREEN else 2
+  expected_temperature = (
+      1.0
+      if P58_Q4_TP4_CARRIER_SCREEN or P58_Q4_TP4_TRAJECTORY_REPLAY
+      else 0.7
+  )
+  expected_prompts = 2 if P58_Q4_TP4_TRAJECTORY_REPLAY else 1
+  expected_max_num_seqs = (
+      16
+      if P58_Q4_TP4_CARRIER_SCREEN
+      else 4
+      if P58_Q4_TP4_TRAJECTORY_REPLAY
+      else 2
+  )
   onehost_exact = {
       "model_version": MODEL_VERSION == "Qwen3-4B-Instruct-2507",
       "local_model": bool(MODEL_ABSOLUTE_PATH)
       and os.path.isdir(MODEL_PATH),
-      "batch_size": BATCH_SIZE == 1,
-      "mini_batch_size": MINI_BATCH_SIZE == 1,
+      "batch_size": BATCH_SIZE == expected_prompts,
+      "mini_batch_size": MINI_BATCH_SIZE == expected_prompts,
       "train_micro_batch_size": TRAIN_MICRO_BATCH_SIZE == 1,
       "compute_logps_micro_batch_size": COMPUTE_LOGPS_MICRO_BATCH_SIZE == 1,
       "rollout_micro_batch_size": ROLLOUT_MICRO_BATCH_SIZE == 1,
-      "num_generations": NUM_GENERATIONS == 2,
+      "num_generations": NUM_GENERATIONS == expected_generations,
       "max_prompt_length": MAX_PROMPT_LENGTH == expected_prompt_length,
       "max_response_length": MAX_RESPONSE_LENGTH == expected_response_length,
       "max_turns": MAX_TURNS == expected_turns,
       "max_steps": MAX_STEPS == 1,
       "num_iterations": NUM_ITERATIONS == 1,
       "rollout_engine": ROLLOUT_ENGINE == "vllm",
+      "temperature": TEMPERATURE == expected_temperature,
+      "top_k": TOP_K == 0,
+      "top_p": TOP_P == 1.0,
       "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
-      "max_num_seqs": VLLM_MAX_NUM_SEQS == 2,
+      "max_num_seqs": VLLM_MAX_NUM_SEQS == expected_max_num_seqs,
       "max_batched_tokens": (
           VLLM_MAX_BATCHED_TOKENS == expected_batched_tokens
       ),
@@ -985,13 +1042,52 @@ if ONEHOST_SMOKE:
     probe_name = "xprof"
   if P58_ONEHOST_SEAM_PROBE:
     probe_name = "seam"
+  if P58_Q4_TP4_SHORT_BACKWARD:
+    probe_name = "short-backward"
+  if P58_Q4_TP4_CARRIER_SCREEN:
+    probe_name = "carrier-screen"
+  if P58_Q4_TP4_TRAJECTORY_REPLAY:
+    probe_name = "trajectory-replay"
+    optimized_replay = {
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "0",
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_VJP": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P29_FULL_TRAIN": "1",
+        "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
+        "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
+        "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
+        "CANON_P30_RELEASE_CAPTURED_STATE": "1",
+        "CANON_P30_RESHARD_ACCUMULATOR": "1",
+        "CANON_P28_BATCHED_REPORT": "1",
+        "CANON_P28_BATCHED_REVERSE": "0",
+        "CANON_BATCHED_EVIDENCE": "0",
+        "CANON_P71_SCAN": "fwd",
+    }
+    replay_drift = {
+        key: os.environ.get(key)
+        for key, expected in optimized_replay.items()
+        if os.environ.get(key) != expected
+    }
+    if replay_drift:
+      raise ValueError(
+          f"P58.23 optimized replay carrier drifted: {replay_drift}"
+      )
+    print(
+        "[P58.23.SYSTEM_OPT] PASS carrier=P28+P30+P71-fwd "
+        "p59=off reason=dp1 prompts=2 generations=2 trajectories=4 "
+        "train_sequence=2560",
+        flush=True,
+    )
   print(
       "[DEEPSWE.ONEHOST.CLI] PASS model=Qwen3-4B-Instruct-2507 "
-      f"stage={stage} prompts=1 generations=2 "
+      f"stage={stage} prompts={expected_prompts} generations={expected_generations} "
       f"probe={probe_name} "
       f"prompt={expected_prompt_length} response={expected_response_length} "
       f"train_sequence={expected_prompt_length + expected_response_length} "
       f"turns={expected_turns} "
+      f"sampling=temperature:{expected_temperature},top_k:0,top_p:1.0 "
       "optimizer=device checkpoint=off",
       flush=True,
   )
@@ -999,7 +1095,15 @@ if ONEHOST_SMOKE:
     print(
         "[P58.ONEHOST.XPROF] ARM_PASS "
         f"arm={P58_ONEHOST_XPROF_ARM} topology=dp1-tp4 "
-        "fixed_head=off p59=off apc=off",
+        f"fixed_head={'on' if P58_Q4_TP4_ZERO_ADMISSION else 'off'} "
+        f"model_variant={'qwen4b_tp4' if P58_Q4_TP4_ZERO_ADMISSION else 'partial'} "
+        f"seam_diagnostic={P58_Q4_TP4_SEAM_DIAGNOSTIC or 'baseline'} "
+        f"continue_kv_diagnostic={int(P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC)} "
+        f"short_backward={int(P58_Q4_TP4_SHORT_BACKWARD)} "
+        f"carrier_screen={int(P58_Q4_TP4_CARRIER_SCREEN)} "
+        f"trajectory_replay={int(P58_Q4_TP4_TRAJECTORY_REPLAY)} "
+        f"continue_decode={expected_continue_decode or 'standard'} "
+        "p59=off apc=off",
         flush=True,
     )
 
@@ -1136,20 +1240,45 @@ if ONEHOST_SMOKE:
   target_image = os.environ.get("CANON_DEEPSWE_ONEHOST_TASK_IMAGE", "")
   if not target_image:
     raise ValueError("CANON_DEEPSWE_ONEHOST_TASK_IMAGE is required")
-  dataset = dataset.filter(
-      lambda entry: entry.get("docker_image") == target_image,
-      keep_in_memory=True,
-  )
-  if len(dataset) != 1:
-    raise ValueError(
-        "one-host task selection must retain exactly one row, got "
-        f"{len(dataset)}"
+  if P58_Q4_TP4_TRAJECTORY_REPLAY:
+    target_images = deepswe_debug.q4_tp4_trajectory_replay_task_images()
+    dataset = dataset.filter(
+        lambda entry: entry.get("docker_image") == target_images[0],
+        keep_in_memory=True,
     )
-  print(
-      "[DEEPSWE.ONEHOST.DATASET] PASS rows=1 "
-      f"docker_image={target_image}",
-      flush=True,
-  )
+    if len(dataset) != 1 or target_images[0] != target_images[1]:
+      raise ValueError(
+          "P58.23 B2xG2 dataset must retain one strict-exact source row "
+          f"before repetition: rows={len(dataset)} images={target_images}"
+      )
+    dataset = dataset.select([0, 0])
+    selected_images = tuple(dataset["docker_image"])
+    if len(dataset) != 2 or selected_images != target_images:
+      raise ValueError(
+          "P58.23 B2xG2 dataset repetition failed: "
+          f"rows={len(dataset)} images={selected_images}"
+      )
+    print(
+      "[DEEPSWE.ONEHOST.DATASET] PASS rows=2 batch_size=2 "
+        "source_rows=1 prompt_identity=repeated-strict-exact "
+        f"docker_images={','.join(selected_images)}",
+        flush=True,
+    )
+  else:
+    dataset = dataset.filter(
+        lambda entry: entry.get("docker_image") == target_image,
+        keep_in_memory=True,
+    )
+    if len(dataset) != 1:
+      raise ValueError(
+          "one-host task selection must retain exactly one row, got "
+          f"{len(dataset)}"
+      )
+    print(
+        "[DEEPSWE.ONEHOST.DATASET] PASS rows=1 "
+        f"docker_image={target_image}",
+        flush=True,
+    )
 
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
@@ -1653,6 +1782,12 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+P58_REPLAY_UPDATE_GEOMETRY = (
+    deepswe_debug.q4_tp4_trajectory_replay_update_geometry(os.environ)
+    if P58_Q4_TP4_TRAJECTORY_REPLAY
+    else None
+)
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: train_mesh,
@@ -1670,10 +1805,18 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         trajectory_mini_batch_size=(
-            p34.global_trajectories if P34_DEEPSWE else None
+            P58_REPLAY_UPDATE_GEOMETRY[0]
+            if P58_REPLAY_UPDATE_GEOMETRY is not None
+            else p34.global_trajectories
+            if P34_DEEPSWE
+            else None
         ),
         train_trajectory_micro_batch_size=(
-            p34.local_trajectories if P34_DEEPSWE else None
+            P58_REPLAY_UPDATE_GEOMETRY[1]
+            if P58_REPLAY_UPDATE_GEOMETRY is not None
+            else p34.local_trajectories
+            if P34_DEEPSWE
+            else None
         ),
         optimizer_offload=OPTIMIZER_OFFLOAD,
         loss_denominator_weighted_accumulation=(

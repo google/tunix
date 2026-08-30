@@ -1055,13 +1055,36 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           original_advantages.tolist(),
           advantages.tolist(),
       )
-    elif deepswe_debug.onehost_xprof_arm(os.environ):
+    elif (
+        deepswe_debug.onehost_xprof_arm(os.environ)
+        and not deepswe_debug.q4_tp4_carrier_screen(os.environ)
+        and not deepswe_debug.q4_tp4_trajectory_replay(os.environ)
+    ):
       original_advantages = np.asarray(advantages, dtype=np.float32)
       advantages = _p58_onehost_xprof_advantages(original_advantages)
       print(
           "[P58.ONEHOST.XPROF] diagnostic_advantages "
           f"original={original_advantages.tolist()} "
           f"injected={advantages.tolist()} purpose=backward-shape-only",
+          flush=True,
+      )
+    elif deepswe_debug.q4_tp4_trajectory_replay(os.environ):
+      replay_advantages = np.asarray(advantages, dtype=np.float32)
+      if (
+          replay_advantages.shape != (4,)
+          or not np.all(np.isfinite(replay_advantages))
+          or not np.all(replay_advantages != 0.0)
+          or not np.allclose(replay_advantages.reshape(2, 2).sum(axis=1), 0.0)
+      ):
+        raise alignment.AlignmentGateError(
+            "P58.23 recorded-trajectory replay requires two B2xG2 groups "
+            "with finite, nonzero, per-group zero-mean real reward "
+            f"advantages, got {replay_advantages.tolist()}"
+        )
+      print(
+          "[P58.23.REPLAY] ADVANTAGE_PASS groups=2 generations=2 "
+          f"values={replay_advantages.tolist()} source=terminal-rewards-1,0x2 "
+          "injected=0",
           flush=True,
       )
 

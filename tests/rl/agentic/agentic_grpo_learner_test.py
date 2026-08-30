@@ -363,6 +363,17 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     })
     self.assertEqual(geometry, (2, 2, "[P41.OPTIMIZER]", False))
 
+  def test_p58_replay_segmented_geometry_is_b2g2_not_batch_one(self):
+    with mock.patch.object(
+        agentic_rl_learner.deepswe_debug,
+        "q4_tp4_trajectory_replay_update_geometry",
+        return_value=(4, 2),
+    ):
+      geometry = agentic_rl_learner._segmented_update_geometry({  # pylint: disable=protected-access
+          "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY": "1",
+      })
+    self.assertEqual(geometry, (4, 2, "[P58.23.REPLAY]", False))
+
   @parameterized.parameters(
       ({},),
       ({"CANON_GSM8K_L3": "1"},),

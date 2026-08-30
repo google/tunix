@@ -7,7 +7,7 @@
 #   --from-path    inside a container: read them straight off the filesystem (no docker, no
 #                  network, no image on disk).  This is the mode a GKE pod uses.
 #   --model        qwen1p7b (default) | qwen1p7b_tp1 | qwen1p7b_tp2 |
-#                  qwen4b | qwen8b | qwen8b_tp8 | qwen32b
+#                  qwen4b | qwen4b_tp4 | qwen8b | qwen8b_tp8 | qwen32b
 #                  -- selects model modules
 #
 # Steps: extract stock -> apply patches/tpu_inference/*.patch -> lay down the shim chain ->
@@ -245,6 +245,11 @@ patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   echo "      PATCH FAILED: 36-tpu-runner-m15-e0-kv-multiround.patch" >&2
   exit 1
 }
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/37-tpu-runner-p58-continue-kv-observer.patch" || {
+  echo "      PATCH FAILED: 37-tpu-runner-p58-continue-kv-observer.patch" >&2
+  exit 1
+}
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"
@@ -253,6 +258,12 @@ if [ "$MODEL" = qwen1p7b_tp1 ] || [ "$MODEL" = qwen1p7b_tp2 ]; then
   # implementation and pair it with the separately manifested TP1/TP2
   # projection contract instead of forking an identical 215-line shim.
   cp "$PKG/src/engine_shims/models/qwen1p7b/qwen3_p22xh.py" "$OUT/"
+fi
+if [ "$MODEL" = qwen4b_tp4 ]; then
+  # The RMSNorm implementation is hidden-width-specific but not TP-width-
+  # specific. Pair the reviewed Qwen3-4B wrapper with the separate TP4
+  # projection manifest instead of forking identical numerical code.
+  cp "$PKG/src/engine_shims/models/qwen4b/qwen3_p22xh.py" "$OUT/"
 fi
 cp "$PKG/src/engine_shims/models/$MODEL"/*.py "$OUT/"
 

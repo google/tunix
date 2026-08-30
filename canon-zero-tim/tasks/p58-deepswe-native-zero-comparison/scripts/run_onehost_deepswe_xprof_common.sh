@@ -10,6 +10,88 @@ case "$arm" in
   *) echo "[P58.ONEHOST.XPROF] invalid arm: $arm" >&2; exit 2 ;;
 esac
 probe_profile="${P58_ONEHOST_PROBE_PROFILE:-xprof}"
+q4_tp4_zero_admission="${CANON_P58_Q4_TP4_ZERO_ADMISSION:-0}"
+q4_tp4_seam_diagnostic="${CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC:-}"
+q4_tp4_continue_kv_diagnostic="${CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC:-0}"
+q4_tp4_short_backward="${CANON_P58_Q4_TP4_SHORT_BACKWARD:-0}"
+q4_tp4_carrier_screen="${CANON_P58_Q4_TP4_CARRIER_SCREEN:-0}"
+q4_tp4_trajectory_replay="${CANON_P58_Q4_TP4_TRAJECTORY_REPLAY:-0}"
+case "$q4_tp4_zero_admission" in
+  0|1) ;;
+  *) echo "[P58.20] CANON_P58_Q4_TP4_ZERO_ADMISSION must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$q4_tp4_seam_diagnostic" in
+  ""|standard-decode) ;;
+  *) echo "[P58.21] seam diagnostic must be empty or standard-decode" >&2; exit 2 ;;
+esac
+case "$q4_tp4_continue_kv_diagnostic" in
+  0|1) ;;
+  *) echo "[P58.22] continue-KV diagnostic must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$q4_tp4_short_backward" in
+  0|1) ;;
+  *) echo "[P58.22] short backward must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$q4_tp4_carrier_screen" in
+  0|1) ;;
+  *) echo "[P58.22] carrier screen must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$q4_tp4_trajectory_replay" in
+  0|1) ;;
+  *) echo "[P58.22] trajectory replay must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ -n "$q4_tp4_seam_diagnostic" ] && \
+   [ "$q4_tp4_zero_admission" != "1" ]; then
+  echo "[P58.21] seam diagnostic requires P58.20 admission" >&2
+  exit 2
+fi
+if [ "$q4_tp4_short_backward" = 1 ] && \
+   { [ "$q4_tp4_zero_admission" != 1 ] || \
+     [ "$q4_tp4_continue_kv_diagnostic" != 0 ] || \
+     [ -n "$q4_tp4_seam_diagnostic" ]; }; then
+  echo "[P58.22] short backward requires baseline P58.20 without diagnostics" >&2
+  exit 2
+fi
+if [ "$q4_tp4_carrier_screen" = 1 ] && \
+   [ "$q4_tp4_short_backward" != 1 ]; then
+  echo "[P58.22] carrier screen requires the short carrier" >&2
+  exit 2
+fi
+if [ "$q4_tp4_trajectory_replay" = 1 ] && \
+   { [ "$q4_tp4_short_backward" != 1 ] || \
+     [ "$q4_tp4_carrier_screen" != 0 ]; }; then
+  echo "[P58.22] trajectory replay requires short backward and forbids carrier screen" >&2
+  exit 2
+fi
+sampling_temperature=0.7
+carrier_prompts=1
+carrier_generations=2
+carrier_max_concurrency=1
+carrier_max_num_seqs=2
+if [ "$q4_tp4_carrier_screen" = 1 ]; then
+  # One bounded harvest at the exact P46 clean-census sampling recipe.  The
+  # frozen Scrapy task was 10/16 at seed 42 in that census.  G16 is therefore
+  # the registered unit for finding a real local mixed-reward pair; varying
+  # seeds or repeatedly launching G2 screens is forbidden.
+  sampling_temperature=1.0
+  carrier_generations=16
+  carrier_max_concurrency=8
+  carrier_max_num_seqs=16
+elif [ "$q4_tp4_trajectory_replay" = 1 ]; then
+  # The immutable local DP1xTP4 source recipe used temperature=1.0. Re-scoring
+  # its recorded sampled-token logprobs at the ordinary one-host 0.7
+  # temperature would compare different mathematical quantities.
+  sampling_temperature=1.0
+  carrier_prompts=2
+  carrier_max_concurrency=4
+  carrier_max_num_seqs=4
+fi
+if [ "$q4_tp4_continue_kv_diagnostic" = 1 ] && \
+   { [ "$q4_tp4_zero_admission" != 1 ] || \
+     [ -n "$q4_tp4_seam_diagnostic" ]; }; then
+  echo "[P58.22] continue-KV diagnostic requires baseline P58.20 continue=8" >&2
+  exit 2
+fi
 case "$probe_profile" in
   xprof) ;;
   seam)
@@ -23,6 +105,11 @@ case "$probe_profile" in
     exit 2
     ;;
 esac
+if [ "$q4_tp4_zero_admission" = "1" ] && \
+   { [ "$arm" != "zero-hp" ] || [ "$probe_profile" != "seam" ]; }; then
+  echo "[P58.20] TP4 Zero admission requires zero-hp/seam" >&2
+  exit 2
+fi
 case "$label" in
   *[!a-zA-Z0-9_-]*|'')
     echo "[P58.ONEHOST.XPROF] invalid immutable label: $label" >&2
@@ -44,6 +131,7 @@ expected_hostname="${P58_ONEHOST_EXPECT_HOSTNAME:?set P58_ONEHOST_EXPECT_HOSTNAM
 evidence_root="${P58_ONEHOST_EVIDENCE_ROOT:-/mnt/disks/tunix-data/deepswe-onehost-xprof}"
 artifact_dir="${P58_ONEHOST_ARTIFACT_DIR:-$evidence_root/p58_${arm}_${label}}"
 timeout_seconds="${P58_ONEHOST_TIMEOUT_SECONDS:-7200}"
+compilation_cache_dir="${P58_ONEHOST_COMPILATION_CACHE_DIR:-}"
 
 case "$timeout_seconds" in
   ''|*[!0-9]*) echo "[P58.ONEHOST.XPROF] timeout must be an integer" >&2; exit 2 ;;
@@ -51,6 +139,19 @@ esac
 if [ "$timeout_seconds" -lt 1 ]; then
   echo "[P58.ONEHOST.XPROF] timeout must be positive" >&2
   exit 2
+fi
+if [ "$q4_tp4_short_backward" = 1 ] && [ "$q4_tp4_carrier_screen" = 0 ]; then
+  if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+    expected_compilation_cache_dir="/mnt/disks/tunix-data/jax-compilation-cache/p58-q4-tp4-systemopt-b2g2-k2560"
+  else
+    expected_compilation_cache_dir="/mnt/disks/tunix-data/jax-compilation-cache/p58-q4-tp4-short-backward"
+  fi
+  if [ "$compilation_cache_dir" != "$expected_compilation_cache_dir" ]; then
+    echo "[P58.ONEHOST.XPROF] short backward requires signed persistent compilation cache: $expected_compilation_cache_dir" >&2
+    exit 2
+  fi
+  mkdir -p "$compilation_cache_dir"
+  export JAX_COMPILATION_CACHE_DIR="$compilation_cache_dir"
 fi
 if [ "$artifact_dir" = "${artifact_dir#/}" ] || [ -e "$artifact_dir" ]; then
   echo "[P58.ONEHOST.XPROF] artifact directory must be a fresh absolute path: $artifact_dir" >&2
@@ -77,11 +178,28 @@ for path in "$model_path/model.safetensors.index.json" "$gold_whitelist"; do
   fi
 done
 gold_whitelist_sha256="$(sha256sum "$gold_whitelist" | awk '{print $1}')"
-if [ "$probe_profile" = seam ] && \
-   [ "$gold_whitelist_sha256" != \
-     "7294da90559ebace771b7bd3fd8be01de87e0ae9bcb7ae1e317dbe5a6ed0db9f" ]; then
-  echo "[P58.ONEHOST.PROBE] frozen Pillow whitelist changed: $gold_whitelist_sha256" >&2
-  exit 2
+if [ "$probe_profile" = seam ]; then
+  if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+    expected_whitelist_sha256="26e06ab7469987b4bc0c66d683e8468c2f10ae7d6842b0e138e563adcf87e257"
+    expected_task_image="namanjain12/scrapy_final:439a3e59b8e858441f8d97dbc32f398db392330d"
+  elif [ "$q4_tp4_carrier_screen" = 1 ]; then
+    expected_whitelist_sha256="26e06ab7469987b4bc0c66d683e8468c2f10ae7d6842b0e138e563adcf87e257"
+    expected_task_image="namanjain12/scrapy_final:439a3e59b8e858441f8d97dbc32f398db392330d"
+  elif [ "$q4_tp4_short_backward" = 1 ]; then
+    expected_whitelist_sha256="7294da90559ebace771b7bd3fd8be01de87e0ae9bcb7ae1e317dbe5a6ed0db9f"
+    expected_task_image="namanjain12/pillow_final:52079cb2975fda98476c7a7f172e5519e67ba612"
+  else
+    expected_whitelist_sha256="7294da90559ebace771b7bd3fd8be01de87e0ae9bcb7ae1e317dbe5a6ed0db9f"
+    expected_task_image="namanjain12/pillow_final:52079cb2975fda98476c7a7f172e5519e67ba612"
+  fi
+  if [ "$gold_whitelist_sha256" != "$expected_whitelist_sha256" ]; then
+    echo "[P58.ONEHOST.PROBE] frozen clean-task whitelist changed: $gold_whitelist_sha256" >&2
+    exit 2
+  fi
+  if [ "$task_image" != "$expected_task_image" ]; then
+    echo "[P58.ONEHOST.PROBE] frozen clean-task image changed: $task_image" >&2
+    exit 2
+  fi
 fi
 
 source_sha="$(git -C "$repo" rev-parse HEAD)"
@@ -127,10 +245,14 @@ if [ "${model_path##*/}" != "cdbee75f17c01a7cc42f958dc650907174af0554" ]; then
   echo "[P58.ONEHOST.XPROF] Qwen3-4B snapshot identity changed: $model_path" >&2
   exit 2
 fi
-task_image_id="$($python_bin -c 'import docker,sys; image=docker.from_env().images.get(sys.argv[1]); print(image.id)' "$task_image")"
-if [[ ! "$task_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "[P58.ONEHOST.XPROF] task image has no immutable local id" >&2
-  exit 2
+if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+  task_image_id="not-applicable-recorded-trajectory-replay"
+else
+  task_image_id="$($python_bin -c 'import docker,sys; image=docker.from_env().images.get(sys.argv[1]); print(image.id)' "$task_image")"
+  if [[ ! "$task_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "[P58.ONEHOST.XPROF] task image has no immutable local id" >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$artifact_dir/xprof-update" "$artifact_dir/perfetto" "$artifact_dir/install"
@@ -191,18 +313,85 @@ if [ "$probe_profile" = seam ]; then
     "$gold_whitelist"
   )
 fi
+if [ "$q4_tp4_zero_admission" = "1" ]; then
+  runner_inputs+=(
+    "$script_dir/run_onehost_deepswe_zero_admission.sh"
+    "$script_dir/run_onehost_deepswe_zero_admission_docker.sh"
+    "$script_dir/run_onehost_deepswe_zero_standard_decode.sh"
+    "$script_dir/run_onehost_deepswe_zero_standard_decode_docker.sh"
+    "$script_dir/run_onehost_deepswe_zero_continue_kv.sh"
+    "$script_dir/run_onehost_deepswe_zero_continue_kv_docker.sh"
+    "$script_dir/run_onehost_deepswe_zero_short_backward.sh"
+    "$script_dir/run_onehost_deepswe_zero_short_backward_docker.sh"
+    "$script_dir/run_onehost_deepswe_zero_carrier_screen.sh"
+    "$script_dir/run_onehost_deepswe_zero_carrier_screen_docker.sh"
+    "$script_dir/classify_short_carrier_screen.py"
+    "$script_dir/classify_continue_kv_probe.py"
+    "$pkg/cluster/profiles/qwen3-4b-dp1-tp4-deepswe-zero.env"
+    "$pkg/src/engine_shims/models/qwen4b_tp4/p22xf_contract.py"
+    "$pkg/src/engine_shims/models/qwen4b_tp4/MANIFEST.sha256"
+  )
+fi
+if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+  replay_source_dir="${P58_ONEHOST_REPLAY_SOURCE_DIR:-/mnt/disks/tunix-data/deepswe-replay-sources/p58-q4-b2g2-k2560-v2}"
+  replay_journal="$replay_source_dir/batch-000000.trajectories.jsonl.gz"
+  replay_source_manifest="$replay_source_dir/run_manifest.json"
+  replay_journal_sha256="091a9273c2067876fbee1996ee853e3c8e861352e307cd5fb94fea2563aec456"
+  replay_source_manifest_sha256="482d7934a95207d0d77bb4857fbb200d7b367cbf437dda6585937b20909afa8f"
+  for path in "$replay_journal" "$replay_source_manifest"; do
+    if [ ! -s "$path" ]; then
+      echo "[P58.23.REPLAY] missing source evidence: $path" >&2
+      exit 2
+    fi
+  done
+  if [ "$(sha256sum "$replay_journal" | awk '{print $1}')" != "$replay_journal_sha256" ]; then
+    echo "[P58.23.REPLAY] source journal hash changed" >&2
+    exit 2
+  fi
+  if [ "$(sha256sum "$replay_source_manifest" | awk '{print $1}')" != "$replay_source_manifest_sha256" ]; then
+    echo "[P58.23.REPLAY] source manifest hash changed" >&2
+    exit 2
+  fi
+  runner_inputs+=(
+    "$script_dir/run_onehost_deepswe_zero_trajectory_replay.sh"
+    "$script_dir/run_onehost_deepswe_zero_trajectory_replay_docker.sh"
+    "$script_dir/classify_trajectory_replay.py"
+    "$script_dir/prepare_q4_b2g2_replay.py"
+    "$replay_journal"
+    "$replay_source_manifest"
+    "$gold_whitelist"
+  )
+fi
 runner_sha256="$(sha256sum "${runner_inputs[@]}" | awk '{print $1}' | sha256sum | awk '{print $1}')"
 run_id="p58-onehost-xprof-${arm}-${label}"
 
 export CANON_DEEPSWE_ONEHOST_SMOKE=1
-export CANON_DEEPSWE_ONEHOST_STAGE=backward-no-commit
-export CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY=0
-export CANON_DEEPSWE_ONEHOST_NO_COMMIT=1
+if [ "$q4_tp4_carrier_screen" = 1 ]; then
+  export CANON_DEEPSWE_ONEHOST_STAGE=rollout-only
+  export CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY=1
+  export CANON_DEEPSWE_ONEHOST_NO_COMMIT=0
+else
+  export CANON_DEEPSWE_ONEHOST_STAGE=backward-no-commit
+  export CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY=0
+  export CANON_DEEPSWE_ONEHOST_NO_COMMIT=1
+fi
 export CANON_DEEPSWE_ONEHOST_DEBUG_DIR="$artifact_dir"
 export CANON_DEEPSWE_ONEHOST_REPORT="$artifact_dir/backward_no_commit.json"
 export CANON_DEEPSWE_ONEHOST_TASK_IMAGE="$task_image"
 export CANON_P58_ONEHOST_XPROF_ARM="$arm"
 export CANON_P58_ONEHOST_SEAM_PROBE="$([ "$probe_profile" = seam ] && echo 1 || echo 0)"
+export CANON_P58_Q4_TP4_ZERO_ADMISSION="$q4_tp4_zero_admission"
+export CANON_P58_Q4_TP4_SEAM_DIAGNOSTIC="$q4_tp4_seam_diagnostic"
+export CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC="$q4_tp4_continue_kv_diagnostic"
+export CANON_P58_Q4_TP4_SHORT_BACKWARD="$q4_tp4_short_backward"
+export CANON_P58_Q4_TP4_CARRIER_SCREEN="$q4_tp4_carrier_screen"
+export CANON_P58_Q4_TP4_TRAJECTORY_REPLAY="$q4_tp4_trajectory_replay"
+if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+  export CANON_P58_REPLAY_JOURNAL="$replay_journal"
+  export CANON_P58_REPLAY_JOURNAL_SHA256="$replay_journal_sha256"
+else
+  unset CANON_P58_REPLAY_JOURNAL CANON_P58_REPLAY_JOURNAL_SHA256
+fi
 export CANON_P58_EXPECT_HOSTNAME="$expected_hostname"
 export CANON_P58_MODEL_SNAPSHOT="$model_path"
 export CANON_P58_R2EGYM_COMMIT="$r2egym_sha"
@@ -256,6 +445,45 @@ export CANON_P28_BATCHED_REVERSE=0
 export CANON_BATCHED_EVIDENCE=0
 export CANON_OPT_STATE_RESIDENT=1
 export CANON_P30_OPT_STATE_OFFLOAD=0
+export CANON_P29_FULL_TRAIN=0
+export CANON_P30_SPARSE_GRAD_ASSEMBLY=0
+export CANON_P30_FUSED_PAIR_ACCUMULATION=0
+export CANON_P30_REUSE_SEGMENTED_ENGINE=0
+export CANON_P30_RELEASE_CAPTURED_STATE=0
+export CANON_P30_RESHARD_ACCUMULATOR=0
+unset CANON_P71_SCAN
+
+if [ "$q4_tp4_continue_kv_diagnostic" = 1 ]; then
+  # This discriminator needs only the durable strict A/B/C precheck and the
+  # paired KV records.  A controlled diagnostic exit prevents a passing
+  # alignment repair from falling through into the deliberately expensive
+  # 8,192-token backward compile.  These are existing P38 observability
+  # controls, atomically scoped to the P58.22 selector above.
+  export CANON_P38_PRECHECK_ONLY=1
+  export CANON_P38_CONTROLLED_EXIT=1
+  export CANON_P38_DIAGNOSTIC_ROUNDS=1
+  export CANON_P38_KV_OBSERVER_DIR="$artifact_dir/continue-kv"
+  export CANON_P38_KV_OBSERVER_MAX_CANDIDATES=1
+  export CANON_P38_KV_OBSERVER_MAX_PAGES=192
+  export CANON_P38_KV_OBSERVER_MAX_BYTES=134217728
+  export CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
+  export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
+  export CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX=2280
+  export CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX=3072
+  mkdir -p "$CANON_P38_KV_OBSERVER_DIR"
+else
+  unset CANON_P38_PRECHECK_ONLY
+  unset CANON_P38_CONTROLLED_EXIT
+  unset CANON_P38_DIAGNOSTIC_ROUNDS
+  unset CANON_P38_KV_OBSERVER_DIR
+  unset CANON_P38_KV_OBSERVER_MAX_CANDIDATES
+  unset CANON_P38_KV_OBSERVER_MAX_PAGES
+  unset CANON_P38_KV_OBSERVER_MAX_BYTES
+  unset CANON_P38_KV_OBSERVER_MAX_READ_BYTES
+  unset CANON_P38_SERVING_CAPTURE_EXPECTED_PATH
+  unset CANON_P58_Q4_TP4_CONTINUE_KV_MIN_PREFIX
+  unset CANON_P58_Q4_TP4_CONTINUE_KV_MAX_PREFIX
+fi
 
 export DATASET_CACHE="$dataset_cache"
 export HF_DATASETS_OFFLINE=1
@@ -270,13 +498,22 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 unset DOCKER_HOST JAX_BACKEND_TARGET PATHWAYS_HEAD
 
 if [ "$arm" = "zero-hp" ]; then
-  # shellcheck disable=SC1091
-  source "$pkg/cluster/profiles/_canonical_engine.env"
-  export FL_SHARED_MESH=1,4
-  export CANON_EXPECT_MODEL_MESH_IDS=0,2,1,3
+  if [ "$q4_tp4_zero_admission" = "1" ]; then
+    # shellcheck disable=SC1091
+    source "$pkg/cluster/profiles/qwen3-4b-dp1-tp4-deepswe-zero.env"
+  else
+    # shellcheck disable=SC1091
+    source "$pkg/cluster/profiles/_canonical_engine.env"
+    export FL_SHARED_MESH=1,4
+    export CANON_EXPECT_MODEL_MESH_IDS=0,2,1,3
+  fi
   export CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER=0
   export CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=0
-  export CANON_CONTINUE_DECODE=8
+  if [ "$q4_tp4_seam_diagnostic" = standard-decode ]; then
+    export CANON_CONTINUE_DECODE=
+  else
+    export CANON_CONTINUE_DECODE=8
+  fi
   export CANON_FIXED_AR_GATHER=1
   export CANON_PALLAS_GATHERED_LOGPROBS=1
   export CANON_LOGPROB_STEP_FUSION=1
@@ -287,16 +524,19 @@ if [ "$arm" = "zero-hp" ]; then
   export CANON_ENGINE_LOGPROB_READBACK=0
   export CANON_ANCHOR_OVERLAP=0
   shim_root="$artifact_dir/install/canonical-shims"
-  bash "$pkg/install.sh" "$shim_root" --from-path "$tpu_inference_path" --model qwen4b \
+  shim_model=qwen4b
+  if [ "$q4_tp4_zero_admission" = "1" ]; then
+    shim_model=qwen4b_tp4
+  fi
+  bash "$pkg/install.sh" "$shim_root" --from-path "$tpu_inference_path" --model "$shim_model" \
     > "$install_log" 2>&1
   # The installer emits flat replacement files plus sibling helper modules.
   # Adding only that flat directory to PYTHONPATH does not replace the real
   # ``tpu_inference.runner.tpu_runner`` package module.  Build a private,
   # writable package overlay so the one-host probe executes the generated
-  # topology-generic runner.  Do not overlay the Qwen3/linear/embed/attention/
-  # RPA files here: the qwen4b installer emits the signed TP8 geometry, while
-  # this local carrier is TP4.  Those model-kernel shims remain a 128-chip
-  # discriminator; pretending to exercise them on TP4 would be a false claim.
+  # topology-generic runner.  The legacy carrier retains runner-only scope.
+  # P58.20 instead selects a separately manifested Qwen3-4B TP4 contract and
+  # must install every numerical target; it never forces TP8 shims onto TP4.
   zero_overlay_root="$artifact_dir/install/zero-overlay"
   zero_package="$zero_overlay_root/tpu_inference"
   mkdir -p "$zero_package"
@@ -307,6 +547,26 @@ if [ "$arm" = "zero-hp" ]; then
   zero_overlay_targets=(
     runner/tpu_runner.py
   )
+  if [ "$q4_tp4_zero_admission" = "1" ]; then
+    zero_overlay_sources=(
+      attn_iface_patched.py
+      embed_patched.py
+      linear_p22xk.py
+      tpu_runner_p21_l30.py
+      qwen3_p22xk.py
+      qwen2_p22xk.py
+      rpa_kernel_p66.py
+    )
+    zero_overlay_targets=(
+      layers/common/attention_interface.py
+      layers/jax/embed.py
+      layers/jax/linear.py
+      runner/tpu_runner.py
+      models/jax/qwen3.py
+      models/jax/qwen2.py
+      kernels/ragged_paged_attention/v3/kernel.py
+    )
+  fi
   for index in "${!zero_overlay_sources[@]}"; do
     source_file="$shim_root/${zero_overlay_sources[$index]}"
     target_file="$zero_package/${zero_overlay_targets[$index]}"
@@ -337,6 +597,17 @@ if [ "$arm" = "zero-hp" ]; then
        "$(sha256sum "$shim_root/tpu_runner_p21_l30.py" | awk '{print $1}')" ]; then
     echo "[P58.ONEHOST.ZERO_OVERLAY] imported TPU runner hash changed" >&2
     exit 2
+  fi
+  if [ "$q4_tp4_zero_admission" = "1" ]; then
+    for index in "${!zero_overlay_sources[@]}"; do
+      source_file="$shim_root/${zero_overlay_sources[$index]}"
+      target_file="$zero_package/${zero_overlay_targets[$index]}"
+      if [ "$(sha256sum "$source_file" | awk '{print $1}')" != \
+           "$(sha256sum "$target_file" | awk '{print $1}')" ]; then
+        echo "[P58.20] imported full-overlay hash mismatch: $index" >&2
+        exit 2
+      fi
+    done
   fi
 else
   unset CANON_FIXED_AR CANON_FIXED_AR_EMBED
@@ -385,34 +656,80 @@ fi
 
 {
   echo "[P58.ONEHOST.XPROF] source=$source_sha diff_sha256=$source_diff_sha256 branch=$source_branch dirty=$([ -n "$source_dirty" ] && echo 1 || echo 0)"
-  echo "[P58.ONEHOST.XPROF] arm=$arm profile=$probe_profile label=$label hostname=$expected_hostname topology=DP1xTP4"
+  echo "[P58.ONEHOST.XPROF] arm=$arm profile=$probe_profile label=$label hostname=$expected_hostname topology=DP1xTP4 seam_diagnostic=${q4_tp4_seam_diagnostic:-baseline} continue_kv_diagnostic=$q4_tp4_continue_kv_diagnostic continue_decode=${CANON_CONTINUE_DECODE:-standard}"
   echo "[P58.ONEHOST.XPROF] model=$model_path r2egym=$r2egym_sha r2egym_patch_sha256=$r2egym_patch_sha256 task_image=$task_image task_image_id=$task_image_id"
-  echo "[P58.ONEHOST.XPROF] capture=update-repeat xplane=required trace_json=required perfetto=required commit=0"
+  echo "[P58.ONEHOST.SAMPLING] PASS source=explicit-cli temperature=$sampling_temperature top_k=0 top_p=1.0"
+  if [ "$q4_tp4_carrier_screen" = 1 ]; then
+    echo "[P58.ONEHOST.XPROF] capture=carrier-screen rollout_only=1 backward=0 commit=0"
+  elif [ "$q4_tp4_trajectory_replay" = 1 ]; then
+    echo "[P58.23.REPLAY] capture=recorded-trajectory-prefix groups=2 generations=2 trajectories=4 prompt_identity=repeated-strict-exact environment=0 rollout_decode=0 rescore_b=1 backward_no_commit=1"
+  else
+    echo "[P58.ONEHOST.XPROF] capture=update-repeat xplane=required trace_json=required perfetto=required commit=0"
+  fi
 } > "$raw_log"
 if [ "$arm" = "zero-hp" ]; then
-  echo "[P58.ONEHOST.ZERO_OVERLAY] PASS files=1 scope=runner-only qwen4b_tp8_model_shims=excluded imported_runner_sha256=$(sha256sum "$imported_tpu_runner" | awk '{print $1}')" \
-    >> "$raw_log"
+  if [ "$q4_tp4_zero_admission" = "1" ]; then
+    echo "[P58.20] ZERO_OVERLAY_PASS files=7 manifest=37/37 model=qwen4b_tp4 topology=DP1xTP4 imported_runner_sha256=$(sha256sum "$imported_tpu_runner" | awk '{print $1}')" \
+      >> "$raw_log"
+    if [ -n "$q4_tp4_seam_diagnostic" ]; then
+      echo "[P58.21] SEAM_CONTROL_PASS arm=$q4_tp4_seam_diagnostic continue_decode=standard treatment_delta=1" \
+        >> "$raw_log"
+    fi
+  else
+    echo "[P58.ONEHOST.ZERO_OVERLAY] PASS files=1 scope=runner-only qwen4b_tp8_model_shims=excluded imported_runner_sha256=$(sha256sum "$imported_tpu_runner" | awk '{print $1}')" \
+      >> "$raw_log"
+  fi
 fi
 
 max_prompt_length=3584
 max_response_length=512
 max_turns=2
 max_num_batched_tokens=512
+expected_filtered_rows=1
 seam_cli_args=()
 if [ "$probe_profile" = seam ]; then
-  max_prompt_length=4096
-  # The fixed-seed probe produces 3,051 completion tokens (4,788 total with
-  # its 1,737-token prompt).  An 8,192-token train width still covers that
-  # trajectory and the remote prefix-3,715 seam while avoiding a needlessly
-  # expensive 12,288-token one-host compilation.
-  max_response_length=4096
+  if [ "$q4_tp4_short_backward" = 1 ]; then
+    # P58.22 compilation-cost carrier.  The immutable Pillow arm has a stable
+    # 1,737-token prompt and one 2,862-token non-clipped completion with 2,413
+    # admitted action tokens.  Three independent clean-census alternatives
+    # clipped both fixed-seed rows at a 2,048-token response cap, so carrier
+    # hunting cannot validate the backward.  The minimal signed padding above
+    # the observed carrier is 1,792/2,880 (train width 4,672); no clipped row is
+    # admitted to alignment or loss, and model/loss/sampling remain unchanged.
+    max_prompt_length=1792
+    if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+      # P58.23 repeats one immutable strict-exact real task as two prompt
+      # groups, each with one solved and one unsolved generation. The repeated
+      # carrier exercises physical B=2 without reintroducing the batch-size-one
+      # bug or the alignment-red historical Coverage task. This proves shape
+      # and math only, not prompt diversity.
+      max_prompt_length=2048
+      max_response_length=512
+    elif [ "$q4_tp4_carrier_screen" = 1 ]; then
+      # A screen is allowed to measure a different clean task but never
+      # reaches alignment or backward.  P46 recorded this exact task's seed-42
+      # sample 0/1 as SUCCEEDED with rewards [0, 1].  The wider exploratory
+      # cap measures their real token lengths; formal promotion must tighten
+      # the cap to the smallest signed bound above both observed rows.
+      max_response_length=8192
+    else
+      max_response_length=2880
+    fi
+  else
+    max_prompt_length=4096
+    # The fixed-seed probe produces 3,051 completion tokens (4,788 total with
+    # its 1,737-token prompt).  An 8,192-token train width still covers that
+    # trajectory and the remote prefix-3,715 seam while avoiding a needlessly
+    # expensive 12,288-token one-host compilation.
+    max_response_length=4096
+  fi
   max_turns=16
   max_num_batched_tokens=256
   seam_cli_args=(
     --dataset_name R2E-Gym/R2E-Gym-Subset
     --dataset_revision 2e8108ff942f24fcb5686badfaf7f9a8808566d5
     --expected_source_rows 4578
-    --expected_filtered_rows 1
+    --expected_filtered_rows "$expected_filtered_rows"
     --per_turn_timeout_secs 300
     --episode_timeout_secs 3000
     --step_timeout_secs 600
@@ -424,7 +741,7 @@ if [ "$probe_profile" = seam ]; then
   export CANON_P34_DATASET_REVISION=2e8108ff942f24fcb5686badfaf7f9a8808566d5
   export CANON_P34_DATASET_SPLIT=train
   export CANON_P34_DATASET_ROWS=4578
-  export CANON_P34_CLEAN_ROWS=1
+  export CANON_P34_CLEAN_ROWS="$expected_filtered_rows"
   export CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS=300
   export CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS=3000
   export CANON_DEEPSWE_STEP_TIMEOUT_SECS=600
@@ -457,12 +774,12 @@ timeout --signal=TERM --kill-after=120s "${timeout_seconds}s" \
     --model_absolute_path "$model_path" \
     --gold_whitelist "$gold_whitelist" \
     "${seam_cli_args[@]}" \
-    --batch_size 1 \
-    --mini_batch_size 1 \
+    --batch_size "$carrier_prompts" \
+    --mini_batch_size "$carrier_prompts" \
     --train_micro_batch_size 1 \
     --compute_logps_micro_batch_size 1 \
     --rollout_micro_batch_size 1 \
-    --num_generations 2 \
+    --num_generations "$carrier_generations" \
     --num_iterations 1 \
     --max_prompt_length "$max_prompt_length" \
     --max_response_length "$max_response_length" \
@@ -470,11 +787,13 @@ timeout --signal=TERM --kill-after=120s "${timeout_seconds}s" \
     --max_steps 1 \
     --num_epochs 1 \
     --eval_every_n_steps 10 \
-    --max_concurrency 1 \
-    --temperature 0.7 \
+    --max_concurrency "$carrier_max_concurrency" \
+    --temperature "$sampling_temperature" \
+    --top_k 0 \
+    --top_p 1.0 \
     --rollout_engine vllm \
     --vllm_utilization 0.3 \
-    --rollout_vllm_max_num_seqs 2 \
+    --rollout_vllm_max_num_seqs "$carrier_max_num_seqs" \
     --max_num_batched_tokens "$max_num_batched_tokens" \
     --rollout_mesh_dp 1 \
     --rollout_mesh_tp 4 \
@@ -492,6 +811,72 @@ set -e
 printf '{"profile":"%s","training_process_status":%s}\n' \
   "$probe_profile" "$run_status" > "$artifact_dir/probe_process_status.json"
 if [ "$probe_profile" = seam ]; then
+  if [ "$q4_tp4_carrier_screen" = 1 ]; then
+    classification="$artifact_dir/carrier_screen.classification.json"
+    set +e
+    "$python_bin" "$script_dir/classify_short_carrier_screen.py" \
+      --artifact-dir "$artifact_dir" \
+      --source-sha "$source_sha" \
+      --expected-hostname "$expected_hostname" \
+      --output "$classification" \
+      --package
+    classification_status=$?
+    set -e
+    if [ "$classification_status" -ne 0 ]; then
+      echo "[P58.22] carrier-screen classification failed status=$classification_status raw=$raw_log" >&2
+      exit "$classification_status"
+    fi
+    bundle="$artifact_dir/P58_CARRIER_SCREEN_RETURN.tar.gz"
+    tar -czf "$bundle" -C "$artifact_dir" --files-from "$artifact_dir/RETURN_FILES"
+    sha256sum "$bundle" > "$artifact_dir/P58_CARRIER_SCREEN_RETURN.tar.gz.sha256"
+    echo "[P58.22] CARRIER_SCREEN_PASS artifact_dir=$artifact_dir training_status=$run_status"
+    echo "[P58.22] RETURN_FILES bundle=$bundle checksum=$bundle.sha256"
+    exit 0
+  fi
+  if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+    classification="$artifact_dir/trajectory_replay.classification.json"
+    set +e
+    "$python_bin" "$script_dir/classify_trajectory_replay.py" \
+      --artifact-dir "$artifact_dir" \
+      --source-sha "$source_sha" \
+      --expected-hostname "$expected_hostname" \
+      --output "$classification" \
+      --package
+    classification_status=$?
+    set -e
+    if [ "$classification_status" -ne 0 ]; then
+      echo "[P58.23.REPLAY] classification failed status=$classification_status raw=$raw_log" >&2
+      exit "$classification_status"
+    fi
+    bundle="$artifact_dir/P58_TRAJECTORY_REPLAY_RETURN.tar.gz"
+    tar -czf "$bundle" -C "$artifact_dir" --files-from "$artifact_dir/RETURN_FILES"
+    sha256sum "$bundle" > "$artifact_dir/P58_TRAJECTORY_REPLAY_RETURN.tar.gz.sha256"
+    echo "[P58.23.REPLAY] RETURN_PASS artifact_dir=$artifact_dir training_status=$run_status"
+    echo "[P58.23.REPLAY] RETURN_FILES bundle=$bundle checksum=$bundle.sha256"
+    exit 0
+  fi
+  if [ "$q4_tp4_continue_kv_diagnostic" = 1 ]; then
+    classification="$artifact_dir/continue_kv_probe.classification.json"
+    set +e
+    "$python_bin" "$script_dir/classify_continue_kv_probe.py" \
+      --artifact-dir "$artifact_dir" \
+      --source-sha "$source_sha" \
+      --expected-hostname "$expected_hostname" \
+      --output "$classification" \
+      --package
+    classification_status=$?
+    set -e
+    if [ "$classification_status" -ne 0 ]; then
+      echo "[P58.22] continue-KV classification failed status=$classification_status raw=$raw_log" >&2
+      exit "$classification_status"
+    fi
+    bundle="$artifact_dir/P58_CONTINUE_KV_RETURN.tar.gz"
+    tar -czf "$bundle" -C "$artifact_dir" --files-from "$artifact_dir/RETURN_FILES"
+    sha256sum "$bundle" > "$artifact_dir/P58_CONTINUE_KV_RETURN.tar.gz.sha256"
+    echo "[P58.22] RETURN_PASS artifact_dir=$artifact_dir training_status=$run_status"
+    echo "[P58.22] RETURN_FILES bundle=$bundle checksum=$bundle.sha256"
+    exit 0
+  fi
   classification="$artifact_dir/decode_prefill_probe.classification.json"
   set +e
   "$python_bin" "$script_dir/classify_decode_prefill_probe.py" \

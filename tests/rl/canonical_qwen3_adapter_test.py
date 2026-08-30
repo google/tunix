@@ -793,6 +793,17 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     })
     self.assertEqual(geometry, (2, (256, 64)))
 
+  def test_p58_replay_segmented_loss_geometry_is_b2g2(self):
+    with mock.patch.object(
+        canonical_qwen3_adapter.deepswe_debug,
+        "q4_tp4_trajectory_replay_update_geometry",
+        return_value=(4, 2),
+    ):
+      geometry = canonical_qwen3_adapter._segmented_loss_geometry({  # pylint: disable=protected-access
+          "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY": "1",
+      })
+    self.assertEqual(geometry, (4, (2048, 512)))
+
   def test_p41_segmented_loss_geometry_rejects_missing_canary(self):
     with self.assertRaisesRegex(
         canonical_qwen3_adapter.FunctionalMappingError,
