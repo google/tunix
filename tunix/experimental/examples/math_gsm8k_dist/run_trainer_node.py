@@ -28,7 +28,6 @@ import signal
 import sys
 from typing import Any
 
-from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
@@ -40,7 +39,6 @@ from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
-from tunix.utils import maxtext_utils
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -67,7 +65,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
-  parser.add_argument("--mesh_expert", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--mini_batch_size", type=int, default=1)
@@ -77,8 +74,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--eval_every_n_steps", type=int, default=1000000)
   parser.add_argument("--learning_rate", type=float, default=2.0e-7)
   parser.add_argument("--use_lora", action="store_true")
-  parser.add_argument("--lora_rank", type=int, default=64)
-  parser.add_argument("--lora_alpha", type=float, default=64.0)
+  parser.add_argument("--lora_rank", type=int, default=16)
+  parser.add_argument("--lora_alpha", type=float, default=16.0)
   parser.add_argument("--checkpoint_save_interval_steps", type=int, default=1)
   parser.add_argument("--checkpoint_max_to_keep", type=int, default=10)
   parser.add_argument(
@@ -89,46 +86,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           os.path.join(REPO_ROOT, "checkpoints"),
       ),
   )
-  parser.add_argument(
-      "--trainer_backend",
-      choices=("tunix", "maxtext"),
-      default="tunix",
-      help=(
-          "tunix runs Tunix's PeftTrainer; maxtext runs MaxTextTrainingEngine"
-      ),
-  )
-  parser.add_argument("--maxtext_model_name", type=str, default="qwen3-0.6b")
-  parser.add_argument(
-      "--maxtext_padded_moe_mlp_dim",
-      type=int,
-      default=0,
-      help=(
-          "Explicit padded_base_moe_mlp_dim override to match rollout TP"
-          " tile-alignment padding for MoE models."
-      ),
-  )
-  parser.add_argument(
-      "--maxtext_ckpt_path",
-      type=str,
-      default=os.getenv("MAXTEXT_CKPT", ""),
-      help="Orbax params-only checkpoint for the MaxText trainer, e.g. gs://...",
-  )
-  parser.add_argument(
-        "--maxtext_output_directory",
-        type=str,
-        default=os.getenv("MAXTEXT_OUTPUT_DIR", os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext")),
-        help="Base directory for MaxText trainer outputs.",
-    )
-  parser.add_argument(
-      "--maxtext_warmup_steps_fraction",
-      type=float,
-      default=0.0,
-      help=(
-          "Warmup fraction for MaxText LR schedule (0.0 enables updates from"
-          " step 0)."
-      ),
-  )
-  return parser.parse_args(argv)
+  parser.add_argument("--discovery_addrs", type=str, default="")
+  parser.add_argument("--pathways_bns", type=str, default="")
+  args, _ = parser.parse_known_args(argv)
+  return args
 
 
 def _nested_safetensors_dirs(model_dir: Path) -> list[str]:
@@ -275,50 +236,57 @@ class _MeshBoundTrainer:
       self._trainer.close()
 
 
-def _create_maxtext_trainer_factory(args) -> Any:
-  """Creates the trainer factory function for MaxText's MaxTextTrainingEngine."""
-  logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
-  pad_id = maxtext_utils.get_tokenizer_pad_id(
-      args.model_id, args.tokenizer_path, args.model_dir
-  )
-  maxtext_config = maxtext_utils.build_maxtext_config(
-      model_name=args.maxtext_model_name,
-      worker_id=args.worker_id,
-      train_micro_batch_size=args.train_micro_batch_size,
-      mesh_fsdp=args.mesh_fsdp,
-      mesh_tp=args.mesh_tp,
-      mesh_expert=args.mesh_expert,
-      num_devices=jax.device_count(),
-      max_prompt_length=args.max_prompt_length,
-      max_response_length=args.max_response_length,
-      learning_rate=args.learning_rate,
-      warmup_steps_fraction=args.maxtext_warmup_steps_fraction,
-      load_parameters_path=args.maxtext_ckpt_path,
-      padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
-      base_output_directory=args.maxtext_output_directory,
-  )
-  logging.info("Creating MaxText device mesh...")
-  mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
-  logging.info("Trainer mesh: %s", mesh)
-
-  def _factory():
-    engine = maxtext_utils.create_maxtext_engine(
-        maxtext_config,
-        mesh=mesh,
-        tokenizer_pad_id=pad_id,
-        wrap_with_tunix_adapter=True,
+def _create_trainer(
+    args,
+    actor_model: Any,
+    training_config: peft_trainer_v2.TrainingConfig,
+    mesh: Mesh,
+) -> _MeshBoundTrainer:
+  with mesh:
+    trainer = peft_trainer_v2.PeftTrainer(
+        actor_model,
+        optax.adamw(learning_rate=args.learning_rate),
+        training_config,
     )
-    return _MeshBoundTrainer(engine, mesh)
-
-  return _factory
+  return _MeshBoundTrainer(trainer, mesh)
 
 
-def _create_tunix_trainer_factory(args) -> Any:
-  """Creates the trainer factory function for Tunix's PeftTrainer."""
-  logging.info("Trainer backend: Tunix's PeftTrainer.")
-  args.model_dir = _ensure_model_dir_for_trainer(
-      args.model_dir, args.model_id
+def main(argv: list[str], context: Any = None) -> None:
+  if context is not None:
+    if not getattr(context, "ipc", None) or not getattr(context.ipc, "discovery", None):
+      raise RuntimeError(
+          "Require discovery API, but process context doesn't support."
+      )
+
+  args_list = argv[1:] if argv and argv[0] == sys.argv[0] else argv
+  args = _parse_args(args_list)
+  if context is None:
+    from tunix.experimental.distributed.runtime.contexts import context_factory  # pylint: disable=g-import-not-at-top
+
+    context = context_factory.get_default_process_context(
+        argparse.Namespace(
+            discovery_id=args.worker_id,
+            discovery_addrs=args.discovery_addrs,
+            port=args.port,
+        )
+    )
+    context.__enter__()
+
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s - [TrainerNode] %(message)s",
+      force=True,
   )
+
+  logging.info("Parsed args: %s", args)
+
+  if context:
+    context.jax.initialize()
+  if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+  logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
+
+  args.model_dir = models.ensure_model_dir(args.model_dir, args.model_id)
   logging.info("Prepared trainer safetensors directory: %s", args.model_dir)
 
   logging.info("Creating trainer mesh...")
@@ -329,6 +297,8 @@ def _create_tunix_trainer_factory(args) -> Any:
   actor_model = _load_actor_model(args, mesh, lora=args.use_lora)
 
   logging.info("Building PeftTrainer v2 config...")
+  if args.train_micro_batch_size <= 0:
+    raise ValueError("--train_micro_batch_size must be positive.")
   grad_accumulation_steps = max(
       1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
   )
@@ -350,55 +320,11 @@ def _create_tunix_trainer_factory(args) -> Any:
       grad_accumulation_steps,
   )
 
-  def _factory():
-    with mesh:
-      trainer = peft_trainer_v2.PeftTrainer(
-          actor_model,
-          optax.adamw(learning_rate=args.learning_rate),
-          training_config,
-      )
-    return _MeshBoundTrainer(trainer, mesh)
-
-  return _factory
-
-
-def _create_trainer_factory(args) -> Any:
-  """Creates the trainer factory function based on args.trainer_backend."""
-  if args.trainer_backend == "maxtext":
-    return _create_maxtext_trainer_factory(args)
-  return _create_tunix_trainer_factory(args)
-
-
-def main(argv: list[str], context: Any = None) -> None:
-  if context and context.ipc and context.ipc.discovery:
-    pass
-  else:
-    raise RuntimeError(
-        "Require discovery API, but process context doesn't support."
-    )
-
-  logging.basicConfig(
-      level=logging.INFO,
-      format="%(asctime)s - [TrainerNode] %(message)s",
-      force=True,
-  )
-
-  args = _parse_args(argv)
-  logging.info("Parsed args: %s", args)
-
-  if context:
-    context.jax.initialize()
-  if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-  logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
-
-  if args.train_micro_batch_size <= 0:
-    raise ValueError("--train_micro_batch_size must be positive.")
-
   logging.info("Creating generic TrainerWorker and gRPC server...")
-  trainer_factory = _create_trainer_factory(args)
   worker_service = trainer_worker.TrainerWorker(
-      trainer_factory=trainer_factory,
+      trainer_factory=lambda: _create_trainer(  # pyrefly: ignore[bad-argument-type]
+          args, actor_model, training_config, mesh
+      ),
       worker_id=args.worker_id,
   )
 
@@ -443,4 +369,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
 
 if __name__ == "__main__":
-  main(sys.argv[1:])
+  from absl import app  # pylint: disable=g-import-not-at-top
+  from absl import flags  # pylint: disable=g-import-not-at-top
+
+  app.run(main, flags_parser=lambda argv: flags.FLAGS(argv, known_only=True))

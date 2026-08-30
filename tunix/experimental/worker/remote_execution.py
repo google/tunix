@@ -447,9 +447,10 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         },
     )
     self._server.add_generic_rpc_handlers((handler,))
-    # NOTE: add_insecure_port is for local loopback / isolated pod testing (experimental v0).
-    # For production across trust boundaries, use secure_server_credentials (ALTS/mTLS).
-    self._server.add_insecure_port(f"[::]:{port}")
+    try:
+      self._server.add_insecure_port(f"[::]:{port}")
+    except Exception:
+      self._server.add_insecure_port(f"0.0.0.0:{port}")
     await self._server.start()
     return self._server
 

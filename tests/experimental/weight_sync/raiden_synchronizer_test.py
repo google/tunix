@@ -284,15 +284,14 @@ class RaidenSynchronizerTest(absltest.TestCase):
     base = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     self.assertEqual(base.work_unit_metadata().unit.job_replica_id, "")
 
-  def test_host_stage_pulls_state_to_host(self):
-    sentinel = {"w": jnp.ones((2, 2))}
-    with mock.patch.object(
-        raiden_synchronizer, "to_host_cpu_state", return_value=sentinel
-    ) as pull:
-      raiden_synchronizer.RaidenSynchronizer(
-          "trainer", self._state(), host_stage=True
-      )
-    pull.assert_called_once()
+  def test_ffi_mode_defaults_under_pathways(self):
+    import os
+    with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      self.assertTrue(sync.use_ffi)
+    with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "tpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      self.assertFalse(sync.use_ffi)
 
 
 if __name__ == "__main__":
