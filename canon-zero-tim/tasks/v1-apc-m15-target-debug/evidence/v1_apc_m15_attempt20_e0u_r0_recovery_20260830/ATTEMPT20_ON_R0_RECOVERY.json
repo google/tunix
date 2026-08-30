@@ -1,0 +1,24 @@
+{
+  "all_num_cached_tokens_zero_runtime_receipt_available": false,
+  "analysis_source_commit": "994ff7b7cb95f2b0f1a80e85679229c927455fc8",
+  "arm": "on",
+  "b_full_reset_runtime_receipt_available": false,
+  "claim_ceiling": "NO_CLASSIFICATION / INCONCLUSIVE / NO_TARGET_PASS / B_RESET_RUNTIME_RECEIPT_UNAVAILABLE / NO_NUMERICAL_REPAIR_AUTHORIZATION",
+  "classification": null,
+  "classification_available": false,
+  "diagnostic_round": 0,
+  "numerical_repair_authorized": false,
+  "remote_mutation": false,
+  "retrieval": {
+    "CLASSIFIER_INPUT_ARCHIVE.tar": "retrieved",
+    "CLASSIFIER_INPUT_RECEIPT.json": "retrieved",
+    "CLASSIFIER_INPUT_SHA256SUMS": "retrieved"
+  },
+  "rounds_recovered": [],
+  "schema": "m15-attempt20-on-round0-offline-recovery-v1",
+  "status": "INVALID_OR_CLASSIFIER_FAILED",
+  "target_rerun": false,
+  "target_source_commit": "97e813de84f6c8b3e2ba911fc96ff8397b199603",
+  "terminal_pair_complete": false,
+  "three_round_verdict": false
+}

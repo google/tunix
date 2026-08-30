@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/tmp/m15-attempt20-on-r0-recovery.So5Clr/classifier-input/classify_p38_kv_observer.py", line 634, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/tmp/m15-attempt20-on-r0-recovery.So5Clr/classifier-input/classify_p38_kv_observer.py", line 623, in main
+    report = classify(
+        args.directory, args.capsule, args.require_red_join,
+        args.replay_ledger,
+    )
+  File "/tmp/m15-attempt20-on-r0-recovery.So5Clr/classifier-input/classify_p38_kv_observer.py", line 517, in classify
+    _require(red_joins, "no paired observer candidate joined a red capsule row")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/m15-attempt20-on-r0-recovery.So5Clr/classifier-input/classify_p38_kv_observer.py", line 31, in _require
+    raise ObserverError(message)
+ObserverError: no paired observer candidate joined a red capsule row
