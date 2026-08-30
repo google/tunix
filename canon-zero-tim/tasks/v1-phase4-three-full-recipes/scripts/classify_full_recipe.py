@@ -108,7 +108,7 @@ def _validate_m15_tito(
     text: str,
     reasons: list[str],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-  """Requires exact-equal TITO receipts only for the M15 full recipe."""
+  """Requires experimental M15 TITO to remain absent from full recipes."""
   receipts = _token_continuity_receipts(text)
   exact_equal = [
       receipt
@@ -119,35 +119,17 @@ def _validate_m15_tito(
       and receipt.get("actual_tokens") == receipt.get("expected_tokens")
       and receipt.get("actual_sha256") == receipt.get("expected_sha256")
   ]
-  if recipe == "m15":
-    _require(
-        env.get("CANON_M15_TOKEN_CONTINUITY") == "exact",
-        "resolved_env.CANON_M15_TOKEN_CONTINUITY",
-        reasons,
-    )
-    _require(
-        text.count("[env] M15 exact TITO enabled mode=exact") >= 1,
-        "missing_m15_exact_tito_env_receipt",
-        reasons,
-    )
-    _require(bool(receipts), "missing_m15_exact_token_receipt", reasons)
-    _require(
-        len(exact_equal) == len(receipts),
-        "m15_exact_token_receipt_not_all_equal",
-        reasons,
-    )
-  else:
-    _require(
-        "CANON_M15_TOKEN_CONTINUITY" not in env,
-        "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected",
-        reasons,
-    )
-    _require(not receipts, "unexpected_m15_token_receipt", reasons)
-    _require(
-        "[env] M15 exact TITO enabled" not in text,
-        "unexpected_m15_exact_tito_env_receipt",
-        reasons,
-    )
+  _require(
+      "CANON_M15_TOKEN_CONTINUITY" not in env,
+      "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected",
+      reasons,
+  )
+  _require(not receipts, "unexpected_m15_token_receipt", reasons)
+  _require(
+      "[env] M15 exact TITO enabled" not in text,
+      "unexpected_m15_exact_tito_env_receipt",
+      reasons,
+  )
   return receipts, exact_equal
 
 
@@ -443,8 +425,6 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
         "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "",
         "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
     })
-    if recipe == "m15":
-      required["CANON_M15_TOKEN_CONTINUITY"] = "exact"
   return required
 
 

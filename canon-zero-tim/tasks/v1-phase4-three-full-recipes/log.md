@@ -1120,3 +1120,27 @@
   one-host mechanism run, target optimizer update, or target convergence claim
   occurred. M15 remains `convergence-only / alignment-degraded` while its A-B
   warning lane is enabled.
+
+## 2026-08-30T09:18:05Z — M15 production default restored to non-TITO locally
+
+- User decision: obtain the M15 training curve first on the historical
+  rendered-text multi-turn input path; debug TITO later in a separate carrier.
+  This supersedes the V1.P4.15 production-default decision before one-host or
+  DP8xTP8 target, without deleting its implementation or evidence.
+- Delivery change: both P45 and M15 production profiles, raw manifests, and
+  resolved environments now require `CANON_M15_TOKEN_CONTINUITY` completely
+  absent. Empty and `0` values still count as presence. Any runtime token-
+  continuity receipt is classified as experimental-carrier leakage.
+- Runtime boundary: `token_continuity.py` and trajectory-engine observer/exact
+  code remain untouched for later debug. APC stays off; evaluation and
+  checkpoint stay off; the existing system/performance bundle and M15 finite
+  A-B warning/fatal boundaries are unchanged.
+- Validation at this checkpoint: focused renderer/classifier suite 43/43,
+  P57 181/181, V1 92/92, flag audit 409/409, Python/Bash syntax, and diff
+  hygiene pass. The immutable-image gate remains to run. No commit, push,
+  render for launch,
+  Kubernetes mutation, TPU use, or target run occurred.
+- Launch-scope clarification: after publication and a separately approved
+  render/launch, the next apply set contains only the non-TITO M15 full
+  300-update curve. The paired renderer may emit P45 for contract comparison,
+  but P45 must not be applied in this wave.

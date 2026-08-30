@@ -1,18 +1,24 @@
 # V1 Phase4 three-full handoff
 
-## START HERE — P74 FrozenLake wave: next M15 full defaults to exact TITO
+## START HERE — P74 FrozenLake wave: next M15 full is non-TITO
 
-This section is the authoritative launch preparation for the two optimized
-FrozenLake Zero full recipes. It supersedes older P45/M15 render commands in
-this historical handoff, but does not erase their incident evidence.
+This section is the authoritative launch preparation for the next optimized
+FrozenLake Zero full run. The next apply set contains **M15 only** so the user
+can obtain its non-TITO training curve; P45 is not launched in this wave. The
+two-recipe render-only wrapper may still render both immutable manifests for
+contract comparison, but only its M15 command is eligible for the separately
+approved apply. This supersedes older P45/M15 launch instructions in this
+historical handoff without erasing their incident evidence.
 
-Status is `M15 EXACT TITO PUBLISHED / HOST PASS / PINNED-IMAGE PASS / REMOTE
-READBACK PASS / ONEHOST NOT RUN / TARGET NOT RUN`. Runtime/delivery commit
-`3fc7ef8b93426d0b9ec6b1b9e133198f0b37aa45` was fast-forward published and
-read back exactly. Observer commit
-`509d3866b39228ce7df29d4eb3e5394591c69de0` alone does **not** make M15 use
-TITO. Render M15 only from a clean checkout containing `3fc7ef8b...` or a
-later explicitly reviewed remote-read descendant.
+Status is `M15 NON-TITO DEFAULT SOURCE CANDIDATE / HOST PASS / IMMUTABLE-IMAGE
+NOT RERUN / REMOTE READBACK REQUIRED / TARGET NOT RUN`. Exact TITO
+runtime/delivery commit
+`3fc7ef8b93426d0b9ec6b1b9e133198f0b37aa45` remains immutable historical
+evidence, but the user withdrew exact TITO as the production default before
+its one-host or DP8xTP8 target gate. The implementation remains available only
+for a later dedicated debug carrier. Do not render or launch from the old
+exact-default commit. Render M15 only after this default-off rollback is
+committed, pushed, and read back at one exact clean SHA.
 
 After separate commit/push approval and exact remote read-back, run the
 exact-image admission and then the render-only wrapper from the physical
@@ -32,6 +38,13 @@ bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_froze
 
 The wrapper never launches. It must emit
 `V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... launch=not-executed`.
+Review both manifests, but the next approved launch command is only:
+
+```bash
+kubectl apply -f <fresh-output-dir>/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+```
+
+Do not apply the P45 manifest in this wave.
 Before a separately approved apply, both resolved environments must contain:
 
 ```text
@@ -45,21 +58,19 @@ CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
 ```
 
-Additionally, the raw and resolved manifests must satisfy this asymmetric
-token-input contract:
+Additionally, both raw and resolved manifests must satisfy this token-input
+contract:
 
 ```text
 P45: CANON_M15_TOKEN_CONTINUITY absent
-M15: CANON_M15_TOKEN_CONTINUITY=exact
+M15: CANON_M15_TOKEN_CONTINUITY absent
 ```
 
-An empty value is not absence. Any P45/GSM8K/Native/IS/eval/diagnostic leak is
-fatal. M15 turn 0 still uses the original prompt to record the serving token
-tail. Every later turn submits the accumulated exact integer IDs directly,
-with no chat-template reapplication. The runtime must return one or more
-`[CANON_M15_TOKEN_CONTINUITY] mode=exact ...
-verdict=TOKEN_STREAM_EQUAL ... first_mismatch=-1` receipts; any verify-mode,
-different, malformed, or missing receipt fails postflight.
+An empty value or `0` is not absence. Any selector presence in P45, M15,
+GSM8K, Native, IS, eval, diagnostic, or another production carrier is fatal.
+The next M15 full uses the historical rendered-text multi-turn input path. It
+must emit no `[CANON_M15_TOKEN_CONTINUITY]` runtime receipt; any such receipt
+means the experimental carrier leaked into the curve run and fails postflight.
 
 `CANON_DP_COLLECTIVE_REDUCE` must remain absent. P74 is source behavior under
 the checked-VMA path, not a flag to add by hand. P45 retains strict Zero.
@@ -69,31 +80,29 @@ warnings; B-C, T-current/r, nonfinite, gradient, replica, and optimizer faults
 still stop the run. Both remain APC-off, no-eval, no-checkpoint, 300-update
 identities. M15 output is `convergence-only / alignment-degraded`, never a
 Zero-TIM pass. Native, IS, diagnostic, legacy resident, and evaluation
-carriers do not inherit this exact-arm policy.
+carriers do not inherit the experimental TITO path.
 
-The warning lane, observer, and exact TITO runtime are published. The fresh
-pinned-image admission on image
-`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
-exited zero with `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ... manifests=3`.
-Its raw console log was not durably saved, so this is an exact-image admission
-receipt rather than a signed evidence artifact. The older
-pinned-image terminal `V1_HP_EXACT_IMAGE_PASS ... m15_token=1 ...` certified
-only observer construction and cannot certify exact input. A fresh complete
-image gate must include `m15_tito_exact=1` after any runtime change. Launch
-still requires separate approval. Offline P74 admission is
-recorded under
-`../v1-system-optimization-workload-rollout/validation.log`. It does not
-certify DP8xTP8 performance or convergence. Each target run must independently
-return its registered alignment policy receipts—strict zero for P45, and zero
-fatal FAIL plus a complete warning count for M15—checked-VMA/P67 receipts, the
-first-update gate, complete `p32_vag_reverse` timing, 300 committed updates,
-and its own final classification.
+The warning lane and experimental TITO implementation are published
+historically. The old pinned-image receipt ending in `m15_tito_exact=1`
+certifies construction of that experimental path only; it does not certify
+the restored non-TITO production default. This rollback has focused 43/43,
+P57 181/181, V1 92/92, and flag audit 409/409 host evidence. Before launch,
+run the current immutable-image gate after an approved commit, and require its
+terminal marker to declare `m15_tito_default=off`. Offline P74 admission under
+`../v1-system-optimization-workload-rollout/validation.log` does not certify
+DP8xTP8 performance or convergence. Each target run must independently return
+its registered alignment policy receipts—strict zero for P45, and zero fatal
+FAIL plus a complete warning count for M15—checked-VMA/P67 receipts, the first-
+update gate, complete `p32_vag_reverse` timing, 300 committed updates, and its
+own final classification.
 
-Return for M15: immutable YAML and manifest index, resolved `env.sh`, complete
-raw log, every token-continuity receipt count, pre-alignment/alignment/update
-reports, full classification JSON, XProf/Perfetto artifacts, and SHA256
-ledger. The claim remains `convergence-only / alignment-degraded` while the
-A-B warning lane is enabled, even if every observed A-B value is zero.
+Return for M15: immutable YAML and manifest index, raw and resolved environment
+proof that `CANON_M15_TOKEN_CONTINUITY` is absent, complete raw log, proof of
+zero token-continuity receipts, pre-alignment/alignment/update reports, full
+classification JSON, XProf/Perfetto artifacts, and SHA256 ledger. The claim
+remains `convergence-only / alignment-degraded` while the A-B warning lane is
+enabled, even if every observed A-B value is zero. Debugging TITO is a later,
+separate carrier and must not be inferred from this training curve.
 
 ## START HERE — GSM8K Native/mismatch and Zero full now have matched controls
 

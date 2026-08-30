@@ -1,10 +1,12 @@
 # V1.P4.15 — M15 exact token continuity (TITO)
 
-Status: active; user overrode the verify-first prerequisite and selected exact
-TITO as the signed M15 full default. T1/T2 runtime, YAML/profile delivery, and
-postflight hard gates are published/read back at `3fc7ef8b`; host and
-post-rebase exact pinned-image construction pass. One-host and DP8xTP8 target
-are not run.
+Status: superseded before target. The historical exact-TITO runtime, delivery,
+and postflight hard gates remain published/read back at `3fc7ef8b`; host and
+post-rebase exact pinned-image construction passed, but one-host and DP8xTP8
+target were never run. On 2026-08-30 the user withdrew exact TITO as the signed
+M15 production default so the next full run can obtain the rendered-text
+training curve first. The implementation and evidence remain available only
+for a later dedicated debug carrier; see V1.P4.16.
 
 ## Problem and evidence boundary
 
@@ -221,3 +223,11 @@ No rollback deletes a run directory.
   same SHA for local HEAD, FETCH_HEAD, and the remote-tracking branch. This is
   source publication only: no manifest render, launch, Kubernetes mutation,
   TPU use, one-host mechanism run, DP8xTP8 target, or optimizer update occurred.
+- 2026-08-30: before any one-host or DP8xTP8 exact-TITO target, the user
+  withdrew exact TITO as the production default and requested the M15 training
+  curve first. V1.P4.16 restores both P45 and M15 production manifests to
+  complete selector absence, rejects empty/`0` presence and runtime TITO
+  receipts, and preserves this phase's implementation and evidence for a
+  later separate debug carrier. This does not retroactively invalidate the
+  historical host/image construction evidence, and it does not certify TITO
+  on real M15.

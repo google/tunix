@@ -5,9 +5,11 @@
 Prepare the optimized P45 and M15/main 64-chip full trains as direct
 300-update efficiency-first concept runs. P45 remains strict. M15 temporarily
 uses its registered finite A-B warning lane and is alignment-degraded, while
-retaining hard token-continuity, B-C, nonfinite, backward-health, optimizer,
+retaining B-C, nonfinite, backward-health, optimizer,
 timing, W&B, JAX-cache, XProf, and Perfetto gates. Both deliberately omit
-in-process held-out evaluation and all checkpoint I/O.
+in-process held-out evaluation and all checkpoint I/O. The next M15 curve uses
+the historical rendered-text input path; exact TITO is deferred to a separate
+debug carrier.
 
 ## Phases
 
@@ -27,7 +29,8 @@ in-process held-out evaluation and all checkpoint I/O.
 | V1.P4.12 | Repair the stale G6 checkpoint admission exposed by Attempt 10 | one checkpoint source of truth; legacy-10 and primary-300 positives; wrong identity/cadence negatives; host and immutable-image gates; then fresh target first update | source published by current CL; host and immutable image PASS; target first gradient sink/AdamW not rerun |
 | V1.P4.13 | Repair the missing FrozenLake effective-learning-rate observation exposed by P45 Wave 02 | keep scalar AdamW unchanged; register the same constant only for receipts; pin entrypoint structure; host and P45 immutable-image gates; then fresh target weight sync | source published by current CL; P57 147/147, Phase4 89/89, P45 exact image PASS; post-fix target not run |
 | V1.P4.14 | Admit exact no-eval/no-checkpoint P45+M15 Zero fast concept runs after f45w09 | both manifests fail closed on eval disabled, checkpoint mode disabled, and empty residual fields; host plus immutable-image gates; then two fresh 300-update targets | active; runtime `a8449b3d` published and exactly read back, host/exact-image PASS; TPU target not run |
-| V1.P4.15 | Make exact TITO the signed M15 full default while retaining the finite A-B concept lane | exact-M15 selector in YAML/profile/runtime; prompt-token equality hard gate; neighboring negatives; host/pinned-image; one-host mechanism; then DP8xTP8 full target | active; runtime `3fc7ef8b` published/read back, host and post-rebase pinned-image construction PASS; one-host/target not run |
+| V1.P4.15 | Make exact TITO the signed M15 full default while retaining the finite A-B concept lane | exact-M15 selector in YAML/profile/runtime; prompt-token equality hard gate; neighboring negatives; host/pinned-image; one-host mechanism; then DP8xTP8 full target | superseded before target; runtime `3fc7ef8b` and historical construction evidence preserved, one-host/target never run |
+| V1.P4.16 | Restore the M15 full default to rendered-text input and defer TITO to a dedicated debug carrier | raw/resolved P45 and M15 selectors absent; no token-continuity receipt; leakage negatives; full host/immutable-image; then non-TITO DP8xTP8 curve | active; focused 43/43, P57 181/181, V1 92/92, flags 409/409 PASS; image, publication, and target pending |
 
 ## Decisions
 
@@ -111,3 +114,10 @@ in-process held-out evaluation and all checkpoint I/O.
   certification. P45, GSM8K, Native, IS, eval, diagnostics, and every other
   topology keep the selector absent; exact token inequality is fatal and the
   first DP8xTP8 full run is the target gate.
+- Decision override (2026-08-30 V1.P4.16): before any one-host or DP8xTP8 exact-
+  TITO target, the user withdrew exact TITO as the M15 production default in
+  order to obtain a training curve first. The next P45 and M15 full manifests
+  both require `CANON_M15_TOKEN_CONTINUITY` completely absent; empty and `0`
+  still count as presence, and any token-continuity receipt is leakage. Keep
+  the implementation and all historical evidence for a later, separately
+  admitted debug carrier; do not infer a TITO verdict from the curve run.

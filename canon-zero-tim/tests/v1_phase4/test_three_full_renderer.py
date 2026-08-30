@@ -199,7 +199,7 @@ class ThreeFullRendererTest(unittest.TestCase):
       self.assertIn("--p57_data_split=main", m15["CANON_RUN_CMD"])
       self.assertIn("--max_response_length=8192", m15["CANON_RUN_CMD"])
       self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
-      self.assertEqual(m15["CANON_M15_TOKEN_CONTINUITY"], "exact")
+      self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15)
 
       for values in envs:
         self.assertEqual(values["CANON_V1_HP_FULL"], "1")

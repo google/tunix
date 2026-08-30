@@ -180,7 +180,6 @@ def render_two(
       required.update({
           "CANON_P57_WORKLOAD_CANDIDATE": "m15",
           "CANON_P57_DATA_SPLIT": "main",
-          "CANON_M15_TOKEN_CONTINUITY": "exact",
       })
     wrong = {
         name: env.get(name)
@@ -193,8 +192,10 @@ def render_two(
       raise ValueError(
           f"{label} rendered an uncertified DP collective reducer"
       )
-    if label == "p45" and "CANON_M15_TOKEN_CONTINUITY" in env:
-      raise ValueError("P45 must not render the M15 TITO selector")
+    if "CANON_M15_TOKEN_CONTINUITY" in env:
+      raise ValueError(
+          f"{label} must not render the experimental M15 TITO selector"
+      )
     receipts.append({
         "recipe": label,
         "path": str(path),

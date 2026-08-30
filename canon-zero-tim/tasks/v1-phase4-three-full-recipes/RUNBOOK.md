@@ -38,7 +38,9 @@ The wrapper refuses a dirty tree, SHA mismatch, reused output root, or
 duplicate IDs. It hashes exactly two immutable manifests, preserves the P57
 64-chip autoscale/exclusive-topology carrier, emits
 `V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... launch=not-executed`, and
-only prints two unpiped `kubectl apply` commands. It never executes them.
+only prints two unpiped `kubectl apply` commands. It never executes them. For
+the current curve-first wave, review both but apply only the M15 command; P45
+is not part of the launch set.
 
 After reviewing `manifest-index.json`, confirm both YAMLs and their profile
 resolution contain the same published source SHA, `CANON_P59_CHECKED_VMA=1`,
@@ -54,35 +56,33 @@ CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
 ```
 
-The token-input diff is mandatory and must be the only TITO admission:
+The training-curve wave is deliberately non-TITO:
 
 ```text
 frozenlake-p45: CANON_M15_TOKEN_CONTINUITY absent
-frozenlake-m15: CANON_M15_TOKEN_CONTINUITY=exact
+frozenlake-m15: CANON_M15_TOKEN_CONTINUITY absent
 ```
 
-Reload both generated `env.sh` files and recheck the same tuple. Reject an
-empty P45 key as presence, a M15 `verify` value, or any neighboring workload
-with the selector. Before accepting M15 postflight, require at least one
-runtime `mode=exact verdict=TOKEN_STREAM_EQUAL first_mismatch=-1` receipt and
-require every token-continuity receipt to have matching lengths and SHA256.
-Any missing or unequal token receipt is fatal; the finite A-B warning policy
-does not cover token-input inequality.
+Reload both generated `env.sh` files and recheck absence. Empty and `0` values
+still count as presence. Reject `verify`, `exact`, or any other selector value
+in either production recipe or a neighboring workload. Before accepting M15
+postflight, require zero `[CANON_M15_TOKEN_CONTINUITY]` receipts. Any receipt
+means the deferred experimental input path leaked into this curve carrier.
 
 `CANON_DP_COLLECTIVE_REDUCE` must be absent. The command must contain
 `--eval_every_n_steps=0` and no `--num_test_batches`. Check no conflicting
-workload is live. The user may apply both YAMLs together; never append a pipe
-to either launch command.
+workload is live. Apply only the M15 YAML in this wave; never append a pipe to
+the launch command.
 
-Watch both raw logs immediately. For each recipe, update 0 must pass strict
-prealignment, one checked-VMA/P67 resolved-env contract, one first-update
+Watch the M15 raw log immediately. Update 0 must pass its registered
+prealignment policy, one checked-VMA/P67 resolved-env contract, one first-update
 precommit receipt (`microsteps=32`, denominator 32, finite, nonzero,
 `stable_norm <= 1e6`), and one valid `0 -> 1` AdamW commit receipt before
-weight sync. Any mismatch, non-finite gradient, missing/duplicate receipt, or
-invalid optimizer transaction is fatal for that recipe. Preserve all evidence
-and let the other independently healthy recipe continue.
+weight sync. Any fatal alignment mismatch, non-finite gradient,
+missing/duplicate receipt, or invalid optimizer transaction stops M15.
+Preserve all evidence.
 
-Do not call either run certified until the in-container full classifier passes
+Do not call the M15 run complete until the in-container full classifier passes
 all 300 updates, all strict alignment records, both evaluation/checkpoint
 disabled runtime markers, P59/fixed-head/reduction evidence, JAX-cache
 receipts, XProf, Perfetto, and artifact hashes. These fast runs intentionally

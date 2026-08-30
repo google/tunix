@@ -526,10 +526,6 @@ def render_all(
             "CANON_WANDB_RUN_NAME": job_name,
         },
     )
-    if m15_zero_ab_warning:
-      _replace_env(
-          document, {"CANON_M15_TOKEN_CONTINUITY": "exact"}
-      )
     labels = document["metadata"].setdefault("labels", {})
     labels["canon.zero-tim/tim-study"] = "p57"
     labels["canon.zero-tim/tim-arm"] = arm.name
@@ -585,11 +581,9 @@ def render_all(
       })
     else:
       expected["CANON_P57_STOP_AFTER_STEP"] = str(stop_after_step)
-    if m15_zero_ab_warning:
-      expected["CANON_M15_TOKEN_CONTINUITY"] = "exact"
-    elif "CANON_M15_TOKEN_CONTINUITY" in env:
+    if "CANON_M15_TOKEN_CONTINUITY" in env:
       raise ValueError(
-          "non-M15 or non-exact P57 recipe rendered token continuity"
+          "P57 production recipes must not render experimental M15 TITO"
       )
     wrong = {key: env.get(key) for key, value in expected.items() if env.get(key) != value}
     if wrong:
@@ -619,15 +613,7 @@ def render_all(
     _validate_pair(
         documents,
         run_kind=run_kind,
-        extra_train_differences=(
-            frozenset({"CANON_M15_TOKEN_CONTINUITY"})
-            if high_performance
-            and workload_candidate == "m15"
-            and data_split == "main"
-            and disable_eval
-            and checkpoint_mode == "disabled"
-            else frozenset()
-        ),
+        extra_train_differences=frozenset(),
     )
   for arm, path in zip(selected_arms, outputs, strict=True):
     header = (
