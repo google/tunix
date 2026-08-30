@@ -317,6 +317,21 @@ class ModelConfig:
     )
 
 
+def _activation_out_sharding(
+    s: Tuple[str | None, ...],
+) -> shd.NamedSharding | None:
+  """Returns the activation sharding to demand from a gather, or None.
+
+  Mirrors ``shard``'s guards: with no physical mesh, or on CPU, the gather is
+  unambiguous and must stay untouched so single-device and test paths keep
+  their exact current behavior.
+  """
+  mesh = pxla.thread_resources.env.physical_mesh
+  if mesh.empty or jax.devices()[0].platform == 'cpu':
+    return None
+  return shd.NamedSharding(mesh, shd.PartitionSpec(*s))
+
+
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
@@ -380,7 +395,18 @@ class Embedder(nnx.Module):
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.input_embedding[(x,)]
+    # On a DP x TP mesh the table's vocabulary dimension is sharded over the
+    # model axis while the token ids are sharded over the data axis, so every
+    # device holds only a slice of the rows its ids ask for.  The gather's
+    # output sharding is therefore ambiguous -- JAX refuses to pick the
+    # collective for us -- and the recipe must name it.  Ask for exactly the
+    # activation sharding the constraint below wants, which makes that
+    # constraint a no-op rather than a second reshard.
+    out_sharding = _activation_out_sharding(self.shd_config.act_btd)
+    if out_sharding is None:
+      x = self.input_embedding[(x,)]
+    else:
+      x = self.input_embedding.value.at[(x,)].get(out_sharding=out_sharding)
     x = jnp.astype(x, self.dtype)
     x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
