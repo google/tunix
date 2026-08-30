@@ -1,0 +1,45 @@
+[DEEPSWE.TITO] ADMISSION_PASS contract=p58-qwen4b-tim-128 arm=zero mode=token-in-token-out retokenize_sampled_tokens=0
+[P34.CLI] PASS model=Qwen3-4B-Instruct-2507 prompts=8 generations=16 prompt=4096 response=16384 turns=50 trajectory_deadline=3000s batch_deadline=3600s scheduler_per_dp=16/256
+[P34.DATASET] SOURCE name=R2E-Gym/R2E-Gym-Subset revision=2e8108ff942f24fcb5686badfaf7f9a8808566d5 split=train rows=4578 fingerprint=594200d1b0ff72fd
+[P34.DATASET] GOLD_FILTER_PASS rows=4578->1012 images=1012 whitelist_rows=1012
+[P34.DATASET] CLEAN_DATA_PASS source_rows=4578 filtered_rows=1012 whitelist_rows=1012 unique_images=1012
+[P34.DEVICE_INVENTORY] PASS devices=128 host_source=logical_task hosts=32 devices_per_host=4 rollout_hosts=16 trainer_hosts=16
+[P34.TOPOLOGY] PASS rollout_devices=64 trainer_devices=64 rollout_processes=16 trainer_processes=16
+*** Rollout Mesh *** | dims: [('dp', 8), ('tp', 8)] | Shape: OrderedDict({'dp': 8, 'tp': 8})
+*** Train Mesh *** | dims: [('dp', 8), ('tp', 8)] | Shape: OrderedDict({'dp': 8, 'tp': 8})
+[DEEPSWE.DATA_SHARDING] PASS axes=('dp',) mesh=('dp', 'tp')
+INFO:root:[SWEEnv group=0 pair=0] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[PERF] step=0 stage=rescore_b seconds=109.512 rows=128
+INFO:absl:[CANON_ALIGN] attached host sidecar rows=128 completion_width=16384
+[CANON_ALIGN_PRE_JSON] {"N_action":427594,"action_geometry":{"max_logical_kv_prefix_length":16098,"min_logical_kv_prefix_length":1737,"rows_reaching_1686":121,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"","warning_boundaries":null,"warning_items":null,"warning_only":false,"workload":""},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":1710376,"total_elements":427594,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":1710376,"total_elements":427594,"valid":true}},"context":{"bucket":"2048","mesh":"8,8","run_stage":"","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"4fd9daceb472093019e534a2fe7bc208f5eb5245519e76f7d3e2512a021c2677","S_prefill":"4d7c5d9a4cb815dd182f0d217bbdbd983cba65246bf03112b546002f0c530ad7","T_old":"4d7c5d9a4cb815dd182f0d217bbdbd983cba65246bf03112b546002f0c530ad7","action_mask":"d5930c51c4540a18f9124d413f7bf327a86d5ca1b8329f163ba3572fef043ccc","policy_version":"076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560","tokens":"b696d2cb88a16764115a89839352b4b99326d381a92aea02bdf438a23215a00b"},"masked_hashes":{"S_decode":"a3608a3d1421dbf50722e353c934ce8fb6da4c09c261b7367217bf259f92b090","S_prefill":"a3608a3d1421dbf50722e353c934ce8fb6da4c09c261b7367217bf259f92b090","T_old":"a3608a3d1421dbf50722e353c934ce8fb6da4c09c261b7367217bf259f92b090"},"no_signal_admitted":false,"reds":[],"reported_reds":[],"step":0,"timestamp":1788123959.0383723,"verdict":"PASS","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k11/pre_alignment.jsonl sha256=4ca3631570d45105c229e7d5325e8e0415ab988ee93b3c8e677d7f28f024a350
+[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=427594 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]
+[CANON_P34_DP8] trajectory_microbatch total=128 size=16 chunks=8 grad_acc=8 segmented=1
+[P41.OPTIMIZER] before_reverse placement=device-resident memory_kind=device
+[P28.G5C] TIED_EMBEDDING_HEAD on shared_leaves=1
+[P30.G2] SPARSE_GRAD_ASSEMBLY on scalar_zero_canonicalization=1
+[P34.DP8] segmented_engine_ready data=8 tp=8 groups=16 local_M=256 global_M=2048
+INFO 08-30 21:06:05 [loggers.py:273] Engine 000: Avg prompt throughput: 3403.1 tokens/s, Avg generation throughput: 0.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2011, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3999, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1622, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 8590, in segmented_dp_grpo_value_and_grad
+[rank0]:     specs = tuple(
+[rank0]:             ^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 8591, in <genexpr>
+[rank0]:     self._p32_group_spec(
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 7590, in _p32_group_spec
+[rank0]:     raise FunctionalMappingError(
+[rank0]: tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: P32 grouped reverse requires nonempty prompt/completion on every rank: n=[4874, 1737, 4415, 1819, 3436, 3538, 1811, 5103] prompt=[1808, 1737, 1876, 1819, 1863, 1800, 1811, 1740] completion=[3066, 0, 2539, 0, 1573, 1738, 0, 3363]

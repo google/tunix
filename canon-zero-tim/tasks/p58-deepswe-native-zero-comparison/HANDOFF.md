@@ -1,5 +1,21 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — K11 passed strict rollout alignment (427k tokens), then hit a nonempty completion reverse assertion
+
+K11 is not another rollout, TiTO, dataset, topology, or alignment failure.
+Source `2f61f8fc7cf073964a9adbd30e78de872426a4d2` completed all 128
+multi-turn R2E trajectories across 32 TPU hosts, produced 427,594 action
+tokens, finished Rescore-B in 109.5s, and passed strict Step-0 pre-alignment
+with A-B=0 and B-C=0 (0 differing bytes, 0 differing elements).
+
+The run stopped during segmented gradient computation in `_p32_group_spec`
+because DP ranks containing 0 completion tokens (from turn-0 environment errors
+or timeouts) triggered the single-turn `host_completion_length < 1` assertion:
+`FunctionalMappingError: P32 grouped reverse requires nonempty prompt/completion on every rank`.
+Because zero-completion rows have `action_mask=0`, they contribute zero loss
+and zero gradient. See the immutable incident directory
+`canon-zero-tim/evidence/p58_k11_deepswe_empty_completion_incident/`.
+
 ## START HERE — K10 passed strict rollout alignment, then hit a workload interface mismatch
 
 K10 is not another rollout, TiTO, dataset, topology, or alignment failure.

@@ -1,5 +1,11 @@
 # Log
 
+## 2026-08-30 UTC — DeepSWE P58 K11 incident intake sealed
+
+- Workload: `canon-p58-ds4b-zero-hp-full-k11` (128 TPU v5p, 32 worker hosts, DP8xTP8).
+- Outcome: Completed Step 0 multi-turn rollout across 128 sandboxes (427,594 action tokens, max KV prefix 16,098). Rescore-B finished in 109.5s. Strict Step-0 pre-alignment passed 100% with $S_{decode} - S_{prefill} = 0$ B and $S_{prefill} - T_{old} = 0$ B. Terminated in `segmented_dp_grpo_value_and_grad` -> `_p32_group_spec` with `FunctionalMappingError: P32 grouped reverse requires nonempty prompt/completion on every rank` due to DP ranks with 0 completion tokens.
+- Evidence: Sealed in `evidence/p58_k11_deepswe_empty_completion_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
+
 ## 2026-08-29 UTC — P58.22 exact alignment PASS and bounded backward carrier
 
 - `p58s22kv9d_20260829t0846z`: real Qwen3-4B DP1xTP4 continue-decode=`8`,
