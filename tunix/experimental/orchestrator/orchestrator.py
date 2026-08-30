@@ -115,6 +115,11 @@ class ClusterOrchestrator:
       self._remote_worker_handles[role].append(handle)
     self._remote_worker_handles_by_id[worker_id] = handle
     self._remote_worker_infos[worker_id] = info
+    logging.info(
+        "Registered remote worker %r with roles %s.",
+        worker_id,
+        sorted(role_names),
+    )
     return info
 
   def unregister_worker(self, worker_id: str) -> None:
@@ -144,17 +149,22 @@ class ClusterOrchestrator:
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
-    logging.info("Bringing up workers across cluster...")
+    logging.info(
+        "Bringing up %d registered worker(s)...",
+        len(self.worker_infos()),
+    )
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
     self.engine = self._create_engine()
+    logging.info("All workers brought up successfully.")
 
   def shutdown(self) -> None:
     """Shuts down all workers and closes health monitoring resources."""
-    logging.info("Shutting down ClusterOrchestrator...")
+    logging.info("Shutting down all workers...")
     self.monitor.close()
     self._shutdown_remote_workers()
     self.lifecycle_driver.shutdown()
+    logging.info("Shutdown complete.")
 
   def validate_startup(self, alg_config: Any, training_config: Any) -> None:
     """Validates cluster geometry against configurations."""
@@ -277,13 +287,14 @@ class ClusterOrchestrator:
       self.bring_up_workers(dummy_data=dummy_data)
 
     self.monitor.poll()
-    logging.info("ClusterOrchestrator executing program...")
+    logging.info("Executing program %s...", type(program).__name__)
     engine = self.engine or self._create_engine()
 
     program.run(
         engine=engine,
         **kwargs,
     )
+    logging.info("Program %s finished.", type(program).__name__)
 
   def run(
       self,
@@ -295,6 +306,7 @@ class ClusterOrchestrator:
       max_steps: int = 1000,
   ) -> None:
     """Managed Program Submission: auto-wires Engine, Assembler, Queues & StandardRLProgram."""
+    logging.info("Starting managed RL program run (max_steps=%d)...", max_steps)
     if self.engine is None:
       self.bring_up_workers()
 

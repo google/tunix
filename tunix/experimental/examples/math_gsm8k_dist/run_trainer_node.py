@@ -379,7 +379,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   logging.basicConfig(
       level=logging.INFO,
-      format="%(asctime)s - [RolloutNode] %(message)s",
+      format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
 

@@ -26,11 +26,19 @@ import inspect
 from typing import Any
 import uuid
 
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
+
+
+def _summarize_ids(ids: Sequence[str], head: int = 2, tail: int = 2) -> str:
+  """Returns a compressed string representation of a sequence of IDs."""
+  if len(ids) <= head + tail:
+    return f"[{', '.join(ids)}]"
+  return f"[{', '.join(ids[:head])}, ..., {', '.join(ids[-tail:])}]"
 
 
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
@@ -140,7 +148,21 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
     """Dispatches pre-formed RolloutRequests across rollout workers using prefix routing."""
+    logging.info(
+        "Dispatching %d rollout request(s) across %d worker(s).",
+        len(requests),
+        len(self._rollout_workers),
+    )
     for req in requests:
+      prompt_id = getattr(req, "prompt_id", "")
+      group_index = getattr(req, "group_index", 0)
+      logging.debug(
+          "Dispatched rollout request (prompt_id=%s, group_index=%d,"
+          " request_id=%s).",
+          prompt_id,
+          group_index,
+          req.request_id,
+      )
       route_key = (req.metadata or {}).get("prefix_hash", req.prompt_id)
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
@@ -238,6 +260,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             )
         )
 
+    prompt_ids = list(dict.fromkeys(req.prompt_id for req in rollout_reqs))
+    logging.info(
+        "Created rollout requests for %d prompts (group_size=%d,"
+        " total_requests=%d, policy_version=%d). Prompt IDs: %s",
+        len(prompts),
+        group_size,
+        len(rollout_reqs),
+        version,
+        _summarize_ids(prompt_ids),
+    )
     return await self.dispatch_rollout_requests(rollout_reqs)
 
   async def poll_rollouts(
@@ -257,7 +289,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     responses = await asyncio.gather(*tasks, return_exceptions=True)
     completed: list[datatypes.TrajectoryItem] = []
 
-    for i, resp in enumerate(responses):
+    for resp in responses:
       if isinstance(resp, Exception) or resp is None:
         continue
       unwrap_fn = getattr(resp, "unwrap", None)
@@ -269,7 +301,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for it in items:
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
-          completed.append(_response_to_trajectory_item(it))
+          traj_item = _response_to_trajectory_item(it)
+          logging.debug(
+              "Received rollout response (prompt_id=%s, group_index=%d).",
+              traj_item.prompt_id,
+              traj_item.group_index,
+          )
+          completed.append(traj_item)
     return completed
 
   async def generate(
@@ -290,6 +328,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sampling parameters."
       )
 
+    logging.info(
+        "Generating rollouts for %d prompt(s)/request(s) across %d"
+        " worker(s)...",
+        len(prompts),
+        len(self._rollout_workers),
+    )
     generation_kwargs = (
         generation_args.as_kwargs() if generation_args is not None else {}
     )
@@ -344,7 +388,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for sublist in results
         for item in (sublist if isinstance(sublist, list) else [sublist])
     ]
-    return [_response_to_trajectory_item(it) for it in raw_items]
+    logging.info(
+        "Completed synchronous generation of %d trajectory item(s).",
+        len(raw_items),
+    )
+    items = [_response_to_trajectory_item(it) for it in raw_items]
+    for it in items:
+      logging.debug(
+          "Generated rollout response (prompt_id=%s, group_index=%d).",
+          it.prompt_id,
+          it.group_index,
+      )
+    return items
 
   async def score(
       self,
@@ -356,6 +411,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker = self._inference_workers.get(role)
     if worker is None:
       raise ValueError(f"No inference worker registered for role {role}")
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    logging.info(
+        "Scoring %d item(s) on %s worker...",
+        len(items),
+        role_name,
+    )
     return await self._invoke_worker(worker, "score", items=items, **kwargs)
 
   async def per_token_logps(
@@ -372,6 +433,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       raise ValueError(
           f"No worker registered for per_token_logps with role {role}"
       )
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    logging.info(
+        "Evaluating per-token log probabilities on %s worker...",
+        role_name,
+    )
     return await self._invoke_worker(
         worker, "per_token_logps", items=items, **kwargs
     )
@@ -389,6 +455,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role}")
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    logging.info(
+        "Executing train_step on %s worker (accumulate_gradients=%s,"
+        " apply_optimizer=%s)...",
+        role_name,
+        accumulate_gradients,
+        apply_optimizer,
+    )
     metadata = dict(getattr(payload, "metadata", {}) or {})
     request = datatypes.TrainRequest(
         request_id=f"train_{uuid.uuid4().hex[:8]}",
@@ -454,10 +528,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
+    logging.info(
+        "Synchronizing weights (advancing to policy_version=%d)...",
+        self._policy_version + 1,
+    )
     result = await self._weight_sync_coordinator.sync(
         policy_version=self._policy_version + 1
     )
     self._policy_version = result.policy_version
+    logging.info(
+        "Weight synchronization complete (policy_version=%d).",
+        self._policy_version,
+    )
     return result.policy_version
 
   async def save_checkpoint(
@@ -470,6 +552,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role}")
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    logging.info(
+        "Saving checkpoint on %s worker...",
+        role_name,
+    )
     return await self._invoke_worker(
         worker, "save_checkpoint", metadata=metadata, **kwargs
     )

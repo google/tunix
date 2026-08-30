@@ -207,6 +207,7 @@ def _build_gsm8k_dataset(args: argparse.Namespace) -> grain.MapDataset:
   dataset = grain.MapDataset.source(data)
   if args.shuffle:
     dataset = dataset.shuffle(seed=args.seed)
+  logging.info("GSM8K dataset loaded successfully: %d examples.", len(dataset))
   return dataset.map(
       lambda x: {
           "prompts": gsm8k.build_prompt(_as_text(x["question"])),
@@ -272,6 +273,14 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   return algo
 
 
+def _get_config_attr(config: Any, key: str, default: Any = None) -> Any:
+  if config is None:
+    return default
+  if isinstance(config, dict):
+    return config.get(key, default)
+  return getattr(config, key, default)
+
+
 def _build_grpo_config(args: argparse.Namespace) -> Any:
   return SimpleNamespace(
       beta=args.beta,
@@ -292,7 +301,16 @@ def _configure_trainer_loss(
     pad_id: int,
     eos_id: int,
 ) -> None:
-  logging.info("Configuring trainer-side GRPO loss via TrainerWorker RPC.")
+  beta = _get_config_attr(grpo_config, "beta", "N/A")
+  epsilon = _get_config_attr(grpo_config, "epsilon", "N/A")
+  loss_algo = _get_config_attr(grpo_config, "loss_algo", "N/A")
+  logging.info(
+      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
+      "epsilon=%s, loss_algo=%s).",
+      beta,
+      epsilon,
+      loss_algo,
+  )
   trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
   trainer_handle.submit(
       "with_gen_model_input_fn",
@@ -422,15 +440,25 @@ def main(argv: list[str], context: Any = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
-  logging.basicConfig(
-      level=logging.INFO, format="%(asctime)s - [OrchestratorV2] %(message)s"
+  logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
+  logging.info(
+      "Configuration: model_id=%s, batch_size=%d (prompt groups), "
+      "num_generations=%d (%d rollouts/step), max_steps=%d, "
+      "train_micro_batch_size=%d, beta=%.4f, epsilon=%.2f, reward_mode=%s, "
+      "max_staleness=%d, weight_sync_backend=%s.",
+      args.model_id,
+      args.batch_size,
+      args.num_generations,
+      args.batch_size * args.num_generations,
+      args.max_steps,
+      args.train_micro_batch_size,
+      args.beta,
+      args.epsilon,
+      args.reward_mode,
+      args.max_staleness,
+      args.weight_sync_backend,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
-  logging.info(
-      "Async rollout max_staleness=%d (0 means queue-level on-policy).",
-      args.max_staleness,
-  )
-  logging.info("Weight sync backend: %s", args.weight_sync_backend)
   logging.info(
       "Dataset: GSM8K split=%s data_dir=%s reward_mode=%s.",
       args.tfds_split,
@@ -444,6 +472,13 @@ def main(argv: list[str], context: Any = None) -> None:
     tokenizer.pad_token = tokenizer.eos_token
   pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
   eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+  logging.info(
+      "Loaded tokenizer from %s (vocab_size=%d, pad_id=%d, eos_id=%d).",
+      tokenizer_path,
+      len(tokenizer),
+      pad_id,
+      eos_id,
+  )
 
   trainer_addr_future = futures.Future()
   rollout_addr_future = futures.Future()
@@ -457,7 +492,7 @@ def main(argv: list[str], context: Any = None) -> None:
     worker_id = md["worker_id"]
 
     logging.info(
-        "discovered %s service %s at %s",
+        "Discovered %s service (%s) at %s.",
         service_type,
         worker_id,
         service_address,
@@ -479,7 +514,7 @@ def main(argv: list[str], context: Any = None) -> None:
   assert context and context.ipc and context.ipc.discovery
   context.ipc.discovery.on_register(accept_worker)
 
-  logging.info("Waiting for workers to connect...")
+  logging.info("Waiting for workers to register via discovery service...")
   trainer_addr = trainer_addr_future.result()
   trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
   rollout_addr = rollout_addr_future.result()
@@ -493,6 +528,13 @@ def main(argv: list[str], context: Any = None) -> None:
         else inference_addr_future.result(timeout=args.rpc_timeout_s)
     )
     inference_handle = _connect(inference_addr, args.rpc_timeout_s)
+
+  logging.info(
+      "Connected to all required workers: Trainer=%s, Rollout=%s%s.",
+      trainer_addr,
+      rollout_addr,
+      f", Inference={inference_addr}" if inference_addr else "",
+  )
 
   algo = _build_algo(args)
   grpo_config = _build_grpo_config(args)
@@ -552,20 +594,23 @@ def main(argv: list[str], context: Any = None) -> None:
       max_staleness=args.max_staleness,
       sync_weights=(weight_sync_backend is not None),
       on_step_begin=lambda step: logging.info(
-          "Async GRPO step %d starting.", step
+          ">>> Step %d starting | Policy Version: %d",
+          step,
+          step,
       ),
       on_step_end=lambda step, result: logging.info(
-          "Async GRPO advanced to policy_version=%d train_result=%s.",
+          "<<< Step %d finished | Advanced to Policy Version: %d",
           step,
-          result,
+          step + 1,
       ),
   )
 
   try:
-    logging.info("Bringing up remote workers through ClusterOrchestrator.")
+    logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
     logging.info(
-        "Running StandardRLProgram through ClusterOrchestrator.run_program."
+        "Cluster workers ready: %s. Starting StandardRLProgram execution...",
+        [w.worker_id for w in cluster.worker_infos()],
     )
     cluster.run_program(
         program=program,
@@ -575,6 +620,7 @@ def main(argv: list[str], context: Any = None) -> None:
   finally:
     program.close()
     if args.stop_workers_on_exit:
+      logging.info("Shutting down cluster workers...")
       cluster.shutdown()
     else:
       cluster.monitor.close()
@@ -582,8 +628,12 @@ def main(argv: list[str], context: Any = None) -> None:
   result = program.last_step_result
   if result is not None:
     logging.info(
-        "Final step summary: step=%d policy_version=%d rollouts=%d "
-        "microbatches=%d reward_mean=%.3f reward_std=%.3f.",
+        "=== GRPO Training Finished Successfully ===\n"
+        "  Final step: %d\n"
+        "  Final policy version: %d\n"
+        "  Total rollouts: %d\n"
+        "  Total microbatches: %d\n"
+        "  Final step reward: mean=%.4f, std=%.4f",
         result.step,
         result.policy_version,
         result.num_rollouts,
@@ -591,7 +641,8 @@ def main(argv: list[str], context: Any = None) -> None:
         result.reward_mean,
         result.reward_std,
     )
-  logging.info("Distributed GSM8K GRPO Orchestrator V2 demo finished.")
+  else:
+    logging.info("=== GRPO Training Finished (No step results) ===")
 
 
 if __name__ == "__main__":
