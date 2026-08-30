@@ -1,0 +1,19 @@
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1316, in main
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3771, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3071, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 862, in _process_results
+[rank0]:     trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1350, in get_actor_per_token_logps
+[rank0]:     common.compute_per_token_logps(
+[rank0]:   File "/app/tunix/rl/common.py", line 455, in compute_per_token_logps
+[rank0]:     outputs, _ = model(input_tokens, **model_kwargs)
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1293, in __call__
+[rank0]:     x = self.embedder.encode(input_tokens)
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 411, in encode
+[rank0]:     x = shard(x, self.shd_config.act_btd)
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 339, in shard
+[rank0]:     return jax.lax.with_sharding_constraint(
+[rank0]: ValueError: The spec of NamedSharding passed to with_sharding_constraint can only refer to Auto axes of the mesh. Got spec=P('data', None, 'model') and mesh=AbstractMesh('data': 16, 'model': 4, axis_types=(Explicit, Explicit), device_kind=TPU v5p, num_cores=2, platform=tpu). You probably meant to use `reshard` API?

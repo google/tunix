@@ -1,0 +1,9 @@
+[2026-08-30T07:49:56Z] [entrypoint] start mode=run pkg=/app/canon-zero-tim
+[2026-08-30T07:49:56Z] [entrypoint] JOBSET_ATTEMPT 0 pod=canon-p58-ds4b-zero-hp-full-k07-pathways-head-0-0-phtmv
+[2026-08-30T07:51:13Z] [DEEPSWE.TITO] ADMISSION_PASS contract=p58-qwen4b-tim-128 arm=zero mode=token-in-token-out retokenize_sampled_tokens=0
+[2026-08-30T07:51:13Z] [P34.CLI] PASS model=Qwen3-4B-Instruct-2507 prompts=8 generations=16 prompt=4096 response=16384 turns=50 trajectory_deadline=3000s batch_deadline=3600s scheduler_per_dp=16/256
+[2026-08-30T07:52:17Z] [P34.DATASET] CLEAN_DATA_PASS source_rows=4578 filtered_rows=1012 whitelist_rows=1012 unique_images=1012
+[2026-08-30T07:52:17Z] [P34.DEVICE_INVENTORY] PASS devices=128 host_source=logical_task hosts=32 devices_per_host=4 rollout_hosts=16 trainer_hosts=16
+[2026-08-30T07:52:17Z] [P34.TOPOLOGY] PASS rollout_devices=64 trainer_devices=64 rollout_processes=16 trainer_processes=16
+[2026-08-30T07:55:55Z] jobset failed due to reaching max number of restarts (first failed job: canon-p58-ds4b-zero-hp-full-k07-pathways-worker-0)
+[2026-08-30T07:55:55Z] BackoffLimitExceeded: job/canon-p58-ds4b-zero-hp-full-k07-pathways-worker-0 reached backoff limit (32 workers contending with concurrent GSM8K 64-chip TPU slice allocation during NAP auto-scaling).
