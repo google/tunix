@@ -2075,3 +2075,28 @@
   `55553dfe0c3c895de81c66191e5082ed9ec41a32`. No repaired target, backward,
   optimizer commit, checkpoint, commit/push, image publication, Kubernetes
   mutation, or TPU launch occurred.
+
+## 2026-08-31 UTC — P58.30 K22 grouped-trainer axis hardening
+
+- Pulled operator HEAD `110146c6f48e997fd426226333d2f39cb3486840`, which
+  contains the K22 incident and minimal source correction. The raw incident
+  tail proves the P59 reverse reached layer 0 and then failed at the
+  post-pullback axis consistency check. Earlier rollout/alignment numbers in
+  the incident report are analysis-grade because the package omits the full
+  run log.
+- Root cause is an identity alias: P34 retained engine `data`, while the
+  trainer state's actual `("dp", "tp")` mesh and report adjoint resolve `dp`.
+  The local hardening isolates this decision in
+  `_p32_grouped_trainer_dp_axis`, which never reads the engine alias.
+- Added forced-four-device positives for `dp/tp -> dp` and
+  `data/model -> data`, plus an `fsdp/tp` fail-closed negative. All 3 pass in
+  the digest-pinned dependency image. Python compilation and shell syntax
+  also pass.
+- P34 static passes ten suites; the flag audit passes
+  `declared=409 actual=409 unique=409 changed_names=0`; Python/Bash syntax and
+  diff hygiene pass. The complete digest-pinned P58 gate exits zero with
+  `grouped_trainer_axis=3` and `P58_EXACT_IMAGE_CPU_PASS` while retaining the
+  TiTO, first-update, P59 TP4/TP8, disaggregated trainer/scan, workload, and
+  empty-completion gates.
+- No commit, push, image publication, Kubernetes mutation, TPU launch,
+  optimizer commit, or checkpoint occurred.

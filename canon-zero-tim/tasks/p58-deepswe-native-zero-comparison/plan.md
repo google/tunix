@@ -130,9 +130,10 @@ commit remain unreachable.
 | P58.26 | K09 full-startup one-host selector scope | Full training binds every later-read one-host diagnostic selector, cannot derive replay geometry, and passes executable full-mode/one-host positive controls plus the complete pinned-image gate | completed for its startup scope; K10 crossed the old line, completed rollout/rescore, and reached segmented update construction |
 | P58.27 | K10 common workload identity | Every signed DeepSWE workload exposes the shared adapter `.name` identity from its single `contract_name` source, without changing serialized recipes; P58 token widths and the complete pinned-image gate pass | completed for its interface scope; K11 crossed that boundary and reached grouped reverse |
 | P58.28 | K11 prompt-only grouped-reverse admission | Only validated DeepSWE may admit prompt-only rows; their loss/output/cotangent is exactly zero, single-turn callers remain fail-closed, exact K11 DP8 geometry and complete pinned-image gates pass | completed for its grouped-reverse scope; K15 crossed that boundary and reached the first P71 scan trace |
-| P58.29 | K15 disaggregated lazy-scan execution mesh | All four lazy segmented scan JITs enter the trainer execution-mesh scope in disaggregated mode; a disjoint four-device positive executes every scan and a colocated negative preserves callable identity; complete pinned-image gate passes | active; local source/P34/flag/complete pinned-image PASS, repaired K16 target pending |
+| P58.29 | K15 disaggregated lazy-scan execution mesh | All four lazy segmented scan JITs enter the trainer execution-mesh scope in disaggregated mode; a disjoint four-device positive executes every scan and a colocated negative preserves callable identity; complete pinned-image gate passes | completed for its scan scope; K22 crossed the former scan failure and reached the post-pullback reducer boundary |
+| P58.30 | K22 grouped-trainer data-axis identity | Grouped reverse derives its reducer axis solely from the trainer state's admitted `dp/tp` or `data/model` mesh, never from a serving adapter alias; both positive identities and an unsupported-mesh negative pass in the complete pinned-image gate | active; local source/P34/flag/complete pinned-image PASS, repaired K23 target pending |
 
-At most one phase may be active. P58.29 is the active construction repair and
+At most one phase may be active. P58.30 is the active construction repair and
 no target launch is active. Commit, push, image publication, Kubernetes render/application, and
 each later TPU execution remain separately user-gated.
 
@@ -148,10 +149,12 @@ alignment gates. P58.26 owns the K09 production-startup scope repair and is
 closed by K10 crossing that boundary. P58.27 owns the K10 common workload
 identity repair and K11 crossed that interface boundary. P58.28 owns the K11
 prompt-only grouped-reverse admission and K15 crossed that boundary. P58.29
-owns the K15 disaggregated lazy-scan execution-mesh repair. K15 certifies real
-rollout/trainer DP8xTP8 roles, rollout/rescore, and strict pre-alignment, but
-not completed segmented backward, optimizer commits, checkpointing, or
-completion.
+owns the K15 disaggregated lazy-scan execution-mesh repair and K22 crossed the
+former scan trace. P58.30 owns the K22 grouped-trainer axis-identity repair.
+The committed K22 raw tail proves entry through layer-0 reverse and the
+post-pullback reducer boundary, but the package does not contain the complete
+earlier rollout/alignment log. No K22/K23 evidence proves all 16 grouped
+reductions, an optimizer commit, checkpointing, or training completion.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation

@@ -1,5 +1,40 @@
 # State
 
+## P58.30 K22 grouped-trainer axis identity repair (2026-08-31)
+
+- K22 ran the 128-device disaggregated DeepSWE target far enough to cross the
+  P58.29 lazy-scan failure and reach the post-pullback P59 reducer boundary.
+  The immutable raw tail shows the reverse path reaching layer 0 before
+  `FunctionalMappingError: P59 report and grouped trainer data axes differ`.
+- The incident report additionally records 128 trajectories, 4 solved tasks,
+  393,135 action tokens, exact A=B=C, and layers 35 through 0. Those earlier
+  receipts are analysis-grade only in the committed package because
+  `RAW_ERROR.log` contains just the final 100 lines rather than the complete
+  run log. Do not promote them to independently reproducible evidence.
+- Root cause was an identity mismatch, not gradient math: the DeepSWE branch
+  kept the serving-facing adapter alias `data`, while the report adjoint
+  correctly derived `dp` from the actual trainer state's `("dp", "tp")`
+  `NamedSharding`. The safety check therefore compared two names for the same
+  replicated trainer role and failed closed after backward work.
+- Operator HEAD `110146c6f48e997fd426226333d2f39cb3486840` removes the P34
+  special case and always derives the grouped reducer axis from trainer state.
+  Local hardening makes that boundary explicit and adds forced-four-device
+  regressions: stale adapter alias plus `dp/tp` resolves to `dp`, ordinary
+  `data/model` remains `data`, and `fsdp/tp` is rejected.
+- The repair changes no flag, model, data, sampler, loss, precision,
+  optimizer, topology, deadline, TiTO, or Zero-HP program. Focused pinned-image
+  tests pass 3/3; P34 static passes ten suites; the flag audit passes 409/409
+  with `changed_names=0`; and the complete P58 image gate exits zero with
+  `grouped_trainer_axis=3` and `P58_EXACT_IMAGE_CPU_PASS`. A repaired target
+  remains pending.
+- No optimizer commit, checkpoint, 1,000-update completion, local commit/push,
+  image publication, Kubernetes mutation, or TPU launch occurred. K23 must
+  complete all 16 grouped reductions, produce finite nonzero gradients, and
+  emit the first intended optimizer/checkpoint transaction before this can be
+  called a training PASS.
+- Immutable incident package:
+  `canon-zero-tim/evidence/p58_k22_data_axis_mismatch_incident/`.
+
 ## P58.29 K15 disaggregated scan execution-mesh repair (2026-08-31)
 
 - K15 ran on 128 TPU v5p devices split into rollout 64 (DP8xTP8) and trainer 64 (DP8xTP8). The incident package's `DP32xTP4` prose is a stale label; raw lines 3–6 are authoritative. K15 completed all 128 multi-turn R2E trajectories (116 finished naturally, 12 max-turn, 0 timeouts), solved 3 SWE tasks in Step 0 (`Reward = 1.0`), generated 31 non-zero advantage samples (24.2%), and produced 407,262 action tokens.

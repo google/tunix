@@ -8436,6 +8436,18 @@ class Qwen3EngineForwardAdapter:
         "p66_vjp_oracle": p66_oracle_summary,
     }
 
+  def _p32_grouped_trainer_dp_axis(self, trainer_state):
+    """Returns the data axis carried by the grouped trainer state.
+
+    The engine-facing adapter alias is intentionally not consulted here.
+    Disaggregated DeepSWE uses ``data/model`` for serving and ``dp/tp`` for
+    training, so topology shape cannot stand in for the trainer mesh identity.
+    """
+    _, trainer_dp_axis = _p59_replicated_data_mesh(
+        trainer_state, "P32 grouped trainer state"
+    )
+    return trainer_dp_axis
+
   def segmented_dp_grpo_value_and_grad(
       self,
       *,
@@ -8522,9 +8534,7 @@ class Qwen3EngineForwardAdapter:
       )
       contract = workload.training_contract()
       reverse_groups = contract.rank_major_reverse_groups()
-    _, trainer_dp_axis = _p59_replicated_data_mesh(
-        trainer_state, "P32 grouped trainer state"
-    )
+    trainer_dp_axis = self._p32_grouped_trainer_dp_axis(trainer_state)
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
 

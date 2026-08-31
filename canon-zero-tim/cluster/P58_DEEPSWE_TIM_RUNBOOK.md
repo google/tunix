@@ -27,6 +27,39 @@ its timeout does not make it safe. Omission also preserves the entrypoint's
 `split_4x4x8_role_devices` admission is the authoritative device/topology
 check for this 128-device P58 geometry.
 
+## K22 grouped-trainer axis identity gate
+
+K22 crossed the K15 scan boundary and reached layer-0 reverse, then stopped
+at the P59 post-pullback consistency check. DeepSWE trainer state uses mesh
+axes `("dp", "tp")`, but the former P34 branch retained the serving adapter
+alias `data`; the report adjoint independently derived the correct `dp` and
+the mismatch failed closed.
+
+P58.30 requires grouped reverse to derive the data axis only from the trainer
+state. It must not use engine aliases or topology-shape inference. Before
+publication require:
+
+```text
+dp/tp trainer state with stale data alias -> dp
+data/model trainer state -> data
+fsdp/tp trainer state -> hard error
+P34_STATIC_PASS suites=10
+flag audit: declared=409 actual=409 unique=409 changed_names=0
+P58_EXACT_IMAGE_CPU_PASS ... grouped_trainer_axis=3
+```
+
+The committed K22 incident contains only the final 100-line raw tail. Preserve
+its report as analysis-grade and do not silently promote the earlier
+rollout/alignment claims to full-log evidence.
+
+After separate publication and launch approvals, K23 must use the clean
+remote readback SHA and matching image. It must preserve the existing
+DeepSWE/TiTO/clean-data/strict-alignment contracts, emit
+`[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8
+staging=parallel_table`, complete all 16 groups with finite nonzero gradients,
+and produce exactly the intended first optimizer commit plus checkpoint.
+Anything less is `INCONCLUSIVE`, not training PASS.
+
 ## K15 disaggregated lazy-scan execution-mesh gate
 
 K15's raw evidence proves the actual 128-device topology is rollout 64 at

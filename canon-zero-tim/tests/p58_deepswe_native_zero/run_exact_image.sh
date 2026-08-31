@@ -149,6 +149,9 @@ $DOCKER run --rm \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_disaggregated_canonical_forward_executes_on_trainer_devices \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_disaggregated_segmented_backward_uses_trainer_graph \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_disaggregated_segmented_scans_bind_trainer_execution_mesh \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p32_grouped_trainer_axis_uses_dp_tp_state_identity \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p32_grouped_trainer_axis_keeps_data_model_identity \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p32_grouped_trainer_axis_rejects_shape_based_identity \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_colocated_segmented_execution_mesh_binding_is_identity \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_canonical_trainer_execution_mesh_rejects_partial_overlap
     )
@@ -259,5 +262,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 continue_kv_observer=1 onehost_xprof=1 zero_hp_full=1 system_optimization=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 qwen4b_tp4=1 trajectory_replay_b2g2=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 disaggregated_scan_mesh=2 p57_wandb=1 m15_token=1 deepswe_workload_identity=1 p34_empty_completion=2 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 continue_kv_observer=1 onehost_xprof=1 zero_hp_full=1 system_optimization=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 qwen4b_tp4=1 trajectory_replay_b2g2=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 disaggregated_scan_mesh=2 grouped_trainer_axis=3 p57_wandb=1 m15_token=1 deepswe_workload_identity=1 p34_empty_completion=2 regressions=1"
   '

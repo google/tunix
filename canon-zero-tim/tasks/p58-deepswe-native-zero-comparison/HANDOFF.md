@@ -11,6 +11,48 @@ does not repair that lifecycle. Leaving all three variables absent skips Step
 process's exact `split_4x4x8_role_devices` admission as the authoritative
 128-device topology check. Do not reintroduce this probe in a rendered JobSet.
 
+## START HERE — K22 reached post-pullback reducer; K23 target not run
+
+K22 crossed the K15 lazy-scan failure and its committed raw tail shows the
+P59 reverse path reaching layer 0. It then failed at the post-pullback safety
+check with `P59 report and grouped trainer data axes differ`. The incident
+report records 128 trajectories, 4 solved tasks, exact A=B=C over 393,135
+tokens, and layers 35 through 0, but the package contains only a 100-line raw
+tail. Treat those earlier report fields as analysis-grade, not as a complete
+reproducible run transcript.
+
+The bug is a mesh-identity alias mismatch. Under DeepSWE the trainer state is
+on `("dp", "tp")`, so its replicated axis is `dp`. The old P34 branch kept
+the serving-facing adapter alias `data`; the P59 report adjoint correctly
+returned `dp`, and the fail-closed equality check stopped the run. This is not
+evidence of nonfinite gradients or changed reduction math.
+
+Operator HEAD `110146c6f48e997fd426226333d2f39cb3486840` derives the
+grouped axis from trainer state unconditionally. The local P58.30 hardening
+makes the boundary explicit and adds three forced-device contracts:
+
+```text
+trainer dp/tp + stale adapter data -> dp
+trainer data/model -> data
+trainer fsdp/tp -> hard error
+```
+
+Focused pinned-image tests pass 3/3; P34 static passes ten suites; the flag
+audit passes 409/409 with no changed names; and the complete pinned-image gate
+exits zero with `grouped_trainer_axis=3` plus
+`P58_EXACT_IMAGE_CPU_PASS`. Do not launch from this dirty worktree. After the
+user separately approves commit/push, image publication, and launch, fetch
+the final clean remote readback SHA for K23. Require
+`[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8
+staging=parallel_table`, all 16 grouped reductions, finite nonzero gradients,
+exact replicas, exactly the intended first optimizer commit, and a durable
+checkpoint. Before those receipts, this is construction evidence only—not a
+training PASS.
+
+Immutable incident:
+`canon-zero-tim/evidence/p58_k22_data_axis_mismatch_incident/`. Phase ledger:
+`phases/p58-30-k22-data-axis-identity.md`.
+
 ## START HERE — K15 lazy-scan mesh repair is local; K16 target not run
 
 K15 completed all 128 multi-turn R2E trajectories across 32 TPU hosts on the 128 TPU v5p slice:

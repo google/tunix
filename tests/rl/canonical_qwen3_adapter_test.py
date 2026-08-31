@@ -1251,6 +1251,82 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     )
     self.assertEqual(report["rank_gradient_staging_mode"], "parallel_table")
 
+  def test_p32_grouped_trainer_axis_uses_dp_tp_state_identity(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ("dp", "tp")
+    )
+    trainer_state = (
+        jax.device_put(
+            jnp.arange(24, dtype=jnp.float32).reshape(4, 6),
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(None, "tp")
+            ),
+        ),
+    )
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
+    self.assertEqual(
+        adapter._p32_grouped_trainer_dp_axis(  # pylint: disable=protected-access
+            trainer_state
+        ),
+        "dp",
+    )
+
+  def test_p32_grouped_trainer_axis_keeps_data_model_identity(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ("data", "model")
+    )
+    trainer_state = (
+        jax.device_put(
+            jnp.arange(24, dtype=jnp.float32).reshape(4, 6),
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(None, "model")
+            ),
+        ),
+    )
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
+    self.assertEqual(
+        adapter._p32_grouped_trainer_dp_axis(  # pylint: disable=protected-access
+            trainer_state
+        ),
+        "data",
+    )
+
+  def test_p32_grouped_trainer_axis_rejects_shape_based_identity(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ("fsdp", "tp")
+    )
+    trainer_state = (
+        jax.device_put(
+            jnp.arange(24, dtype=jnp.float32).reshape(4, 6),
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(None, "tp")
+            ),
+        ),
+    )
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "requires replicated DP mesh",
+    ):
+      adapter._p32_grouped_trainer_dp_axis(  # pylint: disable=protected-access
+          trainer_state
+      )
+
   def test_p59_rank_staged_specs_preserve_unit_tp_parameter_placement(self):
     if len(jax.devices()) < 4:
       self.skipTest("requires four forced CPU or accelerator devices")
