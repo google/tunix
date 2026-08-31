@@ -1033,12 +1033,18 @@ def _unstack_scanned_param(
       # Handling JAX version differences where unstack might be under jnp
       try:
         if hasattr(jax, 'unstack'):
-          return jax.unstack(src_val)
+          res = tuple(jax.unstack(src_val))
         elif hasattr(jnp, 'unstack'):
-          return jnp.unstack(src_val)
+          res = tuple(jnp.unstack(src_val))
         else:
-           # Fallback for older JAX versions
-          return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
+          # Fallback for older JAX versions
+          res = tuple(src_val[i] for i in range(src_val.shape[0]))  # pyrefly: ignore[bad-return]
+        if hasattr(src_val, 'delete') and not getattr(src_val, 'is_deleted', lambda: False)():
+          try:
+            src_val.delete()
+          except Exception:
+            pass
+        return res
       except Exception as e:
         logging.debug(
             "Failed to unstack parameter '%s'. Error: %s. Using original.",
@@ -1308,12 +1314,29 @@ def _bulk_align_and_unstack(
   )
 
   if arr.shape == scanned_tgt_shape:
-    return tuple(jnp.unstack(arr, axis=scan_axis))
+    res = tuple(jnp.unstack(arr, axis=scan_axis))
+    if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
+      try:
+        arr.delete()
+      except Exception:
+        pass
+    return res
 
   aligned = _align_per_axis(
       arr, scanned_tgt_shape, scanned_tgt_sharding, key_path
   )
-  return tuple(jnp.unstack(aligned, axis=scan_axis))
+  if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
+    try:
+      arr.delete()
+    except Exception:
+      pass
+  res = tuple(jnp.unstack(aligned, axis=scan_axis))
+  if hasattr(aligned, 'delete') and not getattr(aligned, 'is_deleted', lambda: False)():
+    try:
+      aligned.delete()
+    except Exception:
+      pass
+  return res
 
 
 def _scanned_sharding_from_per_layer(
@@ -1371,7 +1394,13 @@ def _jit_fuse_and_unstack_moe(
   fused = _interleave_moe_weights(
       wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
   )
-  return jnp.unstack(fused, axis=scan_axis)
+  res = tuple(jnp.unstack(fused, axis=scan_axis))
+  if hasattr(fused, 'delete') and not getattr(fused, 'is_deleted', lambda: False)():
+    try:
+      fused.delete()
+    except Exception:
+      pass
+  return res
 
 
 def _fuse_moe_weights(
@@ -1822,10 +1851,13 @@ def transfer_state_directly(
             continue
 
     # Unflatten back to nested structure
-    return (
-        traverse_util.unflatten_dict(filtered_src_flat),
-        traverse_util.unflatten_dict(filtered_tgt_flat),
-    )
+    res_src = traverse_util.unflatten_dict(filtered_src_flat)
+    res_tgt = traverse_util.unflatten_dict(filtered_tgt_flat)
+    unstacked_cache.clear()
+    del unstacked_cache, filtered_src_flat, filtered_tgt_flat, src_flat, tgt_flat
+    import gc
+    gc.collect()
+    return res_src, res_tgt
 
   # Prepare clean source and target specs
   full_source_dict = to_pure_spec(src_state)
@@ -1833,6 +1865,9 @@ def transfer_state_directly(
 
   # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
+  del full_source_dict, full_target_spec
+  import gc
+  gc.collect()
 
   # Reshard and Update
   if reshard_chunk_size is not None:
