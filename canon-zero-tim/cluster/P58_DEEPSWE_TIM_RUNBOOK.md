@@ -18,6 +18,15 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+P58 production renders must leave `CANON_EXPECTED_SLICE_DEVICES`,
+`CANON_DEVICE_PROBE_TIMEOUT_SECS`, and `CANON_WORKER_INITIAL_SYNC_SECONDS`
+unset. The retired Step 65 fresh-process JAX probe can disconnect after
+discovery and cancel an otherwise healthy shared Pathways session; changing
+its timeout does not make it safe. Omission also preserves the entrypoint's
+180-second worker quiet-period default. The training process's exact
+`split_4x4x8_role_devices` admission is the authoritative device/topology
+check for this 128-device P58 geometry.
+
 ## K15 disaggregated lazy-scan execution-mesh gate
 
 K15's raw evidence proves the actual 128-device topology is rollout 64 at

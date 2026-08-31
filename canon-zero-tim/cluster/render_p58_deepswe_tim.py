@@ -74,6 +74,7 @@ _SEAM_MAX_BYTES = 4 * 1024 * 1024 * 1024
 _SEAM_TAIL_MAX_BYTES = 64 * 1024 * 1024
 _SEAM_INCIDENT_MAX_BYTES = 128 * 1024 * 1024
 _SEAM_CAPTURE_BOUNDS = (1686, 2512, 3072, 3584, 4096)
+_RETIRED_DEVICE_PROBE_TRIGGER = "CANON_EXPECTED_SLICE_DEVICES"
 
 
 def _service_containers(head: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -397,9 +398,6 @@ def render(
           else f"qwen3-4b-p58-{stage}"
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
-      "CANON_WORKER_INITIAL_SYNC_SECONDS": "60",
-      "CANON_EXPECTED_SLICE_DEVICES": "128",
-      "CANON_DEVICE_PROBE_TIMEOUT_SECS": "1800",
   })
   if high_performance:
     p34._set_env(
@@ -629,6 +627,11 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
+  if _RETIRED_DEVICE_PROBE_TRIGGER in env:
+    raise ValueError(
+        "P58 must not re-enable the retired Step 65 device probe: "
+        f"{_RETIRED_DEVICE_PROBE_TRIGGER}"
+    )
   expected_failure_policy = {
       "maxRestarts": 0,
       "restartStrategy": "Recreate",

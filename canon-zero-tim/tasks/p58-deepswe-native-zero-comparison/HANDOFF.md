@@ -1,5 +1,16 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — Step 65 timeout probe remains retired
+
+P58 production manifests must not set `CANON_EXPECTED_SLICE_DEVICES`,
+`CANON_DEVICE_PROBE_TIMEOUT_SECS`, or `CANON_WORKER_INITIAL_SYNC_SECONDS`.
+Presence of the expected-device variable launches a temporary JAX/Pathways
+client whose disconnect can cancel healthy workers; a longer probe timeout
+does not repair that lifecycle. Leaving all three variables absent skips Step
+65 and retains the 180-second worker quiet-period default. Use the training
+process's exact `split_4x4x8_role_devices` admission as the authoritative
+128-device topology check. Do not reintroduce this probe in a rendered JobSet.
+
 ## START HERE — K15 lazy-scan mesh repair is local; K16 target not run
 
 K15 completed all 128 multi-turn R2E trajectories across 32 TPU hosts on the 128 TPU v5p slice:

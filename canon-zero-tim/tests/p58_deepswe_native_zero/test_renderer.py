@@ -102,6 +102,31 @@ class P58RendererTest(unittest.TestCase):
           self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
           self.assertEqual(env["NODE_SELECTOR_VAL"], "cpu-np")
 
+  def test_production_render_does_not_reenable_retired_device_probe(self):
+    for arm in ("native", "zero"):
+      for stage in ("three-update", "full"):
+        with self.subTest(arm=arm, stage=stage):
+          env = renderer.p34._env(self._render(arm, stage))
+          self.assertNotIn(renderer._RETIRED_DEVICE_PROBE_TRIGGER, env)
+
+  def test_retired_device_probe_override_is_rejected(self):
+    document = self._render("zero", "full")
+    renderer.p34._set_env(
+        renderer.p34._container(
+            renderer.p34._head(document)["containers"], "jax-tpu"
+        ),
+        {renderer._RETIRED_DEVICE_PROBE_TRIGGER: "128"},
+    )
+    with self.assertRaisesRegex(ValueError, "retired Step 65 device probe"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="zero",
+          worker_nodepool="tpu-pool",
+      )
+
   def test_rollout_timeout_geometry_is_exactly_one_concurrency_wave(self):
     document = self._render("native", "full")
     args = shlex.split(renderer.p34._env(document)["CANON_RUN_CMD"])
