@@ -347,3 +347,9 @@ class RolloutManager:
     if self.sampler:
       return await self.sampler.get_weight_sync_metadata(**kwargs)
     return []
+
+  def get_target_state(self) -> Any:
+    """Returns the sampler target-state skeleton used for trainer conversion."""
+    if self.sampler is None:
+      raise RuntimeError("RolloutManager has no sampler configured.")
+    return self.sampler.get_target_state()

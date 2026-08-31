@@ -814,6 +814,21 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIn('grad_norm', train_metrics.scalar_metrics)
     self.assertGreater(train_metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
 
+  def test_get_metrics_after_single_train_step(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds)
+
+    metrics = trainer.get_metrics()
+    self.assertNotEqual(metrics.id, -1)
+    self.assertEqual(metrics.mode, 'train')
+    self.assertIn('loss', metrics.scalar_metrics)
+    self.assertIn('grad_norm', metrics.scalar_metrics)
+    self.assertGreater(metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
+
   def test_injected_params(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
