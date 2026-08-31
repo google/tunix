@@ -1,8 +1,9 @@
 import os
 
-path = '/opt/venv/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py'
-if os.path.exists(path):
-    with open(path, 'r') as f:
+# 1. Patch tpu_runner.py
+runner_path = '/opt/venv/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py'
+if os.path.exists(runner_path):
+    with open(runner_path, 'r') as f:
         code = f.read()
 
     # Add top-level import
@@ -23,10 +24,33 @@ if os.path.exists(path):
         k_data = np.array([np.uint32(s >> 32), np.uint32(s & 0xFFFFFFFF)], dtype=np.uint32)
         rng_key = nnx.Rngs(rc.wrap_key_data(k_data, impl=rc.default_prng_impl())).params()'''
 
+    # Target 3: zero_array
+    t3 = 'self.zero_array = jnp.array(0, dtype=jnp.int32)'
+    r3 = 'self.zero_array = device_array(self.mesh, 0, sharding=NamedSharding(self.mesh, PartitionSpec()))'
+
     if t1 in code and t2 in code:
         code = code.replace(t1, r1, 1).replace(t2, r2, 1)
-        with open(path, 'w') as f:
+        if t3 in code:
+            code = code.replace(t3, r3, 1)
+        with open(runner_path, 'w') as f:
             f.write(code)
-        print('Successfully patched tpu_runner.py with clean top-level import!')
+        print('Successfully patched tpu_runner.py!')
     else:
         print('Warning: Targets not found in tpu_runner.py, skipping patch.')
+
+# 2. Patch block_table.py
+bt_path = '/opt/venv/lib/python3.12/site-packages/tpu_inference/runner/block_table.py'
+if os.path.exists(bt_path):
+    with open(bt_path, 'r') as f:
+        bt_code = f.read()
+
+    target_bt = 'self.block_table = jnp.zeros(\n            (max_num_reqs, max_num_blocks_per_req),\n            dtype=jnp.int32,\n        )'
+    replacement_bt = 'self.block_table = np.zeros(\n            (max_num_reqs, max_num_blocks_per_req),\n            dtype=np.int32,\n        )'
+
+    if target_bt in bt_code:
+        bt_code = bt_code.replace(target_bt, replacement_bt, 1)
+        with open(bt_path, 'w') as f:
+            f.write(bt_code)
+        print('Successfully patched block_table.py!')
+    else:
+        print('Warning: Target not found in block_table.py')
