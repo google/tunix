@@ -341,6 +341,32 @@ if MODEL_SOURCE == "maxtext":
   except ImportError as e:
     logger.warning("Could not import maxtext_vllm_adapter: %s", e)
 
+  try:
+    import jax.numpy as jnp
+    from maxtext.layers.embeddings import Qwen3OmniMoeThinkerTextRotaryEmbedding
+
+    _orig_qwen_mrope_call = Qwen3OmniMoeThinkerTextRotaryEmbedding.__call__
+
+    def _patched_qwen_mrope_call(self, inputs, position, *args, **kwargs):
+      if position is not None:
+        if position.ndim == 3 and position.shape[-1] == 1:
+          position = jnp.broadcast_to(position, position.shape[:-1] + (3,))
+        elif position.ndim == 2:
+          position = jnp.broadcast_to(
+              position[..., jnp.newaxis], position.shape + (3,)
+          )
+      return _orig_qwen_mrope_call(self, inputs, position, *args, **kwargs)
+
+    Qwen3OmniMoeThinkerTextRotaryEmbedding.__call__ = _patched_qwen_mrope_call
+    logger.info(
+        "Successfully patched Qwen3OmniMoeThinkerTextRotaryEmbedding for 3D"
+        " MRoPE with singleton last dim."
+    )
+  except Exception as e:
+    logger.warning(
+        "Failed to patch Qwen3OmniMoeThinkerTextRotaryEmbedding: %s", e
+    )
+
 # ========================== Dataset ==========================
 
 logger.info("Loading dataset %s split=%s ...", DATASET_NAME, DATASET_SPLIT)
