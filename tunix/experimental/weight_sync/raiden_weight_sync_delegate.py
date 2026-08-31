@@ -96,7 +96,11 @@ class RaidenWeightSyncDelegate:
       sync.h2d()
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logging.info("destination checksums: %s", sync.checksums())
-    version = getattr(sync_request, "policy_version", 0)
+    version = (
+        getattr(sync_request, "policy_version", None)
+        if sync_request is not None
+        else None
+    )
     self._version = version if version is not None else self._version + 1
     return self._version
 
