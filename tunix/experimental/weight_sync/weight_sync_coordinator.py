@@ -128,6 +128,7 @@ import functools
 import logging
 import os
 import threading
+import logging as py_logging
 from typing import Any, Optional, Sequence
 
 from tunix.experimental.common import datatypes
@@ -651,6 +652,7 @@ class WeightSyncCoordinator:
     self._in_flight = False
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
+    self._logged_debug_manifest_snapshot = False
 
   @property
   def round_index(self) -> int:
@@ -995,6 +997,19 @@ class WeightSyncCoordinator:
             " destination unit(s)"
         )
         raise fail("metadata collection returned an empty side")
+      if (
+          not self._logged_debug_manifest_snapshot
+          and py_logging.getLogger().isEnabledFor(py_logging.DEBUG)
+      ):
+        logging.debug(
+            "Weight sync source metadata snapshot: %s",
+            src_metadata,
+        )
+        logging.debug(
+            "Weight sync destination metadata snapshot: %s",
+            dst_metadata,
+        )
+        self._logged_debug_manifest_snapshot = True
       source_units = tuple(m.unit for m in src_metadata)
       destination_units = tuple(m.unit for m in dst_metadata)
 
@@ -1004,6 +1019,8 @@ class WeightSyncCoordinator:
       # afterwards it degrades into a lost tensor under a green round.
       preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
       if preflight_problems:
+        for problem in preflight_problems:
+          logging.warning("Weight sync manifest mismatch: %s", problem)
         failures.extend(preflight_problems)
         raise fail(
             "manifest preflight failed before any destination was quiesced;"
