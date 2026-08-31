@@ -1039,11 +1039,6 @@ def _unstack_scanned_param(
         else:
           # Fallback for older JAX versions
           res = tuple(src_val[i] for i in range(src_val.shape[0]))  # pyrefly: ignore[bad-return]
-        if hasattr(src_val, 'delete') and not getattr(src_val, 'is_deleted', lambda: False)():
-          try:
-            src_val.delete()
-          except Exception:
-            pass
         return res
       except Exception as e:
         logging.debug(
@@ -1314,29 +1309,12 @@ def _bulk_align_and_unstack(
   )
 
   if arr.shape == scanned_tgt_shape:
-    res = tuple(jnp.unstack(arr, axis=scan_axis))
-    if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
-      try:
-        arr.delete()
-      except Exception:
-        pass
-    return res
+    return tuple(jnp.unstack(arr, axis=scan_axis))
 
   aligned = _align_per_axis(
       arr, scanned_tgt_shape, scanned_tgt_sharding, key_path
   )
-  if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
-    try:
-      arr.delete()
-    except Exception:
-      pass
-  res = tuple(jnp.unstack(aligned, axis=scan_axis))
-  if hasattr(aligned, 'delete') and not getattr(aligned, 'is_deleted', lambda: False)():
-    try:
-      aligned.delete()
-    except Exception:
-      pass
-  return res
+  return tuple(jnp.unstack(aligned, axis=scan_axis))
 
 
 def _scanned_sharding_from_per_layer(
@@ -1395,11 +1373,6 @@ def _jit_fuse_and_unstack_moe(
       wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
   )
   res = tuple(jnp.unstack(fused, axis=scan_axis))
-  if hasattr(fused, 'delete') and not getattr(fused, 'is_deleted', lambda: False)():
-    try:
-      fused.delete()
-    except Exception:
-      pass
   return res
 
 
@@ -1579,15 +1552,8 @@ def _reshard_in_chunks(
       tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
       chunk_dst_shardings_flat[k] = _snapshot_dst_sharding(tgt_arr)
 
-    for tgt_val in chunk_spec_flat.values():
-      tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
-      if hasattr(tgt_arr, 'delete') and not getattr(
-          tgt_arr, 'is_deleted', lambda: False
-      )():
-        try:
-          tgt_arr.delete()
-        except Exception:
-          pass
+    if delete_spec_buffers:
+      _delete_target_buffers(chunk_spec_flat, chunk_src_flat)
 
     def _to_tuple_key(k):
       return tuple(k.split('.')) if isinstance(k, str) else k
@@ -1606,14 +1572,7 @@ def _reshard_in_chunks(
       for k, v in traverse_util.flatten_dict(chunk_resharded).items():
         resharded[k] = v
 
-    for src_val in chunk_src_flat.values():
-      if hasattr(src_val, "delete") and not getattr(
-          src_val, "is_deleted", lambda: False
-      )():
-        try:
-          src_val.delete()
-        except Exception:
-          pass
+
 
     del (  # pyrefly: ignore[unsupported-delete]
         chunk_src,
