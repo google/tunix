@@ -16,6 +16,7 @@ python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_a
 python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_e0v_onehost_arm.py
 python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_e0v_onehost_pair.py
 python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_e0v_onehost_runner.py
+python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_validate_m15_e0w5_recovery_render.py
 python3 canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py
 bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
 python3 -m unittest discover \
@@ -44,7 +45,9 @@ python3 -m py_compile \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_e0v_onehost_runner.py \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_review_m15_attempt20_on_round0.py \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py \
-  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_validate_m15_e0w5_recovery_render.py \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/validate_m15_e0w5_recovery_render.py
 bash -n \
   canon-zero-tim/cluster/steps/00_env.sh \
   canon-zero-tim/cluster/steps/90_run.sh \
@@ -59,6 +62,7 @@ bash -n \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_e0_kv3_return_recovery.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_on_round0_offline_recovery.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_on_round0_preserved_scratch_audit.sh \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0w5_gcs_return.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0v_tito_onehost_arm.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0v_tito_onehost_pair.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_attempt19_e0_kv3_return.sh \
@@ -70,4 +74,4 @@ grep -Fqx \
   canon-zero-tim/MANIFEST.sha256
 git diff --check
 
-echo "M15_E0W_HOST_PASS task_discovery=225 return=1 round0_recovery=8 tito_postflight=7 onehost_arm=5 onehost_pair=5 onehost_runner=3 token_continuity=7 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 onehost_v5p=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0"
+echo "M15_E0Z_HOST_PASS task_discovery=230 return=1 round0_recovery=8 tito_postflight=7 onehost_arm=5 onehost_pair=5 onehost_runner=3 e0w5_recovery=5 token_continuity=7 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 onehost_v5p=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0"

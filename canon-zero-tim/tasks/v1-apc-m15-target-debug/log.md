@@ -1780,3 +1780,37 @@ is not a current fact or launch authority.
 - Next: publish, remote-read the exact full SHA, then let the bucket-capable
   agent create a clean worktree and run prepare-only. Applying the matched
   three-round DP8xTP8 pair remains a separate explicit approval.
+
+# Checkpoint 2026-08-31 — E0z e0w5 read-only recovery prepared
+
+- Started from a clean `local/m15-apc-e0w5-recovery-0831` worktree at
+  published incident tip `6383767c9e553f56e6d16f9535f8373c2b3353ed`.
+- Audited the five-file e0w5 Git incident. Its manifest self-verifies, but the
+  material is only a partial reported return: APC-off rounds 0/1 exact;
+  APC-on round 0 A-B 615 bytes / 262 elements, B-C zero, 89.8% hits. The
+  returned treatment name is not an admitted wide-seam classification, and
+  no shape/source boundary or runtime B/TiTO completeness is present.
+- Added `validate_m15_e0w5_recovery_render.py` and
+  `run_m15_e0w5_gcs_return.sh`. They bind the original source/run/render and
+  call the official three-round small-evidence auditor with no token-bearing
+  bundle download or remote mutation. Partial results exit 3. Audit failures
+  preserve raw log and downloaded small-evidence scratch.
+- Added five render-contract positives/negatives. Missing original render
+  refuses before GCS access with
+  `[M15.E0W5.RECOVERY] REFUSING status=ORIGINAL_RENDER_UNAVAILABLE
+  classification=NONE`.
+- The first complete aggregate attempt r2 failed at the flag audit because
+  the initial failure-preservation selector was an unregistered `CANON_*`
+  environment name. It was correctly removed and replaced with a positional
+  script argument; no flag/default was added.
+- Canonical E0z host aggregate PASS: task discovery 230/230, e0w5 recovery
+  5/5, persistence PASS, flags 409/409, syntax and diff check PASS. Terminal
+  `M15_E0Z_HOST_PASS ... exact_image=0 onehost_v5p=0 target_rerun=0 gcs=0
+  kubernetes=0 tpu=0`. Raw log
+  `/tmp/m15-e0z-host-gate-20260831-r3.log`, SHA256
+  `66abbe9532ccdc7e2a205c06bceb9d6e629eefe8d4185993fb6ce60ca9bef556`,
+  231 lines / 28,883 bytes.
+- Implementation: evidence validation/durability and handoff only. Validation:
+  HOST PASS. Claim: target already executed but returned evidence remains
+  partial; E0z pinned image and real GCS recovery NOT RUN; target PASS false;
+  FIRST_RED_LOCALIZED false; numerical repair unauthorized.

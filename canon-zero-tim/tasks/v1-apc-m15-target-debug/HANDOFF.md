@@ -1,6 +1,158 @@
 # M15 APC target-debug handoff
 
-## START HERE — E0w publication admission PASS; target still approval-gated
+## START HERE — E0z: recover the already executed e0w5 pair; do not launch e0w6
+
+The latest Git incident return does **not** constitute a complete target
+verdict. It reports an already executed exact-TiTO DP8xTP8 pair at target
+source `2f61f8fc7cf073964a9adbd30e78de872426a4d2`, run label `e0w5`:
+
+```text
+control APC-off: reported rounds 0/1 exact; A-B=0, B-C=0
+treatment APC-on: reported round 0 red; A-B=615 bytes / 262 elements
+treatment B-C=0; max_abs_delta=0.9388885498046875; hit_rate=89.8%
+reported mismatch rows=[102,194,208,221]
+```
+
+The five committed files under
+`evidence/v1_apc_m15_e0w5_paired_20260831/` hash correctly, but they are an
+incident subset, not an official signed three-round return. In particular:
+
+- the control return covers only rounds 0/1 and treatment covers only round 0;
+- `M15_TREATMENT_RED_REPRODUCED` is not an admitted wide-seam classifier name;
+- the committed JSON does not establish the report's claimed action position;
+- original run logs, source/image binding, exact-TiTO receipts, B full-reset and
+  all-cached-token-zero receipts, classifier-input checkpoints, ordered stage
+  receipts, remote verification, round completion, learner ACK, shape ledger,
+  and source `file:line` are absent from the Git subset;
+- therefore `FIRST_RED_LOCALIZED=false`, `target_pass=false`, and
+  `numerical_repair_authorized=false`.
+
+The e0w5 target source also predates later one-host source `9f6b9c7e...` and
+differs in renderer/profile/entrypoint/token-continuity/alignment/rollout
+files. The later source-bound one-host result `e0y5p1` is exact across three
+rounds with 91.5% APC hits, but cannot be compared with e0w5 as a pure topology
+scale-up. It is mechanism evidence only.
+
+### Only next operation: read-only GCS recovery from the original e0w5 render
+
+Use a new clean `local/*` worktree at the exact published analysis SHA that
+contains this section. The bucket-side agent must have the **original** e0w5
+render directory with its `RUN_CONTRACT.json`, `SHA256SUMS`, and two rendered
+YAMLs. Do not re-render e0w5, reuse its label, apply YAML, restart a JobSet, or
+launch e0w6. If the original render is unavailable, return
+`ORIGINAL_RENDER_UNAVAILABLE`; do not substitute a reconstructed directory.
+
+Run this command without a pipe:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0w5_gcs_return.sh \
+  <full-published-analysis-SHA> \
+  <absolute-original-e0w5-render-directory> \
+  <absolute-new-local-return-directory> \
+  <absolute-existing-scratch-parent>
+```
+
+The wrapper hard-binds source `2f61f8fc...`, label `e0w5`, exact TiTO, layer
+observer, three rounds, zero backward/optimizer, immutable B reset, exact arm
+pairing, incident manifest, local branch/HEAD/clean preflight, and the original
+render manifest. It calls the official small-evidence auditor. It reads GCS
+only; it performs no GCS write, Kubernetes action, TPU action, launch, commit,
+or push, and it never downloads the token-bearing bundle. A failed official
+audit exits 3 and preserves both a local raw log and the already downloaded
+small-evidence scratch. A valid but partial return also exits 3; that is an
+honest `INCONCLUSIVE`, not a script failure to hide.
+
+Expected terminal families:
+
+```text
+[M15.E0W5.RECOVERY] REFUSING status=ORIGINAL_RENDER_UNAVAILABLE classification=NONE
+[M15.E0W5.RECOVERY] INCONCLUSIVE status=OFFICIAL_RETURN_FAILED ... preserved_scratch=<local-path>
+[M15.E0W5.RECOVERY] COMPLETE status=PARTIAL_ROUNDS_RECOVERED ... target_pass=0 ...
+[M15.E0W5.RECOVERY] COMPLETE status=COMPLETE ... three_round_numerical=1 target_pass=0 ...
+[M15.E0W5.RECOVERY] READ_ONLY gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
+```
+
+Even `status=COMPLETE` leaves `target_pass=0` and
+`numerical_repair_authorized=0` until the returned classifiers, shapes,
+coordinates, runtime receipts, and operator completeness are reviewed. This
+wrapper intentionally does not turn a successful download into a repair
+claim.
+
+### Exact response required from the bucket-side agent
+
+Return the following bounded fields. Use `NONE` where evidence is absent; do
+not infer, reword an old incident claim as a recovered fact, or paste GCS
+roots, remote URLs, credentials, token payloads, capsules, shards, or raw logs.
+
+```text
+branch=<local/*>
+HEAD=<40-char analysis SHA>
+dirty=<0 required>
+command=<exact command, with sensitive locator omitted>
+terminal_marker=<exact M15.E0W5.RECOVERY line>
+target_source=2f61f8fc7cf073964a9adbd30e78de872426a4d2
+analysis_source=<40-char analysis SHA>
+status=<official return status or refusal>
+off_sealed_rounds=<0..3>; off_round_indices=<list>
+on_sealed_rounds=<0..3>; on_round_indices=<list>
+off_classifications=<official names or NONE>
+on_classifications=<official names or NONE>
+reported_A_minus_B=off:0,on:615
+recovered_A_minus_B=<per sealed round or NONE>
+recovered_B_minus_C=<per sealed round or NONE>
+classifier_input_checkpoint=<per arm/round PASS|ABSENT|NONE>
+stage_receipts=<last completed/failure stage per arm/round or NONE>
+root_markers=<PREFLIGHT/COLLECTED/COMPLETE presence per arm>
+B_full_reset_runtime_receipt=<true|false|NONE>
+all_cached_tokens_zero_receipt=<true|false|NONE>
+exact_TiTO_receipts=<per arm/round counts or NONE>
+first_red_localized=false
+first_failure_boundary=<last exact -> first red, or NONE>
+first_red_shape=<shape or NONE>
+request_call_token_cache_page_coordinate=<value or NONE>
+source_file_line=<value or NONE>
+target_pass=false
+numerical_repair_authorized=false
+output=<local return directory or NONE>
+manifest_sha256=<64-char SHA or NONE>
+raw_log=<local path>
+raw_log_sha256=<64-char SHA>
+preserved_scratch=<local path or NONE>
+TARGET_RERUN=NO
+external_mutation=gcs_read:<0|1>,gcs_write:0,kubernetes:0,tpu:0,commit:0,push:0
+next_action=<one concrete action based only on recovered status>
+```
+
+Decision after that return:
+
+- any APC-off A-B red or any B-C red: hard stop; the carrier/APC-specific
+  interpretation is invalid;
+- partial/missing rounds, unsupported classifier name, failed stage, missing
+  B/TiTO receipts, or absent shape/source boundary: preserve and classify as
+  `INCONCLUSIVE`; do not launch automatically;
+- candidate-set result: retain every candidate; Phase E stays closed;
+- only a reviewed official `FIRST_RED_LOCALIZED` with last-exact/first-red,
+  shape, request/call/token/cache/page coordinate, and `file:line` permits a
+  repair proposal to be discussed with the user. It does not permit an
+  immediate code change.
+
+Phase contract:
+`phases/phase-e0z-e0w5-readonly-recovery.md`.
+
+E0z local validation is HOST PASS:
+
+```text
+M15_E0Z_HOST_PASS task_discovery=230 return=1 round0_recovery=8 tito_postflight=7 onehost_arm=5 onehost_pair=5 onehost_runner=3 e0w5_recovery=5 token_continuity=7 v1_cpu=92 p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 onehost_v5p=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0
+```
+
+Raw log `/tmp/m15-e0z-host-gate-20260831-r3.log`, SHA256
+`66abbe9532ccdc7e2a205c06bceb9d6e629eefe8d4185993fb6ce60ca9bef556`
+(231 lines / 28,883 bytes). E0z pinned exact-image and real GCS recovery are
+NOT RUN. The exact-image aggregate has been wired to run the five new contract
+tests, but no image claim is inherited until it is separately approved and
+executed on the published tree.
+
+## SUPERSEDED BY E0z — E0w publication admission PASS; target was approval-gated
 
 Do not rerun `e0w1`, `e0w2`, `e0w3`, or `e0w4`. Do not launch M15 full. Do
 not render/apply a DP8xTP8 target from an inherited worktree. The E0v/E0w

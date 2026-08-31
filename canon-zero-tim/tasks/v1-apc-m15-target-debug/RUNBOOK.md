@@ -1,11 +1,41 @@
 # M15 APC target carrier runbook
 
+## E0z current operation — recover e0w5; do not launch
+
+The Git e0w5 incident subset is partial: it reports APC-off rounds 0/1 exact
+and APC-on round 0 red at A-B 615 bytes / 262 elements with B-C zero, but it
+does not provide a signed three-round verdict or `FIRST_RED_LOCALIZED`.
+
+On the bucket-capable machine, create a clean `local/*` worktree at the full
+published SHA containing the E0z handoff. Use the original e0w5 render (never a
+re-render) and run, without a pipe:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0w5_gcs_return.sh \
+  <full-published-analysis-SHA> \
+  <absolute-original-e0w5-render-directory> \
+  <absolute-new-local-return-directory> \
+  <absolute-existing-scratch-parent>
+```
+
+This is GCS-read-only evidence recovery: no GCS write, Kubernetes, TPU,
+render, apply, restart, or launch. Exit 3 is the expected honest result for a
+partial return and preserves the raw log; an official audit failure also
+preserves its downloaded small-evidence scratch. Do not paste raw logs or
+remote locators into chat. Return the exact bounded template in `HANDOFF.md`.
+Missing runtime B reset, cached-token-zero, TiTO, shape, coordinate, or
+`file:line` fields must be `NONE`. Do not launch e0w6 or edit numerical code
+from this operation.
+
+Phase contract:
+`phases/phase-e0z-e0w5-readonly-recovery.md`.
+
 This runbook is for the remote execution agent. The agent runs checked-in
 commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: prepare published E0w source, then separately approve DP8xTP8 debug
+## Superseded by E0z: prepare published E0w source, then separately approve DP8xTP8 debug
 
 Do not rerun one-host labels `e0w1` through `e0w4`. Do not launch M15 full.
 E0w has passed the bounded four-chip v5p gate on its pre-rebase source, and

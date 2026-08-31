@@ -2,12 +2,17 @@
 # Download and audit only small three-round M15 verdict artifacts.
 set -euo pipefail
 
-render_dir="${1:?usage: run_m15_multiround_gcs_return.sh <render-dir> <output-dir> [scratch-parent]}"
-output="${2:?usage: run_m15_multiround_gcs_return.sh <render-dir> <output-dir> [scratch-parent]}"
+render_dir="${1:?usage: run_m15_multiround_gcs_return.sh <render-dir> <output-dir> [scratch-parent] [preserve-failures:0|1]}"
+output="${2:?usage: run_m15_multiround_gcs_return.sh <render-dir> <output-dir> [scratch-parent] [preserve-failures:0|1]}"
 scratch_parent="${3:-/tmp}"
+preserve_failures="${4:-0}"
 test -d "$render_dir"
 test -d "$scratch_parent"
 test ! -e "$output"
+case "$preserve_failures" in
+  0|1) ;;
+  *) echo "[M15.MULTIROUND] REFUSING: preserve-failures must be 0 or 1" >&2; exit 2 ;;
+esac
 
 if command -v gcloud >/dev/null 2>&1; then
   gcs_cp() { gcloud storage cp "$1" "$2" >/dev/null; }
@@ -21,7 +26,17 @@ else
 fi
 
 scratch="$(mktemp -d -p "$scratch_parent" m15-multiround.XXXXXX)"
-trap 'rm -rf -- "$scratch"' EXIT
+cleanup() {
+  local exit_code="$1"
+  trap - EXIT
+  if [ "$exit_code" -ne 0 ] && [ "$preserve_failures" = "1" ]; then
+    echo "[M15.MULTIROUND] FAILURE_PRESERVED scratch=$scratch" >&2
+  else
+    rm -rf -- "$scratch"
+  fi
+  exit "$exit_code"
+}
+trap 'cleanup $?' EXIT
 
 mapfile -t arm_rows < <(python3 - "$render_dir" <<'PY'
 import pathlib
