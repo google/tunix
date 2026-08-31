@@ -49,7 +49,6 @@ export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
-export WEIGHT_SYNC_USE_FFI=${WEIGHT_SYNC_USE_FFI:-auto}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -237,7 +236,6 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --weight_sync_use_ffi=${WEIGHT_SYNC_USE_FFI} \
         ${maxtext_args} \
         ${DEBUG:+--debug} \
     " \

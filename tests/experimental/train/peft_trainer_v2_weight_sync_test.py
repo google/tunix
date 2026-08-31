@@ -69,7 +69,6 @@ class WeightSyncStagingTest(absltest.TestCase):
         _target_state=None,
         _sampler_type="inprocess_vllm",
         _weight_sync_worker=None,
-        _weight_sync_worker_factory=None,
     )
 
   def test_prepare_stages_and_returns_metadata(self):
@@ -95,15 +94,6 @@ class WeightSyncStagingTest(absltest.TestCase):
       with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy,cpu"}):
         peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
     self.assertTrue(fake._weight_sync_worker.use_ffi)
-
-  def test_prepare_uses_the_injected_factory(self):
-    fake = self._fake_trainer()
-    fake._weight_sync_worker_factory = lambda: _FakeSynchronizer(
-        "trainer", use_ffi=False
-    )
-    with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy,cpu"}):
-      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
-    self.assertFalse(fake._weight_sync_worker.use_ffi)
 
   def test_release_without_prepare_is_a_no_op(self):
     fake = self._fake_trainer()

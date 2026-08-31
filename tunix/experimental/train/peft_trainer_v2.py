@@ -430,7 +430,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       metrics_logger: MetricsLogger | None = None,
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
-      weight_sync_worker_factory: Callable[[], Any] | None = None,
       target_state: Any = None,
       sampler_type: str = "inprocess_vllm",
   ):
@@ -527,7 +526,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._target_state = target_state
     self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
-    self._weight_sync_worker_factory = weight_sync_worker_factory
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -1219,10 +1217,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
     del sync_request, kwargs
-    if self._weight_sync_worker is None:
-      factory = self._weight_sync_worker_factory or _default_weight_sync_worker
-      self._weight_sync_worker = factory()
     worker = self._weight_sync_worker
+    if worker is None:
+      worker = _default_weight_sync_worker()
+      self._weight_sync_worker = worker
 
     backend = (
         "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
