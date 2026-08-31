@@ -70,9 +70,12 @@ class RolloutManager:
       )
 
       if sampler_type == "vllm":
-        raise NotImplementedError(
-            "vLLM sampler is not implemented yet. Use 'inprocess_vllm' or"
-            " 'vanilla'."
+        from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+
+        sampler = vllm_sampler_adapter.VllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+            server_id="vllm_sampler",
+            model_name=getattr(config, "rollout_vllm_model_version", ""),
+            weight_sync_mode=weight_sync_mode,
         )
       elif "inprocess_vllm" in sampler_type:
         from tunix.experimental.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top

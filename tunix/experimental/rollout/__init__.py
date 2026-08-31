@@ -21,5 +21,6 @@ from tunix.experimental.rollout.collector import TrajectoryCollectorEngine
 from tunix.experimental.rollout.manager import RolloutManager
 from tunix.experimental.rollout.sampler import Sampler
 from tunix.experimental.rollout.vanilla_sampler_adapter import VanillaSamplerAdapter
+from tunix.experimental.rollout.vllm_sampler_adapter import VllmSamplerAdapter
 from tunix.experimental.trajectory.trajectory import Trajectory
 from tunix.experimental.trajectory.trajectory import TrajectoryError
