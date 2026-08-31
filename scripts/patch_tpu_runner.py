@@ -66,9 +66,9 @@ if os.path.exists(nnx_path):
         nnx_code = f.read()
 
     # Add top-level import
-    import_target_nnx = 'import numpy as np'
-    import_replacement_nnx = 'import numpy as np\nimport jax._src.random.core as rc'
-    if import_target_nnx in nnx_code and 'import jax._src.random.core as rc' not in nnx_code:
+    import_target_nnx = 'import jax.numpy as jnp'
+    import_replacement_nnx = 'import jax.numpy as jnp\nimport numpy as np\nimport jax._src.random.core as rc'
+    if import_target_nnx in nnx_code and 'import numpy as np' not in nnx_code:
         nnx_code = nnx_code.replace(import_target_nnx, import_replacement_nnx, 1)
 
     t_rng = '  if rng_key is None:\n    rng_key = jax.random.PRNGKey(config.init_weights_seed)'
