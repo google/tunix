@@ -10,7 +10,7 @@
 set -e
 
 INSTALL_DEEPSWE_DEPS=false
-TPU_SYNC_WHEEL_GCS_PATH=${TPU_SYNC_WHEEL_GCS_PATH:-}
+TPU_SYNC_WHEEL_GCS_PATH=${TPU_SYNC_WHEEL_GCS_PATH:-gs://cloud-tpu-inference-test-datenglin/tpu_raiden_jax-0.0.1+git9a9fb93-cp312-cp312-manylinux_2_31_x86_64.whl}
 TPU_SYNC_WHEEL_LOCAL_DIR=.docker/tpu_sync
 
 while [[ "$#" -gt 0 ]]; do

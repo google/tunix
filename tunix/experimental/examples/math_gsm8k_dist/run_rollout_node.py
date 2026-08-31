@@ -406,7 +406,7 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
-  if context and args.sampler != "vllm":
+  if context and args.sampler == "vanilla":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
