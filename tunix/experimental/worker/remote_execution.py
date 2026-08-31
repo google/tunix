@@ -611,12 +611,17 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
 
   def _get_rpc(self) -> Any:
-    if self._rpc is None:
+    # grpc.aio channels bind to the event loop they were created on; callers
+    # like SyncRLProgram drive each phase through a fresh asyncio.run(), so a
+    # cached channel from an earlier (now closed) loop must be rebuilt.
+    loop = asyncio.get_running_loop()
+    if self._rpc is None or getattr(self, "_rpc_loop", None) is not loop:
       assert _grpc_aio_lib is not None
       self._channel = _grpc_aio_lib.insecure_channel(
           self._host_port, options=_grpc_options()
       )
       self._rpc = self._make_rpc(self._channel)
+      self._rpc_loop = loop
     return self._rpc
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
