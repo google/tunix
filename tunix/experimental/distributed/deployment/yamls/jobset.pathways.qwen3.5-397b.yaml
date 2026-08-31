@@ -72,6 +72,7 @@ spec:
                     resources:
                       requests:
                         storage: 400Gi
+            priorityClassName: high-priority
             containers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
@@ -248,6 +249,7 @@ spec:
                       operator: NotIn
                       values:
                       - ${JOBSET_NAME}
+            priorityClassName: high-priority
             containers:
             - name: pathways-worker
               image: ${SERVER_IMAGE}

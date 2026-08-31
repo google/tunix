@@ -29,8 +29,9 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 
-from tunix.experimental.examples.math_gsm8k_dist import gsm8k
-from tunix.experimental.examples.math_gsm8k_dist import models
+from examples.deepswe import swe_env
+from examples.deepswe import swe_agent
+from tunix.experimental.examples.deepswe_dist import models
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.experimental.rollout import vllm_sampler_adapter
 from tunix.experimental.rollout import vanilla_sampler_adapter
@@ -178,8 +179,8 @@ def _create_vanilla_worker(args, tokenizer):
       temperature=1.0,
       top_p=1.0,
       return_logprobs=True,
-      env_name=gsm8k.GSM8K_ENV_NAME,
-      agent_name=gsm8k.GSM8K_AGENT_NAME,
+      env_name="DeepSWE",
+      agent_name="DeepSWEAgent",
   )
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
@@ -274,8 +275,8 @@ def _create_vllm_worker(args, tokenizer):
         top_p=1.0,
         return_logprobs=True,
         rollout_vllm_model_version=vllm_model,
-        env_name=gsm8k.GSM8K_ENV_NAME,
-        agent_name=gsm8k.GSM8K_AGENT_NAME,
+        env_name="DeepSWE",
+        agent_name="DeepSWEAgent",
     )
   else:
     logging.info("Creating vLLM mapping config...")
@@ -324,8 +325,8 @@ def _create_vllm_worker(args, tokenizer):
         top_p=1.0,
         return_logprobs=True,
         rollout_vllm_model_version=vllm_model,
-        env_name=gsm8k.GSM8K_ENV_NAME,
-        agent_name=gsm8k.GSM8K_AGENT_NAME,
+        env_name="DeepSWE",
+        agent_name="DeepSWEAgent",
     )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)

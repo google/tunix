@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU control-plane for a minimal Orchestrator V2 GSM8K GRPO demo.
+"""CPU control-plane for a minimal Orchestrator V2 DeepSWE GRPO demo.
 
 The TPU worker processes host the expensive pieces:
   1. a TrainerWorker backed by experimental PeftTrainer V2,
@@ -45,10 +45,6 @@ import jax  # pylint: disable=g-import-not-at-top
 import numpy as np  # pylint: disable=g-import-not-at-top
 import tensorflow_datasets as tfds  # pylint: disable=g-import-not-at-top
 
-try:
-  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
-except (ImportError, ModuleNotFoundError):
-  pass
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -57,14 +53,14 @@ REPO_ROOT = os.path.abspath(
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
+from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
+from tunix.experimental.examples.deepswe_dist.deepswe_rl_program import DeepsweRLProgram  # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
-from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
-
 
 def _parse_weight_sync_mode(value: str) -> str:
   mode = value.lower()
@@ -76,10 +72,9 @@ def _parse_weight_sync_mode(value: str) -> str:
     )
   return mode
 
-
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-      description="Orchestrator V2 Qwen3 GSM8K GRPO demo."
+      description="Orchestrator V2 Qwen3 DeepSWE GRPO demo."
   )
   parser.add_argument(
       "--batch_size",
@@ -103,7 +98,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=0.0,
       help=(
           "KL coefficient. Set to 0.04 with a reference inference worker to "
-          "match the Qwen3 GSM8K recipe."
+          "match the Qwen3 DeepSWE recipe."
       ),
   )
   parser.add_argument("--epsilon", type=float, default=0.2)
@@ -133,13 +128,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="env",
       help=(
           "env uses rollout environment rewards; exact recomputes the same "
-          "GSM8K reward in the orchestrator from returned trajectory text."
+          "DeepSWE reward in the orchestrator from returned trajectory text."
       ),
   )
   parser.add_argument(
       "--tfds_data_dir",
       type=str,
-      default=os.getenv("TFDS_DATA_DIR", "/tmp/gsm8k_data"),
+      default=os.getenv("TFDS_DATA_DIR", "/tmp/deepswe_data"),
   )
   parser.add_argument("--tfds_split", type=str, default="train")
   parser.add_argument("--seed", type=int, default=42)
@@ -168,12 +163,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   return parser.parse_args(argv)
 
-
 def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
   return remote_execution.ActorHandle.from_address(
       f"grpc://{addr}", rpc_timeout_s=timeout_s
   )
-
 
 def _normalize_example_value(value: Any) -> Any:
   if isinstance(value, np.ndarray):
@@ -187,79 +180,9 @@ def _normalize_example_value(value: Any) -> Any:
     return value.decode("utf-8")
   return value
 
-
 def _as_text(value: Any) -> str:
   normalized = _normalize_example_value(value)
   return normalized if isinstance(normalized, str) else str(normalized)
-
-
-def _build_gsm8k_dataset(args: argparse.Namespace) -> grain.MapDataset:
-  """Loads the real GSM8K split and maps examples to prompt/answer records."""
-  logging.info(
-      "Loading GSM8K TFDS split=%s data_dir=%s shuffle=%s seed=%d.",
-      args.tfds_split,
-      args.tfds_data_dir,
-      args.shuffle,
-      args.seed,
-  )
-  data = tfds.data_source(
-      "gsm8k",
-      split=args.tfds_split,
-      data_dir=args.tfds_data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
-  dataset = grain.MapDataset.source(data)
-  if args.shuffle:
-    dataset = dataset.shuffle(seed=args.seed)
-  logging.info("GSM8K dataset loaded successfully: %d examples.", len(dataset))
-  return dataset.map(
-      lambda x: {
-          "prompts": gsm8k.build_prompt(_as_text(x["question"])),
-          "question": _as_text(x["question"]),
-          "answer": gsm8k.extract_hash_answer(_as_text(x["answer"])),
-      }
-  )
-
-
-def _make_reward_fn(mode: str, num_generations: int, debug: bool = False):
-  """Creates the optional orchestrator-side reward function."""
-  if mode == "env":
-    return None
-
-  def reward_fn(item: datatypes.TrajectoryItem) -> float:
-    metadata = dict(item.metadata or {})
-    text = str(metadata.get("text", ""))
-    
-    reward, _ = gsm8k.score_gsm8k_completion(
-        text, metadata.get("answer", metadata.get("gold_answer"))
-    )
-
-    if debug:
-      prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
-      gold_answer = metadata.get("gold_answer")
-      pair_index = int(metadata.get("pair_index", getattr(item, "pair_index", 0)))
-      
-      logging.debug(
-          "[Orchestrator] Sampler response for %s (generation %d/%d):\n"
-          "--- [Sampled Response] ---\n%s\n--- [End Response] ---\n"
-          "Gold Answer: %s | Extracted Answer: %s",
-          prompt_id,
-          pair_index + 1,
-          num_generations,
-          text,
-          gold_answer,
-          gsm8k.extract_boxed_answer(text),
-      )
-
-    if mode == "synthetic":
-      pair_index = int(metadata.get("pair_index", getattr(item, "pair_index", 0)))
-      return pair_index / max(num_generations - 1, 1)
-
-    return reward
-
-  return reward_fn
-
 
 def _grpo_model_input(
     train_example: Any,
@@ -276,7 +199,6 @@ def _grpo_model_input(
       "eos_id": eos_id,
   }
 
-
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo = algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
@@ -288,14 +210,12 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   )
   return algo
 
-
 def _get_config_attr(config: Any, key: str, default: Any = None) -> Any:
   if config is None:
     return default
   if isinstance(config, dict):
     return config.get(key, default)
   return getattr(config, key, default)
-
 
 def _build_grpo_config(args: argparse.Namespace) -> Any:
   return SimpleNamespace(
@@ -307,7 +227,6 @@ def _build_grpo_config(args: argparse.Namespace) -> Any:
       kl_loss_mode="mse_kl",
       kl_clamp_value=None,
   )
-
 
 def _configure_trainer_loss(
     trainer_handle: remote_execution.ActorHandle,
@@ -422,9 +341,8 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handles, mode: str):
   else:
     raise ValueError(f"Unknown weight sync mode: {mode!r}")
   return weight_sync_coordinator.WeightSyncCoordinator(
-      registry, handler, controller_id="gsm8k-demo"
+      registry, handler, controller_id="deepswe-demo"
   )
-
 
 def _register_workers(
     args: argparse.Namespace,
@@ -464,68 +382,6 @@ def _register_workers(
     )
 
 
-def _build_prompt_item(
-    *,
-    example: dict[str, Any],
-    prompt_idx: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
-) -> dict[str, Any]:
-  prompt = _as_text(example["prompts"])
-  question = _as_text(example["question"])
-  answer = _normalize_example_value(example["answer"])
-  prompt_id = f"prompt_{prompt_idx}"
-  return {
-      "prompt": prompt,
-      "prompt_id": prompt_id,
-      "group_id": prompt_id,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
-      "metadata": {
-          "answer": answer,
-          "gold_answer": answer,
-          "question": question,
-          "prefix_hash": prompt_id,
-          "env_config": {
-              "prompt": prompt,
-              "prompts": prompt,
-              "question": question,
-              "answer": answer,
-              "gold_answer": answer,
-              "group_id": prompt_id,
-              "max_steps": 1,
-          },
-      },
-  }
-
-
-def _iter_prompt_items(
-    args: argparse.Namespace,
-) -> Iterator[dict[str, Any]]:
-  top_k = None if args.top_k < 0 else args.top_k
-  dataset = _build_gsm8k_dataset(args)
-  dataset_size = len(dataset)
-  if dataset_size == 0:
-    raise ValueError("GSM8K dataset is empty.")
-  for prompt_idx in range(args.max_steps * args.batch_size):
-    example = dataset[prompt_idx % dataset_size]
-    yield _build_prompt_item(
-        example=example,
-        prompt_idx=prompt_idx,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
-    )
-
-
 def main(argv: list[str], context: Any = None) -> None:
   if context and context.ipc and context.ipc.discovery:
     pass
@@ -550,7 +406,7 @@ def main(argv: list[str], context: Any = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
-  logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
+  logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d (prompt groups), "
       "num_generations=%d (%d rollouts/step), max_steps=%d, "
@@ -574,7 +430,7 @@ def main(argv: list[str], context: Any = None) -> None:
       args.max_staleness,
   )
   logging.info(
-      "Dataset: GSM8K split=%s data_dir=%s reward_mode=%s.",
+      "Dataset: DeepSWE split=%s data_dir=%s reward_mode=%s.",
       args.tfds_split,
       args.tfds_data_dir,
       args.reward_mode,
@@ -594,6 +450,15 @@ def main(argv: list[str], context: Any = None) -> None:
       pad_id,
       eos_id,
   )
+
+  from examples.deepswe import deepswe_data
+  grain_dataset = deepswe_data.create_dataset(
+      dataset_name=args.tfds_data_dir or "R2E-Gym/R2E-Gym-V1",
+      dataset_split=args.tfds_split or "train",
+      seed=args.seed,
+  )
+  dataset = list(grain_dataset)
+  swe_env._init_global_fleet(tasks=dataset, max_concurrency=args.num_rollout_workers)
 
   trainer_addr_future = futures.Future()
   inference_addr_future = futures.Future()
@@ -704,31 +569,7 @@ def main(argv: list[str], context: Any = None) -> None:
   )
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
-  reward_fn = _make_reward_fn(args.reward_mode, num_generations=args.num_generations, debug=args.debug)
-  reward_fns = [reward_fn] if reward_fn is not None else []
-  program = rl_program.StandardRLProgram(
-      algo=algo,
-      dataset=_iter_prompt_items(args),
-      reward_fns=reward_fns,
-      assembler=batch_assembly.GRPOTrainExampleAssembler(
-          batch_size=args.train_micro_batch_size,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          pad_id=pad_id,
-      ),
-      max_staleness=args.max_staleness,
-      sync_weights=(args.weight_sync_mode != "none"),
-      on_step_begin=lambda step: logging.info(
-          ">>> Step %d starting | Policy Version: %d",
-          step,
-          step,
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< Step %d finished | Advanced to Policy Version: %d",
-          step,
-          step + 1,
-      ),
-  )
+  program = DeepsweRLProgram(dataset=iter(dataset), algo=algo, max_steps=args.max_steps)
 
   try:
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
@@ -767,7 +608,6 @@ def main(argv: list[str], context: Any = None) -> None:
     )
   else:
     logging.info("=== GRPO Training Finished (No step results) ===")
-
 
 if __name__ == "__main__":
   main(sys.argv[1:])

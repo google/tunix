@@ -255,7 +255,7 @@ class RemoteExecutionServer(abc.ABC):
     )
     response = await self.execute_request(request)
     if response.error_message:
-      logging.debug(
+      logging.error(
           "[RemoteExecutionServer] Task %s failed: %s\n%s",
           request.request_id,
           response.error_message,
@@ -534,6 +534,91 @@ class ActorHandle(abc.ABC):
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed result."""
     pass
+
+  def info(self) -> Any:
+    """Returns WorkerInfo for registry."""
+    if hasattr(self, "_info") and getattr(self, "_info") is not None:
+      return getattr(self, "_info")
+    return self.submit("info")
+
+  # Worker lifecycle protocol
+  def initialize(self) -> Any:
+    return self.submit("initialize")
+
+  def compile(self, dummy_data: Any = None) -> Any:
+    return self.submit("compile", dummy_data)
+
+  def start(self) -> Any:
+    return self.submit("start")
+
+  def stop(self) -> Any:
+    return self.submit("stop")
+
+  def pause(self) -> Any:
+    return self.submit("pause")
+
+  def resume(self) -> Any:
+    return self.submit("resume")
+
+  def heartbeat(self) -> Any:
+    return self.submit("heartbeat")
+
+  # WeightSyncSource protocol
+  async def prepare_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "prepare_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def release_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "release_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  # WeightSyncDestination protocol
+  async def bind_weight_sync(self, **kwargs: Any) -> Any:
+    return await self.asubmit("bind_weight_sync", **kwargs)
+
+  async def get_weight_sync_metadata(self, **kwargs: Any) -> Any:
+    return await self.asubmit("get_weight_sync_metadata", **kwargs)
+
+  async def pre_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "pre_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def post_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "post_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def abort_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "abort_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def get_weight_sync_status(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "get_weight_sync_status", sync_request=sync_request, **kwargs
+    )
 
 
 class RemoteActorHandle(ActorHandle):

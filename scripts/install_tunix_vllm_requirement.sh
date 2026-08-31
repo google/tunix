@@ -27,6 +27,7 @@ fi
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REQ_FILE=${REQ_FILE:-"${ROOT_DIR}/requirements/requirements.txt"}
+MAXTEXT_REQ_FILE=${MAXTEXT_REQ_FILE:-"${ROOT_DIR}/requirements/maxtext_requirements.txt"}
 SPECIAL_REQ_FILE=${SPECIAL_REQ_FILE:-"${ROOT_DIR}/requirements/special_requirements.txt"}
 
 python3 -m ensurepip --default-pip
@@ -37,6 +38,13 @@ pip install aiohttp==3.12.15
 # Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
 pip install keyring keyrings.google-artifactregistry-auth
 
+if [ -d "/app/raiden_wheels" ] && compgen -G "/app/raiden_wheels/*.whl" > /dev/null; then
+  pip install --force-reinstall --no-deps /app/raiden_wheels/*.whl
+else
+  pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
+fi
+
 VLLM_TARGET_DEVICE="tpu" uv pip install -r "${REQ_FILE}" --torch-backend=cpu
 uv pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall --torch-backend=cpu
+uv pip install -r "${MAXTEXT_REQ_FILE}" --torch-backend=cpu
 uv pip install --no-deps "qwix>=0.1.6"

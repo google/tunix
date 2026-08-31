@@ -16,13 +16,13 @@
 
 import asyncio
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
-from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
@@ -49,63 +49,32 @@ class RolloutManager:
       chat_parser: Any = None,
       drain_timeout_s: float = 300.0,
   ):
-    """Initializes the RolloutManager.
-
-    Args:
-      config: RolloutConfig configuration options.
-      sampler: Optional pre-constructed Sampler instance.
-      env_pool: Environment pool for rollout execution.
-      agent_factory: Factory callable producing agent instances.
-      max_concurrency: Maximum number of concurrent episodes.
-      tokenizer: Tokenizer for prompt/response encoding.
-      chat_parser: Chat parser for conversation templating.
-      drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
-        before pausing the stragglers, roughly one worst-case trajectory.
-    """
+    """drain_timeout_s: how long pre_weight_sync waits for in-flight
+    trajectories before pausing the stragglers, roughly one worst-case
+    trajectory."""
     self.config = config
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
-      weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
-      )
-
       if sampler_type == "vllm":
         raise NotImplementedError(
             "vLLM sampler is not implemented yet. Use 'inprocess_vllm' or"
             " 'vanilla'."
         )
-      elif "inprocess_vllm" in sampler_type:
+      elif sampler_type == "inprocess_vllm":
         from tunix.experimental.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
-
-        raiden_delegate = None
-        if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
-          from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-          raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-          )
 
         sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
             server_id="inprocess_vllm_sampler",
-            tokenizer=tokenizer,
-            config=config,
-            raiden_sync_delegate=raiden_delegate,
-            weight_sync_mode=weight_sync_mode,
         )
-      elif "vanilla" in sampler_type:
-        raiden_delegate = None
-        if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
-          from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-          raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-          )
-
-        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
+      elif sampler_type == "vanilla":
+        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
             server_id="vanilla_sampler",
-            tokenizer=tokenizer,
-            config=config,
-            raiden_sync_delegate=raiden_delegate,
+        )
+      elif sampler_type == "raiden_vanilla":
+        from tunix.experimental.rollout import vanilla_sampler_adapter  # pylint: disable=g-import-not-at-top
+
+        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+            server_id="raiden_vanilla_sampler",
         )
       else:
         raise ValueError(f"Unknown sampler_type: {sampler_type}")
@@ -330,6 +299,17 @@ class RolloutManager:
     res = None
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    self.resume_all()
+    self._traffic.reopen()
+    return res
+
+  async def abort_weight_sync(
+      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Discards the round, delegates abort to sampler, and resumes collectors."""
+    res = None
+    if self.sampler and hasattr(self.sampler, "abort_weight_sync"):
+      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
     return res
