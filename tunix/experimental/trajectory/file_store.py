@@ -114,24 +114,38 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     return self.get_trajectory_dir(trajectory_id) / step_filename
 
   def get_trajectories_metadata(
-      self,
+      self, trajectory_ids: list[str] | None = None
   ) -> list[trajectory_lib.TrajectoryMetadata]:
-    """Retrieves metadata for each trajectory in the run."""
+    """Retrieves metadata for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metadata for these IDs is returned. If None, metadata
+        for all trajectories in the run is returned.
+
+    Returns:
+      A list of TrajectoryMetadata objects for the requested trajectories.
+
+    Raises:
+      store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
+        not exist.
+    """
     metas: list[trajectory_lib.TrajectoryMetadata] = []
-    if not self.root_dir.exists():
-      return metas
+    if trajectory_ids is None:
+      if not self.root_dir.exists():
+        return metas
+      trajectory_ids = []
+      for entry in self.root_dir.iterdir():
+        if not entry.is_dir():
+          continue
+        if not (match := _TRAJECTORY_DIR_REGEX.match(entry.name)):
+          continue
+        trajectory_ids.append(match.group("trajectory_id"))
 
-    for entry in self.root_dir.iterdir():
-      if not entry.is_dir():
-        continue
-      if not (match := _TRAJECTORY_DIR_REGEX.match(entry.name)):
-        continue
-
-      traj_id = match.group("trajectory_id")
+    for traj_id in trajectory_ids:
       meta_path = self.get_trajectory_metadata_path(traj_id)
       if not meta_path.exists():
-        raise store.TrajectoryMetadataNotFoundError(entry.name)
-
+        raise store.TrajectoryMetadataNotFoundError(traj_id)
       meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
           meta_path.read_text()
       )

@@ -1,7 +1,6 @@
 """Protocols defining Trajectory Store interfaces."""
 
-import typing
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
@@ -31,17 +30,26 @@ class TrajectoryMetadataNotFoundError(KeyError):
 # ==============================================================================
 
 
-@typing.runtime_checkable
+@runtime_checkable
 class TrajectoryReader(Protocol):
   """Structural protocol defining read-only Trajectory Store operations."""
 
   def get_trajectories_metadata(
-      self,
+      self, trajectory_ids: list[str] | None = None
   ) -> list[trajectory_lib.TrajectoryMetadata]:
-    """Retrieves metadata for each trajectory in the run.
+    """Retrieves metadata for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metadata for these IDs is returned. If None, metadata
+        for all trajectories in the run is returned.
 
     Returns:
-      A list of TrajectoryMetadata objects for all trajectories in this run.
+      A list of TrajectoryMetadata objects for the requested trajectories.
+
+    Raises:
+      TrajectoryMetadataNotFoundError: If any requested trajectory ID does not
+        exist.
     """
     ...
 
@@ -62,7 +70,7 @@ class TrajectoryReader(Protocol):
     ...
 
 
-@typing.runtime_checkable
+@runtime_checkable
 class TrajectoryWriter(Protocol):
   """Structural protocol defining write Trajectory Store operations."""
 
