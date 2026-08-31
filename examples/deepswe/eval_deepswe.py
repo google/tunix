@@ -532,52 +532,110 @@ logger.info(
     total_mesh_devices,
 )
 
-# Model Instantiation
-if MODEL_SOURCE == "maxtext":
-  logger.info(
-      "Loading MaxText model %s from %s (scan_layers=%s)...",
-      MODEL_VERSION,
-      MODEL_PATH,
-      SCAN_LAYERS,
-  )
-  model, _ = AutoModel.from_pretrained(
-      model_id=MODEL_VERSION,
-      mesh=mesh,
-      model_source=ModelSource.MAXTEXT,
-      model_path=MODEL_PATH,
-      enable_checkpointing=True,
-      allow_split_physical_axes=True,
-      scan_layers=SCAN_LAYERS,
-      checkpoint_storage_concurrent_gb=48,
-  )
-elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
-  model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
-  logger.info("Loading model weights from %s ...", MODEL_PATH)
-  model = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, model_config, mesh, dtype=jnp.float32
-  )
-elif MODEL_VERSION in ("Qwen/Qwen3-32B", "Qwen3-32B"):
-  model_config = model_lib.ModelConfig.qwen3_32b()
-  logger.info("Loading model weights from %s ...", MODEL_PATH)
-  model = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, model_config, mesh, dtype=jnp.float32
-  )
-else:
-  logger.info("Loading model weights via AutoModel for %s ...", MODEL_VERSION)
-  model, _ = AutoModel.from_pretrained(
-      model_id=MODEL_VERSION,
-      mesh=mesh,
-      model_source=ModelSource.HUGGINGFACE,
-      model_path=MODEL_PATH,
-  )
-
-sft_utils.show_hbm_usage()
-
 # ========================== Sampler ==========================
 
 logger.info("Creating sampler with engine=%s ...", ROLLOUT_ENGINE)
 
-if ROLLOUT_ENGINE == "vanilla":
+if ROLLOUT_ENGINE == "vllm":
+  from flax import nnx
+  from tunix.generate import mappings
+  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+
+  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+
+  additional_config = None
+  if MODEL_SOURCE == "maxtext":
+    additional_config = {
+        "enable_continue_decode": True,
+        "maxtext_config": {
+            "model_name": MODEL_VERSION.lower().split("/")[-1],
+            "model_call_mode": "inference",
+            "load_parameters_path": MODEL_PATH,
+            "scan_layers": SCAN_LAYERS,
+            "enable_dp_attention": False,
+            "allow_split_physical_axes": True,
+            "log_config": False,
+            "weight_dtype": "bfloat16",
+            "prefuse_moe_weights": True,
+            "attention": "vllm_rpa",
+            "checkpoint_storage_concurrent_gb": 8,
+        }
+    }
+
+  mapping_config = mappings.MappingConfig()
+  engine_kwargs = {
+      "model": tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH,
+      "max_model_len": MAX_MODEL_LEN,
+      "max_num_seqs": VLLM_MAX_NUM_SEQS,
+      "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      "enable_prefix_caching": True,
+      "kv_cache_metrics": True,
+      "disable_log_stats": False,
+      "tokenizer": tokenizer_path,
+  }
+  if MODEL_SOURCE == "maxtext":
+    engine_kwargs["hf_overrides"] = {
+        "architectures": ["MaxTextForCausalLM"]
+    }
+  vllm_config = VllmConfig(
+      mesh=mesh,
+      hbm_utilization=VLLM_HBM_UTILIZATION,
+      init_with_random_weights=False,
+      tpu_backend_type="jax",
+      server_mode=VLLM_SERVER_MODE,
+      tensor_parallel_size=mesh.shape["tp"],
+      data_parallel_size=mesh.shape["fsdp"],
+      mapping_config=mapping_config,
+      additional_config=additional_config,
+      reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE if VLLM_RESHARD_CHUNK_SIZE > 0 else None,
+      engine_kwargs=engine_kwargs,
+  )
+
+  logger.info("Initializing VllmSampler directly with checkpoint from %s ...", MODEL_PATH)
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+  logger.info("VllmSampler successfully initialized directly with model weights.")
+
+elif ROLLOUT_ENGINE == "vanilla":
+  if MODEL_SOURCE == "maxtext":
+    logger.info(
+        "Loading MaxText model %s from %s (scan_layers=%s)...",
+        MODEL_VERSION,
+        MODEL_PATH,
+        SCAN_LAYERS,
+    )
+    model, _ = AutoModel.from_pretrained(
+        model_id=MODEL_VERSION,
+        mesh=mesh,
+        model_source=ModelSource.MAXTEXT,
+        model_path=MODEL_PATH,
+        enable_checkpointing=True,
+        allow_split_physical_axes=True,
+        scan_layers=SCAN_LAYERS,
+        checkpoint_storage_concurrent_gb=48,
+    )
+  elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
+    model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
+    logger.info("Loading model weights from %s ...", MODEL_PATH)
+    model = params_lib.create_model_from_safe_tensors(
+        MODEL_PATH, model_config, mesh, dtype=jnp.float32
+    )
+  elif MODEL_VERSION in ("Qwen/Qwen3-32B", "Qwen3-32B"):
+    model_config = model_lib.ModelConfig.qwen3_32b()
+    logger.info("Loading model weights from %s ...", MODEL_PATH)
+    model = params_lib.create_model_from_safe_tensors(
+        MODEL_PATH, model_config, mesh, dtype=jnp.float32
+    )
+  else:
+    logger.info("Loading model weights via AutoModel for %s ...", MODEL_VERSION)
+    model, _ = AutoModel.from_pretrained(
+        model_id=MODEL_VERSION,
+        mesh=mesh,
+        model_source=ModelSource.HUGGINGFACE,
+        model_path=MODEL_PATH,
+    )
+
+  sft_utils.show_hbm_usage()
+
   from tunix.generate import sampler as sampler_lib
 
   sampler = sampler_lib.Sampler(
@@ -596,78 +654,6 @@ if ROLLOUT_ENGINE == "vanilla":
           or 128,
       ),
   )
-
-elif ROLLOUT_ENGINE == "vllm":
-  from flax import nnx
-  from tunix.generate import mappings
-  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
-
-  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-
-  additional_config = None
-  if MODEL_SOURCE == "maxtext":
-    additional_config = {
-        "enable_continue_decode": True,
-        "maxtext_config": {
-            "model_name": MODEL_VERSION.lower().split("/")[-1],
-            "model_call_mode": "inference",
-            "enable_dp_attention": False,
-            "allow_split_physical_axes": True,
-            "log_config": False,
-            "weight_dtype": "bfloat16",
-            "prefuse_moe_weights": True,
-            "attention": "vllm_rpa",
-        }
-    }
-    if hasattr(model, "use_no_op_mappings"):
-      model.use_no_op_mappings = True
-      logger.info("Set use_no_op_mappings=True on model.")
-
-  mapping_config = mappings.MappingConfig.build(
-      mapping_obj=None,
-      model=model,
-      backend="vllm_jax",
-  )
-  engine_kwargs = {
-      "model": tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH,
-      "max_model_len": MAX_MODEL_LEN,
-      "max_num_seqs": VLLM_MAX_NUM_SEQS,
-      "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      "enable_prefix_caching": True,
-      "kv_cache_metrics": True,
-      "disable_log_stats": False,
-      "tokenizer": tokenizer_path,
-  }
-  if MODEL_SOURCE == "maxtext":
-    engine_kwargs["hf_overrides"] = {
-        "architectures": ["MaxTextForCausalLM"]
-    }
-  vllm_config = VllmConfig(
-      mesh=mesh,
-      hbm_utilization=VLLM_HBM_UTILIZATION,
-      init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
-      tpu_backend_type="jax",
-      server_mode=VLLM_SERVER_MODE,
-      tensor_parallel_size=mesh.shape["tp"],
-      data_parallel_size=mesh.shape["fsdp"],
-      mapping_config=mapping_config,
-      additional_config=additional_config,
-      reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE if VLLM_RESHARD_CHUNK_SIZE > 0 else None,
-      engine_kwargs=engine_kwargs,
-  )
-  model_state = nnx.state(model)
-  del model
-  import gc
-  gc.collect()
-  jax.clear_caches()
-  logger.info("Freed initial model before creating vLLM engine.")
-
-  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-  sampler.load_checkpoint(model_state)
-  del model_state
-  gc.collect()
-  jax.clear_caches()
-  logger.info("Synced model weights to vLLM engine and freed model state.")
 
 elif ROLLOUT_ENGINE == "sglang_jax":
   from flax import nnx
