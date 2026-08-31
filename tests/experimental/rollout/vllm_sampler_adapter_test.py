@@ -244,6 +244,40 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler_adapter.sample(None))
 
+  def test_incomplete_sampler_fails_at_init(self):
+    """Raiden-enabled adapters reject samplers missing required hooks."""
+    incomplete = mock.AsyncMock(spec=["start", "stop", "sample"])
+    with self.assertRaises(RuntimeError) as ctx:
+      vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="vllm_slice_01", sampler_instance=incomplete
+      )
+    message = str(ctx.exception)
+    for name in vllm_sampler_adapter._REQUIRED_RAIDEN_METHODS:  # pylint: disable=protected-access
+      self.assertIn(name, message)
+
+  def test_incomplete_sampler_allowed_when_raiden_disabled(self):
+    """The protocol check only applies when Raiden weight sync is enabled."""
+    incomplete = mock.AsyncMock(spec=["start", "stop", "sample"])
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_01",
+        sampler_instance=incomplete,
+        weight_sync_mode="none",
+    )
+    self.assertFalse(adapter.enable_raiden)
+
+  def test_weight_sync_apis_fail_when_uninitialized(self):
+    """Weight sync entry points fail instead of silently initializing."""
+    uninit = vllm_sampler_adapter.VllmSamplerAdapter(server_id="vllm_slice_01")
+    for coro in (
+        uninit.bind_weight_sync(),
+        uninit.pre_weight_sync(None),
+        uninit.weight_sync(None),
+        uninit.post_weight_sync(None),
+        uninit.abort_weight_sync(None),
+    ):
+      with self.assertRaises(RuntimeError):
+        asyncio.run(coro)
+
 
 if __name__ == "__main__":
   absltest.main()

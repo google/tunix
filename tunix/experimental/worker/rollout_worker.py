@@ -347,7 +347,7 @@ class RolloutWorker(abstract_worker.Worker):
     if prompt_token_arr.size == 0:
       raise RuntimeError(
           "Sampler response is missing prompt_token_ids for "
-          f"{request.request_id or request.traj_id}."
+          f"request_id={request.request_id!r} traj_id={request.traj_id!r}."
       )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
@@ -438,25 +438,6 @@ class RolloutWorker(abstract_worker.Worker):
         and all(isinstance(req, str) for req in requests)
     ):
       return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
-
-    req_list = (
-        [requests] if not isinstance(requests, (list, tuple)) else list(requests)
-    )
-    env_name = getattr(self.config, "env_name", "")
-    if (
-        not env_name
-        and self.manager.env_pool is None
-        and self.manager.agent_factory is None
-    ):
-      res = await self._generate_rollout_requests_direct(
-          req_list, **generation_kwargs
-      )
-      if on_complete is not None:
-        for item in res:
-          on_complete(item)
-      if not isinstance(requests, (list, tuple)):
-        return res[0] if res else None
-      return res
 
     cb = None
     if on_complete is not None:
