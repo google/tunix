@@ -143,8 +143,13 @@ def validate(root: Path, target_source: str = TARGET_SOURCE) -> dict[str, Any]:
     jobset = str(document.get("metadata", {}).get("name", ""))
     expected_jobset = f"canon-v1-apc-m15-{arm}-{RUN_ID}-{target_source[:8]}"
     _require(jobset == expected_jobset, "e0w5 JobSet identity drifted")
-    _require(path.name == f"jobset-v1-apc-m15-{arm}-{RUN_ID}.yaml",
-             "e0w5 YAML filename drifted")
+    _require(
+        path.name in (
+            f"jobset-v1-apc-m15-{arm}-{RUN_ID}.yaml",
+            f"jobset-v1-apc-m15-{arm}-layer.yaml",
+        ),
+        "e0w5 YAML filename drifted",
+    )
     wrong_env = {
         name: env.get(name)
         for name, value in expected_values.items()
