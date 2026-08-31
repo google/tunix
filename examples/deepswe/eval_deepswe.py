@@ -558,7 +558,7 @@ if ROLLOUT_ENGINE == "vllm":
             "weight_dtype": "bfloat16",
             "prefuse_moe_weights": True,
             "attention": "vllm_rpa",
-            "checkpoint_storage_concurrent_gb": 8,
+            "checkpoint_storage_concurrent_gb": 32,
         }
     }
 
