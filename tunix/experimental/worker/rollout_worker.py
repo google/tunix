@@ -343,25 +343,12 @@ class RolloutWorker(abstract_worker.Worker):
         and completion_logps.shape != completion_tokens.shape
     ):
       completion_logps = None
-    prompt_token_arr = (
-        np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
-        if prompt_tokens is not None
-        else np.zeros(0, dtype=np.int32)
-    )
+    prompt_token_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
     if prompt_token_arr.size == 0:
-      if (
-          self.manager.tokenizer is not None
-          and hasattr(self.manager.tokenizer, "encode")
-          and getattr(request, "prompt", None)
-      ):
-        prompt_token_arr = np.asarray(
-            self.manager.tokenizer.encode(request.prompt), dtype=np.int32
-        ).reshape(-1)
-      else:
-        raise RuntimeError(
-            "Sampler response is missing prompt_token_ids for "
-            f"{request.request_id or request.traj_id}."
-        )
+      raise RuntimeError(
+          "Sampler response is missing prompt_token_ids for "
+          f"{request.request_id or request.traj_id}."
+      )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
     return datatypes.RolloutResponse(
@@ -425,7 +412,7 @@ class RolloutWorker(abstract_worker.Worker):
         self._sampling_to_rollout_response(
             request=req,
             text=responses[i].text,
-            prompt_tokens=getattr(responses[i], "prompt_token_ids", None),
+            prompt_tokens=responses[i].prompt_token_ids,
             token_ids=responses[i].token_ids,
             logprobs=responses[i].logprobs,
         )

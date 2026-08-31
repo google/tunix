@@ -47,6 +47,11 @@ def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
   tok_ids = getattr(r, "token_ids", np.zeros(0, dtype=np.int32))
   if not isinstance(tok_ids, np.ndarray):
     tok_ids = np.array(tok_ids, dtype=np.int32)
+  prompt_ids = getattr(r, "prompt_token_ids", None)
+  if prompt_ids is None:
+    prompt_ids = np.zeros(0, dtype=np.int32)
+  elif not isinstance(prompt_ids, np.ndarray):
+    prompt_ids = np.array(prompt_ids, dtype=np.int32)
   lps = getattr(r, "logprobs", None)
   if lps is not None and not isinstance(lps, np.ndarray):
     lps = np.array(lps, dtype=np.float32)
@@ -55,7 +60,7 @@ def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
       text=getattr(r, "text", ""),
       token_ids=tok_ids,
       logprobs=lps,
-      prompt_token_ids=getattr(r, "prompt_token_ids", None),
+      prompt_token_ids=prompt_ids,
       finish_reason=getattr(r, "finish_reason", "stop"),
       routed_experts=getattr(r, "routed_experts", None),
       error=getattr(r, "error", None),
