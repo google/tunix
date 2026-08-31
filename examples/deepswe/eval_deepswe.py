@@ -186,7 +186,7 @@ parser_cli.add_argument(
 parser_cli.add_argument(
     "--vllm_init_random_weights",
     type=bool,
-    default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true",
+    default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "false").lower() == "true",
 )
 parser_cli.add_argument(
     "--vllm_server_mode",
@@ -655,16 +655,19 @@ elif ROLLOUT_ENGINE == "vllm":
       reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE if VLLM_RESHARD_CHUNK_SIZE > 0 else None,
       engine_kwargs=engine_kwargs,
   )
-  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
   model_state = nnx.state(model)
   del model
   import gc
   gc.collect()
+  jax.clear_caches()
+  logger.info("Freed initial model before creating vLLM engine.")
+
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
   sampler.load_checkpoint(model_state)
   del model_state
   gc.collect()
   jax.clear_caches()
-  logger.info("Synced model weights to vLLM engine and freed original model.")
+  logger.info("Synced model weights to vLLM engine and freed model state.")
 
 elif ROLLOUT_ENGINE == "sglang_jax":
   from flax import nnx
