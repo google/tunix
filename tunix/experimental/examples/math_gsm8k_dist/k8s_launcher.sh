@@ -134,10 +134,33 @@ apply_cluster_target() {
       TRAINER_MESH_FSDP=16
       ROLLOUT_TPU_SLICE=tpuv5e:4x4
       ;;
+    mlperf-v5p)
+      PROJECT=cloud-tpu-multipod-dev
+      REGION=europe-west4
+      ZONE=europe-west4-b
+      CLUSTER_LOCATION=europe-west4
+      CLUSTER=mlperf-v5p
+      TRAINER_TPU_SLICE=tpuv5:2x2x2
+      TRAINER_MESH_FSDP=8
+      TRAINER_MESH_TP=1
+      ROLLOUT_TPU_SLICE=tpuv5:2x2x1
+      ROLLOUT_JOBSET_YAML=jobset.tpu.yaml
+      NUM_ROLLOUT_WORKERS=2
+      ROLLOUT_COMPLETIONS=2
+      ROLLOUT_PARALLELISM=2
+      ROLLOUT_MESH_TP=4
+      ROLLOUT_MESH_FSDP=1
+      CPU_MACHINE=n2d-standard-128
+      GCS_SCRATCH_LOCATION=gs://mohitkhatwani_multipods/pathways_scratch/$USER
+      MINI_BATCH_SIZE=8
+      TRAIN_MICRO_BATCH_SIZE=8
+      BATCH_SIZE=2
+      NUM_GENERATIONS=4
+      ;;
     "")
       ;;
     *)
-      echo "Error: Unknown cluster target '$1'. Available targets: multipod-rl-scaffolding, multipod-rl-v5e, inference-v5e." >&2
+      echo "Error: Unknown cluster target '$1'. Available targets: multipod-rl-scaffolding, multipod-rl-v5e, inference-v5e, mlperf-v5p." >&2
       exit 1
       ;;
   esac
@@ -176,6 +199,7 @@ start_orchestrator() {
         --tokenizer_path=${TOKENIZER_PATH} \
         --batch_size=${BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
+        --num_rollout_workers=${NUM_ROLLOUT_WORKERS:-1} \
         --max_steps=${MAX_STEPS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -288,7 +312,7 @@ start_rollout() {
     --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
     "
   fi
-  local rollout_startup_env="SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}"
+  local rollout_startup_env="PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}"
   if [[ "${rollout_jobset_yaml}" == "jobset.tpu.yaml" ]]; then
     rollout_startup_env="TPU_SKIP_MDS_QUERY=true ${rollout_startup_env}"
   fi

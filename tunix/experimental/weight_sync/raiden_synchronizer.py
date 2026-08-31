@@ -74,8 +74,13 @@ def _ensure_ffi_compute_on_compat() -> None:
     )
 
   compute_on_mod.compute_on = compute_on2
+  try:
+    from jax.experimental import compute_on as exp_compute_on  # pylint: disable=g-import-not-at-top
+    exp_compute_on.compute_on = compute_on2
+  except (ImportError, AttributeError):
+    pass
   logging.warning(
-      "Patched jax._src.compute_on.compute_on to compute_on2 for TPU-sync FFI compatibility."
+      "Patched jax._src.compute_on.compute_on and jax.experimental.compute_on.compute_on to compute_on2 for TPU-sync FFI compatibility."
   )
 
 

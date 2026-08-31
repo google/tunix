@@ -74,8 +74,20 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       if self.raiden_sync_delegate is None:
         from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
+        pod_index = int(os.getenv("POD_INDEX", "0"))
+        logging.info(
+            "InprocessVllmSamplerAdapter [%s]: constructing RaidenWeightSyncDelegate(worker_index=%d)",
+            self.server_id,
+            pod_index,
+        )
         self.raiden_sync_delegate = (
-            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+            raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                worker_index=pod_index
+            )
+        )
+        logging.info(
+            "InprocessVllmSamplerAdapter [%s]: RaidenWeightSyncDelegate constructed successfully!",
+            self.server_id,
         )
 
     if not self.enable_raiden and self.raiden_sync_delegate:
@@ -86,9 +98,21 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
     if self.tokenizer is not None and self.config is not None:
+      logging.info(
+          "InprocessVllmSamplerAdapter [%s]: getting vLLM sampler class...",
+          self.server_id,
+      )
       vllm_lib = _get_vllm_sampler_cls()
+      logging.info(
+          "InprocessVllmSamplerAdapter [%s]: instantiating VllmSampler...",
+          self.server_id,
+      )
       self.vllm_sampler = vllm_lib.VllmSampler(
           tokenizer=self.tokenizer, config=self.config
+      )
+      logging.info(
+          "InprocessVllmSamplerAdapter [%s]: VllmSampler instantiated successfully!",
+          self.server_id,
       )
 
   def initialize(self) -> None:

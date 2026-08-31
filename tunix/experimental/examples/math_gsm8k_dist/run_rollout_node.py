@@ -25,6 +25,13 @@ import pickle
 import sys
 from typing import Any
 
+# Early import of tpu_sync to prevent allocator / symbol collision with PyTorch/vLLM.
+try:
+  from tpu_sync.api.jax import weight_synchronizer  # pylint: disable=unused-import
+  from tpu_sync.frameworks.jax import weight_synchronizer_ffi  # pylint: disable=unused-import
+except ImportError:
+  pass
+
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
@@ -453,11 +460,15 @@ def main(argv: list[str], context: Any = None) -> None:
         await worker_service.sampler.bind_weight_sync()
         logging.info("Raiden weight sync warmed up.")
 
+    pod_index = os.getenv("POD_INDEX")
+    registered_worker_id = (
+        f"{args.worker_id}-{pod_index}" if pod_index else args.worker_id
+    )
     context.ipc.discovery.register(
         metadata=pickle.dumps({
             "service_type": "rollout",
             "service_port": args.port,
-            "worker_id": args.worker_id,
+            "worker_id": registered_worker_id,
         })
     )
     logging.info("Rollout worker is registered.")

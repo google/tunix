@@ -34,6 +34,7 @@ import logging
 import os
 import pickle
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -88,6 +89,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Number of prompt groups per step.",
   )
   parser.add_argument("--num_generations", type=int, default=8)
+  parser.add_argument(
+      "--num_rollout_workers",
+      type=int,
+      default=int(os.getenv("NUM_ROLLOUT_WORKERS", "1")),
+      help="Number of rollout workers to discover and register.",
+  )
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
@@ -340,8 +347,8 @@ def _register_workers(
     cluster: orchestrator.ClusterOrchestrator,
     trainer_handle: remote_execution.ActorHandle,
     trainer_addr: str,
-    rollout_handle: remote_execution.ActorHandle,
-    rollout_addr: str,
+    rollout_handles: Sequence[remote_execution.ActorHandle],
+    rollout_addrs: Sequence[str],
     inference_handle: remote_execution.ActorHandle | None,
     inference_addr: str | None,
 ) -> None:
@@ -352,12 +359,13 @@ def _register_workers(
       handle=trainer_handle,
       resources={"address": trainer_addr},
   )
-  cluster.register_worker_handle(
-      worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
-      handle=rollout_handle,
-      resources={"address": rollout_addr},
-  )
+  for idx, (handle, addr) in enumerate(zip(rollout_handles, rollout_addrs)):
+    cluster.register_worker_handle(
+        worker_id=f"rollout-{idx}",
+        roles=[datatypes.Role.ROLLOUT],
+        handle=handle,
+        resources={"address": addr},
+    )
   if inference_handle is not None:
     cluster.register_worker_handle(
         worker_id="reference-0",
@@ -491,7 +499,12 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   trainer_addr_future = futures.Future()
-  rollout_addr_future = futures.Future()
+  num_rollout_workers = getattr(args, "num_rollout_workers", 1)
+  discovered_rollout_addrs: list[str] = []
+  rollout_addr_futures: list[futures.Future] = [
+      futures.Future() for _ in range(num_rollout_workers)
+  ]
+  rollout_lock = threading.Lock()
   inference_addr_future = futures.Future()
 
   def accept_worker(hostname: str, _: int, metadata: bytes) -> None:
@@ -513,8 +526,14 @@ def main(argv: list[str], context: Any = None) -> None:
         if not trainer_addr_future.done():
           trainer_addr_future.set_result(service_address)
       case "rollout":
-        if not rollout_addr_future.done():
-          rollout_addr_future.set_result(service_address)
+        with rollout_lock:
+          if (
+              service_address not in discovered_rollout_addrs
+              and len(discovered_rollout_addrs) < num_rollout_workers
+          ):
+            idx = len(discovered_rollout_addrs)
+            discovered_rollout_addrs.append(service_address)
+            rollout_addr_futures[idx].set_result(service_address)
       case "inference":
         if not inference_addr_future.done():
           inference_addr_future.set_result(service_address)
@@ -524,11 +543,14 @@ def main(argv: list[str], context: Any = None) -> None:
   assert context and context.ipc and context.ipc.discovery
   context.ipc.discovery.on_register(accept_worker)
 
-  logging.info("Waiting for workers to register via discovery service...")
+  logging.info(
+      "Waiting for %d rollout worker(s) and 1 trainer to register via discovery service...",
+      num_rollout_workers,
+  )
   trainer_addr = trainer_addr_future.result()
   trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
-  rollout_addr = rollout_addr_future.result()
-  rollout_handle = _connect(rollout_addr, args.rpc_timeout_s)
+  rollout_addrs = [f.result() for f in rollout_addr_futures]
+  rollout_handles = [_connect(addr, args.rpc_timeout_s) for addr in rollout_addrs]
   inference_addr = None
   inference_handle = None
   if args.beta != 0.0:
@@ -542,7 +564,7 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info(
       "Connected to all required workers: Trainer=%s, Rollout=%s%s.",
       trainer_addr,
-      rollout_addr,
+      rollout_addrs,
       f", Inference={inference_addr}" if inference_addr else "",
   )
 
@@ -565,8 +587,8 @@ def main(argv: list[str], context: Any = None) -> None:
       cluster=cluster,
       trainer_handle=trainer_handle,
       trainer_addr=trainer_addr,
-      rollout_handle=rollout_handle,
-      rollout_addr=rollout_addr,
+      rollout_handles=rollout_handles,
+      rollout_addrs=rollout_addrs,
       inference_handle=inference_handle,
       inference_addr=inference_addr,
   )
