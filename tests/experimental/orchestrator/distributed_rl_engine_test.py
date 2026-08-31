@@ -805,30 +805,43 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_sync_weights_notifies_router_once(self):
     router = _RecordingRouter()
-    engine = self._engine_with_router(router)
+    coordinator = mock.MagicMock()
+    coordinator.sync = mock.AsyncMock(
+        return_value=mock.MagicMock(policy_version=42)
+    )
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        router=router,
+        weight_sync_coordinator=coordinator,
+    )
 
     async def _run():
-      mock_meta = datatypes.WeightSyncMetadata(
-          new_policy_version=42,
-          transfer_mode="p2p",
-      )
-      self.mock_actor.prepare_weight_sync.return_value = mock_meta
-
       ver = await engine.sync_weights(role=datatypes.Role.ACTOR)
 
       self.assertEqual(ver, 42)
+      coordinator.sync.assert_awaited_once()
       self.assertEqual(router.weights_synced_count, 1)
 
     asyncio.run(_run())
 
   def test_sync_weights_failure_skips_router_notification(self):
     router = _RecordingRouter()
-    engine = self._engine_with_router(router)
+    coordinator = mock.MagicMock()
+    coordinator.sync = mock.AsyncMock(
+        side_effect=RuntimeError("transfer failed")
+    )
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        router=router,
+        weight_sync_coordinator=coordinator,
+    )
 
     async def _run():
-      self.mock_actor.prepare_weight_sync.return_value = datatypes.Response()
-
-      with self.assertRaisesRegex(RuntimeError, "WeightSyncMetadata"):
+      with self.assertRaisesRegex(RuntimeError, "transfer failed"):
         await engine.sync_weights(role=datatypes.Role.ACTOR)
 
       self.assertEqual(router.weights_synced_count, 0)

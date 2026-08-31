@@ -588,6 +588,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
     )
+    notify = getattr(self._rollout_pool.router, "notify_weights_synced", None)
+    if callable(notify):
+      # External schedulers may cache prefix affinity that a weight sync
+      # invalidates; best-effort notification, only after a successful round.
+      notify()
     return result.policy_version
 
   async def save_checkpoint(

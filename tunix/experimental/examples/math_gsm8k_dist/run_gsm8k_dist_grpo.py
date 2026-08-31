@@ -192,7 +192,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
-  parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
       "--debug",
