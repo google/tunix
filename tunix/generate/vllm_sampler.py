@@ -593,6 +593,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(
         input_strings, outputs
     )
+    del outputs
+    del prompt_objects
+    gc.collect()
     if self.config.return_logprobs and (
         out_logprobs is None or out_logprobs[0] is None
     ):

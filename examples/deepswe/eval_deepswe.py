@@ -607,6 +607,7 @@ elif ROLLOUT_ENGINE == "vllm":
   additional_config = None
   if MODEL_SOURCE == "maxtext":
     additional_config = {
+        "enable_continue_decode": True,
         "maxtext_config": {
             "model_name": MODEL_VERSION.lower().split("/")[-1],
             "model_call_mode": "inference",
@@ -776,6 +777,7 @@ def model_call(
             echo=False,
             eos_tokens=qwen_eos_tokens,
         )
+    gc.collect()
   except Exception as exc:
     if _is_prompt_overflow_error(exc):
       raise PromptTooLongError(str(exc)) from exc
