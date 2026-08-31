@@ -2652,6 +2652,7 @@ class _P28SegmentedEngineForward:
         tuple(self._source_engine_mesh.devices.flat)
         != tuple(self._engine_mesh.devices.flat)
     )
+    self._disaggregated = disaggregated
     if disaggregated and execution_model is None:
       raise FunctionalMappingError(
           "P28 disaggregated segmented forward requires the reconstructed "
@@ -3124,73 +3125,62 @@ class _P28SegmentedEngineForward:
     self._full_state_leaves = tuple(live_leaves)
     self._num_state_leaves = len(live_leaves)
     self._captured_state_released = False
-    if disaggregated:
-
-      def bind_execution_mesh(fn, stage):
-        if fn is None:
-          return None
-
-        def invoke(*args, **kwargs):
-          with _canonical_fixed_ar_execution_mesh(
-              self._source_engine_mesh,
-              self._engine_mesh,
-              f"P28 segmented {stage}",
-          ):
-            return fn(*args, **kwargs)
-
-        return invoke
-
-      self._embed_fn = bind_execution_mesh(self._embed_fn, "embed-reference")
+    if self._disaggregated:
+      self._embed_fn = self._bind_execution_mesh(
+          self._embed_fn, "embed-reference"
+      )
       self._layer_fns = tuple(
-          bind_execution_mesh(fn, "layer-reference")
+          self._bind_execution_mesh(fn, "layer-reference")
           for fn in self._layer_fns
       )
       self._local_layer_fns = tuple(
-          bind_execution_mesh(fn, "layer-forward")
+          self._bind_execution_mesh(fn, "layer-forward")
           for fn in self._local_layer_fns
       )
       self._local_layer_vjp_fns = tuple(
-          bind_execution_mesh(fn, "layer-vjp")
+          self._bind_execution_mesh(fn, "layer-vjp")
           for fn in self._local_layer_vjp_fns
       )
       self._local_layer_pullback_fns = tuple(
-          bind_execution_mesh(fn, "layer-pullback")
+          self._bind_execution_mesh(fn, "layer-pullback")
           for fn in self._local_layer_pullback_fns
       )
       self._local_layer_pullback_vma_fns = tuple(
-          bind_execution_mesh(fn, "layer-pullback-vma")
+          self._bind_execution_mesh(fn, "layer-pullback-vma")
           for fn in self._local_layer_pullback_vma_fns
       )
       self._local_layer_pullback_tape_fns = tuple(
-          bind_execution_mesh(fn, "layer-pullback-tape")
+          self._bind_execution_mesh(fn, "layer-pullback-tape")
           for fn in self._local_layer_pullback_tape_fns
       )
-      self._norm_fn = bind_execution_mesh(self._norm_fn, "norm-reference")
-      self._embed_local_fn = bind_execution_mesh(
+      self._norm_fn = self._bind_execution_mesh(
+          self._norm_fn, "norm-reference"
+      )
+      self._embed_local_fn = self._bind_execution_mesh(
           self._embed_local_fn, "embed-forward"
       )
-      self._embed_pullback_fn = bind_execution_mesh(
+      self._embed_pullback_fn = self._bind_execution_mesh(
           self._embed_pullback_fn, "embed-pullback"
       )
-      self._embed_pullback_vma_fn = bind_execution_mesh(
+      self._embed_pullback_vma_fn = self._bind_execution_mesh(
           self._embed_pullback_vma_fn, "embed-pullback-vma"
       )
-      self._norm_local_fn = bind_execution_mesh(
+      self._norm_local_fn = self._bind_execution_mesh(
           self._norm_local_fn, "norm-forward"
       )
-      self._norm_pullback_fn = bind_execution_mesh(
+      self._norm_pullback_fn = self._bind_execution_mesh(
           self._norm_pullback_fn, "norm-pullback"
       )
-      self._norm_pullback_vma_fn = bind_execution_mesh(
+      self._norm_pullback_vma_fn = self._bind_execution_mesh(
           self._norm_pullback_vma_fn, "norm-pullback-vma"
       )
-      self._head_local_fn = bind_execution_mesh(
+      self._head_local_fn = self._bind_execution_mesh(
           self._head_local_fn, "head-forward"
       )
-      self._head_pullback_fn = bind_execution_mesh(
+      self._head_pullback_fn = self._bind_execution_mesh(
           self._head_pullback_fn, "head-pullback"
       )
-      self._head_pullback_vma_fn = bind_execution_mesh(
+      self._head_pullback_vma_fn = self._bind_execution_mesh(
           self._head_pullback_vma_fn, "head-pullback-vma"
       )
     self._p30_sparse_grad_assembly = (
@@ -3223,6 +3213,21 @@ class _P28SegmentedEngineForward:
           "P28 segmented forward is a host boundary and must not be wrapped "
           "in jax.jit/value_and_grad"
       )
+
+  def _bind_execution_mesh(self, fn, stage):
+    """Binds lazy JIT tracing to the trainer role's physical mesh."""
+    if fn is None or not self._disaggregated:
+      return fn
+
+    def invoke(*args, **kwargs):
+      with _canonical_fixed_ar_execution_mesh(
+          self._source_engine_mesh,
+          self._engine_mesh,
+          f"P28 segmented {stage}",
+      ):
+        return fn(*args, **kwargs)
+
+    return invoke
 
   @staticmethod
   def _state_spec(leaf):
@@ -3474,7 +3479,9 @@ class _P28SegmentedEngineForward:
         )
         return new_caches, hidden_out
 
-      self._layer_scan_fn = jax.jit(scan_layers)
+      self._layer_scan_fn = self._bind_execution_mesh(
+          jax.jit(scan_layers), "layer-scan"
+      )
 
       def tape_scan_layers(stacked_leaves, stacked_caches, hidden, metadata):
         def body(h, xs):
@@ -3491,7 +3498,9 @@ class _P28SegmentedEngineForward:
         # tape keeps the loop path's materialization obligations.
         return hidden_ins, new_caches, hidden_out
 
-      self._layer_tape_scan_fn = jax.jit(tape_scan_layers)
+      self._layer_tape_scan_fn = self._bind_execution_mesh(
+          jax.jit(tape_scan_layers), "layer-tape-scan"
+      )
 
       def rev_scan_layers(
           stacked_leaves,
@@ -3526,7 +3535,9 @@ class _P28SegmentedEngineForward:
         )
         return stacked_dleaves, stacked_dcache_ins, dh_out
 
-      self._layer_rev_scan_fn = jax.jit(rev_scan_layers)
+      self._layer_rev_scan_fn = self._bind_execution_mesh(
+          jax.jit(rev_scan_layers), "layer-reverse-scan"
+      )
 
       layer_total = len(self._local_layer_defs)
 
@@ -3674,10 +3685,13 @@ class _P28SegmentedEngineForward:
         return hidden_ins, new_caches, hidden_out
 
       self._p71_fwd_scan_signature = signature
-      self._p71_fwd_scan_fn = _xprof_jit(
-          fwd_scan,
-          module_name="zt_tr_fwd_scan",
-          scope_name="zt/tr/layers/fwd_scan",
+      self._p71_fwd_scan_fn = self._bind_execution_mesh(
+          _xprof_jit(
+              fwd_scan,
+              module_name="zt_tr_fwd_scan",
+              scope_name="zt/tr/layers/fwd_scan",
+          ),
+          "layer-forward-tape-scan",
       )
     elif self._p71_fwd_scan_signature != signature:
       raise FunctionalMappingError(

@@ -1,69 +1,95 @@
-# P58.29 — K15 Disaggregated Mesh Scan Mismatch Incident
+# P58.29 — K15 disaggregated scan execution-mesh repair
 
-Status: `INCIDENT LOCALIZED / ROOT CAUSE IDENTIFIED / READY FOR REPAIR`
+Status: `LOCAL REPAIR COMPLETE / PINNED-IMAGE PASS / TARGET NOT RUN`
 
-## Incident
+## K15 evidence
 
-K15 ran on the real 128-device DP32xTP4 (32 hosts) target (`canon-p58-ds4b-zero-hp-full-k15`).
-It completed all 128 multi-turn trajectories across 32 TPU hosts:
-- 116 finished naturally, 12 max-turn truncated, 0 timeouts/environment issues.
-- Solved 3 SWE tasks in Step 0 (`Reward = 1.0`), producing 31 non-zero advantage samples (24.2%).
-- Generated 407,262 action tokens.
-- Finished Rescore-B in parallel and passed strict Step-0 pre-alignment with exact A=B=C:
-  ```text
-  [CANON_ALIGN_PRE] step=0 verdict=PASS N_action=407262 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)] diff_bytes=0 diff_elements=0 hash=1ef8b0406cb23d242698ebaf3c8a982e01dfdb8d7d91244cf5ef025fa25890d9
-  ```
-
-The first segmented backward then crashed during `run_layers_fwd_tape_scan`:
+K15 ran on 128 v5p devices split into two disjoint 64-device roles. The raw
+evidence is authoritative about geometry:
 
 ```text
-[rank0]: Traceback (most recent call last):
-[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
-[rank0]:     main()
-[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
-[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
-[rank0]:   File "<frozen runpy>", line 229, in run_module
-[rank0]:   File "<frozen runpy>", line 88, in _run_code
-[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2011, in <module>
-[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
-[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3999, in train
-[rank0]:     segmented_result = self._run_p28_g6_update(
-[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1622, in _run_p28_g6_update
-[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
-[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 8100, in run_train_step
-[rank0]:     stacked_cache_ins, stacked_hidden_ins, hidden = (
-[rank0]:         segmented.run_layers_fwd_tape_scan(
-[rank0]:             engine_leaves, caches, hidden, attention_metadata
-[rank0]:         )
-[rank0]:     )
-[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 3687, in run_layers_fwd_tape_scan
-[rank0]:     stacked_hidden_ins, new_caches, hidden_out = self._p71_fwd_scan_fn(
-[rank0]:         stacked_leaves, stacked_cache_ins, hidden, metadata
-[rank0]:     )
-[rank0]:   File "/app/tunix/models/qwen3/qwen3_p22xh.py", line 144, in __call__
-[rank0]: ValueError: Received incompatible devices for jitted computation. Got argument stacked_leaves[0] of zt_tr_fwd_scan with shape bfloat16[36,2560] and with device ids [2, 3, 18, 19, ...] on platform TPU and shard_map inside jit with device ids [0, 4, 8, 12, 1, 5, ...] on platform TPU at qwen3_p22xh.py:144:11 (P22XHRmsNorm.__call__)
+[P34.TOPOLOGY] PASS rollout_devices=64 trainer_devices=64
+Rollout Mesh: dp=8,tp=8
+Train Mesh: dp=8,tp=8
 ```
 
-The immutable incident directory is `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/`.
+The incident package's `DP32xTP4` prose is a stale label and is superseded by
+the raw device inventory above. The immutable package is intentionally not
+rewritten:
+`canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/`.
 
-## Root Cause
+The run completed all 128 multi-turn trajectories: 116 ended naturally, 12
+reached max turns, and none timed out or failed in the environment. It solved
+3 tasks, produced 31 nonzero-advantage samples (24.2%), and collected 407,262
+action tokens. Rescore-B and strict Step-0 pre-alignment passed exactly:
 
-In a 128-TPU disaggregated setup (DP32xTP4, 32 worker nodes), the 128 chips are split into two 64-chip meshes:
-- `_source_engine_mesh` (Rollout/Serving mesh: devices `[0, 4, 8, 12, ...]`)
-- `_engine_mesh` (Trainer execution mesh: devices `[2, 3, 18, 19, ...]`)
+```text
+[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=407262 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)] diff_bytes=0 diff_elements=0 hash=1ef8b0406cb23d242698ebaf3c8a982e01dfdb8d7d91244cf5ef025fa25890d9
+```
 
-During Rollout, `linear_module._CANON_MESH` is initialized to `_source_engine_mesh`.
-In `SegmentedEngine.__init__`, per-layer callables are wrapped with `bind_execution_mesh` (which enters `_canonical_fixed_ar_execution_mesh(self._source_engine_mesh, self._engine_mesh, ...)`).
+The first segmented backward then failed in `run_layers_fwd_tape_scan` while
+tracing `zt_tr_fwd_scan`. Its arguments lived on trainer devices
+`[2, 3, 18, 19, ...]`, but a nested `shard_map` was constructed from rollout
+devices `[0, 4, 8, 12, ...]`, so JAX rejected the incompatible devices.
 
-However, P71/P50 layer scan callables (`run_layers_fwd_tape_scan`, `run_layers_scan`, `run_layers_tape_scan`, `run_layers_rev_scan`) in `SegmentedEngine` invoke `self._p71_fwd_scan_fn`, `self._layer_scan_fn`, etc., **without** wrapping with `_canonical_fixed_ar_execution_mesh`.
+## Root cause and repair
 
-Consequently, during JIT tracing of `_p71_fwd_scan_fn`, `P22XHRmsNorm.__call__` reads `linear_module._CANON_MESH` (which points to the serving mesh `[0, 4, 8, ...]`), while `stacked_leaves` is sharded on the trainer mesh `[2, 3, 18, ...]`, triggering JAX's incompatible device assertion upon entering reverse reduce.
+`_P28SegmentedEngineForward` already entered
+`_canonical_fixed_ar_execution_mesh` for eagerly built embed/layer/norm/head
+callables. Four scan JITs are created lazily after initialization and bypassed
+that binding:
 
-## Planned Repair
+- `_layer_scan_fn`;
+- `_layer_tape_scan_fn`;
+- `_p71_fwd_scan_fn`;
+- `_layer_rev_scan_fn`.
 
-1. In `SegmentedEngine`:
-   - Store `self._disaggregated = disaggregated`.
-   - Provide a unified `_bind_execution_mesh(fn, stage)` method.
-   - Wrap `_p71_fwd_scan_fn`, `_layer_scan_fn`, `_layer_tape_scan_fn`, `_layer_rev_scan_fn` with `_bind_execution_mesh`.
-2. Commit and push fix.
-3. Relaunch as Attempt K16.
+During their first trace, the installed linear/RMSNorm path therefore read the
+serving value of `linear._CANON_MESH` even though operands were trainer-sharded.
+
+The repair promotes the existing binding closure to the instance method
+`_bind_execution_mesh` and applies the same scoped source-to-trainer mesh
+binding to all four lazy scan callables. It does not add a flag or alter model,
+data, sampling, loss, precision, optimizer, token transport, DP/TP geometry,
+or the alignment contract. The colocated path returns the original callable
+by identity and creates no extra wrapper or program boundary.
+
+The disaggregated path necessarily holds the existing fixed-AR mesh scope
+while each scan callable is dispatched; this is the same bounded global-mesh
+discipline already used by the other segmented callables.
+
+## Local validation
+
+Local changes are based on operator parent
+`55553dfe0c3c895de81c66191e5082ed9ec41a32`; they are not published.
+
+- A forced-four-device positive executes all four scan methods with rollout
+  devices 0–1 and trainer devices 2–3. It observes four trainer-mesh scopes,
+  finite outputs, and no result placed on the rollout devices.
+- A colocated negative proves `_bind_execution_mesh` returns the original
+  callable by identity and preserves `None`.
+- Both focused tests pass 2/2 in the digest-pinned dependency image.
+- `P34_STATIC_PASS suites=10`.
+- Flag audit passes `declared=409 actual=409 unique=409`; no flag was added.
+- The complete digest-pinned P58 image gate exits zero and includes
+  `disaggregated_scan_mesh=2` plus `P58_EXACT_IMAGE_CPU_PASS`.
+
+## Claim ceiling and K16 promotion
+
+This closes the source/image exception only. No direct TPU, Pathways target,
+segmented backward, gradient, optimizer commit, checkpoint, or 1,000-update
+campaign has run from the repaired source. It is not a Zero-TIM target PASS.
+
+After separate approvals for commit/push, matching-image publication, and a
+fresh target launch, K16 must use the final clean remote readback SHA. It must:
+
+1. preserve the K15 TiTO, 1,012-row clean-data, rollout, reward, Rescore-B, and
+   exact A=B=C receipts;
+2. cross the former first `zt_tr_fwd_scan` trace without a serving/trainer
+   device mismatch;
+3. complete segmented forward and reverse with finite nonzero gradients;
+4. produce exactly the intended first optimizer transaction and checkpoint
+   receipts before any broader training claim.
+
+Rollback is limited to removing the four lazy-scan mesh bindings and their
+two regressions. Historical K15 evidence must remain unchanged.

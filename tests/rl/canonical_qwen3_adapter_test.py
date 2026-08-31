@@ -3224,6 +3224,145 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         sum(np.count_nonzero(np.asarray(value)) for value in layer_grads), 0
     )
 
+  def test_disaggregated_segmented_scans_bind_trainer_execution_mesh(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    engine_axes = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    rollout_mesh = jax.make_mesh(
+        (1, 1, 1, 1, 2, 1),
+        engine_axes,
+        devices=jax.devices()[:2],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    trainer_mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[2:4]).reshape(1, 2), ("dp", "tp")
+    )
+    execution_mesh = jax.make_mesh(
+        (1, 1, 1, 1, 2, 1),
+        engine_axes,
+        devices=jax.devices()[2:4],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _MeshBoundSegmentedRunner(rollout_mesh)
+    execution_model = canonical_qwen3_adapter._canonical_execution_model(
+        runner,
+        execution_mesh,
+        "disjoint",
+        "test segmented scan execution",
+    )
+    replicated = jax.sharding.NamedSharding(
+        trainer_mesh, jax.sharding.PartitionSpec()
+    )
+    trainer_leaves = tuple(
+        jax.device_put(jnp.asarray(leaf), replicated)
+        for leaf in runner.state_leaves
+    )
+    mesh_scopes = []
+
+    @contextlib.contextmanager
+    def record_execution_mesh(source_mesh, bound_mesh, label):
+      mesh_scopes.append((source_mesh, bound_mesh, label))
+      yield
+
+    env = {
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with (
+        mock.patch.dict(os.environ, env, clear=False),
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "_canonical_fixed_ar_execution_mesh",
+            record_execution_mesh,
+        ),
+    ):
+      segmented = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner,
+          execution_mesh=execution_mesh,
+          execution_model=execution_model,
+      )
+      token_ids = jax.device_put(jnp.asarray([1, 2], jnp.int32), replicated)
+      hidden = segmented.run_embed_forward(
+          token_ids, state_leaves=trainer_leaves
+      )
+      mesh_scopes.clear()
+      caches = tuple(
+          jax.device_put(jnp.asarray(0.0), replicated)
+          for _ in runner.kv_caches
+      )
+      metadata = jax.device_put(jnp.asarray(0.125), replicated)
+      _, scan_hidden = segmented.run_layers_scan(
+          trainer_leaves, caches, hidden, metadata
+      )
+      stacked_caches, stacked_hiddens, tape_hidden = (
+          segmented.run_layers_tape_scan(
+              trainer_leaves, caches, hidden, metadata
+          )
+      )
+      fwd_caches, fwd_hiddens, fwd_hidden = (
+          segmented.run_layers_fwd_tape_scan(
+              trainer_leaves, caches, hidden, metadata
+          )
+      )
+      stacked_dcaches = jax.tree.map(jnp.ones_like, fwd_caches)
+      _, _, reverse_hidden = segmented.run_layers_rev_scan(
+          trainer_leaves,
+          fwd_caches,
+          fwd_hiddens,
+          metadata,
+          stacked_dcaches,
+          jnp.ones_like(fwd_hidden),
+      )
+
+    self.assertEqual(
+        [scope[2] for scope in mesh_scopes],
+        [
+            "P28 segmented layer-scan",
+            "P28 segmented layer-tape-scan",
+            "P28 segmented layer-forward-tape-scan",
+            "P28 segmented layer-reverse-scan",
+        ],
+    )
+    for source_mesh, bound_mesh, _ in mesh_scopes:
+      self.assertIs(source_mesh, rollout_mesh)
+      self.assertIs(bound_mesh, execution_mesh)
+    trainer_devices = set(trainer_mesh.devices.flat)
+    for value in (
+        scan_hidden,
+        tape_hidden,
+        stacked_hiddens,
+        fwd_hidden,
+        fwd_hiddens,
+        reverse_hidden,
+    ):
+      self.assertTrue(value.devices().issubset(trainer_devices))
+      self.assertTrue(np.isfinite(np.asarray(value)).all())
+
+  def test_colocated_segmented_execution_mesh_binding_is_identity(self):
+    segmented = object.__new__(
+        canonical_qwen3_adapter._P28SegmentedEngineForward
+    )
+    segmented._disaggregated = False  # pylint: disable=protected-access
+    original = lambda value: value
+    self.assertIs(
+        segmented._bind_execution_mesh(  # pylint: disable=protected-access
+            original, "colocated-negative"
+        ),
+        original,
+    )
+    self.assertIsNone(
+        segmented._bind_execution_mesh(  # pylint: disable=protected-access
+            None, "colocated-negative"
+        )
+    )
+
   def test_canonical_trainer_execution_mesh_rejects_partial_overlap(self):
     if len(jax.devices()) < 3:
       self.skipTest("requires three forced CPU or accelerator devices")

@@ -1,11 +1,13 @@
 # State
 
-## P58.29 K15 disaggregated mesh scan mismatch localized (2026-08-31)
+## P58.29 K15 disaggregated scan execution-mesh repair (2026-08-31)
 
-- K15 ran on the 128 TPU v5p slice (32 worker nodes, DP32xTP4). It completed all 128 multi-turn R2E trajectories across 32 TPU hosts (116 finished naturally, 12 max-turn, 0 timeouts), solved 3 SWE tasks in Step 0 (`Reward = 1.0`), generated 31 non-zero advantage samples (24.2%), and produced 407,262 action tokens.
+- K15 ran on 128 TPU v5p devices split into rollout 64 (DP8xTP8) and trainer 64 (DP8xTP8). The incident package's `DP32xTP4` prose is a stale label; raw lines 3–6 are authoritative. K15 completed all 128 multi-turn R2E trajectories (116 finished naturally, 12 max-turn, 0 timeouts), solved 3 SWE tasks in Step 0 (`Reward = 1.0`), generated 31 non-zero advantage samples (24.2%), and produced 407,262 action tokens.
 - Rescore-B passed and strict pre-alignment passed 100% with exact A=B=C (0 differing bytes, 0 differing elements, hash `1ef8b0406cb2...`).
 - Segmented backward crashed at `canonical_qwen3_adapter.py:8100` -> `run_layers_fwd_tape_scan:3687` -> `_p71_fwd_scan_fn` with `ValueError: Received incompatible devices for jitted computation` due to JIT tracing reading `linear._CANON_MESH` (serving mesh `[0, 4, 8, 12...]`) while arguments were on trainer execution mesh `[2, 3, 18, 19...]`.
-- Root cause: Scan methods in `SegmentedEngine` (`run_layers_fwd_tape_scan`, `run_layers_scan`, `run_layers_tape_scan`, `run_layers_rev_scan`) invoked lazy JIT scan functions directly without `_canonical_fixed_ar_execution_mesh`.
+- Root cause: four lazily created scan JITs invoked by `run_layers_fwd_tape_scan`, `run_layers_scan`, `run_layers_tape_scan`, and `run_layers_rev_scan` bypassed the execution-mesh scope used by eager segmented callables. The local repair applies the same trainer-mesh binding to all four and leaves colocated callables unchanged by identity.
+- Local validation on unpublished parent `55553dfe0c3c895de81c66191e5082ed9ec41a32` passes the disjoint positive and colocated negative (2/2), P34 static (10 suites), the 409/409 flag audit, and the complete digest-pinned image gate with `disaggregated_scan_mesh=2` and `P58_EXACT_IMAGE_CPU_PASS`.
+- No repaired target, backward, optimizer commit, checkpoint, commit/push, image publication, Kubernetes mutation, or TPU launch occurred. K16 remains separately gated and must cross the former scan trace, complete segmented reverse, produce finite nonzero gradients, and commit exactly the intended first optimizer transaction.
 - Immutable incident package: `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/`.
 
 ## P58.28 K11 prompt-only grouped-reverse repair (2026-08-30)

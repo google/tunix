@@ -18,6 +18,35 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## K15 disaggregated lazy-scan execution-mesh gate
+
+K15's raw evidence proves the actual 128-device topology is rollout 64 at
+DP8xTP8 plus trainer 64 at DP8xTP8. Treat the incident package's `DP32xTP4`
+prose as a stale label; do not rewrite immutable evidence. K15 completed all
+128 trajectories and strict A=B=C over 407,262 action tokens, then failed on
+the first P71 forward-tape scan because that lazy JIT traced a serving-mesh
+`shard_map` against trainer-mesh operands.
+
+P58.29 binds all four lazy segmented scan JITs to the trainer execution mesh
+in disaggregated mode: forward scan, tape scan, P71 forward-tape scan, and
+reverse scan. Colocated mode must preserve the original callable by identity.
+Before publication require:
+
+```text
+forced four-device disjoint scan positive: PASS
+colocated callable-identity negative: PASS
+P34_STATIC_PASS suites=10
+flag audit: declared=409 actual=409 unique=409
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_scan_mesh=2
+```
+
+These receipts do not prove TPU backward. K16 requires a separately approved
+commit/push, clean remote readback SHA, matching image, and launch. Its target
+log must preserve K15 admission/rollout/strict alignment, cross
+`zt_tr_fwd_scan`, finish segmented reverse with finite nonzero gradients, and
+emit exactly the intended first optimizer transaction plus checkpoint
+receipts. Any serving/trainer device mismatch remains a hard error.
+
 ## K11 prompt-only grouped-reverse gate
 
 K11 completed all 128 trajectories, 427,594 action tokens and strict A=B=C,

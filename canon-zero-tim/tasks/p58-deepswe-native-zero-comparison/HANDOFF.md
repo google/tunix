@@ -1,6 +1,6 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — K15 disaggregated mesh scan mismatch localized, ready for repair
+## START HERE — K15 lazy-scan mesh repair is local; K16 target not run
 
 K15 completed all 128 multi-turn R2E trajectories across 32 TPU hosts on the 128 TPU v5p slice:
 116 finished naturally, 12 max-turn truncated, 0 timeouts/environment failures.
@@ -12,10 +12,32 @@ The run crashed when entering segmented backward in `run_layers_fwd_tape_scan`:
 `ValueError: Received incompatible devices for jitted computation. Got argument stacked_leaves[0] of zt_tr_fwd_scan with shape bfloat16[36,2560] and with device ids [2, 3, 18, 19, ...] on platform TPU and shard_map inside jit with device ids [0, 4, 8, 12, 1, 5, ...] on platform TPU at qwen3_p22xh.py:144:11 (P22XHRmsNorm.__call__)`
 
 Root Cause:
-In the 128 TPU disaggregated topology (DP32xTP4), serving mesh is devices `[0, 4, 8, 12...]` while trainer mesh is `[2, 3, 18, 19...]`.
+In the actual 128 TPU disaggregated topology, rollout uses 64 devices at
+DP8xTP8 and trainer uses a disjoint 64 devices at DP8xTP8. The immutable
+incident prose says `DP32xTP4`, but raw lines 3–6 supersede that stale label.
+Serving mesh is devices `[0, 4, 8, 12...]` while trainer mesh is
+`[2, 3, 18, 19...]`.
 During rollout, `linear._CANON_MESH` is initialized to the serving mesh.
 While per-layer functions were bound with `_canonical_fixed_ar_execution_mesh` in `SegmentedEngine.__init__`, the P71/P50 scan methods (`run_layers_fwd_tape_scan`, `run_layers_scan`, `run_layers_tape_scan`, `run_layers_rev_scan`) invoked lazy JIT scan functions directly without `_canonical_fixed_ar_execution_mesh`.
 When JAX jitted `zt_tr_fwd_scan`, `P22XHRmsNorm.__call__` read the rollout `_CANON_MESH` instead of trainer mesh, failing device compatibility check.
+
+The local P58.29 repair, based on unpublished parent
+`55553dfe0c3c895de81c66191e5082ed9ec41a32`, promotes the existing segmented
+execution-mesh binder to an instance method and applies it to all four lazy
+scan JITs: plain forward scan, tape scan, P71 forward-tape scan, and reverse
+scan. Colocated mode returns the original callable by identity. The disjoint
+positive and colocated negative pass 2/2; P34 static passes ten suites; the
+flag audit passes 409/409; and the complete digest-pinned image gate passes
+with `disaggregated_scan_mesh=2`.
+
+Do not launch from this dirty worktree. No commit/push, image publication, or
+cluster launch has occurred. After separate approval for each transition,
+fetch the final clean remote readback SHA and matching image for K16. K16 must
+preserve K15's TiTO/clean-data/rollout/Rescore-B/exact A=B=C receipts, cross
+the former `zt_tr_fwd_scan` trace, complete segmented reverse with finite
+nonzero gradients, and produce exactly the intended first optimizer commit
+and checkpoint receipts. Until then this is source/image admission only, not
+a repaired target or Zero-TIM PASS.
 
 Immutable incident: `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/`. See `phases/p58-29-k15-disaggregated-mesh-scan.md`.
 

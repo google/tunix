@@ -2054,3 +2054,24 @@
 - Root cause: `_p71_fwd_scan_fn` was invoked without `_canonical_fixed_ar_execution_mesh`, causing JIT tracing to read serving mesh from `linear._CANON_MESH` while input `stacked_leaves` was sharded on trainer execution mesh.
 - Incident logged in `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/` and `phases/p58-29-k15-disaggregated-mesh-scan.md`.
 
+## 2026-08-31 UTC — P58.29 local disaggregated lazy-scan repair
+
+- Reconciled K15 against raw evidence. The real topology is 128 devices split
+  into rollout 64 DP8xTP8 and trainer 64 DP8xTP8; the incident prose's
+  `DP32xTP4` label is stale and the immutable package remains unchanged.
+- The failure was confined to four lazily created segmented scan JITs. They
+  bypassed the execution-mesh scope already used by eager segmented callables,
+  so their first trace read the serving global mesh while operands were
+  trainer-sharded.
+- Promoted the existing binding closure to `_bind_execution_mesh` and applied
+  it to forward scan, tape scan, P71 forward-tape scan, and reverse scan. The
+  colocated path returns the original callable and adds no wrapper.
+- A forced-four-device disjoint positive runs all four scans on trainer
+  devices; a colocated identity negative preserves the old path. Both pass in
+  the dependency image. P34 static passes ten suites, the flag audit passes
+  409/409, and the complete pinned-image gate passes with
+  `disaggregated_scan_mesh=2` and `P58_EXACT_IMAGE_CPU_PASS`.
+- This local repair is based on unpublished parent
+  `55553dfe0c3c895de81c66191e5082ed9ec41a32`. No repaired target, backward,
+  optimizer commit, checkpoint, commit/push, image publication, Kubernetes
+  mutation, or TPU launch occurred.
