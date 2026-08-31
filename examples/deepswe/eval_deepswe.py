@@ -204,6 +204,12 @@ parser_cli.add_argument(
     default=int(os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888")),
 )
 parser_cli.add_argument(
+    "--vllm_reshard_chunk_size",
+    type=int,
+    default=int(os.getenv("VLLM_RESHARD_CHUNK_SIZE", "1")),
+    help="Reshard chunk size for vLLM weight sync",
+)
+parser_cli.add_argument(
     "--sglang_mem_fraction_static",
     type=float,
     default=float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")),
@@ -289,6 +295,7 @@ VLLM_INIT_RANDOM_WEIGHTS = args.vllm_init_random_weights
 VLLM_SERVER_MODE = args.vllm_server_mode
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = args.vllm_max_batched_tokens
+VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
 
 SGLANG_MEM_FRACTION_STATIC = args.sglang_mem_fraction_static
 SGLANG_INIT_RANDOM_WEIGHTS = args.sglang_init_random_weights
@@ -586,6 +593,7 @@ elif ROLLOUT_ENGINE == "vllm":
       data_parallel_size=mesh.shape["fsdp"],
       mapping_config=mapping_config,
       additional_config=additional_config,
+      reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE,
       engine_kwargs={
           "model": MODEL_PATH,
           "max_model_len": MAX_MODEL_LEN,
@@ -598,7 +606,10 @@ elif ROLLOUT_ENGINE == "vllm":
   )
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
   sampler.load_checkpoint(nnx.state(model))
-  logger.info("Synced model weights to vLLM engine.")
+  del model
+  import gc
+  gc.collect()
+  logger.info("Synced model weights to vLLM engine and freed original model.")
 
 elif ROLLOUT_ENGINE == "sglang_jax":
   from flax import nnx
