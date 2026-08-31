@@ -128,6 +128,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " step 0)."
       ),
   )
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging for the trainer worker.",
+  )
+  parser.add_argument(
+      "--weight_sync_use_ffi",
+      choices=("auto", "true", "false"),
+      default="auto",
+      help=(
+          "Whether trainer-side Raiden weight sync should use the FFI path. "
+          "'auto' enables it on Pathways proxy runtimes."
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -270,6 +284,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 
+  def set_target_state(self, target_state: Any) -> None:
+    with self._mesh:
+      self._trainer.set_target_state(target_state)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -350,12 +368,26 @@ def _create_tunix_trainer_factory(args) -> Any:
       grad_accumulation_steps,
   )
 
+  def _weight_sync_worker_factory():
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+    use_ffi = None
+    if args.weight_sync_use_ffi == "true":
+      use_ffi = True
+    elif args.weight_sync_use_ffi == "false":
+      use_ffi = False
+    return raiden_synchronizer.RaidenSynchronizer(
+        "trainer",
+        use_ffi=use_ffi,
+    )
+
   def _factory():
     with mesh:
       trainer = peft_trainer_v2.PeftTrainer(
           actor_model,
           optax.adamw(learning_rate=args.learning_rate),
           training_config,
+          weight_sync_worker_factory=_weight_sync_worker_factory,
       )
     return _MeshBoundTrainer(trainer, mesh)
 
@@ -377,13 +409,12 @@ def main(argv: list[str], context: Any = None) -> None:
         "Require discovery API, but process context doesn't support."
     )
 
+  args = _parse_args(argv)
   logging.basicConfig(
-      level=logging.INFO,
+      level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
-
-  args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
   if context:

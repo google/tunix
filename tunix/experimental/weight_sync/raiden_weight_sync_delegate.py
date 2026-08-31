@@ -40,7 +40,9 @@ class RaidenWeightSyncDelegate:
     super().__init__(*args, **kwargs)
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
-            "rollout", worker_index=worker_index, auto_h2d=True
+            "rollout",
+            worker_index=worker_index,
+            auto_h2d=True,
         )
     ]
     self._version = 0
@@ -60,7 +62,16 @@ class RaidenWeightSyncDelegate:
     for sync in self._synchronizers:
       # The state arrays never change, so one bind covers every round.
       if not sync.bound:
+        logging.info(
+            "Binding rollout weight sync delegate (use_ffi=%s)",
+            sync.use_ffi,
+        )
         sync.bind(state)
+        logging.info(
+            "Rollout weight sync delegate bound: active=%s tensors=%d",
+            sync.active,
+            len(sync.arrays),
+        )
 
     return True
 
@@ -86,7 +97,7 @@ class RaidenWeightSyncDelegate:
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logging.info("destination checksums: %s", sync.checksums())
     version = getattr(sync_request, "policy_version", 0)
-    self._version = version if version else self._version + 1
+    self._version = version if version is not None else self._version + 1
     return self._version
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
