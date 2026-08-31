@@ -206,7 +206,7 @@ parser_cli.add_argument(
 parser_cli.add_argument(
     "--vllm_reshard_chunk_size",
     type=int,
-    default=int(os.getenv("VLLM_RESHARD_CHUNK_SIZE", "1")),
+    default=int(os.getenv("VLLM_RESHARD_CHUNK_SIZE", "30")),
     help="Reshard chunk size for vLLM weight sync",
 )
 parser_cli.add_argument(
