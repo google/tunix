@@ -764,6 +764,27 @@ class P58RendererTest(unittest.TestCase):
           worker_nodepool="tpu-pool",
       )
 
+  def test_custom_instance_type_is_accepted_and_validated(self):
+    document = self._render("zero", "full", instance_type="4x4x8_nowrap")
+    head = renderer.p34._head(document)
+    services = renderer._service_containers(head)
+    manager = renderer.p34._container(services, "pathways-rm")
+    self.assertIn("--instance_type=tpuv5:4x4x8_nowrap", manager["args"])
+    worker_pod = renderer.p34._worker(document)["template"]["spec"]
+    worker = renderer.p34._container(
+        worker_pod["containers"], "pathways-worker"
+    )
+    self.assertIn("--instance_type=tpuv5:4x4x8_nowrap", worker["args"])
+    renderer.validate(
+        document,
+        source_commit="1" * 40,
+        client_image="registry.example/tunix@sha256:" + "2" * 64,
+        stage="full",
+        arm="zero",
+        worker_nodepool="tpu-pool",
+        instance_type="4x4x8_nowrap",
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

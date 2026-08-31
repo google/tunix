@@ -156,6 +156,7 @@ def render(
     cpu_nodepool: str,
     worker_nodepool: str,
     model_pvc: str,
+    instance_type: str = TOPOLOGY,
     whitelist: str = CLEAN_WHITELIST,
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
     sampler_is: bool = False,
@@ -315,7 +316,7 @@ def render(
       manager["args"], "--gcs_scratch_location=", f"--gcs_scratch_location={scratch}"
   )
   p34._replace_arg(
-      manager["args"], "--instance_type=", f"--instance_type=tpuv5:{TOPOLOGY}"
+      manager["args"], "--instance_type=", f"--instance_type=tpuv5:{instance_type}"
   )
   if arm == "native":
     _remove_proxy_precision_pin(proxy)
@@ -503,7 +504,7 @@ def render(
   p34._replace_arg(
       worker_container["args"],
       "--instance_type=",
-      f"--instance_type=tpuv5:{TOPOLOGY}",
+      f"--instance_type=tpuv5:{instance_type}",
   )
   address = f"{name}-pathways-head-0-0.{name}"
   p34._replace_arg(
@@ -522,6 +523,7 @@ def render(
       stage=stage,
       arm=arm,
       worker_nodepool=worker_nodepool,
+      instance_type=instance_type,
       sampler_is=sampler_is,
       high_performance=high_performance,
       checked_vma_off_diagnostic=checked_vma_off_diagnostic,
@@ -597,6 +599,7 @@ def validate(
     stage: str,
     arm: str,
     worker_nodepool: str,
+    instance_type: str = TOPOLOGY,
     sampler_is: bool = False,
     high_performance: bool = False,
     checked_vma_off_diagnostic: bool = False,
@@ -852,7 +855,7 @@ def validate(
   if proxy_pins != expected_proxy_pins:
     raise ValueError("P58 proxy precision treatment drifted")
   manager = p34._container(services, "pathways-rm")
-  if f"--instance_type=tpuv5:{TOPOLOGY}" not in manager["args"]:
+  if f"--instance_type=tpuv5:{instance_type}" not in manager["args"]:
     raise ValueError("P58 resource-manager topology drifted")
   worker_pod = worker["template"]["spec"]
   annotations = document.get("metadata", {}).get("annotations", {})
@@ -912,6 +915,7 @@ def main() -> None:
   parser.add_argument("--arm", choices=_ARMS, required=True)
   parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
   parser.add_argument("--worker-nodepool", required=True)
+  parser.add_argument("--instance-type", default=TOPOLOGY)
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", default=CLEAN_WHITELIST)
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
@@ -935,6 +939,7 @@ def main() -> None:
       arm=args.arm,
       cpu_nodepool=args.cpu_nodepool,
       worker_nodepool=args.worker_nodepool,
+      instance_type=args.instance_type,
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
