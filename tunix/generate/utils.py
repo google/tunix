@@ -1586,6 +1586,7 @@ def _reshard_in_chunks(
     )
     import gc
     gc.collect()
+    jax.clear_caches()
   return resharded
 
 

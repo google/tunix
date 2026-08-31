@@ -662,6 +662,7 @@ elif ROLLOUT_ENGINE == "vllm":
   sampler.load_checkpoint(model_state)
   del model_state
   gc.collect()
+  jax.clear_caches()
   logger.info("Synced model weights to vLLM engine and freed original model.")
 
 elif ROLLOUT_ENGINE == "sglang_jax":
