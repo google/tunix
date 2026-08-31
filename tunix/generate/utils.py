@@ -1540,6 +1540,7 @@ def _reshard_in_chunks(
     reshard_fn: Callable[..., Mapping[str, Any]],
     chunk_size: int,
     delete_spec_buffers: bool = False,
+    dst_state: Optional[Any] = None,
 ) -> Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray]:
   """Reshards a flat weight dict in sequential chunks to reduce peak HBM pressure.
 
@@ -1592,8 +1593,11 @@ def _reshard_in_chunks(
     chunk_dst_shardings = traverse_util.unflatten_dict(chunk_spec_tuples)
     chunk_resharded = reshard_fn(source=chunk_src, target=chunk_dst_shardings)
     jax.block_until_ready(chunk_resharded)
-    for k, v in traverse_util.flatten_dict(chunk_resharded).items():
-      resharded[k] = v
+    if dst_state is not None:
+      nnx.update(dst_state, chunk_resharded)
+    else:
+      for k, v in traverse_util.flatten_dict(chunk_resharded).items():
+        resharded[k] = v
 
     for src_val in chunk_src_flat.values():
       if hasattr(src_val, "delete") and not getattr(
@@ -1878,17 +1882,15 @@ def transfer_state_directly(
     src_flat = traverse_util.flatten_dict(final_source)
     spec_flat = traverse_util.flatten_dict(final_spec)
     del final_source, final_spec
-    resharded_flat = _reshard_in_chunks(
+    _reshard_in_chunks(
         src_flat,
         spec_flat,
         reshard_fn,
         reshard_chunk_size,
         delete_dst_buffers,
+        dst_state=dst_state,
     )
-    resharded_flat_tuples = {
-        k: v for k, v in resharded_flat.items() if isinstance(k, tuple)
-    }
-    resharded_weights = traverse_util.unflatten_dict(resharded_flat_tuples)
+    return
   else:
     src_flat = traverse_util.flatten_dict(final_source)
     spec_flat = traverse_util.flatten_dict(final_spec)
