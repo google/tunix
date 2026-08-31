@@ -1572,6 +1572,14 @@ def _reshard_in_chunks(
       for k, v in traverse_util.flatten_dict(chunk_resharded).items():
         resharded[k] = v
 
+    for src_val in chunk_src_flat.values():
+      arr = src_val.value if hasattr(src_val, 'value') else src_val
+      if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
+        try:
+          arr.delete()
+        except Exception:
+          pass
+
 
 
     del (  # pyrefly: ignore[unsupported-delete]
