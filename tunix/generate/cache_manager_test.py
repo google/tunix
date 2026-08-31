@@ -1,0 +1,117 @@
+import unittest
+from tunix.generate.cache_manager import CacheManager
+
+class MockPageManager:
+    def __init__(self, num_pages=50, batch_size=8, max_seq_pages=16):
+        self.num_available_pages = num_pages
+        self.total_num_pages = num_pages
+        self.batch_size = batch_size
+        self.max_num_pages_per_seq = max_seq_pages
+        self.max_num_seqs = batch_size * 2
+        self.calls = []
+
+    def allocate(self, num_pages):
+        num = int(num_pages)
+        res = [100 + i for i in range(num)]
+        self.num_available_pages -= num
+        return self, res
+
+    def assign(self, idxs, ids, lens):
+        self.calls.append(("assign", idxs, ids, lens))
+        return self
+
+    def evict_pages(self, idxs, count):
+        self.calls.append(("evict", idxs, count))
+        self.num_available_pages += int(count)
+        return self
+
+class CacheManagerTest(unittest.TestCase):
+    def setUp(self):
+        self.hbm = MockPageManager(num_pages=10)
+        self.cpu = MockPageManager(num_pages=20)
+        import jax.numpy as jnp
+        class MockBlock:
+            def __init__(self, num_pages):
+                self.num_available_pages = num_pages
+                self.total_num_pages = num_pages
+                self.pages = jnp.zeros((num_pages, 8, 4))
+                self.available_page_indices = jnp.arange(num_pages)
+                
+            def allocate(self, num_pages):
+                num = int(num_pages)
+                res = [100 + i for i in range(num)]
+                self.num_available_pages -= num
+                return self, res
+                
+            def release(self, idxs, count):
+                self.num_available_pages += int(count)
+                return self
+
+        # Monkey patch MockPageManager for testing
+        self.hbm.block = MockBlock(self.hbm.total_num_pages)
+        cpu_block = jnp.zeros((20, 8, 4))
+        
+        self.cache_manager = CacheManager(
+            hbm_page_manager=self.hbm,
+            max_num_seqs=self.hbm.max_num_seqs,
+            max_num_pages_per_seq=self.hbm.max_num_pages_per_seq,
+            page_size=8,
+            cpu_block=cpu_block
+        )
+
+    def test_allocate(self):
+        """Test allocation updates internal capacities and constructs mapping cleanly."""
+        hbm_initial = self.cache_manager.available_hbm_pages
+        
+        assigned_ids = self.cache_manager.allocate(3)
+        self.assertEqual(len(assigned_ids), 3)
+        self.assertEqual(assigned_ids, [0, 1, 2])
+        
+        self.assertEqual(self.cache_manager.available_hbm_pages, hbm_initial - 3)
+        self.assertEqual(self.cache_manager._page_location[0], "tpu")
+        self.assertEqual(self.cache_manager._page_id_to_idx[0], 100) # Provided by Mock
+        
+    def test_evict(self):
+        """Evict should cleanly tear down physical components back to their source pools."""
+        assigned_ids = self.cache_manager.allocate(4)
+        
+        self.cache_manager.evict([0, 2]) # evict partial logical IDs
+        
+        # Verify internal mapping purged
+        self.assertNotIn(0, self.cache_manager._page_location)
+        self.assertNotIn(2, self.cache_manager._page_id_to_idx)
+        
+        # Should persist 1 and 3
+        self.assertIn(1, self.cache_manager._page_location)
+        self.assertIn(3, self.cache_manager._page_id_to_idx)
+        
+        # Verify mock HBM got the correct evict call
+        self.assertEqual(len(self.hbm.calls), 1)
+        self.assertEqual(self.hbm.calls[0][0], "evict")
+        # Ensure count matches accurately back down to mock!
+        self.assertEqual(int(self.hbm.calls[0][1]), 2) 
+        
+    def test_assign(self):
+        """Test structured batching correctly pads and filters sequence structures."""
+        assigned_ids = self.cache_manager.allocate(5) # logical 0, 1, 2, 3, 4 -> phys 100, 101...
+        
+        # Seq 0 uses [0, 1], Seq 1 uses [2, 3, 4]
+        sseq_ids = [0, 1]
+        sseq_page_ids = [[0, 1], [2, 3, 4]]
+        
+        self.cache_manager.assign(sseq_page_ids)
+        
+        
+        # assign doesn't call hbm anymore, it updates internal numpy arrays
+        self.assertEqual(self.cache_manager.hbm_page_manager.seq_lens[0], 2 * 8)
+        self.assertEqual(self.cache_manager.hbm_page_manager.seq_lens[1], 3 * 8)
+        self.assertEqual(self.cache_manager.hbm_page_manager.page_indices[0, 0], 100)
+        self.assertEqual(self.cache_manager.hbm_page_manager.page_indices[1, 0], 102)
+        
+    def test_allocate_oom(self):
+        """Tests that exceeding physically available boundaries throws Runtime exception."""
+        with self.assertRaises(RuntimeError):
+            self.cache_manager.allocate(11) # Capacity is 10
+
+if __name__ == '__main__':
+    unittest.main()

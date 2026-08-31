@@ -5,7 +5,6 @@ from flax import struct
 from flax.nnx import filterlib
 from flax.nnx import graph
 from flax.nnx import statelib
-import inspect
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -60,13 +59,13 @@ class SamplingConfig:
 class CacheConfig:
   """Serving & execution config."""
 
-  page_size: int = 16
-  max_num_seqs: int = 32 
-  max_prompt_length: int = 128 
-  max_tokens_to_generate: int = 896 
-  max_tpu_bytes: int = 1 * 1024**3
+  page_size: int = 128 
+  max_num_seqs: int = 256
+  max_prompt_length: int = 1000
+  max_tokens_to_generate: int = 1000
+  max_tpu_bytes: int = 5 * 1024**3
   max_cpu_bytes: int = 0
-  max_num_batch_tokens: int = 1024 
+  max_num_batch_tokens: int = 2048
 
 
 def sample_top_p(
@@ -125,7 +124,7 @@ def sample_best(
   return next_token, logp_sampled
 
 
-class VanillaSampler:
+class Sampler:
   """A sampler for tunix."""
 
   def __init__(
@@ -148,13 +147,6 @@ class VanillaSampler:
         else getattr(transformer, 'model_config', None)
     )
 
-    self._supports_decode_only_last_token = (
-        'decode_only_last_token'
-        in inspect.signature(transformer.__call__).parameters
-    )
-
-
-
     self.cache_config = cache_config
     self._seed = seed
 
@@ -163,8 +155,8 @@ class VanillaSampler:
 
     self._compiled_sample_step = jax.jit(
         self._sample_step,
-        static_argnames=['sampling_config'],
-        compiler_options={"xla_tpu_enable_log_recorder": "true"},
+        # static_argnames=['static_token_capacity', 'sampling_config'],
+        static_argnames=['static_token_capacity', 'sampling_config'],
     )
 
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
@@ -286,17 +278,17 @@ class VanillaSampler:
     logits, updated_cache = self._model_step_fn(
         params,
         cache,
-        tokens,
+        jnp.array(tokens, dtype=jnp.int32),
         metadata,
+        batch_size=batch_size,
     )
-    """
+
     if sampling_config.forbidden_token_ids:
-      logits = logits.at[:, :, sampling_config.forbidden_token_ids].set(-jnp.inf)
-    """
-    
+      logits = logits.at[:, sampling_config.forbidden_token_ids].set(-jnp.inf)
+
     key = jax.random.fold_in(jax.random.PRNGKey(self._seed), step_count)
     tokens, logp = sample_top_p(  # pytype: disable=bad-assignment
-        logits,
+        logits[:, None, :],
         key,
         temperature=sampling_config.temperature,
         top_p=sampling_config.top_p,
@@ -312,18 +304,17 @@ class VanillaSampler:
       tokens: np.ndarray,
       metadata: RPAMetadata,
       sampling_config: SamplingConfig,
-      # static_token_capacity: int = 1000,
   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, Any]:
 
     tokens, logits, logp, updated_cache, self._step_count = (
-      self._compiled_sample_step(
-          self._flattened_transformer_state,
-          self._step_count,
-          cache,
-          tokens,
-          metadata,
-          sampling_config,
-      )
+        self._compiled_sample_step(
+            self._flattened_transformer_state,
+            self._step_count,
+            cache,
+            tokens,
+            metadata,
+            sampling_config,
+        )
     )
 
     tokens_cpu = jax.device_get(tokens)
@@ -336,35 +327,43 @@ class VanillaSampler:
       self,
       params: Any,
       cache: Any,
-      packed_tokens: jnp.ndarray,
+      tokens_ragged: jnp.ndarray,
       metadata: RPAMetadata,
+      batch_size: int,
   ) -> Tuple[jnp.ndarray, Any]:
     transformer = nnx.merge(self._transformer_graphdef, params)
-    kwargs = {}
-    decode_only_last_token = self._supports_decode_only_last_token and not echo
-    if decode_only_last_token:
-      kwargs['decode_only_last_token'] = True
 
     ragged = RaggedArray(
-        data=packed_tokens,
+        data=tokens_ragged,
         lens=metadata.query_lens,  # pytype: disable=bad-argument-type
     )
     seq_idxs = ragged.row_idxs
-    local_positions = ragged.intra_offsets
-
-    global_positions = local_positions + metadata.kv_lens[seq_idxs]
+    positions = ragged.intra_offsets
+    global_positions = positions + (
+        metadata.kv_lens[seq_idxs] - metadata.query_lens[seq_idxs]
+    )
 
     logits, updated_cache = transformer(
-        packed_tokens,
+        tokens_ragged,
         global_positions,
         cache=cache,
         metadata=metadata,
         soft_cap=None,
-        **kwargs,
     )
+
     last_token_idxs = jnp.cumsum(metadata.query_lens) - 1
-    last_token_logits = logits[last_token_idxs]
-    last_token_logits = jnp.expand_dims(last_token_logits, axis=1)
+    valid_idxs = jnp.maximum(0, last_token_idxs)
+    last_token_logits = logits[valid_idxs]
+
+    num_sampleable = metadata.distribution[1]
+
+    inferred_batch_size = ragged.lens.shape[0]
+    seq_indices = jnp.arange(inferred_batch_size)
+    is_sampleable = seq_indices < num_sampleable
+
+    last_token_logits = jnp.where(
+        is_sampleable[:, None], last_token_logits, 0.0
+    )
 
     return last_token_logits, updated_cache
 
@@ -376,5 +375,6 @@ class SamplerOutput:
   text: List[str]
   logits: Optional[List[Any]]
   tokens: List[Any]
+  padded_prompt_tokens: Optional[List[List[int]]] = None
   logprobs: Optional[List[Any]] = None
 

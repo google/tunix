@@ -1940,7 +1940,7 @@ def calculate_pages_for_capacity(
     block_subsharding = logical_sharding[1:]
     elements = 1
     for dim, shard in zip(page_shape, block_subsharding):
-        dim_size = (dim * dp_size) if shard == 'dp_axis' else dim
+        dim_size = (dim * dp_size) if shard == 'dp' else dim
         elements *= dim_size
 
     page_bytes = elements * item_size * len(partition_keys)
@@ -1949,7 +1949,7 @@ def calculate_pages_for_capacity(
     
     num_block_pages = max_bytes // page_bytes
     page_sharding = logical_sharding[0]
-    if page_sharding == 'dp_axis':
+    if page_sharding == 'dp':
         num_block_pages = (num_block_pages // dp_size) * dp_size
 
     return num_block_pages
