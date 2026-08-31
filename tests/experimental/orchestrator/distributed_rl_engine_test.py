@@ -61,6 +61,27 @@ class MockActorHandle(mock.MagicMock):
     return await method(*args, **kwargs)
 
 
+class _RecordingRouter:
+  """Callable router stub recording `(method_name, kwargs)` per routing call.
+
+  Deliberately defines no `generate` attribute so RoutingActorPool takes the
+  plain-callable `(actors, method_name, args, kwargs)` path — the same one
+  remote_scheduler_router.RemoteSchedulerRouter relies on.
+  """
+
+  def __init__(self, pick_index: int = 0):
+    self.pick_index = pick_index
+    self.calls = []
+    self.weights_synced_count = 0
+
+  def __call__(self, actors, method_name, args, kwargs):
+    self.calls.append((method_name, dict(kwargs or {})))
+    return actors[self.pick_index]
+
+  def notify_weights_synced(self):
+    self.weights_synced_count += 1
+
+
 class DistributedRLEngineTest(absltest.TestCase):
 
   def setUp(self):
@@ -681,6 +702,136 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       with self.assertRaisesRegex(ValueError, "lacks 'prompt_id'"):
         await self.engine.dispatch_rollouts(["raw_prompt_without_id"])
+
+    asyncio.run(_run())
+
+  def _engine_with_router(self, router):
+    return distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        router=router,
+    )
+
+  def test_dispatch_rollouts_passes_routing_hints_to_router(self):
+    router = _RecordingRouter(pick_index=1)
+    engine = self._engine_with_router(router)
+
+    async def _run():
+      req1 = datatypes.RolloutRequest(
+          request_id="r1",
+          prompt="p1",
+          prompt_id="prompt_1",
+          metadata={"prefix_hash": 7},
+      )
+      req2 = datatypes.RolloutRequest(
+          request_id="r2",
+          prompt="p2",
+          prompt_id="prompt_2",
+      )
+
+      await engine.dispatch_rollouts([req1, req2])
+
+      self.assertEqual(
+          router.calls,
+          [
+              (
+                  "generate",
+                  {"route_key": 7, "request_id": "r1", "prompt": "p1"},
+              ),
+              (
+                  "generate",
+                  {"route_key": "prompt_2", "request_id": "r2", "prompt": "p2"},
+              ),
+          ],
+      )
+      # Both dispatches must land on the router-picked worker.
+      self.mock_rollout_1.generate.assert_not_called()
+      self.assertEqual(self.mock_rollout_2.generate.call_count, 2)
+
+    asyncio.run(_run())
+
+  def test_generate_passes_request_routing_hints_to_router(self):
+    router = _RecordingRouter(pick_index=0)
+    engine = self._engine_with_router(router)
+
+    async def _run():
+      request = datatypes.RolloutRequest(
+          request_id="r1",
+          prompt="p1",
+          prompt_id="prompt_1",
+          metadata={"prefix_hash": 3},
+      )
+      resp = datatypes.RolloutResponse(
+          request_id="r1", status="COMPLETED", env_reward=1.0
+      )
+      self.mock_rollout_1.generate.return_value = [resp]
+
+      results = await engine.generate([request])
+
+      self.assertLen(results, 1)
+      self.assertEqual(
+          router.calls,
+          [("generate", {"route_key": 3, "request_id": "r1", "prompt": "p1"})],
+      )
+      self.mock_rollout_1.generate.assert_called_once()
+      self.mock_rollout_2.generate.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_generate_passes_raw_prompt_routing_hints_to_router(self):
+    router = _RecordingRouter(pick_index=1)
+    engine = self._engine_with_router(router)
+
+    async def _run():
+      resp = datatypes.RolloutResponse(
+          request_id="r1", status="COMPLETED", env_reward=1.0
+      )
+      self.mock_rollout_2.generate.return_value = [resp]
+
+      results = await engine.generate(
+          ["p1"], route_metadata={"prefix_hash": "h1"}
+      )
+
+      self.assertLen(results, 1)
+      self.assertEqual(
+          router.calls,
+          [("generate", {"route_key": "h1", "prompt": "p1"})],
+      )
+      self.mock_rollout_2.generate.assert_called_once_with(prompts=["p1"])
+      self.mock_rollout_1.generate.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_sync_weights_notifies_router_once(self):
+    router = _RecordingRouter()
+    engine = self._engine_with_router(router)
+
+    async def _run():
+      mock_meta = datatypes.WeightSyncMetadata(
+          new_policy_version=42,
+          transfer_mode="p2p",
+      )
+      self.mock_actor.prepare_weight_sync.return_value = mock_meta
+
+      ver = await engine.sync_weights(role=datatypes.Role.ACTOR)
+
+      self.assertEqual(ver, 42)
+      self.assertEqual(router.weights_synced_count, 1)
+
+    asyncio.run(_run())
+
+  def test_sync_weights_failure_skips_router_notification(self):
+    router = _RecordingRouter()
+    engine = self._engine_with_router(router)
+
+    async def _run():
+      self.mock_actor.prepare_weight_sync.return_value = datatypes.Response()
+
+      with self.assertRaisesRegex(RuntimeError, "WeightSyncMetadata"):
+        await engine.sync_weights(role=datatypes.Role.ACTOR)
+
+      self.assertEqual(router.weights_synced_count, 0)
 
     asyncio.run(_run())
 

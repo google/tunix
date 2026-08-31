@@ -238,6 +238,34 @@ class ClusterOrchestratorTest(absltest.TestCase):
         engine._rollout_workers[0], remote_execution.InProcessActorHandle
     )
 
+  def test_create_engine_forwards_rollout_router(self):
+    from tunix.experimental.worker import remote_execution
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def mock_group(role):
+      grp = mock.MagicMock()
+      if role == datatypes.Role.ROLLOUT:
+        grp.members.return_value = [mock_rollout]
+      else:
+        grp.members.return_value = []
+      return grp
+
+    self.mock_registry.group.side_effect = mock_group
+
+    # Default: no router configured, pool router stays unset.
+    engine = self.orch._create_engine()
+    self.assertIsNone(engine._rollout_pool.router)
+
+    router = object()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=self.mock_registry,
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+        rollout_router=router,
+    )
+    engine = orch._create_engine()
+    self.assertIs(engine._rollout_pool.router, router)
+
   def test_run_managed_program_submission(self):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     mock_algo.group_size = 2

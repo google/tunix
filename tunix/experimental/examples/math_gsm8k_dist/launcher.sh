@@ -293,7 +293,9 @@ check_process_alive() {
   local pid="$2"
   local log_file="$3"
   local process_state
-  process_state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+  # Read state from /proc directly: minimal images (e.g. python:*-slim) ship
+  # no `ps`, and an empty result here must mean "dead", not "tool missing".
+  process_state="$(read -r _ _ st _ < "/proc/$pid/stat" 2>/dev/null && echo "$st" || true)"
   if [[ -z "$process_state" || "$process_state" == Z* ]]; then
     echo "Error: $name process exited before gRPC port became ready (pid=$pid)."
     print_file_debug "$name" "$log_file"
