@@ -1594,7 +1594,6 @@ def _reshard_in_chunks(
     jax.block_until_ready(chunk_resharded)
     for k, v in traverse_util.flatten_dict(chunk_resharded).items():
       resharded[k] = v
-      resharded['.'.join(str(p) for p in k)] = v
 
     for src_val in chunk_src_flat.values():
       if hasattr(src_val, "delete") and not getattr(
