@@ -1,0 +1,22 @@
+FROM us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813
+
+ENV PATH="/opt/venv/bin:$PATH"
+ENV RAIDEN_WEIGHT_SYNC_CHUNKS=1
+
+# Bump jax/jaxlib/libtpu to match the Raiden wheel ABI
+RUN pip install --no-cache-dir -U "jax[tpu]==0.11.0" "jaxlib==0.11.0" "libtpu==0.0.44" \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+
+WORKDIR /app
+COPY . /app
+
+RUN bash scripts/install_tunix_vllm_requirement.sh
+
+# Install Raiden wheel
+RUN if [ -d "/app/raiden_wheels" ] && ls /app/raiden_wheels/*.whl 1>/dev/null 2>&1; then \
+      pip install --force-reinstall --no-deps /app/raiden_wheels/*.whl; \
+    fi
+
+RUN pip install --no-deps -e /app
+
+CMD ["bash"]
