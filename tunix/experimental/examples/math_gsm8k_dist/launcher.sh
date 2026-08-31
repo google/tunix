@@ -655,7 +655,7 @@ echo "Launching CPU orchestrator..."
   export WANDB_API_KEY="$WANDB_API_KEY"
   env | egrep 'JAX|TPU'
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
-  "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
+  "${ORCHESTRATOR_CMD[@]}" 2>&1 | tee "$ORCHESTRATOR_LOG"
 ) || {
   exit_code="$?"
   echo "Error: CPU orchestrator failed with exit code $exit_code."
