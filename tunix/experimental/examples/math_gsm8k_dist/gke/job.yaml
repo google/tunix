@@ -93,10 +93,11 @@ spec:
             # scripts use setdefault so the env wins).
             - name: JAX_PLATFORMS
               value: tpu,cpu
-            # 1-chip trainer needs a 1x1 mesh (run_trainer_node defaults to 2x1).
-            - name: MESH_FSDP
+            # 1-chip trainer needs a 1x1 mesh (launcher defaults are fsdp=1,tp=2
+            # for a 2-chip trainer; env names follow the launcher's knobs).
+            - name: TRAINER_FSDP
               value: "1"
-            - name: MESH_TP
+            - name: TRAINER_TP
               value: "1"
             - name: TRAINER_TPU_CHIPS
               value: "0"
