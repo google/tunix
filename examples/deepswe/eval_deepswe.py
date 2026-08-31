@@ -9,6 +9,7 @@ models (e.g. Qwen3.5-35B-A3B) and configurable JAX/vLLM sharding meshes.
 import argparse
 import asyncio
 import collections
+import gc
 import json
 import logging
 import os
