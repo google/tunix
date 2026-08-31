@@ -23,6 +23,7 @@ import asyncio
 import collections
 from collections.abc import Mapping, Sequence
 import inspect
+import logging as py_logging
 from typing import Any
 import uuid
 
@@ -130,6 +131,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+    self._logged_debug_rollout_snapshot = False
 
   async def _invoke_worker(
       self,
@@ -302,6 +304,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
           traj_item = _response_to_trajectory_item(it)
+          if (
+              not self._logged_debug_rollout_snapshot
+              and py_logging.getLogger().isEnabledFor(py_logging.DEBUG)
+          ):
+            logging.debug("Rollout response snapshot (raw): %r", it)
+            logging.debug(
+                "Rollout response snapshot (trajectory): %r",
+                traj_item,
+            )
+            self._logged_debug_rollout_snapshot = True
           logging.debug(
               "Received rollout response (prompt_id=%s, group_index=%d).",
               traj_item.prompt_id,
@@ -516,10 +528,48 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
 
+  async def prepare_rollout_policy(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      sync_weights: bool = True,
+  ) -> int | None:
+    """Bootstraps the rollout-visible policy state before step 0."""
+    trainer = self._trainer_workers.get(role)
+    if trainer is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+
+    if self._rollout_workers:
+      rollout = self._rollout_workers[0]
+      try:
+        logging.info(
+            "Fetching rollout target_state for trainer-side weight conversion."
+        )
+        target_state = await self._invoke_worker(rollout, "get_target_state")
+        await self._invoke_worker(
+            trainer, "set_target_state", target_state=target_state
+        )
+        logging.info(
+            "Configured trainer target_state from rollout worker before"
+            " bootstrap sync."
+        )
+      except RuntimeError as exc:
+        if "AttributeError" not in str(exc):
+          raise
+        logging.info(
+            "Skipping trainer target_state bootstrap; rollout/trainer target"
+            " state RPCs are unavailable: %s",
+            exc,
+        )
+
+    if not sync_weights:
+      return None
+    return await self.sync_weights(role=role, policy_version=self._policy_version)
+
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
   ) -> int:
     """Runs one weight sync round through the coordinator."""
     del role, target_roles
@@ -528,12 +578,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
+    next_policy_version = self._policy_version + 1 if policy_version is None else policy_version
     logging.info(
-        "Synchronizing weights (advancing to policy_version=%d)...",
-        self._policy_version + 1,
+        "Synchronizing weights (target policy_version=%d)...",
+        next_policy_version,
     )
     result = await self._weight_sync_coordinator.sync(
-        policy_version=self._policy_version + 1
+        policy_version=next_policy_version
     )
     self._policy_version = result.policy_version
     logging.info(

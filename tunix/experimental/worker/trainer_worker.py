@@ -17,6 +17,7 @@
 import contextlib
 from typing import Any, Callable, ContextManager, cast
 
+from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
@@ -146,6 +147,16 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
+  def set_target_state(self, target_state: Any) -> datatypes.Response:
+    """Stores rollout target_state so trainer-side weight sync can convert."""
+    setter = getattr(self._trainer, "set_target_state", None)
+    if not callable(setter):
+      raise AttributeError(
+          f"{type(self._trainer).__name__} does not support set_target_state"
+      )
+    setter(target_state)
+    return self._response(target_state_configured=True)
+
   def fwd_bwd(
       self,
       request: datatypes.TrainRequest,
@@ -256,6 +267,7 @@ class TrainerWorker(abstract_worker.Worker):
         return metadata
       return self._response(weight_sync_ready=True)
     except Exception as exc:
+      logging.exception("TrainerWorker.prepare_weight_sync failed")
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise

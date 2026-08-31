@@ -114,6 +114,16 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   def initialize(self) -> datatypes.Response:
+    if self.state == WorkerState.READY:
+      return datatypes.Response(
+        metadata={
+          "worker_id": self.worker_id,
+          "state": self.state.value,
+          "policy_version": self._policy_version,
+          "initialized": True,
+          "already_ready": True,
+        }
+      )
     self.state = WorkerState.INITIALIZING
     self.sampler.initialize()
     try:
@@ -173,6 +183,12 @@ class RolloutWorker(abstract_worker.Worker):
         inflight=len(self.manager._active_tasks),  # pylint: disable=protected-access
         queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
     )
+
+  def get_target_state(self) -> Any:
+    """Returns rollout-side target-state skeleton for trainer-side conversion."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    return self.manager.get_target_state()
 
   def _left_pad_prompt_token_ids(
       self, prompt_token_ids: Sequence[np.ndarray]
@@ -477,7 +493,14 @@ class RolloutWorker(abstract_worker.Worker):
     metadata = kwargs.pop("metadata", None)
     request = sync_request if sync_request is not None else metadata
     result = await self.manager.weight_sync(request, **kwargs)
-    self._policy_version += 1
+    if isinstance(result, int):
+      self._policy_version = result
+    else:
+      version = getattr(request, "policy_version", None)
+      if version is not None:
+        self._policy_version = version
+      else:
+        self._policy_version += 1
     self._record_round(request, "h2d_done")
     return result
 
