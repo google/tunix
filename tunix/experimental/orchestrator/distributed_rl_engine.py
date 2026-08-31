@@ -551,10 +551,42 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
 
+  async def prepare_rollout_policy(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      sync_weights: bool = True,
+      policy_version: int | None = None,
+  ) -> int | None:
+    """Bootstraps the rollout-visible policy state before step 0."""
+    trainer = self._trainer_workers.get(role)
+    if trainer is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+
+    if self._rollout_workers:
+      rollout = self._rollout_workers[0]
+      try:
+        target_state = await self._invoke_worker(rollout, "get_target_state")
+        await self._invoke_worker(
+            trainer, "set_target_state", target_state=target_state
+        )
+      except RuntimeError as exc:
+        if "AttributeError" not in str(exc):
+          raise
+
+    if not sync_weights:
+      return None
+    target_policy_version = (
+        self._policy_version if policy_version is None else policy_version
+    )
+    return await self.sync_weights(
+        role=role, policy_version=target_policy_version
+    )
+
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
   ) -> int:
     """Runs one weight sync round through the coordinator."""
     del role, target_roles
@@ -563,12 +595,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
+    next_policy_version = self._policy_version + 1 if policy_version is None else policy_version
     logging.info(
-        "Synchronizing weights (advancing to policy_version=%d)...",
-        self._policy_version + 1,
+        "Synchronizing weights (target policy_version=%d)...",
+        next_policy_version,
     )
     result = await self._weight_sync_coordinator.sync(
-        policy_version=self._policy_version + 1
+        policy_version=next_policy_version
     )
     self._policy_version = result.policy_version
     logging.info(

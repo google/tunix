@@ -430,7 +430,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
       weight_sync_worker_factory: Callable[[], Any] | None = None,
-      target_state: Any = None,
       sampler_type: str = "inprocess_vllm",
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
@@ -522,7 +521,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
-    self._target_state = target_state
+    self._target_state = None
     self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
     self._weight_sync_worker_factory = weight_sync_worker_factory
@@ -532,6 +531,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def with_data_hooks(self, data_hooks: hooks.DataHooks):
     self.data_hooks = data_hooks
+
+  def set_target_state(self, target_state: Any) -> None:
+    self._target_state = target_state
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.

@@ -135,10 +135,20 @@ class AbstractRLEngine(Protocol):
     """Retrieves step metrics from the worker for the specified role."""
     ...
 
+  async def prepare_rollout_policy(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      sync_weights: bool = True,
+      **kwargs: Any,
+  ) -> int | None:
+    """Bootstraps rollout-facing policy state before step 0 dispatch begins."""
+    ...
+
   async def sync_weights(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
       **kwargs: Any,
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""

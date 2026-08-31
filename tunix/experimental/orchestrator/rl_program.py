@@ -732,6 +732,13 @@ class StandardRLProgram(RLProgram):
     self.engine = engine
     logging.info("Starting StandardRLProgram concurrent stages...")
 
+    if self.sync_weights:
+      await engine.prepare_rollout_policy(
+          role=datatypes.Role.ACTOR,
+          sync_weights=True,
+          policy_version=self.policy_version,
+      )
+
     max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
     self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
