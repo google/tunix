@@ -46,6 +46,22 @@ export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
 export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+# Rollout records its MoE routing and the trainer replays it off the payload,
+# so only the rollout needs a flag.
+export ROUTER_REPLAY=${ROUTER_REPLAY:-0}
+# Replay is meaningless unless the trainer can consume it and both sides hold
+# the same weights, so require both rather than degrading silently.
+if [[ "$ROUTER_REPLAY" == "1" ]]; then
+  if [[ "$TRAINER_BACKEND" != "maxtext" ]]; then
+    echo "Error: ROUTER_REPLAY=1 requires TRAINER_BACKEND=maxtext."
+    exit 1
+  fi
+  if [[ "$WEIGHT_SYNC_MODE" == "none" ]]; then
+    echo "Error: ROUTER_REPLAY=1 requires WEIGHT_SYNC_MODE != none, so the"
+    echo "rollout is bootstrapped from the trainer's weights before step 0."
+    exit 1
+  fi
+fi
 # If TRAINER_BACKEND=maxtext, MAXTEXT_CKPT must be set to the path of an Orbax params-only checkpoint.
 if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
@@ -184,6 +200,10 @@ start_rollout() {
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
     "                                                                                                                                                                                                       
   fi
+  local replay_args=""
+  if [[ "${ROUTER_REPLAY}" == "1" ]]; then
+    replay_args+=" --return_routed_experts"
+  fi
   local vllm_args=""
   if [[ "$SAMPLER" == "vllm" ]]; then
     vllm_args="\
@@ -213,6 +233,7 @@ start_rollout() {
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         ${maxtext_args} \
         ${vllm_args} \
+        ${replay_args} \
         ${DEBUG:+--debug} \
     " \
     | kubectl apply -f -

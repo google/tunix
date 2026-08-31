@@ -84,6 +84,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--lora_rank", type=int, default=64)
   parser.add_argument("--lora_alpha", type=float, default=64.0)
   parser.add_argument(
+      "--return_routed_experts",
+      action="store_true",
+      help=(
+          "Capture per-token MoE expert ids so the trainer can replay them"
+          " instead of re-running its gate. MoE + maxtext trainer only."
+      ),
+  )
+  parser.add_argument(
       "--model_name", type=str, default=os.getenv("MODEL_NAME", "Qwen3-1.7B")
   )
   parser.add_argument(
@@ -274,6 +282,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tensor_parallel_size=args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
+      return_routed_experts=args.return_routed_experts,
       lora_config=lora_config,
       mapping_config=mapping_config,
       engine_kwargs={
