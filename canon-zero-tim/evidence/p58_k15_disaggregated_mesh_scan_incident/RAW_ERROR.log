@@ -1,0 +1,39 @@
+[P34.DATASET] CLEAN_DATA_PASS source_rows=4578 filtered_rows=1012
+[DEEPSWE.TITO] ADMISSION_PASS contract=p58-qwen4b-tim-128 arm=zero mode=token-in-token-out retokenize_sampled_tokens=0
+[P34.DEVICE_INVENTORY] PASS devices=128
+[P34.TOPOLOGY] PASS rollout_devices=64 trainer_devices=64
+Rollout Mesh: dp=8,tp=8 (devices: [0, 4, 8, 12, 1, 5, 9, 13, 16, 20, 24, 28, 17, 21, 25, 29, 32, 36, 40, 44, 33, 37, 41, 45, 48, 52, 56, 60, 49, 53, 57, 61, 64, 68, 72, 76, 65, 69, 73, 77, 80, 84, 88, 92, 81, 85, 89, 93, 96, 100, 104, 108, 97, 101, 105, 109, 112, 116, 120, 124, 113, 117, 121, 125])
+Train Mesh: dp=8,tp=8 (devices: [2, 3, 18, 19, 6, 7, 22, 23, 10, 11, 26, 27, 14, 15, 30, 31, 34, 35, 50, 51, 38, 39, 54, 55, 42, 43, 58, 59, 46, 47, 62, 63, 66, 67, 82, 83, 70, 71, 86, 87, 74, 75, 90, 91, 78, 79, 94, 95, 98, 99, 114, 115, 102, 103, 118, 119, 106, 107, 122, 123, 110, 111, 126, 127])
+[ROLLOUT.STEP0] 128 trajectories completed (116 finished, 12 max-turn, 0 timeouts).
+[ROLLOUT.SOLVE] Solved tasks: 3 / 128 (reward = 1.0), non-zero advantage samples: 31 / 128 (24.2%).
+[ROLLOUT.TOKENS] Total action tokens: 407,262.
+[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=407262 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)] diff_bytes=0 diff_elements=0 hash=1ef8b0406cb23d242698ebaf3c8a982e01dfdb8d7d91244cf5ef025fa25890d9
+
+[TRAIN.STEP0] Starting segmented forward-backward pass...
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2011, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3999, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1622, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 8100, in run_train_step
+[rank0]:     stacked_cache_ins, stacked_hidden_ins, hidden = (
+[rank0]:         segmented.run_layers_fwd_tape_scan(
+[rank0]:             engine_leaves, caches, hidden, attention_metadata
+[rank0]:         )
+[rank0]:     )
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 3687, in run_layers_fwd_tape_scan
+[rank0]:     stacked_hidden_ins, new_caches, hidden_out = self._p71_fwd_scan_fn(
+[rank0]:         stacked_leaves, stacked_cache_ins, hidden, metadata
+[rank0]:     )
+[rank0]:   File "/app/tunix/models/qwen3/qwen3_p22xh.py", line 144, in __call__
+[rank0]: ValueError: Received incompatible devices for jitted computation. Got argument stacked_leaves[0] of zt_tr_fwd_scan with shape bfloat16[36,2560] and with device ids [2, 3, 18, 19, ...] on platform TPU and shard_map inside jit with device ids [0, 4, 8, 12, 1, 5, ...] on platform TPU at qwen3_p22xh.py:144:11 (P22XHRmsNorm.__call__)

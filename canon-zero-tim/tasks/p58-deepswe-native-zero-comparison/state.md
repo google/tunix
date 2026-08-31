@@ -1,5 +1,13 @@
 # State
 
+## P58.29 K15 disaggregated mesh scan mismatch localized (2026-08-31)
+
+- K15 ran on the 128 TPU v5p slice (32 worker nodes, DP32xTP4). It completed all 128 multi-turn R2E trajectories across 32 TPU hosts (116 finished naturally, 12 max-turn, 0 timeouts), solved 3 SWE tasks in Step 0 (`Reward = 1.0`), generated 31 non-zero advantage samples (24.2%), and produced 407,262 action tokens.
+- Rescore-B passed and strict pre-alignment passed 100% with exact A=B=C (0 differing bytes, 0 differing elements, hash `1ef8b0406cb2...`).
+- Segmented backward crashed at `canonical_qwen3_adapter.py:8100` -> `run_layers_fwd_tape_scan:3687` -> `_p71_fwd_scan_fn` with `ValueError: Received incompatible devices for jitted computation` due to JIT tracing reading `linear._CANON_MESH` (serving mesh `[0, 4, 8, 12...]`) while arguments were on trainer execution mesh `[2, 3, 18, 19...]`.
+- Root cause: Scan methods in `SegmentedEngine` (`run_layers_fwd_tape_scan`, `run_layers_scan`, `run_layers_tape_scan`, `run_layers_rev_scan`) invoked lazy JIT scan functions directly without `_canonical_fixed_ar_execution_mesh`.
+- Immutable incident package: `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/`.
+
 ## P58.28 K11 prompt-only grouped-reverse repair (2026-08-30)
 
 - K11 source `2f61f8fc7cf073964a9adbd30e78de872426a4d2` proves

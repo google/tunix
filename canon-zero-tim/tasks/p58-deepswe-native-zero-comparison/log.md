@@ -2043,3 +2043,14 @@
 - This is transcript-only construction evidence. No repaired 128-device
   target, backward, optimizer commit, commit/push, image publication,
   Kubernetes mutation, or TPU launch occurred.
+
+## 2026-08-31 UTC — P58.29 K15 disaggregated mesh scan mismatch incident
+
+- K15 target `canon-p58-ds4b-zero-hp-full-k15` ran on the 128 TPU v5p slice (32 nodes, DP32xTP4).
+- Rollout completed all 128 multi-turn R2E trajectories across 32 TPU hosts (116 natural completions, 12 max-turn truncated, 0 timeouts/environment failures).
+- Solved 3 SWE tasks in Step 0 (`Reward = 1.0`), generated 31 non-zero advantage samples (24.2%), and generated 407,262 action tokens.
+- Rescore-B passed and strict pre-alignment passed 100% with exact A=B=C (0 differing bytes, 0 differing elements, hash `1ef8b0406cb2...`).
+- Segmented backward failed in `run_layers_fwd_tape_scan` -> `_p71_fwd_scan_fn` with `ValueError: Received incompatible devices for jitted computation`.
+- Root cause: `_p71_fwd_scan_fn` was invoked without `_canonical_fixed_ar_execution_mesh`, causing JIT tracing to read serving mesh from `linear._CANON_MESH` while input `stacked_leaves` was sharded on trainer execution mesh.
+- Incident logged in `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/` and `phases/p58-29-k15-disaggregated-mesh-scan.md`.
+

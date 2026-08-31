@@ -1,5 +1,24 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — K15 disaggregated mesh scan mismatch localized, ready for repair
+
+K15 completed all 128 multi-turn R2E trajectories across 32 TPU hosts on the 128 TPU v5p slice:
+116 finished naturally, 12 max-turn truncated, 0 timeouts/environment failures.
+Solved 3 SWE tasks in Step 0 (`Reward = 1.0`), producing 31 non-zero advantage samples (24.2%) across 407,262 action tokens.
+Rescore-B prefill passed, and strict Step-0 pre-alignment passed with 100% exact match:
+`[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=407262 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)] diff_bytes=0 diff_elements=0 hash=1ef8b0406cb2...`
+
+The run crashed when entering segmented backward in `run_layers_fwd_tape_scan`:
+`ValueError: Received incompatible devices for jitted computation. Got argument stacked_leaves[0] of zt_tr_fwd_scan with shape bfloat16[36,2560] and with device ids [2, 3, 18, 19, ...] on platform TPU and shard_map inside jit with device ids [0, 4, 8, 12, 1, 5, ...] on platform TPU at qwen3_p22xh.py:144:11 (P22XHRmsNorm.__call__)`
+
+Root Cause:
+In the 128 TPU disaggregated topology (DP32xTP4), serving mesh is devices `[0, 4, 8, 12...]` while trainer mesh is `[2, 3, 18, 19...]`.
+During rollout, `linear._CANON_MESH` is initialized to the serving mesh.
+While per-layer functions were bound with `_canonical_fixed_ar_execution_mesh` in `SegmentedEngine.__init__`, the P71/P50 scan methods (`run_layers_fwd_tape_scan`, `run_layers_scan`, `run_layers_tape_scan`, `run_layers_rev_scan`) invoked lazy JIT scan functions directly without `_canonical_fixed_ar_execution_mesh`.
+When JAX jitted `zt_tr_fwd_scan`, `P22XHRmsNorm.__call__` read the rollout `_CANON_MESH` instead of trainer mesh, failing device compatibility check.
+
+Immutable incident: `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_incident/`. See `phases/p58-29-k15-disaggregated-mesh-scan.md`.
+
 ## START HERE — K11 prompt-only grouped-reverse repair is local, not published
 
 K11 is not another rollout, TiTO, dataset, topology, or alignment failure.
