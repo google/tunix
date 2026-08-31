@@ -1861,6 +1861,7 @@ def transfer_state_directly(
   # Prepare clean source and target specs
   full_source_dict = to_pure_spec(src_state)
   full_target_spec = to_pure_spec(dst_state)
+  del src_state
 
   # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)

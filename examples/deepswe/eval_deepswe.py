@@ -654,9 +654,12 @@ elif ROLLOUT_ENGINE == "vllm":
       engine_kwargs=engine_kwargs,
   )
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-  sampler.load_checkpoint(nnx.state(model))
+  model_state = nnx.state(model)
   del model
   import gc
+  gc.collect()
+  sampler.load_checkpoint(model_state)
+  del model_state
   gc.collect()
   logger.info("Synced model weights to vLLM engine and freed original model.")
 
