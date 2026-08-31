@@ -21,7 +21,7 @@ import numpy as np
 from tunix.perf import export
 from tunix.perf import metrics
 from tunix.perf import trace
-from tunix.rl import rl_cluster
+from tunix.rl import rl_cluster as rl_engine_lib
 
 patch = mock.patch
 
@@ -55,15 +55,15 @@ def _create_mock_cluster_config_with_perf_metrics(
   mock_mesh.devices = np.array([mock_device])
 
   # Setup mock configuration
-  cluster_config = mock.create_autospec(rl_cluster.ClusterConfig, instance=True)
+  cluster_config = mock.create_autospec(rl_engine_lib.ClusterConfig, instance=True)
   cluster_config.role_to_mesh = {
-      rl_cluster.Role.ROLLOUT: mock_mesh,
-      rl_cluster.Role.ACTOR: mock_mesh,
-      rl_cluster.Role.REFERENCE: mock_mesh,
+      rl_engine_lib.Role.ROLLOUT: mock_mesh,
+      rl_engine_lib.Role.ACTOR: mock_mesh,
+      rl_engine_lib.Role.REFERENCE: mock_mesh,
   }
 
   mock_training_config = mock.create_autospec(
-      rl_cluster.RLTrainingConfig, instance=True
+      rl_engine_lib.RLTrainingConfig, instance=True
   )
   cluster_config.training_config = mock_training_config
 

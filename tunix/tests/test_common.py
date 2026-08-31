@@ -78,26 +78,34 @@ def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
 class Decoder(nnx.Module):
   """Toy decoder for testing."""
 
-  def __init__(self, rngs: nnx.Rngs):
+  def __init__(self, rngs: nnx.Rngs, dtype: jnp.dtype = jnp.float32):
     self.attn = nnx.MultiHeadAttention(
         num_heads=4,
         in_features=16,
         qkv_features=16,
         use_bias=False,
         decode=False,
+        dtype=dtype,
+        param_dtype=dtype,
         rngs=rngs,
     )
     kernel_init_fn = nnx.initializers.lecun_normal()
     self.w1 = nnx.Linear(
         in_features=16,
         out_features=32,
+        dtype=dtype,
+        param_dtype=dtype,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
-        bias_init=nnx.with_partitioning(nnx.initializers.zeros_init(), ('tp',)),
+        bias_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), ('tp',)
+        ),
     )
     self.w2 = nnx.Linear(
         in_features=32,
         out_features=16,
+        dtype=dtype,
+        param_dtype=dtype,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
         bias_init=nnx.with_partitioning(
@@ -133,6 +141,7 @@ class ModelConfig:
   vocab_size: int = 256
   vision_config: VisionConfig | None = None
   remat_config: int | None = None
+  dtype: jnp.dtype = jnp.float32
 
 
 class ToyTransformer(nnx.Module):
@@ -145,12 +154,19 @@ class ToyTransformer(nnx.Module):
       rngs: nnx.Rngs,
   ):
     self.config = config
-    self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
+    dtype = config.dtype
+    self.emb = nnx.Embed(
+        config.vocab_size, 16, dtype=dtype, param_dtype=dtype, rngs=rngs
+    )
     self.layers = nnx.List(
-        [Decoder(rngs=rngs) for _ in range(config.num_layers)]
+        [Decoder(rngs=rngs, dtype=dtype) for _ in range(config.num_layers)]
     )
     self.lm_head = nnx.Linear(
-        in_features=16, out_features=config.vocab_size, rngs=rngs
+        in_features=16,
+        out_features=config.vocab_size,
+        dtype=dtype,
+        param_dtype=dtype,
+        rngs=rngs,
     )
 
     self.head_dim = 16
@@ -226,6 +242,125 @@ class ToyTransformer(nnx.Module):
   def get_model_input(self):
     return get_dummy_inputs_for_lora_toy_transformer_tests()
 
+  def to_hf_mappings(self, backend: str | None = None):
+    del backend
+    return TOY_TRANSFORMER_TO_HF_MAPPINGS
+
+
+TOY_TRANSFORMER_TO_HF_MAPPINGS = {
+    'emb.embedding': ('model.embed_tokens.embedding', (None, None)),
+    'layers.*.attn.query.kernel': (
+        'model.layers.*.self_attn.query.kernel',
+        (None, None, None),
+    ),
+    'layers.*.attn.key.kernel': (
+        'model.layers.*.self_attn.key.kernel',
+        (None, None, None),
+    ),
+    'layers.*.attn.value.kernel': (
+        'model.layers.*.self_attn.value.kernel',
+        (None, None, None),
+    ),
+    'layers.*.attn.out.kernel': (
+        'model.layers.*.self_attn.out.kernel',
+        (None, None, None),
+    ),
+    'layers.*.w1.kernel': ('model.layers.*.mlp.gate_proj.kernel', (None, None)),
+    'layers.*.w1.bias': ('model.layers.*.mlp.gate_proj.bias', (None,)),
+    'layers.*.w2.kernel': ('model.layers.*.mlp.down_proj.kernel', (None, None)),
+    'layers.*.w2.bias': ('model.layers.*.mlp.down_proj.bias', (None,)),
+    'lm_head.kernel': ('lm_head.kernel', (None, None)),
+    'lm_head.bias': ('lm_head.bias', (None,)),
+}
+
+
+class VllmMLP(nnx.Module):
+  """MLP module for VllmToyTransformer."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    kernel_init_fn = nnx.initializers.lecun_normal()
+    self.gate_proj = nnx.Linear(
+        in_features=16,
+        out_features=32,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros_init(), ('tp',)),
+    )
+    self.down_proj = nnx.Linear(
+        in_features=32,
+        out_features=16,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
+        bias_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), ('fsdp',)
+        ),
+    )
+
+  def __call__(self, x):
+    h = nnx.relu(self.gate_proj(x))
+    return self.down_proj(h)
+
+
+class VllmDecoder(nnx.Module):
+  """Decoder layer for VllmToyTransformer."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.self_attn = nnx.MultiHeadAttention(
+        num_heads=4,
+        in_features=16,
+        qkv_features=16,
+        use_bias=False,
+        decode=False,
+        rngs=rngs,
+    )
+    self.mlp = VllmMLP(rngs=rngs)
+
+  def __call__(self, x):
+    x = self.self_attn(x) + x
+    x = self.mlp(x) + x
+    return x
+
+
+class VllmModel(nnx.Module):
+  """Inner model for VllmToyTransformer."""
+
+  def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
+    self.embed_tokens = nnx.Embed(config.vocab_size, 16, rngs=rngs)
+    self.layers = nnx.List(
+        [VllmDecoder(rngs=rngs) for _ in range(config.num_layers)]
+    )
+
+  def __call__(self, tokens):
+    x = self.embed_tokens(tokens)
+    for layer in self.layers:
+      x = layer(x)
+    return x
+
+
+class VllmToyTransformer(nnx.Module):
+  """Toy transformer matching vLLM / HuggingFace module naming conventions."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.model = VllmModel(config, rngs=rngs)
+    self.lm_head = nnx.Linear(
+        in_features=16, out_features=config.vocab_size, rngs=rngs
+    )
+    self.head_dim = 16
+
+  def __call__(self, x, *args, **kwargs):
+    hidden = self.model(x)
+    return self.lm_head(hidden)
+
+  def to_hf_mappings(self, backend: str | None = None):
+    del backend
+    return TOY_TRANSFORMER_TO_HF_MAPPINGS
+
 
 def get_dummy_inputs_for_lora_toy_transformer_tests():
   return {
@@ -254,8 +389,8 @@ def get_lora_model(
       model, lora_provider, **dummy_model_input
   )
   if mesh is not None:
-    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
-  return lora_model
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)  # pyrefly: ignore[bad-argument-type]
+  return lora_model  # pyrefly: ignore[bad-return]
 
 
 class MockVocab(spm.SentencePieceProcessor):
@@ -342,7 +477,7 @@ class ToyTransformerWithScoreHead(nnx.Module):
 
     self.transformer = transformer
     self.score = nnx.Linear(
-        in_features=transformer.head_dim,
+        in_features=transformer.head_dim,  # pyrefly: ignore[missing-attribute]
         out_features=1,
         use_bias=False,
         rngs=rngs,
@@ -450,3 +585,19 @@ def is_running_in_colab() -> bool:
     return hasattr(sys.modules['IPython'].get_ipython(), 'kernel')
   except (NameError, KeyError, AttributeError):
     return False
+
+
+def safe_set_n_cpu_devices(n: int) -> None:
+  """Safely set the number of CPU devices for JAX."""
+  import chex  # pylint: disable=g-import-not-at-top
+  try:
+    chex.set_n_cpu_devices(n)
+  except RuntimeError as e:
+    # If JAX is already initialized, check if we have enough devices.
+    devices = jax.local_devices()
+    if len(devices) < n:
+      raise RuntimeError(
+          f"JAX already initialized with {len(devices)} CPU devices, "
+          f"but {n} are required."
+      ) from e
+

@@ -13,6 +13,8 @@
 # limitations under the License.
 
 # import itertools
+# from typing_extensions import override
+import os
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -22,14 +24,12 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import optax
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils
 from tunix.rl.ppo import ppo_learner as ppo_lib
 # from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
-# from typing_extensions import override
-import os
 
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=2'
@@ -78,7 +78,7 @@ class PPOLearnerTest(parameterized.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     num_cpus = int(os.environ.get('DEVICE_COUNTS', 2))
-    chex.set_n_cpu_devices(num_cpus)
+    tc.safe_set_n_cpu_devices(num_cpus)
     print(f'Setting up test with {num_cpus} devices')
 
   # def test_iterator(self):
@@ -332,22 +332,22 @@ class PPOLearnerTest(parameterized.TestCase):
           temperature=0.5,
       )
       rollout_config = {
-          rl_cluster_lib.Mode.TRAIN: default_rollout_config,
-          rl_cluster_lib.Mode.EVAL: another_rollout_config,
+          rl_engine_lib.Mode.TRAIN: default_rollout_config,
+          rl_engine_lib.Mode.EVAL: another_rollout_config,
       }
     else:
       rollout_config = default_rollout_config
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.CRITIC: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
-            rl_cluster_lib.Role.REWARD: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.CRITIC: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.REWARD: mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             critic_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=2,
@@ -356,11 +356,11 @@ class PPOLearnerTest(parameterized.TestCase):
         ),
         rollout_config=rollout_config,
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         critic=value_model,
         reference=ref_model,
-        reward=reward_model if use_reward_model else None,  # pylint: disable=undefined-variable
+        reward=reward_model if use_reward_model else None,  # pylint: disable=undefined-variable  # pyrefly: ignore[unbound-name]
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
@@ -368,9 +368,9 @@ class PPOLearnerTest(parameterized.TestCase):
         num_iterations=1, epsilon_c=epsilon_c, entropy_coef=entropy_coef
     )
     ppo_learner = ppo_lib.PPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fns,
-        ppo_config=ppo_config,
+        algo_config=ppo_config,
     )
     self.assertFalse(ppo_learner.should_sync_weights)
     self.assertFalse(ppo_learner.can_enable_async_rollout)
@@ -394,11 +394,11 @@ class PPOLearnerTest(parameterized.TestCase):
     self.assertEqual(ppo_learner._iter_steps, 10)
     self.assertEqual(ppo_learner._eval_iter_steps, 2)  # num eval batches
     self.assertEqual(
-        ppo_learner.rl_cluster.actor_trainer._iter_steps,
+        ppo_learner.rl_engine.actor_trainer._iter_steps,
         ppo_learner._iter_steps,
     )
     self.assertEqual(
-        ppo_learner.rl_cluster.critic_trainer._iter_steps,
+        ppo_learner.rl_engine.critic_trainer._iter_steps,
         ppo_learner._iter_steps,
     )
 
@@ -409,41 +409,41 @@ class PPOLearnerTest(parameterized.TestCase):
     ]:
       prefix, metric_name = metric_name.split('/', maxsplit=1)
       self.assertLen(
-          ppo_learner.rl_cluster._rl_metrics_logger.get_metric_history(
+          ppo_learner.rl_engine._rl_metrics_logger.get_metric_history(
               prefix, metric_name, 'train'
           ),
-          ppo_learner.rl_cluster.global_steps,
+          ppo_learner.rl_engine.global_steps,
       )
 
-    actor_metric_logger = ppo_learner.rl_cluster.actor_trainer.metrics_logger
+    actor_metric_logger = ppo_learner.rl_engine.actor_trainer.metrics_logger
     expected_metrics = ['loss', 'pg_clipfrac']  # policy loss
     if epsilon_c is not None:
       expected_metrics.append('pg_clipfrac_lower')
     for metric_name in expected_metrics:
       self.assertLen(
-          actor_metric_logger.get_metric_history('actor', metric_name, 'train'),
+          actor_metric_logger.get_metric_history('actor', metric_name, 'train'),  # pyrefly: ignore[missing-attribute]
           ppo_learner._iter_steps,
       )
       self.assertLen(
-          actor_metric_logger.get_metric_history('actor', metric_name, 'eval'),
-          ppo_learner.rl_cluster.actor_trainer.train_steps
+          actor_metric_logger.get_metric_history('actor', metric_name, 'eval'),  # pyrefly: ignore[missing-attribute]
+          ppo_learner.rl_engine.actor_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
           msg=f'metric_name: {metric_name}',
       )
 
-    critic_metric_logger = ppo_learner.rl_cluster.critic_trainer.metrics_logger
+    critic_metric_logger = ppo_learner.rl_engine.critic_trainer.metrics_logger
     for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
       self.assertLen(
-          critic_metric_logger.get_metric_history(
+          critic_metric_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               'critic', metric_name, 'train'
           ),
-          ppo_learner.rl_cluster.critic_trainer.train_steps,
+          ppo_learner.rl_engine.critic_trainer.train_steps,
       )
       self.assertLen(
-          critic_metric_logger.get_metric_history(
+          critic_metric_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               'critic', metric_name, 'eval'
           ),
-          ppo_learner.rl_cluster.critic_trainer.train_steps
+          ppo_learner.rl_engine.critic_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
       )
 
@@ -590,22 +590,23 @@ class PPOLearnerTest(parameterized.TestCase):
     reward_model = tc.ToyTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.CRITIC: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
-            rl_cluster_lib.Role.REWARD: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.CRITIC: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.REWARD: mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             critic_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=12,
             max_steps=10,
-            gradient_accumulation_steps=gradient_accumulation_steps,
+            mini_batch_size=gradient_accumulation_steps,
+            train_micro_batch_size=1 if gradient_accumulation_steps else None,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_tokens_to_generate=10,
@@ -613,7 +614,7 @@ class PPOLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         critic=value_model,
         reference=ref_model,
@@ -624,25 +625,25 @@ class PPOLearnerTest(parameterized.TestCase):
 
     ppo_config = ppo_lib.PPOConfig(num_iterations=num_iterations, beta=beta)
     ppo_learner = ppo_lib.PPOLearner(
-        rl_cluster=rl_cluster,
-        ppo_config=ppo_config,
+        rl_engine=rl_engine,
+        algo_config=ppo_config,
     )
 
     ppo_learner._generate_and_compute_advantage = wrap_fn(
         ppo_learner._generate_and_compute_advantage,
         gen_fn_call_at_step,
-        ppo_learner.rl_cluster.actor_trainer,
+        ppo_learner.rl_engine.actor_trainer,
     )
 
-    rl_cluster.rollout.get_per_token_logps = wrap_fn(
-        rl_cluster.rollout.get_per_token_logps,
+    rl_engine.rollout.get_per_token_logps = wrap_fn(
+        rl_engine.rollout.get_per_token_logps,
         rollout_worker_logps_fn_call_at_step,
-        ppo_learner.rl_cluster.actor_trainer,
+        ppo_learner.rl_engine.actor_trainer,
     )
-    rl_cluster.inference_worker.get_ref_per_token_logps = wrap_fn(
-        rl_cluster.inference_worker.get_ref_per_token_logps,
+    rl_engine.inference_worker.get_ref_per_token_logps = wrap_fn(
+        rl_engine.inference_worker.get_ref_per_token_logps,
         inference_worker_logps_fn_call_at_step,
-        ppo_learner.rl_cluster.actor_trainer,
+        ppo_learner.rl_engine.actor_trainer,
     )
 
     train_ds = _dummy_dataset(_DUMMY_DATA * 2, batch_size=1)

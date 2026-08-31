@@ -130,46 +130,24 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
       )
 
       # Attention projections
-      # nnx: (num_heads, embed_dim, head_dim) → safetensors: (num_heads*head_dim, embed_dim)
-      # Transform: transpose(1,0,2) then reshape then transpose
       if hasattr(layer.attn, "q_proj"):
-        w = np.array(
-            layer.attn.q_proj.w.value
-        )  # (num_heads, embed_dim, head_dim)
-        w = w.transpose(1, 0, 2)  # (embed_dim, num_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_heads*head_dim)
+        w = np.array(layer.attn.q_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.q_proj.weight"] = w.T
 
       if hasattr(layer.attn, "k_proj"):
-        w = np.array(
-            layer.attn.k_proj.w.value
-        )  # (num_kv_heads, embed_dim, head_dim)
-        w = w.transpose(1, 0, 2)  # (embed_dim, num_kv_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_kv_heads*head_dim)
+        w = np.array(layer.attn.k_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.k_proj.weight"] = w.T
 
       if hasattr(layer.attn, "v_proj"):
-        w = np.array(
-            layer.attn.v_proj.w.value
-        )  # (num_kv_heads, embed_dim, head_dim)
-        w = w.transpose(1, 0, 2)  # (embed_dim, num_kv_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_kv_heads*head_dim)
+        w = np.array(layer.attn.v_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.v_proj.weight"] = w.T
 
       if hasattr(layer.attn, "o_proj"):
-        w = np.array(
-            layer.attn.o_proj.w.value
-        )  # (num_heads, head_dim, embed_dim)
-        w = w.transpose(2, 0, 1)  # (embed_dim, num_heads, head_dim)
-        w = w.reshape(
-            self.config.embed_dim, -1
-        )  # (embed_dim, num_heads*head_dim)
+        w = np.array(layer.attn.o_proj.w.value)
+        w = w.reshape(self.config.embed_dim, -1)
         base_state[f"{prefix}.self_attn.o_proj.weight"] = w.T
 
       # MLP projections
@@ -190,6 +168,10 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
             layer.mlp.down_proj.kernel.value
         ).T
 
+    # Ensure all arrays are contiguous before saving
+    for k, v in base_state.items():
+      base_state[k] = np.ascontiguousarray(v)
+
     safe_np.save_file(
         base_state, os.path.join(self.base_checkpoint_dir, "model.safetensors")
     )
@@ -201,7 +183,6 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
     return self.base_checkpoint_dir
 
 
-
 class Qwen3ModelConfigTest(absltest.TestCase):
   """Tests specific to Qwen3 configurations and architectural flags."""
 
@@ -211,22 +192,52 @@ class Qwen3ModelConfigTest(absltest.TestCase):
     config_0p6b = qwen3_model.ModelConfig.qwen3_0p6b()
     self.assertTrue(
         config_0p6b.use_tied_embedding,
-        "qwen3_0p6b config should have use_tied_embedding=True"
+        "qwen3_0p6b config should have use_tied_embedding=True",
     )
 
     # 1.5B / 1.7B model should use tied embeddings
     config_1p7b = qwen3_model.ModelConfig.qwen3_1p7b()
     self.assertTrue(
         config_1p7b.use_tied_embedding,
-        "qwen3_1p7b config should have use_tied_embedding=True"
+        "qwen3_1p7b config should have use_tied_embedding=True",
     )
 
     # 8B model typically does not use tied embeddings
     config_8b = qwen3_model.ModelConfig.qwen3_8b()
     self.assertFalse(
         config_8b.use_tied_embedding,
-        "qwen3_8b config should have use_tied_embedding=False"
+        "qwen3_8b config should have use_tied_embedding=False",
     )
+
+  def test_qwen3p5_35b_a3b_config(self):
+    """Verify that qwen3p5_35b_a3b config is correctly instantiated."""
+    config = qwen3_model.ModelConfig.qwen3p5_35b_a3b()
+    self.assertEqual(config.num_layers, 40)
+    self.assertEqual(config.vocab_size, 248320)
+    self.assertEqual(config.embed_dim, 2048)
+    self.assertEqual(config.hidden_dim, 512)
+    self.assertEqual(config.num_heads, 16)
+    self.assertEqual(config.head_dim, 256)
+    self.assertEqual(config.num_kv_heads, 2)
+    self.assertEqual(config.norm_eps, 1e-06)
+    self.assertEqual(config.rope_theta, 10_000_000)
+    self.assertEqual(config.num_experts, 256)
+    self.assertEqual(config.num_experts_per_tok, 8)
+
+  def test_qwen3p5_397b_a17b_config(self):
+    """Verify that qwen3p5_397b_a17b config is correctly instantiated."""
+    config = qwen3_model.ModelConfig.qwen3p5_397b_a17b()
+    self.assertEqual(config.num_layers, 60)
+    self.assertEqual(config.vocab_size, 248320)
+    self.assertEqual(config.embed_dim, 4096)
+    self.assertEqual(config.hidden_dim, 1024)
+    self.assertEqual(config.num_heads, 32)
+    self.assertEqual(config.head_dim, 256)
+    self.assertEqual(config.num_kv_heads, 2)
+    self.assertEqual(config.norm_eps, 1e-06)
+    self.assertEqual(config.rope_theta, 10_000_000)
+    self.assertEqual(config.num_experts, 512)
+    self.assertEqual(config.num_experts_per_tok, 10)
 
   def test_model_instantiation_with_tied_embeddings(self):
     """Verify that the Qwen3 model omits the lm_head when embeddings are tied."""
@@ -250,7 +261,8 @@ class Qwen3ModelConfigTest(absltest.TestCase):
     # The model should decode using the embedder, so lm_head shouldn't exist
     self.assertFalse(
         hasattr(tied_model, "lm_head"),
-        "Model should not have a separate lm_head when use_tied_embedding is True"
+        "Model should not have a separate lm_head when use_tied_embedding is"
+        " True",
     )
 
   def test_model_instantiation_without_tied_embeddings(self):
@@ -275,7 +287,7 @@ class Qwen3ModelConfigTest(absltest.TestCase):
     # The model should have a distinct lm_head layer
     self.assertTrue(
         hasattr(untied_model, "lm_head"),
-        "Model must have a separate lm_head when use_tied_embedding is False"
+        "Model must have a separate lm_head when use_tied_embedding is False",
     )
 
 

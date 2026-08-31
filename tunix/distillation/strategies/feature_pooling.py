@@ -183,7 +183,7 @@ class FeaturePoolingStrategy(base_strategy.BaseStrategy):
     teacher_features = feature_extraction.avg_pool_array_to_target_shape(
         teacher_output, student_features.shape
     )
-    feature_loss = self.feature_loss_fn(student_features, teacher_features)
+    feature_loss = self.feature_loss_fn(student_features, teacher_features)  # pyrefly: ignore[not-callable]
 
     # Calculate Task Loss (Cross-Entropy)
     ce_loss_per_example = optax.softmax_cross_entropy(

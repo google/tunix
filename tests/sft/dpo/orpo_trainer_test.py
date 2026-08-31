@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from tunix.sft import utils as sft_utils
 from tunix.sft.dpo import dpo_trainer as orpo_lib
 from tunix.tests import test_common as tc
 
@@ -155,13 +156,13 @@ class ORPOTrainerTest(parameterized.TestCase):
         "odds_ratio",
     ]:
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           orpo_trainer._train_steps,
       )
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "eval"
           ),
           3,
@@ -221,7 +222,7 @@ class ORPOTrainerTest(parameterized.TestCase):
         "rewards/accuracy",
     ]:
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history(
+          orpo_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
               "", metric_name, "train"
           ),
           orpo_trainer._train_steps,
@@ -255,13 +256,16 @@ class ORPOTrainerTest(parameterized.TestCase):
         "compute_logps",
         return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps), None),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      loss_output = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
           lambda_orpo=0.1,
           label_smoothing=0,
       )
+      loss = loss_output.primary_loss.compute()
+      aux = loss_output.aux_metrics
+
       # Loss should be a scalar and finite
       self.assertEqual(loss.shape, ())
       self.assertTrue(jnp.isfinite(loss))
@@ -276,8 +280,14 @@ class ORPOTrainerTest(parameterized.TestCase):
       self.assertIn("odds_ratio", aux)
 
       # Check that accuracy is between 0 and 1
-      self.assertGreaterEqual(aux["rewards/accuracy"], 0.0)
-      self.assertLessEqual(aux["rewards/accuracy"], 1.0)
+      accuracy = aux["rewards/accuracy"]
+      accuracy_val = (
+          accuracy.compute()
+          if isinstance(accuracy, sft_utils.WeightedMetric)
+          else accuracy
+      )
+      self.assertGreaterEqual(accuracy_val, 0.0)
+      self.assertLessEqual(accuracy_val, 1.0)
 
   def test_compute_logps_with_prompt_loss(self):
     """Test compute_logps directly to ensure correct slicing when enable_prompt_loss_orpo=True."""
@@ -373,7 +383,7 @@ class ORPOTrainerTest(parameterized.TestCase):
             jnp.array(prompt_chosen_logps),
         ),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      out = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
@@ -381,6 +391,11 @@ class ORPOTrainerTest(parameterized.TestCase):
           label_smoothing=0,
           enable_prompt_loss_orpo=True,
       )
+      loss = out.primary_loss.compute()
+      aux = {
+          k: v.compute() if isinstance(v, sft_utils.WeightedMetric) else v
+          for k, v in out.aux_metrics.items()
+      }
 
       # Assert against mathematically-verified golden values
       self.assertEqual(loss.shape, ())
@@ -428,7 +443,7 @@ class ORPOTrainerTest(parameterized.TestCase):
         "compute_logps",
         return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps), None),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      out = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
@@ -436,6 +451,11 @@ class ORPOTrainerTest(parameterized.TestCase):
           label_smoothing=0,
           average_log_prob_orpo=True,
       )
+      loss = out.primary_loss.compute()
+      aux = {
+          k: v.compute() if isinstance(v, sft_utils.WeightedMetric) else v
+          for k, v in out.aux_metrics.items()
+      }
 
       # Assert against mathematically-verified golden values
       self.assertEqual(loss.shape, ())

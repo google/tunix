@@ -116,7 +116,7 @@ class Trajectory:
     steps: Chronologically ordered sequence of interaction steps.
     reward: Total episode reward (cumulative or final environment score).
     status: Status of the trajectory (e.g., "success", "truncated").
-    env_time: Total time spent in environment steps in seconds.
+    env_time: Dictionary of environment latency metrics (reset_latency: float, step_latency: list[float] ordered by step index, close_latency: float).
   """
 
   task: Any = None

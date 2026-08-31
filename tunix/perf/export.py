@@ -26,10 +26,10 @@ from tunix.perf import metrics
 from tunix.perf import perfetto
 from tunix.perf import span
 from tunix.perf import trace
-from tunix.rl import rl_cluster
+from tunix.rl import rl_cluster as rl_engine_lib
 
 
-ClusterConfig = rl_cluster.ClusterConfig
+ClusterConfig = rl_engine_lib.ClusterConfig
 MetricsT = metrics.MetricsT
 partial = functools.partial
 PerfSpanQuery = metrics.PerfSpanQuery
@@ -47,7 +47,7 @@ class _GrpoExtractSpansFn(Protocol):
   ) -> tuple[
       bool, list[SpanGroup], list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
-    return (False, None, None, None, None, None)
+    return (False, None, None, None, None, None)  # pyrefly: ignore[bad-return]
 
 
 class PerfMetricsExport:
@@ -149,9 +149,9 @@ class PerfMetricsExport:
       A callable function that takes a PerfSpanQuery and returns MetricsT.
     """
 
-    rollo_mesh = cluster_config.role_to_mesh[rl_cluster.Role.ROLLOUT]
-    actor_mesh = cluster_config.role_to_mesh[rl_cluster.Role.ACTOR]
-    refer_mesh = cluster_config.role_to_mesh[rl_cluster.Role.REFERENCE]
+    rollo_mesh = cluster_config.role_to_mesh[rl_engine_lib.Role.ROLLOUT]
+    actor_mesh = cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
+    refer_mesh = cluster_config.role_to_mesh[rl_engine_lib.Role.REFERENCE]
 
     rollo_devices = map(
         trace.create_device_timeline_id, rollo_mesh.devices.flatten().tolist()

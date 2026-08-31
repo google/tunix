@@ -439,11 +439,11 @@ def add_variable_extra_tokens_for_images(
       counts = soft_token_counts[b] if b < len(soft_token_counts) else ()
 
     for token in row:
-      if token == placeholder_token and image_idx < len(counts):
-        count = counts[image_idx]
+      if token == placeholder_token and image_idx < len(counts):  # pyrefly: ignore[bad-argument-type]
+        count = counts[image_idx]  # pyrefly: ignore[bad-index]
         expanded.append(double_new_line_token)
         expanded.append(start_token)
-        expanded.extend([soft_token_placeholder] * count)
+        expanded.extend([soft_token_placeholder] * count)  # pyrefly: ignore[unsupported-operation]
         expanded.append(end_token)
         expanded.append(double_new_line_token)
         image_idx += 1

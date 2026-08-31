@@ -25,6 +25,7 @@ import jax
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma import params as params_lib
@@ -65,25 +66,25 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  score_weight_d1: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_cndh=(None, 'tp', fsdp, None),
-        qkv_weight_cndh=(None, 'tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
-        score_weight_d1=(fsdp, None),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        q_weight_ndh=P('tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
     )
 
 
@@ -243,7 +244,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
-    x = shard(x, self.shd_config.act_btd)
+    x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
 
   @jax.named_scope('embedder_decode')
@@ -409,9 +410,9 @@ class Attention(nnx.Module):
       query_proj = self.q_einsum(x)
       key_proj, value_proj = self.kv_einsum(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)
-    key_proj = shard(key_proj, self.shd_config.act_btnh)
-    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
         query_proj,
@@ -460,7 +461,7 @@ class Attention(nnx.Module):
       sliding_mask = _create_sliding_mask(
           segment_pos,
           cache_len=attn_mask.shape[-1],
-          sliding_window_size=self.sliding_window_size,
+          sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
       )
       attn_mask = sliding_mask * attn_mask
 
@@ -482,7 +483,7 @@ class Attention(nnx.Module):
       encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = shard(attn_output, self.shd_config.act_btd)
+    attn_output = shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -507,10 +508,14 @@ class Attention(nnx.Module):
         self.remat_config == RematConfig.BLOCK
         or self.remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
@@ -585,19 +590,28 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    ff_gate = self.gate_proj(x)
+    ff_gate = self.gate_proj(x)  # pyrefly: ignore[bad-argument-type]
     gate_value = nnx.gelu(ff_gate)
 
-    ff1 = self.up_proj(x)
+    ff1 = self.up_proj(x)  # pyrefly: ignore[bad-argument-type]
     activations = gate_value * ff1
-    activations = shard(activations, self.config.shd_config.act_btf)
+    activations = shard(activations, self.config.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
 
     outputs = self.down_proj(activations)
     return outputs
 
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)
 
@@ -681,9 +695,18 @@ class DecoderLayer(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.DECODER:
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask
       )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
@@ -700,7 +723,7 @@ class RMSNorm(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.scale = nnx.Param(
-        nnx.initializers.zeros_init()(rngs.params(), dim),
+        nnx.initializers.zeros_init()(rngs.params(), dim),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
 
@@ -776,7 +799,7 @@ def module_from_linen_variables(
         mapped_path: tuple[str | int, ...],
         val: Any,
     ) -> dict[tuple[str, ...], Any]:
-      state[mapped_path].value = val
+      state[mapped_path].value = val  # pyrefly: ignore[bad-index]
       return state
 
   mdl: nnx.Module = nnx.eval_shape(module_factory)
@@ -828,10 +851,10 @@ def _assign_linen_params_to_nnx_state(
     val: Any,
 ) -> dict[tuple[str, ...], Any]:
   if 'gate_proj' in mapped_path:
-    state[mapped_path].value = val[0]
-    state[mapped_path[:-2] + ('up_proj', 'kernel')].value = val[1]
+    state[mapped_path].value = val[0]  # pyrefly: ignore[bad-index]
+    state[mapped_path[:-2] + ('up_proj', 'kernel')].value = val[1]  # pyrefly: ignore[bad-index]
   else:
-    state[mapped_path].value = val
+    state[mapped_path].value = val  # pyrefly: ignore[bad-index]
   return state
 
 
@@ -855,7 +878,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
     except AttributeError as exc:
       raise ValueError(f'Unsupported version: {version}') from exc
 
-    return module_from_linen_variables(
+    return module_from_linen_variables(  # pyrefly: ignore[bad-return]
         module_factory=lambda: cls(config, rngs=nnx.Rngs(params=0)),
         variables=params['transformer'],
         map_key_fn=_map_linen_var_names,
@@ -1002,35 +1025,3 @@ class Gemma(BackendMappingMixin, nnx.Module):
             (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
         ),
     }
-
-
-class GemmaWithScoreHead(nnx.Module):
-  """Gemma transformer with a score head."""
-
-  def __init__(self, transformer: Gemma, rngs: nnx.Rngs):
-    """Initializes the transformer with a score head.
-
-    Args:
-      transformer: The transformer backbone.
-      rngs: The random number generator.
-    """
-
-    self.transformer = transformer
-    self.score = nnx.Linear(
-        in_features=transformer.embed_dim,
-        out_features=1,
-        use_bias=False,
-        kernel_init=nnx.with_partitioning(
-            nnx.initializers.normal(),
-            transformer.config.shd_config.score_weight_d1,
-        ),
-        rngs=rngs,
-    )
-
-  def __call__(self, *args, **kwargs):
-    self.transformer(*args, **kwargs, output_hidden_states=True)
-    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
-        'all_hidden_states'
-    ].value[-1]
-    score = self.score(hidden_states)
-    return score

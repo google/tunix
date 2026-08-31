@@ -176,7 +176,7 @@ class UtilsTest(parameterized.TestCase):
     ]
     expected = [-1.71, -0.37, 0.0]
     self.assertEqual(
-        utils.get_logprobs_from_vllm_output(token_ids, logprobs),
+        utils.get_logprobs_from_vllm_output(token_ids, logprobs),  # pyrefly: ignore[bad-argument-type]
         expected,
     )
 
@@ -184,7 +184,7 @@ class UtilsTest(parameterized.TestCase):
     token_ids = [100, 200]
     logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
     with self.assertRaises(ValueError):
-      utils.get_logprobs_from_vllm_output(token_ids, logprobs)
+      utils.get_logprobs_from_vllm_output(token_ids, logprobs)  # pyrefly: ignore[bad-argument-type]
 
   @parameterized.named_parameters(
       ("none_logprobs", [], None),
@@ -272,6 +272,46 @@ class UtilsTest(parameterized.TestCase):
     )
     self.assertEqual(
         new_tgt_state.params["encoder.layer_0.weight"].sharding, tgt_sharding
+    )
+
+  def test_transfer_state_with_mappings_reshard_alt_keys_tuple_to_str(self):
+    src = MockState({"encoder.layer_0": MockParam(jnp.ones((2, 2)))})
+    dst = MockState({"decoder.layer_0": MockParam(jnp.zeros((2, 2)))})
+    mappings = {"encoder.layer_0": ("decoder.layer_0", None)}
+
+    def mock_reshard_fn(tgt_flat_dict, sharding_dict):
+      resharded_dict = {}
+      for key, val in tgt_flat_dict.items():
+        if isinstance(key, tuple):
+          str_key = ".".join(str(k) for k in key)
+          resharded_dict[str_key] = val + 1.0
+      return resharded_dict
+
+    new_tgt_state = utils.transfer_state_with_mappings(
+        src, dst, mappings, reshard_fn=mock_reshard_fn
+    )
+    self.assertTrue(
+        jnp.allclose(new_tgt_state.params["decoder.layer_0"].value, 2.0)
+    )
+
+  def test_transfer_state_with_mappings_reshard_alt_keys_str_to_tuple(self):
+    src = {"encoder.layer_0": jnp.ones((2, 2))}
+    dst = {"decoder.layer_0": jnp.zeros((2, 2))}
+    mappings = {"encoder.layer_0": ("decoder.layer_0", None)}
+
+    def mock_reshard_fn(tgt_flat_dict, sharding_dict):
+      resharded_dict = {}
+      for key, val in tgt_flat_dict.items():
+        if isinstance(key, str):
+          tup_key = tuple(key.split("."))
+          resharded_dict[tup_key] = val + 2.0
+      return resharded_dict
+
+    new_tgt_state = utils.transfer_state_with_mappings(
+        src, dst, mappings, reshard_fn=mock_reshard_fn
+    )
+    self.assertTrue(
+        jnp.allclose(new_tgt_state["decoder.layer_0"], 3.0)
     )
 
   def test_transfer_state_with_padding(self):
@@ -469,8 +509,17 @@ class UtilsTest(parameterized.TestCase):
 
     # Mock source state (Tunix style)
     src_params = {
+        "layers.0.attn.q_einsum.w": MockParam(
+            jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
+        ),
         "layers.0.attn.kv_einsum.w": MockParam(
             jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
+        ),
+        "layers.0.mlp.gate_proj.kernel": MockParam(
+            jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+        ),
+        "layers.0.mlp.up_proj.kernel": MockParam(
+            jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
         ),
         "layers.0.moe.gating_einsum": MockParam(
             jnp.arange(4 * 2 * 8 * 16, dtype=jnp.float32).reshape(4, 2, 8, 16)
@@ -483,16 +532,16 @@ class UtilsTest(parameterized.TestCase):
 
     # Mock destination state (vLLM Jax backend style)
     dst_params = {
-        "model.layers.0.self_attn.k_proj.weight": MockParam(
-            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        "language_model.layers.0.self_attn.qkv_proj.weight": MockParam(
+            jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.self_attn.v_proj.weight": MockParam(
-            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        "language_model.layers.0.mlp.gate_up_proj.weight": MockParam(
+            jnp.zeros((16, 64), dtype=jnp.float32)
         ),
-        "model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
+        "language_model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
             jnp.zeros((4, 2, 8, 16), dtype=jnp.float32)
         ),
-        "model.layers.0.experts.kernel_down_proj_EFD": MockParam(
+        "language_model.layers.0.experts.kernel_down_proj_EFD": MockParam(
             jnp.zeros((4, 16, 8), dtype=jnp.float32)
         ),
     }
@@ -513,36 +562,44 @@ class UtilsTest(parameterized.TestCase):
     )
 
     # Assertions
-    src_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
-    k_val_src = src_val[0]
-    v_val_src = src_val[1]
+    q_val = jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
+    kv_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
+    k_val = kv_val[0]
+    v_val = kv_val[1]
 
-    expected_k = jnp.transpose(k_val_src, (1, 0, 2))
-    expected_v = jnp.transpose(v_val_src, (1, 0, 2))
+    q_val_t = jnp.reshape(jnp.transpose(q_val, (1, 0, 2)), (16, -1))
+    k_val_t = jnp.reshape(jnp.transpose(k_val, (1, 0, 2)), (16, -1))
+    v_val_t = jnp.reshape(jnp.transpose(v_val, (1, 0, 2)), (16, -1))
+
+    expected_qkv = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
+
+    gate_val = jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+    up_val = jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
+    expected_gate_up = jnp.concatenate([gate_val, up_val], axis=-1)
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.k_proj.weight"],
-            expected_k,
+            new_tgt_state.params["language_model.layers.0.self_attn.qkv_proj.weight"],
+            expected_qkv,
         )
     )
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.self_attn.v_proj.weight"],
-            expected_v,
+            new_tgt_state.params["language_model.layers.0.mlp.gate_up_proj.weight"],
+            expected_gate_up,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.experts.kernel_gating_upproj_EDF"],
+            new_tgt_state.params["language_model.layers.0.experts.kernel_gating_upproj_EDF"],
             src_params["layers.0.moe.gating_einsum"].value,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["model.layers.0.experts.kernel_down_proj_EFD"],
+            new_tgt_state.params["language_model.layers.0.experts.kernel_down_proj_EFD"],
             src_params["layers.0.moe.linear"].value,
         )
     )
@@ -2058,6 +2115,70 @@ class UtilsTest(parameterized.TestCase):
     np.testing.assert_array_equal(np.asarray(result), expected)
 
 
+
+  def test_unroll_scanned_layers_dict_state(self):
+    src_state = {'layer_0.weight': jnp.ones((2, 4))}
+    src_to_tgt_map = {
+        'layer_0.weight': (MockParam(jnp.zeros((2, 4))), 'decoder.layer_0.weight', None)
+    }
+    result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
+    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
+    self.assertTrue(jnp.array_equal(result[('layer_0.weight', 'decoder.layer_0.weight')][0], jnp.ones((2, 4))))
+
+  def test_unroll_scanned_layers_flat_state(self):
+    src_state = MockState({'layer_0.weight': MockParam(jnp.ones((2, 4)))})
+    src_to_tgt_map = {
+        'layer_0.weight': (MockParam(jnp.zeros((2, 4))), 'decoder.layer_0.weight', None)
+    }
+    result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
+    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
+
+  def test_unroll_scanned_layers_skips_rng(self):
+    src_state = {'rng_seed': jnp.zeros(1), 'layer_0.weight': jnp.zeros((2, 4))}
+    src_to_tgt_map = {
+        'layer_0.weight': (MockParam(jnp.zeros((2, 4))), 'decoder.layer_0.weight', None),
+        'rng_seed': (MockParam(jnp.zeros(1)), 'decoder.rng_seed', None)
+    }
+    result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
+    self.assertNotIn(('rng_seed', 'decoder.rng_seed'), result)
+    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
+
+  def test_unroll_scanned_layers_skips_missing_mapping(self):
+    src_state = {'missing.weight': jnp.zeros((2, 4))}
+    src_to_tgt_map = {}
+    result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
+    self.assertEmpty(result)
+
+  def test_unroll_scanned_layers_unrolls_with_layer_axis(self):
+    sharding_spec = ('layer', 'model')
+    src_state = {'scanned.weight': jnp.ones((2, 4))}
+    tgt_param = [MockParam(jnp.zeros((4,))), MockParam(jnp.zeros((4,)))]
+    tgt_path = ['layer_0.weight', 'layer_1.weight']
+    src_to_tgt_map = {
+        'scanned.weight': (tgt_param, tgt_path, sharding_spec)
+    }
+    result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
+    self.assertIn(('scanned.weight', 'layer_0.weight'), result)
+    self.assertIn(('scanned.weight', 'layer_1.weight'), result)
+    val0, param0 = result[('scanned.weight', 'layer_0.weight')]
+    self.assertTrue(jnp.array_equal(val0, jnp.ones((4,))))
+    self.assertIs(param0, tgt_param[0])
+
+  @mock.patch('tunix.generate.utils.nnx.to_flat_state')
+  def test_unroll_scanned_layers_nnx_fallback(self, mock_to_flat_state):
+    src_state = "dummy_state"
+    mock_to_flat_state.return_value = [(('layer_0', 'weight'), jnp.ones((2, 4)))]
+    tgt_param = MockParam(jnp.zeros((2, 4)))
+    src_to_tgt_map = {
+        'layer_0.weight': (tgt_param, 'decoder.layer_0.weight', None)
+    }
+    result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
+    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
+    val, p = result[('layer_0.weight', 'decoder.layer_0.weight')]
+    self.assertTrue(jnp.array_equal(val, jnp.ones((2, 4))))
+    mock_to_flat_state.assert_called_once_with("dummy_state")
+
+
 class ResolveParallelismSizesTest(parameterized.TestCase):
 
   def _make_mesh(self, total_devices):
@@ -2098,6 +2219,35 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
     mesh = self._make_mesh(8)
     with self.assertRaisesRegex(ValueError, "expert_parallel_size"):
       utils.resolve_parallelism_sizes(mesh=mesh, expert_parallel_size=3)
+
+  def test_transfer_state_with_mappings_string_keys_dict_state(self):
+    src_state = {
+        "model.embed_tokens.weight": jnp.ones((4, 8), dtype=jnp.float32),
+        "model.lm_head.weight": jnp.ones((4, 8), dtype=jnp.float32),
+    }
+    tgt_state = {
+        "vllm_model.embed_tokens.weight": jnp.zeros((4, 8), dtype=jnp.float32),
+        "vllm_model.lm_head.weight": jnp.zeros((4, 8), dtype=jnp.float32),
+    }
+    mappings = {
+        "model.embed_tokens.weight": ("vllm_model.embed_tokens.weight", None),
+        "model.lm_head.weight": ("vllm_model.lm_head.weight", None),
+    }
+    res = utils.transfer_state_with_mappings(
+        src_state=src_state,
+        dst_state=tgt_state,
+        key_mappings=mappings,
+        reshard_fn=lambda source, target: source,
+        reshard_chunk_size=1,
+    )
+    np.testing.assert_array_equal(
+        res["vllm_model.embed_tokens.weight"],
+        jnp.ones((4, 8), dtype=jnp.float32),
+    )
+    np.testing.assert_array_equal(
+        res["vllm_model.lm_head.weight"],
+        jnp.ones((4, 8), dtype=jnp.float32),
+    )
 
 
 if __name__ == "__main__":

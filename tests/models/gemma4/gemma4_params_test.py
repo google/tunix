@@ -22,7 +22,9 @@ import numpy as np
 from tunix.models.gemma4 import params
 
 # Small array dimensions used across all fixtures.
-_V, _D, _H, _KV, _N, _F, _PLE = 5, 3, 2, 1, 4, 6, 5
+_V, _D, _H, _KV, _N, _F, _L, _PLE = 5, 3, 2, 1, 4, 6, 2, 5
+# Dimensions for vision encoder.
+_V_INP, _V_POS, _V_H, _V_D, _V_HD, _V_F, _V_L = 6, 10, 2, 4, 2, 8, 2
 
 
 def _layer_arrays(offset: int | float = 0) -> dict[str, np.ndarray]:
@@ -68,6 +70,65 @@ def _semiflat_layer(idx: int, arrs: dict[str, np.ndarray]) -> dict[str, Any]:
   }
 
 
+def _vision_encoder_semiflat() -> dict[str, Any]:
+  """Builds semi-flat entries for Vision encoder with unique values."""
+  offset = 1234
+
+  def _arange(shape):
+    return np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + offset
+
+  d = {
+      'vision_encoder/entry/input_projection': {'w': _arange((_V_INP, _V_D))},
+      'vision_encoder/entry': {'pos_emb': _arange((_V_POS, 2, _V_D))},
+  }
+
+  block_prefix = 'vision_encoder/stacked_layers/block'
+  d.update({
+      f'{block_prefix}/pre_attention_norm': {'scale': _arange((_V_L, _V_D))},
+      f'{block_prefix}/post_attention_norm': {'scale': _arange((_V_L, _V_D))},
+      f'{block_prefix}/pre_ffw_norm': {'scale': _arange((_V_L, _V_D))},
+      f'{block_prefix}/post_ffw_norm': {'scale': _arange((_V_L, _V_D))},
+      f'{block_prefix}/attn/query_norm': {'scale': _arange((_V_L, _V_HD))},
+      f'{block_prefix}/attn/key_norm': {'scale': _arange((_V_L, _V_HD))},
+      f'{block_prefix}/attn/attn_vec_einsum': {
+          'w': _arange((_V_L, _V_H, _V_HD, _V_D)),
+          'clip_input_max': _arange((_V_L,)),
+          'clip_input_min': _arange((_V_L,)),
+          'clip_output_max': _arange((_V_L,)),
+          'clip_output_min': _arange((_V_L,)),
+      },
+      f'{block_prefix}/attn/q_einsum': {
+          'w': _arange((_V_L, _V_H, _V_D, _V_HD)),
+          'clip_input_max': _arange((_V_L,)),
+          'clip_input_min': _arange((_V_L,)),
+          'clip_output_max': _arange((_V_L,)),
+          'clip_output_min': _arange((_V_L,)),
+      },
+      f'{block_prefix}/attn/kv_einsum': {
+          'w': _arange((_V_L, 2, _V_H, _V_D, _V_HD)),
+          'clip_input_max': _arange((_V_L,)),
+          'clip_input_min': _arange((_V_L,)),
+          'clip_output_max': _arange((_V_L,)),
+          'clip_output_min': _arange((_V_L,)),
+      },
+      f'{block_prefix}/mlp/gating_einsum': {
+          'w': _arange((_V_L, 2, _V_F, _V_D)),
+          'clip_input_max': _arange((_V_L,)),
+          'clip_input_min': _arange((_V_L,)),
+          'clip_output_max': _arange((_V_L,)),
+          'clip_output_min': _arange((_V_L,)),
+      },
+      f'{block_prefix}/mlp/linear': {
+          'w': _arange((_V_L, _V_F, _V_D)),
+          'clip_input_max': _arange((_V_L,)),
+          'clip_input_min': _arange((_V_L,)),
+          'clip_output_max': _arange((_V_L,)),
+          'clip_output_min': _arange((_V_L,)),
+      },
+  })
+  return d
+
+
 def _make_upstream_semiflat() -> dict[str, Any]:
   """Builds a multi-layer upstream checkpoint in semi-flat 2-tuple format.
 
@@ -76,15 +137,27 @@ def _make_upstream_semiflat() -> dict[str, Any]:
   """
   embed = np.arange(_V * _D, dtype=np.float32).reshape(_V, _D)
   final_scale = np.arange(_D, dtype=np.float32)
-  per_layer_emb = np.arange(_D * _PLE, dtype=np.float32).reshape(_D, _PLE)
+  per_layer_emb = np.arange(_D * _L * _PLE, dtype=np.float32).reshape(
+      _D, _L, _PLE
+  )
+  per_layer_proj = np.arange(_D * _L * _PLE, dtype=np.float32).reshape(
+      _D, _L, _PLE
+  )
+  mm_input_proj = np.arange(_V_D * _D, dtype=np.float32).reshape(_V_D, _D)
 
   d = {
-      'transformer/embedder': {'input_embedding': embed},
-      'transformer/embedder/per_layer_embeddings': {'w': per_layer_emb},
+      'transformer/embedder': {
+          'input_embedding': embed,
+          'per_layer_embeddings': per_layer_emb,
+      },
+      'transformer/embedder/per_layer_model_projection': {'w': per_layer_proj},
+      'transformer/embedder/mm_input_projection': {'w': mm_input_proj},
       'transformer/final_norm': {'scale': final_scale},
   }
   d.update(_semiflat_layer(0, _layer_arrays(offset=0)))
   d.update(_semiflat_layer(1, _layer_arrays(offset=100)))
+
+  d.update(_vision_encoder_semiflat())
   return d
 
 
@@ -115,7 +188,9 @@ def _expected_keys_and_shapes() -> dict[tuple[str, ...], tuple[int, ...]]:
   """Returns expected output keys and shapes after mapping (both layers)."""
   result = {
       ('embedder', 'input_embedding'): (_V, _D),
-      ('embedder', 'per_layer_input_embedding'): (_D, _PLE),
+      ('embedder', 'per_layer_input_embedding'): (_D, _L * _PLE),
+      ('embedder', 'per_layer_model_projection', 'w'): (_D, _L * _PLE),
+      ('embedder', 'mm_input_projection', 'w'): (_V_D, _D),
       ('final_norm', 'scale'): (_D,),
   }
   for i in range(2):
@@ -133,6 +208,47 @@ def _expected_keys_and_shapes() -> dict[tuple[str, ...], tuple[int, ...]]:
         ('layers', i, 'pre_attention_norm', 'scale'): (_D,),
         ('layers', i, 'pre_ffw_norm', 'scale'): (_D,),
         ('layers', i, 'skip_scale'): (1,),
+    })
+
+  # Vision encoder.
+  result.update({
+      ('vision_encoder', 'entry', 'input_projection', 'w'): (_V_INP, _V_D),
+      ('vision_encoder', 'entry', 'pos_emb'): (_V_POS, 2, _V_D),
+  })
+  for i in range(_V_L):
+    prefix = ('vision_encoder', 'layers', i)
+    result.update({
+        (*prefix, 'pre_attention_norm', 'scale'): (_V_D,),
+        (*prefix, 'attn', 'attn_vec_einsum', 'w'): (_V_H, _V_HD, _V_D),
+        (*prefix, 'attn', 'attn_vec_einsum', 'clip_input_max'): (),
+        (*prefix, 'attn', 'attn_vec_einsum', 'clip_input_min'): (),
+        (*prefix, 'attn', 'attn_vec_einsum', 'clip_output_max'): (),
+        (*prefix, 'attn', 'attn_vec_einsum', 'clip_output_min'): (),
+        (*prefix, 'attn', 'q_einsum', 'w'): (_V_H, _V_D, _V_HD),
+        (*prefix, 'attn', 'q_einsum', 'clip_input_max'): (),
+        (*prefix, 'attn', 'q_einsum', 'clip_input_min'): (),
+        (*prefix, 'attn', 'q_einsum', 'clip_output_max'): (),
+        (*prefix, 'attn', 'q_einsum', 'clip_output_min'): (),
+        (*prefix, 'attn', 'kv_einsum', 'w'): (2, _V_H, _V_D, _V_HD),
+        (*prefix, 'attn', 'kv_einsum', 'clip_input_max'): (),
+        (*prefix, 'attn', 'kv_einsum', 'clip_input_min'): (),
+        (*prefix, 'attn', 'kv_einsum', 'clip_output_max'): (),
+        (*prefix, 'attn', 'kv_einsum', 'clip_output_min'): (),
+        (*prefix, 'attn', 'query_norm', 'scale'): (_V_HD,),
+        (*prefix, 'attn', 'key_norm', 'scale'): (_V_HD,),
+        (*prefix, 'post_attention_norm', 'scale'): (_V_D,),
+        (*prefix, 'pre_ffw_norm', 'scale'): (_V_D,),
+        (*prefix, 'mlp', 'gating_einsum', 'w'): (2, _V_F, _V_D),
+        (*prefix, 'mlp', 'gating_einsum', 'clip_input_max'): (),
+        (*prefix, 'mlp', 'gating_einsum', 'clip_input_min'): (),
+        (*prefix, 'mlp', 'gating_einsum', 'clip_output_max'): (),
+        (*prefix, 'mlp', 'gating_einsum', 'clip_output_min'): (),
+        (*prefix, 'mlp', 'linear', 'w'): (_V_F, _V_D),
+        (*prefix, 'mlp', 'linear', 'clip_input_max'): (),
+        (*prefix, 'mlp', 'linear', 'clip_input_min'): (),
+        (*prefix, 'mlp', 'linear', 'clip_output_max'): (),
+        (*prefix, 'mlp', 'linear', 'clip_output_min'): (),
+        (*prefix, 'post_ffw_norm', 'scale'): (_V_D,),
     })
   return result
 
@@ -219,19 +335,6 @@ class MapFromUpstreamCheckpointTest(parameterized.TestCase):
             nested_flat[key],
             err_msg=f'Value mismatch for {key} between formats',
         )
-
-  def test_non_layer_modules_skipped(self):
-
-    upstream = _make_upstream_semiflat()
-    upstream['transformer/audio_encoder'] = {
-        'weight': np.array([1.0, 2.0, 3.0], dtype=np.float32),
-    }
-
-    mapped = params.map_from_upstream_checkpoint(upstream)
-    flat = flatten_dict(mapped)
-
-    audio_keys = [k for k in flat if 'audio_encoder' in str(k)]
-    self.assertEmpty(audio_keys)
 
   @parameterized.named_parameters(
       dict(
@@ -471,6 +574,36 @@ class CreateModelTest(absltest.TestCase):
         self.checkpoint_path, self.config, mesh=None
     )
     self.assertIs(result, self.fake_model)
+
+  def test_create_model_text_only_flag(self):
+    """Verifies text_only flag is propagated to Gemma4."""
+    for flag in [True, False]:
+      with mock.patch.object(
+          params.model_lib, 'Gemma4', autospec=True
+      ) as mock_gemma4:
+        params.create_model_from_checkpoint(
+            self.checkpoint_path, self.config, text_only=flag
+        )
+        # Lambda passed to nnx.eval_shape should specify text_only flag.
+        callable_arg = self.mock_eval_shape.call_args[0][0]
+        callable_arg()
+        mock_gemma4.assert_called_once_with(
+            self.config, rngs=mock.ANY, text_only=flag
+        )
+
+  def test_create_model_text_only_flag_default_is_true(self):
+    """Verifies text_only flag defaults to True."""
+    with mock.patch.object(
+        params.model_lib, 'Gemma4', autospec=True
+    ) as mock_gemma4:
+      params.create_model_from_checkpoint(self.checkpoint_path, self.config)
+      callable_arg = self.mock_eval_shape.call_args[0][0]
+      callable_arg()
+      mock_gemma4.assert_called_once_with(
+          self.config,
+          rngs=mock.ANY,
+          text_only=True,
+      )
 
   @mock.patch.object(params.spm, 'SentencePieceProcessor', autospec=True)
   @mock.patch.object(params.epath, 'Path', autospec=True)

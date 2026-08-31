@@ -231,15 +231,15 @@ def _is_frac(expr: str) -> bool:
 def _str_is_int(x: str) -> bool:
   try:
     x = _strip_properly_formatted_commas(x)
-    x = float(x)
-    return abs(x - int(round(x))) <= 1e-7
+    x = float(x)  # pyrefly: ignore[bad-assignment]
+    return abs(x - int(round(x))) <= 1e-7  # pyrefly: ignore[bad-argument-type, unsupported-operation]
   except Exception:
     return False
 
 
 def _str_to_int(x: str) -> int:
   x = x.replace(",", "")
-  x = float(x)
+  x = float(x)  # pyrefly: ignore[bad-assignment]
   return int(x)
 
 
@@ -267,7 +267,7 @@ def _strip_properly_formatted_commas(expr: str):
 def _normalize(expr: str) -> str:
   """Normalize answer expressions."""
   if expr is None:
-    return None
+    return None  # pyrefly: ignore[bad-return]
 
   # Remove enclosing `\text{}`.
   m = re.search(r"^\\text\{(?P<text>.+?)\}", expr)
@@ -434,7 +434,7 @@ def remove_boxed(s):
 def extract_boxed_answer(solution: str):
   """Extract the answer from inside a LaTeX \\boxed{} command"""
   solution = last_boxed_only_string(solution)
-  solution = remove_boxed(solution) if solution is not None else solution
+  solution = remove_boxed(solution) if solution is not None else solution  # pyrefly: ignore[bad-assignment]
   logging.vlog(4, f"{solution=} in extracted_boxed_answer")
   return solution
 

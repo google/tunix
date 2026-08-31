@@ -28,7 +28,7 @@ echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
-max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
+max_steps_float=$(awk "BEGIN {print $num_batches * $num_train_epochs * $train_fraction}")
 
 max_steps=$(printf "%.0f" "$max_steps_float")
 
@@ -55,4 +55,3 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.max_steps=$max_steps \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo_gemma3_1b" \
   "$@"
-

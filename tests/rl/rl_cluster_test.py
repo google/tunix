@@ -28,15 +28,16 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 from transformers import tokenization_utils_base
+from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.generate import mappings
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import mock_rollout
 from tunix.tests import test_common as tc
 
-# Some tests relying on SGLang and vLLM cannot run in run_prod environment.
-is_run_prod = os.environ.get('GITHUB_JOB') == 'run_prod'
+# Some tests relying on SGLang and vLLM cannot run in run_core environment.
+is_run_core = os.environ.get('GITHUB_JOB') == 'run_core'
 
 PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
@@ -49,14 +50,17 @@ def _dummy_export_fn(*args, **kwargs) -> None:
   del args, kwargs
 
 
-class RlClusterTest(parameterized.TestCase):
+class RlEngineTest(parameterized.TestCase):
+
+  def test_rl_cluster_alias(self):
+    self.assertIs(rl_engine_lib.RLCluster, rl_engine_lib.RLEngine)
 
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
 
     cls.num_cpus = int(os.environ.get('DEVICE_COUNTS', 4))
-    chex.set_n_cpu_devices(cls.num_cpus)
+    tc.safe_set_n_cpu_devices(cls.num_cpus)
     print(f'Setting up test with {cls.num_cpus} CPU devices before JAX init')
     cls.device_count = jax.device_count()
 
@@ -71,15 +75,15 @@ class RlClusterTest(parameterized.TestCase):
         np.array(jax.devices()[split_index:]).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: actor_mesh,
-            rl_cluster_lib.Role.REFERENCE: actor_mesh,
-            rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: rollout_mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
             max_steps=10,
@@ -104,33 +108,33 @@ class RlClusterTest(parameterized.TestCase):
     original_actor_mesh = utils.get_pytree_mesh_info(nnx.state(model))
     self.assertIsNone(original_actor_mesh)
 
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
     trainer_actor_mesh = utils.get_pytree_mesh_info(
-        nnx.state(rl_cluster.actor_trainer.model)
+        nnx.state(rl_engine.actor_trainer.model)
     )
     self.assertEqual(trainer_actor_mesh, actor_mesh)
 
     rollout_actor_mesh = utils.get_pytree_mesh_info(
-        nnx.state(rl_cluster.rollout.model())
+        nnx.state(rl_engine.rollout.model())
     )
     rollout_actor_data_type = jax.tree.leaves(
-        nnx.state(rl_cluster.rollout.model())
+        nnx.state(rl_engine.rollout.model())
     )[0].dtype
     self.assertEqual(rollout_actor_mesh, rollout_mesh)
     self.assertEqual(rollout_actor_data_type, jnp.bfloat16)
 
-    actor_data_type = jax.tree.leaves(
-        nnx.state(rl_cluster.actor_trainer.model)
-    )[0].dtype
+    actor_data_type = jax.tree.leaves(nnx.state(rl_engine.actor_trainer.model))[
+        0
+    ].dtype
     self.assertEqual(actor_data_type, jnp.float32)
 
     ref_model_mesh = utils.get_pytree_mesh_info(
-        nnx.state(rl_cluster.inference_worker._models['reference'])
+        nnx.state(rl_engine.inference_worker._models['reference'])
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
 
@@ -140,24 +144,24 @@ class RlClusterTest(parameterized.TestCase):
           reshape_dims=(-1, 1),
           mesh_axes=('fsdp', 'tp'),
           export_fns_by_version={'v1': _dummy_export_fn},
-          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
-          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
+          expected_perf_type=rl_engine_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_engine_lib.perf_tracer_v2.NoopTracer,
       ),
       dict(
           testcase_name='3d_mesh_perf_v1_only',
           reshape_dims=(1, -1, 1),
           mesh_axes=('data', 'fsdp', 'tp'),
           export_fns_by_version={'v1': _dummy_export_fn},
-          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
-          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
+          expected_perf_type=rl_engine_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_engine_lib.perf_tracer_v2.NoopTracer,
       ),
       dict(
           testcase_name='2d_mesh_perf_v2_only',
           reshape_dims=(-1, 1),
           mesh_axes=('fsdp', 'tp'),
           export_fns_by_version={'v2': _dummy_export_fn},
-          expected_perf_type=rl_cluster_lib.perf_trace.NoopTracer,
-          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.PerfTracer,
+          expected_perf_type=rl_engine_lib.perf_trace.NoopTracer,
+          expected_perf_v2_type=rl_engine_lib.perf_tracer_v2.PerfTracer,
       ),
       dict(
           testcase_name='2d_mesh_both_v1_and_v2',
@@ -167,16 +171,16 @@ class RlClusterTest(parameterized.TestCase):
               'v1': _dummy_export_fn,
               'v2': _dummy_export_fn,
           },
-          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
-          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.PerfTracer,
+          expected_perf_type=rl_engine_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_engine_lib.perf_tracer_v2.PerfTracer,
       ),
       dict(
           testcase_name='2d_mesh_no_perf',
           reshape_dims=(-1, 1),
           mesh_axes=('fsdp', 'tp'),
           export_fns_by_version={},
-          expected_perf_type=rl_cluster_lib.perf_trace.NoopTracer,
-          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
+          expected_perf_type=rl_engine_lib.perf_trace.NoopTracer,
+          expected_perf_v2_type=rl_engine_lib.perf_tracer_v2.NoopTracer,
       ),
   )
   def test_init_with_perf_config(
@@ -189,15 +193,15 @@ class RlClusterTest(parameterized.TestCase):
       expected_perf_v2_type,
   ):
     mesh = Mesh(np.array(jax.devices()).reshape(*reshape_dims), mesh_axes)
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
             max_steps=10,
@@ -214,59 +218,31 @@ class RlClusterTest(parameterized.TestCase):
     model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
-    perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig(
+    perf_config = rl_engine_lib.perf_metrics.PerfMetricsConfig(
         custom_export_fn=export_fns_by_version.get('v1'),
         custom_export_fn_v2=export_fns_by_version.get('v2'),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         tokenizer=vocab,
         cluster_config=cluster_config,
         perf_config=perf_config,
     )
-    self.assertIsInstance(rl_cluster.perf, expected_perf_type)
-    self.assertIsInstance(rl_cluster.perf_v2, expected_perf_v2_type)
-
-  def test_batch_size_config(self):
-    cfg = rl_cluster_lib.RLTrainingConfig(
-        actor_optimizer=optax.sgd(1e-3),
-        critic_optimizer=None,
-        mini_batch_size=8,
-        train_micro_batch_size=4,
-        eval_every_n_steps=1,
-    )
-    self.assertEqual(cfg.gradient_accumulation_steps, 2)
-
-    cfg = rl_cluster_lib.RLTrainingConfig(
-        actor_optimizer=optax.sgd(1e-3),
-        eval_every_n_steps=1,
-    )
-    self.assertEqual(cfg.gradient_accumulation_steps, None)
-
-    for mini_batch_size, train_micro_batch_size in zip(
-        [8, -8, None], [3, 4, 4]
-    ):
-      with self.assertRaises(ValueError):
-        rl_cluster_lib.RLTrainingConfig(
-            actor_optimizer=optax.sgd(1e-3),
-            critic_optimizer=None,
-            mini_batch_size=mini_batch_size,
-            train_micro_batch_size=train_micro_batch_size,
-            eval_every_n_steps=1,
-        )
+    self.assertIsInstance(rl_engine.perf, expected_perf_type)
+    self.assertIsInstance(rl_engine.perf_v2, expected_perf_v2_type)
 
   def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
     mesh = Mesh(
         np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp')
     )
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             critic_optimizer=None,
             eval_every_n_steps=1,
@@ -292,14 +268,14 @@ class RlClusterTest(parameterized.TestCase):
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         tokenizer=mock_tokenizer,
         cluster_config=cluster_config,
     )
 
     expected_text = 'generated text'
-    rl_cluster.rollout.generate = mock.MagicMock(
+    rl_engine.rollout.generate = mock.MagicMock(
         return_value=base_rollout.RolloutOutput(
             text=[expected_text],
             logits=np.zeros((1, 1, 1)),
@@ -310,10 +286,10 @@ class RlClusterTest(parameterized.TestCase):
     )
 
     messages = [[{'role': 'user', 'content': 'Hello'}]]
-    result = rl_cluster.generate(
+    result = rl_engine.generate(
         prompts=messages,
         apply_chat_template=True,
-        mode=rl_cluster_lib.Mode.EVAL,
+        mode=rl_engine_lib.Mode.EVAL,
     )
 
     self.assertEqual(result.text[0], expected_text)
@@ -323,15 +299,15 @@ class RlClusterTest(parameterized.TestCase):
         tokenize=False,
         enable_thinking=False,
     )
-    rl_cluster.rollout.generate.assert_called_once()
-    called_prompts = rl_cluster.rollout.generate.call_args[0][0]
+    rl_engine.rollout.generate.assert_called_once()
+    called_prompts = rl_engine.rollout.generate.call_args[0][0]
     self.assertEqual(called_prompts, ['formatted prompt'])
 
-  def _create_test_rl_cluster(
+  def _create_test_rl_engine(
       self,
       rollout_engine: str,
       rollout_config: base_rollout.RolloutConfig,
-  ) -> rl_cluster_lib.RLCluster:
+  ) -> rl_engine_lib.RLEngine:
     split_index = self.device_count // 2
     actor_mesh = Mesh(
         np.array(jax.devices()[:split_index]).reshape(split_index, 1),
@@ -341,15 +317,15 @@ class RlClusterTest(parameterized.TestCase):
         np.array(jax.devices()[split_index:]).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: actor_mesh,
-            rl_cluster_lib.Role.REFERENCE: actor_mesh,
-            rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: rollout_mesh,
         },
         rollout_engine=rollout_engine,
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
             max_steps=10,
@@ -361,15 +337,15 @@ class RlClusterTest(parameterized.TestCase):
     model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
-    return rl_cluster_lib.RLCluster(
+    return rl_engine_lib.RLEngine(
         actor=model, tokenizer=vocab, cluster_config=cluster_config
     )
 
-  def test_init_cluster_invalid_engine_string(self):
+  def test_init_engine_invalid_engine_string(self):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_engine` should be one of'
     ):
-      self._create_test_rl_cluster(
+      self._create_test_rl_engine(
           'invalid_engine', base_rollout.RolloutConfig()
       )
 
@@ -378,7 +354,7 @@ class RlClusterTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_config` cannot be None.'
     ):
-      self._create_test_rl_cluster(engine, None)
+      self._create_test_rl_engine(engine, None)
 
   @parameterized.parameters('vanilla', 'vllm', 'sglang_jax')
   def test_init_rollout_engine_empty_dict_config_raises_error(self, engine):
@@ -386,7 +362,7 @@ class RlClusterTest(parameterized.TestCase):
         ValueError,
         'Rollout config is a dict but missing a train config.',
     ):
-      self._create_test_rl_cluster(engine, {})
+      self._create_test_rl_engine(engine, {})
 
   @parameterized.named_parameters(
       dict(
@@ -401,12 +377,12 @@ class RlClusterTest(parameterized.TestCase):
       dict(
           testcase_name='dict_config',
           rollout_config={
-              rl_cluster_lib.Mode.TRAIN: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
                   max_tokens_to_generate=10,
                   kv_cache_size=1024,
                   data_type=jnp.bfloat16,
               ),
-              rl_cluster_lib.Mode.EVAL: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
                   max_tokens_to_generate=10,
                   kv_cache_size=2048,
                   data_type=jnp.bfloat16,
@@ -416,15 +392,15 @@ class RlClusterTest(parameterized.TestCase):
       ),
   )
   @mock.patch.object(
-      rl_cluster_lib.vanilla_rollout, 'VanillaRollout', autospec=True
+      rl_engine_lib.vanilla_rollout, 'VanillaRollout', autospec=True
   )
   def test_init_vanilla_rollout_engine(
       self, mock_vanilla_cls, rollout_config, expected_cache_size
   ):
-    rl_cluster = self._create_test_rl_cluster('vanilla', rollout_config)
+    rl_engine = self._create_test_rl_engine('vanilla', rollout_config)
 
     mock_vanilla_cls.assert_called_once()
-    self.assertEqual(rl_cluster.rollout, mock_vanilla_cls.return_value)
+    self.assertEqual(rl_engine.rollout, mock_vanilla_cls.return_value)
     called_kwargs = mock_vanilla_cls.call_args.kwargs
     self.assertIsInstance(
         called_kwargs['cache_config_or_size'], base_rollout.CacheConfig
@@ -439,15 +415,15 @@ class RlClusterTest(parameterized.TestCase):
         np.array(jax.devices()[:split_index]).reshape(split_index, 1),
         ('fsdp', 'tp'),
     )
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: actor_mesh,
-            rl_cluster_lib.Role.REFERENCE: actor_mesh,
-            rl_cluster_lib.Role.ROLLOUT: actor_mesh,
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: actor_mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
         ),
@@ -463,7 +439,7 @@ class RlClusterTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, '`self.rollout_actor` must have a config attribute.'
     ):
-      rl_cluster_lib.RLCluster(
+      rl_engine_lib.RLEngine(
           actor=DummyModel(),
           tokenizer=tc.MockVocab(),
           cluster_config=cluster_config,
@@ -482,10 +458,10 @@ class RlClusterTest(parameterized.TestCase):
       dict(
           testcase_name='dict_config',
           rollout_config={
-              rl_cluster_lib.Mode.TRAIN: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
                   max_tokens_to_generate=10, kv_cache_size=1024
               ),
-              rl_cluster_lib.Mode.EVAL: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
                   max_tokens_to_generate=20, kv_cache_size=2048
               ),
           },
@@ -502,12 +478,12 @@ class RlClusterTest(parameterized.TestCase):
     with mock.patch.object(
         mock_rollout.MockRollout, '__init__', autospec=True, return_value=None
     ) as mock_init:
-      rl_cluster = self._create_test_rl_cluster(
+      rl_engine = self._create_test_rl_engine(
           mock_rollout.MockRollout, rollout_config
       )
 
       mock_init.assert_called_once()
-      self.assertIsInstance(rl_cluster.rollout, mock_rollout.MockRollout)
+      self.assertIsInstance(rl_engine.rollout, mock_rollout.MockRollout)
       called_kwargs = mock_init.call_args.kwargs
       self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
 
@@ -529,12 +505,12 @@ class RlClusterTest(parameterized.TestCase):
       dict(
           testcase_name='dict_config',
           rollout_config={
-              rl_cluster_lib.Mode.TRAIN: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
                   max_tokens_to_generate=10,
                   kv_cache_size=1024,
                   rollout_vllm_model_version='dummy_version',
               ),
-              rl_cluster_lib.Mode.EVAL: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
                   max_tokens_to_generate=20,
                   kv_cache_size=2048,
                   rollout_vllm_model_version='dummy_version',
@@ -548,23 +524,23 @@ class RlClusterTest(parameterized.TestCase):
           expected_cache_size=2048,
       ),
   )
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_init_vllm_rollout_engine(
       self,
       rollout_config,
       expected_train_config,
       expected_cache_size,
   ):
-    # Internal placeholder for vllm rollout worker stub, don't change this line.
+
     from tunix.rl.rollout import vllm_rollout
 
     with mock.patch.object(
         vllm_rollout, 'VllmRollout', autospec=True
     ) as mock_vllm_cls:
-      rl_cluster = self._create_test_rl_cluster('vllm', rollout_config)
+      rl_engine = self._create_test_rl_engine('vllm', rollout_config)
 
       mock_vllm_cls.assert_called_once()
-      self.assertEqual(rl_cluster.rollout, mock_vllm_cls.return_value)
+      self.assertEqual(rl_engine.rollout, mock_vllm_cls.return_value)
       called_kwargs = mock_vllm_cls.call_args.kwargs
       self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
       self.assertEqual(
@@ -572,7 +548,7 @@ class RlClusterTest(parameterized.TestCase):
       )
       self.assertIn('mesh', called_kwargs)
 
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_init_vllm_rollout_engine_missing_version_raises(self):
     rollout_config = base_rollout.RolloutConfig(
         rollout_vllm_model_version=None,
@@ -580,7 +556,7 @@ class RlClusterTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, 'Rollout vllm model version or path is missing!'
     ):
-      self._create_test_rl_cluster('vllm', rollout_config)
+      self._create_test_rl_engine('vllm', rollout_config)
 
   @parameterized.named_parameters(
       dict(
@@ -595,10 +571,10 @@ class RlClusterTest(parameterized.TestCase):
       dict(
           testcase_name='dict_config',
           rollout_config={
-              rl_cluster_lib.Mode.TRAIN: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
                   max_tokens_to_generate=10, kv_cache_size=1024
               ),
-              rl_cluster_lib.Mode.EVAL: base_rollout.RolloutConfig(
+              rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
                   max_tokens_to_generate=20, kv_cache_size=2048
               ),
           },
@@ -607,7 +583,7 @@ class RlClusterTest(parameterized.TestCase):
           ),
       ),
   )
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_init_sglang_jax_rollout_engine(
       self, rollout_config, expected_train_config
   ):
@@ -617,16 +593,16 @@ class RlClusterTest(parameterized.TestCase):
     with mock.patch.object(
         sglang_jax_rollout, 'SglangJaxRollout', autospec=True
     ) as mock_sglang_cls:
-      rl_cluster = self._create_test_rl_cluster('sglang_jax', rollout_config)
+      rl_engine = self._create_test_rl_engine('sglang_jax', rollout_config)
 
       mock_sglang_cls.assert_called_once()
-      self.assertEqual(rl_cluster.rollout, mock_sglang_cls.return_value)
+      self.assertEqual(rl_engine.rollout, mock_sglang_cls.return_value)
       called_kwargs = mock_sglang_cls.call_args.kwargs
       self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
       self.assertIn('mesh', called_kwargs)
 
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
-  @mock.patch.object(rl_cluster_lib.sft_utils, 'is_lora_enabled', autospec=True)
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
+  @mock.patch.object(rl_engine_lib.sft_utils, 'is_lora_enabled', autospec=True)
   def test_init_sglang_jax_rollout_engine_lora_error(self, mock_is_lora):
     mock_is_lora.return_value = True
     rollout_config = base_rollout.RolloutConfig(
@@ -636,16 +612,16 @@ class RlClusterTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, 'Rollout sglang jax lora config is missing'
     ):
-      self._create_test_rl_cluster('sglang_jax', rollout_config)
+      self._create_test_rl_engine('sglang_jax', rollout_config)
 
-  def test_init_cluster_unsupported_engine_type(self):
+  def test_init_engine_unsupported_engine_type(self):
     class InvalidEngine:
       pass
 
     with self.assertRaisesRegex(
         NotImplementedError, 'Rollout engine .* not supported'
     ):
-      self._create_test_rl_cluster(InvalidEngine, base_rollout.RolloutConfig())
+      self._create_test_rl_engine(InvalidEngine, base_rollout.RolloutConfig())
 
   def test_user_defined_rollout_engine_class(self):
     class CustomRolloutEngine(base_rollout.BaseRollout):
@@ -707,15 +683,15 @@ class RlClusterTest(parameterized.TestCase):
     )
 
     def create_cluster_config(rollout_engine):
-      return rl_cluster_lib.ClusterConfig(
+      return rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: actor_mesh,
-              rl_cluster_lib.Role.REFERENCE: actor_mesh,
-              rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+              rl_engine_lib.Role.ACTOR: actor_mesh,
+              rl_engine_lib.Role.REFERENCE: actor_mesh,
+              rl_engine_lib.Role.ROLLOUT: rollout_mesh,
           },
           rollout_engine=rollout_engine,
           offload_to_cpu=False,
-          training_config=rl_cluster_lib.RLTrainingConfig(
+          training_config=rl_engine_lib.RLTrainingConfig(
               actor_optimizer=optax.sgd(1e-3),
               eval_every_n_steps=1,
               max_steps=10,
@@ -754,29 +730,29 @@ class RlClusterTest(parameterized.TestCase):
     MyCustomizedRolloutEngine = functools.partial(CustomRolloutEngine, my_arg=1)  # pylint: disable=invalid-name
     cluster_config = create_cluster_config(MyCustomizedRolloutEngine)
 
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
-    self.assertIsInstance(rl_cluster.rollout, CustomRolloutEngine)
-    self.assertEqual(rl_cluster.rollout.my_arg, 1)
-    self.assertEqual(rl_cluster.rollout.config, cluster_config.rollout_config)
+    self.assertIsInstance(rl_engine.rollout, CustomRolloutEngine)
+    self.assertEqual(rl_engine.rollout.my_arg, 1)
+    self.assertEqual(rl_engine.rollout.config, cluster_config.rollout_config)
 
     # 2. class type
     cluster_config = create_cluster_config(CustomRolloutEngine)
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
-    self.assertIsInstance(rl_cluster.rollout, CustomRolloutEngine)
-    self.assertEqual(rl_cluster.rollout.my_arg, 0)
-    self.assertEqual(rl_cluster.rollout.config, cluster_config.rollout_config)
+    self.assertIsInstance(rl_engine.rollout, CustomRolloutEngine)
+    self.assertEqual(rl_engine.rollout.my_arg, 0)
+    self.assertEqual(rl_engine.rollout.config, cluster_config.rollout_config)
     self.assertEqual(
-        rl_cluster.r2m[rl_cluster_lib.Role.ROLLOUT], rl_cluster.rollout.mesh
+        rl_engine.r2m[rl_engine_lib.Role.ROLLOUT], rl_engine.rollout.mesh
     )
 
   @parameterized.named_parameters(
@@ -788,14 +764,14 @@ class RlClusterTest(parameterized.TestCase):
       dict(
           testcase_name='missing_role',
           role_to_logical_axis_rules={
-              rl_cluster_lib.Role.ACTOR: ['fsdp'],
+              rl_engine_lib.Role.ACTOR: ['fsdp'],
           },
           expected_logical_axis_rules=(),
       ),
       dict(
           testcase_name='with_rule',
           role_to_logical_axis_rules={
-              rl_cluster_lib.Role.REFERENCE: ['fsdp'],
+              rl_engine_lib.Role.REFERENCE: ['fsdp'],
           },
           expected_logical_axis_rules=['fsdp'],
       ),
@@ -804,16 +780,16 @@ class RlClusterTest(parameterized.TestCase):
       self, role_to_logical_axis_rules, expected_logical_axis_rules
   ):
     mesh = Mesh(np.array(jax.devices()).reshape(1, -1), ('fsdp', 'tp'))
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         role_to_logical_axis_rule=role_to_logical_axis_rules,
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
             max_steps=10,
@@ -833,7 +809,7 @@ class RlClusterTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=vocab,
@@ -852,10 +828,10 @@ class RlClusterTest(parameterized.TestCase):
 
     self.assertEqual(nn_partitioning.get_axis_rules(), ())
 
-    old_fn = rl_cluster.inference_worker.get_ref_per_token_logps
+    old_fn = rl_engine.inference_worker.get_ref_per_token_logps
     try:
-      rl_cluster.inference_worker.get_ref_per_token_logps = mock_fn
-      rl_cluster.get_ref_per_token_logps(
+      rl_engine.inference_worker.get_ref_per_token_logps = mock_fn
+      rl_engine.get_ref_per_token_logps(
           prompt_tokens=jnp.zeros((1, 1)),
           completion_tokens=jnp.zeros((1, 1)),
           pad_id=0,
@@ -863,10 +839,131 @@ class RlClusterTest(parameterized.TestCase):
           micro_batch_size=1,
       )
     finally:
-      rl_cluster.inference_worker.get_ref_per_token_logps = old_fn
+      rl_engine.inference_worker.get_ref_per_token_logps = old_fn
 
     self.assertTrue(invoked)
     self.assertEqual(nn_partitioning.get_axis_rules(), ())
+
+  def test_generic_role_primitives_delegate_to_shorthands(self):
+    actor_mesh = Mesh(
+        np.array(jax.devices()[: self.device_count]).reshape(
+            self.device_count, 1
+        ),
+        ('fsdp', 'tp'),
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: actor_mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    with self.subTest('update_actor'):
+      with mock.patch.object(
+          rl_engine, 'update_actor'
+      ) as mock_update_actor:
+        rl_engine.train(
+            rl_engine_lib.Role.ACTOR, 'train_ds', 'eval_ds', skip_jit=True
+        )
+        mock_update_actor.assert_called_once_with(
+            'train_ds', 'eval_ds', skip_jit=True
+        )
+
+    with self.subTest('update_critic'):
+      with mock.patch.object(
+          rl_engine, 'update_critic'
+      ) as mock_update_critic:
+        rl_engine.train(
+            rl_engine_lib.Role.CRITIC, 'train_ds', 'eval_ds', skip_jit=False
+        )
+        mock_update_critic.assert_called_once_with(
+            'train_ds', 'eval_ds', skip_jit=False
+        )
+
+    with self.subTest('update_unsupported_role'):
+      with self.assertRaises(ValueError):
+        rl_engine.train(
+            rl_engine_lib.Role.REFERENCE, 'train_ds', 'eval_ds'
+        )
+
+    with self.subTest('per_token_logps_reference'):
+      with mock.patch.object(
+          rl_engine, 'get_ref_per_token_logps', return_value='ref_logps'
+      ) as mock_ref_logps:
+        res_ref = rl_engine.per_token_logps(
+            rl_engine_lib.Role.REFERENCE,
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            segment_ids='s',
+        )
+        self.assertEqual(res_ref, 'ref_logps')
+        mock_ref_logps.assert_called_once_with(
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            micro_batch_size=None,
+            segment_ids='s',
+        )
+
+    with self.subTest('per_token_logps_actor'):
+      with mock.patch.object(
+          rl_engine, 'get_actor_per_token_logps', return_value='actor_logps'
+      ) as mock_actor_logps:
+        res_actor = rl_engine.per_token_logps(
+            rl_engine_lib.Role.ACTOR,
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            segment_ids='s',
+        )
+        self.assertEqual(res_actor, 'actor_logps')
+        mock_actor_logps.assert_called_once_with(
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+            micro_batch_size=None,
+            segment_ids='s',
+        )
+
+    with self.subTest('per_token_logps_unsupported_role'):
+      with self.assertRaises(ValueError):
+        rl_engine.per_token_logps(
+            rl_engine_lib.Role.CRITIC,
+            prompt_tokens='p',
+            completion_tokens='c',
+            pad_id=0,
+            eos_id=1,
+        )
 
 
 if __name__ == '__main__':

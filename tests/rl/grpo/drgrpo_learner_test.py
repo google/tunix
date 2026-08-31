@@ -109,7 +109,7 @@ class DrGRPOlearnerTest(parameterized.TestCase):
 
   def test_drgrpo_loss_fn(self):
     drgrpo_config = drgrpo_lib.DrGRPOConfig()
-    drgrpo_config.temperature = 1.0
+    drgrpo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
 
     drgrpo_loss_fn_impl = fr.default_registry.get(
         "policy_loss_fn", drgrpo_config.policy_loss_fn
@@ -126,9 +126,11 @@ class DrGRPOlearnerTest(parameterized.TestCase):
     )
 
     # Call DrGRPO loss function
-    drgrpo_loss, drgrpo_aux = drgrpo_loss_fn_impl(
+    drgrpo_loss_output = drgrpo_loss_fn_impl(
         model, train_example, drgrpo_config, pad_id, eos_id
     )
+    drgrpo_loss = drgrpo_loss_output.primary_loss.compute()
+    drgrpo_aux = drgrpo_loss_output.aux_metrics
 
     self.assertIn("kl", drgrpo_aux)
     self.assertTrue(jnp.isfinite(drgrpo_loss).all())

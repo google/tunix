@@ -26,9 +26,9 @@ import sentencepiece as spm
 
 
 class TokenizerType(enum.Enum):
-  SP: str = 'sp'  # sentencepiece tokenizer
-  HF: str = 'hf'  # huggingface tokenizer
-  NONE: str = 'none'  # Represents no tokenizer
+  SP: str = 'sp'  # sentencepiece tokenizer  # pyrefly: ignore[invalid-annotation]
+  HF: str = 'hf'  # huggingface tokenizer  # pyrefly: ignore[invalid-annotation]
+  NONE: str = 'none'  # Represents no tokenizer  # pyrefly: ignore[invalid-annotation]
 
 
 class TokenizerAdapter:
@@ -98,7 +98,7 @@ class TokenizerAdapter:
       # e.g. llama3 HF tokenizers do not have pad_id
       if self._tokenizer.pad_token_id is None:
         self._tokenizer.pad_token = self._tokenizer.eos_token
-      return self._tokenizer.pad_token_id
+      return self._tokenizer.pad_token_id  # pyrefly: ignore[bad-return]
     else:
       return self._tokenizer.pad_id()
 
@@ -251,17 +251,23 @@ class Tokenizer(TokenizerAdapter):
       )
     elif tokenizer_type == 'sentencepiece':
       model_proto = epath.Path(tokenizer_path).read_bytes()
-      tokenizer = spm.SentencePieceProcessor()
-      tokenizer.LoadFromSerializedProto(model_proto)
-      options = []
-      if add_bos:
-        options.append('bos')
-      if add_eos:
-        options.append('eos')
-
-      extra_options_str = ':'.join(options)
-      if extra_options_str:
-        tokenizer.SetEncodeExtraOptions(extra_options_str)
+      try:
+        tokenizer = spm.SentencePieceProcessor(
+            model_proto=model_proto,  # pyrefly: ignore[unexpected-keyword]
+            add_bos=bool(add_bos),  # pyrefly: ignore[unexpected-keyword]
+            add_eos=bool(add_eos),  # pyrefly: ignore[unexpected-keyword]
+        )
+      except TypeError:
+        tokenizer = spm.SentencePieceProcessor()
+        tokenizer.LoadFromSerializedProto(model_proto)
+        options = []
+        if add_bos:
+          options.append('bos')
+        if add_eos:
+          options.append('eos')
+        extra_options_str = ':'.join(options)
+        if extra_options_str:
+          tokenizer.SetEncodeExtraOptions(extra_options_str)
     else:
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
     super().__init__(tokenizer)

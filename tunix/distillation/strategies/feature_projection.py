@@ -182,7 +182,7 @@ class FeatureProjectionStrategy(base_strategy.BaseStrategy):
     student_logits = student_output["logits"]
     student_features = student_output["features"]
 
-    feature_loss = self.feature_loss_fn(student_features, teacher_output)
+    feature_loss = self.feature_loss_fn(student_features, teacher_output)  # pyrefly: ignore[not-callable]
 
     # Calculate Task Loss (Cross-Entropy)
     ce_loss_per_example = optax.softmax_cross_entropy(

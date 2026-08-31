@@ -1,0 +1,748 @@
+"""Trajectory implementation using Agent Trajectory Interchange Format (ATIF).
+
+For more details on the ATIF specification, see:
+https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime
+import enum
+from typing import Annotated, Any, Final, Literal, get_args
+
+import numpy as np
+import pydantic
+
+
+# ==============================================================================
+# --- Pure ATIF Base Classes ---
+# ==============================================================================
+
+
+class Source(enum.StrEnum):
+  """Source of the step message."""
+
+  SYSTEM = enum.auto()
+  USER = enum.auto()
+  AGENT = enum.auto()
+
+
+def _serialize_array(value: list[Any] | np.ndarray | None) -> list[Any] | None:
+  """Serializes a NumPy array or list into a plain Python list."""
+  if value is None:
+    return None
+  if isinstance(value, np.ndarray):
+    return value.tolist()
+  return list(value)
+
+
+def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
+  """Recursively converts any nested NumPy arrays within a dictionary to lists."""
+  if value is None:
+    return None
+
+  def _convert(v: Any) -> Any:
+    if isinstance(v, np.ndarray):
+      return v.tolist()
+    if isinstance(v, dict):
+      return {k: _convert(val) for k, val in v.items()}
+    if isinstance(v, (list, tuple)):
+      return [_convert(x) for x in v]
+    return v
+
+  return _convert(value)
+
+
+IntArray = Annotated[
+    list[int] | np.ndarray | None,
+    pydantic.PlainSerializer(
+        _serialize_array, return_type=list[int] | None, when_used="always"
+    ),
+]
+
+FloatArray = Annotated[
+    list[float] | np.ndarray | None,
+    pydantic.PlainSerializer(
+        _serialize_array, return_type=list[float] | None, when_used="always"
+    ),
+]
+
+MetadataDict = Annotated[
+    dict[str, Any] | None,
+    pydantic.PlainSerializer(
+        _serialize_dict, return_type=dict[str, Any] | None, when_used="always"
+    ),
+]
+
+ArgumentsDict = Annotated[
+    dict[str, Any],
+    pydantic.PlainSerializer(
+        _serialize_dict, return_type=dict[str, Any], when_used="always"
+    ),
+]
+
+
+class SubagentTrajectoryRef(pydantic.BaseModel):
+  """Reference to a delegated subagent trajectory."""
+
+  trajectory_id: str | None = pydantic.Field(
+      default=None,
+      description="ID of the subagent trajectory in parent.",
+  )
+  session_id: str | None = pydantic.Field(
+      default=None,
+      description="Run identity of the subagent, for debugging/correlation.",
+  )
+  trajectory_path: str | None = pydantic.Field(
+      default=None,
+      description="Path/URL of external subagent trajectory file.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom metadata about the subagent execution.",
+  )
+
+  @pydantic.model_validator(mode="after")
+  def validate_is_resolvable(self) -> SubagentTrajectoryRef:
+    if self.trajectory_id is None and self.trajectory_path is None:
+      raise ValueError(
+          "SubagentTrajectoryRef must set either trajectory_id or"
+          " trajectory_path."
+      )
+    return self
+
+
+class ObservationResult(pydantic.BaseModel):
+  """A single result within an observation."""
+
+  source_call_id: str | None = pydantic.Field(
+      default=None,
+      description="The corresponding tool_call_id from the step's tool_calls.",
+  )
+  content: str | None = pydantic.Field(
+      default=None,
+      description="Output or result from the action/tool execution.",
+  )
+  subagent_trajectory_ref: list[SubagentTrajectoryRef] | None = pydantic.Field(
+      default=None,
+      description="References to delegated subagent trajectories.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom observation result metadata.",
+  )
+
+
+class Observation(pydantic.BaseModel):
+  """Environment feedback/result after actions or system events."""
+
+  results: list[ObservationResult] = pydantic.Field(
+      default_factory=list,
+      description="Array of result objects from actions or tool calls.",
+  )
+
+
+class Metrics(pydantic.BaseModel):
+  """LLM operational and confidence data for a step."""
+
+  prompt_tokens: int | None = pydantic.Field(
+      default=None,
+      description="Total input tokens, including cached and non-cached.",
+  )
+  completion_tokens: int | None = pydantic.Field(
+      default=None,
+      description="Total generated output tokens.",
+  )
+  cached_tokens: int | None = pydantic.Field(
+      default=None,
+      description="Number of prompt tokens that hit the cache.",
+  )
+  cost_usd: float | None = pydantic.Field(
+      default=None,
+      description="Monetary cost of the model call in USD.",
+  )
+  prompt_token_ids: list[int] | None = pydantic.Field(
+      default=None,
+      description="Sequence of token IDs sent to the LLM.",
+  )
+  completion_token_ids: list[int] | None = pydantic.Field(
+      default=None,
+      description="Sequence of token IDs generated by the LLM.",
+  )
+  logprobs: list[float] | None = pydantic.Field(
+      default=None,
+      description="Log probability assigned to each generated token.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Other operational metrics.",
+  )
+
+
+class FinalMetrics(pydantic.BaseModel):
+  """Aggregate statistics for the entire trajectory."""
+
+  total_prompt_tokens: int | None = pydantic.Field(
+      default=None,
+      description="Sum of all prompt tokens across all steps.",
+  )
+  total_completion_tokens: int | None = pydantic.Field(
+      default=None,
+      description="Sum of all completion tokens across all steps.",
+  )
+  total_cached_tokens: int | None = pydantic.Field(
+      default=None,
+      description="Sum of all cached tokens across all steps.",
+  )
+  total_cost_usd: float | None = pydantic.Field(
+      default=None,
+      description="Total monetary cost of the trajectory in USD.",
+  )
+  total_steps: int | None = pydantic.Field(
+      default=None,
+      description="Total step count in the trajectory.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom aggregate metrics.",
+  )
+
+
+class ToolCall(pydantic.BaseModel):
+  """A tool call within a step."""
+
+  tool_call_id: str = pydantic.Field(
+      description="Unique identifier for the tool invocation.",
+  )
+  function_name: str = pydantic.Field(
+      description="Name of the function or tool being called.",
+  )
+  arguments: ArgumentsDict = pydantic.Field(
+      default_factory=dict,
+      description="JSON-serializable arguments passed to the function.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom tool-call-level metadata.",
+  )
+
+
+_AgentOnlyField = Literal[
+    "model_name",
+    "reasoning_effort",
+    "reasoning_content",
+    "tool_calls",
+    "metrics",
+]
+_AGENT_ONLY_FIELDS: Final[tuple[_AgentOnlyField, ...]] = get_args(
+    _AgentOnlyField
+)
+
+_LlmOnlyField = Literal[
+    "metrics",
+    "reasoning_content",
+    "model_name",
+    "reasoning_effort",
+]
+_LLM_ONLY_FIELDS: Final[tuple[_LlmOnlyField, ...]] = get_args(_LlmOnlyField)
+
+
+class Step(pydantic.BaseModel):
+  """A single turn/interaction step."""
+
+  model_config = pydantic.ConfigDict(extra="forbid")
+
+  step_id: int = pydantic.Field(
+      description="Ordinal index of the turn (starting from 1).",
+  )
+  timestamp: datetime.datetime | None = pydantic.Field(
+      default=None,
+      description="UTC timestamp indicating when the step occurred.",
+  )
+  source: Source = pydantic.Field(
+      description="Originator of the step (system, user, or agent).",
+  )
+  model_name: str | None = pydantic.Field(
+      default=None,
+      description="The specific LLM model used for this turn.",
+  )
+  reasoning_effort: str | float | None = pydantic.Field(
+      default=None,
+      description="Qualitative or quantitative measure of effort.",
+  )
+  message: str = pydantic.Field(
+      description="Dialogue message content.",
+  )
+  reasoning_content: str | None = pydantic.Field(
+      default=None,
+      description="Agent's explicit internal reasoning or thoughts.",
+  )
+  tool_calls: list[ToolCall] | None = pydantic.Field(
+      default=None,
+      description="Structured actions or tools invoked by the agent.",
+  )
+  observation: Observation | None = pydantic.Field(
+      default=None,
+      description="Environment feedback resulting from the step's actions.",
+  )
+  metrics: Metrics | None = pydantic.Field(
+      default=None,
+      description="LLM operational and confidence metrics for this step.",
+  )
+  is_copied_context: bool | None = pydantic.Field(
+      default=None,
+      description="True if step was copied from a previous run.",
+  )
+  llm_call_count: int | None = pydantic.Field(
+      default=None,
+      ge=0,
+      description="Number of LLM inferences this step represents.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom step-level metadata.",
+  )
+
+  @pydantic.model_validator(mode="after")
+  def validate_agent_only_fields(self) -> Step:
+    """Validate that certain fields are only present for agent steps."""
+    if self.source == Source.AGENT:
+      return self
+    for field in _AGENT_ONLY_FIELDS:
+      if getattr(self, field) is not None:
+        raise ValueError(
+            f"Field '{field}' is only applicable when source is 'agent', "
+            f"but source is '{self.source}'"
+        )
+    return self
+
+  @pydantic.model_validator(mode="after")
+  def validate_llm_call_count_zero_fields(self) -> Step:
+    """Enforce ATIF v1.7 no-LLM orchestration rule."""
+    if self.llm_call_count != 0 or self.source != Source.AGENT:
+      return self
+    for field in _LLM_ONLY_FIELDS:
+      if getattr(self, field) is not None:
+        raise ValueError(
+            f"Field '{field}' must be absent when llm_call_count is 0 "
+            "(deterministic dispatch on a 'source: agent' step)"
+        )
+    return self
+
+
+class Agent(pydantic.BaseModel):
+  """Basic agent metadata."""
+
+  name: str = pydantic.Field(
+      description="Name of the agent system.",
+  )
+  version: str = pydantic.Field(
+      description="Version of the agent system.",
+  )
+  model_name: str | None = pydantic.Field(
+      default=None,
+      description="Default LLM model used for this trajectory.",
+  )
+  tool_definitions: list[dict[str, Any]] | None = pydantic.Field(
+      default=None,
+      description="Array of tool definitions available to the agent.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom agent configuration details.",
+  )
+
+
+class TrajectoryMetadata(pydantic.BaseModel):
+  """Metadata for a trajectory (excluding steps and subagents)."""
+
+  model_config = pydantic.ConfigDict(extra="forbid")
+
+  schema_version: str = pydantic.Field(
+      default="ATIF-v1.7",
+      description="Compatibility version of the ATIF schema.",
+  )
+  session_id: str | None = pydantic.Field(
+      default=None,
+      description="Run-scoped identity sharing among segment files.",
+  )
+  trajectory_id: str | None = pydantic.Field(
+      default=None,
+      description="Canonical unique identifier for this trajectory document.",
+  )
+  agent: Agent = pydantic.Field(
+      description="Metadata describing the execution agent.",
+  )
+  notes: str | None = pydantic.Field(
+      default=None,
+      description="Custom information, design notes, or explanations.",
+  )
+  final_metrics: FinalMetrics | None = pydantic.Field(
+      default=None,
+      description="Aggregate metrics for the entire run.",
+  )
+  continued_trajectory_ref: str | None = pydantic.Field(
+      default=None,
+      description="Reference to the continuation trajectory file.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom root-level metadata.",
+  )
+
+
+class Trajectory(TrajectoryMetadata):
+  """Root trajectory object containing the interaction history."""
+
+  steps: list[Step] = pydantic.Field(
+      default_factory=list,
+      description="Sequential step history.",
+  )
+  subagent_trajectories: list[Trajectory] | None = pydantic.Field(
+      default=None,
+      description="Array of embedded subagent trajectories.",
+  )
+
+  @pydantic.field_validator("steps")
+  @classmethod
+  def validate_step_ids(cls, steps: list[Step]) -> list[Step]:
+    """Validate that step_ids are sequential starting from 1."""
+    steps.sort(key=lambda step: step.step_id)
+    for expected_step_id, step in enumerate(steps, start=1):
+      if step.step_id != expected_step_id:
+        raise ValueError(
+            f"Expected step_id {expected_step_id} (sequential from 1), got"
+            f" {step.step_id}"
+        )
+    return steps
+
+  @pydantic.field_validator("subagent_trajectories")
+  @classmethod
+  def validate_embedded_subagent_trajectory_ids(
+      cls, subagent_trajectories: list[Trajectory] | None
+  ) -> list[Trajectory] | None:
+    """Every embedded subagent must carry a unique, non-null trajectory_id."""
+    if not subagent_trajectories:
+      return subagent_trajectories
+    seen: set[str] = set()
+    for i, traj in enumerate(subagent_trajectories):
+      if traj.trajectory_id is None:
+        raise ValueError(
+            f"subagent_trajectories[{i}].trajectory_id is required "
+            "for embedded subagents."
+        )
+      if traj.trajectory_id in seen:
+        raise ValueError(
+            f"subagent_trajectories[{i}].trajectory_id: duplicate ID "
+            f"'{traj.trajectory_id}'"
+        )
+      seen.add(traj.trajectory_id)
+    return subagent_trajectories
+
+  def add_step(
+      self,
+      source: Source,
+      message: str,
+      timestamp: datetime.datetime | None = None,
+      reasoning_content: str | None = None,
+      tool_calls: list[ToolCall] | None = None,
+      observation: Observation | None = None,
+      metrics: Metrics | None = None,
+      model_name: str | None = None,
+      reasoning_effort: str | float | None = None,
+      is_copied_context: bool | None = None,
+      llm_call_count: int | None = None,
+      extra: dict[str, Any] | None = None,
+  ) -> Step:
+    """Helper to create and append a step, automatically assigning step_id."""
+    step_id = len(self.steps) + 1
+    new_step = Step(
+        step_id=step_id,
+        timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
+        source=source,
+        message=message,
+        reasoning_content=reasoning_content,
+        tool_calls=tool_calls,
+        observation=observation,
+        metrics=metrics,
+        model_name=model_name,
+        reasoning_effort=reasoning_effort,
+        is_copied_context=is_copied_context,
+        llm_call_count=llm_call_count,
+        extra=extra,
+    )
+    self.steps.append(new_step)
+    return new_step
+
+  def get_metadata(self) -> TrajectoryMetadata:
+    """Returns trajectory metadata (excluding steps and sub-trajectories)."""
+    data = self.model_dump(exclude={"steps", "subagent_trajectories"})
+    return TrajectoryMetadata(**data)
+
+  def to_json_dict(self) -> dict[str, Any]:
+    """Serializes the model to a dictionary suitable for JSON, excluding Nones."""
+    return self.model_dump(exclude_none=True, mode="json")
+
+  @classmethod
+  def from_json_dict(cls, data: dict[str, Any]) -> Trajectory:
+    """Deserializes a dictionary into a Trajectory object."""
+    return cls.model_validate(data)
+
+
+@dataclasses.dataclass
+class TrajectoryError:
+  """Structured error payload returned over streams or futures when generation fails."""
+
+  trajectory_id: str
+  prompt_id: str
+  error_message: str
+  error_type: str = "RuntimeError"
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+# ==============================================================================
+# --- Tunix RL Extensions ---
+# ==============================================================================
+
+
+class TunixAgentStep(Step):
+  """A single turn/interaction agent step with Tunix RL extensions."""
+
+  model_config = pydantic.ConfigDict(
+      arbitrary_types_allowed=True,
+      extra="forbid",
+  )
+
+  mc_return: float | None = pydantic.Field(
+      default=None,
+      description="Monte Carlo return from this step to episode end.",
+  )
+  assistant_tokens: IntArray = pydantic.Field(
+      default=None,
+      description="Token IDs generated by the assistant for this step.",
+  )
+  assistant_masks: IntArray = pydantic.Field(
+      default=None,
+      description="Masks for assistant tokens.",
+  )
+  logprobs: FloatArray = pydantic.Field(
+      default=None,
+      description="Log probabilities for assistant tokens.",
+  )
+  policy_version: int | None = pydantic.Field(
+      default=None,
+      description="Policy/weight version used to generate this step.",
+  )
+
+  @pydantic.model_validator(mode="after")
+  def validate_agent_source(self) -> TunixAgentStep:
+    """Validate that source is 'agent' for TunixAgentStep."""
+    if self.source != Source.AGENT:
+      raise ValueError(
+          "TunixAgentStep is only applicable when source is 'agent', but source"
+          f" is '{self.source}'"
+      )
+    return self
+
+
+class TunixEnvStep(Step):
+  """A single turn/interaction environment step with Tunix RL extensions."""
+
+  model_config = pydantic.ConfigDict(
+      arbitrary_types_allowed=True,
+      extra="forbid",
+  )
+
+  reward: float | None = pydantic.Field(
+      default=None,
+      description="Immediate reward signal from the environment.",
+  )
+  done: bool | None = pydantic.Field(
+      default=None,
+      description="Terminal state flag indicating if the episode ended.",
+  )
+  env_tokens: IntArray = pydantic.Field(
+      default=None,
+      description="Token IDs generated by the environment for this step.",
+  )
+  env_masks: IntArray = pydantic.Field(
+      default=None,
+      description="Masks for environment tokens.",
+  )
+
+  @pydantic.model_validator(mode="after")
+  def validate_env_source(self) -> TunixEnvStep:
+    """Validate that source is 'system' or 'user' for TunixEnvStep."""
+    if self.source not in (Source.SYSTEM, Source.USER):
+      raise ValueError(
+          "TunixEnvStep is only applicable when source is 'system' or 'user',"
+          f" but source is '{self.source}'"
+      )
+    return self
+
+
+class TunixTrajectoryMetadata(TrajectoryMetadata):
+  """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
+
+  prompt_id: str | None = pydantic.Field(
+      default=None,
+      description="Identifier for the initial prompt/task.",
+  )
+  group_index: int = pydantic.Field(
+      default=0,
+      description="Sample index within group for rollouts.",
+  )
+  target_policy_versions: list[int] | None = pydantic.Field(
+      default=None,
+      description="List of policy versions for each step in the trajectory.",
+  )
+  status: str | None = pydantic.Field(
+      default=None,
+      description='Run status ("RUNNING", "COMPLETED", "FAILED", etc.).',
+  )
+  total_reward: float | None = pydantic.Field(
+      default=None,
+      description="Total cumulative reward.",
+  )
+  hyperparams: dict[str, Any] | None = pydantic.Field(
+      default=None,
+      description="Hyperparameters / generation kwargs.",
+  )
+  env_time: dict[str, float] | None = pydantic.Field(
+      default=None,
+      description="Timing information for environment operations.",
+  )
+  reward_time: dict[str, float] | None = pydantic.Field(
+      default=None,
+      description="Timing information for reward operations.",
+  )
+
+
+class TunixTrajectory(TunixTrajectoryMetadata):
+  """Tunix-specific trajectory object containing the interaction history."""
+
+  steps: list[TunixAgentStep | TunixEnvStep] = pydantic.Field(
+      default_factory=list,
+      description="Sequential step history.",
+  )
+  subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
+      default=None,
+      description="Array of embedded subagent trajectories.",
+  )
+
+  @pydantic.field_validator("steps")
+  @classmethod
+  def validate_step_ids(
+      cls, steps: list[TunixAgentStep | TunixEnvStep]
+  ) -> list[TunixAgentStep | TunixEnvStep]:
+    """Validate that step_ids are sequential starting from 0."""
+    steps.sort(key=lambda step: step.step_id)
+    for expected_step_id, step in enumerate(steps, start=0):
+      if step.step_id != expected_step_id:
+        raise ValueError(
+            f"Expected step_id {expected_step_id} (sequential from 0), got"
+            f" {step.step_id}"
+        )
+    return steps
+
+  @pydantic.field_validator("subagent_trajectories")
+  @classmethod
+  def validate_embedded_subagent_trajectory_ids(
+      cls, subagent_trajectories: list[TunixTrajectory] | None
+  ) -> list[TunixTrajectory] | None:
+    """Every embedded subagent must carry a unique, non-null trajectory_id."""
+    if not subagent_trajectories:
+      return subagent_trajectories
+    seen: set[str] = set()
+    for i, traj in enumerate(subagent_trajectories):
+      if traj.trajectory_id is None:
+        raise ValueError(
+            f"subagent_trajectories[{i}].trajectory_id is required "
+            "for embedded subagents."
+        )
+      if traj.trajectory_id in seen:
+        raise ValueError(
+            f"subagent_trajectories[{i}].trajectory_id: duplicate ID "
+            f"'{traj.trajectory_id}'"
+        )
+      seen.add(traj.trajectory_id)
+    return subagent_trajectories
+
+  def add_step(
+      self,
+      source: Source,
+      message: str,
+      timestamp: datetime.datetime | None = None,
+      reasoning_content: str | None = None,
+      tool_calls: list[ToolCall] | None = None,
+      observation: Observation | None = None,
+      metrics: Metrics | None = None,
+      model_name: str | None = None,
+      reasoning_effort: str | float | None = None,
+      is_copied_context: bool | None = None,
+      llm_call_count: int | None = None,
+      reward: float | None = None,
+      done: bool | None = None,
+      mc_return: float | None = None,
+      assistant_tokens: list[int] | np.ndarray | None = None,
+      assistant_masks: list[int] | np.ndarray | None = None,
+      env_tokens: list[int] | np.ndarray | None = None,
+      env_masks: list[int] | np.ndarray | None = None,
+      logprobs: list[float] | np.ndarray | None = None,
+      policy_version: int | None = None,
+      extra: dict[str, Any] | None = None,
+  ) -> TunixAgentStep | TunixEnvStep:
+    """Helper to create and append a step, automatically assigning step_id."""
+    step_id = len(self.steps)
+    ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
+    if source == Source.AGENT:
+      new_step = TunixAgentStep(
+          step_id=step_id,
+          timestamp=ts,
+          source=source,
+          message=message,
+          reasoning_content=reasoning_content,
+          tool_calls=tool_calls,
+          observation=observation,
+          metrics=metrics,
+          model_name=model_name,
+          reasoning_effort=reasoning_effort,
+          is_copied_context=is_copied_context,
+          llm_call_count=llm_call_count,
+          mc_return=mc_return,
+          assistant_tokens=assistant_tokens,
+          assistant_masks=assistant_masks,
+          logprobs=logprobs,
+          policy_version=policy_version,
+          extra=extra,
+      )
+    else:
+      new_step = TunixEnvStep(
+          step_id=step_id,
+          timestamp=ts,
+          source=source,
+          message=message,
+          observation=observation,
+          reward=reward,
+          done=done,
+          env_tokens=env_tokens,
+          env_masks=env_masks,
+          extra=extra,
+      )
+    self.steps.append(new_step)
+    return new_step
+
+  def get_metadata(self) -> TunixTrajectoryMetadata:
+    """Returns trajectory metadata (excluding steps and sub-trajectories)."""
+    data = self.model_dump(exclude={"steps", "subagent_trajectories"})
+    return TunixTrajectoryMetadata(**data)
+
+  def to_json_dict(self) -> dict[str, Any]:
+    """Serializes the model to a dictionary suitable for JSON, excluding Nones."""
+    return self.model_dump(exclude_none=True, mode="json")
+
+  @classmethod
+  def from_json_dict(cls, data: dict[str, Any]) -> TunixTrajectory:
+    """Deserializes a dictionary into a TunixTrajectory object."""
+    return cls.model_validate(data)

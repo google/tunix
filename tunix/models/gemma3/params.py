@@ -371,5 +371,5 @@ def save_lora_merged_model_as_safetensors(
       alpha=alpha,
       state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
       custom_layer_extractor_fn=_extract_gemma3_lora_layers,
-      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,
+      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,  # pyrefly: ignore[bad-argument-type]
   )

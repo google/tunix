@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from flax import nnx
 from flax.nnx import statelib
@@ -45,7 +45,7 @@ class SamplerOutput:
   # Left padded prompt tokens.
   padded_prompt_tokens: np.ndarray
 
-  logprobs: Optional[list[float]]
+  logprobs: Optional[list[list[float]]]
 
 
 class BaseSampler(ABC):
@@ -82,3 +82,14 @@ class BaseSampler(ABC):
   @abstractmethod
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Returns the tokenized the input string."""
+
+  def update_params(
+      self,
+      updated_weights: Any,
+      filter_types: Optional[tuple[Any, ...]] = None,
+  ) -> None:
+    """Updates model parameters in the sampler."""
+    del updated_weights, filter_types
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_params."
+    )

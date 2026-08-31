@@ -120,7 +120,7 @@ def get_dataset_from_module(
   if os.path.exists(specifier) and specifier.endswith(".py"):
     module_name = os.path.splitext(os.path.basename(specifier))[0]
     spec = importlib.util.spec_from_file_location(module_name, specifier)
-    module = importlib.util.module_from_spec(spec)
+    module = importlib.util.module_from_spec(spec)  # pyrefly: ignore[bad-argument-type]
 
     if spec is None:
       raise ImportError(f"Failed to create spec for {specifier}")

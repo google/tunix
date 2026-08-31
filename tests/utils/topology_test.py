@@ -38,6 +38,22 @@ class TopologyTest(absltest.TestCase):
         [(2, 4, 1)],
     )
 
+  def test_supported_topology_shapes_for_chip_count_returns_edge_subslice_shapes(
+      self,
+  ):
+    self.assertEqual(
+        topology.supported_topology_shapes_for_chip_count(
+            "TPU v6e", 2, chip_rank=2
+        ),
+        [(2, 1), (1, 2)],
+    )
+    self.assertEqual(
+        topology.best_topology_shapes_for_chip_count(
+            "TPU v6e", 2, chip_rank=2
+        ),
+        [(2, 1)],
+    )
+
   def test_best_topology_shapes_for_chip_count_returns_empty_for_unsupported_edge_count(
       self,
   ):
@@ -53,6 +69,14 @@ class TopologyTest(absltest.TestCase):
     self.assertEqual(
         topology.best_topology_shapes_for_chip_count("TPU v7", 256),
         [(4, 8, 8)],
+    )
+
+  def test_supported_topology_shapes_for_chip_count_returns_all_fish_shapes(
+      self,
+  ):
+    self.assertEqual(
+        topology.supported_topology_shapes_for_chip_count("TPU v7", 512),
+      [(8, 8, 8), (4, 8, 16), (4, 4, 32)],
     )
 
   def test_best_topology_shapes_for_chip_count_supports_single_host_fish_subslice(

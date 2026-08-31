@@ -209,7 +209,7 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
+    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))  # pyrefly: ignore[bad-argument-type]
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -259,7 +259,7 @@ class Qwen25MathEvaluator:
           ),
       )
       graphdef, _ = nnx.split(abs_model)
-      new_state = nnx.State(ckpt.model_params)
+      new_state = nnx.State(ckpt.model_params)  # pyrefly: ignore[missing-attribute]
       self.model = nnx.merge(graphdef, new_state)
 
   def load_model(self):
@@ -292,7 +292,7 @@ class Qwen25MathEvaluator:
 
     if self.sampler_type == "vanilla":
       self.sampler_vanilla = sampler_lib.Sampler(
-          transformer=self.model,
+          transformer=self.model,  # pyrefly: ignore[bad-argument-type]
           tokenizer=self.tokenizer,
           cache_config=cache_config,
       )
@@ -304,7 +304,7 @@ class Qwen25MathEvaluator:
           model=self.model,
           backend="sglang_jax",
       )
-      self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(
+      self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(  # pyrefly: ignore[bad-instantiation]
           tokenizer=self.tokenizer,
           config=sglang_jax_sampler.SglangJaxConfig(
               mesh=self.mesh,
@@ -330,7 +330,7 @@ class Qwen25MathEvaluator:
           model=self.model,
           backend="vllm_jax",
       )
-      self.sampler_vllm = vllm_sampler.VllmSampler(
+      self.sampler_vllm = vllm_sampler.VllmSampler(  # pyrefly: ignore[bad-instantiation]
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.mesh,
@@ -396,7 +396,7 @@ class Qwen25MathEvaluator:
       else:
         instruction = "Please reason step by step. Your final answer must appear inside \\boxed{...} and nothing else."
         prompt = f"{instruction} {question}"
-      prompt = self.tokenizer.apply_chat_template(
+      prompt = self.tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
           [{"role": "user", "content": prompt}],
           tokenize=False, add_generation_prompt=True)
 
@@ -410,7 +410,7 @@ class Qwen25MathEvaluator:
     print("\n" + "=" * 60)
     print("DEBUG: First formatted prompt:")
     first_item = dataset[0]
-    print(first_item["prompt"])
+    print(first_item["prompt"])  # pyrefly: ignore[unsupported-operation]
     print("=" * 60 + "\n")
 
     return dataset
@@ -451,7 +451,7 @@ class Qwen25MathEvaluator:
           top_p=top_p,
           echo=False,
           eos_tokens=[stop_token_id],
-          seed=jax.random.PRNGKey(seed) if seed is not None else None,
+          seed=jax.random.PRNGKey(seed) if seed is not None else None,  # pyrefly: ignore[bad-argument-type]
       )
     elif self.sampler_type == "sglang_jax":
       out_data = self.sampler_sglang(
@@ -530,8 +530,8 @@ class Qwen25MathEvaluator:
         batch_response = self.generate(
             prompts=prompts,
             temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
+            top_k=top_k,  # pyrefly: ignore[bad-argument-type]
+            top_p=top_p,  # pyrefly: ignore[bad-argument-type]
             seed=pass_idx
             if self.sampler_type != "vllm"
             else None,  # vllm handles seeding differently

@@ -20,6 +20,7 @@ an LLM-based agent and an environment. It supports single and concurrent
 multi-pair trajectory collection.
 """
 import asyncio
+import inspect
 import json
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
@@ -124,7 +125,8 @@ class TrajectoryCollectEngine:
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
-        "step_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
+        "step_latency": [],  # List of per-step wall-clock times, ordered by step index
+        "close_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
     }
     self.reward_time = {
         "reward_latency": (
@@ -234,7 +236,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
-      self.agent.trajectory.env_time = self.env_time
+      self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
       self.agent.trajectory.reward_time = self.reward_time
       return self.agent.trajectory
     elif mode == "Steps":
@@ -431,7 +433,7 @@ class TrajectoryCollectEngine:
           contains_first_msg=True,
           contains_generation_msg=True,
       )
-      self.agent.trajectory.prompt_tokens = prompt_tokens
+      self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
 
   @property
   def _debug_prefix(self) -> str:
@@ -502,22 +504,41 @@ class TrajectoryCollectEngine:
     )
     logging.debug("%s model_call starting", self._debug_prefix)
 
-    def _safe_model_call():
+    model_call_fn = self.model_call
+    is_async = inspect.iscoroutinefunction(model_call_fn) or (
+        hasattr(model_call_fn, "__call__")
+        and inspect.iscoroutinefunction(  # pytype: disable=not-supported-yet
+            getattr(model_call_fn, "__call__")
+        )
+    )
+    if is_async:
       try:
-        return self.model_call(
+        rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
             self.agent.chat_completions,
             self.env,
             max_generation_steps=max_generation_steps,
             **self.model_call_kwargs,
         )
       except Exception as e:
-        logging.exception("Caught exception inside model_call: %s", e)
+        logging.exception("Caught exception inside async model_call: %s", e)
         raise
+    else:
+      def _safe_model_call():
+        try:
+          return model_call_fn(
+              self.agent.chat_completions,
+              self.env,
+              max_generation_steps=max_generation_steps,
+              **self.model_call_kwargs,
+          )
+        except Exception as e:
+          logging.exception("Caught exception inside model_call: %s", e)
+          raise
 
-    rollout_output = await asyncio.get_event_loop().run_in_executor(
-        None,
-        _safe_model_call,
-    )
+      rollout_output = await asyncio.get_running_loop().run_in_executor(
+          None,
+          _safe_model_call,
+      )
     logging.debug("%s model_call done", self._debug_prefix)
 
     # Align trajectory prompt tokens with the rollout worker's actual
@@ -526,7 +547,7 @@ class TrajectoryCollectEngine:
         not self.agent.trajectory.steps
         and rollout_output.left_padded_prompt_tokens is not None
     ):
-      self.agent.trajectory.prompt_tokens = (
+      self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
           rollout_output.left_padded_prompt_tokens[0]
       )
 
@@ -584,7 +605,7 @@ class TrajectoryCollectEngine:
           cur_step.done = True
         return True
 
-      self.env_time["step_latency"] += wall_time
+      self.env_time["step_latency"].append(wall_time)
 
       logging.debug(
           "%s Env Observation (Rew: %s, Done: %s):\n%s",
@@ -653,7 +674,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self._log_trajectory_clip("TIMEOUT")
-      self.agent.get_current_step().done = True
+      self.agent.get_current_step().done = True  # pyrefly: ignore[missing-attribute]
       return True
 
     return done
@@ -723,22 +744,20 @@ class TrajectoryCollectEngine:
     connections, file handles, or external processes.
     """
     logging.debug("%s Closing environment.", self._debug_prefix)
-    for k, v in self.env_time.items():
-      logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
-    for k, v in self.reward_time.items():
-      logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
-
     try:
-      await asyncio.wait_for(
-          asyncio.get_event_loop().run_in_executor(
-              None, self.env.close
-          ),
-          timeout=150.0,
+      _, wall_time = await self._run_with_timing(
+          self.env.close, timeout=150.0
       )
+      self.env_time["close_latency"] += wall_time
     except asyncio.TimeoutError:
       logging.error(
           "%s env.close() timed out after 150s — executor thread may be"
           " leaked. This will starve the thread pool over time.",
           self._debug_prefix,
       )
+    finally:
+      for k, v in self.env_time.items():
+        logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
+      for k, v in self.reward_time.items():
+        logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
     logging.debug("%s Environment closed.", self._debug_prefix)

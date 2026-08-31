@@ -45,10 +45,10 @@ def _merge_embeddings_inner(
   )
 
   # len(vision_embeddings) == max_num_images * num_tokens_per_image
-  target_pos = jnp.nonzero(mask, size=len(vision_embeddings))
+  target_pos = jnp.nonzero(mask, size=len(vision_embeddings))  # pyrefly: ignore[bad-argument-type]
 
   # Save and restore the first position overwritten if there's no MM tokens.
-  first_pos = text_embeddings[0]
+  first_pos = text_embeddings[0]  # pyrefly: ignore[bad-index]
 
   merged = text_embeddings.at[target_pos, :].set(vision_embeddings)  # pytype: disable=attribute-error  # jax-arraylike
 

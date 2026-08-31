@@ -17,13 +17,165 @@
 from __future__ import annotations
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import qwix
 from tunix.models.gemma4 import model as model_lib
 
 
-class ModelTest(absltest.TestCase):
+class ModelTest(parameterized.TestCase):
+
+  def test_gemma4_12b_config(self):
+    config = model_lib.ModelConfig.gemma4_12b()
+
+    self.assertEqual(config.num_layers, 48)
+    self.assertEqual(config.num_embed, 262144)
+    self.assertEqual(config.embed_dim, 3840)
+    self.assertEqual(config.hidden_dim, 15360)
+    self.assertEqual(config.num_heads, 16)
+    self.assertEqual(config.head_dim, 256)
+    self.assertEqual(config.num_kv_heads, 8)
+    self.assertEqual(config.num_global_kv_heads, 1)
+    self.assertEqual(config.global_key_size, 512)
+    self.assertEqual(config.sliding_window_size, 1024)
+    self.assertTrue(config.k_eq_v_global)
+    self.assertEqual(config.per_layer_input_dim, 0)
+    self.assertEqual(
+        config.attention_pattern,
+        (
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.GLOBAL,
+        ),
+    )
+
+  def test_gemma4_12b_it_config_matches_base(self):
+    config = model_lib.ModelConfig.gemma4_12b()
+    it_config = model_lib.ModelConfig.gemma4_12b_it()
+
+    self.assertEqual(it_config.num_layers, config.num_layers)
+    self.assertEqual(it_config.embed_dim, config.embed_dim)
+    self.assertEqual(it_config.hidden_dim, config.hidden_dim)
+    self.assertEqual(it_config.num_heads, config.num_heads)
+    self.assertEqual(it_config.num_kv_heads, config.num_kv_heads)
+    self.assertEqual(it_config.num_global_kv_heads, config.num_global_kv_heads)
+    self.assertEqual(it_config.attention_pattern, config.attention_pattern)
+
+  @parameterized.named_parameters(
+      (
+          'all_unshared',
+          0.0,
+          [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      ),
+      (
+          'half_shared',
+          0.5,
+          [0, 1, 2, 3, 4, 5, 4, 4, 4, 4, 4, 5],
+      ),
+  )
+  def test_kv_cache_sharing_patterns(
+      self, frac_shared_layers, expected_patterns
+  ):
+    patterns = model_lib.create_kv_cache_sharing_patterns(
+        num_layers=12,
+        frac_shared_layers=frac_shared_layers,
+        share_global=True,
+        share_local=True,
+        attention_types=model_lib.GEMMA4_ATTENTION_PATTERN * 2,
+    )
+    self.assertEqual(patterns, expected_patterns)
+
+  def test_kv_cache_sharing_patterns_raises_on_missing_lender(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        r'Cannot share KV cache for layer \d+ of type AttentionType\..*: no'
+        r' unshared layer',
+    ):
+      model_lib.create_kv_cache_sharing_patterns(
+          num_layers=6,
+          frac_shared_layers=0.5,
+          share_global=True,
+          share_local=True,
+          attention_types=model_lib.GEMMA4_ATTENTION_PATTERN,
+      )
+
+  def test_forward_pass_kv_cache_sharing_lifecycle(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 4
+    config.num_embed = 128
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 2
+    config.num_global_kv_heads = 2
+    config.global_key_size = 64
+    config.sliding_window_size = 8
+    config.frac_shared_layers = 0.5
+    config.attention_pattern = (
+        model_lib.AttentionType.LOCAL_SLIDING,
+        model_lib.AttentionType.GLOBAL,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
+
+    self.assertEqual(model.kv_cache_sharing_patterns, [0, 1, 0, 1])
+
+    # 1. Init Cache: unshared layers (0, 1) are allocated; shared (2, 3) are skipped.
+    cache = model.init_cache(batch_size=1, max_seq_len=16, dtype=jnp.float32)
+    self.assertEqual(set(cache.keys()), {'layer_0', 'layer_1'})
+    self.assertNotIn('layer_2', cache)
+    self.assertNotIn('layer_3', cache)
+
+    # 2. Prefill Step (T=4)
+    prefill_tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 4), 0, config.num_embed
+    )
+    prefill_positions = jnp.arange(4)[None, :]
+    prefill_mask = jnp.tril(jnp.ones((4, 4), dtype=jnp.bool_))[None, ...]
+
+    logits, updated_cache = model(
+        prefill_tokens,
+        positions=prefill_positions,
+        cache=cache,
+        attention_mask=prefill_mask,
+    )
+
+    self.assertEqual(logits.shape, (1, 4, config.num_embed))
+    self.assertFalse(jnp.isnan(logits).any())
+    self.assertEqual(set(updated_cache.keys()), {'layer_0', 'layer_1'})
+    self.assertNotIn('layer_2', updated_cache)
+    self.assertNotIn('layer_3', updated_cache)
+    self.assertEqual(int(updated_cache['layer_0']['end_index'][0]), 4)
+    self.assertEqual(int(updated_cache['layer_1']['end_index'][0]), 4)
+
+    # 3. Decode Step (T=1)
+    decode_tokens = jax.random.randint(
+        jax.random.PRNGKey(1), (1, 1), 0, config.num_embed
+    )
+    decode_positions = jnp.array([[4]])
+    decode_mask = jnp.ones((1, 1, 16), dtype=jnp.bool_)
+
+    decode_logits, final_cache = model(
+        decode_tokens,
+        positions=decode_positions,
+        cache=updated_cache,
+        attention_mask=decode_mask,
+    )
+
+    self.assertEqual(decode_logits.shape, (1, 1, config.num_embed))
+    self.assertFalse(jnp.isnan(decode_logits).any())
+    self.assertEqual(set(final_cache.keys()), {'layer_0', 'layer_1'})
+    self.assertNotIn('layer_2', final_cache)
+    self.assertNotIn('layer_3', final_cache)
+    self.assertEqual(int(final_cache['layer_0']['end_index'][0]), 5)
+    self.assertEqual(int(final_cache['layer_1']['end_index'][0]), 5)
 
   def test_forward_pass_dense(self):
     config = model_lib.ModelConfig.gemma4_e2b()
@@ -80,6 +232,33 @@ class ModelTest(absltest.TestCase):
     logits, _ = model(tokens, positions=positions, attention_mask=attn_mask)
 
     self.assertEqual(logits.shape, (2, 32, config.num_embed))
+
+  def test_forward_pass_gemma4_12b(self):
+    config = model_lib.ModelConfig.gemma4_12b()
+    config.num_layers = 6
+    config.num_embed = 128
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 2
+    config.num_global_kv_heads = 1
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (1, 8), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+    logits, _ = model(tokens, positions=positions, attention_mask=attn_mask)
+
+    self.assertEqual(logits.shape, (1, 8, config.num_embed))
 
   def test_remat_block(self):
     config = model_lib.ModelConfig.gemma4_e2b()
@@ -148,6 +327,51 @@ class ModelTest(absltest.TestCase):
     loss, grads = nnx.value_and_grad(loss_fn)(
         model, tokens, positions, attn_mask
     )
+    self.assertIsNotNone(loss)
+    self.assertIsNotNone(grads)
+
+  def test_remat_qwix_lora_compatibility(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.remat_config = model_lib.RematConfig.BLOCK
+    config.frac_shared_layers = 0.0
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
+
+    lora_provider = qwix.LoraProvider(
+        module_path='.*q_einsum|.*kv_einsum|.*attn_vec_einsum|.*gate_proj|.*up_proj|.*down_proj',
+        rank=4,
+        alpha=2.0,
+    )
+    model_input = model.get_model_input()
+    lora_model = qwix.apply_lora_to_model(model, lora_provider, **model_input)
+    lora_model.set_attributes(qwix_rngs=nnx.Rngs(0))
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (2, 32), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+
+    @nnx.jit
+    def train_step(m, tok, pos, mask):
+      def loss_fn(model_in):
+        logits, _ = model_in(tok, positions=pos, attention_mask=mask)
+        return jnp.sum(logits)
+
+      return nnx.value_and_grad(loss_fn)(m)
+
+    loss, grads = train_step(lora_model, tokens, positions, attn_mask)
     self.assertIsNotNone(loss)
     self.assertIsNotNone(grads)
 
@@ -220,7 +444,7 @@ class ModelTest(absltest.TestCase):
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
     )
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -277,7 +501,7 @@ class ModelTest(absltest.TestCase):
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, 32), 0, config.num_embed
     )
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -337,9 +561,9 @@ class ModelTest(absltest.TestCase):
         jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.num_embed
     )
     # Image placeholders: token shape represents visual soft tokens within sequences.
-    tokens = tokens.at[0, 10:15].set(model_lib.TOKEN_PLACEHOLDER)
-    tokens = tokens.at[1, 5:8].set(model_lib.TOKEN_PLACEHOLDER)
-    tokens = tokens.at[1, 20:25].set(model_lib.TOKEN_PLACEHOLDER)
+    tokens = tokens.at[0, 10:15].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:8].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 20:25].set(model_lib.IMAGE_SOFT_TOKEN_PLACEHOLDER)
 
     positions = jnp.tile(
         jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
@@ -374,6 +598,124 @@ class ModelTest(absltest.TestCase):
         positions=positions,
         attention_mask=attn_mask,
         images=images,
+    )
+    self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
+
+  def test_forward_pass_audio(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=256,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    key = jax.random.key(0)
+
+    batch_size = 1
+    num_clips = 1
+    num_samples = 16000
+    key, audio_key = jax.random.split(key)
+    audio = jax.random.normal(audio_key, (batch_size, num_clips, num_samples))
+    audio_seq_len = jnp.array([[num_samples]])
+    audios = model_lib.PreprocessedAudioInput(
+        audios=audio,
+        sequence_lengths=audio_seq_len,
+    )
+
+    seq_len = 32  # total num of tokens
+    _, token_key = jax.random.split(key)
+    tokens = jax.random.randint(
+        token_key, (batch_size, seq_len), 0, config.num_embed
+    )
+    # 16000 audio samples => 25 soft tokens
+    tokens = tokens.at[0, 5:30].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(jnp.arange(seq_len)[None, :], (batch_size, 1))
+    attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
+    )
+    self.assertEqual(logits.shape, (batch_size, 32, config.num_embed))
+
+  def test_forward_pass_audio_heterogeneous(self):
+    """Test batch with varying number of clips and audio sequence_lengths."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.frac_shared_layers = 0.0
+    config.audio_encoder = model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=64,
+        lm_model_dims=256,
+        atten_num_heads=2,
+    )
+
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs, text_only=False)
+
+    key = jax.random.key(0)
+
+    batch_size = 2
+    max_clips = 2
+    num_samples = 16000  # Max samples per clip
+
+    # Batch 0: 1 valid clip (16000), 1 padding clip (0)
+    # Batch 1: 1 valid clip (16000), 1 valid clip (8000)
+    sequence_lengths = jnp.array([[16000, 0], [16000, 8000]])
+
+    key, audio_key = jax.random.split(key)
+    audio = jax.random.normal(audio_key, (batch_size, max_clips, num_samples))
+
+    # Total soft tokens:
+    # 16000 samples => 25 soft tokens
+    # 8000 samples => 12 soft tokens
+    # Batch 0: 25 + 0 = 25 valid soft tokens
+    # Batch 1: 25 + 12 = 37 valid soft tokens
+
+    seq_len = 64  # Total text sequence length
+    _, token_key = jax.random.split(key)
+    tokens = jax.random.randint(
+        token_key, (batch_size, seq_len), 0, config.num_embed
+    )
+
+    # Inject placeholders
+    tokens = tokens.at[0, 5:30].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+    tokens = tokens.at[1, 5:42].set(model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER)
+
+    positions = jnp.tile(jnp.arange(seq_len)[None, :], (batch_size, 1))
+    attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
+    attn_mask = jnp.broadcast_to(attn_mask, (batch_size, seq_len, seq_len))
+
+    audios = model_lib.PreprocessedAudioInput(
+        audios=audio,
+        sequence_lengths=sequence_lengths,
+    )
+
+    logits, _ = model(
+        tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        audios=audios,
     )
     self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
 

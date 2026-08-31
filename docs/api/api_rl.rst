@@ -13,7 +13,7 @@ Reinforcement learning (RL)
     PPOLearner
 
     ClusterConfig
-    RLCluster
+    RLEngine
     RLTrainingConfig
     Role
     RolloutConfig
@@ -45,7 +45,7 @@ Reinforcement learning (RL)
 
 -------
 
-.. autoclass:: RLCluster
+.. autoclass:: RLEngine
 
 -------
 

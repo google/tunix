@@ -178,5 +178,5 @@ def save_lora_merged_model_as_safetensors(
       rank=rank,
       alpha=alpha,
       state_key_transform_fn=_qwen3_state_key_to_safetensors_key,
-      transpose_rules=_QWEN3_HUGGINGFACE_TRANSPOSE_RULES,
+      transpose_rules=_QWEN3_HUGGINGFACE_TRANSPOSE_RULES,  # pyrefly: ignore[bad-argument-type]
   )

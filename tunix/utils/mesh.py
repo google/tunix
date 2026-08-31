@@ -81,21 +81,32 @@ def create_mesh(
   if len(axis_shapes) != len(axis_names):
     raise ValueError(
         f"mesh.shape {axis_shapes} and mesh.axis_names {axis_names} "
-        "must have the same length."
+        "must have the same length "
+        f"(got {len(axis_shapes)} shapes and {len(axis_names)} names)."
     )
 
   num_devices = len(devices) if devices is not None else jax.device_count()
   required_devices = int(np.prod(axis_shapes))
   if required_devices > num_devices:
+    assigned_device_sample = (
+        summarize_devices_for_logging(list(devices), limit=8)
+        if devices is not None
+        else None
+    )
     raise ValueError(
         f"Mesh shape {axis_shapes} requires {required_devices} devices, "
-        f"but found {num_devices}."
+        f"but found {num_devices}. axis_names={axis_names}. "
+        f"assigned_device_sample={assigned_device_sample}."
     )
   if devices is not None:
     if required_devices != num_devices:
+      assigned_device_sample = summarize_devices_for_logging(
+          list(devices), limit=8
+      )
       raise ValueError(
           f"Mesh shape {axis_shapes} requires {required_devices} devices, "
-          f"but was assigned {num_devices}."
+          f"but was assigned {num_devices}. axis_names={axis_names}. "
+          f"assigned_device_sample={assigned_device_sample}."
       )
     return jax.sharding.Mesh(
         np.array(list(devices)).reshape(axis_shapes),
@@ -299,7 +310,7 @@ def infer_core_on_chip_count(devices: Sequence[Any]) -> int | None:
 
   if min_core is None:
     return None
-  return max_core - min_core + 1
+  return max_core - min_core + 1  # pyrefly: ignore[unsupported-operation]
 
 
 def summarize_devices_for_logging(
@@ -654,6 +665,8 @@ def _supported_coord_box_shapes(
     devices: Sequence[Any],
     coord_topology: CoordTopology,
     required_devices: int,
+    *,
+    allocation_policy: str = _COMPACT_ALLOCATION_POLICY,
     available_coord_shape: Sequence[int] | None = None,
 ) -> list[tuple[int, ...]] | None:
   """Returns topology-valid physical box shapes for the current device pool.
@@ -667,6 +680,8 @@ def _supported_coord_box_shapes(
     devices: The candidate device pool.
     coord_topology: The coordinate topology containing device shape boundaries.
     required_devices: Requested device count.
+    allocation_policy: Whether to keep all legal topology shapes (compact) or
+      only the most cubical one (performance).
     available_coord_shape: Optional remaining region boundaries.
 
   Returns:
@@ -675,6 +690,14 @@ def _supported_coord_box_shapes(
   """
   family = topology._device_family(devices)  # pylint: disable=protected-access
   if family is None:
+    logging.info(
+        "Coord allocation is using generic contiguous-box enumeration because "
+        "the accelerator family could not be resolved: required_devices=%d "
+        "topology_shape=%s device_sample=%s.",
+        required_devices,
+        coord_topology.max_shape,
+        summarize_devices_for_logging(devices, debug=True, limit=8),
+    )
     return None
 
   # The topology tables reason in physical chips, but the request is in logical
@@ -682,6 +705,15 @@ def _supported_coord_box_shapes(
   # chips, and the chip count drives the topology-shape search below.
   core_count = infer_core_on_chip_count(devices) or 1
   if required_devices % core_count != 0:
+    logging.info(
+        "Coord allocation has no supported topology shape because the request "
+        "does not align to whole chips: required_devices=%d cores_per_chip=%d "
+        "family=%s topology_shape=%s.",
+        required_devices,
+        core_count,
+        family,
+        coord_topology.max_shape,
+    )
     return []
 
   # Drop the trailing core axis (if present) so we search in chip space.
@@ -689,19 +721,43 @@ def _supported_coord_box_shapes(
       1 if coord_topology.has_core_on_chip_dimension else 0
   )
   if chip_rank <= 0:
+    logging.info(
+        "Coord allocation has no supported topology shape because the derived "
+        "chip rank is invalid: required_devices=%d family=%s num_dims=%d "
+        "has_core_axis=%s topology_shape=%s.",
+        required_devices,
+        family,
+        coord_topology.num_dims,
+        coord_topology.has_core_on_chip_dimension,
+        coord_topology.max_shape,
+    )
     return []
   available_shape = tuple(available_coord_shape or coord_topology.max_shape)
   available_chip_shape = available_shape[:chip_rank]
   required_chips = required_devices // core_count
 
-  candidate_chip_shapes = topology.best_topology_shapes_for_chip_count(
+  candidate_chip_shapes = topology.supported_topology_shapes_for_chip_count(
       family,
       required_chips,
       chip_rank=chip_rank,
       available_chip_shape=available_chip_shape,
   )
+  if allocation_policy == _PERFORMANCE_ALLOCATION_POLICY:
+    candidate_chip_shapes = candidate_chip_shapes[:1]
 
   if not candidate_chip_shapes:
+    logging.info(
+        "Coord allocation found no supported topology shapes: "
+        "required_devices=%d required_chips=%d family=%s chip_rank=%d "
+        "available_chip_shape=%s allocation_policy=%s topology_shape=%s.",
+        required_devices,
+        required_chips,
+        family,
+        chip_rank,
+        available_chip_shape,
+        allocation_policy,
+        coord_topology.max_shape,
+    )
     return []
   # Re-attach the core axis so the returned shape is in device space again,
   # e.g. a (2, 1, 1) chip box on a 2-core chip becomes a (2, 1, 1, 2) box.
@@ -960,38 +1016,90 @@ def _coord_box_score(
   )
 
 
-def _order_candidate_regions(
-    candidate_regions: Sequence[tuple[CoordRegion, Sequence[tuple[int, ...]]]],
-    allocation_policy: str,
-) -> list[tuple[CoordRegion, Sequence[tuple[int, ...]]]]:
-  """Orders candidate regions according to the requested allocation policy.
+def _compact_coord_box_score(
+    region: CoordRegion,
+    start: tuple[int, ...],
+    shape: tuple[int, ...],
+) -> tuple[Any, ...]:
+  """Ranks compact allocations by how cleanly they preserve the remainder.
+
+  Compact mode should prefer allocations that keep the remaining free space as
+  simple as possible: a single leftover slab is better than several fragmented
+  remainders, and a tighter leftover slab is better than a stretched one.
 
   Args:
-    candidate_regions: Candidate remaining regions paired with the supported
-      shapes each region can realize for the current request.
+    region: Remaining coord region the box is carved from.
+    start: Candidate box origin.
+    shape: Candidate box shape.
+
+  Returns:
+    A lexicographic sort key. Lower sorts better.
+  """
+  remainder_regions = _split_coord_region(region, start, shape)
+  return (
+      len(remainder_regions),
+      _coord_box_score(start, shape),
+      tuple(
+          sorted(
+              _coord_box_score(remainder.start, remainder.shape)
+              for remainder in remainder_regions
+          )
+      ),
+  )
+
+
+def _allocation_box_score(
+    region: CoordRegion,
+    start: tuple[int, ...],
+    shape: tuple[int, ...],
+    allocation_policy: str,
+) -> tuple[Any, ...]:
+  """Returns the candidate-box score for the requested allocation policy."""
+  if allocation_policy == _COMPACT_ALLOCATION_POLICY:
+    return _compact_coord_box_score(region, start, shape)
+  return _coord_box_score(start, shape)
+
+
+def _order_region_candidates(
+    candidate_regions: Sequence[
+        tuple[
+            CoordRegion,
+            tuple[int, ...],
+            tuple[int, ...],
+            list[tuple[int, ...]],
+        ]
+    ],
+    allocation_policy: str,
+) -> list[
+    tuple[CoordRegion, tuple[int, ...], tuple[int, ...], list[tuple[int, ...]]]
+]:
+  """Orders realized candidate boxes according to the requested policy.
+
+  Args:
+    candidate_regions: Candidate remaining regions paired with the best box each
+      region can realize for the current request.
     allocation_policy: ``COMPACT`` or ``PERFORMANCE``.
 
   Returns:
-    Candidate regions ordered according to the requested policy.
+    Candidate boxes ordered according to the requested policy.
   """
-  # item = (region, supported_shapes); item[0].shape is the region's own size,
-  # item[1][0] is the best box shape it can realize. The two policies differ
-  # only in which of those two the primary sort key is:
-  #   COMPACT      -> rank by region size first (pack into the tightest region),
-  #   PERFORMANCE  -> rank by realizable box shape first (favor cubical boxes).
+  # item = (region, start, shape, coords). COMPACT still packs into the
+  # tightest remaining region first, but once a region is chosen it ranks the
+  # realized box by how simply it preserves the remainder. PERFORMANCE keeps the
+  # current box-shape-first behavior.
   if allocation_policy == _COMPACT_ALLOCATION_POLICY:
     return sorted(
         candidate_regions,
         key=lambda item: (
-            _coord_box_score(item[0].start, item[0].shape),  # region size first
-            _coord_box_score(item[0].start, item[1][0]),  # then box shape
+            _coord_box_score(item[0].start, item[0].shape),
+            _allocation_box_score(item[0], item[1], item[2], allocation_policy),
         ),
     )
   return sorted(
       candidate_regions,
       key=lambda item: (
-          _coord_box_score(item[0].start, item[1][0]),  # box shape first
-          _coord_box_score(item[0].start, item[0].shape),  # then region size
+          _allocation_box_score(item[0], item[1], item[2], allocation_policy),
+          _coord_box_score(item[0].start, item[0].shape),
       ),
   )
 
@@ -1000,6 +1108,7 @@ def _find_best_candidate_box(
     coord_topology: CoordTopology,
     candidate_shapes: Sequence[tuple[int, ...]],
     *,
+    allocation_policy: str = _COMPACT_ALLOCATION_POLICY,
     region: CoordRegion | None = None,
 ) -> tuple[tuple[int, ...], tuple[int, ...], list[tuple[int, ...]]] | None:
   """Finds the best valid candidate box, optionally constrained to a region.
@@ -1012,6 +1121,7 @@ def _find_best_candidate_box(
   Args:
     coord_topology: Normalized coord metadata for the candidate device pool.
     candidate_shapes: Exact box shapes to consider.
+    allocation_policy: Ranking policy for legal candidate boxes.
     region: Optional remaining coord region that candidate boxes must fit
       inside. When omitted, the scan considers the whole topology.
 
@@ -1021,6 +1131,7 @@ def _find_best_candidate_box(
   """
   best_candidate = None
   best_score = None
+  scoring_region = region or _full_coord_region(coord_topology)
 
   for shape in candidate_shapes:
     for start in sorted(coord_topology.coord_to_device):
@@ -1031,7 +1142,9 @@ def _find_best_candidate_box(
         continue
       if not candidate_uses_whole_chips(coord_topology, candidate_coords):
         continue
-      score = _coord_box_score(start, shape)
+      score = _allocation_box_score(
+          scoring_region, start, shape, allocation_policy
+      )
       if best_score is None or score < best_score:
         best_score = score
         best_candidate = (start, shape, candidate_coords)
@@ -1043,6 +1156,8 @@ def find_best_candidate_coords(
     coord_topology: CoordTopology,
     required_devices: int,
     candidate_shapes: Sequence[tuple[int, ...]] | None = None,
+    *,
+    allocation_policy: str = _COMPACT_ALLOCATION_POLICY,
 ) -> list[tuple[int, ...]] | None:
   """Returns only the coord list for the best candidate box.
 
@@ -1051,6 +1166,7 @@ def find_best_candidate_coords(
     required_devices: Number of devices needed for one mesh.
     candidate_shapes: Optional exact physical shapes to scan instead of
       enumerating every factorization of `required_devices`.
+    allocation_policy: Ranking policy for legal candidate boxes.
 
   Returns:
     The coord list for the best-ranked candidate box, or ``None`` when no
@@ -1062,13 +1178,16 @@ def find_best_candidate_coords(
     the winning box start and shape, which the region-aware allocator still
     needs in order to split remaining regions.
   """
-  shapes = candidate_shapes or _enumerate_box_shapes(
-      required_devices,
-      coord_topology.max_shape,
-  )
+  shapes = candidate_shapes
+  if shapes is None:
+    shapes = _enumerate_box_shapes(
+        required_devices,
+        coord_topology.max_shape,
+    )
   best_candidate = _find_best_candidate_box(
       coord_topology,
       shapes,
+      allocation_policy=allocation_policy,
   )
   if best_candidate is None:
     return None
@@ -1116,31 +1235,40 @@ def _allocate_devices_by_coords(
     return None, None
 
   allocation_policy = _normalize_allocation_policy(allocation_policy)
-  regions = tuple(coord_regions or (_full_coord_region(coord_topology),))
+  regions = (
+      (_full_coord_region(coord_topology),)
+      if coord_regions is None
+      else tuple(coord_regions)
+  )
   candidate_regions = []
   for region in regions:
     candidate_shapes = _supported_coord_box_shapes(
         devices,
         coord_topology,
         required_devices,
+        allocation_policy=allocation_policy,
         available_coord_shape=region.shape,
     )
     if not candidate_shapes:
       continue
-    candidate_regions.append((region, candidate_shapes))
-
-  candidate_regions = _order_candidate_regions(
-      candidate_regions, allocation_policy
-  )
-  for region, candidate_shapes in candidate_regions:
     best_region_candidate = _find_best_candidate_box(
         coord_topology,
         candidate_shapes,
+        allocation_policy=allocation_policy,
         region=region,
     )
     if best_region_candidate is None:
       continue
-    candidate_start, candidate_shape, candidate_coords = best_region_candidate
+    start, shape, coords = best_region_candidate
+    candidate_regions.append((region, start, shape, coords))
+
+  candidate_regions = _order_region_candidates(
+      candidate_regions, allocation_policy
+  )
+  if candidate_regions:
+    region, candidate_start, candidate_shape, candidate_coords = (
+        candidate_regions[0]
+    )
     selected_coords = set(candidate_coords)
     assigned_devices = [
         device
@@ -1160,17 +1288,35 @@ def _allocate_devices_by_coords(
     next_coord_regions = tuple(next_coord_regions_list)
     return assigned_devices, next_coord_regions
 
+  # This fallback runs only after every tracked remaining region failed to
+  # realize a valid box for this request. That can happen because the
+  # guillotine-style region bookkeeping is conservative: the remaining devices
+  # may still contain a contiguous supported box that spans the boundaries of
+  # the tracked regions even though no single tracked region can represent it.
   candidate_shapes = _supported_coord_box_shapes(
       devices,
       coord_topology,
       required_devices,
+      allocation_policy=allocation_policy,
   )
   best_candidate_coords = find_best_candidate_coords(
       coord_topology,
       required_devices,
       candidate_shapes=candidate_shapes,
+      allocation_policy=allocation_policy,
   )
   if best_candidate_coords is None:
+    logging.warning(
+      "Coord allocation could not construct a valid box: "
+      "required_devices=%d allocation_policy=%s topology_shape=%s "
+      "remaining_regions=%s supported_shapes=%s device_sample=%s.",
+      required_devices,
+      allocation_policy,
+      coord_topology.max_shape,
+      [{"start": region.start, "shape": region.shape} for region in regions],
+      candidate_shapes,
+      summarize_devices_for_logging(devices, debug=True, limit=8),
+    )
     return None, tuple(regions)
 
   selected_coords = set(best_candidate_coords)
@@ -1288,10 +1434,18 @@ def _allocate_devices_from_pool(
       allocation_policy,
   )
   if assigned_devices is None:
+    remaining_region_summary = (
+      None
+      if coord_regions is None
+      else [{"start": region.start, "shape": region.shape} for region in coord_regions]
+    )
     raise ValueError(
         f"Mesh allocation requires {required_devices} devices for {mesh_name}, "
         "but coord-based allocation could not construct a valid box from the "
-        "remaining devices."
+        f"remaining devices (allocation_policy={allocation_policy}, "
+      f"remaining_device_count={len(remaining_devices)}, "
+      f"remaining_regions={remaining_region_summary}, "
+      f"device_sample={summarize_devices_for_logging(remaining_devices, debug=True, limit=8)})."
     )
 
   remaining_devices = _remove_devices_by_identity(

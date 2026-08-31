@@ -65,7 +65,7 @@ with cm:
   from tunix.rl.agentic.environments import task_environment
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.rl import rl_cluster as rl_cluster_lib
+  from tunix.rl import rl_cluster as rl_engine_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
@@ -228,7 +228,7 @@ mesh = None
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
 
-if trainer_devices + rollout_devices > jax.device_count():
+if trainer_devices + rollout_devices > jax.device_count():  # pyrefly: ignore[unsupported-operation]
   raise ValueError(
       "Trainer devices must be less than or equal to the number of devices"
       " available."
@@ -237,7 +237,7 @@ if trainer_devices + rollout_devices > jax.device_count():
 
 if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]  # pyrefly: ignore[bad-argument-type, bad-index]
   )
 
   rollout_mesh = jax.sharding.Mesh(
@@ -252,7 +252,7 @@ if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   # )
   print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
   trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
-      TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+      TRAINER_MESH[0], jax.devices()[-trainer_devices:]  # pyrefly: ignore[bad-argument-type, unsupported-operation]
   )
   # trainer_mesh = jax.make_mesh(
   #     *TRAINER_MESH,
@@ -373,7 +373,7 @@ chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -383,7 +383,7 @@ train_dataset, val_dataset = data_lib.post_init_dataset(
 
 test_dataset, _ = data_lib.post_init_dataset(
     test_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -545,22 +545,22 @@ if ROLLOUT_ENGINE == "sglang_jax":
   )
 elif ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **vllm_rollout_dict
+      **base_rollout_dict, **vllm_rollout_dict  # pyrefly: ignore[bad-argument-type]
   )
 elif ROLLOUT_ENGINE == "vanilla":
   rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-cluster_config = rl_cluster_lib.ClusterConfig(
-    role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+cluster_config = rl_engine_lib.ClusterConfig(
+    role_to_mesh={  # pyrefly: ignore[bad-argument-type]
+        rl_engine_lib.Role.ACTOR: trainer_mesh,
+        rl_engine_lib.Role.REFERENCE: trainer_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -603,8 +603,8 @@ perf_metrics_config = PerfMetricsConfig(
 )
 
 # %%
-# RL cluster
-rl_cluster = rl_cluster_lib.RLCluster(
+# RL engine
+rl_engine = rl_engine_lib.RLEngine(
     actor=qwen2_actor,
     reference=qwen2_ref,
     tokenizer=tokenizer,
@@ -612,7 +612,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     perf_config=perf_metrics_config,
 )
 
-show_hbm_usage("after RLCluster creation")
+show_hbm_usage("after RLEngine creation")
 
 
 # %%
@@ -644,7 +644,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     reward_fns=[
         math_rewards.math_reward,
     ],

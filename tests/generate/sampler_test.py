@@ -22,15 +22,11 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.generate import base_sampler
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import utils
 from tunix.models.gemma4 import model as gemma4_model_lib
 from tunix.tests import test_common as tc
-
-
-@dataclasses.dataclass(kw_only=True)
-class ModelConfigWithDtype(tc.ModelConfig):
-  dtype: jax.numpy.dtype = jax.numpy.bfloat16
 
 
 class SamplerTest(parameterized.TestCase):
@@ -42,20 +38,18 @@ class SamplerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='fallback',
-          config_class=tc.ModelConfig,
-          expected_dtype=jax.numpy.float32,
+          testcase_name='default_float32',
+          model_dtype=jax.numpy.float32,
       ),
       dict(
-          testcase_name='from_config',
-          config_class=ModelConfigWithDtype,
-          expected_dtype=jax.numpy.bfloat16,
+          testcase_name='bfloat16',
+          model_dtype=jax.numpy.bfloat16,
       ),
   )
-  def test_dtype(self, config_class, expected_dtype):
+  def test_dtype(self, model_dtype):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        config=config_class(vocab_size=vocab.GetPieceSize()),
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=model_dtype),
         rngs=nnx.Rngs(42),
     )
 
@@ -69,7 +63,7 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
-    self.assertEqual(sampler.dtype, expected_dtype)
+    self.assertEqual(sampler.dtype, model_dtype)
 
   @parameterized.named_parameters(
       dict(
@@ -139,8 +133,8 @@ class SamplerTest(parameterized.TestCase):
             + 1
         )
         np.testing.assert_allclose(
-            result_not_padded.logits[i],
-            result_padded.logits[i][:valid_length],
+            result_not_padded.logits[i],  # pyrefly: ignore[unsupported-operation]
+            result_padded.logits[i][:valid_length],  # pyrefly: ignore[unsupported-operation]
         )
         np.testing.assert_allclose(
             result_not_padded.tokens[i],
@@ -197,7 +191,7 @@ class SamplerTest(parameterized.TestCase):
         return_logits=True,
         max_prompt_length=8,
         echo=True,
-        images=images,
+        images=images,  # pyrefly: ignore[bad-argument-type]
     )
 
     self.assertIsNotNone(result)
@@ -259,9 +253,9 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertLen(result.logits, 2)
     if echo:
-      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
     else:
-      self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
 
     # With 1 beam, the beam search result should be the
     # same as the greedy output
@@ -409,6 +403,62 @@ class SamplerTest(parameterized.TestCase):
     )
     self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pytype: disable=attribute-error
 
+  def test_decode_stops_after_prefill_for_single_generation_step(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    sampler.eos_ids = jnp.array([vocab.eos_id()])
+    max_prompt_length = 4
+    max_generation_steps = 1
+    prompt_tokens = sampler.tokenize('input string')
+    all_input_ids = jnp.array([
+        utils.pad_to_length(
+            prompt_tokens,  # pyrefly: ignore[bad-argument-type]
+            target_length=max_prompt_length,
+            pad_value=vocab.pad_id(),
+            left=True,
+        )
+    ])
+    total_sampling_steps = max_prompt_length + max_generation_steps
+    sampling_state = sampler.init_sample_state(
+        all_input_ids=all_input_ids,
+        total_sampling_steps=total_sampling_steps,
+        include_logits=False,
+        forbidden_token_ids=None,
+        temperature=0.0,
+        top_p=None,
+        top_k=None,
+        seed=jax.random.PRNGKey(0),
+        beam_size=None,
+        include_logprobs=False,
+    )
+
+    after_prefill = sampler._prefill_fn(
+        sampler._flattened_transformer_state, sampling_state, None, echo=False
+    )
+    self.assertEqual(after_prefill.decoding_step, total_sampling_steps - 1)
+
+    after_decode = sampler._decode_fn(
+        sampler._flattened_transformer_state, after_prefill
+    )
+    self.assertEqual(after_decode.decoding_step, total_sampling_steps - 1)
+    np.testing.assert_array_equal(
+        np.asarray(after_decode.token_buffer),
+        np.asarray(after_prefill.token_buffer),
+    )
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
@@ -438,7 +488,7 @@ class SamplerTest(parameterized.TestCase):
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
-      for orig, new in zip(original_logits, new_logits):
+      for orig, new in zip(original_logits, new_logits):  # pyrefly: ignore[bad-argument-type]
         np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
   def test_lora_state_update(self):
@@ -482,7 +532,7 @@ class SamplerTest(parameterized.TestCase):
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
-      for orig, new in zip(original_logits, new_logits):
+      for orig, new in zip(original_logits, new_logits):  # pyrefly: ignore[bad-argument-type]
         np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
   def test_invalid_state_update(self):
@@ -721,8 +771,8 @@ class SamplerTest(parameterized.TestCase):
     self.assertEqual(len(res_opt.tokens), len(res_unopt.tokens))
     for t_opt, t_unopt in zip(res_opt.tokens, res_unopt.tokens):
       np.testing.assert_array_equal(t_opt, t_unopt)
-    self.assertEqual(len(res_opt.logits), len(res_unopt.logits))
-    for l_opt, l_unopt in zip(res_opt.logits, res_unopt.logits):
+    self.assertEqual(len(res_opt.logits), len(res_unopt.logits))  # pyrefly: ignore[bad-argument-type]
+    for l_opt, l_unopt in zip(res_opt.logits, res_unopt.logits):  # pyrefly: ignore[bad-argument-type]
       self.assertEqual(l_opt.shape, l_unopt.shape)
       np.testing.assert_allclose(l_opt, l_unopt, atol=1e-5, rtol=1e-5)
 
@@ -734,10 +784,16 @@ class SamplerTest(parameterized.TestCase):
             '</s>': 2,
             'Describe:': 3,
             '<img>': 258880,
-            '<soi>': 258881,
+            '<soi>': 255999,
             '<eoi>': 258882,
+            '<audio>': 258881,
+            '<soa>': 256000,
+            '<eoa>': 258883,
         }
     )
+    # Since there are a lot of holes (missing ids) in our vocab.
+    vocab.DecodeIds = mock.MagicMock()
+    vocab.DecodeIds.return_value = 'decoded_string'
 
     config = gemma4_model_lib.ModelConfig.gemma4_e2b()
     config = dataclasses.replace(
@@ -758,6 +814,12 @@ class SamplerTest(parameterized.TestCase):
         patch_size=4,
         output_length=5,
     )
+    config.audio_encoder = gemma4_model_lib.audio.ConformerConfig(
+        num_layers=1,
+        model_dims=16,
+        atten_num_heads=2,
+        lm_model_dims=32,
+    )
 
     rngs = nnx.Rngs(42)
     transformer = gemma4_model_lib.Gemma4(config, rngs=rngs, text_only=False)
@@ -766,7 +828,7 @@ class SamplerTest(parameterized.TestCase):
         transformer=transformer,
         tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
-            cache_size=64,
+            cache_size=128,
             num_layers=1,
             num_kv_heads=1,
             head_dim=16,
@@ -774,12 +836,14 @@ class SamplerTest(parameterized.TestCase):
     )
 
     # Let prompt contain image placeholder tag
-    prompt = "Describe: <img>"
+    prompt = "Describe: <img> <audio>"
     dummy_image = np.ones((16, 16, 3), dtype=np.uint8)
+    dummy_audio = np.zeros(16000, dtype=np.float32)
 
     result = sampler(
         [prompt],
         images=[dummy_image],
+        audios=[dummy_audio],
         max_prompt_length=32,
         max_generation_steps=5,
     )
@@ -787,6 +851,151 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertIsNotNone(result.tokens)
     self.assertGreater(len(result.tokens[0]), 0)
+
+  def test_update_params(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Create a source model with modified weights
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(1),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 123.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model)
+
+    # Execute update_params
+    sampler.update_params(new_state)
+
+    # Verify that the sampler's transformer state and module received the updated parameters
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+  def test_update_params_with_filter_types(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Source model with new weights
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(2),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 77.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model, nnx.Param)
+
+    # Execute update_params with explicit filter_types
+    sampler.update_params(new_state, filter_types=(nnx.Param,))
+
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+  def test_update_params_precision_conversion(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=jnp.float32),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Source model configured with bfloat16 parameters
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(
+            vocab_size=vocab.GetPieceSize(), dtype=jnp.bfloat16
+        ),
+        rngs=nnx.Rngs(1),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 42.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model)
+
+    # Execute update_params with bfloat16 params into float32 sampler
+    sampler.update_params(new_state)
+
+    # Verify that updated weights were cast to float32 (sampler rollout precision)
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    self.assertEqual(state_dict["emb.embedding"].value.dtype, jnp.float32)
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(jnp.ones_like(state_dict["emb.embedding"].value) * 42.0),
+    )
+
+  def test_base_sampler_update_params_raises_not_implemented(self):
+    class _DummySampler(base_sampler.BaseSampler):
+
+      @property
+      def transformer(self):
+        return None
+
+      @property
+      def transformer_state(self):
+        return None
+
+      def tokenize(self, input_string: str):
+        return []
+
+      def __call__(self, input_strings, **kwargs):
+        return base_sampler.SamplerOutput(
+            text=[], logits=None, tokens=[], padded_prompt_tokens=np.array([]), logprobs=None
+        )
+
+    dummy = _DummySampler()
+    with self.assertRaises(NotImplementedError):
+      dummy.update_params({})
 
 
 if __name__ == '__main__':

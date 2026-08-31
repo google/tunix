@@ -138,6 +138,28 @@ def load_safetensors_with_offsets(filepath):
   return contiguous_array, tensor_metadata, mm, f
 
 
+def _normalize_tensor(v: Any) -> np.ndarray:
+  """Normalizes a tensor to a numpy array."""
+  if hasattr(v, 'numpy'):
+    if str(getattr(v, 'dtype', '')) == 'torch.bfloat16':
+      return v.detach().float().cpu().numpy().astype(ml_dtypes.bfloat16)
+    else:
+      return v.detach().cpu().numpy()
+
+  elif all(hasattr(v, attr) for attr in ('view', 'shape', 'dtype')):
+    is_explicit_bf16 = str(v.dtype) in ('bfloat16', 'BF16')
+
+    is_unknown_16bit = (
+        getattr(v.dtype, 'itemsize', None) == 2
+        and v.dtype not in (np.float16, np.int16, np.uint16)
+    )
+
+    if is_explicit_bf16 or is_unknown_16bit:
+      return v.view(ml_dtypes.bfloat16)
+
+  return np.asarray(v)
+
+
 def load_and_create_model_orig(
     file_dir: str,
     model_class,
@@ -194,6 +216,7 @@ def load_and_create_model_orig(
   key_map = key_mapping(config)
 
   file_lock = threading.Lock()
+  dict_lock = threading.Lock()  # guards the duplicate-key check and write
 
   # Load tensors from all files
   skipped_keys = []
@@ -214,6 +237,7 @@ def load_and_create_model_orig(
             skipped_keys.append(k_name)
             return
 
+          v = _normalize_tensor(v)
           if transform is not None:
             permute, reshape = transform
             if permute:
@@ -225,11 +249,12 @@ def load_and_create_model_orig(
           if dtype and current_arr.dtype != dtype:
             current_arr = current_arr.astype(dtype)
 
-          if jax_key_mapped in file_loaded_tensors:
-            raise ValueError(
-                f'Duplicate key {jax_key_mapped} found within file {f.name}.'
-            )
-          file_loaded_tensors[jax_key_mapped] = current_arr
+          with dict_lock:
+            if jax_key_mapped in file_loaded_tensors:
+              raise ValueError(
+                  f'Duplicate key {jax_key_mapped} found within file {f.name}.'
+              )
+            file_loaded_tensors[jax_key_mapped] = current_arr
 
         except Exception as e:
           raise RuntimeError(
@@ -246,7 +271,7 @@ def load_and_create_model_orig(
 
       for future in concurrent.futures.as_completed(futures):
         if future.exception():
-          raise future.exception()
+          raise future.exception()  # pyrefly: ignore[bad-raise]
 
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:

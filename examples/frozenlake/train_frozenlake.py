@@ -1,6 +1,6 @@
 """Agentic FrozenLake GRPO recipe for Gemma4-2B on a single TPU host.
 
-Designed for v5p-8 / v6e-4 -class hosts where actor, reference, and rollout
+Designed for v5p-4 / v6e-8 -class hosts where actor, reference, and rollout
 share a single mesh. Configuration is env-driven so the same image runs
 unchanged on any spot VM:
 
@@ -70,7 +70,7 @@ from tunix.oss import utils as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
@@ -175,7 +175,7 @@ SEED = args.seed
 # if _mesh_env:
 #   SHARED_MESH_SHAPE = tuple(int(x) for x in _mesh_env.split(","))
 # else:
-ROLLOUT_MESH_SHAPE = (1, jax.device_count())
+ROLLOUT_MESH_SHAPE = (2, jax.device_count()//2)
 TRAINER_MESH_SHAPE = (jax.device_count(), 1)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 # ====== GRPO ======
@@ -191,7 +191,7 @@ NUM_GENERATIONS = args.num_generations
 # some headroom without provisioning a huge unused KV-cache pool — on a
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 32
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
 
 NUM_ITERATIONS = 1
@@ -334,8 +334,8 @@ def create_datasets(
     item["prompts"] = ""
     return item
 
-  train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
+  train_ds = grain.MapDataset.source(train_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
+  test_ds = grain.MapDataset.source(test_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
   return train_ds, test_ds
 
 
@@ -349,7 +349,7 @@ chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -358,7 +358,7 @@ train_dataset, val_dataset = data_lib.post_init_dataset(
 )
 test_dataset, _ = data_lib.post_init_dataset(
     test_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -369,7 +369,7 @@ show_hbm_usage("Done with loading datasets")
 
 config = model_lib.ModelConfig.gemma4_e2b()
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
@@ -453,7 +453,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.28,
+    "rollout_vllm_hbm_utilization": 0.2,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -470,16 +470,12 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
-        "limit_mm_per_prompt": {
-            "image": 0,
-            "video": 0,
-            "audio": 0,
-        },
         "hf_overrides": {
             "final_logit_softcapping": 30.0,
             "text_config": {
                 "final_logit_softcapping": 30.0,
             },
+            "architectures": ["Gemma4ForCausalLM"],
         },
     },
     "rollout_vllm_sampling_kwargs": {
@@ -496,11 +492,11 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: trainer_mesh,
+        rl_engine_lib.Role.REFERENCE: trainer_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     # Keep actor weights resident on device. With ``delete_dst_buffers=True``
@@ -508,7 +504,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     # host-offload workaround previously used to relieve HBM pressure during
     # sync is no longer necessary on this hardware.
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -529,11 +525,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # invokes the trainer ``mini_batch_size // train_micro_batch_size``
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
-        train_micro_batch_size=1,
-        compute_logps_micro_batch_size=1,
+        train_micro_batch_size=2,
+        compute_logps_micro_batch_size=2,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
+        compute_logps_chunk_size=2048,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -561,16 +558,15 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
-    degenerate_group_masking=False,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=gemma4_actor,
     reference=gemma4_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
-show_hbm_usage("after RLCluster creation")
+show_hbm_usage("after RLEngine creation")
 
 
 _metric_call_idx = 0
@@ -601,7 +597,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 
 
 grpo_trainer = GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,

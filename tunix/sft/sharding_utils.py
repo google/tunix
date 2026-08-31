@@ -88,6 +88,8 @@ def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
     if axis_name is not None:
       axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
       for name in axis_names:
+        if name is not None and name not in mesh.shape:
+          return shd.NamedSharding(mesh, shd.PartitionSpec())
         axis_size = mesh.shape[name]
         if x.shape[i] % axis_size != 0:
           # Replicate if not evenly divisible.

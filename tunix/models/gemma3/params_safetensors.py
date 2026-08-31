@@ -114,7 +114,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
 
   # Vision Tower (SigLIP).
   if cfg.vision_config is not None:
-    mapping.update({
+    mapping.update({  # pyrefly: ignore[no-matching-overload]
         r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
             "vision_encoder.siglip_encoder.embedding.kernel",
             ((2, 3, 1, 0), None),

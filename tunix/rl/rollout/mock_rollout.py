@@ -314,7 +314,7 @@ class MockRollout(base_rollout.BaseRollout):
     """
     batch_size, length = completion_tokens.shape
     # Use numpy to keep it on host memory.
-    return np.zeros((batch_size, length), dtype=np.float32)
+    return np.zeros((batch_size, length), dtype=np.float32)  # pyrefly: ignore[bad-return]
 
   def update_params(
       self,
@@ -332,13 +332,13 @@ class MockRollout(base_rollout.BaseRollout):
   def pad_id(self) -> int:
     if self._tokenizer is not None and hasattr(self._tokenizer, "pad_id"):
       pad_id_attr = self._tokenizer.pad_id
-      return pad_id_attr() if callable(pad_id_attr) else pad_id_attr
+      return pad_id_attr() if callable(pad_id_attr) else pad_id_attr  # pyrefly: ignore[bad-return]
     return self._pad_id
 
   def eos_id(self) -> int:
     if self._tokenizer is not None and hasattr(self._tokenizer, "eos_id"):
       eos_id_attr = self._tokenizer.eos_id
-      return eos_id_attr() if callable(eos_id_attr) else eos_id_attr
+      return eos_id_attr() if callable(eos_id_attr) else eos_id_attr  # pyrefly: ignore[bad-return]
     return self._eos_id
 
   def model(self) -> Any:
