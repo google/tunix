@@ -18,6 +18,34 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## K11 prompt-only grouped-reverse gate
+
+K11 completed all 128 trajectories, 427,594 action tokens and strict A=B=C,
+then stopped before backward because three ranks in one DP8 group had zero
+completion-valid tokens. These are retained turn-zero environment
+failure/timeout rows, not fabricated training examples. Their action masks
+are empty, so they contribute zero loss and zero gradient.
+
+P58.28 admits them only through the validated DeepSWE path. Require:
+
+```text
+_p32_group_spec default allow_empty_completion=false
+P34 caller allow_empty_completion=true
+[P34.EMPTY_COMPLETION] ... semantics=zero-loss-zero-gradient
+K11 replay n=[4874,1737,4415,1819,3436,3538,1811,5103]
+K11 replay completion=[3066,0,2539,0,1573,1738,0,3363]
+K11 replay fixed chunks=20 at local M256
+```
+
+Do not add a fake completion token, discard/resample the rows, or weaken the
+prompt/shape/action-subset gates. GSM8K and other non-DeepSWE P32 callers must
+still reject an empty completion. The local complete pinned-image gate must
+end with `p34_empty_completion=2` and `P58_EXACT_IMAGE_CPU_PASS`. This local
+repair is not a launch source: publish only after explicit approval, and
+launch only a final clean readback SHA under separate approval. A repaired
+target must preserve K11 strict alignment and produce segmented backward plus
+the first optimizer commit.
+
 ## K10 common-workload identity gate
 
 K10 completed the full 128-row rollout and strict Step-0 pre-alignment over

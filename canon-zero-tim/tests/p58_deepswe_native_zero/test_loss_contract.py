@@ -18,6 +18,7 @@ from tunix.rl import common
 
 ROOT = Path(__file__).resolve().parents[3]
 DEEPSWE_SCRIPT = ROOT / "examples/deepswe/train_deepswe_nb.py"
+ADAPTER = ROOT / "tunix/rl/canonical_qwen3_adapter.py"
 FIXED_NORM = 16_384
 RAW_ROWS = 128
 MICROBATCH_ROWS = 16
@@ -59,6 +60,34 @@ class P58LossContractTest(unittest.TestCase):
     )
     self.assertEqual(float(metric.denominator), 0.0)
     self.assertEqual(float(metric.compute()), 0.0)
+
+  def test_empty_completion_admission_is_deepswe_scoped(self):
+    tree = ast.parse(ADAPTER.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    group_spec = functions["_p32_group_spec"]
+    keyword_names = [arg.arg for arg in group_spec.args.kwonlyargs]
+    allow_index = keyword_names.index("allow_empty_completion")
+    allow_default = group_spec.args.kw_defaults[allow_index]
+    self.assertIsInstance(allow_default, ast.Constant)
+    self.assertIs(allow_default.value, False)
+
+    segmented = functions["segmented_dp_grpo_value_and_grad"]
+    calls = [
+        node
+        for node in ast.walk(segmented)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_p32_group_spec"
+    ]
+    self.assertEqual(len(calls), 1)
+    keywords = {item.arg: item.value for item in calls[0].keywords}
+    allow_value = keywords.get("allow_empty_completion")
+    self.assertIsInstance(allow_value, ast.Name)
+    self.assertEqual(allow_value.id, "p34")
 
   def test_eight_unequal_effective_microbatches_match_full_gradient(self):
     coefficients = jnp.arange(

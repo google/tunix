@@ -1,5 +1,21 @@
 # Log
 
+## 2026-08-30 UTC — P58.28 K11 prompt-only grouped-reverse repair, local
+
+- Root cause: the shared P32 group builder treated every zero-completion row
+  as structurally invalid even though DeepSWE preserves turn-zero environment
+  failures/timeouts with empty completion-valid and action masks.
+- Repair: add a keyword-only default-false admission and pass it only from the
+  validated P34 DeepSWE branch. Preserve prompt/shape/action-subset checks,
+  emit an explicit empty-row receipt, and change no loss, reward, reduction,
+  optimizer, sampling, topology, or trajectory policy.
+- Pinned-image evidence passes: loss contract 6/6; zero-output and
+  zero-cotangent grouped reverse; exact K11 DP8 vector with 20 M256 chunks.
+  P34 static passes ten suites; flag audit passes 409/409; the complete gate
+  exits zero with `p34_empty_completion=2` and `P58_EXACT_IMAGE_CPU_PASS`.
+  Source publication, matching image, and repaired target remain pending. No
+  remote state was mutated.
+
 ## 2026-08-30 UTC — DeepSWE P58 K11 incident intake sealed
 
 - Workload: `canon-p58-ds4b-zero-hp-full-k11` (128 TPU v5p, 32 worker hosts, DP8xTP8).

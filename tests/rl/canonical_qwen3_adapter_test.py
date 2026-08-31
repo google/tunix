@@ -2437,6 +2437,143 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           0.7,
       )
 
+  def test_p34_group_spec_admits_empty_completion_as_zero_cotangent(self):
+    if len(jax.devices()) < 16:
+      self.skipTest("requires sixteen forced CPU or accelerator devices")
+    adapter, runner = self._make_p32_group_adapter()
+    runner.mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:16]).reshape(16, 1), ("data", "model")
+    )
+    row = jnp.arange(16, dtype=jnp.int32)[:, None]
+    prompt = jnp.concatenate(
+        (1 + row % 2, 2 + row % 2, jnp.zeros_like(row)), axis=1
+    )
+    completion = jnp.concatenate(
+        (2 + row % 2, 1 + row % 2, jnp.zeros_like(row)), axis=1
+    )
+    empty_ranks = jnp.asarray([1, 3, 6], dtype=jnp.int32)
+    completion = completion.at[empty_ranks].set(0)
+    prompt_valid = prompt != 0
+    completion_valid = completion != 0
+
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "requires nonempty completion on every rank",
+    ):
+      adapter._p32_group_spec(  # pylint: disable=protected-access
+          prompt,
+          completion,
+          prompt_valid,
+          completion_valid,
+          1.0,
+      )
+
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt_valid,
+        completion_valid,
+        1.0,
+        allow_empty_completion=True,
+    )
+    self.assertEqual(
+        tuple(spec["host_completion_length"][index] for index in (1, 3, 6)),
+        (0, 0, 0),
+    )
+    self.assertEqual(
+        tuple(spec["host_n_real"][index] for index in (1, 3, 6)),
+        (2, 2, 2),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(spec["packed_ids"])[[1, 3, 6], :2],
+        np.asarray(prompt)[[1, 3, 6], :2],
+    )
+
+    env = {
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      segmented = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner
+      )
+      forward = adapter._p32_forward_group(  # pylint: disable=protected-access
+          segmented, tuple(runner.state_leaves), spec, keep_cache_inputs=False
+      )
+      reverse_untrusted = adapter._p32_reverse_group(  # pylint: disable=protected-access
+          segmented,
+          tuple(runner.state_leaves),
+          spec,
+          jnp.ones_like(forward["logps"]),
+          jnp.ones_like(forward["entropy"]),
+      )
+      reverse_masked = adapter._p32_reverse_group(  # pylint: disable=protected-access
+          segmented,
+          tuple(runner.state_leaves),
+          spec,
+          completion_valid.astype(jnp.float32),
+          completion_valid.astype(jnp.float32),
+      )
+
+    np.testing.assert_array_equal(
+        np.asarray(forward["logps"])[[1, 3, 6]],
+        np.zeros((3, 3), dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(forward["entropy"])[[1, 3, 6]],
+        np.zeros((3, 3), dtype=np.float32),
+    )
+    for untrusted, masked in zip(
+        jax.tree.leaves(reverse_untrusted["engine_gradients"]),
+        jax.tree.leaves(reverse_masked["engine_gradients"]),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(untrusted), np.asarray(masked))
+    for untrusted, masked in zip(
+        jax.tree.leaves(reverse_untrusted["initial_cache_cotangents"]),
+        jax.tree.leaves(reverse_masked["initial_cache_cotangents"]),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(untrusted), np.asarray(masked))
+
+  def test_p34_k11_group_spec_preserves_prompt_only_dp8_rows(self):
+    adapter, _ = self._make_p32_group_adapter(sequence_bucket=256)
+    adapter._data_size = 8  # pylint: disable=protected-access
+    adapter._tp_size = 8  # pylint: disable=protected-access
+    adapter._bucket = 2048  # pylint: disable=protected-access
+    adapter._max_model_len = 20_480  # pylint: disable=protected-access
+    adapter._max_num_reqs = 8  # pylint: disable=protected-access
+    prompt_lengths = jnp.asarray(
+        [1808, 1737, 1876, 1819, 1863, 1800, 1811, 1740], jnp.int32
+    )
+    completion_lengths = jnp.asarray(
+        [3066, 0, 2539, 0, 1573, 1738, 0, 3363], jnp.int32
+    )
+    prompt_positions = jnp.arange(4096, dtype=jnp.int32)[None, :]
+    completion_positions = jnp.arange(16_384, dtype=jnp.int32)[None, :]
+    prompt_valid = prompt_positions < prompt_lengths[:, None]
+    completion_valid = completion_positions < completion_lengths[:, None]
+    prompt = jnp.where(prompt_valid, 1, 0)
+    completion = jnp.where(completion_valid, 2, 0)
+
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt_valid,
+        completion_valid,
+        1.0,
+        allow_empty_completion=True,
+    )
+    self.assertEqual(
+        spec["host_n_real"],
+        (4874, 1737, 4415, 1819, 3436, 3538, 1811, 5103),
+    )
+    self.assertEqual(
+        spec["host_completion_length"],
+        (3066, 0, 2539, 0, 1573, 1738, 0, 3363),
+    )
+    self.assertEqual(spec["num_chunks"], 20)
+
   def test_p59_dp4_group_spec_requires_exact_proxy_workload(self):
     adapter, _ = self._make_p32_group_adapter()
     adapter._data_size = 4  # pylint: disable=protected-access

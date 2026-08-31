@@ -128,9 +128,10 @@ commit remain unreachable.
 | P58.24 | JobSet-level exclusive-topology contract | Put the nodepool topology key exactly once on JobSet metadata, forbid its worker-Pod copy, preserve Kueue/NAP sentinel resolution and explicit-pool exactness, and require server dry-run before launch | implemented locally; host and pinned-image construction PASS; target not run |
 | P58.25 | Common DeepSWE token-in/token-out continuity | All admitted DeepSWE workloads carry exact sampled assistant token IDs into later prompts, tokenize each environment observation once, bypass chat-template re-tokenization on continuation, and emit admission plus exercised-turn receipts; default-full YAML carries fail-closed DeepSWE/TiTO provenance; Native/Zero token transport is identical | construction completed; direct-v5p DP1xTP4 real-R2E TiTO/A=B=C PASS over 2,413 action tokens; K09 full target passed admission but failed before rollout in P58.26 scope |
 | P58.26 | K09 full-startup one-host selector scope | Full training binds every later-read one-host diagnostic selector, cannot derive replay geometry, and passes executable full-mode/one-host positive controls plus the complete pinned-image gate | completed for its startup scope; K10 crossed the old line, completed rollout/rescore, and reached segmented update construction |
-| P58.27 | K10 common workload identity | Every signed DeepSWE workload exposes the shared adapter `.name` identity from its single `contract_name` source, without changing serialized recipes; P58 token widths and the complete pinned-image gate pass | active; local source/host/pinned-image PASS on `98d102eb`, repaired 128-device target not rerun |
+| P58.27 | K10 common workload identity | Every signed DeepSWE workload exposes the shared adapter `.name` identity from its single `contract_name` source, without changing serialized recipes; P58 token widths and the complete pinned-image gate pass | completed for its interface scope; K11 crossed that boundary and reached grouped reverse |
+| P58.28 | K11 prompt-only grouped-reverse admission | Only validated DeepSWE may admit prompt-only rows; their loss/output/cotangent is exactly zero, single-turn callers remain fail-closed, exact K11 DP8 geometry and complete pinned-image gates pass | active; local source/P34/flag/complete pinned-image PASS, repaired target pending |
 
-At most one phase may be active. P58.27 is the active construction repair and
+At most one phase may be active. P58.28 is the active construction repair and
 no target launch is active. Commit, push, image publication, Kubernetes render/application, and
 each later TPU execution remain separately user-gated.
 
@@ -144,9 +145,10 @@ P58.24 construction is complete and its target was not run. P58.25 owns the
 TiTO source, default-full YAML admission, receipt, exact-image, and direct-v5p
 alignment gates. P58.26 owns the K09 production-startup scope repair and is
 closed by K10 crossing that boundary. P58.27 owns the K10 common workload
-identity repair. K10 certifies real DP8xTP8 rollout/rescore and strict
-pre-alignment, but not segmented forward/backward, optimizer commits,
-checkpointing, or completion.
+identity repair and K11 crossed that interface boundary. P58.28 owns the K11
+prompt-only grouped-reverse admission. K11 certifies real DP8xTP8
+rollout/rescore and strict pre-alignment, but not segmented backward,
+optimizer commits, checkpointing, or completion.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation

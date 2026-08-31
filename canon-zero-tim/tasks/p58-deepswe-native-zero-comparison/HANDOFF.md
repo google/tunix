@@ -1,6 +1,6 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — K11 passed strict rollout alignment (427k tokens), then hit a nonempty completion reverse assertion
+## START HERE — K11 prompt-only grouped-reverse repair is local, not published
 
 K11 is not another rollout, TiTO, dataset, topology, or alignment failure.
 Source `2f61f8fc7cf073964a9adbd30e78de872426a4d2` completed all 128
@@ -15,6 +15,24 @@ or timeouts) triggered the single-turn `host_completion_length < 1` assertion:
 Because zero-completion rows have `action_mask=0`, they contribute zero loss
 and zero gradient. See the immutable incident directory
 `canon-zero-tim/evidence/p58_k11_deepswe_empty_completion_incident/`.
+
+P58.28 repairs only this assertion. `_p32_group_spec` retains a default-false
+empty-completion admission; the validated P34 DeepSWE branch is the only
+caller that opts in. Prompt validity and at least two real tokens remain hard
+requirements. No fake token is inserted and no row is dropped or resampled.
+The exact K11 DP8 vector is covered by regression, and prompt-only rows are
+proven to have zero forward outputs and zero reverse cotangent contribution.
+An admitted batch prints `[P34.EMPTY_COMPLETION] ...
+semantics=zero-loss-zero-gradient`.
+
+The local work is based on operator parent
+`9f6b9c7eb6c32792604a966a7c0b8d9efa4072aa`. P34 static, the 409/409 flag
+audit, and the complete pinned-image gate pass; its terminal marker includes
+`p34_empty_completion=2`. The repaired target has not run. Do not launch from
+this dirty worktree. After separate commit/push and matching-image approval, fetch
+the final clean remote readback SHA and rerun Attempt-0. Require the K11
+strict A=B=C receipts plus segmented backward and the first optimizer commit.
+See `phases/p58-28-k11-empty-completion-reverse.md`.
 
 ## START HERE — K10 passed strict rollout alignment, then hit a workload interface mismatch
 

@@ -1,5 +1,31 @@
 # State
 
+## P58.28 K11 prompt-only grouped-reverse repair (2026-08-30)
+
+- K11 source `2f61f8fc7cf073964a9adbd30e78de872426a4d2` proves
+  the P58.27 workload-interface repair on the real 128-device target. It
+  completed 128 multi-turn trajectories, 427,594 action tokens, Rescore-B,
+  and strict Step-0 pre-alignment with exact A=B=C. It then stopped at the
+  first segmented reverse because one DP8 group contained three prompt-only
+  environment-failure/timeout rows and `_p32_group_spec` required every rank
+  to have at least one completion-valid token.
+- Latest operator parent is
+  `9f6b9c7eb6c32792604a966a7c0b8d9efa4072aa`. The local repair adds an
+  explicit, default-false group-builder admission and enables it only under
+  the validated P34 DeepSWE identity. Prompt-only rows retain empty action
+  masks and therefore contribute zero loss and zero gradient; no fake token,
+  dropping, resampling, or algorithm/topology change occurs.
+- Pinned-image gates pass: the loss contract is 6/6; the grouped
+  forward/reverse regression proves zero output/cotangent behavior; and the
+  exact K11 DP8 length replay preserves the observed counts and 20 M256
+  chunks. P34 static passes ten suites, the flag audit passes 409/409 with
+  `changed_names=0`, and the complete P58 gate exits zero with
+  `p34_empty_completion=2` and `P58_EXACT_IMAGE_CPU_PASS`.
+- K11 remains a signed strict-alignment target PASS only through
+  pre-backward. Segmented backward, optimizer commit, checkpoint, and the
+  1,000-update campaign remain unproved. No commit, push, image publication,
+  Kubernetes mutation, or TPU launch is authorized by this local repair.
+
 ## P58.27 K10 common workload identity repair (2026-08-30)
 
 - K10 source `0e954153cdfd21ee79ebf57eaa6afb4bf273aff0` proves the

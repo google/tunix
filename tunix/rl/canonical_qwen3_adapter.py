@@ -7514,8 +7514,17 @@ class Qwen3EngineForwardAdapter:
       prompt_valid,
       completion_valid,
       temperature,
+      *,
+      allow_empty_completion=False,
   ):
-    """Builds one fixed-M schedule with one sequence per DP rank."""
+    """Builds one fixed-M schedule with one sequence per DP rank.
+
+    DeepSWE can preserve a turn-zero environment failure as a prompt-only
+    row.  Its completion-valid and action masks are both empty, so the row is
+    a zero-loss, zero-cotangent participant in the fixed DP transaction.  The
+    opt-in stays explicit here so single-turn P32 workloads retain their
+    historical nonempty-completion contract.
+    """
     _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
         prompt, completion, prompt_valid, completion_valid
     )
@@ -7584,12 +7593,23 @@ class Qwen3EngineForwardAdapter:
     host_completion_length = np.asarray(
         jax.device_get(completion_length), dtype=np.int32
     )
-    if np.any(host_n_real < 2) or np.any(host_prompt_length < 1) or np.any(
-        host_completion_length < 1
-    ):
+    if np.any(host_n_real < 2) or np.any(host_prompt_length < 1):
       raise FunctionalMappingError(
-          "P32 grouped reverse requires nonempty prompt/completion on every "
+          "P32 grouped reverse requires a nonempty prompt and at least two "
+          "real tokens on every "
           f"rank: n={host_n_real.tolist()} "
+          f"prompt={host_prompt_length.tolist()} "
+          f"completion={host_completion_length.tolist()}"
+      )
+    empty_completion_ranks = np.flatnonzero(
+        host_completion_length == 0
+    ).astype(np.int32)
+    if empty_completion_ranks.size and not allow_empty_completion:
+      raise FunctionalMappingError(
+          "P32 grouped reverse requires nonempty completion on every rank "
+          "unless the caller explicitly admits zero-contribution rows: "
+          f"empty_ranks={empty_completion_ranks.tolist()} "
+          f"n={host_n_real.tolist()} "
           f"prompt={host_prompt_length.tolist()} "
           f"completion={host_completion_length.tolist()}"
       )
@@ -7634,6 +7654,9 @@ class Qwen3EngineForwardAdapter:
         "completion_valid": completion_valid,
         "n_real": n_real,
         "host_n_real": tuple(int(value) for value in host_n_real),
+        "host_completion_length": tuple(
+            int(value) for value in host_completion_length
+        ),
         "num_chunks": num_chunks,
         "temperature": jnp.asarray(temperature, jnp.float32),
     }
@@ -8594,9 +8617,27 @@ class Qwen3EngineForwardAdapter:
             grouped_inputs[2][index],
             grouped_inputs[3][index],
             algo_config.temperature,
+            allow_empty_completion=p34,
         )
         for index in range(contract.local_trajectories)
     )
+    if p34:
+      empty_completion_rows = tuple(
+          (group_index, rank_index)
+          for group_index, spec in enumerate(specs)
+          for rank_index, length in enumerate(
+              spec["host_completion_length"]
+          )
+          if length == 0
+      )
+      if empty_completion_rows:
+        print(
+            "[P34.EMPTY_COMPLETION] "
+            f"admitted_rows={len(empty_completion_rows)} "
+            f"coordinates={empty_completion_rows} "
+            "semantics=zero-loss-zero-gradient",
+            flush=True,
+        )
     report_mode = os.environ.get("CANON_P28_BATCHED_REPORT", "")
     if report_mode not in ("", "0", "1", "verify"):
       raise FunctionalMappingError(
