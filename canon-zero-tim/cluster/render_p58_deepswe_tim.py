@@ -397,6 +397,9 @@ def render(
           else f"qwen3-4b-p58-{stage}"
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
+      "CANON_WORKER_INITIAL_SYNC_SECONDS": "60",
+      "CANON_EXPECTED_SLICE_DEVICES": "128",
+      "CANON_DEVICE_PROBE_TIMEOUT_SECS": "1800",
   })
   if high_performance:
     p34._set_env(
