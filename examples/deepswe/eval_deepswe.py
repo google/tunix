@@ -349,18 +349,35 @@ if MODEL_SOURCE == "maxtext":
 
     def _patched_qwen_mrope_call(self, inputs, position, *args, **kwargs):
       if position is not None:
-        if position.ndim == 3 and position.shape[-1] == 1:
-          position = jnp.broadcast_to(position, position.shape[:-1] + (3,))
+        # Case 1: vLLM (3, N, 1) -> (N, 1, 3)
+        if (
+            position.ndim == 3
+            and position.shape[0] == 3
+            and position.shape[-1] == 1
+        ):
+          position = jnp.transpose(position.squeeze(-1), (1, 0))[:, None, :]
+        # Case 2: vLLM (3, N) -> (N, 1, 3)
+        elif position.ndim == 2 and position.shape[0] == 3:
+          position = jnp.transpose(position, (1, 0))[:, None, :]
+        # Case 3: (N,) -> (N, 1, 3)
+        elif position.ndim == 1:
+          position = jnp.broadcast_to(
+              position[:, None, None], (position.shape[0], 1, 3)
+          )
+        # Case 4: (B, S) -> (B, S, 3)
         elif position.ndim == 2:
           position = jnp.broadcast_to(
-              position[..., jnp.newaxis], position.shape + (3,)
+              position[..., None], position.shape + (3,)
           )
+        # Case 5: (B, S, 1) -> (B, S, 3)
+        elif position.ndim == 3 and position.shape[-1] == 1:
+          position = jnp.broadcast_to(position, position.shape[:-1] + (3,))
       return _orig_qwen_mrope_call(self, inputs, position, *args, **kwargs)
 
     Qwen3OmniMoeThinkerTextRotaryEmbedding.__call__ = _patched_qwen_mrope_call
     logger.info(
         "Successfully patched Qwen3OmniMoeThinkerTextRotaryEmbedding for 3D"
-        " MRoPE with singleton last dim."
+        " MRoPE position normalization."
     )
   except Exception as e:
     logger.warning(
