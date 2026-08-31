@@ -1,0 +1,502 @@
+{
+  "arms": {
+    "off": {
+      "root_markers": {
+        "COLLECTED.json": {
+          "present": false
+        },
+        "COMPLETE.json": {
+          "present": false
+        },
+        "PREFLIGHT.json": {
+          "present": true,
+          "sha256": "0abe48e87cbafcfa77677a7299d2eae7a93aa850bb10cafdb014789e88638031",
+          "source_commit": "2f61f8fc7cf073964a9adbd30e78de872426a4d2",
+          "status": "writable-and-source-verified"
+        }
+      },
+      "rounds": [
+        {
+          "a_b_differing_bytes": 0,
+          "b_c_differing_bytes": 0,
+          "bundle_downloaded": false,
+          "bundle_sha256": "37f14e297ae80d27288ebb76bac9295b27b80352d55b8be3e0eccffde4c3174e",
+          "classification": "M15_OBSERVER_CONTROL_EXACT",
+          "classifier_input": {
+            "files": [
+              "ROUND_INPUT_RECEIPT.json",
+              "m15-replay-envelope.jsonl",
+              "pre-alignment.jsonl"
+            ],
+            "manifest_sha256": "111432d6db51946accbc350256ad7719065ee3572762c22839c8761a017a4fcd",
+            "receipt_sha256": "a1adc52612a4c5d057e9d0dfa7c20c70828d929e1147ec6fbb45eedbad604246",
+            "status": "REMOTE_VERIFIED_BEFORE_CLASSIFY"
+          },
+          "diagnostic_round": 0,
+          "manifest_sha256": "48e291e028911d9a172eca45f099d7f6d3c9fefffee70a3483b2ee1daae1f38b",
+          "record_pairs": 5246,
+          "replay_records": 2695,
+          "stage_state": {
+            "active_stage": null,
+            "failure_exit_code": null,
+            "failure_stage": null,
+            "last_completed_stage": "completion",
+            "receipt_count": 18,
+            "receipts": [
+              {
+                "exit_code": 0,
+                "ordinal": 10,
+                "returned_file": "off.round-000000.stage-10-assemble-STARTED.json",
+                "sha256": "8ada210fc5a6debe54310710c3d1ad7433ed896bfc43de53b8203cbab997fca1",
+                "stage": "assemble",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 10,
+                "returned_file": "off.round-000000.stage-10-assemble-PASS.json",
+                "sha256": "bc023fc58101018d5ab8f89b97e1e2d3711ae70dc485bb20bd7b784ca583d871",
+                "stage": "assemble",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 15,
+                "returned_file": "off.round-000000.stage-15-checkpoint-input-STARTED.json",
+                "sha256": "65c2ae434c1f0f5cdcb49930e3debb1be11bc7de3b7b10a016fe761fcb354cb8",
+                "stage": "checkpoint-input",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 15,
+                "returned_file": "off.round-000000.stage-15-checkpoint-input-PASS.json",
+                "sha256": "2e023e0e750b82ff71c2fe7bd795810ce661ae6521e2a845788f2a83bc557633",
+                "stage": "checkpoint-input",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 20,
+                "returned_file": "off.round-000000.stage-20-classify-STARTED.json",
+                "sha256": "beabf3cc2f1761176f2b4eb6220fff66e55d5e457efae848fd9859aaab31c568",
+                "stage": "classify",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 20,
+                "returned_file": "off.round-000000.stage-20-classify-PASS.json",
+                "sha256": "0984ac516bde0bcbd6b218e32f90384b767407d6d8d2abb1eab8d1d6cae592a2",
+                "stage": "classify",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 30,
+                "returned_file": "off.round-000000.stage-30-package-STARTED.json",
+                "sha256": "f661d6c8ac10d05adcff4f7d74db66a35215a199807278fbd96ddd15528574c8",
+                "stage": "package",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 30,
+                "returned_file": "off.round-000000.stage-30-package-PASS.json",
+                "sha256": "979c5ed6d9926d5cebf3e30114c307c990a5454159571dc311988e79369b3faf",
+                "stage": "package",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 35,
+                "returned_file": "off.round-000000.stage-35-local-export-STARTED.json",
+                "sha256": "5e3d52bde01849a8978ad82e0f9dfc0ed8ffeaf94eb64270dfe647d208b5a1fe",
+                "stage": "local-export",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 35,
+                "returned_file": "off.round-000000.stage-35-local-export-PASS.json",
+                "sha256": "0061417eccb1901be1b57e9f89313e61a9b64b69aa924ad13cb255ab9b3b9bbe",
+                "stage": "local-export",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 40,
+                "returned_file": "off.round-000000.stage-40-manifest-STARTED.json",
+                "sha256": "ecd80d6dc44d137cc269f8849607c44dfbcd97a016bd481625740d92bc0af40b",
+                "stage": "manifest",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 40,
+                "returned_file": "off.round-000000.stage-40-manifest-PASS.json",
+                "sha256": "0928d4a076e256bacbc7b286bbe961d88d2a5755525f889b9ef20a60e58c0821",
+                "stage": "manifest",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 50,
+                "returned_file": "off.round-000000.stage-50-upload-STARTED.json",
+                "sha256": "58f01b027e15ed24485d4b1bd24298eb8cfdb46a51416b1722d135246723007c",
+                "stage": "upload",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 50,
+                "returned_file": "off.round-000000.stage-50-upload-PASS.json",
+                "sha256": "8686910b23a3c6aab8871ff12ff8012555ea37ae995dace20780d0cb9cee2377",
+                "stage": "upload",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 60,
+                "returned_file": "off.round-000000.stage-60-remote-verify-STARTED.json",
+                "sha256": "1c058a4c2353c6c87b853d8451b77acacdf35f0d455493b385724e987681d75f",
+                "stage": "remote-verify",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 60,
+                "returned_file": "off.round-000000.stage-60-remote-verify-PASS.json",
+                "sha256": "53f5b9532c269ebcd00815cd16848e0619dddabee71752509c09397a1ed8e1ec",
+                "stage": "remote-verify",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 70,
+                "returned_file": "off.round-000000.stage-70-completion-STARTED.json",
+                "sha256": "208181184e1d6a6c34dc8b2068350d252afd4f62a8299570dd262f8eaa1bec60",
+                "stage": "completion",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 70,
+                "returned_file": "off.round-000000.stage-70-completion-PASS.json",
+                "sha256": "064bb703b105243817524ab390616fd550e8a19ea6d6bb338bfb3b9521700bcc",
+                "stage": "completion",
+                "status": "PASS"
+              }
+            ],
+            "status": "PIPELINE_COMPLETE"
+          },
+          "status": "SEALED"
+        },
+        {
+          "a_b_differing_bytes": 0,
+          "b_c_differing_bytes": 0,
+          "bundle_downloaded": false,
+          "bundle_sha256": "cf7e72d88028bfbfd3a527c4f76ebc7b2708740f77cef9a592192e9d9c79fb1d",
+          "classification": "M15_OBSERVER_CONTROL_EXACT",
+          "classifier_input": {
+            "files": [
+              "ROUND_INPUT_RECEIPT.json",
+              "m15-replay-envelope.jsonl",
+              "pre-alignment.jsonl"
+            ],
+            "manifest_sha256": "08156df954dacf323c4208f1d9fec9ff84e4cec28011544addedde4963d7ef58",
+            "receipt_sha256": "09a698b3f4514844dd9d834987cbe9d95bfa6d876933fd00e7a5bd3799970328",
+            "status": "REMOTE_VERIFIED_BEFORE_CLASSIFY"
+          },
+          "diagnostic_round": 1,
+          "manifest_sha256": "d36b8f9271b9c9d6be4a76dea3e5e0611b2eb153f836ba4cd2b5ef268bcd6069",
+          "record_pairs": 4530,
+          "replay_records": 2467,
+          "stage_state": {
+            "active_stage": null,
+            "failure_exit_code": null,
+            "failure_stage": null,
+            "last_completed_stage": "completion",
+            "receipt_count": 18,
+            "receipts": [
+              {
+                "exit_code": 0,
+                "ordinal": 10,
+                "returned_file": "off.round-000001.stage-10-assemble-STARTED.json",
+                "sha256": "7f8b760b5dbb3c2bc8613ef5abf6efb6178f7766015c8fd7b25bacbda7833b84",
+                "stage": "assemble",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 10,
+                "returned_file": "off.round-000001.stage-10-assemble-PASS.json",
+                "sha256": "8d3f9b179cbcd75859207f2dcdd2d1d633f04d25815a0e35dc986249b86553b6",
+                "stage": "assemble",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 15,
+                "returned_file": "off.round-000001.stage-15-checkpoint-input-STARTED.json",
+                "sha256": "e93d4192bb7ca2bd13832316291c6cc7a1b320574e80a3e03211f52b2683b2f7",
+                "stage": "checkpoint-input",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 15,
+                "returned_file": "off.round-000001.stage-15-checkpoint-input-PASS.json",
+                "sha256": "4a3576e0f36ce81e6b7bfd3f0f60de5c28acbe34cc50c90c06b679c15d83cb6f",
+                "stage": "checkpoint-input",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 20,
+                "returned_file": "off.round-000001.stage-20-classify-STARTED.json",
+                "sha256": "1ee41bf427d86d9d7a20bbbd17da3c2ecbdf1eddf0cbc5f3a93976d0367149c0",
+                "stage": "classify",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 20,
+                "returned_file": "off.round-000001.stage-20-classify-PASS.json",
+                "sha256": "6be965dd42fb3ab809c037ade4ab90a76da769251ae3fea10542672d5debcf2b",
+                "stage": "classify",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 30,
+                "returned_file": "off.round-000001.stage-30-package-STARTED.json",
+                "sha256": "befc7c79df501a690ab3f9ceddb3489655bf5e249e4c49fccb2c598815ec530d",
+                "stage": "package",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 30,
+                "returned_file": "off.round-000001.stage-30-package-PASS.json",
+                "sha256": "81c1f5f0382152c2ffd93698dc5b890cb97203753cced5fb5e480a26686e7f65",
+                "stage": "package",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 35,
+                "returned_file": "off.round-000001.stage-35-local-export-STARTED.json",
+                "sha256": "4c5b30b3c4ce233950244f7ccf4521f3e786d98eafe11c574347c7b6bc3350c9",
+                "stage": "local-export",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 35,
+                "returned_file": "off.round-000001.stage-35-local-export-PASS.json",
+                "sha256": "57421b0ccbccd92a66c9535647e17645ad2bd64f35fd0bab7652cc9c7d90547e",
+                "stage": "local-export",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 40,
+                "returned_file": "off.round-000001.stage-40-manifest-STARTED.json",
+                "sha256": "b532844ff7c90eec1366298282d55574df49502c7eec8f0838ba9d4abd448e25",
+                "stage": "manifest",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 40,
+                "returned_file": "off.round-000001.stage-40-manifest-PASS.json",
+                "sha256": "6108a6a0f08f981cbc46d1e152b676f947b22b94e64c8e539804f522018c3dbb",
+                "stage": "manifest",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 50,
+                "returned_file": "off.round-000001.stage-50-upload-STARTED.json",
+                "sha256": "285b506ca0eed429d6e363f6bb50398b191096cc028bb7faedfaadac70b61ae2",
+                "stage": "upload",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 50,
+                "returned_file": "off.round-000001.stage-50-upload-PASS.json",
+                "sha256": "5077dd4a679199e726d78ca5afc759c0666c830e1bfb8c12e3efb8b4d340943f",
+                "stage": "upload",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 60,
+                "returned_file": "off.round-000001.stage-60-remote-verify-STARTED.json",
+                "sha256": "9c130a4f7e02eebd7daa3ca63eddb8770e26b6ce484495a378ea79b1c7afcc94",
+                "stage": "remote-verify",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 60,
+                "returned_file": "off.round-000001.stage-60-remote-verify-PASS.json",
+                "sha256": "76c70ffdb71704ae9d725468cc2fb06e0ff3de5e5d5d8defc71fbf6eb16b37eb",
+                "stage": "remote-verify",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 70,
+                "returned_file": "off.round-000001.stage-70-completion-STARTED.json",
+                "sha256": "d7b1cdd99a4f2c089eb666222643e20738dbdf742af62dc1aa59716f8f9f7168",
+                "stage": "completion",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 70,
+                "returned_file": "off.round-000001.stage-70-completion-PASS.json",
+                "sha256": "5b6a281ce6b565a8f85e65da6d11c49ae77bffa3699e525b601bf07571df10e5",
+                "stage": "completion",
+                "status": "PASS"
+              }
+            ],
+            "status": "PIPELINE_COMPLETE"
+          },
+          "status": "SEALED"
+        },
+        {
+          "diagnostic_round": 2,
+          "stage_state": {
+            "active_stage": null,
+            "failure_exit_code": null,
+            "failure_stage": null,
+            "last_completed_stage": null,
+            "receipt_count": 0,
+            "receipts": [],
+            "status": "UNINSTRUMENTED"
+          },
+          "status": "ABSENT"
+        }
+      ],
+      "sealed_rounds": 2
+    },
+    "on": {
+      "root_markers": {
+        "COLLECTED.json": {
+          "present": false
+        },
+        "COMPLETE.json": {
+          "present": false
+        },
+        "PREFLIGHT.json": {
+          "present": true,
+          "sha256": "ee6dc4e580fd2766b5b935b86ba9b08558ad952e691264d8dbafa89f5ccb9852",
+          "source_commit": "2f61f8fc7cf073964a9adbd30e78de872426a4d2",
+          "status": "writable-and-source-verified"
+        }
+      },
+      "rounds": [
+        {
+          "diagnostic_round": 0,
+          "partial_round_files": [],
+          "stage_state": {
+            "active_stage": "classify",
+            "failure_exit_code": 1,
+            "failure_stage": "classify",
+            "last_completed_stage": "checkpoint-input",
+            "receipt_count": 6,
+            "receipts": [
+              {
+                "exit_code": 0,
+                "ordinal": 10,
+                "returned_file": "on.round-000000.stage-10-assemble-STARTED.json",
+                "sha256": "8ada210fc5a6debe54310710c3d1ad7433ed896bfc43de53b8203cbab997fca1",
+                "stage": "assemble",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 10,
+                "returned_file": "on.round-000000.stage-10-assemble-PASS.json",
+                "sha256": "bc023fc58101018d5ab8f89b97e1e2d3711ae70dc485bb20bd7b784ca583d871",
+                "stage": "assemble",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 15,
+                "returned_file": "on.round-000000.stage-15-checkpoint-input-STARTED.json",
+                "sha256": "65c2ae434c1f0f5cdcb49930e3debb1be11bc7de3b7b10a016fe761fcb354cb8",
+                "stage": "checkpoint-input",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 15,
+                "returned_file": "on.round-000000.stage-15-checkpoint-input-PASS.json",
+                "sha256": "2e023e0e750b82ff71c2fe7bd795810ce661ae6521e2a845788f2a83bc557633",
+                "stage": "checkpoint-input",
+                "status": "PASS"
+              },
+              {
+                "exit_code": 0,
+                "ordinal": 20,
+                "returned_file": "on.round-000000.stage-20-classify-STARTED.json",
+                "sha256": "beabf3cc2f1761176f2b4eb6220fff66e55d5e457efae848fd9859aaab31c568",
+                "stage": "classify",
+                "status": "STARTED"
+              },
+              {
+                "exit_code": 1,
+                "ordinal": 20,
+                "returned_file": "on.round-000000.stage-20-classify-FAIL.json",
+                "sha256": "5041d3f2d526dfdb19cc0d22e63cd00c09d389a2e02267437dd980deb492001b",
+                "stage": "classify",
+                "status": "FAIL"
+              }
+            ],
+            "status": "FAILED"
+          },
+          "status": "UNSEALED"
+        },
+        {
+          "diagnostic_round": 1,
+          "stage_state": {
+            "active_stage": null,
+            "failure_exit_code": null,
+            "failure_stage": null,
+            "last_completed_stage": null,
+            "receipt_count": 0,
+            "receipts": [],
+            "status": "UNINSTRUMENTED"
+          },
+          "status": "ABSENT"
+        },
+        {
+          "diagnostic_round": 2,
+          "stage_state": {
+            "active_stage": null,
+            "failure_exit_code": null,
+            "failure_stage": null,
+            "last_completed_stage": null,
+            "receipt_count": 0,
+            "receipts": [],
+            "status": "UNINSTRUMENTED"
+          },
+          "status": "ABSENT"
+        }
+      ],
+      "sealed_rounds": 0
+    }
+  },
+  "claim_ceiling": "Only SEALED rows establish independently durable per-round classifiers. Stage receipts locate persistence progress/failure but carry no numerical equality claim. Root COLLECTED/COMPLETE are still required for a full signed target PASS.",
+  "expected_rounds_per_arm": 3,
+  "next_action": "use recovered rounds; do not claim paired target completion",
+  "schema": "m15-apc-multiround-small-return-v1",
+  "source_commit": "2f61f8fc7cf073964a9adbd30e78de872426a4d2",
+  "status": "PARTIAL_ROUNDS_RECOVERED"
+}

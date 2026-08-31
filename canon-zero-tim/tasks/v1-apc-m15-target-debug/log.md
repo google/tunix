@@ -1,5 +1,17 @@
 # Log
 
+## 2026-08-31 UTC — Phase E0z (e0w5 GCS read-only recovery & audit) executed and archived
+
+- Executed read-only GCS recovery audit for e0w5 DP8xTP8 pair using original render contract (`/tmp/m15-e0v-e0w5`, 5/5 verified) via `run_m15_e0w5_gcs_return.sh` at analysis SHA `b171250c78c238fb89529265d442892e780f9ce6`.
+- Audit finding:
+  - Result: `[M15.E0W5.RECOVERY] COMPLETE status=PARTIAL_ROUNDS_RECOVERED exit_code=3`
+  - Control arm (APC-off): 2 rounds sealed and exact (`M15_OBSERVER_CONTROL_EXACT` on rounds 0 and 1; A-B=0, B-C=0; round 2 uninstrumented/absent).
+  - Treatment arm (APC-on): Round 0 classifier-input verified (`REMOTE_VERIFIED_BEFORE_CLASSIFY`), failed at `stage-20-classify` with exit code 1 (reported divergence A-B=615 bytes); rounds 1 and 2 absent.
+  - Root markers: `PREFLIGHT.json` present on both arms (`2f61f8fc...`); `COLLECTED.json` and `COMPLETE.json` absent.
+- Evidence archived under `evidence/v1_apc_m15_e0w5_recovery_20260831/` (46 files; `SHA256SUMS` SHA256 `a45433099491655b2e53f4cbdebdc8ea871ae4a1be51bdc9e1504b3ce00dbae6`).
+- Raw log: `/tmp/m15-e0w5-gcs-return.YDFNWD.log`, SHA256 `02518b4a91c8b5a3ef165e16016ee0eb5903159cb3e902c2686a18f3db73ffa6`.
+- Scope & boundaries: Read-only operation (`gcs_read=1, gcs_write=0, kubernetes=0, tpu=0`). `FIRST_RED_LOCALIZED=false`, `target_pass=false`, `numerical_repair_authorized=false`. Phase E remains closed; zero model weights, RoPE, RPA, KV values, or numerical paths modified.
+
 ## 2026-08-30 UTC — Attempt 20 (Phase E0t Carrier Repair & KV3 Salvage Return) executed and archived
 
 - Executed Gate 4 read-only GCS salvage return for Attempt 20 (`run_id=k02`) across Control (APC-off) and Treatment (APC-on) arms.

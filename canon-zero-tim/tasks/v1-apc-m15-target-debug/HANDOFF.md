@@ -78,49 +78,47 @@ coordinates, runtime receipts, and operator completeness are reviewed. This
 wrapper intentionally does not turn a successful download into a repair
 claim.
 
-### Exact response required from the bucket-side agent
+### Recovered response from bucket-side agent (Phase E0z GCS recovery)
 
-Return the following bounded fields. Use `NONE` where evidence is absent; do
-not infer, reword an old incident claim as a recovered fact, or paste GCS
-roots, remote URLs, credentials, token payloads, capsules, shards, or raw logs.
+The official e0w5 read-only GCS recovery audit executed on the original render contract (`/tmp/m15-e0v-e0w5`) and returned `status=PARTIAL_ROUNDS_RECOVERED`.
 
 ```text
-branch=<local/*>
-HEAD=<40-char analysis SHA>
-dirty=<0 required>
-command=<exact command, with sensitive locator omitted>
-terminal_marker=<exact M15.E0W5.RECOVERY line>
+branch=local/m15-e0-att20
+HEAD=b171250c78c238fb89529265d442892e780f9ce6
+dirty=0
+command=bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0w5_gcs_return.sh b171250c78c238fb89529265d442892e780f9ce6 /tmp/m15-e0v-e0w5 canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_e0w5_recovery_20260831 /tmp
+terminal_marker=[M15.E0W5.RECOVERY] COMPLETE status=PARTIAL_ROUNDS_RECOVERED exit_code=3 off_sealed=2 on_sealed=0 off_rounds=[0,1] on_rounds=[] reported_off=EXACT reported_on=RED A-B=off:0,on:615 B-C=off:0,on:0 three_round_numerical=0 target_pass=0 numerical_repair_authorized=0 target_source=2f61f8fc7cf073964a9adbd30e78de872426a4d2 analysis_source=b171250c78c238fb89529265d442892e780f9ce6
 target_source=2f61f8fc7cf073964a9adbd30e78de872426a4d2
-analysis_source=<40-char analysis SHA>
-status=<official return status or refusal>
-off_sealed_rounds=<0..3>; off_round_indices=<list>
-on_sealed_rounds=<0..3>; on_round_indices=<list>
-off_classifications=<official names or NONE>
-on_classifications=<official names or NONE>
+analysis_source=b171250c78c238fb89529265d442892e780f9ce6
+status=PARTIAL_ROUNDS_RECOVERED
+off_sealed_rounds=2; off_round_indices=[0, 1]
+on_sealed_rounds=0; on_round_indices=[]
+off_classifications=M15_OBSERVER_CONTROL_EXACT
+on_classifications=NONE
 reported_A_minus_B=off:0,on:615
-recovered_A_minus_B=<per sealed round or NONE>
-recovered_B_minus_C=<per sealed round or NONE>
-classifier_input_checkpoint=<per arm/round PASS|ABSENT|NONE>
-stage_receipts=<last completed/failure stage per arm/round or NONE>
-root_markers=<PREFLIGHT/COLLECTED/COMPLETE presence per arm>
-B_full_reset_runtime_receipt=<true|false|NONE>
-all_cached_tokens_zero_receipt=<true|false|NONE>
-exact_TiTO_receipts=<per arm/round counts or NONE>
+recovered_A_minus_B=off:[0:0,1:0];on:NONE
+recovered_B_minus_C=off:[0:0,1:0];on:NONE
+classifier_input_checkpoint=off:[0:PASS,1:PASS];on:[0:PASS]
+stage_receipts=off:[0:stage-70-completion-PASS,1:stage-70-completion-PASS];on:[0:stage-20-classify-FAIL]
+root_markers=off:PREFLIGHT;on:PREFLIGHT
+B_full_reset_runtime_receipt=NONE
+all_cached_tokens_zero_receipt=NONE
+exact_TiTO_receipts=NONE
 first_red_localized=false
-first_failure_boundary=<last exact -> first red, or NONE>
-first_red_shape=<shape or NONE>
-request_call_token_cache_page_coordinate=<value or NONE>
-source_file_line=<value or NONE>
+first_failure_boundary=NONE
+first_red_shape=NONE
+request_call_token_cache_page_coordinate=NONE
+source_file_line=NONE
 target_pass=false
 numerical_repair_authorized=false
-output=<local return directory or NONE>
-manifest_sha256=<64-char SHA or NONE>
-raw_log=<local path>
-raw_log_sha256=<64-char SHA>
-preserved_scratch=<local path or NONE>
+output=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_e0w5_recovery_20260831
+manifest_sha256=a45433099491655b2e53f4cbdebdc8ea871ae4a1be51bdc9e1504b3ce00dbae6
+raw_log=/tmp/m15-e0w5-gcs-return.YDFNWD.log
+raw_log_sha256=02518b4a91c8b5a3ef165e16016ee0eb5903159cb3e902c2686a18f3db73ffa6
+preserved_scratch=NONE
 TARGET_RERUN=NO
-external_mutation=gcs_read:<0|1>,gcs_write:0,kubernetes:0,tpu:0,commit:0,push:0
-next_action=<one concrete action based only on recovered status>
+external_mutation=gcs_read:1,gcs_write:0,kubernetes:0,tpu:0,commit:0,push:0
+next_action=Review recovered partial evidence; numerical repair unauthorized; do not launch e0w6 without user approval
 ```
 
 Decision after that return:

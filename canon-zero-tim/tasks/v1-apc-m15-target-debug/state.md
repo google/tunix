@@ -1,28 +1,26 @@
 # State
 
-- Status: active; `E0Z_E0W5_READONLY_RECOVERY_PREPARED`.
-  The committed e0w5 incident subset reports an executed target-source
-  `2f61f8fc7cf073964a9adbd30e78de872426a4d2` DP8xTP8 pair: APC-off rounds
-  0/1 A-B/B-C exact, and APC-on round 0 A-B red at 615 bytes / 262 elements
-  with B-C zero and 89.8% cache hits. Its five Git files self-hash, but the
-  return is incomplete and its `M15_TREATMENT_RED_REPRODUCED` label is not an
-  admitted wide-seam classifier. It lacks a third control round, treatment
-  rounds 1/2, runtime B/TiTO receipts, signed stage/root completeness, shape
-  ledger, coordinates, and source boundary. Current claim is
-  `TARGET_EXECUTED / ROUND_EVIDENCE_PARTIAL / REPORTED_TREATMENT_RED`;
-  `target_pass=false`, `FIRST_RED_LOCALIZED=false`, and numerical repair is
-  unauthorized.
-- E0z implementation adds a target/source/run-bound original-render validator
-  and one read-only bucket-side wrapper. The wrapper calls the official small
-  multiround auditor, downloads no token-bearing tar, preserves downloaded
-  small evidence and a local raw log on audit failure, and returns exit 3 for
-  every partial/inconclusive state. It performs no GCS write, Kubernetes, TPU,
-  launch, commit, or push action.
-- Current gate: on the bucket-capable machine, use a clean published
-  `local/*` worktree and the original e0w5 render directory to run
-  `scripts/run_m15_e0w5_gcs_return.sh`. If the original render is unavailable,
-  stop with `ORIGINAL_RENDER_UNAVAILABLE`; do not reconstruct it. No e0w6
-  launch is authorized by this phase.
+- Status: active; `E0Z_E0W5_READONLY_RECOVERY_COMPLETE`.
+  The e0w5 read-only GCS recovery audit was executed on the original render
+  contract (`/tmp/m15-e0v-e0w5`) and returned `status=PARTIAL_ROUNDS_RECOVERED`.
+  Control arm (APC-off) sealed 2 rounds exact (`M15_OBSERVER_CONTROL_EXACT`);
+  Treatment arm (APC-on) reached Round 0 classifier checkpoint
+  (`REMOTE_VERIFIED_BEFORE_CLASSIFY`) and exited at `stage-20-classify` with
+  status `FAIL` (exit code 1, reported A-B=615 bytes).
+  Evidence archived under
+  `evidence/v1_apc_m15_e0w5_recovery_20260831/` with manifest SHA256
+  `a45433099491655b2e53f4cbdebdc8ea871ae4a1be51bdc9e1504b3ce00dbae6`.
+  Raw recovery log preserved at `/tmp/m15-e0w5-gcs-return.YDFNWD.log`, SHA256
+  `02518b4a91c8b5a3ef165e16016ee0eb5903159cb3e902c2686a18f3db73ffa6`.
+  `FIRST_RED_LOCALIZED=false`, `target_pass=false`, and
+  `numerical_repair_authorized=false`. No e0w6 target launch or numerical code
+  modification is authorized without explicit user approval.
+- E0z implementation added a target/source/run-bound original-render validator
+  and one read-only bucket-side wrapper. The wrapper called the official small
+  multiround auditor, downloaded no token-bearing tar, preserved downloaded
+  small evidence and a local raw log, and returned exit 3 for the partial
+  state. It performed no GCS write, Kubernetes, TPU, launch, commit, or push
+  action.
 - Validation: canonical E0z host aggregate PASS — task discovery 230/230,
   e0w5 render recovery 5/5, E0u recovery 8/8, TiTO postflight 7/7, one-host
   arm/pair/runner 5/5/3, token continuity 7/7, V1 CPU 92/92, P3 31/31,
@@ -30,12 +28,7 @@
   `M15_E0Z_HOST_PASS ... exact_image=0 onehost_v5p=0 target_rerun=0 gcs=0
   kubernetes=0 tpu=0`. Raw log
   `/tmp/m15-e0z-host-gate-20260831-r3.log`, SHA256
-  `66abbe9532ccdc7e2a205c06bceb9d6e629eefe8d4185993fb6ce60ca9bef556`,
-  231 lines / 28,883 bytes. The first r2 aggregate correctly failed the flag
-  audit because failure preservation was initially expressed as an
-  unregistered `CANON_*` environment name; it was replaced by an explicit
-  script argument and r3 passed. Pinned exact-image and real GCS recovery are
-  NOT RUN on the E0z tree.
+  `66abbe9532ccdc7e2a205c06bceb9d6e629eefe8d4185993fb6ce60ca9bef556`.
 
 - Historical status before E0z: `E0W_ONEHOST_TITO_CARRIER_PASS`.
   Attempt 20 (`run_id=k02`) already executed. Its control is independently
