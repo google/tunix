@@ -27,6 +27,7 @@ from typing import Any, Generic, Protocol, Sequence, TypeVar
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.rl import common as rl_common
+from tunix.rl import utils as rl_utils
 
 T = TypeVar("T")
 
@@ -135,135 +136,46 @@ def with_ref_per_token_logps(
 
 
 class SequencePackedBatchAssembler:
-  """1D Sequence Packing: Concatenates items into dense [1, max_packed_len] buffers."""
-  # TODO: align implementation with current path.
-  def __init__(self, max_packed_len: int = 8192, pad_id: int = 0):
+  """1D Sequence Packing: Concatenates items into dense [pack_size, max_packed_len] buffers."""
+
+  def __init__(
+      self,
+      max_packed_len: int = 8192,
+      pad_id: int = 0,
+      pack_size: int = 1,
+      max_segments_per_packed_row: int | None = None,
+  ):
+    if max_packed_len <= 0:
+      raise ValueError(
+          f"max_packed_len must be positive, got {max_packed_len}."
+      )
+    if pack_size <= 0:
+      raise ValueError(f"pack_size must be positive, got {pack_size}.")
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+    self.pack_size = pack_size
+    self.max_segments_per_packed_row = max_segments_per_packed_row
 
-  def pack(self, items: Sequence[datatypes.RLTrainerPayload]) -> list[datatypes.RLTrainerPayload]:
+  def pack(
+      self, items: Sequence[datatypes.RLTrainerPayload]
+  ) -> list[datatypes.RLTrainerPayload]:
     """Bin-packs items into dense 1D buffers with segment boundaries."""
     if not items:
       return []
 
-    # Calculate token lengths from explicit fields
-    item_lengths = []
-    for it in items:
-      item_lengths.append(len(it.token_ids) if it.token_ids is not None else 0)  # pyrefly: ignore[bad-argument-type]
-
-    item_list = sorted(zip(items, item_lengths), key=lambda x: x[1], reverse=True)
-
-    bins: list[list[datatypes.RLTrainerPayload]] = []
-    bin_lengths: list[int] = []
-
-    for item, length in item_list:
-      placed = False
-      for b_idx, current_len in enumerate(bin_lengths):
-        if current_len + length <= self.max_packed_len:
-          bins[b_idx].append(item)
-          bin_lengths[b_idx] += length
-          placed = True
-          break
-      if not placed:
-        bins.append([item])
-        bin_lengths.append(length)
-
-    payloads: list[datatypes.RLTrainerPayload] = []
-    for b_items in bins:
-      all_tokens = []
-      all_loss_masks = []
-      all_action_masks = []
-      all_segment_ids = []
-      all_segment_positions = []
-      all_advantages = []
-      all_old_logprobs = []
-      all_ref_logprobs = []
-
-      for seg_idx, it in enumerate(b_items, start=1):
-        toks = (
-            np.asarray(it.token_ids, dtype=np.int32).reshape(-1)
-            if it.token_ids is not None
-            else np.zeros(0, dtype=np.int32)
+    packed_chunks = list(
+        rl_utils.pack_sequences(
+            item_iterator=iter([items]),
+            max_token_budget=self.max_packed_len,
+            sequences_per_update=len(items),
+            pad_id=self.pad_id,
+            pack_size=self.pack_size,
+            max_segments_per_packed_row=self.max_segments_per_packed_row,
         )
-        seq_len = len(toks)
+    )
+    return [chunk[0] for chunk in packed_chunks]
 
-        all_tokens.append(toks)
 
-        loss_mask = (
-            it.loss_mask
-            if it.loss_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_loss_masks.append(np.asarray(loss_mask, dtype=np.float32).reshape(-1))
-
-        action_mask = (
-            it.action_mask
-            if it.action_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_action_masks.append(
-            np.asarray(action_mask, dtype=np.float32).reshape(-1)
-        )
-
-        adv_arr = (
-            np.asarray(it.advantages, dtype=np.float32).reshape(-1)
-            if it.advantages is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_advantages.append(adv_arr)
-
-        all_segment_ids.append(np.full(seq_len, seg_idx, dtype=np.int32))
-        all_segment_positions.append(np.arange(seq_len, dtype=np.int32))
-
-        if it.old_per_token_logps is not None:
-          all_old_logprobs.append(
-              np.asarray(it.old_per_token_logps, dtype=np.float32).reshape(-1)
-          )
-
-        if it.ref_per_token_logps is not None:
-          all_ref_logprobs.append(
-              np.asarray(it.ref_per_token_logps, dtype=np.float32).reshape(-1)
-          )
-
-      concat_tokens = np.concatenate(all_tokens)
-      concat_loss_masks = np.concatenate(all_loss_masks)
-      concat_action_masks = np.concatenate(all_action_masks)
-      concat_segment_ids = np.concatenate(all_segment_ids)
-      concat_segment_positions = np.concatenate(all_segment_positions)
-      concat_advantages = np.concatenate(all_advantages)
-
-      pad_len = max(0, self.max_packed_len - len(concat_tokens))
-      padded_tokens = np.pad(concat_tokens[: self.max_packed_len], (0, pad_len), constant_values=self.pad_id)
-      padded_loss_mask = np.pad(concat_loss_masks[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-      padded_action_mask = np.pad(concat_action_masks[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-      padded_segment_ids = np.pad(concat_segment_ids[: self.max_packed_len], (0, pad_len), constant_values=0)
-      padded_segment_positions = np.pad(concat_segment_positions[: self.max_packed_len], (0, pad_len), constant_values=0)
-      padded_advantages = np.pad(concat_advantages[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-
-      batch_old_lp = None
-      if all_old_logprobs:
-        concat_old = np.concatenate(all_old_logprobs)
-        batch_old_lp = np.pad(concat_old[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
-
-      batch_ref_lp = None
-      if all_ref_logprobs:
-        concat_ref = np.concatenate(all_ref_logprobs)
-        batch_ref_lp = np.pad(concat_ref[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
-
-      payload = datatypes.RLTrainerPayload(
-          token_ids=padded_tokens[np.newaxis, :],
-          token_mask=padded_segment_ids[np.newaxis, :],
-          loss_mask=padded_loss_mask[np.newaxis, :],
-          advantages=padded_advantages[np.newaxis, :],
-          action_mask=padded_action_mask[np.newaxis, :],
-          old_per_token_logps=batch_old_lp,
-          ref_per_token_logps=batch_ref_lp,
-          segment_ids=padded_segment_ids[np.newaxis, :],
-          segment_positions=padded_segment_positions[np.newaxis, :],
-      )
-      payloads.append(payload)
-
-    return payloads
 
 
 # TODO(tunix-dev): Remove GRPOTrainExampleAssembler.

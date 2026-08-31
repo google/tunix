@@ -178,18 +178,20 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
   def test_sequence_packed_assembler_with_trainer_payload(self):
     payload1 = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        advantages=np.full(4, 1.5, dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 1.5, dtype=np.float32),
     )
     payload2 = datatypes.RLTrainerPayload(
-        token_ids=np.array([5, 6, 7, 8], dtype=np.int32),
-        token_mask=np.array([0, 0, 0, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 0, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 0, 1], dtype=np.float32),
-        advantages=np.full(4, -0.5, dtype=np.float32),
+        prompt_ids=np.array([5, 6, 7], dtype=np.int32),
+        prompt_mask=np.array([1, 1, 1], dtype=np.float32),
+        completion_ids=np.array([8], dtype=np.int32),
+        completion_mask=np.array([1], dtype=np.float32),
+        loss_mask=np.array([1], dtype=np.float32),
+        advantages=np.full(1, -0.5, dtype=np.float32),
     )
 
     assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
@@ -197,11 +199,29 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
     self.assertLen(payloads, 1)
     payload = payloads[0]
-    self.assertEqual(payload.token_ids.shape, (1, 16))
+    self.assertEqual(payload.prompt_ids.shape, (1, 0))
+    self.assertEqual(payload.prompt_mask.shape, (1, 0))
+    self.assertEqual(payload.completion_ids.shape, (1, 16))
+    self.assertEqual(payload.completion_mask.shape, (1, 16))
     self.assertEqual(payload.loss_mask.shape, (1, 16))
+    self.assertEqual(payload.action_mask.shape, (1, 16))
     self.assertEqual(payload.segment_ids.shape, (1, 16))
     self.assertEqual(payload.segment_positions.shape, (1, 16))
     self.assertEqual(payload.advantages.shape, (1, 16))
+    self.assertIsNone(payload.token_ids)
+    self.assertIsNone(payload.token_mask)
+
+    # Check packed token content: prompt + completion concatenated
+    np.testing.assert_array_equal(
+        payload.completion_ids[0, :8], [1, 2, 3, 4, 5, 6, 7, 8]
+    )
+    np.testing.assert_array_equal(payload.completion_ids[0, 8:], 0)
+
+    # Check completion_mask (0 for prompt tokens, 1 for completion tokens)
+    np.testing.assert_array_equal(
+        payload.completion_mask[0, :8], [0, 0, 1, 1, 0, 0, 0, 1]
+    )
+    np.testing.assert_array_equal(payload.completion_mask[0, 8:], 0)
 
     # Check segment boundaries
     seg_ids = payload.segment_ids[0]
@@ -213,25 +233,41 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     seg_pos = payload.segment_positions[0]
     np.testing.assert_array_equal(seg_pos[:4], [0, 1, 2, 3])
     np.testing.assert_array_equal(seg_pos[4:8], [0, 1, 2, 3])
+    np.testing.assert_array_equal(seg_pos[8:], 0)
+
+    # Check advantages (0 for prompt tokens, advantage value for completion)
+    np.testing.assert_allclose(
+        payload.advantages[0, :8],
+        [0.0, 0.0, 1.5, 1.5, 0.0, 0.0, 0.0, -0.5],
+    )
+    np.testing.assert_allclose(payload.advantages[0, 8:], 0.0)
 
   def test_sequence_packed_assembler_all_optional_fields(self):
     payload1 = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        advantages=np.full(4, 1.5, dtype=np.float32),
-        old_per_token_logps=np.full(4, -1.0, dtype=np.float32),
-        ref_per_token_logps=np.full(4, -1.2, dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 1.5, dtype=np.float32),
+        old_per_token_logps=np.full(2, -1.0, dtype=np.float32),
+        ref_per_token_logps=np.full(2, -1.2, dtype=np.float32),
+        returns=np.full(2, 0.8, dtype=np.float32),
+        old_values=np.full(2, 0.5, dtype=np.float32),
+        sampler_is_weights=np.full(2, 1.1, dtype=np.float32),
     )
     payload2 = datatypes.RLTrainerPayload(
-        token_ids=np.array([5, 6, 7], dtype=np.int32),
-        token_mask=np.array([0, 1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 1, 1], dtype=np.float32),
-        advantages=np.full(3, 2.0, dtype=np.float32),
-        old_per_token_logps=np.full(3, -0.5, dtype=np.float32),
-        ref_per_token_logps=np.full(3, -0.7, dtype=np.float32),
+        prompt_ids=np.array([5], dtype=np.int32),
+        prompt_mask=np.array([1], dtype=np.float32),
+        completion_ids=np.array([6, 7], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 2.0, dtype=np.float32),
+        old_per_token_logps=np.full(2, -0.5, dtype=np.float32),
+        ref_per_token_logps=np.full(2, -0.7, dtype=np.float32),
+        returns=np.full(2, 0.9, dtype=np.float32),
+        old_values=np.full(2, 0.6, dtype=np.float32),
+        sampler_is_weights=np.full(2, 1.2, dtype=np.float32),
     )
 
     assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=12)
@@ -239,42 +275,125 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
     self.assertLen(payloads, 1)
     payload = payloads[0]
-    self.assertEqual(payload.token_ids.shape, (1, 12))
+    self.assertEqual(payload.completion_ids.shape, (1, 12))
     self.assertEqual(payload.loss_mask.shape, (1, 12))
     self.assertEqual(payload.action_mask.shape, (1, 12))
     self.assertEqual(payload.advantages.shape, (1, 12))
     self.assertEqual(payload.old_per_token_logps.shape, (1, 12))
     self.assertEqual(payload.ref_per_token_logps.shape, (1, 12))
+    self.assertEqual(payload.returns.shape, (1, 12))
+    self.assertEqual(payload.old_values.shape, (1, 12))
+    self.assertEqual(payload.sampler_is_weights.shape, (1, 12))
 
     np.testing.assert_allclose(
         payload.old_per_token_logps[0],
-        [-1.0, -1.0, -1.0, -1.0, -0.5, -0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0, -1.0, 0.0, -0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
     np.testing.assert_allclose(
         payload.ref_per_token_logps[0],
-        [-1.2, -1.2, -1.2, -1.2, -0.7, -0.7, -0.7, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, -1.2, -1.2, 0.0, -0.7, -0.7, 0.0, 0.0, 0.0, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        payload.returns[0],
+        [0.0, 0.0, 0.8, 0.8, 0.0, 0.9, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        payload.old_values[0],
+        [0.0, 0.0, 0.5, 0.5, 0.0, 0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        payload.sampler_is_weights[0],
+        [0.0, 0.0, 1.1, 1.1, 0.0, 1.2, 1.2, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
 
   def test_sequence_packed_assembler_multiple_bins(self):
     payload1 = datatypes.RLTrainerPayload(
-        token_ids=np.arange(10, dtype=np.int32),
-        token_mask=np.ones(10, dtype=np.float32),
-        loss_mask=np.ones(10, dtype=np.float32),
-        advantages=np.ones(10, dtype=np.float32),
+        prompt_ids=np.arange(5, dtype=np.int32),
+        prompt_mask=np.ones(5, dtype=np.float32),
+        completion_ids=np.arange(5, dtype=np.int32),
+        completion_mask=np.ones(5, dtype=np.float32),
+        loss_mask=np.ones(5, dtype=np.float32),
+        advantages=np.ones(5, dtype=np.float32),
     )
     payload2 = datatypes.RLTrainerPayload(
-        token_ids=np.arange(8, dtype=np.int32),
-        token_mask=np.ones(8, dtype=np.float32),
-        loss_mask=np.ones(8, dtype=np.float32),
-        advantages=np.ones(8, dtype=np.float32),
+        prompt_ids=np.arange(4, dtype=np.int32),
+        prompt_mask=np.ones(4, dtype=np.float32),
+        completion_ids=np.arange(4, dtype=np.int32),
+        completion_mask=np.ones(4, dtype=np.float32),
+        loss_mask=np.ones(4, dtype=np.float32),
+        advantages=np.ones(4, dtype=np.float32),
     )
 
     assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=12)
     payloads = assembler.pack([payload1, payload2])
 
     self.assertLen(payloads, 2)
-    self.assertEqual(payloads[0].token_ids.shape, (1, 12))
-    self.assertEqual(payloads[1].token_ids.shape, (1, 12))
+    self.assertEqual(payloads[0].completion_ids.shape, (1, 12))
+    self.assertEqual(payloads[1].completion_ids.shape, (1, 12))
+
+  def test_sequence_packed_assembler_leading_prompt_padding(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([0, 0, 1, 2], dtype=np.int32),
+        prompt_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 1.0, dtype=np.float32),
+    )
+    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=8)
+    payloads = assembler.pack([payload])
+
+    self.assertLen(payloads, 1)
+    # Leading padding tokens 0, 0 must be stripped, leaving 4 tokens: [1, 2, 3, 4]
+    np.testing.assert_array_equal(
+        payloads[0].completion_ids[0, :4], [1, 2, 3, 4]
+    )
+    np.testing.assert_array_equal(payloads[0].segment_ids[0, :4], [1, 1, 1, 1])
+    np.testing.assert_array_equal(payloads[0].segment_ids[0, 4:], 0)
+    np.testing.assert_array_equal(
+        payloads[0].segment_positions[0, :4], [0, 1, 2, 3]
+    )
+
+  def test_sequence_packed_assembler_pack_size(self):
+    payload1 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 1.0, dtype=np.float32),
+    )
+    payload2 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([5, 6], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([7, 8], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 2.0, dtype=np.float32),
+    )
+
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        max_packed_len=4, pack_size=2
+    )
+    payloads = assembler.pack([payload1, payload2])
+
+    self.assertLen(payloads, 1)
+    self.assertEqual(payloads[0].completion_ids.shape, (2, 4))
+    self.assertEqual(payloads[0].prompt_ids.shape, (2, 0))
+
+  def test_sequence_packed_assembler_oversized_sequence_raises(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.arange(10, dtype=np.int32),
+        prompt_mask=np.ones(10, dtype=np.float32),
+        completion_ids=np.arange(10, dtype=np.int32),
+        completion_mask=np.ones(10, dtype=np.float32),
+        loss_mask=np.ones(10, dtype=np.float32),
+        advantages=np.ones(10, dtype=np.float32),
+    )
+    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
+    with self.assertRaises(ValueError):
+      assembler.pack([payload])
+
 
 
 class GRPOTrainExampleAssemblerTest(absltest.TestCase):

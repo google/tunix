@@ -14,9 +14,10 @@
 
 """Simple utils used by RL algorithms."""
 
+import dataclasses
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, Mapping, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence, TypeVar
 
 from absl import logging
 from flax import nnx
@@ -29,6 +30,7 @@ import jaxtyping
 import numpy as np
 from tunix.rl import common
 
+ExampleT = TypeVar("ExampleT")
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
 
@@ -37,6 +39,7 @@ _OPTIONAL_PER_TOKEN_KEYS = (
     "old_per_token_logps",
     "returns",
     "old_values",
+    "sampler_is_weights",
 )
 
 
@@ -330,65 +333,199 @@ def get_partition_spec(
     return jax.sharding.PartitionSpec()
 
 
-def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
-  """Unpads a TrainExample into a list of dictionaries with numpy arrays."""
+def unpad_train_example(example: Any) -> list[dict[str, Any]]:
+  """Unpads a TrainExample or RLTrainerPayload into a list of item dictionaries."""
   # TODO(noghabi): Skip padding and unpadding directly in the learner.
   res = []
-  batch_size = example.prompt_ids.shape[0]
 
-  p_ids = np.asarray(example.prompt_ids)
-  p_mask = np.asarray(example.prompt_mask)
-  c_ids = np.asarray(example.completion_ids)
-  c_mask = np.asarray(example.completion_mask)
-  adv = np.asarray(example.advantages)
-  adv_is_per_token = adv.ndim == 2
+  p_ids_val = getattr(example, "prompt_ids", None)
+  p_ids = (
+      np.asarray(p_ids_val)
+      if p_ids_val is not None
+      else np.zeros((1, 0), dtype=np.int32)
+  )
+  p_mask_val = getattr(example, "prompt_mask", None)
+  p_mask = (
+      np.asarray(p_mask_val)
+      if p_mask_val is not None
+      else np.ones_like(p_ids, dtype=np.float32)
+  )
 
-  has_ref = example.ref_per_token_logps is not None
+  c_ids_val = getattr(example, "completion_ids", None)
+  c_ids = (
+      np.asarray(c_ids_val)
+      if c_ids_val is not None
+      else np.zeros((1, 0), dtype=np.int32)
+  )
+  c_mask_val = getattr(example, "completion_mask", None)
+  if c_mask_val is None:
+    c_mask_val = getattr(example, "action_mask", None)
+  if c_mask_val is None:
+    c_mask_val = getattr(example, "loss_mask", None)
+  c_mask = (
+      np.asarray(c_mask_val)
+      if c_mask_val is not None
+      else np.ones_like(c_ids, dtype=np.float32)
+  )
+
+  is_1d = (
+      (p_ids.ndim == 1 and p_ids.size > 0)
+      or (c_ids.ndim == 1 and c_ids.size > 0)
+      or (p_mask.ndim == 1 and p_mask.size > 0)
+      or (c_mask.ndim == 1 and c_mask.size > 0)
+  )
+
+  if p_ids.ndim == 1:
+    p_ids = p_ids[np.newaxis, :]
+  elif p_ids.ndim == 0:
+    p_ids = p_ids.reshape(1, -1)
+
+  if p_mask.ndim == 1:
+    p_mask = p_mask[np.newaxis, :]
+  elif p_mask.ndim == 0:
+    p_mask = p_mask.reshape(1, -1)
+
+  if c_ids.ndim == 1:
+    c_ids = c_ids[np.newaxis, :]
+  elif c_ids.ndim == 0:
+    c_ids = c_ids.reshape(1, -1)
+
+  if c_mask.ndim == 1:
+    c_mask = c_mask[np.newaxis, :]
+  elif c_mask.ndim == 0:
+    c_mask = c_mask.reshape(1, -1)
+
+  batch_size = max(p_ids.shape[0], c_ids.shape[0], 1)
+
+  adv_val = getattr(example, "advantages", None)
+  if adv_val is None:
+    adv = np.zeros((batch_size, c_ids.shape[1]), dtype=np.float32)
+  else:
+    adv = np.asarray(adv_val)
+    if adv.ndim == 0:
+      adv = adv.reshape(1)
+    elif adv.ndim == 1 and is_1d and adv.size > 1:
+      adv = adv[np.newaxis, :]
+
+  ref_logps = None
+  has_ref = getattr(example, "ref_per_token_logps", None) is not None
   if has_ref:
     ref_logps = np.asarray(example.ref_per_token_logps)
-  has_old = example.old_per_token_logps is not None
+    if ref_logps.ndim == 1:
+      ref_logps = ref_logps[np.newaxis, :]
+
+  old_logps = None
+  has_old = getattr(example, "old_per_token_logps", None) is not None
   if has_old:
     old_logps = np.asarray(example.old_per_token_logps)
+    if old_logps.ndim == 1:
+      old_logps = old_logps[np.newaxis, :]
 
+  returns_np = None
   returns_val = getattr(example, "returns", None)
   has_returns = returns_val is not None
   if has_returns:
     returns_np = np.asarray(returns_val)
+    if returns_np.ndim == 1:
+      returns_np = returns_np[np.newaxis, :]
 
+  old_values_np = None
   old_values_val = getattr(example, "old_values", None)
   has_old_values = old_values_val is not None
   if has_old_values:
     old_values_np = np.asarray(old_values_val)
+    if old_values_np.ndim == 1:
+      old_values_np = old_values_np[np.newaxis, :]
 
+  sampler_is_weights_np = None
+  sampler_is_weights_val = getattr(example, "sampler_is_weights", None)
+  has_sampler_is_weights = sampler_is_weights_val is not None
+  if has_sampler_is_weights:
+    sampler_is_weights_np = np.asarray(sampler_is_weights_val)
+    if sampler_is_weights_np.ndim == 1:
+      sampler_is_weights_np = sampler_is_weights_np[np.newaxis, :]
+
+  policy_version_np = None
   policy_version_val = getattr(example, "policy_version", None)
   has_policy_version = policy_version_val is not None
   if has_policy_version:
     policy_version_np = np.asarray(policy_version_val)
+    if policy_version_np.ndim == 0:
+      policy_version_np = policy_version_np.reshape(1)
+
 
   for i in range(batch_size):
-    p_len = int(np.sum(p_mask[i]))
-    c_len = int(np.sum(c_mask[i]))
+    p_len = int(np.sum(p_mask[i])) if i < p_mask.shape[0] else 0
+    if is_1d or getattr(example, "is_unpadded", False):
+      c_len = c_ids[i].shape[0] if i < c_ids.shape[0] else 0
+    else:
+      c_len = int(np.sum(c_mask[i])) if i < c_mask.shape[0] else 0
+
+    p_ids_i = p_ids[i] if i < p_ids.shape[0] else np.zeros(0, dtype=np.int32)
+    p_mask_i = p_mask[i] if i < p_mask.shape[0] else np.zeros(0, dtype=np.float32)
+    c_ids_i = c_ids[i] if i < c_ids.shape[0] else np.zeros(0, dtype=np.int32)
+    c_mask_i = c_mask[i] if i < c_mask.shape[0] else np.zeros(0, dtype=np.float32)
+
+    prompt_seq_len = p_ids_i.shape[0]
+    completion_seq_len = c_ids_i.shape[0]
+
+    if adv.ndim == 2:
+      adv_is_per_token = True
+      adv_row = adv[i] if i < adv.shape[0] else np.zeros(0, dtype=np.float32)
+      if adv_row.shape[0] == prompt_seq_len + completion_seq_len:
+        adv_i = adv_row[prompt_seq_len : prompt_seq_len + c_len]
+      elif adv_row.shape[0] >= c_len:
+        adv_i = adv_row[:c_len]
+      else:
+        adv_i = np.pad(
+            adv_row,
+            (0, max(0, c_len - adv_row.shape[0])),
+            constant_values=0.0,
+        )
+    elif adv.ndim == 1 and adv.shape[0] == batch_size and not is_1d:
+      adv_is_per_token = False
+      adv_i = adv[i]
+    else:
+      adv_is_per_token = False
+      adv_i = float(adv.reshape(-1)[0]) if adv.size > 0 else 0.0
+
+    def _slice_feat(arr_2d: np.ndarray | None) -> np.ndarray | None:
+      if arr_2d is None:
+        return None
+      row = arr_2d[i] if i < arr_2d.shape[0] else np.zeros(0, dtype=np.float32)
+      if row.shape[0] == prompt_seq_len + completion_seq_len:
+        return row[prompt_seq_len : prompt_seq_len + c_len]
+      elif row.shape[0] >= c_len:
+        return row[:c_len]
+      else:
+        return np.pad(
+            row, (0, max(0, c_len - row.shape[0])), constant_values=0.0
+        )
+
+    policy_version_slice = (
+        policy_version_np[i : i + 1] if policy_version_np is not None else None
+    )
 
     # `policy_version` is per-row: row `i` of the input maps to scalar
     # `policy_version_np[i]`. We slice with `i:i+1` to keep a 1-D shape so that
     # `pack_sequences` can stack scalars from multiple items unambiguously.
     item = {
-        "prompt_ids": p_ids[i, -p_len:] if p_len > 0 else p_ids[i, :0],
-        "prompt_mask": p_mask[i, -p_len:] if p_len > 0 else p_mask[i, :0],
-        "completion_ids": c_ids[i, :c_len],
-        "completion_mask": c_mask[i, :c_len],
-        "advantages": adv[i, :c_len] if adv_is_per_token else adv[i],
+        "prompt_ids": p_ids_i[-p_len:] if p_len > 0 else p_ids_i[:0],
+        "prompt_mask": p_mask_i[-p_len:] if p_len > 0 else p_mask_i[:0],
+        "completion_ids": c_ids_i[:c_len],
+        "completion_mask": c_mask_i[:c_len],
+        "advantages": adv_i,
         "adv_is_per_token": adv_is_per_token,
-        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,  # pyrefly: ignore[unbound-name]
-        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
-        "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
-        "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
-        "policy_version": (
-            policy_version_np[i : i + 1] if has_policy_version else None  # pyrefly: ignore[unbound-name]
-        ),
+        "ref_per_token_logps": _slice_feat(ref_logps),
+        "old_per_token_logps": _slice_feat(old_logps),
+        "returns": _slice_feat(returns_np),
+        "old_values": _slice_feat(old_values_np),
+        "sampler_is_weights": _slice_feat(sampler_is_weights_np),
+        "policy_version": policy_version_slice,
     }
     res.append(item)
   return res
+
 
 
 def compute_pack_size(mesh: jax.sharding.Mesh) -> int:
@@ -474,13 +611,13 @@ def _fill_one_chunk(
 
 
 def pack_sequences(
-    item_iterator: Iterator[Sequence[common.TrainExample]],
+    item_iterator: Iterator[Sequence[ExampleT]],
     max_token_budget: int,
     sequences_per_update: int,
     pad_id: int = 0,
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
-) -> Iterator[list[common.TrainExample]]:
+) -> Iterator[list[ExampleT]]:
   """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
   A chunk is emitted as soon as buffered sequences fill it (so training can
@@ -534,6 +671,8 @@ def pack_sequences(
       tracked_per_token_keys.append("returns")
     if first_item.get("old_values") is not None:
       tracked_per_token_keys.append("old_values")
+    if first_item.get("sampler_is_weights") is not None:
+      tracked_per_token_keys.append("sampler_is_weights")
 
     if not pack_items:
       p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
@@ -559,6 +698,15 @@ def pack_sequences(
         kwargs[k] = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
       if has_policy_version:
         kwargs["policy_version"] = first_item["policy_version"]
+
+      fields = getattr(example_cls, "__dataclass_fields__", None)
+      if fields is not None:
+        if "loss_mask" in fields and "loss_mask" not in kwargs:
+          kwargs["loss_mask"] = c_mask_arr
+        if "action_mask" in fields and "action_mask" not in kwargs:
+          kwargs["action_mask"] = c_mask_arr
+        valid_kwargs = {k: v for k, v in kwargs.items() if k in fields}
+        return example_cls(**valid_kwargs)
       return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
     # `len(pack_items)` is the real segment count of this row. It cannot exceed
@@ -638,16 +786,26 @@ def pack_sequences(
         completion_ids=c_ids_arr,
         completion_mask=c_mask_arr,
         advantages=adv_arr,
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
+        ref_per_token_logps=per_token_features.get("ref_per_token_logps"),
+        old_per_token_logps=per_token_features.get("old_per_token_logps"),
         segment_ids=seg_arr,
         segment_positions=pos_arr,
     )
     for k in tracked_per_token_keys:
-      kwargs[k] = per_token_features[k]
+      if k not in kwargs:
+        kwargs[k] = per_token_features[k]
 
     if has_policy_version:
       kwargs["policy_version"] = pack_items[0]["policy_version"]
+
+    fields = getattr(example_cls, "__dataclass_fields__", None)
+    if fields is not None:
+      if "loss_mask" in fields and "loss_mask" not in kwargs:
+        kwargs["loss_mask"] = c_mask_arr
+      if "action_mask" in fields and "action_mask" not in kwargs:
+        kwargs["action_mask"] = c_mask_arr
+      valid_kwargs = {k: v for k, v in kwargs.items() if k in fields}
+      return example_cls(**valid_kwargs)
 
     return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
@@ -659,6 +817,25 @@ def pack_sequences(
         _flush_pack(bin_items, example_cls, first_item_for_dummy)
         for bin_items in chunk
     ]
+    if dataclasses.is_dataclass(chunk_examples[0]) and not hasattr(
+        type(chunk_examples[0]), "_flax_dataclass"
+    ):
+      merged_fields = {}
+      for f in dataclasses.fields(chunk_examples[0]):
+        vals = [getattr(ex, f.name) for ex in chunk_examples]
+        if all(v is None for v in vals):
+          merged_fields[f.name] = None
+        elif any(v is None for v in vals):
+          merged_fields[f.name] = None
+        elif isinstance(vals[0], dict):
+          merged_fields[f.name] = vals[0]
+        else:
+          try:
+            merged_fields[f.name] = jnp.concatenate(vals, axis=0)
+          except Exception:
+            merged_fields[f.name] = vals[0]
+      return example_cls(**merged_fields)
+
     return jax.tree.map(
         lambda first_x, *rest_xs: None
         if first_x is None
@@ -673,7 +850,18 @@ def pack_sequences(
     kwargs = dict(is_update_step=jnp.array([is_update], dtype=jnp.bool_))
     if hasattr(merged, "num_segments"):
       kwargs["num_segments"] = effective_max_segments + 1  # pyrefly: ignore[bad-assignment]
-    return [merged.replace(**kwargs)]
+    if hasattr(merged, "replace"):
+      return [merged.replace(**kwargs)]
+    elif dataclasses.is_dataclass(merged):
+      dc_kwargs = {}
+      if hasattr(merged, "is_update_step"):
+        dc_kwargs["is_update_step"] = kwargs["is_update_step"]
+      if hasattr(merged, "num_segments"):
+        dc_kwargs["num_segments"] = kwargs["num_segments"]
+      if dc_kwargs:
+        return [dataclasses.replace(merged, **dc_kwargs)]
+      return [merged]
+    return [merged]
 
   # See the docstring: buffer sequences, emit a chunk once it holds a chunk's
   # worth of tokens, and mark the mini-batch's last chunk as the update.

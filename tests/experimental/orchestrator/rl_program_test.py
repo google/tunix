@@ -199,11 +199,13 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.requires_reference_kl = False
 
     mock_payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        advantages=np.full(4, 1.0, dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.full(2, 1.0, dtype=np.float32),
+        action_mask=np.array([1, 1], dtype=np.float32),
     )
     self.mock_algo.create_trainer_payloads.return_value = [
         mock_payload,
@@ -1185,6 +1187,8 @@ class RLProgramTest(absltest.TestCase):
   def test_token_mask_and_loss_mask_fallback(self):
     async def _run():
       payload_0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.arange(4, dtype=np.int32),
+          completion_ids=np.arange(4, 10, dtype=np.int32),
           token_ids=np.arange(10, dtype=np.int32),
           token_mask=np.ones(10, dtype=np.float32),
           loss_mask=np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1], dtype=np.float32),
@@ -1192,6 +1196,8 @@ class RLProgramTest(absltest.TestCase):
           action_mask=np.ones(10, dtype=np.float32),
       )
       payload_1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.arange(4, dtype=np.int32),
+          completion_ids=np.arange(4, 10, dtype=np.int32),
           token_ids=np.arange(10, dtype=np.int32),
           token_mask=np.ones(10, dtype=np.float32),
           loss_mask=np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1], dtype=np.float32),

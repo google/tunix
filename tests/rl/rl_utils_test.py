@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import os
 from unittest import mock
 from absl.testing import absltest
@@ -663,6 +664,70 @@ class UtilsTest(absltest.TestCase):
     self.assertLen(packed, 2)
     self.assertFalse(bool(np.asarray(packed[0][0].is_update_step)[0]))
     self.assertTrue(bool(np.asarray(packed[1][0].is_update_step)[0]))
+
+  def test_pack_sequences_custom_dataclass_payload(self):
+    @dataclasses.dataclass(kw_only=True)
+    class CustomPayload:
+      prompt_ids: np.ndarray | None = None
+      prompt_mask: np.ndarray | None = None
+      completion_ids: np.ndarray | None = None
+      completion_mask: np.ndarray | None = None
+      loss_mask: np.ndarray | None = None
+      advantages: np.ndarray | None = None
+      segment_ids: np.ndarray | None = None
+      segment_positions: np.ndarray | None = None
+      sampler_is_weights: np.ndarray | None = None
+
+    item1 = CustomPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4, 5], dtype=np.int32),
+        completion_mask=np.array([1, 1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1, 1], dtype=np.float32),
+        advantages=np.array([2.5], dtype=np.float32),
+        sampler_is_weights=np.array([0.9, 0.9, 0.9], dtype=np.float32),
+    )
+    item2 = CustomPayload(
+        prompt_ids=np.array([10], dtype=np.int32),
+        prompt_mask=np.array([1], dtype=np.float32),
+        completion_ids=np.array([20, 30], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        loss_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+        sampler_is_weights=np.array([0.8, 0.8], dtype=np.float32),
+    )
+
+    packed = list(
+        utils.pack_sequences(
+            iter([[item1, item2]]),
+            max_token_budget=10,
+            pack_size=1,
+            sequences_per_update=2,
+        )
+    )
+    self.assertLen(packed, 1)
+    [pack] = packed[0]
+    self.assertIsInstance(pack, CustomPayload)
+    self.assertEqual(pack.completion_ids.shape, (1, 10))
+    np.testing.assert_array_equal(
+        pack.completion_ids,
+        np.array([[1, 2, 3, 4, 5, 10, 20, 30, 0, 0]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        pack.segment_ids,
+        np.array([[1, 1, 1, 1, 1, 2, 2, 2, 0, 0]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        pack.loss_mask,
+        np.array([[0, 0, 1, 1, 1, 0, 1, 1, 0, 0]], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        pack.sampler_is_weights,
+        np.array(
+            [[0.0, 0.0, 0.9, 0.9, 0.9, 0.0, 0.8, 0.8, 0.0, 0.0]],
+            dtype=np.float32,
+        ),
+    )
 
   def _mock_example(self, prompt_len: int, completion_len: int):
     return common.TrainExample(
