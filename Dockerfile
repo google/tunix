@@ -38,6 +38,9 @@ RUN pip install kubernetes gym swebench==3.0.2 && \
     sed -i "s/create_repo, upload_folder, HfFolder/create_repo, upload_folder/" /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
     sed -i "s/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/" /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py
 
+# Patch tpu_inference to ensure random keys are scoped to CPU device on Pathways
+RUN python3 /app/scripts/patch_tpu_runner.py
+
 # Copy the project files to the image (cache buster ensures fresh code is always copied)
 ARG CACHEBUST=1
 COPY . .
