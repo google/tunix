@@ -22,7 +22,7 @@ if os.path.exists(runner_path):
 
     # Target 2: load_model rng_key creation
     t2 = "rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()\n        self.rng_params_for_sampling = device_array(self.mesh,\n                                                    rng_key,\n                                                    sharding=NamedSharding(\n                                                        self.mesh,\n                                                        PartitionSpec()))"
-    r2 = "s = int(self.model_config.seed or 0)\n        cpu = jax.devices('cpu')[0]\n        k_data = np.array([np.uint32(s >> 32), np.uint32(s & 0xFFFFFFFF)], dtype=np.uint32)\n        base_arr = jax.device_put(k_data, cpu)\n        rng_key = nnx.Rngs(rc.wrap_key_data(base_arr, impl=rc.default_prng_impl())).params()\n        with jax.set_mesh(self.mesh):\n            self.rng_params_for_sampling = jax.jit(lambda: jax.random.key(s), out_shardings=NamedSharding(self.mesh, PartitionSpec()))()"
+    r2 = "s = int(self.model_config.seed or 0)\n        with jax.set_mesh(self.mesh):\n            self.rng_params_for_sampling = jax.jit(lambda: jax.random.key(s), out_shardings=NamedSharding(self.mesh, PartitionSpec()))()"
     # Target 3: zero_array
     t3 = 'self.zero_array = jnp.array(0, dtype=jnp.int32)'
     r3 = 'self.zero_array = device_array(self.mesh, 0, sharding=NamedSharding(self.mesh, PartitionSpec()))'
