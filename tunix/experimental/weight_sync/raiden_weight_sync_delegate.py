@@ -39,9 +39,9 @@ class RaidenWeightSyncDelegate:
   def __init__(self, *args, worker_index: int = 0, **kwargs):
     super().__init__(*args, **kwargs)
     self._synchronizers: List[Any] = [
-        raiden_synchronizer.RaidenSynchronizer(
-            "rollout", worker_index=worker_index, auto_h2d=True
-        )
+      raiden_synchronizer.RaidenSynchronizer(
+        "rollout", worker_index=worker_index, auto_h2d=True
+      )
     ]
     self._version = 0
 

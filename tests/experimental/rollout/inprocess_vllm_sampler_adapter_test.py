@@ -217,6 +217,27 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         sync_request=sync_req
     )
 
+  def test_raiden_bind_is_idempotent_when_already_bound(self):
+    mock_delegate = mock.MagicMock(
+        spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
+    )
+    mock_delegate.is_bounded.return_value = True
+    mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
+    self.mock_vllm_sampler.transformer_state = {"param": "tensor"}
+
+    raiden_config = mock.MagicMock()
+    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+
+    raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_raiden_slice",
+        tokenizer=self.mock_tokenizer,
+        config=raiden_config,
+        raiden_sync_delegate=mock_delegate,
+    )
+
+    self.assertTrue(asyncio.run(raiden_adapter.bind_weight_sync()))
+    mock_delegate.bind_weight_sync.assert_not_awaited()
+
   def test_raiden_bind_without_transformer_state_raises(self):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate

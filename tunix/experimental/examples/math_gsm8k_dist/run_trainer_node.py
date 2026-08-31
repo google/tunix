@@ -114,11 +114,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Orbax params-only checkpoint for the MaxText trainer, e.g. gs://...",
   )
   parser.add_argument(
-        "--maxtext_output_directory",
-        type=str,
-        default=os.getenv("MAXTEXT_OUTPUT_DIR", os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext")),
-        help="Base directory for MaxText trainer outputs.",
-    )
+      "--maxtext_output_directory",
+      type=str,
+      default=os.getenv(
+          "MAXTEXT_OUTPUT_DIR",
+          os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext"),
+      ),
+      help="Base directory for MaxText trainer outputs.",
+  )
   parser.add_argument(
       "--maxtext_warmup_steps_fraction",
       type=float,
@@ -127,6 +130,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Warmup fraction for MaxText LR schedule (0.0 enables updates from"
           " step 0)."
       ),
+  )
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging for the trainer worker.",
   )
   return parser.parse_args(argv)
 
@@ -382,7 +390,6 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
-
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
