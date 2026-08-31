@@ -179,7 +179,7 @@ parser_cli.add_argument(
     "--vllm_utilization",
     type=float,
     default=float(
-        os.getenv("VLLM_UTILIZATION", os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
+        os.getenv("VLLM_UTILIZATION", os.getenv("VLLM_HBM_UTILIZATION", "0.85"))
     ),
     help="HBM utilization ratio for vLLM",
 )
