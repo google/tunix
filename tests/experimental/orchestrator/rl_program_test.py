@@ -188,6 +188,7 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.sleep(0.01)
       return []
 
+    self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
@@ -306,6 +307,10 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.step, 1)
       self.assertEqual(begin_steps, [0])
       self.assertEqual(end_steps, [(0, "step_done")])
+      self.mock_engine.prepare_rollout_policy.assert_called_once_with(
+          role=datatypes.Role.ACTOR,
+          sync_weights=True,
+      )
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
           [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
           group_size=2,
@@ -342,6 +347,7 @@ class RLProgramTest(absltest.TestCase):
 
       self.assertEqual(program.step, 1)
       self.mock_engine.save_checkpoint.assert_called_once()
+      self.mock_engine.prepare_rollout_policy.assert_not_called()
       self.mock_engine.sync_weights.assert_not_called()
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.policy_version, 0)

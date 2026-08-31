@@ -345,10 +345,7 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
         )
 
       if self.raiden_sync_delegate.is_bounded():
-        raise RuntimeError(
-            f"InprocessVllmSamplerAdapter [{self.server_id}] weight sync"
-            " delegate is already bounded before bind_weight_sync."
-        )
+        return True
 
       state = self.vllm_sampler.transformer_state
       return await self.raiden_sync_delegate.bind_weight_sync(

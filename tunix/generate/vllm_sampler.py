@@ -578,6 +578,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           )
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
+    logging.debug(
+      "vLLM.generate inputs=%r prompt_token_ids=%r",
+      input_strings,
+      [list(ids) for ids in prompt_ids],
+    )
     prompt_objects = cast(
         List[TokensPrompt],
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],

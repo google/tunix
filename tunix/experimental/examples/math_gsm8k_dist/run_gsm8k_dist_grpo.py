@@ -435,13 +435,12 @@ def main(argv: list[str], context: Any = None) -> None:
         "Require discovery API, but process context doesn't support."
     )
 
+  args = _parse_args(argv)
   logging.basicConfig(
-      level=logging.INFO,
+      level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [Orchestrator] %(message)s",
       force=True,
   )
-
-  args = _parse_args(argv)
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:

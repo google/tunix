@@ -389,9 +389,10 @@ class GradientAccumulator(nnx.Module):
 def _default_weight_sync_worker() -> Any:
   from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
 
+  is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
   return raiden_synchronizer.RaidenSynchronizer(
       "trainer",
-      host_stage="proxy" in os.environ.get("JAX_PLATFORMS", ""),
+      use_ffi=is_proxy,
   )
 
 
@@ -429,7 +430,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       metrics_logger: MetricsLogger | None = None,
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
-      weight_sync_worker_factory: Callable[[], Any] | None = None,
       target_state: Any = None,
       sampler_type: str = "inprocess_vllm",
   ):
@@ -518,6 +518,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # a buffer. We should delete this once the metrics logging implementations
     # are updated according to the new design.
     self._written_metrics: exp_metrics.MetricsBuffer | None = None
+    self._pending_train_metrics: exp_metrics.MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -525,13 +526,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._target_state = target_state
     self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
-    self._weight_sync_worker_factory = weight_sync_worker_factory
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
 
   def with_data_hooks(self, data_hooks: hooks.DataHooks):
     self.data_hooks = data_hooks
+
+  def set_target_state(self, target_state: Any) -> None:
+    self._target_state = target_state
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.
@@ -949,6 +952,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if self._prev_buffered_train_metrics is None:
       # skip the first step so we can overlap I/O with next step.
       self._prev_buffered_train_metrics = self._buffered_train_metrics
+      if self._buffered_train_metrics is not None:
+        self._pending_train_metrics = self._export_metrics_buffer(
+            self._buffered_train_metrics,
+            step=self._train_steps,
+            mode=sft_metrics_logger.Mode.TRAIN,
+        )
       self._buffered_train_metrics = None
       return
     # increment the step by one for logging purpose, because train_step is not
@@ -961,7 +970,46 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         loss=self._prev_buffered_train_metrics.loss,
     )
     self._prev_buffered_train_metrics = self._buffered_train_metrics
+    if self._buffered_train_metrics is not None:
+      self._pending_train_metrics = self._export_metrics_buffer(
+          self._buffered_train_metrics,
+          step=self._train_steps,
+          mode=sft_metrics_logger.Mode.TRAIN,
+      )
     self._buffered_train_metrics = None
+
+  def _export_metrics_buffer(
+      self,
+      metrics_buffer: MetricsBuffer,
+      *,
+      step: int,
+      mode: sft_metrics_logger.Mode,
+  ) -> exp_metrics.MetricsBuffer:
+    def _to_np_array(v):
+      if isinstance(v, jax.Array):
+        return np.asarray(v, dtype=np.float32)
+      elif isinstance(v, list):
+        return [_to_np_array(x) for x in v]
+      return v
+
+    loss = metrics_buffer.loss
+    additional_metrics = {
+        k: op(_to_np_array(v))
+        for k, (v, op) in metrics_buffer.additional_metrics.items()
+    }
+    weighted_metrics = {}
+    scalar_metrics = {"loss": loss}
+    for k, val in additional_metrics.items():
+      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+        weighted_metrics[k] = val
+      else:
+        scalar_metrics[k] = val
+    return exp_metrics.MetricsBuffer(
+        id=step,
+        weighted_metrics=weighted_metrics,
+        scalar_metrics=scalar_metrics,
+        mode=mode.value,
+    )
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
     def _to_np_array(v):
@@ -981,18 +1029,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         step=metrics_buffer.step,
         additional_metrics=additional_metrics,
     )
-    weighted_metrics = {}
-    scalar_metrics = {"loss": loss}
-    for k, val in additional_metrics.items():
-      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
-        weighted_metrics[k] = val
-      else:
-        scalar_metrics[k] = val
-    self._written_metrics = exp_metrics.MetricsBuffer(
-        id=metrics_buffer.step,
-        weighted_metrics=weighted_metrics,
-        scalar_metrics=scalar_metrics,
-        mode=self._mode.value,
+    self._written_metrics = self._export_metrics_buffer(
+        metrics_buffer,
+        step=metrics_buffer.step,
+        mode=self._mode,
     )
 
   @contextlib.contextmanager
@@ -1177,10 +1217,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
     del sync_request, kwargs
-    if self._weight_sync_worker is None:
-      factory = self._weight_sync_worker_factory or _default_weight_sync_worker
-      self._weight_sync_worker = factory()
     worker = self._weight_sync_worker
+    if worker is None:
+      worker = _default_weight_sync_worker()
+      self._weight_sync_worker = worker
 
     backend = (
         "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
@@ -1234,6 +1274,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:
+    if self._pending_train_metrics is not None:
+      ret = self._pending_train_metrics
+      self._pending_train_metrics = None
+      return ret
     if self._written_metrics is None:
       return exp_metrics.MetricsBuffer(id=-1)
     ret = self._written_metrics

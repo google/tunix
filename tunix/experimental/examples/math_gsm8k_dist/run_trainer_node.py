@@ -128,6 +128,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " step 0)."
       ),
   )
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging for the trainer worker.",
+  )
   return parser.parse_args(argv)
 
 
@@ -270,6 +275,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 
+  def set_target_state(self, target_state: Any) -> None:
+    with self._mesh:
+      self._trainer.set_target_state(target_state)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -377,13 +386,12 @@ def main(argv: list[str], context: Any = None) -> None:
         "Require discovery API, but process context doesn't support."
     )
 
+  args = _parse_args(argv)
   logging.basicConfig(
-      level=logging.INFO,
+      level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
-
-  args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
   if context:

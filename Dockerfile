@@ -21,11 +21,20 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip
 
 RUN pip install uv
+# Needed to generate gRPC Python stubs that are not checked into the tree.
+RUN pip install grpcio-tools
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
 RUN pip install wandb
+
+# Optional local staging area for prebuilt tpu-sync wheels.
+COPY .docker/tpu_sync/ /tmp/tpu_sync/
+RUN if compgen -G "/tmp/tpu_sync/*.whl" > /dev/null; then \
+            pip install /tmp/tpu_sync/*.whl; \
+            pip install 'numpy<=2.3.5'; \
+        fi
 
 # Set the working directory
 WORKDIR /app
@@ -33,10 +42,20 @@ WORKDIR /app
 # Copy the project files to the image
 COPY . .
 
+# Generate required gRPC stubs for the distributed runtime and RL examples.
+RUN python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
+    tunix/experimental/distributed/runtime/discovery/discovery_service.proto && \
+    python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
+    tunix/experimental/distributed/examples/rl/service.proto
+
 # Install the project in editable mode
 RUN pip install -e .
 
 RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+
+# Override transitive pins so the image uses the TPU JAX stack and Flax build
+# that match the trainer-side FFI path.
+RUN pip install --upgrade 'jax[tpu]==0.11.1' 'flax==0.12.9'
 
 # Build argument to conditionally install MaxText dependencies
 ARG INSTALL_MAXTEXT=false
