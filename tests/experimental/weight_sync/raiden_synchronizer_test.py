@@ -175,6 +175,14 @@ class RaidenSynchronizerTest(absltest.TestCase):
     )
     self.assertEqual(names, ["good"])
 
+  def test_census_keeps_proxy_platforms_for_ffi(self):
+    names, _ = raiden_synchronizer._filter_bindable(
+        ["good", "proxy"],
+        [jnp.ones((2,)), _ProxyArray()],
+        allow_proxy=True,
+    )
+    self.assertEqual(names, ["good", "proxy"])
+
   def test_census_keeps_bfloat16_weights(self):
     names, _ = raiden_synchronizer._filter_bindable(
         ["w"], [jnp.ones((2,), jnp.bfloat16)]
@@ -284,15 +292,57 @@ class RaidenSynchronizerTest(absltest.TestCase):
     base = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     self.assertEqual(base.work_unit_metadata().unit.job_replica_id, "")
 
-  def test_host_stage_pulls_state_to_host(self):
-    sentinel = {"w": jnp.ones((2, 2))}
+  def test_defaults_to_ffi_under_proxy(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    self.assertTrue(sync.use_ffi)
+
+  def test_defaults_to_non_ffi_without_proxy(self):
+    with mock.patch.dict("os.environ", {}, clear=True):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    self.assertFalse(sync.use_ffi)
+
+  def test_ffi_source_routes_through_d2h_init(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", use_ffi=True)
     with mock.patch.object(
-        raiden_synchronizer, "to_host_cpu_state", return_value=sentinel
-    ) as pull:
-      raiden_synchronizer.RaidenSynchronizer(
-          "trainer", self._state(), host_stage=True
-      )
-    pull.assert_called_once()
+        sync, "_init_ffi_transport", autospec=True
+    ) as init_ffi:
+      sync.bind(self._state())
+      init_ffi.assert_not_called()
+      sync.d2h()
+    init_ffi.assert_called_once_with(execute_d2h=True)
+
+  def test_ffi_destination_init_runs_at_bind(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", use_ffi=True, auto_h2d=True
+    )
+    with mock.patch.object(
+        sync, "_init_ffi_transport", autospec=True
+    ) as init_ffi:
+      sync.bind(self._state())
+    init_ffi.assert_called_once_with(execute_d2h=False)
+
+  def test_ffi_destination_h2d_routes_through_multi_h2d(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", use_ffi=True, auto_h2d=True
+    )
+    sync.names, sync.arrays = raiden_synchronizer.flatten_weights(self._state())
+    with mock.patch.object(sync, "_ffi_h2d", autospec=True) as ffi_h2d:
+      sync.h2d()
+    ffi_h2d.assert_called_once_with()
+
+  def test_ffi_compute_on_compat_accepts_out_memory_spaces(self):
+    compute_on_mod = raiden_synchronizer.jax._src.compute_on
+    original = compute_on_mod.compute_on
+    self.addCleanup(setattr, compute_on_mod, "compute_on", original)
+
+    raiden_synchronizer._ensure_ffi_compute_on_compat()
+
+    decorator = compute_on_mod.compute_on(
+        compute_type="device_host",
+        out_memory_spaces=jax.memory.Space.Device,
+    )
+    self.assertTrue(callable(decorator))
 
 
 if __name__ == "__main__":

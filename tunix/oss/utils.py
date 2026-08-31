@@ -74,8 +74,14 @@ def kaggle_pipeline(model_id: str, model_download_path: str):
 
 def hf_pipeline(model_id: str, model_download_path: str):
   """Download model from HuggingFace."""
-  if 'HF_TOKEN' not in os.environ:
-    hf.login()
+  token = os.environ.get('HF_TOKEN')
+  if token:
+    hf.login(token=token)
+  else:
+    logging.info(
+        'HF_TOKEN is not set; downloading %s anonymously from Hugging Face.',
+        model_id,
+    )
   all_files = hf.list_repo_files(model_id)
   filtered_files = [f for f in all_files if not f.startswith('original/')]
   for filename in filtered_files:
@@ -83,6 +89,7 @@ def hf_pipeline(model_id: str, model_download_path: str):
         repo_id=model_id,
         filename=filename,
         local_dir=model_download_path,
+        token=token,
     )
   logging.info(
       'Downloaded %s to: %s',
