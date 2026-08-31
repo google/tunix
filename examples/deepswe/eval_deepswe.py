@@ -583,6 +583,20 @@ elif ROLLOUT_ENGINE == "vllm":
       model=model,
       backend="vllm_jax",
   )
+  engine_kwargs = {
+      "model": tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH,
+      "max_model_len": MAX_MODEL_LEN,
+      "max_num_seqs": VLLM_MAX_NUM_SEQS,
+      "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      "enable_prefix_caching": True,
+      "kv_cache_metrics": True,
+      "disable_log_stats": False,
+      "tokenizer": tokenizer_path,
+  }
+  if MODEL_SOURCE == "maxtext":
+    engine_kwargs["hf_overrides"] = {
+        "architectures": ["MaxTextForCausalLM"]
+    }
   vllm_config = VllmConfig(
       mesh=mesh,
       hbm_utilization=VLLM_HBM_UTILIZATION,
@@ -594,15 +608,7 @@ elif ROLLOUT_ENGINE == "vllm":
       mapping_config=mapping_config,
       additional_config=additional_config,
       reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE,
-      engine_kwargs={
-          "model": MODEL_PATH,
-          "max_model_len": MAX_MODEL_LEN,
-          "max_num_seqs": VLLM_MAX_NUM_SEQS,
-          "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-          "enable_prefix_caching": True,
-          "kv_cache_metrics": True,
-          "disable_log_stats": False,
-      },
+      engine_kwargs=engine_kwargs,
   )
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
   sampler.load_checkpoint(nnx.state(model))
