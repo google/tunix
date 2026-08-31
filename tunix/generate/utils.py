@@ -1854,47 +1854,56 @@ def transfer_state_directly(
   gc.collect()
 
   # Reshard and Update
+  src_flat = traverse_util.flatten_dict(final_source)
+  spec_flat = traverse_util.flatten_dict(final_spec)
+
+  if delete_dst_buffers:
+    _delete_target_buffers(spec_flat, src_flat)
+
+  # Check if all source leaves already match target sharding and shape
+  needs_reshard = False
+  for k, src_val in src_flat.items():
+    tgt_val = spec_flat[k]
+    src_arr = src_val.value if hasattr(src_val, 'value') else src_val
+    tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+    if not (hasattr(src_arr, 'sharding') and hasattr(tgt_arr, 'sharding') and
+            src_arr.sharding == tgt_arr.sharding and src_arr.shape == tgt_arr.shape):
+      needs_reshard = True
+      break
+
+  if not needs_reshard:
+    logging.info("Direct state transfer: all %d parameters match target sharding and shape. Applying directly without reshard RPC.", len(src_flat))
+    nnx.update(dst_state, final_source)
+    del final_source, final_spec, src_flat, spec_flat
+    import gc
+    gc.collect()
+    jax.clear_caches()
+    return
+
   if reshard_chunk_size is not None:
-    # Chunked path: split the flat weight dict into groups of reshard_chunk_size
-    # entries and reshard each group independently. This keeps peak contiguous
-    # HBM allocation proportional to chunk_size, avoiding XLA fragmentation
-    # errors on large models without needing to clear the compilation cache.
-    src_flat = traverse_util.flatten_dict(final_source)
-    spec_flat = traverse_util.flatten_dict(final_spec)
     del final_source, final_spec
     _reshard_in_chunks(
         src_flat,
         spec_flat,
         reshard_fn,
         reshard_chunk_size,
-        delete_dst_buffers,
+        delete_spec_buffers=False,
         dst_state=dst_state,
     )
     return
   else:
-    src_flat = traverse_util.flatten_dict(final_source)
-    spec_flat = traverse_util.flatten_dict(final_spec)
-
-    # Snapshot dst shardings before any deletion so reshard_fn never has to
-    # touch a deleted jax.Array. reshard_pytree's _get_dst_sharding accepts
-    # NamedSharding leaves directly, so this is a drop-in substitute for
-    # passing the array objects.
     dst_shardings_flat = {
         k: _snapshot_dst_sharding(
             tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
         )
         for k, tgt_val in spec_flat.items()
     }
-
-    if delete_dst_buffers:
-      _delete_target_buffers(spec_flat, src_flat)
-
     del final_spec
     resharded_weights = reshard_fn(
         source=final_source,
         target=traverse_util.unflatten_dict(dst_shardings_flat),
     )
-  nnx.update(dst_state, resharded_weights)
+    nnx.update(dst_state, resharded_weights)
 
 
 def resolve_parallelism_sizes(
