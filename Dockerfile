@@ -25,6 +25,7 @@ RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
 RUN pip install wandb
+RUN pip install aqtp==0.9.0 tokamax==0.0.12 git+https://github.com/AI-Hypercomputer/maxtext.git@bc72cc7a9455a5dfa5143fc71a67a31c186954e7
 
 # Set the working directory
 WORKDIR /app
