@@ -39,7 +39,7 @@ RUN pip install -e .
 RUN bash /app/scripts/install_tunix_vllm_requirement.sh
 
 # Build argument to conditionally install DeepSWE evaluation dependencies
-ARG INSTALL_DEEPSWE_DEPS=false
+ARG INSTALL_DEEPSWE_DEPS=true
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
