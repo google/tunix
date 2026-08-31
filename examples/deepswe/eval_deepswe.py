@@ -651,7 +651,7 @@ elif ROLLOUT_ENGINE == "vllm":
       data_parallel_size=mesh.shape["fsdp"],
       mapping_config=mapping_config,
       additional_config=additional_config,
-      reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE,
+      reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE if VLLM_RESHARD_CHUNK_SIZE > 0 else None,
       engine_kwargs=engine_kwargs,
   )
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
