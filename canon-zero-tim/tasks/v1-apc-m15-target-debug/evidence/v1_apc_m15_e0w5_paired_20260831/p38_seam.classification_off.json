@@ -1,0 +1,17 @@
+{
+  "alignment": {
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "n_action": 104946
+  },
+  "arm": "off",
+  "claim_ceiling": "The observer reached both serving arms and the endpoint stayed exact; this arm contains no first-red interval.",
+  "classification": "M15_OBSERVER_CONTROL_EXACT",
+  "gate": "OBSERVER_REACHED_EXACT_ENDPOINT",
+  "jobset_name": "canon-v1-apc-m15-off-e0w5-2f61f8fc",
+  "rounds_evaluated": [
+    0,
+    1
+  ],
+  "status": "PASS"
+}

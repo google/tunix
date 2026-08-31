@@ -1,0 +1,22 @@
+{
+  "alignment": {
+    "a_b_differing_bytes": 615,
+    "a_b_differing_elements": 262,
+    "b_c_differing_bytes": 0,
+    "max_abs_delta": 0.9388885498046875,
+    "n_action": 115749
+  },
+  "arm": "on",
+  "claim_ceiling": "Treatment arm reproduced 615 differing bytes on S_decode vs S_prefill while B-C remained 0. Exact token-level localization required.",
+  "classification": "M15_TREATMENT_RED_REPRODUCED",
+  "gate": "TREATMENT_RED_LOCALIZATION_REQUIRED",
+  "jobset_name": "canon-v1-apc-m15-on-e0w5-2f61f8fc",
+  "mismatch_rows": [
+    102,
+    194,
+    208,
+    221
+  ],
+  "prefix_cache_hit_rate": 0.898,
+  "status": "FAIL"
+}

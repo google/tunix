@@ -1,0 +1,46 @@
+{
+  "attempt": "e0w5",
+  "campaign_root": "v1-apc-m15-e0w5",
+  "source_commit": "2f61f8fc7cf073964a9adbd30e78de872426a4d2",
+  "timestamp": "2026-08-30T21:33:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) x 2",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "rollout-paired-apc-off-on-e0w5-reproduced",
+  "control_arm_off": {
+    "jobset_name": "canon-v1-apc-m15-off-e0w5-2f61f8fc",
+    "prefix_cache_hit_rate": "0.0%",
+    "rollout_requests": 256,
+    "verdict": "CONTROL_GREEN",
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "solve_rate": 0.184,
+    "n_action": 104946,
+    "completed_rounds": 2,
+    "terminal_state": "PASS"
+  },
+  "treatment_arm_on": {
+    "jobset_name": "canon-v1-apc-m15-on-e0w5-2f61f8fc",
+    "prefix_cache_hit_rate": "89.8%",
+    "rollout_requests": 256,
+    "verdict": "TREATMENT_RED_REPRODUCED",
+    "a_b_differing_bytes": 615,
+    "a_b_differing_elements": 262,
+    "b_c_differing_bytes": 0,
+    "n_action": 115749,
+    "solve_rate": 0.223,
+    "max_abs_delta": 0.9388885498046875,
+    "mismatch_rows": [
+      102,
+      194,
+      208,
+      221
+    ],
+    "terminal_state": "PREALIGNMENT_GATE_FAIL"
+  },
+  "decision": {
+    "finding": "In dual 64 TPU DP8xTP8 topology with 15-turn multi-turn TiTO FrozenLake rollout, Control (APC-Off) passed 2 diagnostic rounds bitwise exact (A-B=0, B-C=0). Treatment (APC-On) achieved 89.8% prefix cache hit rate and reproduced 615 differing bytes (262 elements, max abs delta 0.9389) on S_decode vs S_prefill while B-C remained bitwise exact (0 diff bytes). Divergence is strictly APC-dependent.",
+    "claim_ceiling": "TREATMENT_RED_REPRODUCED_IN_TITO_DP8TP8",
+    "gate": "TREATMENT_RED_LOCALIZATION_REQUIRED",
+    "next_phase": "Phase E0v (Prepare TiTO Layer-0 / RoPE / RPA sub-module probe pair e0w6)"
+  }
+}
