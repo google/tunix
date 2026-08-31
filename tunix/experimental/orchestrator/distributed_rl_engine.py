@@ -24,6 +24,7 @@ import collections
 from collections.abc import Mapping, Sequence
 import inspect
 import logging as py_logging
+import os
 from typing import Any
 import uuid
 
@@ -40,6 +41,58 @@ def _summarize_ids(ids: Sequence[str], head: int = 2, tail: int = 2) -> str:
   if len(ids) <= head + tail:
     return f"[{', '.join(ids)}]"
   return f"[{', '.join(ids[:head])}, ..., {', '.join(ids[-tail:])}]"
+
+
+def _should_run_post_sync_probe() -> bool:
+  value = os.getenv("POST_SYNC_ROLLOUT_PROBE", "")
+  if value:
+    return value.lower() not in ("0", "false", "no", "off")
+  return py_logging.getLogger().isEnabledFor(py_logging.DEBUG)
+
+
+async def _log_post_sync_rollout_probe(
+    invoke_worker: Any,
+    rollout: remote_execution.ActorHandle,
+    *,
+    policy_version: int,
+) -> None:
+  """Runs a narrow rollout probe after bootstrap sync for quality checks."""
+  prompts = [
+      [{"role": "user", "content": "Reply with exactly OK."}],
+      [
+          {
+              "role": "user",
+              "content": "What is 2 + 3? Reply with digits only.",
+          }
+      ],
+  ]
+  try:
+    probe = await invoke_worker(
+        rollout,
+        "sample_prompts",
+        prompts=prompts,
+        max_generation_steps=32,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=1,
+        return_logprobs=False,
+    )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Post-sync rollout probe failed at policy_version=%d: %r",
+        policy_version,
+        exc,
+    )
+    return
+
+  texts = list(getattr(probe, "text", []) or [])
+  for idx, text in enumerate(texts, start=1):
+    logging.info(
+        "Post-sync rollout probe %d at policy_version=%d: %s",
+        idx,
+        policy_version,
+        text,
+    )
 
 
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
@@ -563,7 +616,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     if not sync_weights:
       return None
-    return await self.sync_weights(role=role, policy_version=self._policy_version)
+    synced_version = await self.sync_weights(
+        role=role, policy_version=self._policy_version
+    )
+    if self._rollout_workers and _should_run_post_sync_probe():
+      await _log_post_sync_rollout_probe(
+          self._invoke_worker,
+          self._rollout_workers[0],
+          policy_version=synced_version,
+      )
+    return synced_version
 
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,
