@@ -25,9 +25,12 @@ RUN pip install gcsfs
 RUN pip install wandb
 RUN pip install aqtp==0.9.0 tokamax==0.0.12 git+https://github.com/AI-Hypercomputer/maxtext.git@bc72cc7a9455a5dfa5143fc71a67a31c186954e7
 
-# Install vllm/tpu dependencies
-RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu && \
-    pip install vllm==0.8.3.post1 torchax==0.0.4 tpu-inference==0.0.4.dev20250428+jax -f https://storage.googleapis.com/libtpu-releases/index.html -f https://storage.googleapis.com/libtpu-wheels/index.html
+WORKDIR /app
+
+# Copy scripts and requirements first for cached dependency installation
+COPY requirements requirements
+COPY scripts scripts
+RUN bash /app/scripts/install_tunix_vllm_requirement.sh
 
 # Install DeepSWE specific dependencies
 RUN pip install kubernetes gym swebench==3.0.2 && \
@@ -35,17 +38,11 @@ RUN pip install kubernetes gym swebench==3.0.2 && \
     sed -i "s/create_repo, upload_folder, HfFolder/create_repo, upload_folder/" /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
     sed -i "s/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/" /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py
 
-# Set the working directory
-WORKDIR /app
-
-# Cache buster to ensure local code changes are always copied
+# Copy the project files to the image (cache buster ensures fresh code is always copied)
 ARG CACHEBUST=1
-
-# Copy the project files to the image
 COPY . .
 
 # Install the project in editable mode
 RUN pip install -e .
 
-# Set the default command to bash
 CMD ["bash"]
