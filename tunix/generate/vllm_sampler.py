@@ -227,7 +227,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       utils.transfer_state_directly(
           src_state=updated_weights,
           dst_state=self.transformer_state,
-          reshard_fn=functools.partial(reshard.reshard_pytree, donate_input=True),
+          reshard_fn=functools.partial(reshard.reshard_pytree, donate_input=True, cache_plan=False),
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
