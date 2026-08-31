@@ -131,10 +131,16 @@ def _get_reshard_fn_jax_device_put(
     cache_resharding_plans: bool = False,  # pylint: disable=unused-argument
     use_experimental_pre_reshard: bool = False,  # pylint: disable=unused-argument
 ):
-  return functools.partial(
-      jax.device_put,
-      donate=donate,
-  )
+  def _fast_device_put(source, target):
+    def _leaf_put(s, t):
+      if hasattr(s, "sharding") and hasattr(t, "spec"):
+        if s.sharding == t:
+          return s
+      return jax.device_put(s, t, donate=donate)
+
+    return jax.tree_util.tree_map(_leaf_put, source, target)
+
+  return _fast_device_put
 
 
 def _get_reshard_fn(

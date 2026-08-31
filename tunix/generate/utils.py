@@ -1572,8 +1572,13 @@ def _reshard_in_chunks(
       for k, v in traverse_util.flatten_dict(chunk_resharded).items():
         resharded[k] = v
 
+    resharded_leaf_ids = {
+        id(x) for x in jax.tree_util.tree_leaves(chunk_resharded)
+    }
     for src_val in chunk_src_flat.values():
       arr = src_val.value if hasattr(src_val, 'value') else src_val
+      if id(arr) in resharded_leaf_ids:
+        continue
       if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
         try:
           arr.delete()
