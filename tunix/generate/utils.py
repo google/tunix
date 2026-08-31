@@ -1579,8 +1579,15 @@ def _reshard_in_chunks(
       tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
       chunk_dst_shardings_flat[k] = _snapshot_dst_sharding(tgt_arr)
 
-    if delete_spec_buffers:
-      _delete_target_buffers(chunk_spec_flat, chunk_src_flat)
+    for tgt_val in chunk_spec_flat.values():
+      tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+      if hasattr(tgt_arr, 'delete') and not getattr(
+          tgt_arr, 'is_deleted', lambda: False
+      )():
+        try:
+          tgt_arr.delete()
+        except Exception:
+          pass
 
     def _to_tuple_key(k):
       return tuple(k.split('.')) if isinstance(k, str) else k
