@@ -548,6 +548,7 @@ if MODEL_SOURCE == "maxtext":
       enable_checkpointing=True,
       allow_split_physical_axes=True,
       scan_layers=SCAN_LAYERS,
+      checkpoint_storage_concurrent_gb=16,
   )
 elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
   model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
