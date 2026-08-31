@@ -1567,6 +1567,15 @@ def _reshard_in_chunks(
       resharded[k] = v
       resharded['.'.join(str(p) for p in k)] = v
 
+    for src_val in chunk_src_flat.values():
+      if hasattr(src_val, "delete") and not getattr(
+          src_val, "is_deleted", lambda: False
+      )():
+        try:
+          src_val.delete()
+        except Exception:
+          pass
+
     del (  # pyrefly: ignore[unsupported-delete]
         chunk_src,
         chunk_dst_shardings,
@@ -1574,7 +1583,11 @@ def _reshard_in_chunks(
         chunk_src_flat,
         chunk_spec_flat,
         chunk_dst_shardings_flat,
+        chunk_src_tuples,
+        chunk_spec_tuples,
     )
+    import gc
+    gc.collect()
   return resharded
 
 
