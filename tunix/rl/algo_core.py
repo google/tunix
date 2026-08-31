@@ -425,6 +425,7 @@ def grpo_loss_fn(
       segment_positions=getattr(train_example, "segment_positions", None),
       temperature=algo_config.temperature,
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+      routed_experts=getattr(train_example, "routed_experts", None),
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.

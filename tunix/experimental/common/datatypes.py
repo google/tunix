@@ -37,6 +37,10 @@ Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
 Role = common_datatypes.Role
 
+# Marks a router-replay slot the trainer must not replay, so the model falls
+# back to its own gate there. Matches what MaxText's replay path expects.
+UNSET_ROUTED_EXPERT = -1
+
 
 # TODO(tunix-dev): Unify this extended TrajectoryItem back into
 # agent_types.TrajectoryItem so that all agentic workflows share the same strict
@@ -44,6 +48,7 @@ Role = common_datatypes.Role
 @dataclasses.dataclass(kw_only=True)
 class TrajectoryItem:
   """Extended TrajectoryItem for Orchestrator with token arrays."""
+
   prompt_id: str = ""
   group_index: int = 0
   start_step: int = 0
@@ -51,6 +56,9 @@ class TrajectoryItem:
   prompt_tokens: np.ndarray | None = None
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
+  # `[len(prompt_tokens) + len(completion_tokens), num_layers, top_k]` expert
+  # ids from the rollout, for replaying its routing during training.
+  routed_experts: np.ndarray | None = None
   policy_version: int = 0
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -272,12 +280,17 @@ class TokenSegment:
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
     logps: Array of per-token log-probabilities under the sampling distribution,
       or None for spans the model did not emit (e.g. env tokens).
+    routed_experts: `[len(tokens), num_layers, top_k]` MoE expert ids this span
+      was routed through, so training can replay the routing the rollout
+      actually used. None for dense models, spans the model did not emit, or
+      when the sampler was not asked to capture routing.
   """
 
   source: str
   tokens: np.ndarray
   loss_mask: np.ndarray
   logps: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
     if self.loss_mask.shape != self.tokens.shape:
@@ -289,6 +302,19 @@ class TokenSegment:
       raise ValueError(
           f"logps shape {self.logps.shape} != tokens shape {self.tokens.shape}"
       )
+    if self.routed_experts is not None:
+      # The trailing axes are [num_layers, top_k] and are model-dependent, so
+      # only the rank and the leading (per-token) axis are checked.
+      if self.routed_experts.ndim != 3:
+        raise ValueError(
+            "routed_experts must be [length, num_layers, top_k]; got shape"
+            f" {self.routed_experts.shape}"
+        )
+      if self.routed_experts.shape[0] != self.tokens.shape[0]:
+        raise ValueError(
+            f"routed_experts shape {self.routed_experts.shape} does not cover"
+            f" tokens shape {self.tokens.shape} along axis 0"
+        )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -577,6 +603,11 @@ class RLTrainerPayload(TrainerPayload):
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
+    routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert ids
+      captured during rollout. When set, a training engine that supports router
+      replay forces these experts instead of re-running its own gate, so the
+      training forward pass matches the routing the rollout actually used. `-1`
+      marks a padded or unused slot.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     metadata: Extra payload metadata dictionary.
@@ -594,6 +625,7 @@ class RLTrainerPayload(TrainerPayload):
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+  routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)

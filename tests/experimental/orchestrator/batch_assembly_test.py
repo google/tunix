@@ -834,5 +834,127 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_allclose(payload.advantages[0], [0.0, 0.0, 0.0, 0.0, 0.0])
 
 
+_ROUTING_LAYERS = 2
+_ROUTING_TOP_K = 2
+_UNSET = datatypes.UNSET_ROUTED_EXPERT
+
+
+def _routing(length, fill):
+  """`[length, num_layers, top_k]` routing where every slot holds `fill`."""
+  shape = (length, _ROUTING_LAYERS, _ROUTING_TOP_K)
+  return np.full(shape, fill, dtype=np.int32)
+
+
+class RoutedExpertsAlignmentTest(absltest.TestCase):
+  """Replayed routing must be padded the same way the token ids are."""
+
+  def test_prompt_is_right_aligned_and_completion_left_aligned(self):
+    """Routing must follow the token padding, not sit at the row start.
+
+    Prompts are left-padded and completions right-padded; if the routing does
+    not follow, every replayed expert lands on the wrong token.
+    """
+    prompt_len, completion_len = 2, 3
+    max_prompt, max_response = 5, 6
+    routed = np.concatenate(
+        [_routing(prompt_len, 7), _routing(completion_len, 9)], axis=0
+    )
+
+    out = batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response
+    )
+
+    self.assertEqual(
+        out.shape, (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K)
+    )
+    # Prompt window: leading pad unset, prompt routing flush against the end.
+    np.testing.assert_array_equal(out[: max_prompt - prompt_len], _UNSET)
+    np.testing.assert_array_equal(out[max_prompt - prompt_len : max_prompt], 7)
+    # Response window: completion routing first, trailing pad unset.
+    np.testing.assert_array_equal(
+        out[max_prompt : max_prompt + completion_len], 9
+    )
+    np.testing.assert_array_equal(out[max_prompt + completion_len :], _UNSET)
+
+  def test_overlong_prompt_keeps_the_tail(self):
+    """`_left_pad` keeps the last tokens, so routing must keep its last rows."""
+    # One prompt row per position, so a dropped row is visible by value.
+    prompt = np.broadcast_to(
+        np.arange(4, dtype=np.int32).reshape(4, 1, 1),
+        (4, _ROUTING_LAYERS, _ROUTING_TOP_K),
+    )
+    routed = np.concatenate([prompt, _routing(1, 9)], axis=0)
+    out = batch_assembly._routed_experts_aligned(routed, 4, 1, 2, 3)  # pylint: disable=protected-access
+    # Prompt rows 0 and 1 are dropped; 2 and 3 survive, in order.
+    np.testing.assert_array_equal(out[0], 2)
+    np.testing.assert_array_equal(out[1], 3)
+
+
+class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
+  """The assembler must emit `[B, P + C, num_layers, top_k]`, or nothing."""
+
+  MAX_PROMPT = 4
+  MAX_RESPONSE = 4
+
+  def _assembler(self, batch_size=2):
+    return batch_assembly.PaddedBatchAssembler(
+        batch_size=batch_size,
+        max_prompt_length=self.MAX_PROMPT,
+        max_response_length=self.MAX_RESPONSE,
+        pad_id=0,
+    )
+
+  def _payload(self, fill, with_routing=True):
+    prompt = np.array([1, 2], dtype=np.int32)
+    completion = np.array([3, 4, 5], dtype=np.int32)
+    routed = None
+    if with_routing:
+      routed = np.concatenate(
+          [_routing(len(prompt), fill), _routing(len(completion), fill)],
+          axis=0,
+      )
+    return datatypes.RLTrainerPayload(
+        advantages=np.zeros(len(completion), dtype=np.float32),
+        loss_mask=np.ones(len(completion), dtype=np.float32),
+        prompt_ids=prompt,
+        prompt_mask=np.ones(len(prompt), dtype=np.float32),
+        completion_ids=completion,
+        completion_mask=np.ones(len(completion), dtype=np.float32),
+        routed_experts=routed,
+    )
+
+  def test_batches_routing_across_rows(self):
+    packed = self._assembler().pack([self._payload(1), self._payload(2)])
+    self.assertLen(packed, 1)
+    routed = packed[0].routed_experts
+    self.assertIsNotNone(routed, "assembler dropped the replayed routing")
+    self.assertEqual(
+        routed.shape,
+        (
+            2,
+            self.MAX_PROMPT + self.MAX_RESPONSE,
+            _ROUTING_LAYERS,
+            _ROUTING_TOP_K,
+        ),
+    )
+    # Row order must be preserved, or rows train on each other's routing.
+    self.assertEqual(int(routed[0, self.MAX_PROMPT, 0, 0]), 1)
+    self.assertEqual(int(routed[1, self.MAX_PROMPT, 0, 0]), 2)
+
+  def test_partial_capture_disables_replay_for_the_batch(self):
+    """A half-replayed batch would silently mix replayed and fresh routing."""
+    packed = self._assembler().pack(
+        [self._payload(1), self._payload(2, with_routing=False)]
+    )
+    self.assertIsNone(packed[0].routed_experts)
+
+  def test_short_batch_pads_rows_as_unset(self):
+    """Filler rows must not replay a real expert id."""
+    packed = self._assembler(batch_size=2).pack([self._payload(1)])
+    routed = packed[0].routed_experts
+    self.assertEqual(routed.shape[0], 2)
+    np.testing.assert_array_equal(routed[1], _UNSET)
+
+
 if __name__ == "__main__":
   absltest.main()

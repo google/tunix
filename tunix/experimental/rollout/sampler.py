@@ -38,6 +38,10 @@ class SamplingParams:
     seed: Random seed for reproducible generation.
     return_logprobs: Whether to record per-token log probabilities.
     return_logits: Whether to record per-token output logits.
+    return_routed_experts: Whether to record the MoE expert ids each token was
+      routed through, so training can replay them instead of re-routing. Only
+      meaningful for MoE models on a backend that supports capture; the backend
+      must also be configured to capture, since it is an engine-level setting.
     beam_size: Beam width for beam search decoding.
   """
 
@@ -48,6 +52,7 @@ class SamplingParams:
   seed: int | None = None
   return_logprobs: bool = False
   return_logits: bool = False
+  return_routed_experts: bool = False
   beam_size: int | None = None
 
 
@@ -80,8 +85,10 @@ class SamplingResponse(datatypes.Response):
       "cancelled", "error").
     error: Structured failure details when sampling failed for this prompt, else
       None (inherited from datatypes.Response).
-    routed_experts: Array of routed expert IDs of shape [Batch, Layers, Length,
-      Top K], or None if not requested.
+    routed_experts: Per-token MoE expert ids for this one completion, shaped
+      `[Length, Layers, Top K]` to match what the backend reports. Covers the
+      prompt as well as the generated tokens. None if not requested, or if the
+      model is dense.
   """
 
   text: str = ""
