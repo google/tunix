@@ -16,8 +16,7 @@
 
 Defines:
 - LineageEvent: Individual telemetry event for a component/operation.
-- LineageContext: Provenance tree node carrying tracking IDs and DAG causal
-  edges.
+- LineageContext: Provenance tree node carrying tracking IDs and DAG causal edges.
 """
 
 from collections.abc import Sequence

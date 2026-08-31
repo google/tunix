@@ -274,6 +274,18 @@ class RolloutWorker(abstract_worker.Worker):
         logprobs=logprobs,
     )
 
+  def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
+    """Appends worker generation telemetry to the lineage context if present."""
+    if metadata is None:
+      return
+    lineage_ctx = metadata.get("lineage")
+    if lineage_ctx is not None and hasattr(lineage_ctx, "add_event"):
+      lineage_ctx.add_event(
+          component="worker.rollout",
+          operation="generate",
+          attributes={"worker_id": self.worker_id},
+      )
+
   def _to_rollout_response(
       self,
       item: Any,
@@ -297,11 +309,11 @@ class RolloutWorker(abstract_worker.Worker):
           ),
           policy_version=self._policy_version,
       )
-    if isinstance(item, trajectory_lib.Trajectory):
+    if isinstance(item, (trajectory_lib.Trajectory, datatypes.Trajectory)):
       req_id = request_id or getattr(item, "trajectory_id", "default")
-      extra = getattr(item, "extra", None)
-      extra = extra if isinstance(extra, dict) else {}
       if prompt_tokens is None:
+        extra = getattr(item, "extra", None)
+        extra = extra if isinstance(extra, dict) else {}
         prompt_tokens = np.asarray(
             extra.get("prompt_tokens", np.zeros(0, dtype=np.int32)),
             dtype=np.int32,
@@ -312,14 +324,7 @@ class RolloutWorker(abstract_worker.Worker):
           prompt_tokens=prompt_tokens,
           policy_version=self._policy_version,
       )
-      response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
-      response.group_index = int(
-          extra.get("group_index", response.group_index) or 0
-      )
-      response.env_reward = float(extra.get("reward", response.env_reward))
-      response.metadata.update(
-          {k: v for k, v in extra.items() if k != "prompt_tokens"}
-      )
+      self._stamp_worker_lineage(response.metadata)
       return response
     return item
 
@@ -351,6 +356,7 @@ class RolloutWorker(abstract_worker.Worker):
       )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
+    self._stamp_worker_lineage(metadata)
     return datatypes.RolloutResponse(
         request_id=request.request_id,
         prompt_id=request.prompt_id,

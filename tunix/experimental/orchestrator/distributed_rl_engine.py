@@ -29,16 +29,18 @@ import uuid
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
-def _summarize_ids(ids: Sequence[str], head: int = 2, tail: int = 2) -> str:
+def _summarize_ids(ids: Sequence[Any], head: int = 2, tail: int = 2) -> str:
   """Returns a compressed string representation of a sequence of IDs."""
-  if len(ids) <= head + tail:
-    return f"[{', '.join(ids)}]"
-  return f"[{', '.join(ids[:head])}, ..., {', '.join(ids[-tail:])}]"
+  str_ids = [str(x) for x in ids]
+  if len(str_ids) <= head + tail:
+    return f"[{', '.join(str_ids)}]"
+  return f"[{', '.join(str_ids[:head])}, ..., {', '.join(str_ids[-tail:])}]"
 
 
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
@@ -58,51 +60,54 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
             else datatypes.TrajectoryStatus.FAILED
         ),
     )
+    prompt_tokens = (
+        np.asarray(resp.prompt_tokens, dtype=np.int32)
+        if resp.prompt_tokens is not None
+        else np.zeros(0, dtype=np.int32)
+    )
     item = datatypes.TrajectoryItem(
         prompt_id=resp.prompt_id,
         group_index=resp.group_index,
         start_step=0,
         traj=traj,
         metadata=metadata,
-        prompt_tokens=resp.prompt_tokens,
+        prompt_tokens=prompt_tokens,
         policy_version=resp.policy_version,
     )
 
     assistant_tokens = []
     assistant_masks = []
     for seg in resp.segments:
-      if seg.source == "assistant":
-        assistant_tokens.append(seg.tokens)
-        assistant_masks.append(seg.loss_mask)
+      seg_any: Any = seg
+      source = (
+          seg.source
+          if isinstance(seg, datatypes.TokenSegment)
+          else seg_any.get("source")
+      )
+      tokens = (
+          seg.tokens
+          if isinstance(seg, datatypes.TokenSegment)
+          else seg_any.get("tokens")
+      )
+      loss_mask = (
+          seg.loss_mask
+          if isinstance(seg, datatypes.TokenSegment)
+          else seg_any.get("loss_mask")
+      )
+      if source == "assistant" and tokens is not None:
+        token_arr = np.asarray(tokens)
+        assistant_tokens.append(token_arr)
+        if loss_mask is not None:
+          assistant_masks.append(np.asarray(loss_mask))
+        else:
+          assistant_masks.append(np.ones_like(token_arr, dtype=np.float32))
+
     if assistant_tokens:
       item.completion_tokens = np.concatenate(assistant_tokens)
       item.action_mask = np.concatenate(assistant_masks)
     else:
       item.completion_tokens = np.zeros(0, dtype=np.int32)
       item.action_mask = np.zeros(0, dtype=np.float32)
-    return item
-
-  if isinstance(resp, datatypes.Trajectory):
-    item = datatypes.TrajectoryItem(
-        prompt_id=getattr(resp, "prompt_id", ""),
-        group_index=getattr(resp, "group_index", 0),
-        start_step=0,
-        traj=resp,
-        policy_version=getattr(resp, "policy_version", 0),
-        prompt_tokens=getattr(
-            resp, "prompt_tokens", np.zeros(0, dtype=np.int32)
-        ),
-        completion_tokens=getattr(
-            resp, "completion_tokens", np.zeros(0, dtype=np.int32)
-        ),
-        action_mask=getattr(
-            resp,
-            "action_mask",
-            np.ones(
-                len(getattr(resp, "completion_tokens", [])), dtype=np.float32
-            ),
-        ),
-    )
     return item
 
   raise TypeError(
@@ -148,6 +153,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
     """Dispatches pre-formed RolloutRequests across rollout workers using prefix routing."""
+    requests = self._build_rollout_requests(requests)
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
         len(requests),
@@ -173,7 +179,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     return [r.request_id for r in requests]
 
-  async def dispatch_rollouts(
+  def _build_rollout_requests(
       self,
       prompts: Sequence[Any],
       *,
@@ -182,12 +188,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
-  ) -> list[str]:
-    """Dispatches rollout requests across workers, constructing RolloutRequests internally.
-
-    Every prompt item in `prompts` MUST have a unique, collision-free `prompt_id`
-    attribute or dict key. Missing prompt IDs raise a ValueError.
-    """
+  ) -> list[datatypes.RolloutRequest]:
+    """Validates prompts and constructs typed RolloutRequests with lineage attached."""
     base_metadata = {
         **(route_metadata or {}),
         **(kwargs.get("metadata") or {}),
@@ -200,6 +202,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     rollout_reqs: list[datatypes.RolloutRequest] = []
     for idx, p in enumerate(prompts):
       if isinstance(p, datatypes.RolloutRequest):
+        if p.prompt_id is None or p.prompt_id == "":
+          raise ValueError(
+              f"RolloutRequest at index {idx} (id='{p.request_id}') lacks"
+              " 'prompt_id'. Every request must provide a non-empty"
+              " 'prompt_id'."
+          )
         rollout_reqs.append(p)
         continue
 
@@ -211,10 +219,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             dict(p.get("generation_kwargs", {}) or {})
         )
 
-      prompt_id = getattr(p, "prompt_id", None) or (
-          p.get("prompt_id") if isinstance(p, dict) else None
-      )
-      if not prompt_id:
+      if isinstance(p, Mapping):
+        prompt_id = p.get("prompt_id")
+      else:
+        prompt_id = getattr(p, "prompt_id", None)
+
+      if prompt_id is None or prompt_id == "":
         raise ValueError(
             f"Prompt at index {idx} lacks 'prompt_id'. Every prompt item "
             "dispatched to DistributedRLEngine must provide a unique, "
@@ -269,6 +279,50 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         len(rollout_reqs),
         version,
         _summarize_ids(prompt_ids),
+    )
+    for req in rollout_reqs:
+      if req.metadata is None:  # pyrefly: ignore[comparison-with-never]
+        req.metadata = {}  # pyrefly: ignore[bad-assignment]
+      if req.metadata.get("lineage") is None:
+        lineage_ctx = lineage.LineageContext(
+            tracking_id=req.traj_id,
+            parent_tracking_ids=[str(req.prompt_id)],
+        )
+        lineage_ctx.add_event(
+            component="engine.dispatch",
+            operation="rollout",
+            attributes={
+                "policy_version": req.target_policy_version,
+                "group_index": req.group_index,
+            },
+        )
+        req.metadata["lineage"] = lineage_ctx
+
+    return rollout_reqs
+
+  async def dispatch_rollouts(
+      self,
+      prompts: Sequence[Any],
+      *,
+      group_size: int = 1,
+      policy_version: int = 0,
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
+  ) -> list[str]:
+    """Dispatches rollout requests across workers, constructing RolloutRequests internally.
+
+    Every prompt item in `prompts` MUST have a unique, collision-free
+    `prompt_id`
+    attribute or dict key. Missing prompt IDs raise a ValueError.
+    """
+    rollout_reqs = self._build_rollout_requests(
+        prompts,
+        group_size=group_size,
+        policy_version=policy_version,
+        generation_args=generation_args,
+        route_metadata=route_metadata,
+        **kwargs,
     )
     return await self.dispatch_rollout_requests(rollout_reqs)
 
@@ -337,52 +391,33 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     generation_kwargs = (
         generation_args.as_kwargs() if generation_args is not None else {}
     )
-    route_metadata_map = dict(route_metadata or {})
-    worker_to_prompts: dict[Any, list[Any]] = collections.defaultdict(list)
+    requests = self._build_rollout_requests(
+        prompts,
+        policy_version=self._policy_version,
+        generation_args=generation_args,
+        route_metadata=route_metadata,
+    )
     worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
         collections.defaultdict(list)
     )
-    for p in prompts:
-      if isinstance(p, datatypes.RolloutRequest):
-        request_metadata = dict(p.metadata or {})
-        route_key = request_metadata.get("prefix_hash")
-        if route_key is None:
-          route_key = p.prompt_id
-        worker = self._rollout_pool._get_next_actor(
-            kwargs={"route_key": route_key}
-        )
-        worker_to_requests[worker].append(p)
-        continue
-
-      route_key = route_metadata_map.get("prefix_hash") or getattr(
-          p, "prompt_id", p.get("prompt_id") if isinstance(p, dict) else None
-      )
+    for req in requests:
+      route_key = req.metadata.get("prefix_hash", req.prompt_id)
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )
-      worker_to_prompts[worker].append(p)
+      worker_to_requests[worker].append(req)
 
-    tasks = []
-    for worker, w_requests in worker_to_requests.items():
-      if w_requests:
-        tasks.append(
-            self._invoke_worker(
-                worker, "generate", requests=w_requests, **generation_kwargs
-            )
+    tasks = [
+        self._invoke_worker(
+            worker, "generate", requests=w_requests, **generation_kwargs
         )
-    for worker, w_prompts in worker_to_prompts.items():
-      if w_prompts:
-        tasks.append(
-            self._invoke_worker(
-                worker, "generate", prompts=w_prompts, **generation_kwargs
-            )
-        )
-
+        for worker, w_requests in worker_to_requests.items()
+        if w_requests
+    ]
     if not tasks:
       return []
 
     results = await asyncio.gather(*tasks)
-
     raw_items = [
         item
         for sublist in results
@@ -465,7 +500,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     metadata = dict(getattr(payload, "metadata", {}) or {})
     request = datatypes.TrainRequest(
-        request_id=f"train_{uuid.uuid4().hex[:8]}",
+        request_id=f"train_req_{uuid.uuid4().hex[:8]}",
         payload=payload,
         metadata=metadata,
     )

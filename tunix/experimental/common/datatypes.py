@@ -389,13 +389,42 @@ class RolloutResponse(Response):
       status_val = "COMPLETED"
 
     resp_metadata = {}
+    extra = getattr(traj, "extra", None)
+    if isinstance(extra, dict):
+      resp_metadata.update(extra)
     if hasattr(traj, "metadata") and isinstance(traj.metadata, dict):
       resp_metadata.update(traj.metadata)
     if metadata:
       resp_metadata.update(metadata)
 
-    prompt_id = str(resp_metadata.get("prompt_id", ""))
-    group_index = int(resp_metadata.get("group_index", 0))
+    raw_prompt_id = resp_metadata.get("prompt_id")
+    if raw_prompt_id is None:
+      raw_prompt_id = getattr(traj, "task", "")
+    prompt_id = "" if raw_prompt_id is None else str(raw_prompt_id)
+
+    if (
+        "group_index" not in resp_metadata
+        or resp_metadata["group_index"] is None
+    ):
+      raise ValueError(
+          f"Rollout response for request '{request_id}'"
+          f" (prompt_id='{prompt_id}') lacks 'group_index'."
+      )
+    try:
+      group_index = int(resp_metadata["group_index"])
+    except (ValueError, TypeError) as exc:
+      raise ValueError(
+          f"Invalid group_index '{resp_metadata['group_index']}' for request"
+          f" '{request_id}': must be an integer."
+      ) from exc
+
+    raw_reward = resp_metadata.get("reward")
+    if raw_reward is None:
+      raw_reward = getattr(traj, "reward", 0.0)
+    try:
+      env_reward = float(raw_reward or 0.0)
+    except (ValueError, TypeError):
+      env_reward = 0.0
 
     return cls(
         request_id=request_id,
@@ -404,7 +433,7 @@ class RolloutResponse(Response):
         status=status_val,
         prompt_tokens=prompt_tokens,
         segments=segments,
-        env_reward=getattr(traj, "reward", 0.0) or 0.0,
+        env_reward=env_reward,
         policy_version=policy_version,
         metadata=resp_metadata,
     )

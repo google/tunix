@@ -183,6 +183,7 @@ class WireSerializationTest(absltest.TestCase):
     request = datatypes.RolloutRequest(
         request_id="req-1",
         prompt_id="prompt-1",
+        group_index=0,
         prompt="hello",
         generation_kwargs={"max_tokens": 10},
     )
@@ -192,9 +193,11 @@ class WireSerializationTest(absltest.TestCase):
         traj=traj,
         prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
         policy_version=7,
+        metadata={"group_index": 0},
     )
 
     self.assertEqual(result.request_id, "req-1")
+    self.assertEqual(result.group_index, 0)
     self.assertEqual(result.status, "SUCCEEDED")
     self.assertEqual(result.env_reward, 1.25)
     self.assertEqual(result.policy_version, 7)
@@ -220,7 +223,7 @@ class WireSerializationTest(absltest.TestCase):
         reward=1.0,
         status=datatypes.TrajectoryStatus.SUCCEEDED,
     )
-    traj.metadata = {"traj_meta": "foo"}
+    traj.metadata = {"traj_meta": "foo", "group_index": 0}
 
     result = datatypes.RolloutResponse.from_trajectory(
         request_id="req-2",
@@ -231,14 +234,16 @@ class WireSerializationTest(absltest.TestCase):
     )
 
     self.assertEqual(
-        result.metadata, {"caller_meta": "bar", "traj_meta": "foo"}
+        result.metadata,
+        {"caller_meta": "bar", "traj_meta": "foo", "group_index": 0},
     )
 
   def test_from_trajectory_metadata_edge_cases(self):
-    # 1. Neither metadata nor traj.metadata provided
+    # 1. Neither metadata nor traj.metadata provided besides group_index
     traj_none = datatypes.Trajectory(
         steps=[], reward=1.0, status=datatypes.TrajectoryStatus.SUCCEEDED
     )
+    traj_none.metadata = {"group_index": 0}
     res_none = datatypes.RolloutResponse.from_trajectory(
         request_id="req-1",
         traj=traj_none,
@@ -246,9 +251,9 @@ class WireSerializationTest(absltest.TestCase):
         policy_version=1,
         metadata=None,
     )
-    self.assertEqual(res_none.metadata, {})
+    self.assertEqual(res_none.metadata, {"group_index": 0})
 
-    # 2. traj.metadata is non-dict (e.g., string or None)
+    # 2. traj.metadata is non-dict (e.g., string or None) with caller metadata providing group_index
     traj_non_dict = datatypes.Trajectory(
         steps=[], reward=1.0, status=datatypes.TrajectoryStatus.SUCCEEDED
     )
@@ -258,21 +263,30 @@ class WireSerializationTest(absltest.TestCase):
         traj=traj_non_dict,
         prompt_tokens=np.array([1], dtype=np.int32),
         policy_version=1,
-        metadata={"key": "val"},
+        metadata={"key": "val", "group_index": 1},
     )
-    self.assertEqual(res_non_dict.metadata, {"key": "val"})
+    self.assertEqual(res_non_dict.metadata, {"key": "val", "group_index": 1})
+    self.assertEqual(res_non_dict.group_index, 1)
 
     # 3. Caller metadata overrides traj.metadata on collision
     traj_collision = datatypes.Trajectory(
         steps=[], reward=1.0, status=datatypes.TrajectoryStatus.SUCCEEDED
     )
-    traj_collision.metadata = {"shared_key": "traj_val", "traj_only": 123}
+    traj_collision.metadata = {
+        "shared_key": "traj_val",
+        "traj_only": 123,
+        "group_index": 0,
+    }
     res_collision = datatypes.RolloutResponse.from_trajectory(
         request_id="req-3",
         traj=traj_collision,
         prompt_tokens=np.array([1], dtype=np.int32),
         policy_version=1,
-        metadata={"shared_key": "caller_val", "caller_only": 456},
+        metadata={
+            "shared_key": "caller_val",
+            "caller_only": 456,
+            "group_index": 2,
+        },
     )
     self.assertEqual(
         res_collision.metadata,
@@ -280,8 +294,193 @@ class WireSerializationTest(absltest.TestCase):
             "shared_key": "caller_val",
             "traj_only": 123,
             "caller_only": 456,
+            "group_index": 2,
         },
     )
+    self.assertEqual(res_collision.group_index, 2)
+
+  def test_from_trajectory_requires_group_index(self):
+    traj = datatypes.Trajectory(
+        steps=[],
+        reward=1.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    with self.assertRaisesRegex(ValueError, "lacks 'group_index'"):
+      datatypes.RolloutResponse.from_trajectory(
+          request_id="req-missing-group",
+          traj=traj,
+          prompt_tokens=np.zeros(0, dtype=np.int32),
+          policy_version=1,
+          metadata={"prompt_id": "p1"},
+      )
+
+    with self.assertRaisesRegex(ValueError, "lacks 'group_index'"):
+      datatypes.RolloutResponse.from_trajectory(
+          request_id="req-none-group",
+          traj=traj,
+          prompt_tokens=np.zeros(0, dtype=np.int32),
+          policy_version=1,
+          metadata={"prompt_id": "p1", "group_index": None},
+      )
+
+    with self.assertRaisesRegex(ValueError, "must be an integer"):
+      datatypes.RolloutResponse.from_trajectory(
+          request_id="req-bad-group",
+          traj=traj,
+          prompt_tokens=np.zeros(0, dtype=np.int32),
+          policy_version=1,
+          metadata={"prompt_id": "p1", "group_index": "invalid_group"},
+      )
+
+  def test_from_trajectory_handles_integer_prompt_id_zero(self):
+    traj = datatypes.Trajectory(
+        steps=[],
+        reward=1.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    resp = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-int-0",
+        traj=traj,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": 0, "group_index": 0},
+    )
+    self.assertEqual(resp.prompt_id, "0")
+    self.assertEqual(resp.group_index, 0)
+
+  def test_from_trajectory_unpacks_extra_reward(self):
+    traj = datatypes.Trajectory(
+        steps=[],
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    traj.extra = {"prompt_id": "p1", "group_index": 1, "reward": 3.5}
+    resp = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-extra",
+        traj=traj,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+    )
+    self.assertEqual(resp.prompt_id, "p1")
+    self.assertEqual(resp.group_index, 1)
+    self.assertEqual(resp.env_reward, 3.5)
+
+  def test_from_trajectory_invalid_reward_fallback(self):
+    traj = datatypes.Trajectory(
+        steps=[],
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    # 1. Unparseable string reward in metadata falls back to 0.0
+    resp_str = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-bad-str-reward",
+        traj=traj,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": "p1", "group_index": 0, "reward": "not_a_float"},
+    )
+    self.assertEqual(resp_str.env_reward, 0.0)
+
+    # 2. Dictionary reward in metadata (TypeError on float cast) falls back to 0.0
+    resp_dict = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-dict-reward",
+        traj=traj,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": "p1", "group_index": 0, "reward": {"bad": 123}},
+    )
+    self.assertEqual(resp_dict.env_reward, 0.0)
+
+    # 3. Invalid reward attribute on traj falls back to 0.0 when metadata has no reward
+    traj_bad_reward = datatypes.Trajectory(
+        steps=[],
+        reward="unparseable",  # pytype: disable=annotation-type-mismatch
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    resp_traj_reward = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-traj-bad-reward",
+        traj=traj_bad_reward,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": "p1", "group_index": 0},
+    )
+    self.assertEqual(resp_traj_reward.env_reward, 0.0)
+
+    # 4. None / empty reward falls back to 0.0
+    resp_none = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-none-reward",
+        traj=traj,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": "p1", "group_index": 0, "reward": None},
+    )
+    self.assertEqual(resp_none.env_reward, 0.0)
+
+    # 5. Valid numerical string parses correctly to float
+    resp_valid_str = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-valid-str-reward",
+        traj=traj,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": "p1", "group_index": 0, "reward": "4.25"},
+    )
+    self.assertEqual(resp_valid_str.env_reward, 4.25)
+
+  def test_from_trajectory_falls_back_to_traj_task_for_prompt_id(self):
+    # 1. traj.task string fallback when prompt_id is missing from metadata
+    traj_with_task = datatypes.Trajectory(
+        steps=[],
+        reward=1.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    traj_with_task.task = "task_prompt_99"
+    resp = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-task-fallback",
+        traj=traj_with_task,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"group_index": 0},
+    )
+    self.assertEqual(resp.prompt_id, "task_prompt_99")
+
+    # 2. traj.task non-string (int) fallback gets converted to str
+    traj_int_task = datatypes.Trajectory(
+        steps=[],
+        reward=1.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    traj_int_task.task = 42
+    resp_int = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-int-task-fallback",
+        traj=traj_int_task,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"group_index": 0},
+    )
+    self.assertEqual(resp_int.prompt_id, "42")
+
+    # 3. traj without task and without metadata prompt_id defaults to empty str
+    traj_no_task = datatypes.Trajectory(
+        steps=[],
+        reward=1.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    resp_empty = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-no-task",
+        traj=traj_no_task,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"group_index": 0},
+    )
+    self.assertEqual(resp_empty.prompt_id, "")
+
+    # 4. Explicit metadata prompt_id takes precedence over traj.task
+    resp_override = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-override-task",
+        traj=traj_with_task,
+        prompt_tokens=np.zeros(0, dtype=np.int32),
+        policy_version=1,
+        metadata={"prompt_id": "explicit_id", "group_index": 0},
+    )
+    self.assertEqual(resp_override.prompt_id, "explicit_id")
 
   def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
     before = time.time()

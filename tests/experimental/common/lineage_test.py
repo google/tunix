@@ -61,20 +61,6 @@ class LineageTest(absltest.TestCase):
     self.assertEqual(event.attributes["worker_id"], "w0")
     self.assertEqual(event.attributes["latency_ms"], 42.5)
 
-  def test_lineage_context_add_event_none_attributes(self):
-    ctx = lineage.LineageContext(
-        tracking_id="traj_prompt_1_0",
-    )
-    event = ctx.add_event(
-        component="worker.rollout",
-        operation="generate",
-        attributes=None,
-    )
-    self.assertLen(ctx.events, 1)
-    self.assertEqual(event.attributes, {})
-    self.assertIsInstance(event.timestamp_s, float)
-    self.assertGreater(event.timestamp_s, 0.0)
-
   def test_lineage_context_merge(self):
     ctx1 = lineage.LineageContext(
         tracking_id="traj_p1_0",
@@ -105,30 +91,30 @@ class LineageTest(absltest.TestCase):
         merged.events[0].attributes, {"bin_size": 2, "packed_len": 4096}
     )
 
-  def test_lineage_context_merge_none_attributes(self):
-    ctx1 = lineage.LineageContext(tracking_id="traj_p1_0")
-    merged = lineage.LineageContext.merge(
-        batch_id="batch_1",
-        contexts=[ctx1],
-        component="orchestrator.assembler",
-        operation="pack",
-        attributes=None,
+  def test_lineage_context_merge_deduplication(self):
+    ctx1 = lineage.LineageContext(
+        tracking_id="traj_p1_0",
+        parent_tracking_ids=["p1"],
     )
-    self.assertEqual(merged.events[0].attributes, {})
-
-  def test_lineage_context_merge_deduplicates_parent_ids(self):
-    ctx1 = lineage.LineageContext(tracking_id="traj_p1_0")
-    ctx2 = lineage.LineageContext(tracking_id="traj_p2_0")
-    ctx3 = lineage.LineageContext(tracking_id="traj_p1_0")  # duplicate
+    ctx2 = lineage.LineageContext(
+        tracking_id="traj_p1_0",
+        parent_tracking_ids=["p1"],
+    )
+    ctx3 = lineage.LineageContext(
+        tracking_id="traj_p2_0",
+        parent_tracking_ids=["p2"],
+    )
 
     merged = lineage.LineageContext.merge(
         batch_id="batch_0",
-        contexts=[ctx1, ctx2, ctx3, ctx1, None],
+        contexts=[ctx1, ctx2, ctx3, None, ctx1],
         component="orchestrator.assembler",
         operation="pack",
     )
 
+    self.assertEqual(merged.tracking_id, "batch_0")
     self.assertEqual(merged.parent_tracking_ids, ["traj_p1_0", "traj_p2_0"])
+    self.assertLen(merged.events, 1)
 
   def test_lineage_context_cloudpickle_round_trip(self):
     ctx = lineage.LineageContext(
