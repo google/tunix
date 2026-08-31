@@ -8522,11 +8522,9 @@ class Qwen3EngineForwardAdapter:
       )
       contract = workload.training_contract()
       reverse_groups = contract.rank_major_reverse_groups()
-    trainer_dp_axis = self._dp_axis
-    if not p34:
-      _, trainer_dp_axis = _p59_replicated_data_mesh(
-          trainer_state, "P32 grouped trainer state"
-      )
+    _, trainer_dp_axis = _p59_replicated_data_mesh(
+        trainer_state, "P32 grouped trainer state"
+    )
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
 

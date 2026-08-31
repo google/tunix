@@ -1,0 +1,100 @@
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.1.mlp.down_proj (mn,np->mp, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=1216 N=2560
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=1216 Kp=1280 N=2560 Np=2560 contract_padded=1 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.1.mlp.down_proj M=256 Klocal=1216 Nlocal=2560
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=1216
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.1.mlp.up_proj M=256 Klocal=2560 Nlocal=1216
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=1216
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.1.mlp.gate_proj M=256 Klocal=2560 Nlocal=1216
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.1.self_attn.v_proj M=256 Klocal=2560 Nlocal=128
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.1.self_attn.k_proj M=256 Klocal=2560 Nlocal=128
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=512
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=512 Np=512 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.1.self_attn.q_proj M=256 Klocal=2560 Nlocal=512
+[P66.VMA] outer_check_enabled module=zt_tr_dp_parallel_bwd_layer_00 manual_axes=['data', 'model']
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_layer_00 tp=8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=256 F=2560
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.0.input_layernorm rows=256 F=2560 model=qwen3-4b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=512
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=512 Np=512 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=256 Klocal=2560 Nlocal=512
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_layer_00 tp=8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=1024 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.0.self_attn.q_norm rows=1024 F=128 model=qwen3-4b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.0.self_attn.k_proj M=256 Klocal=2560 Nlocal=128
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_layer_00 tp=8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=256 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.0.self_attn.k_norm rows=256 F=128 model=qwen3-4b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.0.self_attn.v_proj M=256 Klocal=2560 Nlocal=128
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_layer_00 tp=8
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.0.self_attn.o_proj (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=512 N=2560
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=512 Kp=512 N=2560 Np=2560 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.0.self_attn.o_proj M=256 Klocal=512 Nlocal=2560
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_layer_00 tp=8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=256 F=2560
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.0.post_attention_layernorm rows=256 F=2560 model=qwen3-4b
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=1216
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.0.mlp.gate_proj M=256 Klocal=2560 Nlocal=1216
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=8 site=gate_proj local_width=1216 declared_width=9728 layout_shards=1 pieces=1
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=1216
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.0.mlp.up_proj M=256 Klocal=2560 Nlocal=1216
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=8 site=up_proj local_width=1216 declared_width=9728 layout_shards=1 pieces=1
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_layer_00 tp=8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=256 F=1216
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=256 Mp=256 F=1216 Fp=1280 row_padded=0 feature_padded=1
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=256 Flocal=1216
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.0.mlp.down_proj (mn,np->mp, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=1216 N=2560
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=1216 Kp=1280 N=2560 Np=2560 contract_padded=1 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.0.mlp.down_proj M=256 Klocal=1216 Nlocal=2560
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=1216
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.0.mlp.up_proj M=256 Klocal=2560 Nlocal=1216
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=1216
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=1216 Np=1280 contract_padded=0 output_padded=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.0.mlp.gate_proj M=256 Klocal=2560 Nlocal=1216
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.0.self_attn.v_proj M=256 Klocal=2560 Nlocal=128
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.0.self_attn.k_proj M=256 Klocal=2560 Nlocal=128
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=256 K=2560 N=512
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=256 Mp=256 padded=0 K=2560 Kp=2560 N=512 Np=512 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=256 Klocal=2560 Nlocal=512
+[P66.VMA] outer_check_enabled module=zt_tr_dp_parallel_bwd_embed manual_axes=['data', 'model']
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_bwd_embed tp=8
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2011, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3999, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1622, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9308, in segmented_dp_grpo_value_and_grad
+[rank0]:     one_gradient, report = reverse_reduce_group(index, spec)
+[rank0]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9044, in reverse_reduce_group
+[rank0]:     raise FunctionalMappingError(
+[rank0]: tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: P59 report and grouped trainer data axes differ
