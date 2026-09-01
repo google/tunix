@@ -138,6 +138,26 @@ def render_two(
         f"frozenlake-{label}"
     )
     _set_env(document, additions)
+    head = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    affinity = head.setdefault("affinity", {})
+    pod_anti_affinity = affinity.setdefault("podAntiAffinity", {})
+    required_anti_affinity = pod_anti_affinity.setdefault(
+        "requiredDuringSchedulingIgnoredDuringExecution", []
+    )
+    anti_affinity_term = {
+        "labelSelector": {
+            "matchExpressions": [{
+                "key": "jobset.sigs.k8s.io/replicatedjob-name",
+                "operator": "In",
+                "values": ["pathways-head"],
+            }],
+        },
+        "topologyKey": "kubernetes.io/hostname",
+    }
+    if anti_affinity_term not in required_anti_affinity:
+      required_anti_affinity.append(anti_affinity_term)
     if label == "m15" and m15_tito_exact:
       _set_env(document, {"CANON_M15_TOKEN_CONTINUITY": "exact"})
     _write_yaml(path, document)
