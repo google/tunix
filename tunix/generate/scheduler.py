@@ -16,17 +16,18 @@
 
 import collections
 import logging
-from typing import Dict, List, Tuple, OrderedDict, Deque
+import numpy as np
 from tunix.generate import utils
-from tunix.generate.tiered_page_pool import TieredPagePoolManager
+import tunix.generate.tiered_page_pool as page_pool_lib
 
 logger = logging.getLogger(__name__)
-logging.disable(logging.CRITICAL)
+# logging.disable(logging.CRITICAL)
+
 
 class Request:
   """A request to be scheduled."""
 
-  def __init__(self, req_id: str, prompt_token_ids: List[int]):
+  def __init__(self, req_id: str, prompt_token_ids: list[int]):
     self.request_id = req_id
     self.prompt_length = len(prompt_token_ids)
 
@@ -40,8 +41,8 @@ class Request:
     self.num_completed_tokens = 0
     self.num_in_flight_tokens = 0
 
-    self.is_done = False
     self.is_decode = False
+    self.is_chunked_prefill = False
 
 
 class Scheduler:
@@ -49,32 +50,41 @@ class Scheduler:
 
   def __init__(
       self,
-      kv_cache_manager: TieredPagePoolManager,
+      kv_cache_manager: page_pool_lib.TieredPagePoolManager,
       max_num_batch_tokens: int,
       max_seqs_per_batch: int,
       max_tokens_to_generate: int,
-      eos_token_ids: int,
+      chunked_prefill_length: int,
+      eos_token_ids: list[int],
   ):
+    assert chunked_prefill_length > 0
+    assert chunked_prefill_length % 2 == 0
+    assert chunked_prefill_length <= max_num_batch_tokens
+
     # --- Scheduling parameters --
     self.max_seqs_per_batch: int = max_seqs_per_batch
     self.max_num_batch_tokens: int = max_num_batch_tokens
     self.max_tokens_to_generate: int = max_tokens_to_generate
-    self.eos_token_ids: int = eos_token_ids
+    self.chunked_prefill_length: int = chunked_prefill_length
+    self.eos_token_ids: list[int] = eos_token_ids
 
     # --- Seq state ---
-    self._running_requests: Deque[Request] = collections.deque()
-    self._pending_requests: Deque[Request] = collections.deque()
+    self._running_requests: collections.deque[Request] = collections.deque()
+    self._pending_requests: collections.deque[Request] = collections.deque()
+    self._scheduled_requests: list[Request] = []
 
     # --- KV cache state ---
-    self._kv_cache_manager: TieredPagePoolManager = kv_cache_manager
+    self._kv_cache_manager: page_pool_lib.TieredPagePoolManager = (
+        kv_cache_manager
+    )
 
-    self._prefix_hash_to_page_id: Dict[int, int] = {}
-    self._page_ref_counts: Dict[int, int] = {}
+    self._prefix_hash_to_page_id: dict[int, int] = {}
+    self._page_ref_counts: dict[int, int] = {}
 
-    self._unreferenced_tpu_page_ids: OrderedDict[int, None] = (
+    self._unreferenced_tpu_page_ids: collections.OrderedDict[int, None] = (
         collections.OrderedDict()
     )
-    self._unreferenced_cpu_page_ids: OrderedDict[int, None] = (
+    self._unreferenced_cpu_page_ids: collections.OrderedDict[int, None] = (
         collections.OrderedDict()
     )
 
@@ -98,6 +108,7 @@ class Scheduler:
   def _touch_page(self, page_id: int):
     """Mark that a page was referenced."""
     logger.info(f"Touched page {page_id}")
+
     if page_id not in self._page_ref_counts:
       self._page_ref_counts[page_id] = 1
     else:
@@ -126,13 +137,10 @@ class Scheduler:
 
   def _allocate(self, request: Request, num_pages: int):
     """Allocate TPU pages for a request."""
-    full_tokens = request.token_ids
     allocated_pages = self._kv_cache_manager.allocate_tpu_pages(num_pages)
     logger.info(f"Allocated {num_pages} pages")
 
-
     for pid in allocated_pages:
-      chunk_idx = len(request.page_ids)
       request.page_ids.append(pid)
       self._touch_page(pid)
 
@@ -140,7 +148,7 @@ class Scheduler:
     """Free unreferenced TPU pages, offloading to CPU where possible."""
     if num_pages <= 0:
       return
-  
+
     assert num_pages <= len(self._unreferenced_tpu_page_ids)
 
     cpu_shortfall = num_pages - self._num_free_cpu_pages
@@ -151,12 +159,14 @@ class Scheduler:
     pages_to_offload = []
     pages_to_discard = []
 
+    num_free_cpu = self._num_free_cpu_pages
     for _ in range(num_pages):
       pid, _ = self._unreferenced_tpu_page_ids.popitem(last=False)
 
-      if self._num_free_cpu_pages > 0:
+      if num_free_cpu > 0:
         pages_to_offload.append(pid)
         self._unreferenced_cpu_page_ids[pid] = None
+        num_free_cpu -= 1
       else:
         pages_to_discard.append(pid)
 
@@ -165,13 +175,12 @@ class Scheduler:
 
     if pages_to_discard:
       self._kv_cache_manager.evict(pages_to_discard)
-    
-    logger.info(
-      f"Freed {num_pages} unreferenced tpu pages."
-      f"{len(pages_to_offload)} pages were offloaded to the cpu."
-      f"{len(pages_to_discard)} pages were discarded."
-    )
 
+    logger.info(
+        f"Freed {num_pages} unreferenced tpu pages."
+        f"{len(pages_to_offload)} pages were offloaded to the cpu."
+        f"{len(pages_to_discard)} pages were discarded."
+    )
 
   def _free_up_unreferenced_cpu_space(self, num_pages: int):
     """Free unreferenced cpu pages."""
@@ -188,12 +197,19 @@ class Scheduler:
       del self._page_ref_counts[pid]
 
     self._kv_cache_manager.evict(pages_to_evict)
-    logger.info(
-      f"Freed {num_pages} unreferenced cpu pages."
-    )
+    logger.info(f"Freed {num_pages} unreferenced cpu pages.")
 
   # ----------- Request helpers -----------
-  def _chunk_and_hash(self, tokens: List[int], start_hash: int = 0) -> List[int]:
+  @property
+  def num_active_requests(self) -> int:
+    print("Num active: ", len(self._running_requests) + len(self._pending_requests))
+    return len(self._running_requests) + len(self._pending_requests)
+
+  def _chunk_and_hash(
+      self,
+      tokens: list[int],
+      start_hash: int = 0,
+  ) -> list[int]:
     """Returns the list of block hashes for a full sequence of tokens."""
     hashes = []
     parent_hash = start_hash
@@ -223,31 +239,31 @@ class Scheduler:
       matched_page_ids.append(pid)
 
     logger.info(
-      f"Found {len(matched_page_ids)} matched pages for Request {request.request_id}."
+        f"Found {len(matched_page_ids)} matched pages for Request"
+        f" {request.request_id}."
     )
 
     return matched_page_ids
 
   def _deduplicate_and_cache_full_pages(self, request):
-    """Hashes newly completed pages.
-
-    If a collision is found in the cache, deduplicates the page. 
-    """
+    """Hashes newly completed pages, and removes duplicates."""
 
     n_unhashed_tokens = (
-      request.num_completed_tokens % self._page_size +
-      request.num_inflight_tokens
+        request.num_completed_tokens % self._page_size
+        + request.num_in_flight_tokens
     )
-  
+
     n_unhashed_full_pages = n_unhashed_tokens // self._page_size
     if n_unhashed_full_pages == 0:
-      return 
+      return
 
     n_hashed_full_pages = request.num_completed_tokens // self._page_size
     n_hashed_tokens = n_hashed_full_pages * self._page_size
-    
+
     n_new_tokens_to_hash = n_unhashed_full_pages * self._page_size
-    new_tokens_to_hash = request.token_ids[n_hashed_tokens: n_hashed_tokens + n_new_tokens_to_hash]
+    new_tokens_to_hash = request.token_ids[
+        n_hashed_tokens : n_hashed_tokens + n_new_tokens_to_hash
+    ]
 
     start_hash = request.last_page_hash
     hashes = self._chunk_and_hash(new_tokens_to_hash, start_hash)
@@ -271,47 +287,58 @@ class Scheduler:
     request.last_page_hash = hashes[-1]
 
   def update_from_output(
-      self, 
-      generated_tokens: list[int], 
-      logits: list | None = None, 
-      logprobs: list | None = None
+      self,
+      generated_tokens: np.ndarray,
+      logits: np.ndarray | None = None,
+      logprobs: np.ndarray | None = None,
+      eos_token_ids: tuple[int, ...] | list[int] | None = None,
   ):
+    """Update the scheduler state from the output of the sampler."""
+    if eos_token_ids is None:
+      eos_token_ids = self.eos_token_ids
+
     completed_reqs = []
     surviving_reqs = []
 
-    for i, req in enumerate(self._running_requests):
-      new_token = generated_tokens[i]
-     
-      # TODO: Logprobs and logits should be stored with pages.
-      # Otherwise, they may be lost because of prefix matching. 
-      if logprobs is not None:
-          req.logprobs.append(logprobs[i])
-      if logits is not None:
-          req.logits.append(logits[i])
+    for req in self._running_requests:
+      idx = self._scheduled_requests.index(req)
+      new_token = generated_tokens[idx]
+      req.token_ids.append(new_token)
 
-      terminated = new_token in self.eos_token_ids       
+      # TODO: Logprobs and logits should be stored alongside pages.
+      # Otherwise, they may be lost because of prefix matching.
+      if logprobs is not None:
+        req.logprobs.append(logprobs[idx])
+      if logits is not None:
+        req.logits.append(logits[idx])
+
+      terminated = new_token in eos_token_ids
       truncated = (
           len(req.token_ids) - req.prompt_length
       ) >= self.max_tokens_to_generate
 
       if terminated or truncated:
+        if terminated:
+          print("terminated")
+        if truncated:
+          print("truncated")
+        assert len(req.token_ids) > 0
+
         for pid in reversed(req.page_ids):
-            self._release_page(pid)
-        
-        if new_token not in self.eos_token_ids:
-          new_token = self.eos_token_ids[0] 
-        req.token_ids.append(new_token)
+          self._release_page(pid)
+
+        if truncated and not terminated:
+          req.token_ids[-1] = eos_token_ids[0]
 
         completed_reqs.append(req)
       else:
-        req.token_ids.append(new_token)
         self._deduplicate_and_cache_full_pages(req)
         surviving_reqs.append(req)
 
-      req.num_completed_tokens += req.num_inflight_tokens
-      req.num_inflight_tokens = 0
+      req.num_completed_tokens += req.num_in_flight_tokens
+      req.num_in_flight_tokens = 0
 
-    self._running_requests = surviving_reqs
+    self._running_requests = collections.deque(surviving_reqs)
 
     return completed_reqs
 
@@ -328,50 +355,63 @@ class Scheduler:
 
     self._pending_requests.appendleft(preempted_request)
 
-    logger.info(
-      f"Preempted request {preempted_request.request_id}."
-    )
+    logger.info(f"Preempted request {preempted_request.request_id}.")
 
   def schedule_step(
-      self, new_requests: List[Request]
-  ) -> Tuple[List[Request], List[int]]:
-    """Select the requests to sample in the next step, and ensure their pages are loaded
-    on to the TPU.
+      self, new_requests: list[Request]
+  ) -> tuple[list[Request], list[int]]:
+    """Select the requests to sample in the next step, and fetch their pages.
 
-    Requests are scheduled in order of arrival untill the batch reaches either
+    Requests are scheduled in order of arrival until the batch reaches either
     `max_num_batch_tokens` compute tokens or `max_seqs_per_batch` requests.
+
+    Args:
+      new_requests: The requests that were added to the scheduler in the current
+        step.
     """
 
     self._num_decodes = 0
     self._num_prefills = 0
 
     self._token_budget = self.max_num_batch_tokens
-    self._deduplicate_and_cache_full_pages()
-
     self._queue_new_requests(new_requests)
 
     self._schedule_running_sequences()
     self._schedule_pending_sequences()
-    
-    decodes = [r for r in self._running_requests if r.is_decode]
-    prefills = [r for r in self._running_requests if not r.is_decode]
 
-    # TODO: We may want to support chunked prefill in cases of long prompts.
-    i = len(decodes)        # n_decodes 
-    j = i + 0               # n_decodes + n_chunked
-    k = j + len(prefills)   # n_decodes + n_chunked + n_prefills
-    
-    # The RPA kernel expects [decodes, prefills]. Genrally, 
-    # running_requests will have the same order as ordered_requests.
-    # Exceptions can occur if req_{n+1} prefix matched all of its
-    # prompt tokens, but req_n has not.
- 
-    ordered_requests = decodes + prefills
+    assert (
+        len(self._running_requests) > 0 or
+        self.num_active_requests == 0
+    )
+
+    decodes = []
+    prefills = []
+    chunked = []
+
+    for r in self._running_requests:
+      if r.is_decode:
+        decodes.append(r)
+      elif r.is_chunked_prefill:
+        chunked.append(r)
+      else:
+        prefills.append(r)
+
+    i = len(decodes)
+    j = i + len(chunked)
+    k = j + len(prefills)
+
+    self._num_decodes = len(decodes)
+    self._num_prefills = len(prefills)
+    self._num_chunked_prefills = len(chunked)
+
+    # The RPA kernel expects [decodes, chunked, prefills] ordering.
+    ordered_requests = decodes + chunked + prefills
+    self._scheduled_requests = ordered_requests
     distribution = [i, j, k]
 
     return ordered_requests, distribution
 
-  def _queue_new_requests(self, new_requests: List[Request]):
+  def _queue_new_requests(self, new_requests: list[Request]):
     """Insert new requests into the pending queue."""
     for req in new_requests:
       self._pending_requests.append(req)
@@ -390,17 +430,26 @@ class Scheduler:
     n_running_admitted = 0
     while n_running_admitted < len(self._running_requests):
       if (
-          self._token_budget <= 0
-          or n_running_admitted >= self.max_seqs_per_batch
+          self._token_budget <= 0 or
+          n_running_admitted >= self.max_seqs_per_batch
       ):
         break
 
       req = self._running_requests[n_running_admitted]
 
       # --- Compute page requirements ---
-      n_tokens_to_compute = len(req.token_ids) - req.num_completed_tokens
-      if n_tokens_to_compute > self._token_budget:
-        break
+      n_tokens_remaining = len(req.token_ids) - req.num_completed_tokens
+
+      # If the (prefill) request has more tokens remaining than the token
+      # budget, we attempt to schedule a chunked prefill.
+      if n_tokens_remaining > self._token_budget:
+        if self._token_budget < self.chunked_prefill_length:
+          break
+        n_tokens_to_compute = self.chunked_prefill_length
+        is_chunked_prefill = True
+      else:
+        n_tokens_to_compute = n_tokens_remaining
+        is_chunked_prefill = False
 
       n_total_pages_needed = utils.cdiv(
           req.num_completed_tokens + n_tokens_to_compute, self._page_size
@@ -412,6 +461,9 @@ class Scheduler:
       # retry Scheduling.
       if n_new_pages_needed > n_pages_available:
         self._preempt()
+        n_pages_available = self._num_free_tpu_pages + len(
+            self._unreferenced_tpu_page_ids
+        )
         continue
 
       # --- Assign new pages to request ---
@@ -427,14 +479,24 @@ class Scheduler:
       self._token_budget -= n_tokens_to_compute
       n_running_admitted += 1
 
-      req.is_decode = True 
-      logger.info(
-        f"Scheduled decode request {req.request_id}."
-      )
+      if (
+          req.num_completed_tokens >= req.prompt_length and
+          n_tokens_to_compute == 1
+      ):
+        req.is_decode = True
+        logger.info(f"Scheduled decode request {req.request_id}.")
+      else:
+        req.is_decode = False
+        req.is_chunked_prefill = is_chunked_prefill
+        logger.info(
+            f"Scheduled {n_tokens_to_compute} tokens for prefill request"
+            f" {req.request_id}."
+        )
 
-    # Verify that deadlock did not occur.
-    assert n_running_admitted > 0
-    
+    # Verify that deadlock did not occur (use exception since opt strips asserts)
+    if n_running_admitted <= 0:
+      raise RuntimeError("Deadlock occurred: No running requests were admitted.")
+
     # We must preempt the remaining unscheduled requests if the token
     # budget is exceeded.
     while n_running_admitted < len(self._running_requests):
@@ -459,14 +521,24 @@ class Scheduler:
 
       n_tokens = len(req.token_ids)
       n_matched_tokens = len(matched_page_ids) * self._page_size
-      
-      n_tokens_to_compute = n_tokens - n_matched_tokens
-      if n_tokens_to_compute > self._token_budget:
-        break
+
+      n_tokens_remaining = n_tokens - n_matched_tokens
+
+      # If the (prefill) request has more tokens remaining than the token
+      # budget, we attempt to schedule a chunked prefill.
+      if n_tokens_remaining > self._token_budget:
+        if self._token_budget < self.chunked_prefill_length:
+          break
+        n_tokens_to_compute = self.chunked_prefill_length
+        is_chunked_prefill = True
+      else:
+        n_tokens_to_compute = n_tokens_remaining
+        is_chunked_prefill = False
 
       n_tokens_to_load = n_tokens_to_compute + n_matched_tokens
       n_total_pages_needed = utils.cdiv(n_tokens_to_load, self._page_size)
       n_new_pages_needed = n_total_pages_needed - len(matched_page_ids)
+
 
       n_cpu_pages_used = sum(
           1
@@ -487,6 +559,10 @@ class Scheduler:
         self._touch_page(pid)
         req.page_ids.append(pid)
 
+      if n_new_pages_needed > self._num_free_tpu_pages:
+        shortfall = n_new_pages_needed - self._num_free_tpu_pages
+        self._free_up_unreferenced_tpu_space(shortfall)
+
       self._allocate(req, n_new_pages_needed)
 
       # --- Schedule request ---
@@ -498,20 +574,16 @@ class Scheduler:
       req.num_completed_tokens = n_matched_tokens
 
       n_free_tpu -= n_total_tpu_cost
-      
- 
-      if (
-        n_matched_tokens >= req.prompt_length and 
-        n_tokens_to_compute == 1
-      ):
+
+      if n_matched_tokens >= req.prompt_length and n_tokens_to_compute == 1:
         req.is_decode = True
-        logger.info(
-          f"Scheduled decode request {req.request_id}."
-        )
+        logger.info(f"Scheduled decode request {req.request_id}.")
       else:
-        req.is_decode = False 
+        req.is_decode = False
+        req.is_chunked_prefill = is_chunked_prefill
         logger.info(
-          f"Scheduled {n_tokens_to_compute} tokens for prefill request {req.request_id}."
+            f"Scheduled {n_tokens_to_compute} tokens for prefill request"
+            f" {req.request_id}."
         )
 
     n_physically_free = self._num_free_tpu_pages

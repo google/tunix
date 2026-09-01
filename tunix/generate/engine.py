@@ -10,9 +10,6 @@ from tunix.generate import scheduler
 from tunix.generate import tiered_page_pool as tiered_page_lib
 from tunix.generate import utils
 
-import os
-# os.environ["TPU_STDERR_LOG_LEVEL"] = "0" # Forward all C++ logs to stderr
-# os.environ["llo_log_report_handler"] = "1" # Forward all C++ logs to stderr
 
 def create_kv_page_manager(
     cache_config,
@@ -35,13 +32,14 @@ def create_kv_page_manager(
 
   # TODO: Check if a model defines an init cache function.
   # If so, use it to initalize the cache.
+
   # TODO: Utilizing this function should throw a deprecated warning.
   partition_keys = tuple(f'layer_{i}' for i in range(num_layers))
   page_subshape = (packed_kv_dim, kv_packing, head_dim)
   logical_subsharding = ('tp', None, None)
   logical_page_sharding = 'dp'
 
-  # TODO: This should be cleaner.
+  # TODO: We should not have to explicitly construct the logical sharding here.
   logical_tpu_sharding = (logical_page_sharding, None) + logical_subsharding
   num_tpu_pages = utils.calculate_pages_for_capacity(
       cache_config.max_tpu_bytes,
@@ -94,14 +92,12 @@ class LLMEngine:
       self,
       transformer: 'nnx.Module',
       tokenizer: Any,
-      cache_config: Any,
-      image_processor: Any | None = None,
+      cache_config: sampler_lib.CacheConfig,
   ):
     self.transformer = transformer
     self.tokenizer = tokenizer
     self.cache_config = cache_config
     self.max_num_batch_tokens = cache_config.max_num_batch_tokens
-    
 
     self._new_requests = []
     self.max_seq_len = (
@@ -111,7 +107,6 @@ class LLMEngine:
     self.sampler = sampler_lib.VanillaSampler(
         transformer=transformer,
         cache_config=cache_config,
-        image_processor=image_processor,
     )
 
     model_config = self.transformer.config  # pytype: disable=attribute-error
@@ -162,9 +157,10 @@ class LLMEngine:
         max_num_batch_tokens=self.max_num_batch_tokens,
         max_seqs_per_batch=self.cache_config.max_num_seqs,
         max_tokens_to_generate=self.cache_config.max_tokens_to_generate,
-        eos_token_ids=eos_ids
+        chunked_prefill_length=self.cache_config.chunked_prefill_size,
+        eos_token_ids=eos_ids,
     )
-  
+
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
@@ -180,7 +176,7 @@ class LLMEngine:
     else:
       input_ids = np.array(input_ids, dtype=np.int32)
     return input_ids
-  
+
   def add_request(self, req_id: str, prompt: str, **kwargs):
     token_ids = self.tokenize(prompt)
     req = scheduler.Request(req_id, list(token_ids))
@@ -193,8 +189,7 @@ class LLMEngine:
   def has_unfinished_requests(self) -> bool:
     return (
         len(self._new_requests) > 0
-        or len(self.scheduler._pending_requests) > 0
-        or len(self.scheduler._running_requests) > 0
+        or self.scheduler.num_active_requests > 0
     )
 
   def step(
@@ -202,40 +197,39 @@ class LLMEngine:
       sampling_config: sampler_lib.SamplingConfig | None = None,
       return_logits: bool = False,
   ):
+    """One physical iteration of the continuous batch engine."""
     if sampling_config is None:
       sampling_config = sampler_lib.SamplingConfig()
-    """One physical iteration of the continuous batch engine."""
 
     ordered_reqs, distribution_list = self.scheduler.schedule_step(
         self._new_requests
     )
     self._new_requests.clear()
     if not ordered_reqs:
-      return
-
-    j = distribution_list[1]  # num_decode + num (chunked) prefill.
-    k = distribution_list[2]  # j + num full prefill.
+      return []
 
     # --- Form ragged inputs for the attention kernel ---
     max_n_batch_tokens = (
         self.max_num_batch_tokens
     )  # TODO (AGT): Move to and get from sampling config
     max_n_seqs = self.cache_config.max_num_seqs
-    max_seq_len = (
-        self.max_seq_len
-    )  # TODO (AGT): Move to and get from sampling config
-    max_n_pages_per_seq = utils.cdiv(max_seq_len, self.cache_config.page_size)
+    max_n_pages_per_seq = utils.cdiv(
+        self.max_seq_len, self.cache_config.page_size
+    )
+
+    # Ensure that we have enough space in the input buffers.
+    # Otherwise, deadlock can occur if a sequence is offloaded
+    # with length greater than the max_n_batch_tokens. This
+    # constraint can be relaxed once chunked prefill is supported.
+    assert max_n_batch_tokens >= self.max_seq_len
 
     tokens = np.zeros(max_n_batch_tokens, dtype=np.int32)
     query_lens = np.zeros(max_n_seqs, dtype=np.int32)
     kv_lens = np.zeros(max_n_seqs, dtype=np.int32)
-    page_indices = np.zeros(
-        (max_n_seqs, max_n_pages_per_seq), dtype=np.int32
-    )
+    page_indices = np.zeros((max_n_seqs, max_n_pages_per_seq), dtype=np.int32)
     distribution = np.array(distribution_list, dtype=np.int32)
 
     total_n_batch_tokens = 0
-    total_n_pages = 0
     for i, req in enumerate(ordered_reqs):
       n_completed = req.num_completed_tokens
       n_in_flight = req.num_in_flight_tokens
@@ -247,12 +241,12 @@ class LLMEngine:
 
       kv_lens[i] = n_completed + n_in_flight
       query_lens[i] = n_in_flight
-      
+
       phys_idxs = [self.cache_manager.get_page_idx(pid) for pid in req.page_ids]
-      page_indices[i, :len(phys_idxs)] = phys_idxs
+      page_indices[i, : len(phys_idxs)] = phys_idxs
 
       total_n_batch_tokens += n_in_flight
-    
+
     metadata = sampler_lib.RPAMetadata(
         page_indices=jnp.array(page_indices),
         query_lens=jnp.array(query_lens),
@@ -273,7 +267,10 @@ class LLMEngine:
     # we must update pages outside of the sampler
     self.cache_manager.update_tpu_pool(next_cache)
 
-    completed_reqs = self.scheduler.update_from_output(gen_tokens, logits, logp)
-   
+    completed_reqs = self.scheduler.update_from_output(
+        gen_tokens, logits, logp,
+        eos_token_ids=sampling_config.eos_token_ids if sampling_config else None
+    )
+
     return completed_reqs
 

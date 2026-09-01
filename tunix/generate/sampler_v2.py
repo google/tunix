@@ -1,15 +1,17 @@
+"""Sampler for tunix."""
+
 import dataclasses
-from typing import Any, List, Optional, Tuple
+import inspect
 from flax import nnx
 from flax import struct
 from flax.nnx import filterlib
 from flax.nnx import graph
 from flax.nnx import statelib
-import inspect
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+Cache = dict[str, jax.Array]
 
 @struct.dataclass
 class RPAMetadata:
@@ -61,12 +63,13 @@ class CacheConfig:
   """Serving & execution config."""
 
   page_size: int = 16
-  max_num_seqs: int = 32 
-  max_prompt_length: int = 128 
-  max_tokens_to_generate: int = 896 
+  max_num_seqs: int = 32
+  max_prompt_length: int = 128
+  max_tokens_to_generate: int = 896
   max_tpu_bytes: int = 1 * 1024**3
   max_cpu_bytes: int = 0
-  max_num_batch_tokens: int = 1024 
+  max_num_batch_tokens: int = 4096
+  chunked_prefill_size: int = 1024
 
 
 def sample_top_p(
@@ -130,9 +133,8 @@ class VanillaSampler:
 
   def __init__(
       self,
-      transformer: Any,  # FIX: any -> Any
-      cache_config: Any,
-      image_processor: Any | None = None,
+      transformer: nnx.Module,
+      cache_config: CacheConfig,
       seed: int = 0,
   ):
     self._transformer_graphdef = nnx.graphdef(transformer)
@@ -142,18 +144,10 @@ class VanillaSampler:
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
-    config = (
-        transformer.config
-        if hasattr(transformer, 'config')
-        else getattr(transformer, 'model_config', None)
-    )
-
     self._supports_decode_only_last_token = (
         'decode_only_last_token'
         in inspect.signature(transformer.__call__).parameters
     )
-
-
 
     self.cache_config = cache_config
     self._seed = seed
@@ -164,7 +158,6 @@ class VanillaSampler:
     self._compiled_sample_step = jax.jit(
         self._sample_step,
         static_argnames=['sampling_config'],
-        compiler_options={"xla_tpu_enable_log_recorder": "true"},
     )
 
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
@@ -273,15 +266,13 @@ class VanillaSampler:
 
   def _sample_step(
       self,
-      params: Any,
+      params: statelib.State,
       step_count: int,
-      cache: Any,
-      tokens: np.ndarray,
+      cache: Cache,
+      tokens: jnp.ndarray,
       metadata: RPAMetadata,
       sampling_config: SamplingConfig,
-  ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, Any, Any]:
-
-    batch_size = metadata.kv_lens.shape[0]
+  ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, Cache, int]:
 
     logits, updated_cache = self._model_step_fn(
         params,
@@ -289,41 +280,48 @@ class VanillaSampler:
         tokens,
         metadata,
     )
-    """
+
     if sampling_config.forbidden_token_ids:
-      logits = logits.at[:, :, sampling_config.forbidden_token_ids].set(-jnp.inf)
-    """
-    
+      logits = logits.at[
+          :, :, sampling_config.forbidden_token_ids
+      ].set(-jnp.inf)
+
     key = jax.random.fold_in(jax.random.PRNGKey(self._seed), step_count)
-    tokens, logp = sample_top_p(  # pytype: disable=bad-assignment
-        logits,
-        key,
-        temperature=sampling_config.temperature,
-        top_p=sampling_config.top_p,
-        top_k=sampling_config.top_k,
-        return_logprobs=sampling_config.return_logprobs,
-    ) # pytype: disable=bad-assignment
+    if sampling_config.temperature == 0.0:
+      tokens, logp = sample_best(
+          logits,
+          return_logprobs=sampling_config.return_logprobs,
+      )
+    else:
+      tokens, logp = sample_top_p(  # pytype: disable=bad-assignment
+          logits,
+          key,
+          temperature=sampling_config.temperature,
+          top_p=sampling_config.top_p,
+          top_k=sampling_config.top_k,
+          return_logprobs=sampling_config.return_logprobs,
+      )  # pytype: disable=bad-assignment
 
     return tokens, logits, logp, updated_cache, step_count + 1  # pytype: disable=bad-return
 
   def sample_step(
       self,
-      cache: Any,
-      tokens: np.ndarray,
+      cache: Cache,
+      tokens: jnp.ndarray,
       metadata: RPAMetadata,
       sampling_config: SamplingConfig,
-      # static_token_capacity: int = 1000,
-  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, Any]:
+  ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, Cache]:
+    """Performs a single sampling step."""
 
     tokens, logits, logp, updated_cache, self._step_count = (
-      self._compiled_sample_step(
-          self._flattened_transformer_state,
-          self._step_count,
-          cache,
-          tokens,
-          metadata,
-          sampling_config,
-      )
+        self._compiled_sample_step(
+            self._flattened_transformer_state,
+            self._step_count,
+            cache,
+            tokens,
+            metadata,
+            sampling_config,
+        )
     )
 
     tokens_cpu = jax.device_get(tokens)
@@ -334,14 +332,16 @@ class VanillaSampler:
 
   def _model_step_fn(
       self,
-      params: Any,
-      cache: Any,
+      params: statelib.State,
+      cache: Cache,
       packed_tokens: jnp.ndarray,
       metadata: RPAMetadata,
-  ) -> Tuple[jnp.ndarray, Any]:
+  ) -> tuple[jnp.ndarray, Cache]:
+    """Performs a single model step."""
+
     transformer = nnx.merge(self._transformer_graphdef, params)
     kwargs = {}
-    decode_only_last_token = self._supports_decode_only_last_token and not echo
+    decode_only_last_token = self._supports_decode_only_last_token
     if decode_only_last_token:
       kwargs['decode_only_last_token'] = True
 
@@ -368,13 +368,12 @@ class VanillaSampler:
 
     return last_token_logits, updated_cache
 
-
-@dataclasses.dataclass
+@struct.dataclass
 class SamplerOutput:
   """Output of the sampler."""
 
-  text: List[str]
-  logits: Optional[List[Any]]
-  tokens: List[Any]
-  logprobs: Optional[List[Any]] = None
+  text: list[str]
+  logits: list[np.ndarray] | None
+  tokens: list[np.ndarray]
+  logprobs: list[np.ndarray] | None = None
 
