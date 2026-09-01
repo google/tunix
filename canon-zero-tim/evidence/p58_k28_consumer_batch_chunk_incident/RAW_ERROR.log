@@ -1,0 +1,1000 @@
+[PERF] stage=rollout_generate seconds=70.675 rows=1
+INFO:root:[SWEEnv group=9 pair=2] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=9 pair=2] env.step done in 0.09s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=110.890 rows=1
+INFO:root:[SWEEnv group=12 pair=11] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=12 pair=11] env.step done in 0.08s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=25.450 rows=1
+[PERF] stage=rollout_generate seconds=89.681 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=26 function=file_editor
+INFO:root:[SWEEnv group=11 pair=7] env.step start step=9 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.17s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=8047 sha256=b3a0f1d279ab58ee692dd262185ac5b8938b169bec60ebf2e02a8f6ab9e34f9b
+INFO:root:[SWEEnv group=11 pair=7] env.step done in 0.21s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=10 prompt_tokens=7927 sha256=30749bd008ac9e1ec66c30673bcb07cfd90aff257f938ac6d66e7cfd3b0a5402
+INFO 09-01 09:37:46 [loggers.py:273] Engine 000: Avg prompt throughput: 8693.2 tokens/s, Avg generation throughput: 189.5 tokens/s, Running: 37 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.2%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=12 pair=11] closing RepoEnv
+INFO:root:[SWEEnv group=9 pair=2] closing RepoEnv
+[PERF] stage=rollout_generate seconds=70.200 rows=1
+INFO:root:[SWEEnv group=12 pair=12] env.step start step=18 function=finish
+INFO:root:[SWEEnv group=12 pair=12] env.step done in 0.10s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=232.434 rows=1
+INFO:root:[SWEEnv group=11 pair=10] env.step start step=14 function=finish
+INFO:root:[SWEEnv group=11 pair=10] env.step done in 0.10s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=70.441 rows=1
+INFO:root:[SWEEnv group=12 pair=2] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=12] closing RepoEnv
+INFO:root:[SWEEnv group=12 pair=2] env.step done in 0.16s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=7693 sha256=64b03587bd4c27aa0c18c7ec6a0084bad0103f3cb1222f0c14e4092624856798
+INFO:root:[SWEEnv group=11 pair=10] closing RepoEnv
+[PERF] stage=rollout_generate seconds=28.123 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.46s done=False reward=0 chars=385
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9660 sha256=454145db1156b1190caf67d9c3319947edd45432bcfd92c1a2d2c59251818665
+[PERF] stage=rollout_generate seconds=65.764 rows=1
+INFO:root:[SWEEnv group=13 pair=4] env.step start step=17 function=file_editor
+INFO:root:[SWEEnv group=13 pair=4] env.step done in 0.08s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=8980 sha256=201ffbb60e4f2435cf7b2252230395622954a2240137596aff15668be73f9c60
+INFO 09-01 09:37:51 [loggers.py:273] Engine 000: Avg prompt throughput: 5058.2 tokens/s, Avg generation throughput: 187.5 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=81.598 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=17 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=8741 sha256=6d274e30864e234390a0c8cc4ebb96badd25ae13e16c2caf31d51d3096286035
+[PERF] stage=rollout_generate seconds=61.382 rows=1
+INFO:root:[SWEEnv group=10 pair=1] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=10 pair=1] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=10756 sha256=43690e208d1917e4c114def1cc5e9859b724225452062cc08a72d368f322f844
+[PERF] stage=rollout_generate seconds=38.118 rows=1
+INFO:root:[SWEEnv group=11 pair=5] env.step start step=10 function=execute_bash
+[PERF] stage=rollout_generate seconds=50.066 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=5] env.step done in 0.47s done=False reward=0 chars=145
+[DEEPSWE.TITO] CONTINUATION turn=11 prompt_tokens=7902 sha256=238d525dc54f8841f207e14d21b8743e7ca148b4bf5f3aa7ac37fb32f962844e
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.14s done=False reward=0 chars=172
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9903 sha256=cb232a23d8fabb9861674667685d4a9b20a1114ac6f8a461c69cda1489a67c3a
+INFO 09-01 09:37:56 [loggers.py:273] Engine 000: Avg prompt throughput: 1634.0 tokens/s, Avg generation throughput: 161.4 tokens/s, Running: 35 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=83.718 rows=1
+INFO:root:[SWEEnv group=15 pair=6] env.step start step=14 function=file_editor
+INFO:root:[SWEEnv group=15 pair=6] env.step done in 0.20s done=False reward=0 chars=826
+[DEEPSWE.TITO] CONTINUATION turn=15 prompt_tokens=9729 sha256=21cb57eba3a08241eb2abd0bb2be47fc0f6732909dfb63377aa4500241643af4
+INFO 09-01 09:38:01 [loggers.py:273] Engine 000: Avg prompt throughput: 6493.3 tokens/s, Avg generation throughput: 175.2 tokens/s, Running: 35 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=37.307 rows=1
+INFO:root:[SWEEnv group=8 pair=14] env.step start step=19 function=file_editor
+INFO:root:[SWEEnv group=8 pair=14] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=14042 sha256=d17336fb23f54c6c62ed6544303a339db646e8623e42fcbdbdd1b151b2ea6c36
+[PERF] stage=rollout_generate seconds=49.360 rows=1
+INFO:root:[SWEEnv group=12 pair=15] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=15] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=7838 sha256=cd72f5b21ccb80b7b7f6fcf8931aa56c326b7d7b7d924be2fe0fcdb6c1bddeaf
+[PERF] stage=rollout_generate seconds=27.878 rows=1
+[PERF] stage=rollout_generate seconds=80.021 rows=1
+INFO:root:[SWEEnv group=11 pair=1] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=20 function=file_editor
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.19s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=10751 sha256=b2e2df84021b32f67e68900514239b250c089a970671102e989529b9819195a3
+[PERF] stage=rollout_generate seconds=29.705 rows=1
+INFO 09-01 09:38:06 [loggers.py:273] Engine 000: Avg prompt throughput: 4517.0 tokens/s, Avg generation throughput: 176.7 tokens/s, Running: 32 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=11 pair=1] env.step done in 0.40s done=False reward=0 chars=426
+INFO:root:[SWEEnv group=9 pair=1] env.step start step=16 function=execute_bash
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=7616 sha256=faf6b68b5bd6a5f12cc2dc9ceba2b9210f2330a381d966694a5d58c1ed0b3739
+INFO:root:[SWEEnv group=9 pair=1] env.step done in 0.15s done=False reward=0 chars=2860
+[DEEPSWE.TITO] CONTINUATION turn=17 prompt_tokens=8636 sha256=2e2bf5af0a3e5438369beb9b655769210c7193dd5078975074ad4dfda80509a9
+[PERF] stage=rollout_generate seconds=36.342 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.19s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=8694 sha256=acf2cf555e54691adbbcfeb005d266338d2f335122e9e94d24e0015b0dcf2367
+[PERF] stage=rollout_generate seconds=59.674 rows=1
+INFO:root:[SWEEnv group=11 pair=8] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=8] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=9496 sha256=f49f385ac867aa101570327bab4aff514c77f6ee95acccb6a8bea2d1672dbceb
+[PERF] stage=rollout_generate seconds=71.782 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=14 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.15s done=False reward=0 chars=156
+[DEEPSWE.TITO] CONTINUATION turn=15 prompt_tokens=8041 sha256=898d1260c1c61133f44914b00603fb8c7c64c71aeee1a851e10c6ada2ec1f8fc
+[PERF] stage=rollout_generate seconds=54.177 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=22 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.22s done=False reward=0 chars=429
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=8421 sha256=1ab8708d39bd9fe2be5da851e28ac75c107b9b1fa399ad6fd9634215cece3f15
+[PERF] stage=rollout_generate seconds=37.708 rows=1
+INFO:root:[SWEEnv group=15 pair=0] env.step start step=9 function=file_editor
+INFO:root:[SWEEnv group=15 pair=0] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=10 prompt_tokens=9358 sha256=ea08d0fd382e571e43d2ce1e7435e395884d4593003aa5e2adf43e045fd66ef5
+INFO 09-01 09:38:11 [loggers.py:273] Engine 000: Avg prompt throughput: 3158.3 tokens/s, Avg generation throughput: 144.9 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=28.349 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=27 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.16s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=8275 sha256=c74d4e5405e4d094734ce04084ea16bcee0c1b59da5a571d232f753dae6f852f
+[PERF] stage=rollout_generate seconds=96.863 rows=1
+INFO:root:[SWEEnv group=14 pair=2] env.step start step=18 function=finish
+INFO:root:[SWEEnv group=14 pair=2] env.step done in 0.10s done=True reward=0 chars=16
+INFO 09-01 09:38:16 [loggers.py:273] Engine 000: Avg prompt throughput: 15151.9 tokens/s, Avg generation throughput: 157.0 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.2%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=14 pair=2] closing RepoEnv
+[PERF] stage=rollout_generate seconds=27.715 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.16s done=False reward=0 chars=469
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=9911 sha256=a5c5d96e450e686fa3541eff58bfa4a65dbf4ec36bc686aff99d8fbde92c9075
+INFO 09-01 09:38:22 [loggers.py:273] Engine 000: Avg prompt throughput: 4564.6 tokens/s, Avg generation throughput: 186.2 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=108.657 rows=1
+INFO:root:[SWEEnv group=15 pair=13] env.step start step=23 function=file_editor
+INFO:root:[SWEEnv group=15 pair=13] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=6918 sha256=968887aa0e94f409c18eaa5ca136104f22e4845e1a4734e2a100671447c9a734
+[PERF] stage=rollout_generate seconds=53.634 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=18 function=search
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.20s done=False reward=0 chars=271
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=9943 sha256=2c812f924a87621854b5c6ae0ebdc49af6fc1adfd36a5fa9731df90d2f331002
+[PERF] stage=rollout_generate seconds=54.159 rows=1
+INFO:root:[SWEEnv group=13 pair=12] env.step start step=20 function=file_editor
+INFO:root:[SWEEnv group=13 pair=12] env.step done in 0.09s done=False reward=0 chars=76
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9089 sha256=7d483f0b58a87b8781aaac92be7278c2e69e192a94dd483ec1b8e4b3e6e222b7
+INFO 09-01 09:38:26 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 167.0 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=33.535 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.16s done=False reward=0 chars=342
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=8999 sha256=3d5c562df4324a2066bdaa466bf785e9a807e67ab98fee19af1421da3e2c3561
+[PERF] stage=rollout_generate seconds=17.929 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=23 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.17s done=False reward=0 chars=498
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=8609 sha256=9eb53a33c3b152b99ef423f5253aeaa7d286d9b46e5031f4c7d2e9281e604dd4
+[PERF] stage=rollout_generate seconds=56.574 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=17 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.17s done=False reward=0 chars=315
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=11540 sha256=e4b91db797fe4f0d3cb2465bc9b6ff079d191f74619f370d6c60d0513eec6fb6
+[PERF] stage=rollout_generate seconds=54.328 rows=1
+INFO:root:[SWEEnv group=11 pair=13] env.step start step=13 function=file_editor
+INFO:root:[SWEEnv group=11 pair=13] env.step done in 0.18s done=False reward=0 chars=504
+[DEEPSWE.TITO] CONTINUATION turn=14 prompt_tokens=8188 sha256=f0816480d4f7090d5c32e7879fb4209ab5955e9be243befc84d54ae516dead3d
+[PERF] stage=rollout_generate seconds=40.058 rows=1
+INFO:root:[SWEEnv group=13 pair=4] env.step start step=18 function=file_editor
+INFO:root:[SWEEnv group=13 pair=4] env.step done in 0.07s done=False reward=0 chars=76
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=9198 sha256=59a6bc0cdd7b9f7d0862038e4cea1f670fd4d69b5460fb122837fd4a632d4289
+INFO 09-01 09:38:32 [loggers.py:273] Engine 000: Avg prompt throughput: 4589.4 tokens/s, Avg generation throughput: 165.6 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=30.818 rows=1
+INFO:root:[SWEEnv group=8 pair=14] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=14] env.step done in 0.17s done=False reward=0 chars=207
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=14227 sha256=9fcf81bb4b02c1bfaa0ed46559c052644043b5abede47b1036c2d7096338b991
+INFO 09-01 09:38:36 [loggers.py:273] Engine 000: Avg prompt throughput: 6404.9 tokens/s, Avg generation throughput: 159.8 tokens/s, Running: 34 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=70.372 rows=1
+INFO:root:[SWEEnv group=13 pair=15] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=13 pair=15] env.step done in 0.09s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=48.821 rows=1
+INFO:root:[SWEEnv group=12 pair=2] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=2] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=7968 sha256=87040eb5db8a8d267fed7100e36afe6b4987e838b759146d01ae7d4909f82312
+[PERF] stage=rollout_generate seconds=25.763 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=28 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=8491 sha256=5eb9bdc2b8c129dd10915ab7e6f460083e0786160055095e0cda9e47f876ba98
+[PERF] stage=rollout_generate seconds=32.822 rows=1
+INFO:root:[SWEEnv group=11 pair=8] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=8] env.step done in 0.13s done=False reward=0 chars=1409
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=10129 sha256=b4cfce2fedac80b3349e783411c681a8b5b13afd6ca8b4b4e96cec2d2143a54e
+INFO 09-01 09:38:42 [loggers.py:273] Engine 000: Avg prompt throughput: 4881.6 tokens/s, Avg generation throughput: 166.9 tokens/s, Running: 33 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=13 pair=15] closing RepoEnv
+[PERF] stage=rollout_generate seconds=39.732 rows=1
+INFO:root:[SWEEnv group=12 pair=15] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=15] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=8062 sha256=0f15428b74eb50ca46696e87edfc53eb2faf841ffe19c05a1c59b01c2aa83a3f
+[PERF] stage=rollout_generate seconds=82.953 rows=1
+INFO:root:[SWEEnv group=15 pair=10] env.step start step=19 function=file_editor
+INFO:root:[SWEEnv group=15 pair=10] env.step done in 0.18s done=False reward=0 chars=437
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=10143 sha256=fa7fc95f3d1e84e6f7733f1478a82ab2ee5b76d35b3897d6c0f8234f6fb91afe
+[PERF] stage=rollout_generate seconds=44.522 rows=1
+INFO:root:[SWEEnv group=15 pair=6] env.step start step=15 function=finish
+INFO:root:[SWEEnv group=15 pair=6] env.step done in 0.10s done=True reward=0 chars=16
+INFO 09-01 09:38:46 [loggers.py:273] Engine 000: Avg prompt throughput: 5446.6 tokens/s, Avg generation throughput: 155.8 tokens/s, Running: 32 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=85.629 rows=1
+INFO:root:[SWEEnv group=8 pair=9] env.step start step=16 function=file_editor
+INFO:root:[SWEEnv group=8 pair=9] env.step done in 0.16s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=17 prompt_tokens=12235 sha256=cdfd0cbe18c3e02c07d2dbee691320e2ceabb129590afe4cde1e6e69e77a649b
+INFO:root:[SWEEnv group=15 pair=6] closing RepoEnv
+[PERF] stage=rollout_generate seconds=41.666 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.17s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=10973 sha256=ecf8446ec6550e2c2b49cc9f709900a160f7cf81d83985d98172bc70d4284f72
+[PERF] stage=rollout_generate seconds=53.286 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.18s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=10193 sha256=8c6aeafdb0e9fb88f88ee015a6a028ca7d1129a4dfc5321b94a91d2df332e67c
+[PERF] stage=rollout_generate seconds=72.110 rows=1
+INFO:root:[SWEEnv group=11 pair=0] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=0] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=8813 sha256=f3528644e2be854250e2218f5e375cd25b5a6317ee5418741d6743b0b0d840cf
+INFO 09-01 09:38:52 [loggers.py:273] Engine 000: Avg prompt throughput: 4424.5 tokens/s, Avg generation throughput: 149.1 tokens/s, Running: 32 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=27.498 rows=1
+INFO:root:[SWEEnv group=13 pair=12] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=12] env.step done in 0.34s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=9241 sha256=ccb85afab30f84ca74ed2eb29b49aa6d1ec6a0ad8c990b3d21ccbeef034df6e6
+[PERF] stage=rollout_generate seconds=35.173 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=10102 sha256=5b3656d2a701307f630d54c41860778a0fdb91494f9069e03b41423f7ecee4e2
+[PERF] stage=rollout_generate seconds=31.616 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.15s done=False reward=0 chars=3529
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=10808 sha256=18a64efc0991ca6e68854e1cb55cfd70d64284517514be36480232cfc71d452a
+[PERF] stage=rollout_generate seconds=85.375 rows=1
+INFO:root:[SWEEnv group=11 pair=6] env.step start step=11 function=finish
+INFO:root:[SWEEnv group=11 pair=6] env.step done in 0.09s done=True reward=0 chars=16
+INFO 09-01 09:38:56 [loggers.py:273] Engine 000: Avg prompt throughput: 13180.9 tokens/s, Avg generation throughput: 140.5 tokens/s, Running: 31 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=49.407 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=8967 sha256=0071d926b4124f4637afe49f38346a8d6f5793423cfdaef77a0d7b6ade599989
+[PERF] stage=rollout_generate seconds=75.010 rows=1
+INFO:root:[SWEEnv group=13 pair=10] env.step start step=27 function=file_editor
+INFO:root:[SWEEnv group=11 pair=6] closing RepoEnv
+INFO:root:[SWEEnv group=13 pair=10] env.step done in 0.08s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=11214 sha256=a756df3536d00e82c213e0e3a640e47ea25a887de3641e6b10ea10297a2f86cb
+[PERF] stage=rollout_generate seconds=93.563 rows=1
+INFO:root:[SWEEnv group=8 pair=4] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=4] env.step done in 0.13s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=9457 sha256=9acb3bfd4f8399b74a1ff69dc8b862b9bf412daf8db5ae2026ef2fd41ce50fd5
+[PERF] stage=rollout_generate seconds=48.655 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=15 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.17s done=False reward=0 chars=156
+[DEEPSWE.TITO] CONTINUATION turn=16 prompt_tokens=8333 sha256=a1c42121b4e06d0c5aca9ec28c0e2f9fe13ea08807bf2b4dff974b0470782f19
+INFO 09-01 09:39:02 [loggers.py:273] Engine 000: Avg prompt throughput: 3130.3 tokens/s, Avg generation throughput: 137.7 tokens/s, Running: 31 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=23.033 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=29 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=8687 sha256=3d204447ec1cd23a686e2199d26129eca11141f879a4043ff89157e076d2c940
+[PERF] stage=rollout_generate seconds=112.180 rows=1
+INFO:root:[SWEEnv group=15 pair=3] env.step start step=28 function=finish
+INFO:root:[SWEEnv group=15 pair=3] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=15 pair=3] closing RepoEnv
+INFO 09-01 09:39:06 [loggers.py:273] Engine 000: Avg prompt throughput: 12763.9 tokens/s, Avg generation throughput: 151.5 tokens/s, Running: 30 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=17.755 rows=1
+INFO:root:[SWEEnv group=11 pair=0] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=0] env.step done in 0.33s done=False reward=0 chars=426
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=9020 sha256=588815b3d8c3e08548d294117e36eb1c055b2e4a59dc6d03addbfd9dcf13a333
+[PERF] stage=rollout_generate seconds=35.970 rows=1
+INFO:root:[SWEEnv group=11 pair=13] env.step start step=14 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=13] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=15 prompt_tokens=8389 sha256=8695dcaee52a77fb395b7a305aa6e29e77cb0fec699ec3cb14b6096e22f0053b
+[PERF] stage=rollout_generate seconds=19.965 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.37s done=False reward=0 chars=135
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=11095 sha256=adb51bfdbc6249cd46ede4188e4da45fd92c191b1b62b719cb145e200f608b80
+[PERF] stage=rollout_generate seconds=39.531 rows=1
+INFO:root:[SWEEnv group=13 pair=4] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=4] env.step done in 0.14s done=False reward=0 chars=166
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=9438 sha256=826326e35e2f0835c77a312074d40efdda2a002fe7c4862ff909ef556ab50a5d
+INFO 09-01 09:39:12 [loggers.py:273] Engine 000: Avg prompt throughput: 1383.0 tokens/s, Avg generation throughput: 149.3 tokens/s, Running: 30 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=45.536 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.13s done=False reward=0 chars=2284
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=9730 sha256=09168268fd115ef4f72d7f78c4ad0e5f074e1e193d1c6ce9c4db459b41d35587
+[PERF] stage=rollout_generate seconds=29.730 rows=1
+INFO:root:[SWEEnv group=12 pair=15] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=15] env.step done in 0.16s done=False reward=0 chars=545
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=8347 sha256=e8111a1f211b3f2ab9478fd51e43a29b62043ab389e9ff55d6e6140d18f546e5
+[PERF] stage=rollout_generate seconds=67.315 rows=1
+INFO:root:[SWEEnv group=11 pair=1] env.step start step=19 function=file_editor
+INFO:root:[SWEEnv group=11 pair=1] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=8058 sha256=b1f08cc74ad9528c604266ca5be786c9eb46fdb69e980010c9b109c69434d457
+[PERF] stage=rollout_generate seconds=67.748 rows=1
+INFO:root:[SWEEnv group=9 pair=1] env.step start step=17 function=file_editor
+INFO:root:[SWEEnv group=9 pair=1] env.step done in 0.19s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=9078 sha256=c810aac5bfbb01538f6ca8ca8b9ea456dd202c9e7cb3f8ebe5aefa4aaab76ce5
+INFO 09-01 09:39:16 [loggers.py:273] Engine 000: Avg prompt throughput: 4678.7 tokens/s, Avg generation throughput: 124.4 tokens/s, Running: 30 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=23.091 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.54s done=False reward=0 chars=385
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=10316 sha256=fcedde0411a2c4cadd8c9f0b53176b6147f0e866fc6037e49ae72b57a7011bf7
+[PERF] stage=rollout_generate seconds=87.694 rows=1
+INFO:root:[SWEEnv group=10 pair=1] env.step start step=20 function=file_editor
+INFO:root:[SWEEnv group=10 pair=1] env.step done in 0.17s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=11301 sha256=363a972eb6b8f250d1a2223bc884763fe82a32c2917eeb400abce8e60e15aa0e
+INFO 09-01 09:39:22 [loggers.py:273] Engine 000: Avg prompt throughput: 8856.0 tokens/s, Avg generation throughput: 151.2 tokens/s, Running: 30 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=34.387 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.49s done=False reward=0 chars=413
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=10474 sha256=f5723d9c42c2f07c8888f3eeaf96c559aa79410bbb864436c6135a07f2471764
+[PERF] stage=rollout_generate seconds=29.677 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=20 function=search
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.08s done=False reward=0 chars=79
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=10965 sha256=63d8f60f23ed8c59b81bfe16923386eb44eca827549b073ebf52134da9cf57d4
+[PERF] stage=rollout_generate seconds=55.995 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=24 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.16s done=False reward=0 chars=429
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=8984 sha256=241dc47e5938affbee742af6797f52b21aa014258dc37043b9ffb718ed1b5967
+INFO 09-01 09:39:26 [loggers.py:273] Engine 000: Avg prompt throughput: 2783.4 tokens/s, Avg generation throughput: 136.8 tokens/s, Running: 30 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=30.783 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.58s done=False reward=0 chars=584
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=9274 sha256=cb03aab253411fbfa8b8f70782e94f44c35345d9a58781b36cd5e51325bc9fd4
+[PERF] stage=rollout_generate seconds=121.579 rows=1
+INFO:root:[SWEEnv group=15 pair=7] env.step start step=13 function=execute_bash
+INFO:root:[SWEEnv group=15 pair=7] env.step done in 0.14s done=False reward=0 chars=156
+[DEEPSWE.TITO] CONTINUATION turn=14 prompt_tokens=9577 sha256=b12353d4f8917f188b3bc6058ddaf6ffc12804b2822b550e09f1ed001a23d7f9
+[PERF] stage=rollout_generate seconds=27.088 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=30 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=31 prompt_tokens=8906 sha256=e797f440d95f9c8e4e36c066993b86b474a10c950d1d5558607c51f3ac5de890
+INFO 09-01 09:39:32 [loggers.py:273] Engine 000: Avg prompt throughput: 4884.6 tokens/s, Avg generation throughput: 143.7 tokens/s, Running: 30 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=71.540 rows=1
+INFO:root:[SWEEnv group=15 pair=13] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=15 pair=13] env.step done in 0.13s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=7320 sha256=40ba042d646dff80f7e0c7545a2dd992f2329d5775d06ba30821fce3a0785bdc
+[PERF] stage=rollout_generate seconds=36.346 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=16 function=file_editor
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.08s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=17 prompt_tokens=8538 sha256=e41543a8ef5f37dddfe81e96db82bfc9af7635a09e6f48d2d0e0981eb88dce68
+[PERF] stage=rollout_generate seconds=100.440 rows=1
+INFO:root:[SWEEnv group=11 pair=5] env.step start step=11 function=finish
+INFO:root:[SWEEnv group=11 pair=5] env.step done in 0.09s done=True reward=0 chars=16
+INFO 09-01 09:39:36 [loggers.py:273] Engine 000: Avg prompt throughput: 5464.5 tokens/s, Avg generation throughput: 142.0 tokens/s, Running: 29 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=11 pair=5] closing RepoEnv
+[PERF] stage=rollout_generate seconds=27.915 rows=1
+INFO:root:[SWEEnv group=13 pair=4] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=4] env.step done in 0.14s done=False reward=0 chars=166
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9615 sha256=1cf6ff664c9d8904ddd8ba7fa64c613f4e6e3a7499327ea756c88ed14d4be0cc
+[PERF] stage=rollout_generate seconds=53.874 rows=1
+INFO:root:[SWEEnv group=8 pair=9] env.step start step=17 function=file_editor
+INFO:root:[SWEEnv group=8 pair=9] env.step done in 0.18s done=False reward=0 chars=437
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=12588 sha256=53d5deccff554649a2abf7fbc10d93f8cd63df82349189de3b5058c3816f3d56
+[PERF] stage=rollout_generate seconds=16.750 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=25 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.16s done=False reward=0 chars=498
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=9164 sha256=b774240c8eccdb8f4c82ddd61216122cb49ae8a0591b4279e535b37dc4a9485b
+INFO 09-01 09:39:42 [loggers.py:273] Engine 000: Avg prompt throughput: 5349.5 tokens/s, Avg generation throughput: 149.2 tokens/s, Running: 29 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=74.991 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.15s done=False reward=0 chars=156
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=11963 sha256=13d9cc70de129e84e742fcc00c391a2437c7a217b57f70e33405689e85da568a
+[PERF] stage=rollout_generate seconds=48.874 rows=1
+INFO:root:[SWEEnv group=13 pair=10] env.step start step=28 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=10] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=11476 sha256=a7466e91b9181cb23640b8a35b5ce98621186e7369f805bf955bb71a214f23c2
+INFO 09-01 09:39:48 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 79.9 tokens/s, Running: 28 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+WARNING 09-01 09:39:48 [dp_scheduler.py:542] Slow IPC send (2.58s, serialize=2.58s, 230942 bytes) for 'add_request' to rank 0/8 at step 11615.
+[PERF] stage=rollout_generate seconds=36.359 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=20 function=search
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.14s done=False reward=0 chars=171
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9929 sha256=1d6cd4e22e1b5ee1b271599d61d4867a0639af4d17abaad897cc92dbf9ab2658
+[PERF] stage=rollout_generate seconds=69.358 rows=1
+INFO:root:[SWEEnv group=11 pair=8] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=11 pair=8] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=11 pair=8] closing RepoEnv
+[PERF] stage=rollout_generate seconds=72.988 rows=1
+INFO:root:[SWEEnv group=12 pair=2] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=12 pair=2] env.step done in 0.10s done=True reward=0 chars=16
+INFO 09-01 09:39:52 [loggers.py:273] Engine 000: Avg prompt throughput: 6742.1 tokens/s, Avg generation throughput: 127.7 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=12 pair=2] closing RepoEnv
+[PERF] stage=rollout_generate seconds=36.987 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.18s done=False reward=0 chars=95
+[PERF] stage=rollout_generate seconds=40.913 rows=1
+INFO:root:[SWEEnv group=9 pair=1] env.step start step=18 function=execute_bash
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=10515 sha256=07903456b390598e5249a1ee94f2f61f8c3e70b7925c49ab55f6a63f8a385729
+INFO:root:[SWEEnv group=9 pair=1] env.step done in 0.18s done=False reward=0 chars=198
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=9325 sha256=88f92034a3873d5bfa7ea3e4ba15a0c88bd638ec385f310ddbdaaa5f44bfd23e
+[PERF] stage=rollout_generate seconds=33.243 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=23 function=file_editor
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.17s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=10707 sha256=0e26a3d9a47c92ce1edef6da94bec5648e3ab14f4a51fe7986d3645aa44ee8e8
+[PERF] stage=rollout_generate seconds=43.571 rows=1
+INFO:root:[SWEEnv group=12 pair=15] env.step start step=23 function=execute_bash
+[PERF] stage=rollout_generate seconds=26.631 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=31 function=file_editor
+WARNING 09-01 09:39:57 [dp_scheduler.py:580] Long wait time (0.01s) for rank 7/8 response to 'add_request' command at step 11663 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.22s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=32 prompt_tokens=9108 sha256=9fd068bce7e54b928c4f4c583bc3e6c4a126c55abb33a909845d02356231c496
+INFO:root:[SWEEnv group=12 pair=15] env.step done in 0.91s done=False reward=0 chars=148
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=8591 sha256=d3ac22fa3a161c36ad9de913b3362572c8fb1fbba7273008d23dbd645b11a3e0
+INFO 09-01 09:39:58 [loggers.py:273] Engine 000: Avg prompt throughput: 6238.0 tokens/s, Avg generation throughput: 121.1 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.9%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:40:03 [loggers.py:273] Engine 000: Avg prompt throughput: 1948.1 tokens/s, Avg generation throughput: 129.5 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=41.699 rows=1
+INFO:root:[SWEEnv group=10 pair=1] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=10 pair=1] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=11509 sha256=9ca990cea4fe58b6c97b835252ed43e6339bd81bada2f5d08057a600a935eb18
+[PERF] stage=rollout_generate seconds=31.238 rows=1
+INFO:root:[SWEEnv group=15 pair=13] env.step start step=25 function=execute_bash
+INFO:root:[SWEEnv group=15 pair=13] env.step done in 0.26s done=False reward=0 chars=583
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=7627 sha256=04653b035a22183a0005dc74d402b0571dd512bed41e162a3059c5f0372cb136
+[PERF] stage=rollout_generate seconds=80.166 rows=1
+INFO:root:[SWEEnv group=15 pair=10] env.step start step=20 function=file_editor
+INFO:root:[SWEEnv group=15 pair=10] env.step done in 0.17s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=10634 sha256=6e7410ee54f19375996e4a23363483fea7ab8abc9e0e82f798e86461a11a224f
+[PERF] stage=rollout_generate seconds=39.536 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.17s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=9478 sha256=6bc6bc08d1fbb8fad894d45e759a9fdcc479b0416e7c06d9c6e20bd5a9620a29
+INFO 09-01 09:40:08 [loggers.py:273] Engine 000: Avg prompt throughput: 7463.4 tokens/s, Avg generation throughput: 126.6 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=59.992 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.17s done=False reward=0 chars=197
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=11436 sha256=2bdfbfd0795467ef508cb1839af0dc4018c313d05d7fc505369b2e045e1e5285
+[PERF] stage=rollout_generate seconds=73.270 rows=1
+INFO:root:[SWEEnv group=8 pair=4] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=4] env.step done in 0.13s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9846 sha256=4f37640cc9c0ea234ead007f1ccd753d101a65b046c26bbb215d8cddf1850dc0
+[PERF] stage=rollout_generate seconds=21.685 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.14s done=False reward=0 chars=3059
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=10644 sha256=c446df755b9b59020a1fdb08fb328a5cc3f32c7d257842ba5c3dacddf4e5db4f
+[PERF] stage=rollout_generate seconds=120.121 rows=1
+INFO:root:[SWEEnv group=15 pair=0] env.step start step=10 function=file_editor
+INFO:root:[SWEEnv group=15 pair=0] env.step done in 0.08s done=False reward=0 chars=76
+[DEEPSWE.TITO] CONTINUATION turn=11 prompt_tokens=9998 sha256=23a91be07fb84eff0431894f91633bf35cf5f63fa7719edd452a6c659f06e882
+[PERF] stage=rollout_generate seconds=33.188 rows=1
+INFO:root:[SWEEnv group=13 pair=4] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=4] env.step done in 0.17s done=False reward=0 chars=166
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=9804 sha256=2b90c39730809297781a58b54381f3ac937d4055976520b77cc14a7dbd2f3ed4
+INFO 09-01 09:40:13 [loggers.py:273] Engine 000: Avg prompt throughput: 3890.2 tokens/s, Avg generation throughput: 112.4 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=52.456 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=21 function=search
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.19s done=False reward=0 chars=488
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=11343 sha256=080aa67e7c4ac2367fe00c942748429e4ce45ab8076b0125aa0ecf8c8e5c2d4a
+INFO 09-01 09:40:18 [loggers.py:273] Engine 000: Avg prompt throughput: 8145.5 tokens/s, Avg generation throughput: 119.6 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=23.194 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=32 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.17s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=33 prompt_tokens=9305 sha256=2e4b378ae25de985629f3fe1c558f6ff7ef27baeafde88e0e0eba33778f417c6
+INFO 09-01 09:40:23 [loggers.py:273] Engine 000: Avg prompt throughput: 6114.8 tokens/s, Avg generation throughput: 144.2 tokens/s, Running: 27 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=29.259 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.14s done=False reward=0 chars=2789
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=11473 sha256=38b92b955362b3f91517a15b7f9fa3cbeef5a5da588c208804f13d2fe7b4e913
+[PERF] stage=rollout_generate seconds=52.439 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=17 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.17s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=8816 sha256=cd83c7e3c26a103c3a2c5c04ea874558ea1d087a5f4a78e9d62ea57f88a84d90
+INFO 09-01 09:40:28 [loggers.py:273] Engine 000: Avg prompt throughput: 4111.1 tokens/s, Avg generation throughput: 140.8 tokens/s, Running: 26 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=114.720 rows=1
+INFO:root:[SWEEnv group=8 pair=14] env.step start step=21 function=finish
+INFO:root:[SWEEnv group=8 pair=14] env.step done in 0.08s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=8 pair=14] closing RepoEnv
+[PERF] stage=rollout_generate seconds=164.764 rows=1
+INFO:root:[SWEEnv group=11 pair=7] env.step start step=10 function=finish
+INFO:root:[SWEEnv group=11 pair=7] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=11 pair=7] closing RepoEnv
+INFO 09-01 09:40:33 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 135.1 tokens/s, Running: 25 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=38.457 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=25 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=10722 sha256=620efa9ad69642f45d71a37bda14fa7ec4ebd9ae99c8fd200e74f4c4afc52834
+[PERF] stage=rollout_generate seconds=101.521 rows=1
+INFO:root:[SWEEnv group=13 pair=12] env.step start step=22 function=finish
+[PERF] stage=rollout_generate seconds=37.268 rows=1
+INFO:root:[SWEEnv group=12 pair=15] env.step start step=24 function=finish
+INFO:root:[SWEEnv group=12 pair=15] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=13 pair=12] env.step done in 0.12s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=12 pair=15] closing RepoEnv
+INFO 09-01 09:40:38 [loggers.py:273] Engine 000: Avg prompt throughput: 4085.7 tokens/s, Avg generation throughput: 126.5 tokens/s, Running: 23 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=57.794 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=26 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.17s done=False reward=0 chars=429
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=9538 sha256=0b374c93796309806370380a0b45bc2e2e2f67329e7dc6752f47fa7fd09cb6aa
+INFO:root:[SWEEnv group=13 pair=12] closing RepoEnv
+[PERF] stage=rollout_generate seconds=34.481 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=11621 sha256=024c426c602b90a39cf51ec55f268d8b73de642de3a70eeaf9bf546d5b3aae2f
+INFO 09-01 09:40:43 [loggers.py:273] Engine 000: Avg prompt throughput: 2081.0 tokens/s, Avg generation throughput: 122.3 tokens/s, Running: 23 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=24.380 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=33 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=34 prompt_tokens=9511 sha256=99e55c5b3d55ac8bbce1f8ccec3ebf88840c04446e35bf43fe1b5c8e25931345
+INFO 09-01 09:40:48 [loggers.py:273] Engine 000: Avg prompt throughput: 1967.1 tokens/s, Avg generation throughput: 114.7 tokens/s, Running: 23 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=101.038 rows=1
+INFO:root:[SWEEnv group=11 pair=13] env.step start step=15 function=finish
+INFO:root:[SWEEnv group=11 pair=13] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=11 pair=13] closing RepoEnv
+[PERF] stage=rollout_generate seconds=68.850 rows=1
+INFO:root:[SWEEnv group=8 pair=9] env.step start step=18 function=finish
+INFO:root:[SWEEnv group=8 pair=9] env.step done in 0.09s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=64.392 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.17s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=12296 sha256=24d92afb6398f9146fe869f111b4b2664398f0c8372fb5227aabf4a4e34e22b9
+INFO:root:[SWEEnv group=8 pair=9] closing RepoEnv
+[PERF] stage=rollout_generate seconds=35.576 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.16s done=False reward=0 chars=2493
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=12149 sha256=43a8a61267bc11f71504196a806b7fb3977c3f1ea63a4b244f91e3b180d2abb2
+INFO 09-01 09:40:53 [loggers.py:273] Engine 000: Avg prompt throughput: 3972.0 tokens/s, Avg generation throughput: 108.6 tokens/s, Running: 21 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=101.961 rows=1
+INFO:root:[SWEEnv group=11 pair=1] env.step start step=20 function=file_editor
+INFO:root:[SWEEnv group=11 pair=1] env.step done in 0.18s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=8684 sha256=a72081f081d13a38e9370f4010c7004a3f2d6ce363f31f095f528a914ba1d3ca
+[PERF] stage=rollout_generate seconds=22.449 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=26 function=execute_bash
+[PERF] stage=rollout_generate seconds=49.061 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.50s done=False reward=0 chars=385
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=10933 sha256=6458f6c3d7542dbbe65c56389413812b80776cb16988d12faef7447370cf5029
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.17s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=9751 sha256=98c2016554d958e3483eeb56911f881eaaee02d894e32789171d14dbdb804c9f
+[PERF] stage=rollout_generate seconds=17.123 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=27 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.17s done=False reward=0 chars=498
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=9718 sha256=b94be909e930479943787811efc5d35417ea022badadb985a535ae15e7af5ca3
+INFO 09-01 09:40:58 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 94.9 tokens/s, Running: 21 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=31.375 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=18 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.19s done=False reward=0 chars=212
+[DEEPSWE.TITO] CONTINUATION turn=19 prompt_tokens=9029 sha256=a883b37de2c9b6a1899a9ef7b157692ebf35c2ac769d216ad1b89af6fa18cd47
+INFO 09-01 09:41:03 [loggers.py:273] Engine 000: Avg prompt throughput: 6038.3 tokens/s, Avg generation throughput: 91.9 tokens/s, Running: 21 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=54.204 rows=1
+INFO:root:[SWEEnv group=15 pair=0] env.step start step=11 function=file_editor
+INFO:root:[SWEEnv group=15 pair=0] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=12 prompt_tokens=10314 sha256=6fc05561ac7e366abbf4b888f93d4fb6abdbeca0a690e0c8aec48d72c3c1964a
+[PERF] stage=rollout_generate seconds=23.254 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=25 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.36s done=False reward=0 chars=135
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=11782 sha256=26224858e8209086eb1072f9ea8d18cd9c6211be06dc869226f958f36dfa9638
+[PERF] stage=rollout_generate seconds=22.062 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=34 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.19s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=35 prompt_tokens=9720 sha256=7763d93ce7221a6bf10d40b6e314f58425561d373d220a2615a8d4d0baa37167
+INFO 09-01 09:41:08 [loggers.py:273] Engine 000: Avg prompt throughput: 8734.5 tokens/s, Avg generation throughput: 189.0 tokens/s, Running: 21 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=63.144 rows=1
+INFO:root:[SWEEnv group=15 pair=13] env.step start step=26 function=file_editor
+INFO:root:[SWEEnv group=15 pair=13] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=8004 sha256=f631636ed74f5dde5e49f32bc49388b34ec643590c224cc07879a4c8dee3f7f3
+[PERF] stage=rollout_generate seconds=73.662 rows=1
+INFO:root:[SWEEnv group=9 pair=1] env.step start step=19 function=finish
+INFO:root:[SWEEnv group=9 pair=1] env.step done in 0.10s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=60.296 rows=1
+INFO:root:[SWEEnv group=8 pair=4] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=4] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=10201 sha256=47b1f9780db636336c2534a260ecd24896d28da310c7c3c976c0d201701eea28
+[PERF] stage=rollout_generate seconds=67.994 rows=1
+INFO:root:[SWEEnv group=10 pair=1] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=10 pair=1] env.step done in 0.19s done=False reward=0 chars=225
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=11936 sha256=625ca49d430005460c233bace40b2cb3d5847ccbd56b4df5f0a4ab4ca09234d3
+INFO 09-01 09:41:13 [loggers.py:273] Engine 000: Avg prompt throughput: 1833.0 tokens/s, Avg generation throughput: 87.8 tokens/s, Running: 20 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=127.830 rows=1
+INFO:root:[SWEEnv group=11 pair=0] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=0] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9735 sha256=43394fe6657775f48605f28f45d3ce13168b76b777b3c9320b85adca5948e240
+[PERF] stage=rollout_generate seconds=25.393 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.15s done=False reward=0 chars=176
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=12472 sha256=056e913e88755b7d1c51fedb4b0c0fba5420f113741aecd112808e43fbd4ad00
+INFO:root:[SWEEnv group=9 pair=1] closing RepoEnv
+INFO 09-01 09:41:18 [loggers.py:273] Engine 000: Avg prompt throughput: 6744.6 tokens/s, Avg generation throughput: 88.0 tokens/s, Running: 20 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=20.667 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.19s done=False reward=0 chars=212
+[DEEPSWE.TITO] CONTINUATION turn=20 prompt_tokens=9200 sha256=4771b750fbdaa5959dcffad51542627ba8569df3d10013c48442f81fe5d7876e
+[PERF] stage=rollout_generate seconds=74.866 rows=1
+INFO:root:[SWEEnv group=15 pair=10] env.step start step=21 function=file_editor
+INFO:root:[SWEEnv group=15 pair=10] env.step done in 0.21s done=False reward=0 chars=437
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=11134 sha256=40cd9e4f30a6b5cd33edbc559d655b0f3a719b518a3924017fee0ddab1330a2e
+INFO 09-01 09:41:24 [loggers.py:273] Engine 000: Avg prompt throughput: 5498.7 tokens/s, Avg generation throughput: 95.4 tokens/s, Running: 20 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=27.455 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=25 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.57s done=False reward=0 chars=584
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=10058 sha256=9f16f878741da2ac15a9615f8575b43f58eca4472cda8e95ffab72938fb42bc1
+[PERF] stage=rollout_generate seconds=115.480 rows=1
+INFO:root:[SWEEnv group=15 pair=7] env.step start step=14 function=execute_bash
+[PERF] stage=rollout_generate seconds=72.783 rows=1
+INFO:root:[SWEEnv group=13 pair=4] env.step start step=22 function=finish
+INFO:root:[SWEEnv group=13 pair=4] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=15 pair=7] env.step done in 0.15s done=False reward=0 chars=156
+[DEEPSWE.TITO] CONTINUATION turn=15 prompt_tokens=10242 sha256=12deb01442ba5698896ef8edff0e9e6abe981c03e52d1036167d2d3265bf4995
+[PERF] stage=rollout_generate seconds=29.379 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=27 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.14s done=False reward=0 chars=2824
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=11761 sha256=a5ad5ab9028ba37ac585ccd7939dca56c043501be51b7d861ec9b5f59e713679
+INFO 09-01 09:41:28 [loggers.py:273] Engine 000: Avg prompt throughput: 5154.4 tokens/s, Avg generation throughput: 81.6 tokens/s, Running: 19 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=13 pair=4] closing RepoEnv
+[PERF] stage=rollout_generate seconds=25.036 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=35 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=36 prompt_tokens=9926 sha256=ff463ea73ef18ea0f3177279be26c5a2dc254ba640e5842a5ef652b4d1535413
+INFO 09-01 09:41:34 [loggers.py:273] Engine 000: Avg prompt throughput: 5401.6 tokens/s, Avg generation throughput: 94.3 tokens/s, Running: 19 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=19.472 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=12569 sha256=bd854b48b2dbc91336ba5c5c5d98ceb0039bd84aea21ae84fe4bbcf772c41fe1
+[PERF] stage=rollout_generate seconds=85.156 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.13s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=11134 sha256=a888db1e783608499c0f4b1f694886ab2174b4ffafe796f5c56d484f2c83d7aa
+INFO 09-01 09:41:38 [loggers.py:273] Engine 000: Avg prompt throughput: 2811.8 tokens/s, Avg generation throughput: 91.8 tokens/s, Running: 19 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=21.211 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.16s done=False reward=0 chars=615
+[DEEPSWE.TITO] CONTINUATION turn=21 prompt_tokens=9445 sha256=81d0317cbc30f64db9b0724240f70a400c1cf8dd1a6f4507d8b00053a8046fa4
+[PERF] stage=rollout_generate seconds=27.888 rows=1
+INFO:root:[SWEEnv group=11 pair=0] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=0] env.step done in 0.25s done=False reward=0 chars=145
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=9918 sha256=be81ff19b11c8c78fbee542e127ca1ae472268235dc01f578ef64c0285df832b
+INFO 09-01 09:41:44 [loggers.py:273] Engine 000: Avg prompt throughput: 3759.0 tokens/s, Avg generation throughput: 92.1 tokens/s, Running: 19 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=37.677 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=26 function=search
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.40s done=False reward=0 chars=86
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=11981 sha256=112023dc5215daabf412277aef7f9f93e50fe491482ebd4ed12f7cca016ab276
+[PERF] stage=rollout_generate seconds=80.412 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=25 function=file_editor
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.17s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=12003 sha256=c8d1ac6caf225455b79b569e8936a9f141ea915dd5f13c4da44db99fef72029d
+[PERF] stage=rollout_generate seconds=36.955 rows=1
+INFO:root:[SWEEnv group=8 pair=4] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=4] env.step done in 0.16s done=False reward=0 chars=362
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=10479 sha256=b99406f388918f0cdc3d216cb1dda7cde63e0d2611c07fcccc4e998069d1c9f8
+INFO 09-01 09:41:48 [loggers.py:273] Engine 000: Avg prompt throughput: 2772.1 tokens/s, Avg generation throughput: 81.7 tokens/s, Running: 18 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=51.738 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=28 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.17s done=False reward=0 chars=429
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=10091 sha256=1f82025ab493825114f960b0c28a49431eb2ebeaada7c699f8437aa9bc9ed64c
+[PERF] stage=rollout_generate seconds=18.463 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.61s done=False reward=0 chars=351
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=12732 sha256=8a754df8e89baf196b412a4431237f566bbdfd7ebd84fd88549733b8e15ec237
+INFO 09-01 09:41:54 [loggers.py:273] Engine 000: Avg prompt throughput: 5025.6 tokens/s, Avg generation throughput: 85.5 tokens/s, Running: 19 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=42.761 rows=1
+INFO:root:[SWEEnv group=10 pair=1] env.step start step=23 function=finish
+INFO:root:[SWEEnv group=10 pair=1] env.step done in 0.10s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=10 pair=1] closing RepoEnv
+[PERF] stage=rollout_generate seconds=12.085 rows=1
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=12017 sha256=a6598d6e2a43e316e59b98a5a2ca6e2439b403fae5a0527f9ba0fed99720836a
+INFO 09-01 09:41:58 [loggers.py:273] Engine 000: Avg prompt throughput: 8651.3 tokens/s, Avg generation throughput: 87.4 tokens/s, Running: 18 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=25.916 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=36 function=file_editor
+[PERF] stage=rollout_generate seconds=65.598 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=23 function=search
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.20s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=37 prompt_tokens=10137 sha256=52c3199ae417a4345e9bf8b097872b61677f2b55f911f46531149e63c04ffac9
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.20s done=False reward=0 chars=562
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=12659 sha256=a03a87a1d411450f92ae6f95bc1e305696839bd9c9b6f3b8ba8bf27648b7f608
+[PERF] stage=rollout_generate seconds=35.452 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=26 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.18s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=10253 sha256=1de2d355e961656e6769dede03c4213a56242ffc198519b45a4f22a9c728327d
+INFO 09-01 09:42:04 [loggers.py:273] Engine 000: Avg prompt throughput: 1998.5 tokens/s, Avg generation throughput: 77.9 tokens/s, Running: 18 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=39.312 rows=1
+INFO:root:[SWEEnv group=15 pair=7] env.step start step=15 function=execute_bash
+INFO:root:[SWEEnv group=15 pair=7] env.step done in 0.14s done=False reward=0 chars=812
+[DEEPSWE.TITO] CONTINUATION turn=16 prompt_tokens=10667 sha256=da24e351439926211ee7c2bf5d891f904358b5b484832aac10b90ea51829f71e
+[PERF] stage=rollout_generate seconds=70.799 rows=1
+INFO:root:[SWEEnv group=11 pair=1] env.step start step=21 function=finish
+INFO:root:[SWEEnv group=11 pair=1] env.step done in 0.09s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=17.282 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=29 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.15s done=False reward=0 chars=498
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=10271 sha256=7fe62606547c2433d05d47599f79dabc76179ac9547f63ae859f6c9ae5fb62d6
+INFO:root:[SWEEnv group=11 pair=1] closing RepoEnv
+INFO 09-01 09:42:08 [loggers.py:273] Engine 000: Avg prompt throughput: 8927.1 tokens/s, Avg generation throughput: 72.2 tokens/s, Running: 17 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=145.438 rows=1
+INFO:root:[SWEEnv group=13 pair=10] env.step start step=29 function=file_editor
+INFO:root:[SWEEnv group=13 pair=10] env.step done in 0.10s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=12283 sha256=911c5c9db0610f3b45c49bf95d16ce4c2fac64118d1fa6b7ed797f7f612b9246
+[PERF] stage=rollout_generate seconds=35.602 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.23s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=11327 sha256=9f3dd7666eca9cf77ca77a4583e2d647fdb2af3c6dcbd53fba544affed4d5a26
+INFO 09-01 09:42:14 [loggers.py:273] Engine 000: Avg prompt throughput: 5245.0 tokens/s, Avg generation throughput: 83.8 tokens/s, Running: 17 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=50.267 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=28 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.16s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=12034 sha256=0f7ca396df222b6c2c98a3a72b8913ed3cc2841a46e1a8667c39a5b83f4768a7
+INFO 09-01 09:42:18 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 81.2 tokens/s, Running: 17 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=23.911 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=37 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.19s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=38 prompt_tokens=10337 sha256=39824b58455821b3398b88910ed42f54d13577166004bba3f80365d47a712ce5
+INFO 09-01 09:42:24 [loggers.py:273] Engine 000: Avg prompt throughput: 3621.0 tokens/s, Avg generation throughput: 88.0 tokens/s, Running: 17 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=28.758 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=24 function=search
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.20s done=False reward=0 chars=93
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=12808 sha256=4812b9b3e3f9a91089950217fbfe85cb855925229d3261ffc0c3ed70165358c5
+INFO 09-01 09:42:28 [loggers.py:273] Engine 000: Avg prompt throughput: 3457.0 tokens/s, Avg generation throughput: 90.8 tokens/s, Running: 16 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=46.804 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=21 function=file_editor
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=22 prompt_tokens=9708 sha256=297803b82e347b7ed93f360054622f7b3fb5a9309fdd2f755a0868388dd6e555
+[PERF] stage=rollout_generate seconds=45.406 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=26 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.14s done=False reward=0 chars=172
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=12276 sha256=76af468dfc30f5f94c81c60afc8702654d73ab87f300d6807bd6420965cd2748
+[PERF] stage=rollout_generate seconds=22.481 rows=1
+INFO:root:[SWEEnv group=13 pair=10] env.step start step=30 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=10] env.step done in 0.16s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=31 prompt_tokens=12399 sha256=73507dbbd6f5bfd9feb181d195cef3d3d4c2acea901d64ea1e2a6ddc7147881c
+INFO 09-01 09:42:34 [loggers.py:273] Engine 000: Avg prompt throughput: 1548.7 tokens/s, Avg generation throughput: 78.8 tokens/s, Running: 17 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=76.786 rows=1
+INFO:root:[SWEEnv group=15 pair=10] env.step start step=22 function=finish
+INFO:root:[SWEEnv group=15 pair=10] env.step done in 0.10s done=True reward=0 chars=16
+INFO 09-01 09:42:38 [loggers.py:273] Engine 000: Avg prompt throughput: 6769.5 tokens/s, Avg generation throughput: 80.0 tokens/s, Running: 16 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=15 pair=10] closing RepoEnv
+[PERF] stage=rollout_generate seconds=42.492 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=27 function=file_editor
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.19s done=False reward=0 chars=442
+[DEEPSWE.TITO] CONTINUATION turn=31 prompt_tokens=12315 sha256=379c2ce509dba6ae6856a37389b62bac2a6e7554c954abd64905c4fe6529b02c
+[PERF] stage=rollout_generate seconds=25.189 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=29 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.46s done=False reward=0 chars=385
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=12257 sha256=e8cf3c06acc6d9655613d95e28919560ca1e9e4f3d25844660641dcc218d70bd
+[PERF] stage=rollout_generate seconds=96.726 rows=1
+INFO:root:[SWEEnv group=15 pair=0] env.step start step=12 function=file_editor
+INFO:root:[SWEEnv group=15 pair=0] env.step done in 0.10s done=False reward=0 chars=76
+[DEEPSWE.TITO] CONTINUATION turn=13 prompt_tokens=10850 sha256=959d4d78e30708a7b2e2888362cdbd9ac6bb320255e8944006bf284ca2ad294d
+INFO 09-01 09:42:45 [loggers.py:273] Engine 000: Avg prompt throughput: 3652.4 tokens/s, Avg generation throughput: 75.5 tokens/s, Running: 16 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=53.594 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.19s done=False reward=0 chars=1294
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=13320 sha256=d68914806023537593566591be50659bd0a5e57321e7b8aab879a03d3dc89f95
+INFO 09-01 09:42:48 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 71.5 tokens/s, Running: 15 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=100.533 rows=1
+INFO:root:[SWEEnv group=15 pair=13] env.step start step=27 function=execute_bash
+INFO:root:[SWEEnv group=15 pair=13] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=8574 sha256=515de519d6451aa74456c35add5ad2cabda854b4ead85f26f19cc1e8512064e3
+[PERF] stage=rollout_generate seconds=26.467 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=38 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.17s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=39 prompt_tokens=10550 sha256=cb9a7d8e7f1a4aaca508eee3cf4facdbbe50eb08a01a4958c69ab6ce296779a2
+[PERF] stage=rollout_generate seconds=49.128 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=27 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.16s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=10526 sha256=9d77926c3a1ee45f2e2bd02932eff8593d9e6075464a3a84a9e8c6f6e247b642
+[PERF] stage=rollout_generate seconds=66.146 rows=1
+INFO:root:[SWEEnv group=8 pair=4] env.step start step=23 function=finish
+INFO:root:[SWEEnv group=8 pair=4] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=8 pair=4] closing RepoEnv
+INFO 09-01 09:42:55 [loggers.py:273] Engine 000: Avg prompt throughput: 5218.6 tokens/s, Avg generation throughput: 64.8 tokens/s, Running: 15 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=29.393 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=25 function=search
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.09s done=False reward=0 chars=79
+[DEEPSWE.TITO] CONTINUATION turn=26 prompt_tokens=12958 sha256=b591359f8fb5253c33ecd29d27b800a7883021f862efe4841282cba18c9ff9fc
+INFO 09-01 09:42:58 [loggers.py:273] Engine 000: Avg prompt throughput: 13367.2 tokens/s, Avg generation throughput: 70.6 tokens/s, Running: 15 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=55.035 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=30 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.17s done=False reward=0 chars=429
+[DEEPSWE.TITO] CONTINUATION turn=31 prompt_tokens=10646 sha256=05449db55fbb912a09865c8fe759b981b8fd588f837e3a4a95828cdf8111a4d5
+INFO 09-01 09:43:05 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 78.7 tokens/s, Running: 15 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=28.146 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=28 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.20s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=32 prompt_tokens=12462 sha256=d9b675b370c2497b155e8d8bb8c3bb820327e54c1faa8be03521bd6ef4abf42e
+INFO 09-01 09:43:08 [loggers.py:273] Engine 000: Avg prompt throughput: 4181.2 tokens/s, Avg generation throughput: 73.9 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=23.366 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=39 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=40 prompt_tokens=10746 sha256=c8c63f820cdd5b508e35c205c8f39bb2a04414d24ad242723caa996cac23e380
+[PERF] stage=rollout_generate seconds=61.401 rows=1
+INFO:root:[SWEEnv group=8 pair=2] env.step start step=24 function=finish
+INFO:root:[SWEEnv group=8 pair=2] env.step done in 0.09s done=True reward=0 chars=16
+INFO 09-01 09:43:15 [loggers.py:273] Engine 000: Avg prompt throughput: 1536.2 tokens/s, Avg generation throughput: 76.6 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=8 pair=2] closing RepoEnv
+[PERF] stage=rollout_generate seconds=46.803 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=22 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.16s done=False reward=0 chars=156
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=9991 sha256=c8605e7d45ecb6047b28b0a0db5990bfd80b880c94e7f22c414b0bd447902e90
+INFO 09-01 09:43:18 [loggers.py:273] Engine 000: Avg prompt throughput: 4056.8 tokens/s, Avg generation throughput: 64.5 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=35.993 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=30 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.15s done=False reward=0 chars=95
+[DEEPSWE.TITO] CONTINUATION turn=31 prompt_tokens=12461 sha256=fc29794370f520eee57ae08744f1937389b62c524e443289f4f108728849254f
+[PERF] stage=rollout_generate seconds=17.842 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=31 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.16s done=False reward=0 chars=498
+[DEEPSWE.TITO] CONTINUATION turn=32 prompt_tokens=10826 sha256=22c059a183707035751ec592cf85bd8d758cbbd5fbba2545794991105a6e0c08
+[PERF] stage=rollout_generate seconds=30.904 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=28 function=execute_bash
+[PERF] stage=rollout_generate seconds=48.855 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=27 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.60s done=False reward=0 chars=584
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=10833 sha256=e8c24e844b581eb8ee26fed68b5c99f3a252d35c32a8411483c9cfab923747f6
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.15s done=False reward=0 chars=167
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=12562 sha256=dfe5342b65dd58c92706bfa27eca07725fd36b8cb5145cecc3af41a9d5f91aa0
+[PERF] stage=rollout_generate seconds=34.093 rows=1
+INFO:root:[SWEEnv group=15 pair=13] env.step start step=28 function=execute_bash
+INFO:root:[SWEEnv group=15 pair=13] env.step done in 0.26s done=False reward=0 chars=583
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=8910 sha256=69cd62001587d3d8142672671184a3c234c5d3a968dab358a0717a56442c3a11
+INFO 09-01 09:43:25 [loggers.py:273] Engine 000: Avg prompt throughput: 2943.2 tokens/s, Avg generation throughput: 54.5 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:43:28 [loggers.py:273] Engine 000: Avg prompt throughput: 7877.4 tokens/s, Avg generation throughput: 54.1 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=22.413 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=29 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.38s done=False reward=0 chars=135
+[DEEPSWE.TITO] CONTINUATION turn=33 prompt_tokens=12600 sha256=55035eb5ac0198fa3b35d7150da58e34c2a28784ce447677aac3193564086007
+[PERF] stage=rollout_generate seconds=20.955 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=40 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.18s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=41 prompt_tokens=10950 sha256=60509e65d98c77fddd04d23018ab315a589a363e722f5a6f1586d57f3e6d3a1c
+INFO 09-01 09:43:35 [loggers.py:273] Engine 000: Avg prompt throughput: 4496.3 tokens/s, Avg generation throughput: 117.3 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:43:38 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 68.2 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=119.217 rows=1
+INFO:root:[SWEEnv group=11 pair=0] env.step start step=22 function=execute_bash
+[PERF] stage=rollout_generate seconds=24.037 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=31 function=execute_bash
+INFO:root:[SWEEnv group=11 pair=0] env.step done in 0.15s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=23 prompt_tokens=10650 sha256=1020fc663c4b29229c1ec3131a8606366c5540cbaaa5cdb3e59461969736d39f
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.17s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=32 prompt_tokens=12655 sha256=e7d360ccc88efa9728fe3436eb858f1337641d10750f2608b0406fcd82c124cc
+[PERF] stage=rollout_generate seconds=21.753 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=29 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.14s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=11027 sha256=ec4439cae4f210a24e9fa2029411c68c3cafa867fe27e8197a7419a36956a158
+INFO 09-01 09:43:45 [loggers.py:273] Engine 000: Avg prompt throughput: 3241.4 tokens/s, Avg generation throughput: 164.5 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=48.834 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=26 function=search
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.21s done=False reward=0 chars=87
+[DEEPSWE.TITO] CONTINUATION turn=27 prompt_tokens=13296 sha256=7109f3de61bc75ed0e89da893c410e0d79485f196d5124a5ff3b386664b91777
+INFO 09-01 09:43:48 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 56.7 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=29.960 rows=1
+[PERF] stage=rollout_generate seconds=35.742 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=28 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.16s done=False reward=0 chars=172
+[DEEPSWE.TITO] CONTINUATION turn=29 prompt_tokens=12824 sha256=c0859a84b441aaeb59215d4b0f06518a2c688156abc4ea357e657a54c625b9e7
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.16s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=24 prompt_tokens=10267 sha256=a7ea0e5438ea27d1d8fbcfaaacf03b01624fade45a91b87ea9c4e816ffba0dd9
+[PERF] stage=rollout_generate seconds=20.682 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=41 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.19s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=42 prompt_tokens=11179 sha256=4086228d77cc7a4b43af5006d4cafe904212f114c124b918a62b30615fa6af7d
+INFO 09-01 09:43:55 [loggers.py:273] Engine 000: Avg prompt throughput: 4651.7 tokens/s, Avg generation throughput: 60.7 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:43:58 [loggers.py:273] Engine 000: Avg prompt throughput: 5071.8 tokens/s, Avg generation throughput: 62.2 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=41.430 rows=1
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=32 function=file_editor
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.16s done=False reward=0 chars=429
+[DEEPSWE.TITO] CONTINUATION turn=33 prompt_tokens=11199 sha256=479c6855d0ee5f63b00e4d1e911db66fa26b4f0e5115b12716daacda2e4c4a6f
+[PERF] stage=rollout_generate seconds=80.953 rows=1
+INFO:root:[SWEEnv group=15 pair=0] env.step start step=13 function=file_editor
+INFO:root:[SWEEnv group=15 pair=0] env.step done in 0.09s done=False reward=0 chars=76
+[DEEPSWE.TITO] CONTINUATION turn=14 prompt_tokens=11376 sha256=27679ae49bf85de9a5da83dff6bf54f7573a109805265e6ae21fe3b65f512fa6
+INFO 09-01 09:44:05 [loggers.py:273] Engine 000: Avg prompt throughput: 4599.7 tokens/s, Avg generation throughput: 70.9 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:44:08 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 65.8 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=26.222 rows=1
+INFO:root:[SWEEnv group=14 pair=14] env.step start step=32 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=14] env.step done in 0.50s done=False reward=0 chars=385
+[DEEPSWE.TITO] CONTINUATION turn=33 prompt_tokens=12881 sha256=79a77ca909c2484c6bf21cbca3d0996f49acbb6f833560f3e18b6c6410f11524
+INFO 09-01 09:44:15 [loggers.py:273] Engine 000: Avg prompt throughput: 3025.7 tokens/s, Avg generation throughput: 73.4 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:44:18 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 71.7 tokens/s, Running: 14 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=47.792 rows=1
+INFO:root:[SWEEnv group=13 pair=6] env.step start step=30 function=finish
+[PERF] stage=rollout_generate seconds=23.371 rows=1
+INFO:root:[SWEEnv group=15 pair=12] env.step start step=42 function=file_editor
+[PERF] stage=rollout_generate seconds=27.035 rows=1
+[PERF] stage=rollout_generate seconds=16.714 rows=1
+INFO:root:[SWEEnv group=12 pair=5] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=13 pair=6] env.step done in 0.11s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=13 pair=14] env.step start step=33 function=file_editor
+INFO:root:[SWEEnv group=15 pair=12] env.step done in 0.19s done=False reward=0 chars=435
+[DEEPSWE.TITO] CONTINUATION turn=43 prompt_tokens=11378 sha256=b3274ed37c8495ae99e355d076aa41e24ae36b2028ef246e4bae92bcbc6bbd47
+INFO:root:[SWEEnv group=13 pair=14] env.step done in 0.18s done=False reward=0 chars=498
+[DEEPSWE.TITO] CONTINUATION turn=34 prompt_tokens=11379 sha256=94dcb2635d2517a1fefc316622e10c9de8995cb7b6af7a3679f68d4386b688a3
+INFO:root:[SWEEnv group=12 pair=5] env.step done in 0.94s done=False reward=0 chars=140
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=10436 sha256=3c5f640b312c1b6922e2ebbe45bb58f9c431fbe6568748fdbc4166171210c72e
+[PERF] stage=rollout_generate seconds=29.288 rows=1
+INFO:root:[SWEEnv group=14 pair=4] env.step start step=29 function=execute_bash
+INFO:root:[SWEEnv group=14 pair=4] env.step done in 0.16s done=False reward=0 chars=602
+[DEEPSWE.TITO] CONTINUATION turn=30 prompt_tokens=13138 sha256=e94537b7f92c61882881db459e340dee7d329a8c4cc42974e5d20c6090ef6829
+[PERF] stage=rollout_generate seconds=93.730 rows=1
+INFO:root:[SWEEnv group=13 pair=3] env.step start step=24 function=file_editor
+INFO:root:[SWEEnv group=13 pair=3] env.step done in 0.09s done=False reward=0 chars=84
+[DEEPSWE.TITO] CONTINUATION turn=25 prompt_tokens=13930 sha256=0a3396106566be6016a603fba0a599dba19a7ca59f6fb01ed00a670284ebdfa2
+INFO:root:[SWEEnv group=13 pair=6] closing RepoEnv
+INFO 09-01 09:44:25 [loggers.py:273] Engine 000: Avg prompt throughput: 1718.7 tokens/s, Avg generation throughput: 78.3 tokens/s, Running: 13 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:44:28 [loggers.py:273] Engine 000: Avg prompt throughput: 13242.8 tokens/s, Avg generation throughput: 53.1 tokens/s, Running: 13 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=45.685 rows=1
+INFO:root:[SWEEnv group=12 pair=9] env.step start step=30 function=execute_bash
+INFO:root:[SWEEnv group=12 pair=9] env.step done in 0.19s done=False reward=0 chars=73
+[DEEPSWE.TITO] CONTINUATION turn=31 prompt_tokens=11300 sha256=57b1f7eaf8c67c5b67645c5441a096f2e16307736ab64e75673c0aab492916dc
+INFO 09-01 09:44:35 [loggers.py:273] Engine 000: Avg prompt throughput: 3608.4 tokens/s, Avg generation throughput: 67.2 tokens/s, Running: 13 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=50.599 rows=1
+INFO:root:[SWEEnv group=10 pair=7] env.step start step=27 function=file_editor
+INFO:root:[SWEEnv group=10 pair=7] env.step done in 0.09s done=False reward=0 chars=88
+[DEEPSWE.TITO] CONTINUATION turn=28 prompt_tokens=13589 sha256=c21223313f1c57de66ecb197316c6a26e3f85897937b415fc173c5036a7f43af
+INFO 09-01 09:44:38 [loggers.py:273] Engine 000: Avg prompt throughput: 4519.6 tokens/s, Avg generation throughput: 106.8 tokens/s, Running: 13 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+INFO:root:[SWEEnv group=10 pair=7] closing RepoEnv
+INFO:root:[SWEEnv group=11 pair=0] closing RepoEnv
+INFO:root:[SWEEnv group=12 pair=5] closing RepoEnv
+INFO:root:[SWEEnv group=12 pair=9] closing RepoEnv
+INFO:root:[SWEEnv group=13 pair=3] closing RepoEnv
+INFO:root:[SWEEnv group=13 pair=10] closing RepoEnv
+INFO:root:[SWEEnv group=13 pair=14] closing RepoEnv
+INFO:root:[SWEEnv group=14 pair=4] closing RepoEnv
+INFO:root:[SWEEnv group=14 pair=14] closing RepoEnv
+INFO:root:[SWEEnv group=15 pair=0] closing RepoEnv
+INFO:root:[SWEEnv group=15 pair=7] closing RepoEnv
+INFO:root:[SWEEnv group=15 pair=12] closing RepoEnv
+INFO:root:[SWEEnv group=15 pair=13] closing RepoEnv
+[P58.LOGPS_BATCH] configured_prompts=8 generations=16 execution_trajectories=128 observed_trajectories=32
+[PERF] stage=rollout_generate seconds=25.638 rows=1
+WARNING 09-01 09:44:44 [dp_scheduler.py:580] Long wait time (0.01s) for rank 2/8 response to 'update_from_output' command at step 13284 (pipe_wait=0.01s, deserialize=0.0001s, gc_re_enable=0.0000s, 1124 bytes).
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=8 static_width=20480 chunks=80 global_M=2048 local_M=256
+WARNING 09-01 09:44:45 [dp_scheduler.py:580] Long wait time (0.01s) for rank 0/8 response to 'get_num_unfinished_requests' command at step 13285 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:45 [dp_scheduler.py:580] Long wait time (0.01s) for rank 3/8 response to 'get_num_unfinished_requests' command at step 13285 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:45 [dp_scheduler.py:580] Long wait time (0.02s) for rank 5/8 response to 'get_num_unfinished_requests' command at step 13285 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+INFO 09-01 09:44:46 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 53.9 tokens/s, Running: 12 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+WARNING 09-01 09:44:46 [dp_scheduler.py:580] Long wait time (0.01s) for rank 3/8 response to 'get_num_unfinished_requests' command at step 13287 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:46 [dp_scheduler.py:580] Long wait time (0.02s) for rank 6/8 response to 'get_num_unfinished_requests' command at step 13287 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:47 [dp_scheduler.py:580] Long wait time (0.01s) for rank 3/8 response to 'get_num_unfinished_requests' command at step 13288 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:47 [dp_scheduler.py:580] Long wait time (0.01s) for rank 4/8 response to 'get_num_unfinished_requests' command at step 13288 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:47 [dp_scheduler.py:580] Long wait time (0.01s) for rank 2/8 response to 'get_num_unfinished_requests' command at step 13289 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:47 [dp_scheduler.py:580] Long wait time (0.01s) for rank 5/8 response to 'get_num_unfinished_requests' command at step 13289 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+INFO 09-01 09:44:48 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 14.6 tokens/s, Running: 12 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+WARNING 09-01 09:44:48 [dp_scheduler.py:580] Long wait time (0.01s) for rank 6/8 response to 'get_num_unfinished_requests' command at step 13290 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:48 [dp_scheduler.py:580] Long wait time (0.01s) for rank 7/8 response to 'get_num_unfinished_requests' command at step 13290 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:49 [dp_scheduler.py:580] Long wait time (0.01s) for rank 3/8 response to 'update_from_output' command at step 13291 (pipe_wait=0.01s, deserialize=0.0001s, gc_re_enable=0.0000s, 1124 bytes).
+WARNING 09-01 09:44:49 [dp_scheduler.py:580] Long wait time (0.02s) for rank 0/8 response to 'get_num_unfinished_requests' command at step 13291 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:49 [dp_scheduler.py:580] Long wait time (0.01s) for rank 5/8 response to 'get_num_unfinished_requests' command at step 13291 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:52 [dp_scheduler.py:580] Long wait time (0.01s) for rank 2/8 response to 'get_num_unfinished_requests' command at step 13293 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:52 [dp_scheduler.py:580] Long wait time (0.01s) for rank 1/8 response to 'schedule' command at step 13294 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 819 bytes).
+WARNING 09-01 09:44:52 [dp_scheduler.py:580] Long wait time (0.15s) for rank 0/8 response to 'get_grammar_bitmask' command at step 13294 (pipe_wait=0.15s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:53 [dp_scheduler.py:580] Long wait time (0.01s) for rank 4/8 response to 'get_grammar_bitmask' command at step 13294 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:53 [dp_scheduler.py:580] Long wait time (0.01s) for rank 7/8 response to 'get_grammar_bitmask' command at step 13294 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:53 [dp_scheduler.py:580] Long wait time (0.01s) for rank 0/8 response to 'get_grammar_bitmask' command at step 13295 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:54 [dp_scheduler.py:580] Long wait time (0.01s) for rank 6/8 response to 'update_from_output' command at step 13296 (pipe_wait=0.01s, deserialize=0.0001s, gc_re_enable=0.0000s, 610 bytes).
+WARNING 09-01 09:44:55 [dp_scheduler.py:580] Long wait time (0.01s) for rank 3/8 response to 'get_grammar_bitmask' command at step 13298 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:55 [dp_scheduler.py:580] Long wait time (0.01s) for rank 4/8 response to 'get_grammar_bitmask' command at step 13298 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:55 [dp_scheduler.py:580] Long wait time (0.01s) for rank 3/8 response to 'get_grammar_bitmask' command at step 13299 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+WARNING 09-01 09:44:55 [dp_scheduler.py:580] Long wait time (0.02s) for rank 6/8 response to 'get_grammar_bitmask' command at step 13299 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 4 bytes).
+INFO 09-01 09:44:56 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 14.1 tokens/s, Running: 12 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+WARNING 09-01 09:44:56 [dp_scheduler.py:580] Long wait time (0.01s) for rank 2/8 response to 'get_num_unfinished_requests' command at step 13299 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+WARNING 09-01 09:44:56 [dp_scheduler.py:580] Long wait time (0.01s) for rank 6/8 response to 'get_num_unfinished_requests' command at step 13300 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+[PERF] stage=rollout_generate seconds=29.045 rows=1
+INFO 09-01 09:44:58 [loggers.py:273] Engine 000: Avg prompt throughput: 6224.2 tokens/s, Avg generation throughput: 389.8 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=37.331 rows=1
+[PERF] stage=rollout_generate seconds=38.134 rows=1
+[PERF] stage=rollout_generate seconds=174.261 rows=1
+[PERF] stage=rollout_generate seconds=22.162 rows=1
+[PERF] stage=rollout_generate seconds=55.739 rows=1
+[PERF] stage=rollout_generate seconds=41.402 rows=1
+[PERF] stage=rollout_generate seconds=146.395 rows=1
+[PERF] stage=rollout_generate seconds=77.921 rows=1
+[PERF] stage=rollout_generate seconds=97.215 rows=1
+[PERF] stage=rollout_generate seconds=52.074 rows=1
+[PERF] stage=rollout_generate seconds=43.183 rows=1
+INFO 09-01 09:45:08 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 130.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 09-01 09:45:18 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2055, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3793, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3093, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1126, in _process_results
+[rank0]:     debug_metrics = deepswe_debug.persist_batch(
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/deepswe_debug.py", line 1481, in persist_batch
+[rank0]:     raise ValueError(
+[rank0]: ValueError: DeepSWE artifact batch requires exactly 128 trajectories, rewards, and advantages
+INFO:absl:Stopping trajectory logging thread...
+INFO:absl:Stopped trajectory logging thread.
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 0: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 1: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 3: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 5: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 2: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 4: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 6: Shutting down
+INFO 09-01 09:56:37 [dp_scheduler.py:314] Rank 7: Shutting down
+Exception ignored in: <finalize object at 0x7d8e9059b740; dead>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/weakref.py", line 590, in __call__
+    return info.func(*info.args, **(info.kwargs or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 441, in _cleanup_instance_caches
+    for module in model.modules():
+                  ^^^^^^^^^^^^^
+AttributeError: 'Qwen3ForCausalLM' object has no attribute 'modules'
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33m2026-09-01_08-13-31[0m at: [34mhttps://wandb.ai/yuxzhang-google/tunix/runs/6mfndc36[0m
+[1;34mwandb[0m: Find logs at: [1;35mwandb/run-20260901_081332-6mfndc36/logs[0m
+[run] exit=1
+[run] transport_rc=0
+[JAX_CACHE_SYNC] phase=save status=disabled tool=none rc=0 entries=0 profile=qwen3-4b-dp8-tp8-deepswe-v1-hp bucket=unset local=unset
+[P51.XPROF.GCS] phase=restore status=INVALID_CONTRACT tool=none rc=2 xplanes=0 traces=0 remote=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k28/xprof-update local=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k28/attempt-0/xprof-update
+[CANON_PRE_ALIGN_ARTIFACT] path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k28/pre_alignment.jsonl rows=1 sha256=83e0de60bfd8329b82fd56cd9d0124fc10030d1487147694bed4d2d49b4ac58d
+[CANON_PRE_ALIGN_ARTIFACT_JSON] {"N_action": 374516, "action_geometry": {"max_logical_kv_prefix_length": 12771, "min_logical_kv_prefix_length": 1737, "rows_reaching_1686": 116, "valid": true}, "admission_policy": {"bounded_ab_only": false, "byte_fraction_limit": null, "claim_level": "convergence-only", "enabled": true, "id": "deepswe-zero-hp-ab-warning-v1", "max_abs_limit": null, "stage": "full", "warning_boundaries": ["S_decode_vs_S_prefill"], "warning_items": ["S_decode_vs_S_prefill", "w_all_exactly_1", "wr_all_exactly_1", "clip_hits", "tis_hits"], "warning_only": true, "workload": "deepswe"}, "all_compact_filtered": false, "blocking_reds": [], "boundaries": {"S_decode_vs_S_prefill": {"byte_fraction": 0.0, "differing_bytes": 0, "differing_elements": 0, "element_fraction": 0.0, "finite": true, "first_mismatch": null, "max_abs": 0.0, "max_abs_mismatch": null, "mismatches": [], "mismatches_truncated": false, "reported_mismatches": 0, "total_bytes": 1498064, "total_elements": 374516, "valid": true}, "S_prefill_vs_T_old": {"byte_fraction": 0.0, "differing_bytes": 0, "differing_elements": 0, "element_fraction": 0.0, "finite": true, "first_mismatch": null, "max_abs": 0.0, "max_abs_mismatch": null, "mismatches": [], "mismatches_truncated": false, "reported_mismatches": 0, "total_bytes": 1498064, "total_elements": 374516, "valid": true}}, "context": {"bucket": "2048", "mesh": "8,8", "run_stage": "", "source": "VllmRollout.get_prefill_rescore_logps"}, "hashes": {"S_decode": "e5bd43be14a8928ff9a917159b40db878ee57af0c63309265670d0979f05200f", "S_prefill": "9d561e309c08fcf05eeaea11e7a5e9141604dce9d2a87bd47706404106e9452c", "T_old": "9d561e309c08fcf05eeaea11e7a5e9141604dce9d2a87bd47706404106e9452c", "action_mask": "d9640119d5bef4da8e95d7cc181196c65fae4a3a87d3566f5df3a711d56d2781", "policy_version": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560", "tokens": "6cb80c3e7f842585a8bfcaad234fa0abea799155cf2aa1deadfbb71473b07643"}, "masked_hashes": {"S_decode": "733434a339cc5055f26618446f2ddf08f1f6ddcb40eabbee631da649573fb9de", "S_prefill": "733434a339cc5055f26618446f2ddf08f1f6ddcb40eabbee631da649573fb9de", "T_old": "733434a339cc5055f26618446f2ddf08f1f6ddcb40eabbee631da649573fb9de"}, "no_signal_admitted": false, "reds": [], "reported_reds": [], "step": 0, "timestamp": 1788253224.1911547, "verdict": "PASS", "warning_reds": []}
+[P34.WEIGHT_ARTIFACT] path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k28/weight_attestation.jsonl rows=1 sha256=3158437ccb34ffc9c837229a88c92d267078b87389fc0637a87b4aac57c8bd96
+[P34.WEIGHT_ARTIFACT_JSON] {"equal":true,"live_leaves":398,"mapped_leaves":398,"mesh_device_ids":[0,4,8,12,1,5,9,13,16,20,24,28,17,21,25,29,32,36,40,44,33,37,41,45,48,52,56,60,49,53,57,61,64,68,72,76,65,69,73,77,80,84,88,92,81,85,89,93,96,100,104,108,97,101,105,109,112,116,120,124,113,117,121,125],"mesh_shape":{"dp":8,"tp":8},"mismatch_indices":[],"normalized_memory_leaves":398,"schema":"canon.p34.deepswe.weight-attestation.v1","step":0,"total_elements":4022468096,"verdict":"PASS"}
+[run] PATHTRACE fixed_ar=0 embed=1 logprob_m=1 wandb_online=0 p34_wandb_online=1 eval_off=0 eval_on=0 p35_base=0 p35_stop=0 p35_replay=0 p35_stage_begin=0 p35_stage_ready=0 p35_stage_complete=0 p38_precheck=0 p38_rounds=0 p38_controlled_exit=0 p38_fixed_primal=15 p38_fixed_vjp=0 p38_kv_unified=0 p38_capture_init=0 p38_capture_observe=0 p38_capture_error=0 p38_request_journal=0 p38_incident_ledger=0 p38_incident_bypass=0 p38_incident_bypass_e0=0 p58_continue_decode_observer_bypass=0 p38_kv_observer_init=0 p38_kv_observer_candidate=0 p38_kv_observer_a=0 p38_kv_observer_b=0 p38_seam_init=0 p38_seam_records=0 p38_tail_init=0 p38_tail_a=0 p38_tail_b=0 p38_terminal_init=0 p38_terminal_a=0 p38_terminal_b=0 p38_coverage=0 p57_stock_sync=0 p57_stock_train_runtime=0 p57_stock_observer=0 p57_tim_purity_none=0 p57_tim_purity_is=0 p58_stock_observer=0 p58_seed=1 p58_seed_route=1 p58_recipe_raw=0 p58_recipe_is=0 deepswe_tito_admission=1 deepswe_tito_continuation=3457 p57_stock_segment_preflight=0 p57_stock_segment_complete=0
+[P38.FIXED_LM_HEAD] RECEIPTS_FAIL endpoint=tied_embed K=2560 TP=8 request_M=16,32,64,128,256 learner_M=4096 p59_dp=None local_M=None vjp=0 reasons=missing_primal_M=256,4096;missing_fixed_order_vjp
+[run] FATAL: fixed lm-head executable receipt contract failed
+[entrypoint] FATAL: 90_run.sh exited 1
