@@ -47,6 +47,10 @@ class SamplerOutput:
 
   logprobs: Optional[list[list[float]]]
 
+  @property
+  def left_padded_prompt_tokens(self) -> np.ndarray:
+    return self.padded_prompt_tokens
+
 
 class BaseSampler(ABC):
   """Base class for samplers."""
