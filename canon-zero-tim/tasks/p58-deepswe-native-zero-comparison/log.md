@@ -2274,3 +2274,18 @@
 - K28 has no checkpoint and cannot resume. K29 remains the fresh target that
   must cross Step 1; construction evidence alone does not prove the target
   repair.
+
+## 2026-09-01 UTC — P58.37 K29 XProf GCS path incident
+
+- Target `canon-p58-ds4b-zero-hp-full-k29` proved the P58.36 consumer repair on
+  128 TPU v5p: Step 1 collected all 128 trajectories across 8 prompt groups,
+  completed 128-row rescore B in 105.009s, and passed `[CANON_ALIGN_PRE]` with 0
+  mismatches across 412,449 action tokens (`S_decode_vs_S_prefill = 0 B`,
+  `S_prefill_vs_T_old = 0 B`).
+- Immediately upon pre-alignment success, Step 1 update entry triggered
+  `_canon_xprof_update_entry()`. `pathwaysutils.profiling.start_trace` rejected
+  the local `/mnt/disks/linchai_data/.../xprof-update` path with `ValueError:
+  log_dir must be a GCS bucket path`.
+- Immutable evidence archived in `evidence/p58_k29_xprof_gcs_path_incident/`
+  (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
+
