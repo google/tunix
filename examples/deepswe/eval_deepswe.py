@@ -1040,15 +1040,31 @@ def save_results(results):
         f.write(json.dumps(record) + "\n")
     logger.info("Results saved locally to %s", output_file)
     try:
-      import subprocess
+      from google.cloud import storage
 
-      gcs_target = os.path.join(OUTPUT_DIR, filename)
-      subprocess.run(
-          ["gcloud", "storage", "cp", output_file, gcs_target], check=False
+      gcs_path = OUTPUT_DIR[5:]
+      bucket_name, *prefix_parts = gcs_path.split("/")
+      blob_prefix = "/".join(prefix_parts)
+      blob_name = (
+          os.path.join(blob_prefix, filename) if blob_prefix else filename
       )
-      logger.info("Uploaded results to %s", gcs_target)
+      client = storage.Client()
+      bucket = client.bucket(bucket_name)
+      blob = bucket.blob(blob_name)
+      blob.upload_from_filename(output_file)
+      logger.info("Uploaded results to gs://%s/%s", bucket_name, blob_name)
     except Exception as e:
-      logger.warning("Failed to upload to GCS: %s", e)
+      logger.warning("Failed to upload to GCS via storage client: %s", e)
+      try:
+        import subprocess
+
+        gcs_target = os.path.join(OUTPUT_DIR, filename)
+        subprocess.run(
+            ["gcloud", "storage", "cp", output_file, gcs_target], check=False
+        )
+        logger.info("Uploaded results via gcloud storage to %s", gcs_target)
+      except Exception as ex:
+        logger.warning("Failed to upload to GCS via gcloud: %s", ex)
     return output_file
   else:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
