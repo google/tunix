@@ -860,6 +860,38 @@ class P57RendererTest(unittest.TestCase):
             stock_only=True,
         )
 
+  def test_canon_cpu_pool_and_guaranteed_qos(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57canon",
+          campaign_tag="p57-canon",
+          checkpoint_mode="disabled",
+          expected_updates=300,
+          arm="zero",
+          high_performance=True,
+          disable_eval=True,
+          cpu_nodepool="canon-cpu-pool",
+      )
+      self.assertEqual(len(paths), 1)
+      document = yaml.safe_load(paths[0].read_text())
+      head = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+      self.assertEqual(
+          head["nodeSelector"]["cloud.google.com/gke-nodepool"],
+          "canon-cpu-pool",
+      )
+      proxy = next(c for c in head["initContainers"] if c["name"] == "pathways-proxy")
+      rm = next(c for c in head["initContainers"] if c["name"] == "pathways-rm")
+      main = next(c for c in head["containers"] if c["name"] == "jax-tpu")
+      self.assertEqual(proxy["resources"]["requests"], {"cpu": "8", "memory": "16Gi"})
+      self.assertEqual(proxy["resources"]["limits"], {"cpu": "8", "memory": "16Gi"})
+      self.assertEqual(rm["resources"]["requests"], {"cpu": "8", "memory": "16Gi"})
+      self.assertEqual(rm["resources"]["limits"], {"cpu": "8", "memory": "16Gi"})
+      self.assertEqual(main["resources"]["requests"], {"cpu": "14", "memory": "180Gi"})
+      self.assertEqual(main["resources"]["limits"], {"cpu": "14", "memory": "180Gi"})
+
 
 if __name__ == "__main__":
   unittest.main()

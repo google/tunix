@@ -52,9 +52,17 @@ _EXCLUSIVE_TOPOLOGY_ANNOTATION = (
 _KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 _ADMITTED_CPU_NODEPOOLS = frozenset({
     "canon-cpu-pool",
+    "deepswe-cpu-pool-2",
+    "cpu-np",
+})
+_ADMITTED_SANDBOX_NODEPOOLS = frozenset({
+    "deepswe-cpu-pool-2",
+    "deepswe-cpu-pool",
+    "canon-cpu-pool",
     "cpu-np",
 })
 _DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
+_DEFAULT_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
 _CPU_NODEPOOL = _DEFAULT_CPU_NODEPOOL
 HEAD_GUARANTEED_RESOURCES = {
     "pathways-proxy": {
@@ -193,6 +201,7 @@ def render(
     cpu_nodepool: str,
     worker_nodepool: str,
     model_pvc: str,
+    sandbox_nodepool: str | None = None,
     instance_type: str = TOPOLOGY,
     whitelist: str = CLEAN_WHITELIST,
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
@@ -240,6 +249,20 @@ def render(
     raise ValueError(
         f"P58 requires an admitted CPU node pool ({sorted(_ADMITTED_CPU_NODEPOOLS)}), "
         f"got {cpu_nodepool!r}"
+    )
+  target_sandbox_nodepool = (
+      sandbox_nodepool
+      if sandbox_nodepool is not None
+      else (
+          _DEFAULT_SANDBOX_NODEPOOL
+          if cpu_nodepool == "canon-cpu-pool"
+          else cpu_nodepool
+      )
+  )
+  if target_sandbox_nodepool not in _ADMITTED_SANDBOX_NODEPOOLS:
+    raise ValueError(
+        f"P58 requires an admitted sandbox node pool ({sorted(_ADMITTED_SANDBOX_NODEPOOLS)}), "
+        f"got {target_sandbox_nodepool!r}"
     )
   if whitelist != CLEAN_WHITELIST or whitelist_sha256 != CLEAN_WHITELIST_SHA256:
     raise ValueError("P58 requires the reviewed 1012-task clean whitelist")
@@ -424,7 +447,7 @@ def render(
       "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "R2E_K8S_QUEUE_NAME": queue_name,
-      "NODE_SELECTOR_VAL": cpu_nodepool,
+      "NODE_SELECTOR_VAL": target_sandbox_nodepool,
       "MIN_TOKEN_BUCKET": "2048",
       "CANON_RUN_CMD": shlex.join(
           _command(
@@ -573,6 +596,8 @@ def render(
       stage=stage,
       arm=arm,
       worker_nodepool=worker_nodepool,
+      cpu_nodepool=cpu_nodepool,
+      sandbox_nodepool=sandbox_nodepool,
       instance_type=instance_type,
       sampler_is=sampler_is,
       high_performance=high_performance,
@@ -648,6 +673,8 @@ def validate(
     stage: str,
     arm: str,
     worker_nodepool: str,
+    cpu_nodepool: str = _DEFAULT_CPU_NODEPOOL,
+    sandbox_nodepool: str | None = None,
     instance_type: str = TOPOLOGY,
     sampler_is: bool = False,
     high_performance: bool = False,
@@ -670,8 +697,17 @@ def validate(
   )
   zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
   head = p34._head(document)
-  cpu_nodepool = head.get("nodeSelector", {}).get(
+  actual_cpu_nodepool = head.get("nodeSelector", {}).get(
       "cloud.google.com/gke-nodepool", ""
+  )
+  target_sandbox_nodepool = (
+      sandbox_nodepool
+      if sandbox_nodepool is not None
+      else (
+          _DEFAULT_SANDBOX_NODEPOOL
+          if actual_cpu_nodepool == "canon-cpu-pool"
+          else actual_cpu_nodepool
+      )
   )
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
@@ -695,9 +731,14 @@ def validate(
       _TOKEN_TRANSPORT_LABEL
   ) != _TOKEN_TRANSPORT:
     raise ValueError("P58 DeepSWE token transport must be TiTO")
-  if cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
+  if actual_cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
     raise ValueError(
-        f"P58 CPU head lost an admitted CPU node pool, got {cpu_nodepool!r}"
+        f"P58 CPU head lost an admitted CPU node pool, got {actual_cpu_nodepool!r}"
+    )
+  if target_sandbox_nodepool not in _ADMITTED_SANDBOX_NODEPOOLS:
+    raise ValueError(
+        f"P58 requires an admitted sandbox node pool ({sorted(_ADMITTED_SANDBOX_NODEPOOLS)}), "
+        f"got {target_sandbox_nodepool!r}"
     )
   if (
       head.get("hostNetwork") is not True
@@ -746,7 +787,7 @@ def validate(
       "R2E_K8S_QUEUE_NAME": document["metadata"]["labels"].get(
           _KUEUE_QUEUE_LABEL
       ),
-      "NODE_SELECTOR_VAL": cpu_nodepool,
+      "NODE_SELECTOR_VAL": target_sandbox_nodepool,
   }
   if checked_vma_diagnostic:
     expected.update({
@@ -1005,6 +1046,7 @@ def main() -> None:
   parser.add_argument("--stage", choices=tuple(_STAGE_STEPS), required=True)
   parser.add_argument("--arm", choices=_ARMS, required=True)
   parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
+  parser.add_argument("--sandbox-nodepool", default=None)
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--instance-type", default=TOPOLOGY)
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
@@ -1029,6 +1071,7 @@ def main() -> None:
       stage=args.stage,
       arm=args.arm,
       cpu_nodepool=args.cpu_nodepool,
+      sandbox_nodepool=args.sandbox_nodepool,
       worker_nodepool=args.worker_nodepool,
       instance_type=args.instance_type,
       model_pvc=args.model_pvc,

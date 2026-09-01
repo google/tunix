@@ -738,7 +738,11 @@ class P58RendererTest(unittest.TestCase):
 
   def test_nonadmitted_cpu_nodepool_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "admitted CPU node pool"):
-      self._render("native", cpu_nodepool="deepswe-cpu-pool")
+      self._render("native", cpu_nodepool="nonexistent-pool")
+
+  def test_nonadmitted_sandbox_nodepool_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "admitted sandbox node pool"):
+      self._render("native", sandbox_nodepool="nonexistent-pool")
 
   def test_canon_cpu_pool_and_guaranteed_qos(self):
     for arm in ("native", "zero"):
@@ -749,7 +753,7 @@ class P58RendererTest(unittest.TestCase):
           "canon-cpu-pool",
       )
       env = renderer.p34._env(document)
-      self.assertEqual(env["NODE_SELECTOR_VAL"], "canon-cpu-pool")
+      self.assertEqual(env["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
       services = renderer._service_containers(head)
       proxy = renderer.p34._container(services, "pathways-proxy")
       manager = renderer.p34._container(services, "pathways-rm")
@@ -772,6 +776,14 @@ class P58RendererTest(unittest.TestCase):
       self.assertEqual(
           main["resources"]["limits"], {"cpu": "14", "memory": "180Gi"}
       )
+
+  def test_explicit_sandbox_nodepool_override(self):
+    for arm in ("native", "zero"):
+      document = self._render(
+          arm, "full", cpu_nodepool="canon-cpu-pool", sandbox_nodepool="deepswe-cpu-pool"
+      )
+      env = renderer.p34._env(document)
+      self.assertEqual(env["NODE_SELECTOR_VAL"], "deepswe-cpu-pool")
 
   def test_head_host_network_regression_is_rejected(self):
     document = self._render("native", "full")
