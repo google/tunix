@@ -140,25 +140,25 @@ apply_cluster_target() {
       ZONE=europe-west4-b
       CLUSTER_LOCATION=europe-west4
       CLUSTER=mlperf-v5p
-      TRAINER_TPU_SLICE=tpuv5:2x2x2
-      TRAINER_MESH_FSDP=8
-      TRAINER_MESH_TP=1
-      ROLLOUT_TPU_SLICE=tpuv5:2x2x1
+      TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x4}
+      TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
+      TRAINER_MESH_TP=${TRAINER_MESH_TP:-2}
+      ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
       ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}
       NUM_ROLLOUT_WORKERS=1
       ROLLOUT_COMPLETIONS=1
       ROLLOUT_PARALLELISM=1
-      ROLLOUT_MESH_TP=4
-      ROLLOUT_MESH_FSDP=1
+      ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
+      ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-2}
       SAMPLER=${SAMPLER:-inprocess_vllm}
       CPU_MACHINE=n2d-standard-128
       GCS_SCRATCH_LOCATION=gs://mohitkhatwani_multipods/pathways_scratch/$USER
       PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812}
       PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:raiden_20260812}
-      MINI_BATCH_SIZE=8
-      TRAIN_MICRO_BATCH_SIZE=8
-      BATCH_SIZE=2
-      NUM_GENERATIONS=4
+      MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-8}
+      TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
+      BATCH_SIZE=${BATCH_SIZE:-2}
+      NUM_GENERATIONS=${NUM_GENERATIONS:-4}
       ;;
     "")
       ;;
@@ -191,6 +191,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      HF_HUB_DISABLE_XET=1 \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
@@ -244,7 +245,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      HF_HUB_DISABLE_XET=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -316,7 +317,7 @@ start_rollout() {
     --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
     "
   fi
-  local rollout_startup_env="PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}"
+  local rollout_startup_env="HF_HUB_DISABLE_XET=1 PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}"
   if [[ "${rollout_jobset_yaml}" == "jobset.tpu.yaml" ]]; then
     rollout_startup_env="TPU_SKIP_MDS_QUERY=true ${rollout_startup_env}"
   fi
