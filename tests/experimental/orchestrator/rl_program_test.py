@@ -210,7 +210,8 @@ class RLProgramTest(absltest.TestCase):
         mock_payload,
     ]
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
-        max_packed_len=16
+        group_size=2,
+        max_packed_len=16,
     )
 
   def tearDown(self):
@@ -227,6 +228,7 @@ class RLProgramTest(absltest.TestCase):
       dataset: Any = ("prompt_0",),
       max_steps: int | None = 1,
       reward_fns: Any = None,
+      assembler: Any = None,
       **kwargs: Any,
   ) -> rl_program.StandardRLProgram:
     program = rl_program.StandardRLProgram(
@@ -234,7 +236,7 @@ class RLProgramTest(absltest.TestCase):
         max_steps=max_steps,
         algo=self.mock_algo,
         reward_fns=reward_fns if reward_fns is not None else [lambda x: 1.0],
-        assembler=self.assembler,
+        assembler=assembler if assembler is not None else self.assembler,
         **kwargs,
     )
     return program
@@ -475,6 +477,12 @@ class RLProgramTest(absltest.TestCase):
 
   def test_train_stage_updates_only_on_last_microbatch(self):
     class TwoMicrobatchAssembler:
+      group_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.group_size
 
       def pack(self, items):
         del items
@@ -520,6 +528,12 @@ class RLProgramTest(absltest.TestCase):
 
   def test_train_stage_logs_prompt_ids(self):
     class TwoMicrobatchAssembler:
+      group_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.group_size
 
       def pack(self, items):
         del items
@@ -1555,6 +1569,147 @@ class RLProgramTest(absltest.TestCase):
         mock_wandb.finish.assert_called_once()
 
     asyncio.run(_run())
+
+  def test_pipelined_multi_prompt_microbatch_execution(self):
+    async def _run():
+      self.mock_algo.group_size = 2
+      self.mock_algo.mini_batch_size = 4
+      mock_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          loss_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.side_effect = (
+          lambda group, **kwargs: [mock_payload] * len(group)
+      )
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=4,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          group_size=2,
+      )
+
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", group_size=2),
+          _make_trajectory_group("prompt_1", group_size=2),
+          _make_trajectory_group("prompt_2", group_size=2),
+          _make_trajectory_group("prompt_3", group_size=2),
+      )
+
+      program = self._create_program(
+          dataset=["p0", "p1", "p2", "p3"],
+          assembler=assembler,
+          sync_weights=False,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      # 4 groups of 2 rollouts = 8 rollouts total.
+      # train_micro_batch_size = 4 rollouts (2 groups per microbatch).
+      # Total microbatches = 2.
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      calls = self.mock_engine.train_step.call_args_list
+
+      # First microbatch (groups 0 & 1): accumulate_gradients=True,
+      # apply_optimizer=False
+      self.assertTrue(calls[0].kwargs["accumulate_gradients"])
+      self.assertFalse(calls[0].kwargs["apply_optimizer"])
+      # Second microbatch (groups 2 & 3): accumulate_gradients=True,
+      # apply_optimizer=True
+      self.assertTrue(calls[1].kwargs["accumulate_gradients"])
+      self.assertTrue(calls[1].kwargs["apply_optimizer"])
+
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.num_rollouts, 8)
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+
+    asyncio.run(_run())
+
+  def test_pipelined_sub_prompt_microbatch_execution(self):
+    async def _run():
+      self.mock_algo.group_size = 4
+      self.mock_algo.mini_batch_size = 1
+      mock_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          loss_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.side_effect = (
+          lambda group, **kwargs: [mock_payload] * len(group)
+      )
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          group_size=4,
+      )
+
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", group_size=4),
+      )
+
+      program = self._create_program(
+          dataset=["p0"],
+          assembler=assembler,
+          sync_weights=False,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      # 1 group of 4 rollouts = 4 rollouts total.
+      # train_micro_batch_size = 2 rollouts (2 microbatches for the group).
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      calls = self.mock_engine.train_step.call_args_list
+
+      # First microbatch: accumulate_gradients=True, apply_optimizer=False
+      self.assertTrue(calls[0].kwargs["accumulate_gradients"])
+      self.assertFalse(calls[0].kwargs["apply_optimizer"])
+      # Second microbatch: accumulate_gradients=True, apply_optimizer=True
+      self.assertTrue(calls[1].kwargs["accumulate_gradients"])
+      self.assertTrue(calls[1].kwargs["apply_optimizer"])
+
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.num_rollouts, 4)
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+
+    asyncio.run(_run())
+
+  def test_invalid_geometry_raises_value_error(self):
+    self.mock_algo.group_size = 2
+    self.mock_algo.mini_batch_size = 3
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=4,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        group_size=2,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "Total rollouts per mini-batch step .* is not divisible by"
+    ):
+      self._create_program(assembler=assembler)
+
+  def test_non_positive_batch_dimensions_rejected(self):
+    self.mock_algo.mini_batch_size = 0
+    with self.assertRaisesRegex(
+        ValueError, "mini_batch_size and group_size must be positive"
+    ):
+      self._create_program()
+
+    self.mock_algo.mini_batch_size = 1
+    self.mock_algo.group_size = 0
+    with self.assertRaisesRegex(
+        ValueError, "mini_batch_size and group_size must be positive"
+    ):
+      self._create_program()
 
 
 if __name__ == "__main__":

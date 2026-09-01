@@ -119,9 +119,20 @@ class StandardRLProgram(RLProgram):
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
+    if self.mini_batch_size <= 0 or self.group_size <= 0:
+      raise ValueError("mini_batch_size and group_size must be positive.")
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
-        max_packed_len=getattr(algo, "max_packed_len", 8192)
+        group_size=self.group_size,
+        max_packed_len=getattr(algo, "max_packed_len", 8192),
     )
+    self.assembler.group_size = self.group_size
+    rollouts_per_mini_batch_step = self.mini_batch_size * self.group_size
+    assembly_batch_size = self.assembler.assembly_batch_size
+    if rollouts_per_mini_batch_step % assembly_batch_size != 0:
+      raise ValueError(
+          f"Total rollouts per mini-batch step ({rollouts_per_mini_batch_step}) is "
+          f"not divisible by assembler assembly_batch_size ({assembly_batch_size})."
+      )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
@@ -590,15 +601,20 @@ class StandardRLProgram(RLProgram):
       scored_items = []
       groups_consumed = 0
 
-      for group_idx in range(self.mini_batch_size):
-        scored_items = await self.scored_q.get_batch(num_groups=1)
+      groups_per_assembly_batch = self.assembler.groups_per_assembly_batch
+
+      while groups_consumed < self.mini_batch_size:
+        groups_to_fetch = min(
+            groups_per_assembly_batch, self.mini_batch_size - groups_consumed
+        )
+        scored_items = await self.scored_q.get_batch(num_groups=groups_to_fetch)
         if not scored_items:
           break
 
-        if group_idx == 0 and self.on_step_begin:
+        if groups_consumed == 0 and self.on_step_begin:
           self.on_step_begin(current_step)
 
-        groups_consumed += 1
+        groups_consumed += groups_to_fetch
         uncommitted_groups.append(scored_items)
         all_step_items.extend(scored_items)
         num_rollouts += len(scored_items)
@@ -613,8 +629,8 @@ class StandardRLProgram(RLProgram):
             )
         )
         payloads = [getattr(item, "payload", None) for item in scored_items]
-        # TODO: Implement streaming microbatch assembly to overlap packing
-        # with trainer execution.
+        # TODO(tunix-dev): Implement streaming microbatch assembly to overlap
+        # packing with trainer execution.
         microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
         logging.info(
             "Packed %d prompt groups into %d microbatches (total_rollouts=%d)."
@@ -642,7 +658,7 @@ class StandardRLProgram(RLProgram):
           microbatches = scored_microbatches
 
         num_microbatches += len(microbatches)
-        is_final_group = group_idx == self.mini_batch_size - 1
+        is_final_group = groups_consumed >= self.mini_batch_size
         for batch_idx, batch in enumerate(microbatches):
           is_final_batch = is_final_group and batch_idx == len(microbatches) - 1
           step_result = await self.engine.train_step(

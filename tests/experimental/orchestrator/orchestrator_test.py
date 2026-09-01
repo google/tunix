@@ -246,7 +246,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.requires_reference_kl = False
 
-    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        group_size=2, max_packed_len=16
+    )
 
     with mock.patch("asyncio.run") as mock_asyncio_run:
       self.orch.run(

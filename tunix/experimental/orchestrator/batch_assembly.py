@@ -32,10 +32,41 @@ T = TypeVar("T")
 
 
 class BatchAssembler(Generic[T], Protocol):
-  """Universal batch assembly protocol for microbatch packing."""
+  """Universal batch assembly protocol for microbatch packing.
+
+  Attributes:
+    group_size: Number of rollout trajectories / generations generated per
+      prompt group (G). Must be a positive integer.
+  """
+
+  group_size: int
+
+  @property
+  def groups_per_assembly_batch(self) -> int:
+    """Number of prompt groups to fetch before pack().
+
+    Determines queue batching granularity so that `pack()` receives complete
+    prompt groups matching the assembler's packing strategy.
+    """
+    # TODO(tunix-dev): we can remove this once we move to streaming fashion
+    # packing as we will be sending one group at a time to the assembler.
+    ...
+
+  @property
+  def assembly_batch_size(self) -> int:
+    """Total rollouts (groups_per_assembly_batch * group_size) per pack() call."""
+    return self.groups_per_assembly_batch * self.group_size
 
   def pack(self, items: Sequence[T]) -> list[Any]:
-    """Packs items into hardware-sized microbatch trainer payloads."""
+    """Packs items into hardware-sized microbatch trainer payloads.
+
+    Args:
+      items: Sequence of items to pack. Assumes `items` contains an integer
+        multiple of `group_size` rollouts, ordered contiguously by prompt group.
+
+    Returns:
+      List of packed microbatch payloads.
+    """
     ...
 
 
@@ -177,10 +208,44 @@ def with_ref_per_token_logps(
 
 class SequencePackedBatchAssembler:
   """1D Sequence Packing: Concatenates items into dense [1, max_packed_len] buffers."""
-  # TODO: align implementation with current path.
-  def __init__(self, max_packed_len: int = 8192, pad_id: int = 0):
+
+  # TODO(tunix-dev): Support dynamic token-budget sequence packing across
+  # multiple prompt groups and streaming microbatch assembly to overlap packing
+  # with trainer execution.
+  def __init__(
+      self,
+      *,
+      group_size: int,
+      max_packed_len: int = 8192,
+      pad_id: int = 0,
+  ):
+    """Initializes SequencePackedBatchAssembler.
+
+    Args:
+      group_size: Number of rollout generations per prompt group (G).
+      max_packed_len: Maximum packed sequence length.
+      pad_id: Token ID used for padding.
+    """
+    if group_size <= 0:
+      raise ValueError(f"group_size must be positive, got {group_size}.")
+    self.group_size = group_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+
+  @property
+  def groups_per_assembly_batch(self) -> int:
+    """Number of prompt groups fetched per assembly batch.
+
+    Currently returns 1 because sequence packing operates on one prompt group
+    at a time. Multi-group dynamic token-budget packing will expand this in
+    future iterations.
+    """
+    return 1
+
+  @property
+  def assembly_batch_size(self) -> int:
+    """Total rollouts (groups_per_assembly_batch * group_size) per pack() call."""
+    return self.groups_per_assembly_batch * self.group_size
 
   def pack(self, items: Sequence[datatypes.RLTrainerPayload]) -> list[datatypes.RLTrainerPayload]:
     """Bin-packs items into dense 1D buffers with segment boundaries."""
@@ -308,17 +373,27 @@ class SequencePackedBatchAssembler:
 
 
 class PaddedBatchAssembler:
-  """Simple 2D rectangular batching into fixed `[B, P + C]` trainer payloads.
-  """
+  """Simple 2D rectangular batching into fixed `[B, P + C]` trainer payloads."""
 
   def __init__(
       self,
       *,
-      batch_size: int = 4,
+      batch_size: int,
       max_prompt_length: int,
       max_response_length: int,
       pad_id: int,
+      group_size: int,
   ):
+    """Initializes PaddedBatchAssembler.
+
+    Args:
+      batch_size: Hardware train microbatch size (number of sequences per
+        batch).
+      max_prompt_length: Maximum padded prompt sequence length.
+      max_response_length: Maximum padded response sequence length.
+      pad_id: Token ID used for padding prompts and completions.
+      group_size: Number of rollout generations per prompt group (G).
+    """
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
     if max_prompt_length <= 0:
@@ -329,10 +404,31 @@ class PaddedBatchAssembler:
       raise ValueError(
           f"max_response_length must be positive, got {max_response_length}."
       )
+    if group_size <= 0:
+      raise ValueError(f"group_size must be positive, got {group_size}.")
     self.batch_size = batch_size
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
+    self.group_size = group_size
+
+  @property
+  def groups_per_assembly_batch(self) -> int:
+    """Number of prompt groups fetched per assembly batch.
+
+    - Multi-prompt microbatching (`batch_size >= group_size`): Accumulates
+      `batch_size // group_size` prompt groups so one `pack()` call yields one
+      or more full microbatches.
+    - Sub-prompt microbatching (`batch_size < group_size`): Fetches 1 prompt
+      group (`group_size` rollouts) which `pack()` then slices into multiple
+      sub-group microbatches of size `batch_size`.
+    """
+    return max(1, self.batch_size // self.group_size)
+
+  @property
+  def assembly_batch_size(self) -> int:
+    """Total rollouts (groups_per_assembly_batch * group_size) per pack() call."""
+    return self.groups_per_assembly_batch * self.group_size
 
   @property
   def max_seq_len(self) -> int:

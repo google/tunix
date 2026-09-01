@@ -170,7 +170,9 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
 class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
   def test_empty_input_returns_empty_list(self):
-    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        group_size=1, max_packed_len=16
+    )
     self.assertEmpty(assembler.pack([]))
 
   def test_sequence_packed_assembler_with_trainer_payload(self):
@@ -189,7 +191,9 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         advantages=np.full(4, -0.5, dtype=np.float32),
     )
 
-    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        group_size=1, max_packed_len=16
+    )
     payloads = assembler.pack([payload1, payload2])
 
     self.assertLen(payloads, 1)
@@ -231,7 +235,9 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         ref_per_token_logps=np.full(3, -0.7, dtype=np.float32),
     )
 
-    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=12)
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        group_size=1, max_packed_len=12
+    )
     payloads = assembler.pack([payload1, payload2])
 
     self.assertLen(payloads, 1)
@@ -266,12 +272,30 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         advantages=np.ones(8, dtype=np.float32),
     )
 
-    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=12)
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        group_size=1, max_packed_len=12
+    )
     payloads = assembler.pack([payload1, payload2])
 
     self.assertLen(payloads, 2)
     self.assertEqual(payloads[0].token_ids.shape, (1, 12))
     self.assertEqual(payloads[1].token_ids.shape, (1, 12))
+
+  def test_assembly_batch_properties(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        max_packed_len=16, group_size=4
+    )
+    self.assertEqual(assembler.group_size, 4)
+    self.assertEqual(assembler.groups_per_assembly_batch, 1)
+    self.assertEqual(assembler.assembly_batch_size, 4)
+
+    assembler.group_size = 8
+    self.assertEqual(assembler.groups_per_assembly_batch, 1)
+    self.assertEqual(assembler.assembly_batch_size, 8)
+
+  def test_rejects_non_positive_group_size(self):
+    with self.assertRaisesRegex(ValueError, "group_size must be positive"):
+      batch_assembly.SequencePackedBatchAssembler(group_size=0)
 
 
 def _make_payload(
@@ -357,7 +381,11 @@ def _make_payload(
 class PaddedBatchAssemblerTest(absltest.TestCase):
   def _assembler(self, **kwargs):
     defaults = dict(
-        batch_size=2, max_prompt_length=4, max_response_length=5, pad_id=0
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=5,
+        pad_id=0,
+        group_size=1,
     )
     defaults.update(kwargs)
     return batch_assembly.PaddedBatchAssembler(**defaults)
@@ -367,9 +395,21 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         dict(batch_size=0),
         dict(max_prompt_length=0),
         dict(max_response_length=-1),
+        dict(group_size=0),
     ):
       with self.assertRaises(ValueError):
         self._assembler(**bad)
+
+  def test_assembly_batch_properties(self):
+    # Multi-prompt: batch_size=4, group_size=2 -> 2 groups per assembly batch.
+    assembler = self._assembler(batch_size=4, group_size=2)
+    self.assertEqual(assembler.groups_per_assembly_batch, 2)
+    self.assertEqual(assembler.assembly_batch_size, 4)
+
+    # Sub-prompt: batch_size=2, group_size=4 -> 1 group per assembly batch.
+    assembler.group_size = 4
+    self.assertEqual(assembler.groups_per_assembly_batch, 1)
+    self.assertEqual(assembler.assembly_batch_size, 4)
 
   def test_max_seq_len_is_sum_of_prompt_and_response_lengths(self):
     assembler = self._assembler(
@@ -779,12 +819,13 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
   MAX_PROMPT = 4
   MAX_RESPONSE = 4
 
-  def _assembler(self, batch_size=2):
+  def _assembler(self, batch_size=2, group_size=1):
     return batch_assembly.PaddedBatchAssembler(
         batch_size=batch_size,
         max_prompt_length=self.MAX_PROMPT,
         max_response_length=self.MAX_RESPONSE,
         pad_id=0,
+        group_size=group_size,
     )
 
   def _payload(self, fill, with_routing=True):

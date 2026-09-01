@@ -312,7 +312,8 @@ class ClusterOrchestrator:
       self.bring_up_workers()
 
     active_assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
-        max_packed_len=getattr(algo, "max_packed_len", 8192)
+        group_size=getattr(algo, "group_size", 8),
+        max_packed_len=getattr(algo, "max_packed_len", 8192),
     )
     metrics_logging_options = getattr(
         self.config, "metrics_logging_options", None

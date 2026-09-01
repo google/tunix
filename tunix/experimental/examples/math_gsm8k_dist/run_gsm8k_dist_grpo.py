@@ -597,6 +597,7 @@ def main(argv: list[str], context: Any = None) -> None:
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
           pad_id=pad_id,
+          group_size=algo.group_size,
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,
