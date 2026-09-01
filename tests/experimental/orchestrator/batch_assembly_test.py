@@ -19,7 +19,6 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import batch_assembly
-from tunix.rl import common as rl_common
 
 
 class HelperFunctionsTest(absltest.TestCase):
@@ -104,8 +103,8 @@ class HelperFunctionsTest(absltest.TestCase):
 
 class WithRefPerTokenLogpsTest(absltest.TestCase):
 
-  def _make_train_example(self, b=2, p=3, c=4):
-    return rl_common.TrainExample(
+  def _make_payload(self, b=2, p=3, c=4):
+    return datatypes.RLTrainerPayload(
         prompt_ids=np.ones((b, p), dtype=np.int32),
         prompt_mask=np.ones((b, p), dtype=np.float32),
         completion_ids=np.ones((b, c), dtype=np.int32),
@@ -116,10 +115,11 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     )
 
   def test_success_with_ndarray(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     ref_logps = np.full((2, 4), -0.5, dtype=np.float32)
     updated = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
 
+    self.assertIsInstance(updated, datatypes.RLTrainerPayload)
     self.assertIsNotNone(updated.ref_per_token_logps)
     self.assertEqual(updated.ref_per_token_logps.shape, (2, 4))
     np.testing.assert_allclose(updated.ref_per_token_logps, ref_logps)
@@ -127,12 +127,13 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     np.testing.assert_array_equal(updated.completion_ids, batch.completion_ids)
 
   def test_success_with_logprobs_response(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     resp = datatypes.LogprobsResponse(
         per_token_logps=np.full((2, 4), -0.8, dtype=np.float32)
     )
     updated = batch_assembly.with_ref_per_token_logps(batch, resp)
 
+    self.assertIsInstance(updated, datatypes.RLTrainerPayload)
     self.assertIsNotNone(updated.ref_per_token_logps)
     self.assertEqual(updated.ref_per_token_logps.shape, (2, 4))
     np.testing.assert_allclose(
@@ -140,7 +141,7 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     )
 
   def test_error_in_logprobs_response_raises_runtime_error(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     resp = datatypes.LogprobsResponse(
         per_token_logps=None,
         error=datatypes.ErrorInfo(
@@ -150,18 +151,14 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "inference worker failed"):
       batch_assembly.with_ref_per_token_logps(batch, resp)
 
-  def test_rejects_non_train_example(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2], dtype=np.int32),
-        token_mask=np.array([1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 1], dtype=np.float32),
-        advantages=np.array([1.0, 1.0], dtype=np.float32),
-    )
-    with self.assertRaisesRegex(TypeError, "expects a padded TrainExample"):
-      batch_assembly.with_ref_per_token_logps(payload, np.zeros((2, 2)))
+  def test_rejects_unsupported_type(self):
+    with self.assertRaisesRegex(TypeError, "expects a padded RLTrainerPayload"):
+      batch_assembly.with_ref_per_token_logps(
+          {"raw": "batch"}, np.zeros((2, 2))
+      )
 
   def test_mismatched_shape_raises_value_error(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     bad_shape_logps = np.zeros((2, 3), dtype=np.float32)
     with self.assertRaisesRegex(
         ValueError,
@@ -275,121 +272,6 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     self.assertLen(payloads, 2)
     self.assertEqual(payloads[0].token_ids.shape, (1, 12))
     self.assertEqual(payloads[1].token_ids.shape, (1, 12))
-
-
-class GRPOTrainExampleAssemblerTest(absltest.TestCase):
-
-  def test_rejects_non_positive_batch_size(self):
-    with self.assertRaisesRegex(ValueError, "batch size must be positive"):
-      batch_assembly.GRPOTrainExampleAssembler(
-          batch_size=0,
-          max_prompt_length=4,
-          max_response_length=5,
-          pad_id=0,
-      )
-
-  def test_empty_input_returns_empty_list(self):
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-    )
-    self.assertEmpty(assembler.pack([]))
-
-  def test_grpo_train_example_assembler_basic(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
-        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32),
-        prompt_ids=np.array([10, 11], dtype=np.int32),
-        prompt_mask=np.ones(2, dtype=np.float32),
-        completion_ids=np.array([20, 21, 22], dtype=np.int32),
-        completion_mask=np.array([1, 1, 0], dtype=np.float32),
-    )
-
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-    )
-    train_example = assembler.pack([payload])[0]
-
-    self.assertEqual(train_example.prompt_ids.shape, (2, 4))
-    self.assertEqual(train_example.completion_ids.shape, (2, 5))
-    np.testing.assert_array_equal(
-        train_example.prompt_ids[0], np.array([0, 0, 10, 11])
-    )
-    np.testing.assert_array_equal(
-        train_example.completion_ids[0], np.array([20, 21, 22, 0, 0])
-    )
-    np.testing.assert_array_equal(
-        train_example.completion_mask[0], np.array([1, 1, 0, 0, 0])
-    )
-    np.testing.assert_array_equal(
-        train_example.advantages[0], np.array([2, 2, 2, 0, 0])
-    )
-
-  def test_grpo_assembler_optional_fields_propagation(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
-        advantages=np.array([2, 2, 2], dtype=np.float32),
-        prompt_ids=np.array([10, 11], dtype=np.int32),
-        prompt_mask=np.ones(2, dtype=np.float32),
-        completion_ids=np.array([20, 21, 22], dtype=np.int32),
-        completion_mask=np.ones(3, dtype=np.float32),
-        ref_per_token_logps=np.array([-0.3, -0.4, -0.5], dtype=np.float32),
-        old_per_token_logps=np.array([-0.1, -0.2, -0.3], dtype=np.float32),
-    )
-
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-    )
-    train_example = assembler.pack([payload])[0]
-
-    self.assertIsNotNone(train_example.ref_per_token_logps)
-    self.assertIsNotNone(train_example.old_per_token_logps)
-
-    self.assertEqual(train_example.ref_per_token_logps.shape, (2, 5))
-    self.assertEqual(train_example.old_per_token_logps.shape, (2, 5))
-
-    np.testing.assert_allclose(
-        train_example.ref_per_token_logps[0], [-0.3, -0.4, -0.5, 0.0, 0.0]
-    )
-    np.testing.assert_allclose(
-        train_example.old_per_token_logps[0], [-0.1, -0.2, -0.3, 0.0, 0.0]
-    )
-
-  def test_grpo_assembler_chunks_multiple_microbatches(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3], dtype=np.int32),
-        token_mask=np.ones(3, dtype=np.float32),
-        loss_mask=np.array([0, 1, 1], dtype=np.float32),
-        advantages=np.array([1.0, 1.0], dtype=np.float32),
-        prompt_ids=np.array([1], dtype=np.int32),
-        completion_ids=np.array([2, 3], dtype=np.int32),
-    )
-
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=3,
-        max_response_length=4,
-        pad_id=0,
-    )
-    train_examples = assembler.pack([payload, payload, payload])
-
-    self.assertLen(train_examples, 2)
-    self.assertEqual(train_examples[0].prompt_ids.shape, (2, 3))
-    self.assertEqual(train_examples[1].prompt_ids.shape, (2, 3))
 
 
 def _make_payload(
@@ -585,8 +467,9 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_allclose(payload.advantages[0], [2.5, 2.5, 2.5, 0, 0])
 
   def test_sequence_aligned_advantage_is_sliced_to_completion(self):
-    item = _make_payload(2, 3)
-    item.advantages = np.array([0, 0, 2, 2, 2], dtype=np.float32)
+    item = _make_payload(
+        2, 3, advantage=np.array([0, 0, 2, 2, 2], dtype=np.float32)
+    )
     payload = self._assembler().pack([item])[0]
 
     np.testing.assert_allclose(payload.advantages[0], [2, 2, 2, 0, 0])

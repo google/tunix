@@ -32,7 +32,6 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
-from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
@@ -612,10 +611,10 @@ class StandardRLProgram(RLProgram):
         if getattr(self.algo, "requires_reference_kl", False):
           scored_microbatches = []
           for batch in microbatches:
-            if not isinstance(batch, rl_common.TrainExample):
+            if not isinstance(batch, datatypes.RLTrainerPayload):
               raise TypeError(
                   "Reference KL requires an assembler that returns "
-                  "rl_common.TrainExample microbatches; got "
+                  "datatypes.RLTrainerPayload microbatches; got "
                   f"{type(batch).__name__}."
               )
             ref_logps = await self.engine.per_token_logps(

@@ -28,7 +28,6 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.worker import remote_execution
-from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
 
@@ -726,7 +725,7 @@ class RLProgramTest(absltest.TestCase):
   def test_reference_kl_logprobs_scoring_in_train_stage(self):
     async def _run():
       self.mock_algo.requires_reference_kl = True
-      mock_train_example = rl_common.TrainExample(
+      mock_payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([[1, 2]], dtype=np.int32),
           prompt_mask=np.ones((1, 2), dtype=np.float32),
           completion_ids=np.array([[3, 4]], dtype=np.int32),
@@ -735,7 +734,7 @@ class RLProgramTest(absltest.TestCase):
           ref_per_token_logps=None,
           old_per_token_logps=None,
       )
-      self.assembler.pack = mock.MagicMock(return_value=[mock_train_example])
+      self.assembler.pack = mock.MagicMock(return_value=[mock_payload])
       self.mock_engine.per_token_logps = mock.AsyncMock(
           return_value=np.array([[-0.1, -0.2]], dtype=np.float32)
       )
@@ -746,7 +745,7 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       self.mock_engine.per_token_logps.assert_called_once_with(
-          datatypes.Role.REFERENCE, items=mock_train_example
+          datatypes.Role.REFERENCE, items=mock_payload
       )
       self.assertEqual(program.step, 1)
 
@@ -755,7 +754,7 @@ class RLProgramTest(absltest.TestCase):
   def test_reference_kl_raises_type_error_for_invalid_microbatch(self):
     async def _run():
       self.mock_algo.requires_reference_kl = True
-      # Returning a raw dict instead of TrainExample
+      # Returning a raw dict instead of RLTrainerPayload
       self.assembler.pack = mock.MagicMock(return_value=[{"raw": "batch"}])
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
       program = self._create_program(dataset=["prompt_0"])
