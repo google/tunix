@@ -322,39 +322,16 @@ class RaidenSynchronizer:
           len(self.arrays),
           devices_per_host,
       )
-
-      @compute_on.compute_on(
-          compute_type="device_host",
-          out_memory_spaces=jax.memory.Space.Device,
-      )
-      def _local_init(anchor, s_idx, sizes):
-        axis_names = mesh.axis_names
-        out_shape = tuple([1] * len(axis_names)) + (6,)
-        return jax.ffi.ffi_call(
-            "init_weight_synchronizer",
-            jax.ShapeDtypeStruct(out_shape, jnp.int32),
-            has_side_effect=True,
-        )(
-            anchor,
-            s_idx,
-            sizes,
-            local_port=np.int32(0),
-            parallelism=np.int32(self._parallelism),
-            num_layers=np.int32(len(self.arrays)),
-            listener_port=np.int32(0),
-            num_shards=np.int32(devices_per_host),
-        )
-
-      ws_info = jax.shard_map(
-          _local_init,
+      ws_info = _raiden_ffi.init_weight_synchronizer(
+          device_array=self.arrays[0],
+          shard_idx=shard_idx,
           mesh=mesh,
-          in_specs=(
-              self.arrays[0].sharding.spec,
-              jax.sharding.PartitionSpec(*mesh.axis_names),
-              jax.sharding.PartitionSpec(None),
-          ),
-          out_specs=jax.sharding.PartitionSpec(*mesh.axis_names, None),
-      )(self.arrays[0], shard_idx, slice_byte_sizes_sharded)
+          slice_byte_sizes=slice_byte_sizes_sharded,
+          parallelism=self._parallelism,
+          num_layers=len(self.arrays),
+          listener_port=0,
+          num_shards=devices_per_host,
+      )
 
     local_ws_info = multihost_utils.global_array_to_host_local_array(
         ws_info,
