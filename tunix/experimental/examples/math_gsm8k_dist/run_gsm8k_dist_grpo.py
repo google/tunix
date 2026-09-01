@@ -263,7 +263,7 @@ def _grpo_model_input(
     pad_id: int,
     eos_id: int,
 ) -> dict[str, Any]:
-  """Maps a TrainExample microbatch to algo_core.grpo_loss_fn kwargs."""
+  """Maps an RLTrainerPayload microbatch to algo_core.grpo_loss_fn kwargs."""
   return {
       "train_example": train_example,
       "algo_config": algo_config,
@@ -592,7 +592,7 @@ def main(argv: list[str], context: Any = None) -> None:
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
-      assembler=batch_assembly.GRPOTrainExampleAssembler(
+      assembler=batch_assembly.PaddedBatchAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,

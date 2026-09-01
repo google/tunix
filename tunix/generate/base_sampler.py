@@ -47,6 +47,11 @@ class SamplerOutput:
 
   logprobs: Optional[list[list[float]]]
 
+  # Per-generation MoE routing decisions, each `[length, num_layers, top_k]`.
+  # None unless the backend was asked to capture them. Used to replay the
+  # rollout's expert choices during training instead of re-routing.
+  routed_experts: Optional[list[np.ndarray | None]] = None
+
   @property
   def left_padded_prompt_tokens(self) -> np.ndarray:
     return self.padded_prompt_tokens

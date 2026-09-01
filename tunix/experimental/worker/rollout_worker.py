@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import threading
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -79,6 +80,7 @@ class RolloutWorker(abstract_worker.Worker):
     self.config = config
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
+    self._init_lock = threading.Lock()
     self._sync_round = {"req_id": None, "uuid": 0, "phase": "idle"}
     if tokenizer is None or chat_parser is None:
       raise ValueError(
@@ -114,18 +116,29 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   def initialize(self) -> datatypes.Response:
-    self.state = WorkerState.INITIALIZING
-    self.sampler.initialize()
-    try:
-      return datatypes.Response(
-          metadata={
-              "worker_id": self.worker_id,
-              "state": self.state.value,
-              "policy_version": self._policy_version,
-          }
-      )
-    finally:
-      self.state = WorkerState.READY
+    with self._init_lock:
+      if self.state == WorkerState.READY:
+        return datatypes.Response(
+            metadata={
+                "worker_id": self.worker_id,
+                "state": self.state.value,
+                "policy_version": self._policy_version,
+                "initialized": True,
+                "ready": True,
+            }
+        )
+      self.state = WorkerState.INITIALIZING
+      self.sampler.initialize()
+      try:
+        return datatypes.Response(
+            metadata={
+                "worker_id": self.worker_id,
+                "state": self.state.value,
+                "policy_version": self._policy_version,
+            }
+        )
+      finally:
+        self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
     if self.state == WorkerState.PENDING:
@@ -173,6 +186,12 @@ class RolloutWorker(abstract_worker.Worker):
         inflight=len(self.manager._active_tasks),  # pylint: disable=protected-access
         queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
     )
+
+  def get_target_state(self) -> Any:
+    """Returns rollout-side target-state skeleton for trainer-side conversion."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    return self.manager.get_target_state()
 
   def _left_pad_prompt_token_ids(
       self, prompt_token_ids: Sequence[np.ndarray]
@@ -274,6 +293,18 @@ class RolloutWorker(abstract_worker.Worker):
         logprobs=logprobs,
     )
 
+  def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
+    """Appends worker generation telemetry to the lineage context if present."""
+    if metadata is None:
+      return
+    lineage_ctx = metadata.get("lineage")
+    if lineage_ctx is not None and hasattr(lineage_ctx, "add_event"):
+      lineage_ctx.add_event(
+          component="worker.rollout",
+          operation="generate",
+          attributes={"worker_id": self.worker_id},
+      )
+
   def _to_rollout_response(
       self,
       item: Any,
@@ -297,11 +328,11 @@ class RolloutWorker(abstract_worker.Worker):
           ),
           policy_version=self._policy_version,
       )
-    if isinstance(item, trajectory_lib.Trajectory):
+    if isinstance(item, (trajectory_lib.Trajectory, datatypes.Trajectory)):
       req_id = request_id or getattr(item, "trajectory_id", "default")
-      extra = getattr(item, "extra", None)
-      extra = extra if isinstance(extra, dict) else {}
       if prompt_tokens is None:
+        extra = getattr(item, "extra", None)
+        extra = extra if isinstance(extra, dict) else {}
         prompt_tokens = np.asarray(
             extra.get("prompt_tokens", np.zeros(0, dtype=np.int32)),
             dtype=np.int32,
@@ -312,14 +343,7 @@ class RolloutWorker(abstract_worker.Worker):
           prompt_tokens=prompt_tokens,
           policy_version=self._policy_version,
       )
-      response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
-      response.group_index = int(
-          extra.get("group_index", response.group_index) or 0
-      )
-      response.env_reward = float(extra.get("reward", response.env_reward))
-      response.metadata.update(
-          {k: v for k, v in extra.items() if k != "prompt_tokens"}
-      )
+      self._stamp_worker_lineage(response.metadata)
       return response
     return item
 
@@ -351,6 +375,7 @@ class RolloutWorker(abstract_worker.Worker):
       )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
+    self._stamp_worker_lineage(metadata)
     return datatypes.RolloutResponse(
         request_id=request.request_id,
         prompt_id=request.prompt_id,
@@ -477,7 +502,14 @@ class RolloutWorker(abstract_worker.Worker):
     metadata = kwargs.pop("metadata", None)
     request = sync_request if sync_request is not None else metadata
     result = await self.manager.weight_sync(request, **kwargs)
-    self._policy_version += 1
+    if isinstance(result, int):
+      self._policy_version = result
+    else:
+      version = getattr(request, "policy_version", None)
+      if version is not None:
+        self._policy_version = version
+      else:
+        self._policy_version += 1
     self._record_round(request, "h2d_done")
     return result
 

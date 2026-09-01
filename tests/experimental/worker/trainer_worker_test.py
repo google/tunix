@@ -18,6 +18,8 @@ Verifies TrainerWorker RPC request unpacking (TrainRequest), delegation to
 AbstractTrainer (fwd_bwd, eval_step, update), and response metadata stamping.
 """
 
+from typing import Any
+
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -32,6 +34,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.eval_step_calls = []
     self.policy_version = 3
     self.step_count = 10
+    self.target_state = None
 
   def compile(self, dummy_data=None):
     pass
@@ -63,6 +66,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
 
   def prepare_weight_sync(self, **kwargs):
     pass
+
+  def set_target_state(self, target_state: Any) -> None:
+    self.target_state = target_state
 
   def close(self):
     pass
@@ -125,6 +131,19 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
+
+  def test_set_target_state_configures_trainer(self):
+    target_state = {"params": np.zeros((4, 4))}
+    resp = self.worker.set_target_state(target_state=target_state)
+
+    self.assertIsInstance(resp, datatypes.Response)
+    self.assertTrue(resp.metadata["target_state_configured"])
+    self.assertEqual(self.fake_trainer.target_state, target_state)
+
+  def test_set_target_state_raises_when_trainer_unsupported(self):
+    self.fake_trainer.set_target_state = None
+    with self.assertRaises(AttributeError):
+      self.worker.set_target_state(target_state={"params": 1})
 
 
 if __name__ == "__main__":

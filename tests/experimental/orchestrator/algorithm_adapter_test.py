@@ -79,5 +79,37 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(adapter.loss_fn(), algo_core.ppo_policy_loss_fn)
 
 
+_ROUTING_LAYERS = 2
+_ROUTING_TOP_K = 2
+
+
+def _routing(length, fill):
+  """`[length, num_layers, top_k]` routing where every slot holds `fill`."""
+  shape = (length, _ROUTING_LAYERS, _ROUTING_TOP_K)
+  return np.full(shape, fill, dtype=np.int32)
+
+
+class RoutedExpertsForItemTest(absltest.TestCase):
+  """`_routed_experts_for` must match the payload's sequence length exactly."""
+
+  def _align(self, routed, seq_len=8):
+    item = datatypes.TrajectoryItem(routed_experts=routed)
+    return algorithm_adapter._routed_experts_for(item, seq_len)  # pylint: disable=protected-access
+
+  def test_returns_none_without_capture(self):
+    self.assertIsNone(self._align(None))
+
+  def test_short_capture_is_padded_as_unset(self):
+    """Missing tail rows must fall back to the gate, not replay expert 0."""
+    out = self._align(_routing(5, 3))
+    self.assertEqual(out.shape, (8, _ROUTING_LAYERS, _ROUTING_TOP_K))
+    np.testing.assert_array_equal(out[:5], 3)
+    np.testing.assert_array_equal(out[5:], datatypes.UNSET_ROUTED_EXPERT)
+
+  def test_wrong_rank_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "length, num_layers, top_k"):
+      self._align(np.zeros((8, _ROUTING_TOP_K), dtype=np.int32))
+
+
 if __name__ == "__main__":
   absltest.main()

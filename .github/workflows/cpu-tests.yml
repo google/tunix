@@ -108,7 +108,7 @@ jobs:
   run_vllm:
     runs-on: ubuntu-latest
     container:
-      image: vllm/vllm-tpu:nightly-20260819-12eed6e-9842d70 # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20260831-f6ad5ec-d626108 # zizmor: ignore[unpinned-images]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

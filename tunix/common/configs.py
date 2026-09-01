@@ -119,6 +119,11 @@ class RolloutConfig:
   # Whether to return logprobs from the sampler.
   return_logprobs: bool = False
 
+  # Whether to capture the MoE experts each token was routed through, so the
+  # trainer can replay them instead of re-running its own router. MoE models on
+  # a backend that supports capture only; a no-op otherwise.
+  return_routed_experts: bool = False
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.

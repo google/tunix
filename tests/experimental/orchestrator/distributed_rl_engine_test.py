@@ -18,7 +18,9 @@ import asyncio
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.worker import remote_execution
 
@@ -49,6 +51,8 @@ class MockActorHandle(mock.MagicMock):
     self.save_checkpoint = mock.AsyncMock()
     self.restore_checkpoint = mock.AsyncMock()
     self.get_metrics = mock.AsyncMock(return_value={})
+    self.get_target_state = mock.AsyncMock(return_value={"params": 1})
+    self.set_target_state = mock.AsyncMock()
 
   async def asubmit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -86,19 +90,24 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.generate.return_value = [resp1]
       self.mock_rollout_2.generate.return_value = [resp2]
 
-      results = await self.engine.generate(["p1", "p2"])
+      results = await self.engine.generate([
+          {"prompt": "p1", "prompt_id": "p1", "metadata": {"prefix_hash": 0}},
+          {"prompt": "p2", "prompt_id": "p2", "metadata": {"prefix_hash": 1}},
+      ])
       self.assertLen(results, 2)
       rewards = {res.traj.reward for res in results}
       self.assertEqual(rewards, {1.0, 2.0})
 
       # Verify underlying logical methods were called correctly
       self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
-      p1 = self.mock_rollout_1.generate.call_args.kwargs["prompts"][0]
-      self.assertEqual(p1, "p1")
+      p1 = self.mock_rollout_1.generate.call_args.kwargs["requests"][0]
+      self.assertEqual(p1.prompt, "p1")
+      self.assertEqual(p1.prompt_id, "p1")
 
       self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
-      p2 = self.mock_rollout_2.generate.call_args.kwargs["prompts"][0]
-      self.assertEqual(p2, "p2")
+      p2 = self.mock_rollout_2.generate.call_args.kwargs["requests"][0]
+      self.assertEqual(p2.prompt, "p2")
+      self.assertEqual(p2.prompt_id, "p2")
 
     asyncio.run(_run())
 
@@ -109,7 +118,11 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.mock_rollout_1.generate.return_value = [resp]
       results = await self.engine.generate(
-          ["p1"],
+          [{
+              "prompt": "p1",
+              "prompt_id": "prompt_1",
+              "metadata": {"prefix_hash": 0},
+          }],
           generation_args=datatypes.GenerationArgs(
               max_generation_steps=8,
               temperature=0.5,
@@ -117,18 +130,24 @@ class DistributedRLEngineTest(absltest.TestCase):
           ),
       )
       self.assertLen(results, 1)
-      self.mock_rollout_1.generate.assert_called_once_with(
-          prompts=["p1"],
-          max_generation_steps=8,
-          temperature=0.5,
-          return_logprobs=False,
+      self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
+      req = self.mock_rollout_1.generate.call_args.kwargs["requests"][0]
+      self.assertEqual(
+          req.generation_kwargs,
+          {
+              "max_generation_steps": 8,
+              "temperature": 0.5,
+              "return_logprobs": False,
+          },
       )
     asyncio.run(_run())
 
   def test_generate_rejects_legacy_generation_kwargs(self):
     async def _run():
       with self.assertRaisesRegex(TypeError, "GenerationArgs"):
-        await self.engine.generate(["p1"], temperature=0.5)
+        await self.engine.generate(
+            [{"prompt": "p1", "prompt_id": "prompt_1"}], temperature=0.5
+        )
     asyncio.run(_run())
 
   def test_generate_routes_rollout_requests(self):
@@ -369,7 +388,6 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
   def test_sync_weights_delegates_to_coordinator(self):
     async def _run():
       class _FakeResult:
@@ -395,6 +413,41 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(await engine.sync_weights(), 1)
       self.assertEqual(await engine.sync_weights(), 2)
       self.assertEqual(coordinator.calls, [1, 2])
+
+    asyncio.run(_run())
+
+  def test_prepare_rollout_policy_sets_target_state_and_bootstraps_sync(self):
+    async def _run():
+      class _FakeResult:
+        policy_version = 0
+
+      class _FakeCoordinator:
+
+        def __init__(self):
+          self.calls = []
+
+        async def sync(self, policy_version=0, **kwargs):
+          del kwargs
+          self.calls.append(policy_version)
+          _FakeResult.policy_version = policy_version
+          return _FakeResult
+
+      coordinator = _FakeCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+          weight_sync_coordinator=coordinator,
+      )
+
+      version = await engine.prepare_rollout_policy()
+
+      self.assertEqual(version, 0)
+      self.mock_rollout_1.get_target_state.assert_called_once_with()
+      self.mock_actor.set_target_state.assert_called_once_with(
+          target_state={"params": 1}
+      )
+      self.assertEqual(coordinator.calls, [0])
 
     asyncio.run(_run())
 
@@ -542,6 +595,74 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_build_rollout_requests_deep_injects_env_config_for_mappings(self):
+    original_env_config = {"env_name": "math_arena", "timeout_s": 30}
+    prompts = [
+        {
+            "prompt": "Solve 2+2",
+            "prompt_id": "math_p1",
+            "metadata": {"env_config": original_env_config},
+        }
+    ]
+    requests = self.engine._build_rollout_requests(
+        prompts, group_size=3, policy_version=4
+    )
+    self.assertLen(requests, 3)
+
+    for idx, req in enumerate(requests):
+      self.assertEqual(req.group_index, idx)
+      self.assertEqual(req.target_policy_version, 4)
+      self.assertEqual(req.metadata["group_index"], idx)
+      self.assertEqual(req.metadata["group_size"], 3)
+      # Verify env_config deep injection
+      env_cfg = req.metadata["env_config"]
+      self.assertEqual(env_cfg["env_name"], "math_arena")
+      self.assertEqual(env_cfg["timeout_s"], 30)
+      self.assertEqual(env_cfg["group_index"], idx)
+      self.assertEqual(env_cfg["group_size"], 3)
+      self.assertEqual(env_cfg["policy_version"], 4)
+
+    # Verify original env_config was not mutated in place
+    self.assertEqual(
+        original_env_config, {"env_name": "math_arena", "timeout_s": 30}
+    )
+
+  def test_build_rollout_requests_handles_non_mapping_env_config(self):
+    # 1. env_config is a string
+    requests_str = self.engine._build_rollout_requests(
+        [{
+            "prompt": "p1",
+            "prompt_id": "p1",
+            "metadata": {"env_config": "env_v1"},
+        }],
+        group_size=2,
+        policy_version=1,
+    )
+    self.assertLen(requests_str, 2)
+    self.assertEqual(requests_str[0].metadata["env_config"], "env_v1")
+
+    # 2. env_config is None
+    requests_none = self.engine._build_rollout_requests(
+        [{
+            "prompt": "p2",
+            "prompt_id": "p2",
+            "metadata": {"env_config": None},
+        }],
+        group_size=1,
+        policy_version=1,
+    )
+    self.assertLen(requests_none, 1)
+    self.assertIsNone(requests_none[0].metadata["env_config"])
+
+    # 3. env_config is omitted
+    requests_omitted = self.engine._build_rollout_requests(
+        [{"prompt": "p3", "prompt_id": "p3"}],
+        group_size=1,
+        policy_version=1,
+    )
+    self.assertLen(requests_omitted, 1)
+    self.assertNotIn("env_config", requests_omitted[0].metadata)
+
   def test_dispatch_rollouts_passes_generation_args_and_route_metadata(self):
     async def _run():
       gen_args = datatypes.GenerationArgs(
@@ -595,6 +716,397 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       with self.assertRaisesRegex(ValueError, "lacks 'prompt_id'"):
         await self.engine.dispatch_rollouts(["raw_prompt_without_id"])
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_auto_stamps_lineage_context(self):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [{"prompt": "Hello world", "prompt_id": "prompt_42"}],
+          group_size=2,
+          policy_version=5,
+      )
+      self.assertLen(req_ids, 2)
+
+      requests = []
+      for call in self.mock_rollout_1.generate.call_args_list:
+        requests.extend(call.kwargs.get("requests", []))
+      for call in self.mock_rollout_2.generate.call_args_list:
+        requests.extend(call.kwargs.get("requests", []))
+      self.assertLen(requests, 2)
+      requests.sort(key=lambda r: r.group_index)
+
+      req0 = requests[0]
+      self.assertIn("lineage", req0.metadata)
+      ctx0 = req0.metadata["lineage"]
+      self.assertIsInstance(ctx0, lineage.LineageContext)
+      self.assertEqual(ctx0.tracking_id, "traj_prompt_42_g0")
+      self.assertEqual(ctx0.parent_tracking_ids, ["prompt_42"])
+      self.assertLen(ctx0.events, 1)
+      self.assertEqual(ctx0.events[0].component, "engine.dispatch")
+      self.assertEqual(ctx0.events[0].operation, "rollout")
+      self.assertEqual(ctx0.events[0].attributes["policy_version"], 5)
+      self.assertEqual(ctx0.events[0].attributes["group_index"], 0)
+
+      req1 = requests[1]
+      ctx1 = req1.metadata["lineage"]
+      self.assertEqual(ctx1.tracking_id, "traj_prompt_42_g1")
+      self.assertEqual(ctx1.parent_tracking_ids, ["prompt_42"])
+      self.assertEqual(ctx1.events[0].attributes["group_index"], 1)
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_forwards_lineage_to_trajectory_item(self):
+    async def _run():
+      ctx = lineage.LineageContext(
+          tracking_id="traj_p1_g0", parent_tracking_ids=["p1"]
+      )
+      ctx.add_event("engine.dispatch", "rollout")
+      ctx.add_event("worker.rollout", "generate", {"worker_id": "rollout_0"})
+
+      resp = datatypes.RolloutResponse(
+          request_id="r1",
+          prompt_id="p1",
+          group_index=0,
+          status="COMPLETED",
+          env_reward=1.5,
+          metadata={"lineage": ctx},
+      )
+      self.mock_rollout_1.poll_responses.return_value = [resp]
+      self.mock_rollout_2.poll_responses.return_value = []
+
+      items = await self.engine.poll_rollouts()
+      self.assertLen(items, 1)
+      item = items[0]
+      self.assertIn("lineage", item.metadata)
+      self.assertIs(item.metadata["lineage"], ctx)
+      self.assertEqual(item.metadata["lineage"].tracking_id, "traj_p1_g0")
+      self.assertLen(item.metadata["lineage"].events, 2)
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_preserves_existing_lineage(self):
+    async def _run():
+      custom_ctx = lineage.LineageContext(
+          tracking_id="custom_traj_id_99", parent_tracking_ids=["custom_parent"]
+      )
+      custom_ctx.add_event("custom.system", "custom_op")
+
+      req = datatypes.RolloutRequest(
+          request_id="req_custom",
+          prompt="test prompt",
+          prompt_id="prompt_custom",
+          metadata={"lineage": custom_ctx},
+      )
+      await self.engine.dispatch_rollout_requests([req])
+
+      self.assertIs(req.metadata["lineage"], custom_ctx)
+      self.assertEqual(req.metadata["lineage"].tracking_id, "custom_traj_id_99")
+      self.assertLen(req.metadata["lineage"].events, 1)
+      self.assertEqual(
+          req.metadata["lineage"].events[0].component, "custom.system"
+      )
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_handles_none_metadata(self):
+    async def _run():
+      req = datatypes.RolloutRequest(
+          request_id="req_none_meta",
+          prompt="test prompt",
+          prompt_id="p_none",
+          metadata=None,
+      )
+      await self.engine.dispatch_rollout_requests([req])
+
+      self.assertIsNotNone(req.metadata)
+      self.assertIn("lineage", req.metadata)
+      self.assertEqual(req.metadata["lineage"].tracking_id, "traj_p_none_g0")
+      self.assertEqual(req.metadata["lineage"].parent_tracking_ids, ["p_none"])
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_coerces_int_prompt_id_to_str(self):
+    async def _run():
+      req = datatypes.RolloutRequest(
+          request_id="req_int_id",
+          prompt="test prompt",
+          prompt_id=42,  # pyrefly: ignore[bad-argument-type]
+          metadata={},
+      )
+      await self.engine.dispatch_rollout_requests([req])
+
+      ctx = req.metadata["lineage"]
+      self.assertEqual(ctx.tracking_id, "traj_42_g0")
+      self.assertEqual(ctx.parent_tracking_ids, ["42"])
+      self.assertIsInstance(ctx.parent_tracking_ids[0], str)
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_raises_without_prompt_id(self):
+    async def _run():
+      req = datatypes.RolloutRequest(
+          request_id="req_no_prompt_id",
+          prompt="test prompt",
+          prompt_id="",
+          metadata={},
+      )
+      with self.assertRaisesRegex(ValueError, "lacks 'prompt_id'"):
+        await self.engine.dispatch_rollout_requests([req])
+
+    asyncio.run(_run())
+
+  def test_generate_stamps_lineage_context_for_rollout_requests(self):
+    async def _run():
+      req = datatypes.RolloutRequest(
+          request_id="r1",
+          prompt="p1",
+          prompt_id="prompt_1",
+          group_index=0,
+          target_policy_version=3,
+          metadata={},
+      )
+      resp = datatypes.RolloutResponse(
+          request_id="r1",
+          prompt_id="prompt_1",
+          status="COMPLETED",
+          env_reward=1.0,
+      )
+      self.mock_rollout_1.generate.return_value = [resp]
+      self.mock_rollout_2.generate.return_value = [resp]
+
+      await self.engine.generate([req])
+
+      self.assertIn("lineage", req.metadata)
+      ctx = req.metadata["lineage"]
+      self.assertIsInstance(ctx, lineage.LineageContext)
+      self.assertEqual(ctx.tracking_id, "traj_prompt_1_g0")
+      self.assertEqual(ctx.parent_tracking_ids, ["prompt_1"])
+      self.assertLen(ctx.events, 1)
+      self.assertEqual(ctx.events[0].component, "engine.dispatch")
+      self.assertEqual(ctx.events[0].operation, "rollout")
+      self.assertEqual(ctx.events[0].attributes["policy_version"], 3)
+      self.assertEqual(ctx.events[0].attributes["group_index"], 0)
+
+    asyncio.run(_run())
+
+  def test_generate_stamps_lineage_context_for_mapping_prompts(self):
+    async def _run():
+      p = {
+          "prompt": "hello",
+          "prompt_id": "prompt_dict_1",
+          "group_index": 2,
+          "policy_version": 4,
+          "metadata": {},
+      }
+      resp = datatypes.RolloutResponse(
+          request_id="r1",
+          prompt_id="prompt_dict_1",
+          group_index=2,
+          status="COMPLETED",
+          env_reward=1.0,
+      )
+      self.mock_rollout_1.generate.return_value = [resp]
+      self.mock_rollout_2.generate.return_value = [resp]
+
+      await self.engine.generate([p])
+
+      mock_call = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched_req = mock_call.kwargs["requests"][0]
+      self.assertEqual(dispatched_req.prompt_id, "prompt_dict_1")
+      self.assertEqual(dispatched_req.group_index, 0)
+      self.assertIn("lineage", dispatched_req.metadata)
+      ctx = dispatched_req.metadata["lineage"]
+      self.assertEqual(ctx.tracking_id, "traj_prompt_dict_1_g0")
+      self.assertEqual(ctx.parent_tracking_ids, ["prompt_dict_1"])
+      self.assertEqual(ctx.events[0].component, "engine.dispatch")
+      self.assertEqual(ctx.events[0].operation, "rollout")
+      self.assertEqual(ctx.events[0].attributes["policy_version"], 0)
+      self.assertEqual(ctx.events[0].attributes["group_index"], 0)
+
+    asyncio.run(_run())
+
+  def test_response_to_trajectory_item_with_rollout_response(self):
+    ctx = lineage.LineageContext(
+        tracking_id="traj_p_extra_g1", parent_tracking_ids=["p_extra"]
+    )
+    resp = datatypes.RolloutResponse(
+        request_id="req_1",
+        prompt_id="p_extra",
+        group_index=1,
+        policy_version=2,
+        status="COMPLETED",
+        env_reward=2.0,
+        prompt_tokens=np.array([10], dtype=np.int32),
+        segments=[
+            datatypes.TokenSegment(
+                source="assistant",
+                tokens=np.array([1, 2], dtype=np.int32),
+                loss_mask=np.array([1, 1], dtype=np.float32),
+            )
+        ],
+        metadata={"lineage": ctx},
+    )
+
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertEqual(item.prompt_id, "p_extra")
+    self.assertEqual(item.group_index, 1)
+    self.assertEqual(item.policy_version, 2)
+    self.assertIn("lineage", item.metadata)
+    self.assertIs(item.metadata["lineage"], ctx)
+    np.testing.assert_array_equal(
+        item.completion_tokens, np.array([1, 2], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        item.action_mask, np.array([1, 1], dtype=np.float32)
+    )
+
+  def test_response_to_trajectory_item_rejects_unsupported_type(self):
+    with self.assertRaises(TypeError):
+      distributed_rl_engine._response_to_trajectory_item("invalid_type")
+
+  def test_train_step_generates_unique_request_ids_across_microbatches(self):
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      mock_payload.metadata = {}
+
+      req_ids = []
+      for _ in range(3):
+        await self.engine.train_step(
+            mock_payload,
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=False,
+        )
+        req = self.mock_actor.fwd_bwd.call_args.kwargs["request"]
+        req_ids.append(req.request_id)
+
+      self.assertLen(req_ids, 3)
+      self.assertLen(set(req_ids), 3)
+      for req_id in req_ids:
+        self.assertTrue(req_id.startswith("train_req_"))
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_handles_integer_prompt_id_zero(self):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [{"prompt": "Test 0", "prompt_id": 0}],
+          group_size=1,
+          policy_version=0,
+      )
+      self.assertEqual(req_ids, ["req_0_g0_v0"])
+      mock_call = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched = mock_call.kwargs["requests"][0]
+      self.assertEqual(dispatched.prompt_id, "0")
+      self.assertEqual(dispatched.traj_id, "traj_0_g0")
+      self.assertEqual(dispatched.metadata["lineage"].tracking_id, "traj_0_g0")
+      self.assertEqual(
+          dispatched.metadata["lineage"].parent_tracking_ids, ["0"]
+      )
+
+    asyncio.run(_run())
+
+  def test_response_to_trajectory_item_with_dict_segments(self):
+    ctx = lineage.LineageContext(
+        tracking_id="traj_p_dict_g0", parent_tracking_ids=["p_dict"]
+    )
+    resp = datatypes.RolloutResponse(
+        request_id="req_dict_seg",
+        prompt_id="p_dict",
+        group_index=0,
+        policy_version=1,
+        status="COMPLETED",
+        env_reward=1.0,
+        prompt_tokens=np.array([10], dtype=np.int32),
+        segments=[
+            {
+                "source": "assistant",
+                "tokens": [1, 2],
+                "loss_mask": [1.0, 1.0],
+            },
+            {
+                "source": "env",
+                "tokens": [3],
+            },
+        ],  # pyrefly: ignore[bad-argument-type]
+        metadata={"lineage": ctx},
+    )
+
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertEqual(item.prompt_id, "p_dict")
+    self.assertEqual(item.group_index, 0)
+    self.assertIn("lineage", item.metadata)
+    np.testing.assert_array_equal(
+        item.completion_tokens, np.array([1, 2], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        item.action_mask, np.array([1, 1], dtype=np.float32)
+    )
+
+  def test_response_to_trajectory_item_with_dict_segments_missing_loss_mask(
+      self,
+  ):
+    resp = datatypes.RolloutResponse(
+        request_id="req_dict_no_mask",
+        prompt_id="p_dict",
+        group_index=0,
+        policy_version=1,
+        status="COMPLETED",
+        segments=[{
+            "source": "assistant",
+            "tokens": [5, 6],
+        }],  # pyrefly: ignore[bad-argument-type]
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    np.testing.assert_array_equal(
+        item.completion_tokens, np.array([5, 6], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        item.action_mask, np.array([1.0, 1.0], dtype=np.float32)
+    )
+
+  def test_poll_rollouts_deserializes_dict_responses_with_dict_segments(self):
+    async def _run():
+      raw_dict_response = {
+          "request_id": "r_deserialized",
+          "prompt_id": "p_raw",
+          "group_index": 0,
+          "policy_version": 1,
+          "status": "COMPLETED",
+          "env_reward": 2.5,
+          "prompt_tokens": [10, 20],
+          "segments": [{
+              "source": "assistant",
+              "tokens": [30, 40],
+              "loss_mask": [1.0, 1.0],
+          }],
+          "metadata": {},
+      }
+      self.mock_rollout_1.poll_responses.return_value = [raw_dict_response]
+      self.mock_rollout_2.poll_responses.return_value = []
+
+      items = await self.engine.poll_rollouts()
+      self.assertLen(items, 1)
+      item = items[0]
+      self.assertEqual(item.prompt_id, "p_raw")
+      self.assertEqual(item.traj.reward, 2.5)
+      np.testing.assert_array_equal(
+          item.prompt_tokens, np.array([10, 20], dtype=np.int32)
+      )
+      np.testing.assert_array_equal(
+          item.completion_tokens, np.array([30, 40], dtype=np.int32)
+      )
+      np.testing.assert_array_equal(
+          item.action_mask, np.array([1.0, 1.0], dtype=np.float32)
+      )
 
     asyncio.run(_run())
 

@@ -19,7 +19,6 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import batch_assembly
-from tunix.rl import common as rl_common
 
 
 class HelperFunctionsTest(absltest.TestCase):
@@ -104,8 +103,8 @@ class HelperFunctionsTest(absltest.TestCase):
 
 class WithRefPerTokenLogpsTest(absltest.TestCase):
 
-  def _make_train_example(self, b=2, p=3, c=4):
-    return rl_common.TrainExample(
+  def _make_payload(self, b=2, p=3, c=4):
+    return datatypes.RLTrainerPayload(
         prompt_ids=np.ones((b, p), dtype=np.int32),
         prompt_mask=np.ones((b, p), dtype=np.float32),
         completion_ids=np.ones((b, c), dtype=np.int32),
@@ -116,10 +115,11 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     )
 
   def test_success_with_ndarray(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     ref_logps = np.full((2, 4), -0.5, dtype=np.float32)
     updated = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
 
+    self.assertIsInstance(updated, datatypes.RLTrainerPayload)
     self.assertIsNotNone(updated.ref_per_token_logps)
     self.assertEqual(updated.ref_per_token_logps.shape, (2, 4))
     np.testing.assert_allclose(updated.ref_per_token_logps, ref_logps)
@@ -127,12 +127,13 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     np.testing.assert_array_equal(updated.completion_ids, batch.completion_ids)
 
   def test_success_with_logprobs_response(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     resp = datatypes.LogprobsResponse(
         per_token_logps=np.full((2, 4), -0.8, dtype=np.float32)
     )
     updated = batch_assembly.with_ref_per_token_logps(batch, resp)
 
+    self.assertIsInstance(updated, datatypes.RLTrainerPayload)
     self.assertIsNotNone(updated.ref_per_token_logps)
     self.assertEqual(updated.ref_per_token_logps.shape, (2, 4))
     np.testing.assert_allclose(
@@ -140,7 +141,7 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     )
 
   def test_error_in_logprobs_response_raises_runtime_error(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     resp = datatypes.LogprobsResponse(
         per_token_logps=None,
         error=datatypes.ErrorInfo(
@@ -150,18 +151,14 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "inference worker failed"):
       batch_assembly.with_ref_per_token_logps(batch, resp)
 
-  def test_rejects_non_train_example(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2], dtype=np.int32),
-        token_mask=np.array([1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 1], dtype=np.float32),
-        advantages=np.array([1.0, 1.0], dtype=np.float32),
-    )
-    with self.assertRaisesRegex(TypeError, "expects a padded TrainExample"):
-      batch_assembly.with_ref_per_token_logps(payload, np.zeros((2, 2)))
+  def test_rejects_unsupported_type(self):
+    with self.assertRaisesRegex(TypeError, "expects a padded RLTrainerPayload"):
+      batch_assembly.with_ref_per_token_logps(
+          {"raw": "batch"}, np.zeros((2, 2))
+      )
 
   def test_mismatched_shape_raises_value_error(self):
-    batch = self._make_train_example(b=2, p=3, c=4)
+    batch = self._make_payload(b=2, p=3, c=4)
     bad_shape_logps = np.zeros((2, 3), dtype=np.float32)
     with self.assertRaisesRegex(
         ValueError,
@@ -275,121 +272,6 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     self.assertLen(payloads, 2)
     self.assertEqual(payloads[0].token_ids.shape, (1, 12))
     self.assertEqual(payloads[1].token_ids.shape, (1, 12))
-
-
-class GRPOTrainExampleAssemblerTest(absltest.TestCase):
-
-  def test_rejects_non_positive_batch_size(self):
-    with self.assertRaisesRegex(ValueError, "batch size must be positive"):
-      batch_assembly.GRPOTrainExampleAssembler(
-          batch_size=0,
-          max_prompt_length=4,
-          max_response_length=5,
-          pad_id=0,
-      )
-
-  def test_empty_input_returns_empty_list(self):
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-    )
-    self.assertEmpty(assembler.pack([]))
-
-  def test_grpo_train_example_assembler_basic(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1, 0], dtype=np.float32),
-        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32),
-        prompt_ids=np.array([10, 11], dtype=np.int32),
-        prompt_mask=np.ones(2, dtype=np.float32),
-        completion_ids=np.array([20, 21, 22], dtype=np.int32),
-        completion_mask=np.array([1, 1, 0], dtype=np.float32),
-    )
-
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-    )
-    train_example = assembler.pack([payload])[0]
-
-    self.assertEqual(train_example.prompt_ids.shape, (2, 4))
-    self.assertEqual(train_example.completion_ids.shape, (2, 5))
-    np.testing.assert_array_equal(
-        train_example.prompt_ids[0], np.array([0, 0, 10, 11])
-    )
-    np.testing.assert_array_equal(
-        train_example.completion_ids[0], np.array([20, 21, 22, 0, 0])
-    )
-    np.testing.assert_array_equal(
-        train_example.completion_mask[0], np.array([1, 1, 0, 0, 0])
-    )
-    np.testing.assert_array_equal(
-        train_example.advantages[0], np.array([2, 2, 2, 0, 0])
-    )
-
-  def test_grpo_assembler_optional_fields_propagation(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
-        advantages=np.array([2, 2, 2], dtype=np.float32),
-        prompt_ids=np.array([10, 11], dtype=np.int32),
-        prompt_mask=np.ones(2, dtype=np.float32),
-        completion_ids=np.array([20, 21, 22], dtype=np.int32),
-        completion_mask=np.ones(3, dtype=np.float32),
-        ref_per_token_logps=np.array([-0.3, -0.4, -0.5], dtype=np.float32),
-        old_per_token_logps=np.array([-0.1, -0.2, -0.3], dtype=np.float32),
-    )
-
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-    )
-    train_example = assembler.pack([payload])[0]
-
-    self.assertIsNotNone(train_example.ref_per_token_logps)
-    self.assertIsNotNone(train_example.old_per_token_logps)
-
-    self.assertEqual(train_example.ref_per_token_logps.shape, (2, 5))
-    self.assertEqual(train_example.old_per_token_logps.shape, (2, 5))
-
-    np.testing.assert_allclose(
-        train_example.ref_per_token_logps[0], [-0.3, -0.4, -0.5, 0.0, 0.0]
-    )
-    np.testing.assert_allclose(
-        train_example.old_per_token_logps[0], [-0.1, -0.2, -0.3, 0.0, 0.0]
-    )
-
-  def test_grpo_assembler_chunks_multiple_microbatches(self):
-    payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3], dtype=np.int32),
-        token_mask=np.ones(3, dtype=np.float32),
-        loss_mask=np.array([0, 1, 1], dtype=np.float32),
-        advantages=np.array([1.0, 1.0], dtype=np.float32),
-        prompt_ids=np.array([1], dtype=np.int32),
-        completion_ids=np.array([2, 3], dtype=np.int32),
-    )
-
-    assembler = batch_assembly.GRPOTrainExampleAssembler(
-        batch_size=2,
-        max_prompt_length=3,
-        max_response_length=4,
-        pad_id=0,
-    )
-    train_examples = assembler.pack([payload, payload, payload])
-
-    self.assertLen(train_examples, 2)
-    self.assertEqual(train_examples[0].prompt_ids.shape, (2, 3))
-    self.assertEqual(train_examples[1].prompt_ids.shape, (2, 3))
 
 
 def _make_payload(
@@ -585,8 +467,9 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_allclose(payload.advantages[0], [2.5, 2.5, 2.5, 0, 0])
 
   def test_sequence_aligned_advantage_is_sliced_to_completion(self):
-    item = _make_payload(2, 3)
-    item.advantages = np.array([0, 0, 2, 2, 2], dtype=np.float32)
+    item = _make_payload(
+        2, 3, advantage=np.array([0, 0, 2, 2, 2], dtype=np.float32)
+    )
     payload = self._assembler().pack([item])[0]
 
     np.testing.assert_allclose(payload.advantages[0], [2, 2, 2, 0, 0])
@@ -832,6 +715,128 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
 
     self.assertEqual(payload.advantages.shape, (2, 5))
     np.testing.assert_allclose(payload.advantages[0], [0.0, 0.0, 0.0, 0.0, 0.0])
+
+
+_ROUTING_LAYERS = 2
+_ROUTING_TOP_K = 2
+_UNSET = datatypes.UNSET_ROUTED_EXPERT
+
+
+def _routing(length, fill):
+  """`[length, num_layers, top_k]` routing where every slot holds `fill`."""
+  shape = (length, _ROUTING_LAYERS, _ROUTING_TOP_K)
+  return np.full(shape, fill, dtype=np.int32)
+
+
+class RoutedExpertsAlignmentTest(absltest.TestCase):
+  """Replayed routing must be padded the same way the token ids are."""
+
+  def test_prompt_is_right_aligned_and_completion_left_aligned(self):
+    """Routing must follow the token padding, not sit at the row start.
+
+    Prompts are left-padded and completions right-padded; if the routing does
+    not follow, every replayed expert lands on the wrong token.
+    """
+    prompt_len, completion_len = 2, 3
+    max_prompt, max_response = 5, 6
+    routed = np.concatenate(
+        [_routing(prompt_len, 7), _routing(completion_len, 9)], axis=0
+    )
+
+    out = batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response
+    )
+
+    self.assertEqual(
+        out.shape, (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K)
+    )
+    # Prompt window: leading pad unset, prompt routing flush against the end.
+    np.testing.assert_array_equal(out[: max_prompt - prompt_len], _UNSET)
+    np.testing.assert_array_equal(out[max_prompt - prompt_len : max_prompt], 7)
+    # Response window: completion routing first, trailing pad unset.
+    np.testing.assert_array_equal(
+        out[max_prompt : max_prompt + completion_len], 9
+    )
+    np.testing.assert_array_equal(out[max_prompt + completion_len :], _UNSET)
+
+  def test_overlong_prompt_keeps_the_tail(self):
+    """`_left_pad` keeps the last tokens, so routing must keep its last rows."""
+    # One prompt row per position, so a dropped row is visible by value.
+    prompt = np.broadcast_to(
+        np.arange(4, dtype=np.int32).reshape(4, 1, 1),
+        (4, _ROUTING_LAYERS, _ROUTING_TOP_K),
+    )
+    routed = np.concatenate([prompt, _routing(1, 9)], axis=0)
+    out = batch_assembly._routed_experts_aligned(routed, 4, 1, 2, 3)  # pylint: disable=protected-access
+    # Prompt rows 0 and 1 are dropped; 2 and 3 survive, in order.
+    np.testing.assert_array_equal(out[0], 2)
+    np.testing.assert_array_equal(out[1], 3)
+
+
+class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
+  """The assembler must emit `[B, P + C, num_layers, top_k]`, or nothing."""
+
+  MAX_PROMPT = 4
+  MAX_RESPONSE = 4
+
+  def _assembler(self, batch_size=2):
+    return batch_assembly.PaddedBatchAssembler(
+        batch_size=batch_size,
+        max_prompt_length=self.MAX_PROMPT,
+        max_response_length=self.MAX_RESPONSE,
+        pad_id=0,
+    )
+
+  def _payload(self, fill, with_routing=True):
+    prompt = np.array([1, 2], dtype=np.int32)
+    completion = np.array([3, 4, 5], dtype=np.int32)
+    routed = None
+    if with_routing:
+      routed = np.concatenate(
+          [_routing(len(prompt), fill), _routing(len(completion), fill)],
+          axis=0,
+      )
+    return datatypes.RLTrainerPayload(
+        advantages=np.zeros(len(completion), dtype=np.float32),
+        loss_mask=np.ones(len(completion), dtype=np.float32),
+        prompt_ids=prompt,
+        prompt_mask=np.ones(len(prompt), dtype=np.float32),
+        completion_ids=completion,
+        completion_mask=np.ones(len(completion), dtype=np.float32),
+        routed_experts=routed,
+    )
+
+  def test_batches_routing_across_rows(self):
+    packed = self._assembler().pack([self._payload(1), self._payload(2)])
+    self.assertLen(packed, 1)
+    routed = packed[0].routed_experts
+    self.assertIsNotNone(routed, "assembler dropped the replayed routing")
+    self.assertEqual(
+        routed.shape,
+        (
+            2,
+            self.MAX_PROMPT + self.MAX_RESPONSE,
+            _ROUTING_LAYERS,
+            _ROUTING_TOP_K,
+        ),
+    )
+    # Row order must be preserved, or rows train on each other's routing.
+    self.assertEqual(int(routed[0, self.MAX_PROMPT, 0, 0]), 1)
+    self.assertEqual(int(routed[1, self.MAX_PROMPT, 0, 0]), 2)
+
+  def test_partial_capture_disables_replay_for_the_batch(self):
+    """A half-replayed batch would silently mix replayed and fresh routing."""
+    packed = self._assembler().pack(
+        [self._payload(1), self._payload(2, with_routing=False)]
+    )
+    self.assertIsNone(packed[0].routed_experts)
+
+  def test_short_batch_pads_rows_as_unset(self):
+    """Filler rows must not replay a real expert id."""
+    packed = self._assembler(batch_size=2).pack([self._payload(1)])
+    routed = packed[0].routed_experts
+    self.assertEqual(routed.shape[0], 2)
+    np.testing.assert_array_equal(routed[1], _UNSET)
 
 
 if __name__ == "__main__":

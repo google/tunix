@@ -190,7 +190,7 @@ class PrewarmDatasetIterator:
     # 1. Prime Slot 1 (Current Batch)
     try:
       self.current_batch = next(self.dataset_iter)
-      self._warm_batch(self.current_batch, wait=False)
+      self._warm_batch(self.current_batch, wait=True)
     except StopIteration:
       pass
 

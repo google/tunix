@@ -34,8 +34,6 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 
-SAMPLERS = ("inprocess_vllm",)
-
 # This must be set before the first vLLM import. Keep vLLM imports lazy so the
 # rollout process can start with non-vLLM samplers in environments where vLLM is
 # not installed.

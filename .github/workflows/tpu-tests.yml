@@ -140,7 +140,7 @@ jobs:
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-20260819-12eed6e-9842d70 # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20260831-f6ad5ec-d626108 # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8
@@ -209,7 +209,7 @@ jobs:
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-20260819-12eed6e-9842d70 # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20260831-f6ad5ec-d626108 # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8

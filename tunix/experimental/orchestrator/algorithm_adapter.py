@@ -29,6 +29,40 @@ from tunix.experimental.common import datatypes
 from tunix.rl import algo_core
 
 
+def _routed_experts_for(
+    item: datatypes.TrajectoryItem, seq_len: int
+) -> np.ndarray | None:
+  """Aligns a rollout's captured routing to the payload's token sequence.
+
+  Args:
+    item: Trajectory item, whose `routed_experts` (if any) is `[captured_len,
+      num_layers, top_k]`.
+    seq_len: Length of the prompt+completion sequence in the payload.
+
+  Returns:
+    `[seq_len, num_layers, top_k]`, or None when nothing was captured. Rows
+    beyond what the rollout reported are left `UNSET_ROUTED_EXPERT` so the
+    model falls back to its own gate there rather than replaying a wrong
+    expert.
+  """
+  if item.routed_experts is None:
+    return None
+  routed = np.asarray(item.routed_experts, dtype=np.int32)
+  if routed.ndim != 3:
+    raise ValueError(
+        "routed_experts must be [length, num_layers, top_k]; got shape"
+        f" {routed.shape}"
+    )
+  if routed.shape[0] >= seq_len:
+    return routed[:seq_len]
+  pad = np.full(
+      (seq_len - routed.shape[0],) + routed.shape[1:],
+      datatypes.UNSET_ROUTED_EXPERT,
+      dtype=np.int32,
+  )
+  return np.concatenate([routed, pad], axis=0)
+
+
 class AlgorithmAdapter(abc.ABC):
   """Abstract algorithm adapter for returns math, advantages, and loss functions."""
 
@@ -147,7 +181,10 @@ class GRPOAdapter(AlgorithmAdapter):
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
-          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
+          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
+          if ref_lp is not None
+          else None,
+          routed_experts=_routed_experts_for(item, len(seq_tokens)),
       )
       payloads.append(payload)
     return payloads

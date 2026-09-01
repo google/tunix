@@ -57,6 +57,12 @@ class RolloutOutput:
   # The log probs from sampler generations.
   logprobs: list[np.ndarray] | None
 
+  # Per-generation MoE routing decisions, each `[length, num_layers, top_k]`
+  # covering prompt + completion, so training can replay the experts the
+  # rollout actually routed through instead of re-running the router. None
+  # unless the backend was asked to capture them, or for dense models.
+  routed_experts: list[np.ndarray | None] | None = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""

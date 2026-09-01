@@ -166,6 +166,17 @@ class AbstractTrainer(abc.ABC):
         f"{type(self).__name__} does not implement restore_checkpoint."
     )
 
+  def set_target_state(self, target_state: Any) -> None:
+    """Stores target state shape/dtype pytree for rollout parameter conversion.
+
+    Default implementation is a no-op for trainers that do not require state
+    conversion before weight synchronization.
+
+    Args:
+      target_state: The target state pytree from the rollout worker.
+    """
+    pass
+
   @abc.abstractmethod
   def prepare_weight_sync(self, **kwargs) -> None:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull.

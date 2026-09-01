@@ -72,7 +72,7 @@ class TrainerWorker(abstract_worker.Worker):
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
     if self.state == WorkerState.READY:
-      return self._response(initialized=True, already_ready=True)
+      return self._response(initialized=True, ready=True)
     self.state = WorkerState.INITIALIZING
     try:
       return self._response(initialized=True)
@@ -145,6 +145,16 @@ class TrainerWorker(abstract_worker.Worker):
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
     self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
+
+  def set_target_state(self, target_state: Any) -> datatypes.Response:
+    """Stores rollout target_state so trainer-side weight sync can convert."""
+    setter = getattr(self._trainer, "set_target_state", None)
+    if not callable(setter):
+      raise AttributeError(
+          f"{type(self._trainer).__name__} does not support set_target_state"
+      )
+    setter(target_state)
+    return self._response(target_state_configured=True)
 
   def fwd_bwd(
       self,

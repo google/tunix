@@ -12,15 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for RolloutWorker request_id and prompt_id handling."""
+"""Unit tests for RolloutWorker and lineage telemetry generation."""
 
 import asyncio
+import threading
 from unittest import mock
 
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
-from tunix.experimental.rollout import sampler
+from tunix.experimental.common import lineage
+from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.worker import rollout_worker
 
 
@@ -28,80 +30,123 @@ class RolloutWorkerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.mock_sampler = mock.AsyncMock(spec=sampler.Sampler)
+    self.tokenizer = mocks.MockTokenizer()
+    self.chat_parser = mocks.MockChatParser()
+    self.sampler = mocks.MockBaseSamplerImpl(
+        sampler_name="test_sampler", default_delay=0.0
+    )
+    self.env_pool = mocks.MockEnvironmentPool(pool_size=5, default_delay=0.0)
     self.worker = rollout_worker.RolloutWorker(
-        worker_id="rollout_worker_test_0",
-        sampler=self.mock_sampler,
-        tokenizer=mock.MagicMock(),
-        chat_parser=mock.MagicMock(),
+        worker_id="rollout_worker_42",
+        sampler=self.sampler,
+        env_pool=self.env_pool,
+        agent_factory=mocks.MockAgent,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
     )
 
-  def test_sampling_to_rollout_response_echoes_request_id_and_prompt_id(self):
+  def test_generate_appends_lineage_telemetry_event(self):
+    async def _run():
+      ctx = lineage.LineageContext(
+          tracking_id="traj_prompt_1_0",
+          parent_tracking_ids=["prompt_1"],
+      )
+      ctx.add_event(
+          component="engine.dispatch",
+          operation="rollout",
+          attributes={"policy_version": 0, "group_index": 0},
+      )
+
+      req = datatypes.RolloutRequest(
+          request_id="req_prompt_1_0",
+          prompt="What is 2+2?",
+          prompt_id="prompt_1",
+          group_index=0,
+          metadata={"lineage": ctx},
+      )
+
+      resp = await self.worker.generate(requests=req)
+      self.assertIsInstance(resp, datatypes.RolloutResponse)
+      self.assertIn("lineage", resp.metadata)
+      resp_ctx = resp.metadata["lineage"]
+      self.assertIs(resp_ctx, ctx)
+      self.assertLen(resp_ctx.events, 2)
+
+      dispatch_event = resp_ctx.events[0]
+      self.assertEqual(dispatch_event.component, "engine.dispatch")
+      self.assertEqual(dispatch_event.operation, "rollout")
+
+      worker_event = resp_ctx.events[1]
+      self.assertEqual(worker_event.component, "worker.rollout")
+      self.assertEqual(worker_event.operation, "generate")
+      self.assertEqual(
+          worker_event.attributes.get("worker_id"), "rollout_worker_42"
+      )
+
+    asyncio.run(_run())
+
+  def test_sampling_to_rollout_response_appends_lineage_event(self):
+    ctx = lineage.LineageContext(
+        tracking_id="traj_p2_0",
+        parent_tracking_ids=["p2"],
+    )
     req = datatypes.RolloutRequest(
-        request_id="req_custom_uuid_123",
-        prompt_id="42",
-        group_index=2,
-        prompt="Solve 2+2",
+        request_id="req_p2_0",
+        prompt="Hello",
+        prompt_id="p2",
+        group_index=0,
+        metadata={"lineage": ctx},
     )
 
     resp = self.worker._sampling_to_rollout_response(
         request=req,
-        text="4",
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        token_ids=np.array([3], dtype=np.int32),
-        logprobs=np.array([-0.1], dtype=np.float32),
+        text="Hello there!",
+        prompt_tokens=np.array([1, 2, 3], dtype=np.int32),
+        token_ids=np.array([4, 5, 6], dtype=np.int32),
+        logprobs=None,
     )
 
-    self.assertEqual(resp.request_id, "req_custom_uuid_123")
-    self.assertEqual(resp.prompt_id, "42")
-    self.assertEqual(resp.group_index, 2)
-    self.assertEqual(resp.status, "COMPLETED")
-    self.assertEqual(resp.metadata.get("text"), "4")
-
-  def test_to_rollout_response_preserves_rollout_response(self):
-    existing_resp = datatypes.RolloutResponse(
-        request_id="req_existing_uuid",
-        prompt_id="99",
-        group_index=1,
-        status="COMPLETED",
+    self.assertIn("lineage", resp.metadata)
+    resp_ctx = resp.metadata["lineage"]
+    self.assertIs(resp_ctx, ctx)
+    self.assertLen(resp_ctx.events, 1)
+    self.assertEqual(resp_ctx.events[0].component, "worker.rollout")
+    self.assertEqual(resp_ctx.events[0].operation, "generate")
+    self.assertEqual(
+        resp_ctx.events[0].attributes.get("worker_id"), "rollout_worker_42"
     )
 
-    result = self.worker._to_rollout_response(existing_resp)
-    self.assertIs(result, existing_resp)
-    self.assertEqual(result.request_id, "req_existing_uuid")
-    self.assertEqual(result.prompt_id, "99")
-    self.assertEqual(result.group_index, 1)
+  def test_initialize_only_runs_sampler_once_under_concurrency(self):
+    enter_init = threading.Event()
+    release_init = threading.Event()
 
-  def test_generate_direct_echoes_request_id_and_prompt_id(self):
-    async def _run():
-      self.mock_sampler.sample.return_value = [
-          sampler.SamplingResponse(
-              prompt_token_ids=np.array([1, 2], dtype=np.int32),
-              token_ids=np.array([3, 4], dtype=np.int32),
-              text="4",
-              logprobs=np.array([-0.1, -0.2], dtype=np.float32),
-          )
-      ]
-      req = datatypes.RolloutRequest(
-          request_id="req_test_uuid_999",
-          prompt_id="42",
-          group_index=3,
-          prompt="Test prompt",
-      )
-      responses = await self.worker._generate_rollout_requests_direct([req])
-      self.mock_sampler.sample.assert_called_once()
-      sampled_requests = self.mock_sampler.sample.call_args[0][0]
-      self.assertLen(sampled_requests, 1)
-      self.assertEqual(sampled_requests[0].request_id, "req_test_uuid_999")
+    def _initialize():
+      enter_init.set()
+      release_init.wait(timeout=1.0)
 
-      self.assertLen(responses, 1)
-      resp = responses[0]
-      self.assertEqual(resp.request_id, "req_test_uuid_999")
-      self.assertEqual(resp.prompt_id, "42")
-      self.assertEqual(resp.group_index, 3)
-      self.assertEqual(resp.status, "COMPLETED")
+    responses = []
 
-    asyncio.run(_run())
+    def _call_initialize():
+      responses.append(self.worker.initialize())
+
+    t1 = threading.Thread(target=_call_initialize)
+    t2 = threading.Thread(target=_call_initialize)
+    with mock.patch.object(
+        self.sampler, "initialize", side_effect=_initialize
+    ) as init_mock:
+      t1.start()
+      self.assertTrue(enter_init.wait(timeout=1.0))
+      t2.start()
+      release_init.set()
+      t1.join(timeout=1.0)
+      t2.join(timeout=1.0)
+
+    self.assertFalse(t1.is_alive())
+    self.assertFalse(t2.is_alive())
+    self.assertEqual(init_mock.call_count, 1)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
+    self.assertLen(responses, 2)
+    self.assertEqual(sum(bool(r.metadata.get("ready")) for r in responses), 1)
 
 
 if __name__ == "__main__":
