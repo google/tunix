@@ -1,6 +1,44 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
-## P58.34 K25 environment-admission boundary and fresh K26
+## P58.35 K26 trainer-local commit and fresh K27
+
+K26 completed strict A=B=C over 383,383 action tokens, all sixteen backward
+groups, finite nonzero precommit, and one TPU-resident trainer-local Adam
+transaction. Trainer step advanced 0 to 1 and 3,655,535,873 parameter
+elements changed. The first-update gate then rejected
+`effective_learning_rate=None` before outer weight synchronization.
+
+This was a receipt-observer defect. DeepSWE's state is
+`[clip EmptyState, injected AdamW hyperparams]`; the old scanner stopped at
+the empty entry. The repaired scanner skips state-free transforms and reads
+the real AdamW learning rate. It still returns `None` when no optimizer state
+exposes a learning rate, so the gate remains fail closed. Do not add a config
+fallback and do not change optimizer, clipping, loss, alignment, or warning
+semantics.
+
+K26 has no resumable checkpoint. After separately approved publication and
+launch, render a fresh K27 from one verified clean remote-read SHA and its
+matching image:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k27.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k27 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Require a finite positive learning-rate receipt matching configured `1e-6`
+(`float32` may render `9.999999974752427e-07`), first-update gate PASS, outer
+weight sync, and entry into the next rollout/update boundary. Until then the
+repair is source/image-admitted only. K26 is strict numerical plus backward
+plus trainer-local Adam evidence, not synchronized training completion.
+
+## HISTORICAL — P58.34 K25 environment-admission boundary and K26
 
 K25 proved P58.33's disabled-checkpoint startup marker, returned all 128
 trajectories, and completed Rescore B. It then failed before the first

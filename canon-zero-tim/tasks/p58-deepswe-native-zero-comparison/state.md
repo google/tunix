@@ -1,5 +1,28 @@
 # State
 
+## P58.35 K26 effective-learning-rate observer (2026-09-01)
+
+- K26 returned 128 multi-turn rollouts and reached a strict full backward:
+  16/16 post-backward records cover 383,383 action tokens with A=B=C,
+  `w/r/wr` exact, zero clip hits, and zero TIS hits.
+- The precommit was finite and nonzero over 398/398 leaves. Adam ran on TPU,
+  advanced trainer step 0 to 1, and changed 3,655,535,873 parameter elements.
+- The run then stopped before outer weight synchronization because the
+  commit receipt reported `effective_learning_rate=None`. K26 is therefore a
+  trainer-local optimizer PASS, not a synchronized Step-0 or training PASS.
+- Root cause is the learning-rate state observer: it stopped at the clip
+  transform's `EmptyState` before reaching injected AdamW hyperparameters.
+  The repair skips empty state entries and preserves `None` when no actual
+  hyperparameter state exists; there is no config fallback or gate relaxation.
+- K26 has no resumable checkpoint. The next separately approved target is a
+  fresh K27 and must prove a finite positive learning-rate receipt matching
+  configured `1e-6`, the first-update gate, outer synchronization, and
+  continued execution.
+- Both incident checksums, Python syntax, and the complete digest-pinned
+  `P58_EXACT_IMAGE_CPU_PASS` gate pass. No target has run after the repair.
+- Phase: `phases/p58-35-k26-effective-learning-rate-observer.md`. Immutable
+  incident: `canon-zero-tim/evidence/p58_k26_effective_learning_rate_incident/`.
+
 ## P58.34 K25 precheck-only environment admission (2026-09-01)
 
 - K25 crossed P58.33's disabled-checkpoint startup boundary, returned all 128

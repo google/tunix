@@ -1776,7 +1776,9 @@ class PeftTrainer:
     except AttributeError:
       for chainpart in self.optimizer.opt_state:
         if isinstance(chainpart, optax.EmptyState):
-          break
+          # Stateless transforms (for example gradient clipping) do not
+          # terminate an Optax chain; a later transform may own hyperparams.
+          continue
         if hasattr(chainpart, "hyperparams"):
           return chainpart.hyperparams["learning_rate"].value
       return None

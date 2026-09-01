@@ -1,15 +1,15 @@
 # Plan
 
-## Active phase: P58.34 K25 precheck-only environment admission
+## Active phase: P58.35 K26 effective-learning-rate observer
 
-K25 crossed P58.33, completed 128 rollouts and Rescore B, then stopped before
-the first comparison because the exact Zero-HP warning identity treated an
-absent `CANON_P38_PRECHECK_ONLY` differently from shell/profile default `0`.
-Unify the representation without broadening the program identity: absent,
-empty, and `0` mean disabled; `1` remains a strict diagnostic; malformed
-values fail. Preserve P58.32's narrow finite A-B warning policy and every hard
-numerical/optimizer boundary. K25 is not resumable; the next target is fresh
-K26 and remains separately approval-gated.
+K26 crossed P58.34, completed strict A=B=C over 383,383 action tokens, all
+sixteen backward groups, and one TPU-resident trainer-local Adam transaction.
+It stopped before outer weight synchronization because the learning-rate
+observer terminated at gradient clipping's `EmptyState` and failed to inspect
+the later injected AdamW hyperparameters. Skip state-free transforms while
+keeping a missing actual hyperparameter state fatal. Do not use a config
+fallback and do not change any numerical, optimizer, warning, or workload
+semantics. K26 is not resumable; a fresh K27 remains separately approval-gated.
 
 ## Outcome
 

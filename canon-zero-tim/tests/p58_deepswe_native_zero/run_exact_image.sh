@@ -190,6 +190,8 @@ $DOCKER run --rm \
       PYTHONPATH=/workspace python3 -m unittest \
         sft_utils_test.StableGlobalNormTest \
         peft_trainer_test.PeftTrainerTest.test_p58_precomputed_transaction_requires_sixteen_gradient_groups \
+        peft_trainer_test.PeftTrainerTest.test_effective_learning_rate_skips_empty_chain_state \
+        peft_trainer_test.PeftTrainerTest.test_effective_learning_rate_fails_closed_without_hyperparams \
         peft_trainer_test.PeftTrainerTest.test_p63_finite_overflow_commits_nonzero_clipped_update \
         peft_trainer_test.PeftTrainerTest.test_denominator_weighted_accumulation_matches_concatenated_batch \
         peft_trainer_test.PeftTrainerTest.test_denominator_weighted_all_empty_skips_optimizer \

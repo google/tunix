@@ -1721,6 +1721,44 @@ class PeftTrainerTest(parameterized.TestCase):
       self.assertEqual(evidence["parameter_changed_elements"], 0)
       self.assertEqual(evidence["parameter_delta_max_abs"], 0.0)
 
+  def test_effective_learning_rate_skips_empty_chain_state(self):
+    learning_rate = 1.0e-6
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    optimizer = optax.chain(
+        utils.overflow_safe_clip_by_global_norm(1.0),
+        optax.schedules.inject_hyperparams(optax.adamw)(
+            learning_rate=learning_rate,
+            b1=0.9,
+            b2=0.99,
+            weight_decay=0.01,
+        ),
+    )
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+
+    self.assertAlmostEqual(
+        trainer.effective_learning_rate(), learning_rate, places=12
+    )
+
+  def test_effective_learning_rate_fails_closed_without_hyperparams(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    optimizer = optax.chain(
+        utils.overflow_safe_clip_by_global_norm(1.0),
+        optax.adamw(1.0e-6),
+    )
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+
+    self.assertIsNone(trainer.effective_learning_rate())
+
   def test_p30_optimizer_offload_matches_two_device_commits(self):
     def make_trainer(*, optimizer_offload):
       config = peft_trainer.TrainingConfig(

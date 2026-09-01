@@ -1,5 +1,24 @@
 # Log
 
+## 2026-09-01 UTC — P58.35 K26 learning-rate observer incident and repair
+
+- K26 crossed the K25 admission repair and completed strict A=B=C over
+  383,383 action tokens, all sixteen reverse groups, finite nonzero precommit,
+  and a TPU-resident Adam transaction. Trainer step advanced 0 to 1 and
+  3,655,535,873 parameter elements changed.
+- The first-update gate then rejected only `effective_learning_rate=None`
+  before outer weight sync. This is a trainer-local commit with no complete
+  synchronized cycle and no resumable checkpoint.
+- DeepSWE chains a state-free gradient clip before injected AdamW. The
+  observer incorrectly broke on the clip `EmptyState`; it now continues to
+  the real AdamW hyperparameter state. Missing observable state still returns
+  `None` and remains fatal.
+- The exact DeepSWE chain and the negative no-hyperparams case are pinned into
+  the P58 image gate. Python syntax and the complete digest-pinned image suite
+  pass with terminal `P58_EXACT_IMAGE_CPU_PASS`.
+- No flags or training semantics changed. K27 publication and execution are
+  separately approval-gated; no commit or push occurred in this local repair.
+
 ## 2026-09-01 UTC — P58.34 K25 precheck-only environment incident and repair
 
 - K25 crossed the P58.33 startup marker, returned 128 trajectories, and

@@ -1,6 +1,49 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — P58.34 K25 crossed checkpointing; K26 is fresh
+## START HERE — P58.35 K26 committed locally; K27 is fresh
+
+K26 is the first P58 run to complete the full strict numerical and backward
+path plus a trainer-local TPU Adam transaction. Across 16 reverse groups it
+covered 383,383 action tokens with A=B=C, exact `w/r/wr`, zero clip/TIS hits,
+and finite nonzero gradients. The precommit covered 398/398 nonzero leaves;
+trainer step advanced 0 to 1 and 3,655,535,873 parameter elements changed.
+
+It is not a complete Step-0 training PASS. The gate stopped after the local
+commit and before outer weight synchronization because the commit receipt had
+`effective_learning_rate=None`. P58 checkpointing is disabled, so K26 cannot
+resume.
+
+Root cause: DeepSWE uses `optax.chain(clip, injected_adamw)`. The clip owns an
+`EmptyState`; the learning-rate observer treated that as end-of-chain and
+never reached AdamW's real `learning_rate=1e-6`. The repair skips empty state
+entries, reads only actual optimizer hyperparameter state, and remains fatal
+when no such state exists. It does not change training math or relax a gate.
+
+After separately approved source publication, matching image preparation,
+and cluster launch, render a fresh K27:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k27.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k27 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Require the K26 numerical/backward receipts, then a finite positive
+learning-rate receipt matching configured `1e-6` (`float32` may render
+`9.999999974752427e-07`), first-update gate PASS, outer weight sync, and
+continued execution into the next rollout/update boundary. Do not reuse the
+K26 render and do not claim repair success until K27 runs. See
+`phases/p58-35-k26-effective-learning-rate-observer.md` and immutable
+analysis-grade evidence
+`canon-zero-tim/evidence/p58_k26_effective_learning_rate_incident/`.
+
+## HISTORICAL — P58.34 K25 crossed checkpointing; K26 was fresh
 
 K25 crossed the disabled-checkpoint receipt, returned all 128 trajectories,
 and completed Rescore B. It then stopped before the first numerical comparison
