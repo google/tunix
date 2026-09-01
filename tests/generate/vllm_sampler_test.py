@@ -592,6 +592,63 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sampler.args["tensor_parallel_size"], 8)
     self.assertEqual(sampler.args["data_parallel_size"], 1)
 
+  def test_no_mesh_parallel_sizes_and_sharding_strategy(self):
+    # In distributed settings, mesh is None during initial config assembly.
+    config = vllm_sampler.VllmConfig(
+        mesh=None,
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        expert_parallel_size=2,
+        enable_dp_attention=True,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    self.assertEqual(sampler.args["tensor_parallel_size"], 4)
+    self.assertEqual(sampler.args["data_parallel_size"], 2)
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 2)
+    self.assertTrue(sharding_strategy["enable_dp_attention"])
+    self.assertNotIn("device_indexes", sharding_strategy)
+
+  def test_no_mesh_default_parallel_sizes(self):
+    config = vllm_sampler.VllmConfig(
+        mesh=None,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    self.assertEqual(sampler.args["tensor_parallel_size"], -1)
+    self.assertEqual(sampler.args["data_parallel_size"], -1)
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 1)
+    self.assertFalse(sharding_strategy["enable_dp_attention"])
+    self.assertNotIn("device_indexes", sharding_strategy)
+
+  def test_no_mesh_preserves_additional_config_sharding(self):
+    config = vllm_sampler.VllmConfig(
+        mesh=None,
+        additional_config={
+            "sharding": {
+                "attn_dp_size": 2,
+                "sharding_strategy": {"custom_param": "foo"},
+            }
+        },
+        expert_parallel_size=4,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding = sampler.args["additional_config"]["sharding"]
+    self.assertEqual(sharding["attn_dp_size"], 2)
+    self.assertEqual(sharding["sharding_strategy"]["custom_param"], "foo")
+    self.assertEqual(sharding["sharding_strategy"]["expert_parallelism"], 4)
+    self.assertNotIn("device_indexes", sharding["sharding_strategy"])
+
 
 if __name__ == "__main__":
   absltest.main()

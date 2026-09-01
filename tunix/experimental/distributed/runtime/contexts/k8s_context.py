@@ -50,26 +50,29 @@ def resolve_self_hostname() -> str:
   Raises:
     ValueError: If required Kubernetes pod environment variables are missing.
   """
-  required_envs = [
-      "JOBSET_NAME",
-      "REPLICATED_JOB_NAME",
-      "JOB_INDEX",
-      "POD_INDEX",
-  ]
-  missing_envs = [env for env in required_envs if env not in os.environ]
-  if missing_envs:
-    raise ValueError(
-        f"Missing required environment variable(s): {', '.join(missing_envs)}"
-    )
+  if "LWS_LEADER_ADDRESS" in os.environ:
+    return os.environ["LWS_LEADER_ADDRESS"]
+  else:
+    required_envs = [
+        "JOBSET_NAME",
+        "REPLICATED_JOB_NAME",
+        "JOB_INDEX",
+        "POD_INDEX",
+    ]
+    missing_envs = [env for env in required_envs if env not in os.environ]
+    if missing_envs:
+      raise ValueError(
+          f"Missing required environment variable(s): {', '.join(missing_envs)}"
+      )
 
-  jobset_name = os.environ["JOBSET_NAME"]
-  replicated_job = os.environ["REPLICATED_JOB_NAME"]
-  job_index = os.environ["JOB_INDEX"]
-  pod_index = os.environ["POD_INDEX"]
+    jobset_name = os.environ["JOBSET_NAME"]
+    replicated_job = os.environ["REPLICATED_JOB_NAME"]
+    job_index = os.environ["JOB_INDEX"]
+    pod_index = os.environ["POD_INDEX"]
 
-  # Constructing a fully qualified domain name (FQDN)
-  fqdn = f"{jobset_name}-{replicated_job}-{job_index}-{pod_index}.{jobset_name}"
-  return fqdn
+    # Constructing a fully qualified domain name (FQDN)
+    fqdn = f"{jobset_name}-{replicated_job}-{job_index}-{pod_index}.{jobset_name}"
+    return fqdn
 
 
 class K8sJaxContext(context.JaxContext):
@@ -85,6 +88,8 @@ class K8sJaxContext(context.JaxContext):
       import pathwaysutils
 
       pathwaysutils.initialize()
+    elif "ray" in os.environ.get("TPU_MULTIHOST_BACKEND", ""):
+      pass
     else:
       logging.info("initializing multi-controller JAX runtime")
 
