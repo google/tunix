@@ -54,6 +54,51 @@ def _left_pad(
   return out, mask
 
 
+def _routed_experts_aligned(
+    routed: np.ndarray,
+    prompt_len: int,
+    completion_len: int,
+    max_prompt_length: int,
+    max_response_length: int,
+) -> np.ndarray:
+  """Lays one row of routing out over the padded `[prompt | completion]`.
+
+  Mirrors how the token ids themselves are padded -- prompts right-aligned in
+  the prompt window (keeping the tail, as `_left_pad` does) and completions
+  left-aligned in the response window -- so replayed routing stays attached to
+  the token it was captured for. Everything else is left unset.
+
+  Args:
+    routed: `[prompt_len + completion_len, num_layers, top_k]` for one
+      generation. Only axis 0 (the per-token axis) is ever sliced below; the
+      trailing `[num_layers, top_k]` axes are carried through untouched.
+    prompt_len: Unpadded prompt length, i.e. where the completion starts.
+    completion_len: Unpadded completion length.
+    max_prompt_length: Padded prompt width.
+    max_response_length: Padded completion width.
+
+  Returns:
+    `[max_prompt_length + max_response_length, num_layers, top_k]`.
+  """
+  routed = np.asarray(routed, dtype=np.int32)
+  # Prompts are left-padded, so an over-long one keeps its tail; completions are
+  # right-padded, so an over-long one keeps its head.
+  kept_prompt_start = max(prompt_len - max_prompt_length, 0)
+  kept_completion_end = prompt_len + min(completion_len, max_response_length)
+  prompt_part = routed[kept_prompt_start:prompt_len]
+  completion_part = routed[prompt_len:kept_completion_end]
+
+  out = np.full(
+      (max_prompt_length + max_response_length,) + routed.shape[1:],
+      datatypes.UNSET_ROUTED_EXPERT,
+      dtype=np.int32,
+  )
+  prompt_end = max_prompt_length
+  out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
+  out[prompt_end : prompt_end + len(completion_part)] = completion_part
+  return out
+
+
 def _right_pad(
     values: np.ndarray,
     length: int,
@@ -340,6 +385,10 @@ class PaddedBatchAssembler:
     optional_rows: dict[str, list[np.ndarray]] = {
         name: [] for name in present_fields
     }
+    # Router replay is all-or-nothing per batch: a partially replayed batch
+    # would silently mix replayed and freshly routed rows.
+    replay_routing = all(it.routed_experts is not None for it in chunk)
+    routed_experts_rows: list[np.ndarray] = []
     truncated_prompts = truncated_completions = 0
 
     for item in chunk:
@@ -420,6 +469,23 @@ class PaddedBatchAssembler:
             )
         )
 
+      # `replay_routing` already guarantees this is set; binding it locally
+      # also narrows the optional field for the type checker.
+      routed = item.routed_experts
+      if replay_routing and routed is not None:
+        routed_experts_rows.append(
+            _routed_experts_aligned(
+                # `routed_experts` is declared ArrayLike, which admits jax
+                # arrays and scalars; concretise it here as the sibling fields
+                # above do.
+                np.asarray(routed, dtype=np.int32),
+                p_full.size,
+                c.size,
+                self.max_prompt_length,
+                self.max_response_length,
+            )
+        )
+
     if truncated_prompts or truncated_completions:
       logging.warning(
           "PaddedBatchAssembler truncated %d prompt(s) to %d tokens and %d "
@@ -445,6 +511,10 @@ class PaddedBatchAssembler:
       advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
       for rows in optional_rows.values():
         rows.append(np.zeros(self.max_response_length, dtype=np.float32))
+      if routed_experts_rows:
+        routed_experts_rows.append(
+            np.full_like(routed_experts_rows[0], datatypes.UNSET_ROUTED_EXPERT)
+        )
 
     batched_prompt_ids = np.stack(prompt_ids)
     batched_prompt_mask = np.stack(prompt_mask)
@@ -473,4 +543,7 @@ class PaddedBatchAssembler:
         returns=stacked_optional.get("returns"),
         old_values=stacked_optional.get("old_values"),
         sampler_is_weights=stacked_optional.get("sampler_is_weights"),
+        routed_experts=(
+            np.stack(routed_experts_rows) if routed_experts_rows else None
+        ),
     )

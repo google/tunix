@@ -224,6 +224,7 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     top_ks = []
     seeds = []
     return_logprobs_list = []
+    return_routed_experts_list = []
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
@@ -241,6 +242,7 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       top_ks.append(sp.top_k)
       seeds.append(sp.seed)
       return_logprobs_list.append(sp.return_logprobs)
+      return_routed_experts_list.append(sp.return_routed_experts)
 
     max_generation_steps = (
         max(max_gen_steps_list) if max_gen_steps_list else 64
@@ -252,6 +254,19 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     return_logprobs = any(return_logprobs_list) or kwargs.get(
         "return_logprobs", False
     )
+    # Capture is an engine-level vLLM setting, so it cannot be turned on
+    # per request. Warn rather than silently handing back None routing, which
+    # would look like a dense model to the trainer.
+    if any(return_routed_experts_list) and not getattr(
+        self.vllm_sampler.config, "return_routed_experts", False
+    ):
+      logging.warning(
+          "InprocessVllmSamplerAdapter [%s]: routed experts were requested per"
+          " request, but the vLLM engine was built without"
+          " return_routed_experts, so none will be returned. Set"
+          " return_routed_experts on the sampler's VllmConfig.",
+          self.server_id,
+      )
 
     sampler_output = self.vllm_sampler(
         input_strings=prompts,
@@ -281,6 +296,9 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       if sampler_output.logprobs and isinstance(sampler_output.logprobs, list):
         lps = sampler_output.logprobs[i]
 
+      routed_list = getattr(sampler_output, "routed_experts", None) or []
+      routed = routed_list[i] if i < len(routed_list) else None
+
       tok_ids = (
           np.array(toks, dtype=np.int32)
           if toks is not None
@@ -298,6 +316,7 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
               prompt_token_ids=prompt_token_ids,
               token_ids=tok_ids,
               logprobs=log_ps,
+              routed_experts=routed,
               finish_reason="stop",
           )
       )

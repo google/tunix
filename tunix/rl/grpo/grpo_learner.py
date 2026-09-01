@@ -269,6 +269,15 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         for completion_ids in rollout_output.tokens
     ])
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
+    # Router replay: lay the rollout's routing out over the same
+    # `[prompt | completion]` padding the token ids just got, so a replayed
+    # expert stays attached to the token it was captured for.
+    routed_experts = common.align_routed_experts(
+        rollout_output.routed_experts,
+        completion_lengths=[len(t) for t in rollout_output.tokens],
+        prompt_width=prompt_ids.shape[-1],
+        completion_width=rollout_config.max_tokens_to_generate,
+    )
 
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
@@ -497,6 +506,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
         sampler_is_weights=sampler_is_weights,
+        routed_experts=(
+            None if routed_experts is None else jax.device_put(routed_experts)
+        ),
     )
 
   def _compute_trajectory_ids(

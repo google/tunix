@@ -535,5 +535,20 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(item_default.group_index, 0)
 
 
+class TokenSegmentRoutingTest(absltest.TestCase):
+  """`routed_experts` must line up with the tokens it describes."""
+
+  def test_rejects_length_mismatch(self):
+    """Only the per-token axis is checked; trailing axes are model-specific."""
+    tokens = np.arange(4, dtype=np.int32)
+    with self.assertRaisesRegex(ValueError, "routed_experts shape"):
+      datatypes.TokenSegment(
+          source="assistant",
+          tokens=tokens,
+          loss_mask=np.ones_like(tokens),
+          routed_experts=np.zeros((3, 2, 2), dtype=np.int32),
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -270,5 +270,61 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
       asyncio.run(self.sampler_adapter.sample(None))
 
 
+class RoutedExpertsTest(absltest.TestCase):
+  """Captured MoE routing must reach the matching response."""
+
+  def _adapter(self, routed_experts, engine_captures=True):
+    rows = len(routed_experts) if routed_experts else 1
+    sampler = mock.MagicMock()
+    sampler.return_value = base_sampler.SamplerOutput(
+        text=["c"] * rows,
+        logits=None,
+        tokens=[np.array([10, 20, 30], dtype=np.int32)] * rows,
+        padded_prompt_tokens=np.tile(
+            np.array([1, 2], dtype=np.int32), (rows, 1)
+        ),
+        logprobs=None,
+        routed_experts=routed_experts,
+    )
+    sampler.config = mock.Mock(return_routed_experts=engine_captures)
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="rollout"
+    )
+    adapter.vllm_sampler = sampler
+    return adapter
+
+  def _requests(self, n):
+    return [
+        base_sampler_lib.SamplingRequest(
+            request_id=f"req-{i}",
+            prompt=np.array([1, 2], dtype=np.int32),
+            sampling_params=base_sampler_lib.SamplingParams(
+                max_tokens=3, return_routed_experts=True
+            ),
+        )
+        for i in range(n)
+    ]
+
+  def test_routing_reaches_each_response_in_order(self):
+    """Row i's routing must land on row i, or replay trains the wrong tokens."""
+    routed = [np.full((3, 2, 2), i, dtype=np.int32) for i in range(2)]
+    responses = asyncio.run(self._adapter(routed).sample(self._requests(2)))
+
+    self.assertLen(responses, 2)
+    for i, response in enumerate(responses):
+      self.assertEqual(response.request_id, f"req-{i}")
+      np.testing.assert_array_equal(response.routed_experts, routed[i])
+
+  def test_warns_when_engine_cannot_capture(self):
+    """Silently returning None would look like a dense model to the trainer."""
+    adapter = self._adapter(None, engine_captures=False)
+    with self.assertLogs(level="WARNING") as logs:
+      asyncio.run(adapter.sample(self._requests(1)))
+    self.assertTrue(
+        any("return_routed_experts" in line for line in logs.output),
+        f"expected a warning about the engine setting, got {logs.output}",
+    )
+
+
 if __name__ == "__main__":
   absltest.main()
