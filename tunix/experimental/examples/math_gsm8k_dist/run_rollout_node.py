@@ -21,6 +21,7 @@ import asyncio
 import importlib
 import logging
 import os
+from pathlib import Path
 import pickle
 import sys
 from typing import Any
@@ -44,6 +45,30 @@ CHAT_PARSERS = {
     "llama": chat_parser_lib.LlamaChatTemplateParser,
     "gemma": chat_parser_lib.GemmaChatTemplateParser,
 }
+
+
+DEFAULT_MODEL_DOWNLOAD_DIR = os.getenv(
+    "MODEL_DOWNLOAD_DIR", "/tmp/artifacts/qwen3_dist_gsm8k/models"
+)
+
+
+def _has_direct_safetensors(model_path: Path) -> bool:
+  return model_path.is_dir() and any(
+      f.name.endswith(".safetensors") for f in model_path.iterdir()
+  )
+
+
+def _ensure_model_dir_for_rollout(model_dir: str, model_id: str) -> str:
+  if not model_dir:
+    model_dir = DEFAULT_MODEL_DOWNLOAD_DIR
+  model_path = Path(model_dir)
+  if _has_direct_safetensors(model_path):
+    return str(model_path)
+  model_path.mkdir(parents=True, exist_ok=True)
+  from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
+
+  oss_utils.hf_pipeline(model_id, str(model_path))
+  return str(model_path)
 
 
 def _import_vllm_sampler():
@@ -73,7 +98,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument(
-      "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
+      "--model_dir",
+      type=str,
+      default=os.getenv(
+          "MODEL_DIR",
+          os.getenv(
+              "MODEL_DOWNLOAD_DIR", "/tmp/artifacts/qwen3_dist_gsm8k/models"
+          ),
+      ),
   )
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=1)
@@ -127,7 +159,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync_lib.WeightSyncMode),
       help="Weight sync mode (none, fallback, or raiden).",
   )
-  return parser.parse_args(argv)
+  parser.add_argument("--discovery_addrs", type=str, default="")
+  args, _ = parser.parse_known_args(argv)
+  return args
 
 
 def _create_rollout_mesh(args) -> Any:
@@ -163,10 +197,9 @@ def _create_vanilla_worker(args, tokenizer):
 
   logging.info("Creating native sampler on the rollout mesh...")
   mesh = _create_rollout_mesh(args)
+  model_dir = _ensure_model_dir_for_rollout(args.model_dir, args.model_id)
   with mesh:
-    model = models.create_model(
-        args.model_name, args.model_dir or args.model_id, mesh
-    )
+    model = models.create_model(args.model_name, model_dir, mesh)
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
       weight_sync_mode=args.weight_sync_mode,
@@ -380,12 +413,25 @@ def _create_vllm_sampler(args):
 
 
 def main(argv: list[str], context: Any = None) -> None:
-  if context and context.ipc and context.ipc.discovery:
-    pass
-  else:
-    raise RuntimeError(
-        "Require discovery API, but process context doesn't support."
+  if context is not None:
+    if not getattr(context, "ipc", None) or not getattr(context.ipc, "discovery", None):
+      raise RuntimeError(
+          "Require discovery API, but process context doesn't support."
+      )
+
+  args_list = argv[1:] if argv and argv[0] == sys.argv[0] else argv
+  args = _parse_args(args_list)
+  if context is None:
+    from tunix.experimental.distributed.runtime.contexts import context_factory  # pylint: disable=g-import-not-at-top
+
+    context = context_factory.get_default_process_context(
+        argparse.Namespace(
+            discovery_id=args.worker_id,
+            discovery_addrs=args.discovery_addrs,
+            port=args.port,
+        )
     )
+    context.__enter__()
 
   logging.basicConfig(
       level=logging.INFO,
@@ -393,7 +439,6 @@ def main(argv: list[str], context: Any = None) -> None:
       force=True,
   )
 
-  args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
   if context and args.sampler != "vllm":
@@ -408,9 +453,12 @@ def main(argv: list[str], context: Any = None) -> None:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
 
+  args.model_dir = models.ensure_model_dir(args.model_dir, args.model_id)
+  logging.info("Prepared rollout safetensors directory: %s", args.model_dir)
+
   from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
-  tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
+  tokenizer_path = args.tokenizer_path or args.model_dir
   logging.info("Loading tokenizer from %s...", tokenizer_path)
   tokenizer: Any = AutoTokenizer.from_pretrained(
       tokenizer_path, trust_remote_code=True
@@ -466,4 +514,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
 
 if __name__ == "__main__":
-  main(sys.argv[1:])
+  from absl import app  # pylint: disable=g-import-not-at-top
+  from absl import flags  # pylint: disable=g-import-not-at-top
+
+  app.run(main, flags_parser=lambda argv: flags.FLAGS(argv, known_only=True))

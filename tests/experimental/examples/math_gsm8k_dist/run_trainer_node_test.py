@@ -160,7 +160,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
       mock_ensure_model_dir,
       mock_create_mesh,
       mock_load_actor_model,
-      mock_create_trainer_factory,
+      mock_create_trainer,
       mock_trainer_worker_cls,
       mock_grpc_server_cls,
   ):
@@ -168,7 +168,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_mesh = mock.MagicMock(spec=Mesh)
     mock_create_mesh.return_value = mock_mesh
     mock_load_actor_model.return_value = mock.MagicMock()
-    mock_create_trainer_factory.return_value = mock.MagicMock()
+    mock_create_trainer.return_value = mock.MagicMock()
     mock_trainer_worker_cls.return_value = self.mock_worker_service
     mock_grpc_server_cls.return_value = self.mock_server
 
@@ -192,14 +192,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
-  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(run_trainer_node, "_create_trainer")
   @mock.patch.object(trainer_worker, "TrainerWorker")
   @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
   def test_shutdown_handler_drains_worker_on_sigterm(
       self,
       mock_grpc_server_cls,
       mock_trainer_worker_cls,
-      mock_create_trainer_factory,
+      mock_create_trainer,
       mock_load_actor_model,
       mock_create_mesh,
       mock_ensure_model_dir,
@@ -208,7 +208,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_ensure_model_dir,
         mock_create_mesh,
         mock_load_actor_model,
-        mock_create_trainer_factory,
+        mock_create_trainer,
         mock_trainer_worker_cls,
         mock_grpc_server_cls,
     )
@@ -237,14 +237,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
-  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(run_trainer_node, "_create_trainer")
   @mock.patch.object(trainer_worker, "TrainerWorker")
   @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
   def test_shutdown_handler_drains_worker_on_sigint(
       self,
       mock_grpc_server_cls,
       mock_trainer_worker_cls,
-      mock_create_trainer_factory,
+      mock_create_trainer,
       mock_load_actor_model,
       mock_create_mesh,
       mock_ensure_model_dir,
@@ -253,7 +253,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_ensure_model_dir,
         mock_create_mesh,
         mock_load_actor_model,
-        mock_create_trainer_factory,
+        mock_create_trainer,
         mock_trainer_worker_cls,
         mock_grpc_server_cls,
     )
@@ -279,14 +279,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
-  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(run_trainer_node, "_create_trainer")
   @mock.patch.object(trainer_worker, "TrainerWorker")
   @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
   def test_shutdown_handler_handles_drain_exception_and_stops_server(
       self,
       mock_grpc_server_cls,
       mock_trainer_worker_cls,
-      mock_create_trainer_factory,
+      mock_create_trainer,
       mock_load_actor_model,
       mock_create_mesh,
       mock_ensure_model_dir,
@@ -295,7 +295,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_ensure_model_dir,
         mock_create_mesh,
         mock_load_actor_model,
-        mock_create_trainer_factory,
+        mock_create_trainer,
         mock_trainer_worker_cls,
         mock_grpc_server_cls,
     )
@@ -319,14 +319,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
-  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(run_trainer_node, "_create_trainer")
   @mock.patch.object(trainer_worker, "TrainerWorker")
   @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
   def test_shutdown_ignores_not_implemented_error_on_add_signal_handler(
       self,
       mock_grpc_server_cls,
       mock_trainer_worker_cls,
-      mock_create_trainer_factory,
+      mock_create_trainer,
       mock_load_actor_model,
       mock_create_mesh,
       mock_ensure_model_dir,
@@ -335,7 +335,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_ensure_model_dir,
         mock_create_mesh,
         mock_load_actor_model,
-        mock_create_trainer_factory,
+        mock_create_trainer,
         mock_trainer_worker_cls,
         mock_grpc_server_cls,
     )
@@ -367,26 +367,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.mock_worker_service.stop.assert_called_once()
     self.mock_server.stop_serving.assert_called_once()
 
-  @mock.patch.object(run_trainer_node, "_create_tunix_trainer_factory")
-  @mock.patch.object(run_trainer_node, "_create_maxtext_trainer_factory")
-  def test_create_trainer_factory_delegates_by_backend(
-      self, mock_create_maxtext, mock_create_tunix
-  ):
-    args_tunix = mock.MagicMock(trainer_backend="tunix")
-    run_trainer_node._create_trainer_factory(args_tunix)
-    mock_create_tunix.assert_called_once_with(args_tunix)
-    mock_create_maxtext.assert_not_called()
-
-    mock_create_tunix.reset_mock()
-    args_maxtext = mock.MagicMock(trainer_backend="maxtext")
-    run_trainer_node._create_trainer_factory(args_maxtext)
-    mock_create_maxtext.assert_called_once_with(args_maxtext)
-    mock_create_tunix.assert_not_called()
-
   def test_main_raises_without_discovery_context(self):
-    with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
-      run_trainer_node.main([], context=None)
-
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       run_trainer_node.main([], context=mock.MagicMock(ipc=None))
 
@@ -466,19 +447,19 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   def test_has_direct_safetensors(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
       p = Path(tmp_dir)
-      self.assertFalse(run_trainer_node._has_direct_safetensors(p))
+      self.assertFalse(models._has_direct_safetensors(p))
       (p / "model.safetensors").touch()
-      self.assertTrue(run_trainer_node._has_direct_safetensors(p))
+      self.assertTrue(models._has_direct_safetensors(p))
 
   def test_ensure_model_dir_raises_for_empty_or_file(self):
     with self.assertRaisesRegex(ValueError, "--model_dir is required"):
-      run_trainer_node._ensure_model_dir_for_trainer("", "Qwen/Qwen3-1.7B")
+      models.ensure_model_dir("", "Qwen/Qwen3-1.7B")
 
     with tempfile.NamedTemporaryFile() as tmp_file:
       with self.assertRaisesRegex(
-          ValueError, "--model_dir must point to an existing local directory"
+          ValueError, "--model_dir must point to a directory"
       ):
-        run_trainer_node._ensure_model_dir_for_trainer(
+        models.ensure_model_dir(
             tmp_file.name, "Qwen/Qwen3-1.7B"
         )
 

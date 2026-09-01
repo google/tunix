@@ -66,7 +66,10 @@ class DiscoveryServer:
     pb2_grpc.add_DiscoveryServiceServicer_to_server(_handler(), server)
 
     # start server
-    server.add_insecure_port(f"[::]:{port}")
+    try:
+      server.add_insecure_port(f"[::]:{port}")
+    except Exception:
+      server.add_insecure_port(f"0.0.0.0:{port}")
     server.start()
     self._server = server
 

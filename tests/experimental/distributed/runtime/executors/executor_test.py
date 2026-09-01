@@ -19,8 +19,10 @@ from unittest import mock
 
 from absl.testing import absltest
 import portpicker
+from tunix.experimental.distributed.runtime.contexts import borg_context
 from tunix.experimental.distributed.runtime.contexts import k8s_context
 from tunix.experimental.distributed.runtime.contexts import local_context
+from tunix.experimental.distributed.runtime.executors import borg_executor
 from tunix.experimental.distributed.runtime.executors import k8s_executor
 from tunix.experimental.distributed.runtime.executors import local_executor
 
@@ -60,6 +62,23 @@ class ExecutorTest(absltest.TestCase):
     executor.run(main_fn, ["--bar=baz"], args)
     self.assertEqual(received["argv"], ["--bar=baz"])
     self.assertIsInstance(received["ctx"], k8s_context.K8sProcessContext)
+
+  def test_borg_executor_run(self):
+    executor = borg_executor.BorgExecutor()
+    args = argparse.Namespace(
+        discovery_port=portpicker.pick_unused_port(),
+        discovery_addrs="10.0.0.1:1234",
+    )
+
+    received = {}
+
+    def main_fn(argv, ctx):
+      received["argv"] = argv
+      received["ctx"] = ctx
+
+    executor.run(main_fn, ["--qux=quux"], args)
+    self.assertEqual(received["argv"], ["--qux=quux"])
+    self.assertIsInstance(received["ctx"], borg_context.BorgProcessContext)
 
 
 if __name__ == "__main__":

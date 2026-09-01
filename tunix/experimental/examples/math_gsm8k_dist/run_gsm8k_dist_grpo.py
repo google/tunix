@@ -164,6 +164,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("WANDB_RUN_NAME", ""),
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
+  parser.add_argument("--discovery_id", type=str, default="orch")
+  parser.add_argument("--discovery_port", type=int, default=20000)
+  parser.add_argument("--discovery_addrs", type=str, default="")
+  parser.add_argument("--mini_batch_size", type=int, default=1)
+  parser.add_argument("--model_name", type=str, default="Qwen3-1.7B")
+  parser.add_argument(
+      "--model_dir",
+      type=str,
+      default=os.getenv(
+          "MODEL_DIR",
+          os.getenv(
+              "MODEL_DOWNLOAD_DIR", "/tmp/artifacts/qwen3_dist_gsm8k/models"
+          ),
+      ),
+  )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -172,7 +187,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
   )
-  return parser.parse_args(argv)
+  args, _ = parser.parse_known_args(argv)
+  return args
 
 
 def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
@@ -428,20 +444,19 @@ def _iter_prompt_items(
 
 
 def main(argv: list[str], context: Any = None) -> None:
-  if context and context.ipc and context.ipc.discovery:
-    pass
-  else:
-    raise RuntimeError(
-        "Require discovery API, but process context doesn't support."
+  args_list = argv[1:] if argv and argv[0] == sys.argv[0] else argv
+  args = _parse_args(args_list)
+  if context is None:
+    from tunix.experimental.distributed.runtime.contexts import context_factory  # pylint: disable=g-import-not-at-top
+
+    context = context_factory.get_default_process_context(
+        argparse.Namespace(
+            discovery_id=args.discovery_id,
+            discovery_port=args.discovery_port,
+            discovery_addrs=getattr(args, "discovery_addrs", ""),
+        )
     )
-
-  logging.basicConfig(
-      level=logging.INFO,
-      format="%(asctime)s - [Orchestrator] %(message)s",
-      force=True,
-  )
-
-  args = _parse_args(argv)
+    context.__enter__()
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:
@@ -483,13 +498,6 @@ def main(argv: list[str], context: Any = None) -> None:
     tokenizer.pad_token = tokenizer.eos_token
   pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
   eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
-  logging.info(
-      "Loaded tokenizer from %s (vocab_size=%d, pad_id=%d, eos_id=%d).",
-      tokenizer_path,
-      len(tokenizer),
-      pad_id,
-      eos_id,
-  )
 
   trainer_addr_future = futures.Future()
   rollout_addr_future = futures.Future()
@@ -654,4 +662,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
 
 if __name__ == "__main__":
-  main(sys.argv[1:])
+  from absl import app  # pylint: disable=g-import-not-at-top
+  from absl import flags  # pylint: disable=g-import-not-at-top
+
+  app.run(main, flags_parser=lambda argv: flags.FLAGS(argv, known_only=True))

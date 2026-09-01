@@ -389,9 +389,10 @@ class GradientAccumulator(nnx.Module):
 def _default_weight_sync_worker() -> Any:
   from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
 
+  is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
   return raiden_synchronizer.RaidenSynchronizer(
       "trainer",
-      host_stage="proxy" in os.environ.get("JAX_PLATFORMS", ""),
+      use_ffi=is_proxy,
   )
 
 
