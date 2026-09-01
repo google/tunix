@@ -371,7 +371,7 @@ try:
 except ImportError as e:
   print(f"❌ Still missing a module: {e}")
 
-if pathwaysutils is not None and "proxy" in os.getenv("JAX_PLATFORMS", ""):  # pyrefly: ignore[unbound-name]
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
   pathwaysutils.initialize()
 
 
@@ -587,10 +587,7 @@ RCP_LOGGING = args.rcp_logging
 tokenizer_path = MODEL_PATH
 local_files_only = True
 if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
-  if MODEL_VERSION.startswith("Qwen/"):
-    tokenizer_path = MODEL_VERSION
-  else:
-    tokenizer_path = f"Qwen/{MODEL_VERSION}"
+  tokenizer_path = MODEL_VERSION
   local_files_only = False
   print(f"Loading tokenizer from HF Hub: {tokenizer_path}")
 
