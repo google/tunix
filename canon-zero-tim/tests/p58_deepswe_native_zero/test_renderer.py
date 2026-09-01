@@ -737,8 +737,41 @@ class P58RendererTest(unittest.TestCase):
           self._render("native", base=base)
 
   def test_nonadmitted_cpu_nodepool_is_rejected(self):
-    with self.assertRaisesRegex(ValueError, "admitted cpu-np"):
+    with self.assertRaisesRegex(ValueError, "admitted CPU node pool"):
       self._render("native", cpu_nodepool="deepswe-cpu-pool")
+
+  def test_canon_cpu_pool_and_guaranteed_qos(self):
+    for arm in ("native", "zero"):
+      document = self._render(arm, "full", cpu_nodepool="canon-cpu-pool")
+      head = renderer.p34._head(document)
+      self.assertEqual(
+          head["nodeSelector"]["cloud.google.com/gke-nodepool"],
+          "canon-cpu-pool",
+      )
+      env = renderer.p34._env(document)
+      self.assertEqual(env["NODE_SELECTOR_VAL"], "canon-cpu-pool")
+      services = renderer._service_containers(head)
+      proxy = renderer.p34._container(services, "pathways-proxy")
+      manager = renderer.p34._container(services, "pathways-rm")
+      main = renderer.p34._container(head["containers"], "jax-tpu")
+      self.assertEqual(
+          proxy["resources"]["requests"], {"cpu": "8", "memory": "16Gi"}
+      )
+      self.assertEqual(
+          proxy["resources"]["limits"], {"cpu": "8", "memory": "16Gi"}
+      )
+      self.assertEqual(
+          manager["resources"]["requests"], {"cpu": "8", "memory": "16Gi"}
+      )
+      self.assertEqual(
+          manager["resources"]["limits"], {"cpu": "8", "memory": "16Gi"}
+      )
+      self.assertEqual(
+          main["resources"]["requests"], {"cpu": "14", "memory": "180Gi"}
+      )
+      self.assertEqual(
+          main["resources"]["limits"], {"cpu": "14", "memory": "180Gi"}
+      )
 
   def test_head_host_network_regression_is_rejected(self):
     document = self._render("native", "full")

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from pathlib import Path
 import re
 import shlex
@@ -49,7 +50,26 @@ _EXCLUSIVE_TOPOLOGY_ANNOTATION = (
     "alpha.jobset.sigs.k8s.io/exclusive-topology"
 )
 _KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
-_CPU_NODEPOOL = "cpu-np"
+_ADMITTED_CPU_NODEPOOLS = frozenset({
+    "canon-cpu-pool",
+    "cpu-np",
+})
+_DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
+_CPU_NODEPOOL = _DEFAULT_CPU_NODEPOOL
+HEAD_GUARANTEED_RESOURCES = {
+    "pathways-proxy": {
+        "requests": {"cpu": "8", "memory": "16Gi"},
+        "limits": {"cpu": "8", "memory": "16Gi"},
+    },
+    "pathways-rm": {
+        "requests": {"cpu": "8", "memory": "16Gi"},
+        "limits": {"cpu": "8", "memory": "16Gi"},
+    },
+    "jax-tpu": {
+        "requests": {"cpu": "14", "memory": "180Gi"},
+        "limits": {"cpu": "14", "memory": "180Gi"},
+    },
+}
 _JOBSET_REPLICATEDJOB_LABEL = "jobset.sigs.k8s.io/replicatedjob-name"
 _PATHWAYS_HEAD_REPLICATEDJOB = "pathways-head"
 _HOSTNAME_TOPOLOGY_KEY = "kubernetes.io/hostname"
@@ -216,8 +236,11 @@ def render(
     raise ValueError("P58 sampler IS is admitted only for the native arm")
   if sampler_is and high_performance:
     raise ValueError("P58 sampler IS and Zero high-performance are disjoint")
-  if cpu_nodepool != _CPU_NODEPOOL:
-    raise ValueError("P58 requires the admitted cpu-np CPU node pool")
+  if cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
+    raise ValueError(
+        f"P58 requires an admitted CPU node pool ({sorted(_ADMITTED_CPU_NODEPOOLS)}), "
+        f"got {cpu_nodepool!r}"
+    )
   if whitelist != CLEAN_WHITELIST or whitelist_sha256 != CLEAN_WHITELIST_SHA256:
     raise ValueError("P58 requires the reviewed 1012-task clean whitelist")
 
@@ -326,6 +349,13 @@ def render(
   proxy = p34._container(services, "pathways-proxy")
   manager = p34._container(services, "pathways-rm")
   main = p34._container(head["containers"], "jax-tpu")
+  proxy["resources"] = copy.deepcopy(
+      HEAD_GUARANTEED_RESOURCES["pathways-proxy"]
+  )
+  manager["resources"] = copy.deepcopy(
+      HEAD_GUARANTEED_RESOURCES["pathways-rm"]
+  )
+  main["resources"] = copy.deepcopy(HEAD_GUARANTEED_RESOURCES["jax-tpu"])
   scratch = f"gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p58/{name}"
   p34._replace_arg(
       proxy["args"], "--gcs_scratch_location=", f"--gcs_scratch_location={scratch}"
@@ -665,8 +695,10 @@ def validate(
       _TOKEN_TRANSPORT_LABEL
   ) != _TOKEN_TRANSPORT:
     raise ValueError("P58 DeepSWE token transport must be TiTO")
-  if cpu_nodepool != _CPU_NODEPOOL:
-    raise ValueError("P58 CPU head lost the admitted cpu-np node pool")
+  if cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
+    raise ValueError(
+        f"P58 CPU head lost an admitted CPU node pool, got {cpu_nodepool!r}"
+    )
   if (
       head.get("hostNetwork") is not True
       or head.get("dnsPolicy") != "ClusterFirstWithHostNet"
@@ -902,6 +934,20 @@ def validate(
   manager = p34._container(services, "pathways-rm")
   if f"--instance_type=tpuv5:{instance_type}" not in manager["args"]:
     raise ValueError("P58 resource-manager topology drifted")
+  for container_name, expected_res in HEAD_GUARANTEED_RESOURCES.items():
+    if container_name == "pathways-proxy":
+      target_c = proxy
+    elif container_name == "pathways-rm":
+      target_c = manager
+    elif container_name == "jax-tpu":
+      target_c = main
+    else:
+      raise ValueError(f"unknown container name: {container_name}")
+    if target_c.get("resources") != expected_res:
+      raise ValueError(
+          f"P58 {container_name} container drifted from Guaranteed QoS resources: "
+          f"expected={expected_res} actual={target_c.get('resources')}"
+      )
   worker_pod = worker["template"]["spec"]
   annotations = document.get("metadata", {}).get("annotations", {})
   if annotations.get(_EXCLUSIVE_TOPOLOGY_ANNOTATION) != (
