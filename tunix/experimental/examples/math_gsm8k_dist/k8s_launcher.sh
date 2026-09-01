@@ -155,10 +155,10 @@ apply_cluster_target() {
       GCS_SCRATCH_LOCATION=gs://mohitkhatwani_multipods/pathways_scratch/$USER
       PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812}
       PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:raiden_20260812}
-      MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-8}
-      TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
-      BATCH_SIZE=${BATCH_SIZE:-2}
-      NUM_GENERATIONS=${NUM_GENERATIONS:-4}
+      MINI_BATCH_SIZE=8
+      TRAIN_MICRO_BATCH_SIZE=8
+      BATCH_SIZE=2
+      NUM_GENERATIONS=4
       ;;
     "")
       ;;
