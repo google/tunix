@@ -518,6 +518,51 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_stage_logs_prompt_ids(self):
+    class TwoMicrobatchAssembler:
+
+      def pack(self, items):
+        del items
+        return ["microbatch_0", "microbatch_1"]
+
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda x: 1.0],
+          assembler=TwoMicrobatchAssembler(),
+          sync_weights=False,
+      )
+      program.engine = self.mock_engine
+
+      for group_index in range(2):
+        item = datatypes.TrajectoryItem(
+            group_index=group_index,
+            prompt_id="prompt_0",
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = self.mock_algo.create_trainer_payloads.return_value[
+            group_index
+        ]
+        await program.scored_q.put(item)
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      with self.assertLogs(level="INFO") as logs:
+        await program.train_stage()
+
+      self.assertTrue(
+          any(
+              "Packed 1 prompt groups into 2 microbatches (total_rollouts=2)."
+              " All prompt groups ids packed: [prompt_0]"
+              in log
+              for log in logs.output
+          )
+      )
+
+    asyncio.run(_run())
+
   def test_stage_exception_aborts_queue_and_propagates(self):
     class FailingProgram(rl_program.StandardRLProgram):
 

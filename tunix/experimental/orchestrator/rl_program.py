@@ -28,6 +28,7 @@ from typing import Any
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
@@ -604,10 +605,25 @@ class StandardRLProgram(RLProgram):
         for item in scored_items:
           step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
 
+        prompt_ids = list(
+            dict.fromkeys(
+                item.prompt_id
+                for item in scored_items
+                if getattr(item, "prompt_id", None)
+            )
+        )
         payloads = [getattr(item, "payload", None) for item in scored_items]
         # TODO: Implement streaming microbatch assembly to overlap packing
         # with trainer execution.
         microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
+        logging.info(
+            "Packed %d prompt groups into %d microbatches (total_rollouts=%d)."
+            " All prompt groups ids packed: %s",
+            len(prompt_ids),
+            len(microbatches),
+            len(payloads),
+            logging_utils.summarize_list(prompt_ids),
+        )
         if getattr(self.algo, "requires_reference_kl", False):
           scored_microbatches = []
           for batch in microbatches:

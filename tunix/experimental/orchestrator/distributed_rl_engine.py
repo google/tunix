@@ -30,17 +30,13 @@ from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
+from tunix.experimental.common import logging_utils
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
-def _summarize_ids(ids: Sequence[Any], head: int = 2, tail: int = 2) -> str:
-  """Returns a compressed string representation of a sequence of IDs."""
-  str_ids = [str(x) for x in ids]
-  if len(str_ids) <= head + tail:
-    return f"[{', '.join(str_ids)}]"
-  return f"[{', '.join(str_ids[:head])}, ..., {', '.join(str_ids[-tail:])}]"
+_summarize_list = logging_utils.summarize_list
 
 
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
@@ -278,7 +274,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         group_size,
         len(rollout_reqs),
         version,
-        _summarize_ids(prompt_ids),
+        _summarize_list(prompt_ids),
     )
     for req in rollout_reqs:
       if req.metadata is None:  # pyrefly: ignore[comparison-with-never]
