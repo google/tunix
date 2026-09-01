@@ -94,6 +94,7 @@ def _init_global_fleet(
     max_concurrency: int = 128,
     num_generations: int = 8,
     batch_size: int = 8,
+    max_warmpool_replicas: int | None = None,
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -138,7 +139,7 @@ def _init_global_fleet(
         ],
         max_concurrent=effective_max_concurrent,
         window_size=batch_size,
-        max_warmpool_size=num_generations,
+        max_warmpool_size=max_warmpool_replicas if max_warmpool_replicas is not None else num_generations,
         warm_per_task=True,
     )
     fleet_inst = SandboxFleet(fleet_cfg)
@@ -147,7 +148,7 @@ def _init_global_fleet(
     msg = (
         f"[SandboxFleet] Initializing pipelined fleet in namespace={fleet_ns} "
         f"(max_concurrent={effective_max_concurrent}, window_size={batch_size}, "
-        f"max_warmpool_size={num_generations}, warm_per_task=True)..."
+        f"max_warmpool_replicas={max_warmpool_replicas if max_warmpool_replicas is not None else num_generations}, warm_per_task=True)..."
     )
     logging.info(msg)
     if fleet_cfg.install_teardown_hooks:
@@ -178,18 +179,23 @@ class PrewarmDatasetIterator:
       fleet: Any | None = None,
       num_generations: int = 8,
       batch_size: int = 8,
+      max_warmpool_replicas: int | None = None,
   ):
     self.dataset_iter = iter(dataset)
     self.num_generations = num_generations
     self.batch_size = batch_size
+    self.max_warmpool_replicas = max_warmpool_replicas
     self.fleet = fleet or _get_global_fleet()
     self.current_batch = None
     self.next_batch = None
     self.prev_batch_images: list[str] = []
 
-    # 1. Prime Slot 1 (Current Batch)
+    # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
     try:
       self.current_batch = next(self.dataset_iter)
+      logging.info(
+          "[PrewarmDatasetIterator] Warming initial batch on K8s and waiting for pods to be ready..."
+      )
       self._warm_batch(self.current_batch, wait=True)
     except StopIteration:
       pass
@@ -228,13 +234,15 @@ class PrewarmDatasetIterator:
   def _warm_batch(self, batch: Any, wait: bool = False):
     images = self._extract_images(batch)
     if images and self.fleet:
+      target_replicas = self.max_warmpool_replicas or self.num_generations
       try:
         self.fleet.warm_images(
-            images, replicas_override=self.num_generations, wait=wait
+            images, replicas_override=target_replicas, wait=wait
         )
         logging.info(
-            "[PrewarmDatasetIterator] Pre-warming %d image(s) on K8s: %s",
+            "[PrewarmDatasetIterator] Pre-warming %d image(s) (%d replicas each) on K8s: %s",
             len(images),
+            target_replicas,
             images[:3],
         )
       except Exception as e:

@@ -32,13 +32,21 @@ RUN pip install wandb
 # Set the working directory
 WORKDIR /app
 
-# Copy the project files to the image
-COPY . .
+# Copy scripts and requirements first to leverage Docker cache
+COPY scripts/install_tunix_vllm_requirement.sh scripts/
+COPY requirements/ requirements/
 
-# Install the project in editable mode
-RUN pip install -e .
+RUN bash scripts/install_tunix_vllm_requirement.sh
 
-RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+# Copy pyproject.toml and README.md to install dependencies first
+COPY pyproject.toml README.md /app/
+RUN mkdir /app/tunix && touch /app/tunix/__init__.py
+RUN uv pip install .
+
+# Install SFT/MaxText dependencies (unconditional)
+RUN uv pip install --upgrade flax && \
+    uv pip install torchax aqtp tokamax math_verify drjax && \
+    uv pip install --no-deps git+https://github.com/google/maxtext.git
 
 # Build argument to conditionally install MaxText dependencies
 ARG INSTALL_MAXTEXT=false
@@ -67,11 +75,19 @@ ARG INSTALL_DEEPSWE_DEPS=false
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      pip install kubernetes gym swebench==3.0.2 && \
-      pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
+      uv pip install kubernetes gym swebench==3.0.2 && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
+      uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
     fi
+
+# Copy the rest of the project files
+COPY . .
+
+# Install Tunix in editable mode
+RUN uv pip install --no-deps -e .
 
 # Set the default command to bash
 CMD ["bash"]
