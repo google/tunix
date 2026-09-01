@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import os
 from typing import Any, List, Mapping, Sequence
@@ -31,10 +32,18 @@ logger = logging.getLogger(__name__)
 
 
 def _get_rl_vllm_sampler_cls():
-  """Lazy import of tpu_inference.rl.RLVllmSampler."""
-  from tpu_inference.rl import RLVllmSampler  # pylint: disable=g-import-not-at-top
+  """Lazy import of tpu_inference.rl.RLVllmSampler.
 
-  return RLVllmSampler
+  Resolved through importlib so static analyzers do not try to follow the
+  tpu-inference dependency, which is not available in every environment.
+  """
+  try:
+    return getattr(importlib.import_module("tpu_inference.rl"), "RLVllmSampler")
+  except (ImportError, AttributeError) as e:
+    raise ImportError(
+        "tpu_inference.rl.RLVllmSampler is not available. Please ensure"
+        " tpu-inference is installed."
+    ) from e
 
 
 # Hooks RLVllmSampler must expose for Raiden weight sync; verified once at
@@ -172,9 +181,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
   async def start(self, **kwargs) -> Any:
     """Starts the underlying sampler engine."""
-    if self.sampler is None:
-      self.initialize()
-    return await self.sampler.start(**kwargs)
+    return await self._require_sampler().start(**kwargs)
 
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
@@ -226,16 +233,25 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   # WeightSyncDestination Protocol Implementation
   # ---------------------------------------------------------------------------
 
-  async def bind_weight_sync(self) -> None:
+  async def bind_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs: Any,
+  ) -> Any:
     """Idempotent transport binding called while the worker is STILL SERVING."""
+    del sync_request, kwargs
     if not self.enable_raiden:
       return None
-    await self._require_sampler().bind_raiden_sync(
+    return await self._require_sampler().bind_raiden_sync(
         worker_index=self.worker_index, parallelism=self._parallelism
     )
 
-  async def get_weight_sync_metadata(self) -> Sequence[weight_sync.WorkUnitMetadata]:
+  async def get_weight_sync_metadata(
+      self,
+      **kwargs: Any,
+  ) -> Sequence[weight_sync.WorkUnitMetadata] | Any:
     """Returns transport metadata with Raiden endpoints and TensorMetadata."""
+    del kwargs
     if not self.enable_raiden:
       raise NotImplementedError(
           f"VllmSamplerAdapter [{self.server_id}] does not support"
