@@ -144,14 +144,17 @@ apply_cluster_target() {
       TRAINER_MESH_FSDP=8
       TRAINER_MESH_TP=1
       ROLLOUT_TPU_SLICE=tpuv5:2x2x1
-      ROLLOUT_JOBSET_YAML=jobset.tpu.yaml
-      NUM_ROLLOUT_WORKERS=2
-      ROLLOUT_COMPLETIONS=2
-      ROLLOUT_PARALLELISM=2
+      ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}
+      NUM_ROLLOUT_WORKERS=1
+      ROLLOUT_COMPLETIONS=1
+      ROLLOUT_PARALLELISM=1
       ROLLOUT_MESH_TP=4
       ROLLOUT_MESH_FSDP=1
+      SAMPLER=${SAMPLER:-inprocess_vllm}
       CPU_MACHINE=n2d-standard-128
       GCS_SCRATCH_LOCATION=gs://mohitkhatwani_multipods/pathways_scratch/$USER
+      PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812}
+      PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:raiden_20260812}
       MINI_BATCH_SIZE=8
       TRAIN_MICRO_BATCH_SIZE=8
       BATCH_SIZE=2
@@ -306,9 +309,10 @@ start_rollout() {
       rollout_mesh_fsdp=1
     fi
   fi
-  local vllm_args=""
+  local vllm_args="--sampler=${SAMPLER}"
   if [[ "$SAMPLER" == "vllm" ]]; then
     vllm_args="\
+    ${vllm_args} \
     --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
     "
   fi

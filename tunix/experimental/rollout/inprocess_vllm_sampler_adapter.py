@@ -16,6 +16,7 @@
 
 import abc
 import numbers
+import os
 from typing import Any, List, Sequence
 from absl import logging
 from flax import nnx
@@ -372,6 +373,11 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
         return True
 
       state = self.vllm_sampler.transformer_state
+      if hasattr(state, "__getitem__") and "model" in state and "base" not in state:
+        if isinstance(state, nnx.State):
+          state = nnx.State({"base": state["model"]})
+        else:
+          state = {"base": state["model"]}
       return await self.raiden_sync_delegate.bind_weight_sync(
           sync_request=sync_request, state=state, **kwargs
       )
@@ -388,6 +394,11 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       return self.vllm_sampler.get_target_state()
     if hasattr(self.vllm_sampler, "transformer_state"):
       state = self.vllm_sampler.transformer_state
+      if hasattr(state, "__getitem__") and "model" in state and "base" not in state:
+        if isinstance(state, nnx.State):
+          state = nnx.State({"base": state["model"]})
+        else:
+          state = {"base": state["model"]}
       return jax.tree.map(
           lambda x: nnx.Param(jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)),
           state,

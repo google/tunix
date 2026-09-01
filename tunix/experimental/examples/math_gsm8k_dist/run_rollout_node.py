@@ -284,6 +284,36 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_lora_rank": args.lora_rank,
         "max_loras": 1,
     }
+  engine_kwargs = {
+      "model": vllm_model,
+      "max_model_len": max_model_len,
+  }
+  if args.maxtext_model_name:
+    logging.info(
+        "Loading MaxText model %r natively via maxtext_vllm_adapter's"
+        " MaxTextForCausalLM (architectures override).",
+        args.maxtext_model_name,
+    )
+    try:
+      from maxtext.integration.vllm import maxtext_vllm_adapter  # pylint: disable=g-import-not-at-top
+      maxtext_vllm_adapter.register()
+    except Exception as e:
+      logging.warning("Could not register maxtext_vllm_adapter: %s", e)
+    engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
+    mapping_config = mappings_lib.MappingConfig()
+    maxtext_config_overrides = {
+        "model_name": args.maxtext_model_name,
+        "model_call_mode": "inference",
+        "enable_dp_attention": False,
+        "allow_split_physical_axes": True,
+        "log_config": False,
+        "weight_dtype": "bfloat16",
+    }
+    if args.maxtext_attention:
+      maxtext_config_overrides["attention"] = args.maxtext_attention
+    engine_kwargs["additional_config"] = {
+        "maxtext_config": maxtext_config_overrides
+    }
   vllm_config = vllm_sampler.VllmConfig(
       mesh=rollout_mesh,
       tensor_parallel_size=args.mesh_tp,
@@ -291,10 +321,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      engine_kwargs={
-          "model": vllm_model,
-          "max_model_len": max_model_len,
-      },
+      engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -374,10 +401,12 @@ def _create_vllm_sampler(args):
         "maxtext_config": maxtext_config_overrides
     }
   engine_args = AsyncEngineArgs(**engine_kwargs)
+  pod_index = int(os.getenv("POD_INDEX", "0"))
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
       server_id=args.worker_id,
       engine_args=engine_args,
       model_name=vllm_model,
+      worker_index=pod_index,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

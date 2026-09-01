@@ -217,17 +217,17 @@ ${HF_TOKEN_ENV}
                       values:
                       - ${JOBSET_NAME}
               # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              # podAntiAffinity:
+              #   requiredDuringSchedulingIgnoredDuringExecution:
+              #   - topologyKey: cloud.google.com/gke-nodepool
+              #     labelSelector:
+              #       matchExpressions:
+              #       - key: jobset.sigs.k8s.io/jobset-name
+              #         operator: Exists
+              #       - key: jobset.sigs.k8s.io/jobset-name
+              #         operator: NotIn
+              #       - values:
+              #         - ${JOBSET_NAME}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
