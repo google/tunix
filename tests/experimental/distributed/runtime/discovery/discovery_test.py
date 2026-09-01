@@ -25,19 +25,26 @@ from tunix.experimental.distributed.runtime.discovery import discovery
 
 class DiscoveryTest(absltest.TestCase):
 
+  def test_start_unconfigured_mode_raises(self):
+    server = discovery.DiscoveryServer()
+    with self.assertRaises(RuntimeError):
+      server.start(8888)
+
   def test_start_with_zero_port_raises(self):
     server = discovery.DiscoveryServer()
+    server.on_register(lambda h, p, m: None)
     with self.assertRaises(ValueError):
-      server.start(0, lambda h, p, m: None)
+      server.start(0)
 
   @mock.patch.object(grpc, "server")
   def test_start_twice_raises(self, mock_grpc_server):
     server = discovery.DiscoveryServer()
     port = 8888
-    server.start(port, lambda h, p, m: None)
+    server.on_register(lambda h, p, m: None)
+    server.start(port)
     try:
       with self.assertRaises(RuntimeError):
-        server.start(port, lambda h, p, m: None)
+        server.start(port)
     finally:
       server.stop()
 
@@ -52,7 +59,8 @@ class DiscoveryTest(absltest.TestCase):
       received["port"] = p
       received["metadata"] = metadata
 
-    server.start(port, callback)
+    server.on_register(callback)
+    server.start(port)
     try:
       self.assertTrue(server.is_started())
       mock_grpc_server.return_value.add_insecure_port.assert_called_once_with(
@@ -101,6 +109,149 @@ class DiscoveryTest(absltest.TestCase):
     ):
       with self.assertRaises(RuntimeError):
         discovery.register("localhost:9999", "node-0", 1234, b"meta")
+
+  def test_connect_initial_connection(self):
+    port = portpicker.pick_unused_port()
+    server = discovery.DiscoveryServer(heartbeat_sec=1)
+    server_connected_events = []
+
+    server.on_connect(
+        on_client_connected=lambda cid, h, p, m, rec: server_connected_events.append(
+            (cid, h, p, m, rec)
+        )
+    )
+    server.start(port, heartbeat_sec=1)
+
+    client_connected_events = []
+    try:
+      client = discovery.connect(
+          f"localhost:{port}",
+          "node-0",
+          1234,
+          b"meta-data",
+          client_id="node-0",
+          on_connected=lambda epoch, rec: client_connected_events.append(
+              (epoch, rec)
+          ),
+      )
+
+      self.assertEqual(len(client_connected_events), 1)
+      epoch, is_reconnect = client_connected_events[0]
+      self.assertFalse(is_reconnect)
+
+      self.assertEqual(len(server_connected_events), 1)
+      cid, h, p, m, is_rec = server_connected_events[0]
+      self.assertEqual(cid, "node-0")
+      self.assertFalse(is_rec)
+
+      client.stop()
+    finally:
+      server.stop()
+
+  def test_connect_reconnect_on_server_restart(self):
+    port = portpicker.pick_unused_port()
+    server = discovery.DiscoveryServer(heartbeat_sec=1)
+    server_connected_events = []
+
+    server.on_connect(
+        on_client_connected=lambda cid, h, p, m, rec: server_connected_events.append(
+            (cid, h, p, m, rec)
+        )
+    )
+    server.start(port, heartbeat_sec=1)
+
+    client_connected_events = []
+    client_disconnected_events = []
+    reconnected_event = threading.Event()
+
+    def on_connected(epoch, rec):
+      client_connected_events.append((epoch, rec))
+      if rec:
+        reconnected_event.set()
+
+    try:
+      client = discovery.connect(
+          f"localhost:{port}",
+          "node-0",
+          1234,
+          b"meta-data",
+          client_id="node-0",
+          on_connected=on_connected,
+          on_disconnected=lambda epoch, reason: client_disconnected_events.append(
+              (epoch, reason)
+          ),
+      )
+
+      initial_epoch = client_connected_events[0][0]
+
+      # Simulate server restart by changing servicer epoch
+      server._servicer._server_epoch = "rebooted-epoch-1234"
+
+      # Wait for heartbeat loop to detect epoch mismatch and reconnect
+      self.assertTrue(reconnected_event.wait(timeout=5.0))
+
+      self.assertGreaterEqual(len(client_disconnected_events), 1)
+      self.assertEqual(client_disconnected_events[0][0], initial_epoch)
+      self.assertEqual(client_disconnected_events[0][1], "epoch_mismatch")
+
+      self.assertGreaterEqual(len(client_connected_events), 2)
+      new_epoch, is_reconnected = client_connected_events[1]
+      self.assertTrue(is_reconnected)
+      self.assertEqual(new_epoch, "rebooted-epoch-1234")
+
+      self.assertGreaterEqual(len(server_connected_events), 2)
+      self.assertTrue(server_connected_events[1][4])  # is_reconnect=True
+
+      client.stop()
+    finally:
+      server.stop()
+
+  def test_server_lease_eviction_on_heartbeat_timeout(self):
+    port = portpicker.pick_unused_port()
+    server = discovery.DiscoveryServer(heartbeat_sec=1)
+    server_disconnected_events = []
+    evicted_event = threading.Event()
+
+    def on_disconnected(cid, h, p, reason):
+      server_disconnected_events.append((cid, h, p, reason))
+      evicted_event.set()
+
+    server.on_connect(on_client_disconnected=on_disconnected)
+    server.start(port, heartbeat_sec=1)
+
+    try:
+      client = discovery.connect(
+          f"localhost:{port}",
+          "node-0",
+          1234,
+          b"meta-data",
+          client_id="node-0",
+      )
+      # Stop client heartbeat thread prematurely to simulate crashed/dead client
+      client._stop_event.set()
+
+      # Wait for server eviction loop (threshold = 3 * heartbeat_sec)
+      self.assertTrue(evicted_event.wait(timeout=5.0))
+
+      self.assertGreaterEqual(len(server_disconnected_events), 1)
+      cid, h, p, reason = server_disconnected_events[0]
+      self.assertEqual(cid, "node-0")
+      self.assertEqual(reason, "heartbeat_timeout")
+
+      client.stop()
+    finally:
+      server.stop()
+
+  def test_mode_mutual_exclusion(self):
+    server = discovery.DiscoveryServer()
+    server.on_register(lambda h, p, m: None)
+    with self.assertRaises(RuntimeError):
+      server.on_connect(lambda cid, h, p, m, rec: None)
+
+    server2 = discovery.DiscoveryServer()
+    server2.on_connect(lambda cid, h, p, m, rec: None)
+    with self.assertRaises(RuntimeError):
+      server2.on_register(lambda h, p, m: None)
 
 
 if __name__ == "__main__":

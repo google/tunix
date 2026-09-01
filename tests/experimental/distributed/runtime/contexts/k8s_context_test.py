@@ -50,7 +50,7 @@ class K8sContextTest(absltest.TestCase):
       with self.assertRaises(ValueError):
         k8s_context.resolve_self_hostname()
 
-  def test_k8s_jax_context_pathways(self):
+  def test_jax_context_pathways(self):
     envs = {
         "JAX_PLATFORMS": "proxy",
         "JAX_BACKEND_TARGET": "0.0.0.0:8000",
@@ -61,7 +61,7 @@ class K8sContextTest(absltest.TestCase):
         k8s_context.K8sJaxContext().initialize()
         mock_pw.initialize.assert_called_once()
 
-  def test_k8s_jax_context_mcjax(self):
+  def test_jax_context_mcjax(self):
     envs = {}
     mock_jax = mock.MagicMock()
     with mock.patch.dict(os.environ, envs, clear=True):
@@ -69,7 +69,7 @@ class K8sContextTest(absltest.TestCase):
         k8s_context.K8sJaxContext().initialize()
         mock_jax.distributed.initialize.assert_called_once()
 
-  def test_k8s_discovery_context_register(self):
+  def test_discovery_context_register(self):
     envs = {
         "JOBSET_NAME": "myjobset",
         "REPLICATED_JOB_NAME": "worker",
@@ -95,7 +95,68 @@ class K8sContextTest(absltest.TestCase):
               b"pod-meta",
           )
 
-  def test_k8s_process_context(self):
+  @mock.patch(
+      "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.connect"
+  )
+  @mock.patch(
+      "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.DiscoveryServer"
+  )
+  def test_discovery_context_connect(self, mock_server_cls, mock_connect):
+    envs = {
+        "JOBSET_NAME": "myjobset",
+        "REPLICATED_JOB_NAME": "worker",
+        "JOB_INDEX": "0",
+        "POD_INDEX": "1",
+    }
+    port = 8888
+    args = argparse.Namespace(
+        discovery_port=port,
+        discovery_addrs=f"door:{port}",
+        discovery_id="door",
+    )
+
+    mock_server = mock_server_cls.return_value
+
+    with mock.patch.dict(os.environ, envs):
+      with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
+        on_client_connected = lambda cid, h, p, m, rec: None
+        on_client_disconnected = lambda cid, h, p, r: None
+
+        disc_ctx.on_connect(
+            on_client_connected=on_client_connected,
+            on_client_disconnected=on_client_disconnected,
+        )
+        mock_server.on_connect.assert_called_once_with(
+            on_client_connected=on_client_connected,
+            on_client_disconnected=on_client_disconnected,
+        )
+        mock_server.start.assert_called_once_with(port)
+
+        on_connected = lambda epoch, rec: None
+        on_disconnected = lambda epoch, r: None
+
+        client = disc_ctx.connect(
+            b"pod-meta",
+            client_id="door",
+            on_connected=on_connected,
+            on_disconnected=on_disconnected,
+        )
+        mock_connect.assert_called_once_with(
+            "door-proc-0-0.door:8888",
+            "myjobset-worker-0-1.myjobset",
+            port,
+            b"pod-meta",
+            client_id="door",
+            on_connected=on_connected,
+            on_disconnected=on_disconnected,
+        )
+        self.assertEqual(disc_ctx._client, mock_connect.return_value)
+
+    mock_connect.return_value.stop.assert_called_once()
+    mock_server.stop.assert_called_once()
+    self.assertIsNone(disc_ctx._client)
+
+  def test_process_context(self):
     args = argparse.Namespace(
         discovery_port=portpicker.pick_unused_port(),
         discovery_addrs="door:8888",

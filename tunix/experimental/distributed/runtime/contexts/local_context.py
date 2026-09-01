@@ -47,6 +47,7 @@ class LocalDiscoveryContext(context.DiscoveryContext):
     """
     self._args = args
     self._server = discovery.DiscoveryServer()
+    self._client: discovery.DiscoveryClient | None = None
 
   def __enter__(self) -> "LocalDiscoveryContext":
     """Enters the discovery context manager scope."""
@@ -58,7 +59,10 @@ class LocalDiscoveryContext(context.DiscoveryContext):
       exc: Any | None,
       tb: Any | None,
   ) -> None:
-    """Stops the local discovery server if started."""
+    """Stops the local discovery client and server if started."""
+    if self._client is not None:
+      self._client.stop()
+      self._client = None
     if self._server.is_started():
       self._server.stop()
       logging.info("discovery server stopped")
@@ -69,7 +73,28 @@ class LocalDiscoveryContext(context.DiscoveryContext):
     Args:
       callback: Invoked when a peer registers with this server.
     """
-    self._server.start(self._args.discovery_port, callback)
+    self._server.on_register(callback)
+    self._server.start(self._args.discovery_port)
+    logging.info(
+        "discovery server started on port %s", self._args.discovery_port
+    )
+
+  def on_connect(
+      self,
+      on_client_connected: (
+          Callable[[str, str, int, bytes, bool], None] | None
+      ) = None,
+      *,
+      on_client_disconnected: (
+          Callable[[str, str, int, str], None] | None
+      ) = None,
+  ) -> None:
+    """Configures handlers and starts the local discovery server on the configured port."""
+    self._server.on_connect(
+        on_client_connected=on_client_connected,
+        on_client_disconnected=on_client_disconnected,
+    )
+    self._server.start(self._args.discovery_port)
     logging.info(
         "discovery server started on port %s", self._args.discovery_port
     )
@@ -89,6 +114,32 @@ class LocalDiscoveryContext(context.DiscoveryContext):
         server_address, hostname, self._args.discovery_port, metadata
     )
     logging.info("registered to discovery server at %s", server_address)
+
+  def connect(
+      self,
+      metadata: bytes,
+      *,
+      client_id: str,
+      on_connected: Callable[[str, bool], None] | None = None,
+      on_disconnected: Callable[[str, str], None] | None = None,
+  ) -> discovery.DiscoveryClient:
+    """Establishes a persistent reconnecting discovery session with heartbeats."""
+    server_address = resolve_discovery_address(self._args.discovery_addrs)
+
+    hostname = "localhost"
+
+    logging.info("connecting to discovery server at %s", server_address)
+    self._client = discovery.connect(
+        server_address,
+        hostname,
+        self._args.discovery_port,
+        metadata,
+        client_id=client_id,
+        on_connected=on_connected,
+        on_disconnected=on_disconnected,
+    )
+    logging.info("connected to discovery server at %s", server_address)
+    return self._client
 
 
 class LocalIpcContext(context.IpcContext):

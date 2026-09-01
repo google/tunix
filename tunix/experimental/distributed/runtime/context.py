@@ -45,6 +45,42 @@ class DiscoveryContext:
     """
     pass
 
+  def on_connect(
+      self,
+      on_client_connected: (
+          Callable[[str, str, int, bytes, bool], None] | None
+      ) = None,
+      *,
+      on_client_disconnected: (
+          Callable[[str, str, int, str], None] | None
+      ) = None,
+  ) -> None:
+    """Configures server-side handlers for managed client connections and eviction.
+
+    Args:
+      on_client_connected: Invoked when a client connects or re-connects.
+      on_client_disconnected: Invoked when a connected client misses heartbeats.
+    """
+    pass
+
+  def connect(
+      self,
+      metadata: bytes,
+      *,
+      client_id: str,
+      on_connected: Callable[[str, bool], None] | None = None,
+      on_disconnected: Callable[[str, str], None] | None = None,
+  ) -> Any:
+    """Establishes a persistent reconnecting discovery session with heartbeats.
+
+    Args:
+      metadata: Serialized metadata bytes describing this worker node.
+      client_id: Unique client identifier.
+      on_connected: Invoked when connection succeeds (initial or reconnect).
+      on_disconnected: Invoked when server session breaks or epoch changes.
+    """
+    pass
+
 
 class IpcContext:
   """Abstract interface providing inter-process communication contexts."""
