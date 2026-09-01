@@ -18,6 +18,7 @@ Verifies TrainerWorker RPC request unpacking (TrainRequest), delegation to
 AbstractTrainer (fwd_bwd, eval_step, update), and response metadata stamping.
 """
 
+from typing import Any
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
