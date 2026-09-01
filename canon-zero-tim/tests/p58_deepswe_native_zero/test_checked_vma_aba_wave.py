@@ -47,7 +47,8 @@ def _render(root: Path) -> tuple[Path, dict, dict]:
       source_branch="yuxzhang/canon-zero-tim",
       client_image=IMAGE,
       wave_id="p58aba01",
-      cpu_nodepool="cpu-np",
+      cpu_nodepool="canon-cpu-pool",
+      sandbox_nodepool="deepswe-cpu-pool-2",
       worker_nodepool="tpu-pool",
       model_pvc="model-pvc",
   )

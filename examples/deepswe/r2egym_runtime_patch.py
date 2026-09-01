@@ -11,6 +11,21 @@ import time
 _KUBERNETES_DNS_LABEL = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
 )
+_DEFAULT_NODE_SELECTOR_VAL = "cpu-np"
+_P58_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
+
+
+def resolve_node_selector_value(environ: dict[str, str]) -> str:
+  """Returns the sandbox pool, failing closed for the P58 production lane."""
+  value = environ.get("NODE_SELECTOR_VAL", "")
+  if environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1":
+    if value != _P58_SANDBOX_NODEPOOL:
+      raise ValueError(
+          "P58 requires NODE_SELECTOR_VAL=deepswe-cpu-pool-2; "
+          f"got {value!r}"
+      )
+    return value
+  return value or _DEFAULT_NODE_SELECTOR_VAL
 
 
 def _is_empty_kubernetes_error_body_decode(error: BaseException) -> bool:
@@ -324,7 +339,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     node_key = os.environ.get(
         "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
     )
-    node_value = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
+    node_value = resolve_node_selector_value(os.environ)
     pull_secret = os.environ.get("IMAGE_PULL_SECRET", "dockerhub-pro")
     cpu_request = os.environ.get("R2E_K8S_CPU", "2")
     memory_request = os.environ.get("R2E_K8S_MEM", "4Gi")

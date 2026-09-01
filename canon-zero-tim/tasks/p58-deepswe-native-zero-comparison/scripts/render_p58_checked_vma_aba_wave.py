@@ -40,7 +40,7 @@ def _sha256(path: Path) -> str:
 def _render_arm(
     *, base: dict, source_commit: str, source_branch: str,
     client_image: str, run_id: str, selector: str, cpu_nodepool: str,
-    worker_nodepool: str, model_pvc: str,
+    sandbox_nodepool: str, worker_nodepool: str, model_pvc: str,
 ) -> dict:
   return p58.render(
       base,
@@ -51,6 +51,7 @@ def _render_arm(
       stage="full",
       arm="zero",
       cpu_nodepool=cpu_nodepool,
+      sandbox_nodepool=sandbox_nodepool,
       worker_nodepool=worker_nodepool,
       model_pvc=model_pvc,
       checked_vma_off_diagnostic=selector == "off",
@@ -61,7 +62,8 @@ def _render_arm(
 def render_wave(
     *, base_path: Path, output_dir: Path, source_commit: str,
     source_branch: str, client_image: str, wave_id: str,
-    cpu_nodepool: str, worker_nodepool: str, model_pvc: str,
+    cpu_nodepool: str, sandbox_nodepool: str, worker_nodepool: str,
+    model_pvc: str,
 ) -> dict:
   if not _SHA.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex")
@@ -87,6 +89,7 @@ def render_wave(
         run_id=run_id,
         selector=selector,
         cpu_nodepool=cpu_nodepool,
+        sandbox_nodepool=sandbox_nodepool,
         worker_nodepool=worker_nodepool,
         model_pvc=model_pvc,
     )
@@ -148,6 +151,8 @@ def render_wave(
       "source_commit": source_commit,
       "source_branch": source_branch,
       "client_image": client_image,
+      "cpu_nodepool": cpu_nodepool,
+      "sandbox_nodepool": sandbox_nodepool,
       "worker_nodepool": worker_nodepool,
       "wave_id": wave_id,
       "arm_order": [arm for arm, _, _ in _ARMS],
@@ -195,7 +200,10 @@ def main() -> int:
   parser.add_argument("--source-branch", default="yuxzhang/canon-zero-tim")
   parser.add_argument("--client-image", required=True)
   parser.add_argument("--wave-id", required=True)
-  parser.add_argument("--cpu-nodepool", default="cpu-np")
+  parser.add_argument("--cpu-nodepool", default="canon-cpu-pool")
+  parser.add_argument(
+      "--sandbox-nodepool", default="deepswe-cpu-pool-2"
+  )
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   args = parser.parse_args()
@@ -207,6 +215,7 @@ def main() -> int:
       client_image=args.client_image,
       wave_id=args.wave_id,
       cpu_nodepool=args.cpu_nodepool,
+      sandbox_nodepool=args.sandbox_nodepool,
       worker_nodepool=args.worker_nodepool,
       model_pvc=args.model_pvc,
   )

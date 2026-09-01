@@ -35,6 +35,8 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
+from examples.deepswe.r2egym_runtime_patch import resolve_node_selector_value
+
 faulthandler.register(signal.SIGINT, all_threads=True)
 
 Dataset = datasets_lib.Dataset
@@ -59,7 +61,7 @@ parser.add_argument("--model_version", type=str, default="Qwen3-32B")
 parser.add_argument(
     "--node_selector_val",
     type=str,
-    default=os.environ.get("NODE_SELECTOR_VAL", "cpu-np"),
+    default=resolve_node_selector_value(os.environ),
 )
 parser.add_argument("--dataset_path", type=str, default=None)
 parser.add_argument("--dataset_name", type=str, default=None)
@@ -328,12 +330,23 @@ _P58_TIM_RAW = os.environ.get("CANON_P58_DEEPSWE_TIM", "0")
 if _P58_TIM_RAW not in ("0", "1"):
   raise ValueError("CANON_P58_DEEPSWE_TIM must be exactly 0 or 1")
 if _P58_TIM_RAW == "1":
+  expected_node_selector_val = resolve_node_selector_value(os.environ)
+  if args.node_selector_val != expected_node_selector_val:
+    raise ValueError(
+        "P58 --node_selector_val must match the signed NODE_SELECTOR_VAL: "
+        f"cli={args.node_selector_val!r} env={expected_node_selector_val!r}"
+    )
   if args.ckpt_dir != "none":
     raise ValueError(
         "P58 precomputed-gradient training requires exact --ckpt_dir=none"
     )
   print(
       "[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported",
+      flush=True,
+  )
+  print(
+      "[P58.SANDBOX_ROUTE] PASS "
+      "head=canon-cpu-pool sandbox=deepswe-cpu-pool-2",
       flush=True,
   )
 MODEL_VERSION = args.model_version
@@ -375,7 +388,7 @@ def patch_kubernetes_runtime():
           key = os.environ.get(
               "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
           )
-          val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
+          val = resolve_node_selector_value(os.environ)
           body["spec"]["nodeSelector"] = {key: val}
           print(f"[Monkeypatch] Overrode nodeSelector to {key}={val}")
         return original_create_namespaced_pod(*args, **kwargs)

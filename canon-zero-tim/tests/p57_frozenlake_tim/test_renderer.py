@@ -860,7 +860,7 @@ class P57RendererTest(unittest.TestCase):
             stock_only=True,
         )
 
-  def test_canon_cpu_pool_and_guaranteed_qos(self):
+  def test_canon_cpu_pool_and_large_head_limits(self):
     with tempfile.TemporaryDirectory() as tmp:
       paths = paired.render_all(
           base_path=BASE,
@@ -885,12 +885,12 @@ class P57RendererTest(unittest.TestCase):
       proxy = next(c for c in head["initContainers"] if c["name"] == "pathways-proxy")
       rm = next(c for c in head["initContainers"] if c["name"] == "pathways-rm")
       main = next(c for c in head["containers"] if c["name"] == "jax-tpu")
-      self.assertEqual(proxy["resources"]["requests"], {"cpu": "8", "memory": "16Gi"})
-      self.assertEqual(proxy["resources"]["limits"], {"cpu": "8", "memory": "16Gi"})
-      self.assertEqual(rm["resources"]["requests"], {"cpu": "8", "memory": "16Gi"})
-      self.assertEqual(rm["resources"]["limits"], {"cpu": "8", "memory": "16Gi"})
-      self.assertEqual(main["resources"]["requests"], {"cpu": "14", "memory": "180Gi"})
-      self.assertEqual(main["resources"]["limits"], {"cpu": "14", "memory": "180Gi"})
+      self.assertEqual(proxy["resources"]["requests"], {"cpu": "32", "memory": "200Gi"})
+      self.assertEqual(proxy["resources"]["limits"], {"cpu": "32", "memory": "350G"})
+      self.assertEqual(rm["resources"]["requests"], {"cpu": "8", "memory": "32Gi"})
+      self.assertEqual(rm["resources"]["limits"], {"cpu": "16", "memory": "150G"})
+      self.assertEqual(main["resources"]["requests"], {"cpu": "16", "memory": "64Gi"})
+      self.assertEqual(main["resources"]["limits"], {"cpu": "24", "memory": "350G"})
 
 
 if __name__ == "__main__":

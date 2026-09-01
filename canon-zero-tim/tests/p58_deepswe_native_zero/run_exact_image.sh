@@ -28,6 +28,7 @@ $DOCKER run --rm \
       canon-zero-tim/cluster/steps/90_run.sh \
       canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh \
       canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh \
+      canon-zero-tim/cluster/steps/p58_verify_head_pvc_probe.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_common.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_native.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_zero_hp.sh \

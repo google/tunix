@@ -1655,6 +1655,17 @@ lines, and its digest matches the frozen value. Never print secret values.
 
 ## 2A. P58 sandbox capacity gate
 
+The current P58 production route is exact and fail-closed:
+
+```text
+Pathways head: canon-cpu-pool
+R2E sandboxes: deepswe-cpu-pool-2
+```
+
+Older `cpu-np` instructions below this point are superseded for new P58
+renders; historical incident descriptions remain unchanged. The sandbox
+probe and full JobSet must select the same `deepswe-cpu-pool-2` pool.
+
 P58f12 had 128/128 sandboxes `scheduling_gated`. Before reserving TPUs, prove
 one production-shaped sandbox can pass the exact Kueue/CPU route. This probe
 checks admission only; it does not execute R2E, model rollout, or training.
@@ -1673,6 +1684,7 @@ PROBE_YAML="/tmp/${PROBE_POD}.yaml"
 python3 canon-zero-tim/cluster/render_p58_sandbox_probe.py \
   --run-id "$PROBE_RUN_ID" \
   --task-image "$TASK_IMAGE" \
+  --sandbox-nodepool deepswe-cpu-pool-2 \
   --output "$PROBE_YAML"
 sha256sum "$PROBE_YAML"
 kubectl apply --server-side --dry-run=server -f "$PROBE_YAML"
@@ -1692,6 +1704,7 @@ kubectl apply -f "$PROBE_YAML"
 kubectl -n default wait --for=condition=Ready "pod/$PROBE_POD" \
   --timeout=10m || true
 P58_SANDBOX_PROBE_POD="$PROBE_POD" \
+P58_SANDBOX_NODEPOOL=deepswe-cpu-pool-2 \
   bash canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh
 ```
 
@@ -1702,9 +1715,10 @@ P58_SANDBOX_CAPACITY_PASS scope=one-sandbox-admission-only ...
 ```
 
 The verifier requires an Active `multislice-queue` LocalQueue, an Active
-backing ClusterQueue, at least one Ready schedulable `cpu-np` node, a Running
+backing ClusterQueue, at least one Ready schedulable `deepswe-cpu-pool-2` node, a Running
 probe labeled `kueue.x-k8s.io/managed=true` with no scheduling gate, the exact
-queue/node selector, and a selected node that actually belongs to `cpu-np`.
+queue/node selector, and a selected node that actually belongs to
+`deepswe-cpu-pool-2`.
 Preserve read-only evidence before cleanup:
 
 ```bash
@@ -1716,7 +1730,7 @@ CLUSTER_QUEUE="$(kubectl -n default get localqueue.kueue.x-k8s.io \
   multislice-queue -o jsonpath='{.spec.clusterQueue}')"
 kubectl get clusterqueue.kueue.x-k8s.io "$CLUSTER_QUEUE" -o yaml
 kubectl get resourceflavors.kueue.x-k8s.io -o yaml
-kubectl get nodes -l cloud.google.com/gke-nodepool=cpu-np \
+kubectl get nodes -l cloud.google.com/gke-nodepool=deepswe-cpu-pool-2 \
   -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable,CPU:.status.allocatable.cpu,MEMORY:.status.allocatable.memory
 ```
 
@@ -1733,7 +1747,7 @@ and must also remain feasible on selected nodes.
 If the probe remains Pending or gated, the verifier emits
 `P58_SANDBOX_CAPACITY_BLOCKED`. Preserve Pod conditions/events, the matching
 Workload's `QuotaReserved`/admission checks, LocalQueue/ClusterQueue status,
-selected ResourceFlavor, and `cpu-np` readiness. Do not launch TPUs, tune vLLM,
+selected ResourceFlavor, and `deepswe-cpu-pool-2` readiness. Do not launch TPUs, tune vLLM,
 increase `max_num_seqs`, or remove the queue label. The returned p58f12 log is
 insufficient to distinguish quota exhaustion from a flavor/admission issue.
 
@@ -1747,6 +1761,72 @@ kubectl -n default wait --for=delete "pod/$PROBE_POD" --timeout=5m
 This deletion is also a Kubernetes mutation and requires operator authority.
 Report the exact deleted Pod name and whether deletion was confirmed.
 
+## 2B. P58 canon-head PVC compatibility gate
+
+The retained model claim is named `haoyugao-cpu-np-pvc`, but the P58 Pathways
+head now schedules on `canon-cpu-pool`. The name does not prove compatibility.
+Before rendering K30, first preserve the PVC/PV topology read-only:
+
+```bash
+MODEL_PVC='haoyugao-cpu-np-pvc'
+kubectl -n default get pvc "$MODEL_PVC" -o wide
+PV_NAME="$(kubectl -n default get pvc "$MODEL_PVC" \
+  -o jsonpath='{.spec.volumeName}')"
+test -n "$PV_NAME"
+kubectl get pv "$PV_NAME" \
+  -o jsonpath='{.spec.accessModes}{"\n"}{.spec.nodeAffinity}{"\n"}'
+kubectl get nodes -l cloud.google.com/gke-nodepool=canon-cpu-pool \
+  -o custom-columns=NAME:.metadata.name,ZONE:.metadata.labels.topology\.kubernetes\.io/zone,READY:.status.conditions[-1].status,CPU:.status.allocatable.cpu,MEMORY:.status.allocatable.memory
+```
+
+Then render a bounded, read-only mount probe from the exact digest-pinned
+client image. Rendering does not contact Kubernetes:
+
+```bash
+PVC_RUN_ID='p58k30'
+PVC_PROBE_POD="canon-p58-head-pvc-probe-${PVC_RUN_ID}"
+PVC_PROBE_YAML="/tmp/${PVC_PROBE_POD}.yaml"
+python3 canon-zero-tim/cluster/render_p58_head_pvc_probe.py \
+  --run-id "$PVC_RUN_ID" \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --head-nodepool canon-cpu-pool \
+  --model-pvc "$MODEL_PVC" \
+  --output "$PVC_PROBE_YAML"
+sha256sum "$PVC_PROBE_YAML"
+kubectl apply --server-side --dry-run=server -f "$PVC_PROBE_YAML"
+```
+
+Required construction marker:
+
+```text
+P58_HEAD_PVC_PROBE_RENDER_PASS ...
+```
+
+The live `apply` and later deletion are separate Kubernetes mutations and
+require explicit operator approval. After approval:
+
+```bash
+kubectl apply -f "$PVC_PROBE_YAML"
+kubectl -n default wait \
+  --for=jsonpath='{.status.phase}'=Succeeded "pod/$PVC_PROBE_POD" \
+  --timeout=10m || true
+P58_HEAD_PVC_PROBE_POD="$PVC_PROBE_POD" \
+P58_HEAD_NODEPOOL=canon-cpu-pool \
+P58_MODEL_PVC="$MODEL_PVC" \
+  bash canon-zero-tim/cluster/steps/p58_verify_head_pvc_probe.sh
+```
+
+The only PASS is:
+
+```text
+P58_HEAD_PVC_PASS scope=canon-head-read-only-mount ...
+```
+
+Before approved cleanup, preserve the Pod YAML, describe output, logs, events,
+PVC YAML, PV YAML, selected node, and matching Kueue Workload. `Pending`, a
+volume node-affinity conflict, attach/mount failure, missing model directory,
+or missing PASS marker is `BLOCKED_HEAD_PVC`; do not launch the TPU JobSet.
+
 ## 3N. Render and launch the fresh Native+IS full campaign
 
 Use the exact source SHA, image digest, CPU pool, Kueue worker sentinel, PVC,
@@ -1758,7 +1838,8 @@ model; never resume the collapsed Native/no-IS checkpoint.
 
 ```bash
 CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
-CPU_NODEPOOL='cpu-np'
+HEAD_NODEPOOL='canon-cpu-pool'
+SANDBOX_NODEPOOL='deepswe-cpu-pool-2'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
 RUN_STEM='p58is01'
@@ -1777,7 +1858,8 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --stage "$STAGE" \
   --arm "$ARM" \
   --sampler-is \
-  --cpu-nodepool "$CPU_NODEPOOL" \
+  --cpu-nodepool "$HEAD_NODEPOOL" \
+  --sandbox-nodepool "$SANDBOX_NODEPOOL" \
   --worker-nodepool "$TPU_NODEPOOL" \
   --model-pvc "$MODEL_PVC"
 sha256sum "$OUTPUT"
@@ -1802,7 +1884,8 @@ cloud.google.com/gke-tpu-topology: 4x4x8
 no cloud.google.com/gke-nodepool: tpu-v5p-slice
 JobSet label kueue.x-k8s.io/queue-name: multislice-queue
 jax-tpu env R2E_K8S_QUEUE_NAME: multislice-queue
-head nodeSelector cloud.google.com/gke-nodepool: cpu-np
+head nodeSelector cloud.google.com/gke-nodepool: canon-cpu-pool
+jax-tpu env NODE_SELECTOR_VAL: deepswe-cpu-pool-2
 head hostNetwork: true
 head dnsPolicy: ClusterFirstWithHostNet
 head required podAntiAffinity selector: jobset.sigs.k8s.io/replicatedjob-name In [pathways-head]
@@ -1819,7 +1902,8 @@ Kueue's selected ResourceFlavor supplies the concrete pool affinity. If the
 literal sentinel appears as node-pool affinity, stop before apply; that is the
 p58c05 admission bug.
 
-If the head loses host networking, uses `deepswe-cpu-pool`, or lacks the exact
+If the head loses host networking, is not on `canon-cpu-pool`, routes sandboxes
+outside `deepswe-cpu-pool-2`, or lacks the exact
 required hostname anti-affinity, stop before apply. The anti-affinity is the
 fixed-port isolation; changing the proven transport is not. After apply,
 confirm each Pathways head is on a distinct CPU hostname. If a strict-CL

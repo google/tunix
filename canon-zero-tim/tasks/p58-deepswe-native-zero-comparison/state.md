@@ -1,5 +1,30 @@
 # State
 
+## P58.38 canon head and dedicated sandbox pool migration (2026-09-01)
+
+- P58 now admits only `canon-cpu-pool` for the Pathways head and
+  `deepswe-cpu-pool-2` for R2E sandboxes. Renderer, runtime, capacity probe,
+  verifier, and diagnostic helpers agree on that exact pair; P58 runtime
+  fails closed instead of silently falling back to `cpu-np`.
+- The rejected 16Gi proxy/RM hard limits are replaced by the historical large
+  ceilings. P58 head resources are proxy 32 CPU/200Gi request and 32 CPU/350G
+  limit; RM 8 CPU/32Gi request and 16 CPU/150G limit; main 16 CPU/64Gi request
+  and 24 CPU/200G limit. The Pod is Burstable with `very-high` priority.
+- Added a digest-pinned, Kueue-labeled, read-only head PVC probe for
+  `haoyugao-cpu-np-pvc` on `canon-cpu-pool`. It checks the
+  `Qwen3-4B-Instruct-2507` directory and has a fail-closed verifier.
+- Local focused gates pass: P58 renderer 40/40, sandbox/PVC probes 8/8,
+  checked-VMA ABA 4/4, P57 renderer 25/25, P34 static ten suites, and
+  pinned-image environment integration 21/21. Python/Bash syntax and diff
+  hygiene pass. The bare-host environment attempt alone is inconclusive
+  because `metrax` is absent.
+- No cluster target has run. Before K30, a remote operator must prove the
+  `deepswe-cpu-pool-2` Kueue route/capacity and separately prove the PVC can
+  mount read-only on `canon-cpu-pool`. Live probe apply/delete, image
+  publication, and K30 render/apply all require their own approval. Source
+  publication alone does not promote either infrastructure gate.
+- Phase: `phases/p58-38-cpu-pool-migration.md`.
+
 ## P58.37 K29 profiler-free production full training (2026-09-01)
 
 - K29 proved P58.36 on 128 TPU v5p: Step 1 returned all 128 trajectories,

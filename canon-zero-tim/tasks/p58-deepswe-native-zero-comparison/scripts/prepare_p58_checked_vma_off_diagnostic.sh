@@ -52,7 +52,8 @@ python3 "$pkg/cluster/render_p58_deepswe_tim.py" \
   --run-id "$run_id" \
   --stage full \
   --arm zero \
-  --cpu-nodepool cpu-np \
+  --cpu-nodepool canon-cpu-pool \
+  --sandbox-nodepool deepswe-cpu-pool-2 \
   --worker-nodepool "$worker_nodepool" \
   --model-pvc "$model_pvc" \
   --checked-vma-off-diagnostic

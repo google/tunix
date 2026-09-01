@@ -12,7 +12,7 @@ import yaml
 
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _QUEUE = "multislice-queue"
-_CPU_NODEPOOL = "cpu-np"
+_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
 
 
 def _label(value: str, *, field: str) -> str:
@@ -27,21 +27,25 @@ def render(
     task_image: str,
     namespace: str = "default",
     queue_name: str = _QUEUE,
-    cpu_nodepool: str = _CPU_NODEPOOL,
+    sandbox_nodepool: str = _SANDBOX_NODEPOOL,
     image_pull_secret: str = "dockerhub-pro",
 ) -> dict:
   """Return a single-Pod admission probe; this does not execute R2E."""
   run_id = _label(run_id, field="run_id")
   namespace = _label(namespace, field="namespace")
   queue_name = _label(queue_name, field="queue_name")
-  cpu_nodepool = _label(cpu_nodepool, field="cpu_nodepool")
+  sandbox_nodepool = _label(
+      sandbox_nodepool, field="sandbox_nodepool"
+  )
   image_pull_secret = _label(
       image_pull_secret, field="image_pull_secret"
   )
   if queue_name != _QUEUE:
     raise ValueError(f"P58 sandbox probe requires queue {_QUEUE!r}")
-  if cpu_nodepool != _CPU_NODEPOOL:
-    raise ValueError(f"P58 sandbox probe requires node pool {_CPU_NODEPOOL!r}")
+  if sandbox_nodepool != _SANDBOX_NODEPOOL:
+    raise ValueError(
+        f"P58 sandbox probe requires node pool {_SANDBOX_NODEPOOL!r}"
+    )
   if not task_image or any(char.isspace() for char in task_image):
     raise ValueError("task_image must be a non-empty container image reference")
   name = f"canon-p58-sandbox-probe-{run_id}"
@@ -66,7 +70,7 @@ def render(
           "terminationGracePeriodSeconds": 10,
           "automountServiceAccountToken": False,
           "nodeSelector": {
-              "cloud.google.com/gke-nodepool": cpu_nodepool,
+              "cloud.google.com/gke-nodepool": sandbox_nodepool,
           },
           "imagePullSecrets": [{"name": image_pull_secret}],
           "containers": [{
@@ -91,7 +95,7 @@ def main() -> None:
   parser.add_argument("--output", required=True)
   parser.add_argument("--namespace", default="default")
   parser.add_argument("--queue-name", default=_QUEUE)
-  parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
+  parser.add_argument("--sandbox-nodepool", default=_SANDBOX_NODEPOOL)
   parser.add_argument("--image-pull-secret", default="dockerhub-pro")
   args = parser.parse_args()
   output = Path(args.output)
@@ -102,7 +106,7 @@ def main() -> None:
       task_image=args.task_image,
       namespace=args.namespace,
       queue_name=args.queue_name,
-      cpu_nodepool=args.cpu_nodepool,
+      sandbox_nodepool=args.sandbox_nodepool,
       image_pull_secret=args.image_pull_secret,
   )
   with output.open("x", encoding="utf-8") as stream:

@@ -1,6 +1,17 @@
 # Plan
 
-## Active phase: P58.37 K29 profiler-free production full training
+## Active phase: P58.38 canon head and dedicated sandbox pool migration
+
+Make `canon-cpu-pool` (Pathways head) and `deepswe-cpu-pool-2` (R2E
+sandboxes) one fail-closed P58 contract. Restore the historical large head
+limits without over-reserving them as Guaranteed requests. Before any fresh
+K30 launch, require a production-shaped sandbox admission/capacity gate and a
+separately approved read-only mount probe proving that
+`haoyugao-cpu-np-pvc` is usable from `canon-cpu-pool`. Run the complete
+pinned-image gate after focused construction passes. Kubernetes apply/delete,
+image publication, and K30 launch remain separate approval boundaries.
+
+## Superseded active phase: P58.37 K29 profiler-free production full training
 
 K29 proved P58.36 by returning the complete Step-1 128-row batch and exact
 A=B=C over 412,449 action tokens. It failed before Step-1 backward when the

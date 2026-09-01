@@ -47,18 +47,20 @@ _ADMITTED_CPU_NODEPOOLS = frozenset({
     "cpu-np",
 })
 _DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
-HEAD_GUARANTEED_RESOURCES = {
+# Preserve the historical requests and large limits on the dedicated head
+# pool.  Raising requests to these ceilings would over-reserve the whole Pod.
+HEAD_RESOURCES = {
     "pathways-proxy": {
-        "requests": {"cpu": "8", "memory": "16Gi"},
-        "limits": {"cpu": "8", "memory": "16Gi"},
+        "requests": {"cpu": "32", "memory": "200Gi"},
+        "limits": {"cpu": "32", "memory": "350G"},
     },
     "pathways-rm": {
-        "requests": {"cpu": "8", "memory": "16Gi"},
-        "limits": {"cpu": "8", "memory": "16Gi"},
+        "requests": {"cpu": "8", "memory": "32Gi"},
+        "limits": {"cpu": "16", "memory": "150G"},
     },
     "jax-tpu": {
-        "requests": {"cpu": "14", "memory": "180Gi"},
-        "limits": {"cpu": "14", "memory": "180Gi"},
+        "requests": {"cpu": "16", "memory": "64Gi"},
+        "limits": {"cpu": "24", "memory": "350G"},
     },
 }
 _EVAL_GENERATIONS = p57_workloads.GENERATIONS_PER_PROMPT
@@ -483,9 +485,9 @@ def render_all(
     if cpu_nodepool == "canon-cpu-pool":
       proxy = next(c for c in head["initContainers"] if c["name"] == "pathways-proxy")
       rm = next(c for c in head["initContainers"] if c["name"] == "pathways-rm")
-      proxy["resources"] = copy.deepcopy(HEAD_GUARANTEED_RESOURCES["pathways-proxy"])
-      rm["resources"] = copy.deepcopy(HEAD_GUARANTEED_RESOURCES["pathways-rm"])
-      main["resources"] = copy.deepcopy(HEAD_GUARANTEED_RESOURCES["jax-tpu"])
+      proxy["resources"] = copy.deepcopy(HEAD_RESOURCES["pathways-proxy"])
+      rm["resources"] = copy.deepcopy(HEAD_RESOURCES["pathways-rm"])
+      main["resources"] = copy.deepcopy(HEAD_RESOURCES["jax-tpu"])
     else:
       if main.get("resources", {}).get("limits", {}).get("memory") != _BASE_MEMORY:
         raise ValueError("P57 base jax-tpu memory limit drifted")
@@ -635,7 +637,7 @@ def render_all(
     if wrong:
       raise ValueError(f"P57 rendered contract drifted: {wrong}")
     expected_memory = (
-        HEAD_GUARANTEED_RESOURCES["jax-tpu"]["limits"]["memory"]
+        HEAD_RESOURCES["jax-tpu"]["limits"]["memory"]
         if cpu_nodepool == "canon-cpu-pool"
         else _P57_MEMORY
     )

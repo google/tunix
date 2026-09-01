@@ -1,5 +1,73 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — P58.38 CPU-pool migration and K30 preflight
+
+The current P58 infrastructure contract supersedes older active instructions
+that name `cpu-np`:
+
+```text
+Pathways head node pool: canon-cpu-pool
+R2E sandbox node pool: deepswe-cpu-pool-2
+Model PVC under test: haoyugao-cpu-np-pvc
+```
+
+The production renderer admits only that head/sandbox pair. It writes
+`NODE_SELECTOR_VAL=deepswe-cpu-pool-2`; Python and the bounded R2E runtime now
+fail closed if a P58 process loses or changes that value. Required startup
+receipt:
+
+```text
+[P58.SANDBOX_ROUTE] PASS head=canon-cpu-pool sandbox=deepswe-cpu-pool-2
+```
+
+The temporary 16Gi proxy/RM hard limits were rejected. P58 restores the
+historical requests and generous limits: proxy 32 CPU / 200Gi request and
+32 CPU / 350G limit; RM 8 CPU / 32Gi request and 16 CPU / 150G limit; main
+16 CPU / 64Gi request and 24 CPU / 200G limit. This is Burstable rather than
+Guaranteed QoS, while retaining `very-high` priority. Do not restore the
+16Gi limits and do not raise every request to its limit: the latter would
+reserve roughly 700GB for one head Pod and can make it unschedulable.
+
+Before K30, the remote operator must complete two independent gates. Neither
+gate proves TPU training.
+
+1. **Sandbox admission:** render
+   `render_p58_sandbox_probe.py --sandbox-nodepool deepswe-cpu-pool-2`, then,
+   after separate approval to apply, require
+   `P58_SANDBOX_CAPACITY_PASS scope=one-sandbox-admission-only`. Confirm the
+   selected Kueue ResourceFlavor actually admits `deepswe-cpu-pool-2` and
+   that quota/autoscaling can supply the 128-Pod request floor: 256 CPU and
+   512Gi memory plus overhead. A one-Pod PASS is necessary but insufficient.
+2. **Head PVC mount:** inspect `haoyugao-cpu-np-pvc` and its bound PV read-only,
+   including zone/node affinity. Render
+   `render_p58_head_pvc_probe.py` from the exact digest-pinned client image.
+   After separate apply approval, require
+   `P58_HEAD_PVC_PASS scope=canon-head-read-only-mount`. The probe schedules
+   on `canon-cpu-pool`, mounts the claim read-only, and checks
+   `/mnt/disks/linchai_data/models/Qwen3-4B-Instruct-2507`. Preserve Pod YAML,
+   describe, logs, events, PVC/PV YAML, selected node, and Kueue Workload
+   before separately approved deletion. Any affinity, attach, mount, model
+   path, or admission failure is `BLOCKED_HEAD_PVC`; do not launch K30.
+
+Exact commands and approval boundaries are in
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md` sections 2A and 2B. No Kubernetes probe
+has been applied from this worktree; target validation is still pending.
+Local construction is green through P58 renderer 40/40, sandbox/PVC probe
+8/8, checked-VMA ABA 4/4, P57 renderer 25/25, P34 static ten suites, and the
+pinned-image environment contract 21/21. The complete P58 exact-image gate
+and both live infrastructure probes remain pending.
+
+After both gates pass, render K30 explicitly with:
+
+```text
+--cpu-nodepool canon-cpu-pool
+--sandbox-nodepool deepswe-cpu-pool-2
+--model-pvc haoyugao-cpu-np-pvc
+```
+
+Do not apply the generic checked-in base YAML directly. Historical `cpu-np`
+incident records remain valid history and must not be rewritten.
+
 ## START HERE — P58.37 K29 passed rollout/alignment; production full drops XProf
 
 K29 proved the P58.36 repair on 128 TPU v5p. Step 1 returned all 128
@@ -34,6 +102,9 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --client-image <matching-digest-pinned-image> \
   --run-id k30 \
   --stage full --arm zero --high-performance \
+  --cpu-nodepool canon-cpu-pool \
+  --sandbox-nodepool deepswe-cpu-pool-2 \
+  --model-pvc haoyugao-cpu-np-pvc \
   --worker-nodepool <pool-or-auto>
 ```
 

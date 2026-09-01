@@ -2312,3 +2312,29 @@
   the flag audit passes 409/409; Python/Bash syntax and diff hygiene pass.
 - No image publication, Kubernetes mutation, TPU launch, commit, or push was
   performed. K30 remains a fresh, separately approved target.
+
+## 2026-09-01 UTC — P58.38 CPU-pool migration under local validation
+
+- Pulled and confirmed clean operator HEAD
+  `70fa3de5e9ad2aaf6ed42f5a59cd9b352f2e1042`. The published renderer had
+  changed P58 defaults to head `canon-cpu-pool` and sandbox
+  `deepswe-cpu-pool-2`, but the sandbox probe, capacity verifier, current
+  runbook/handoff, and diagnostic helpers still selected `cpu-np`.
+- Made the P58 pair exact and fail-closed through renderer, Python startup,
+  bounded R2E runtime, probe/verifier, and checked-VMA/seam preparation. The
+  new startup receipt is `[P58.SANDBOX_ROUTE] PASS head=canon-cpu-pool
+  sandbox=deepswe-cpu-pool-2`.
+- Rejected the 16Gi proxy/RM hard limits and restored historical requests and
+  large ceilings. P58 is intentionally Burstable with `very-high` priority;
+  matching every request to the ceiling would reserve roughly 700GB and can
+  make the head unschedulable.
+- Added a digest-pinned standalone Pod renderer and verifier for a read-only
+  `haoyugao-cpu-np-pvc` mount on `canon-cpu-pool`, including the exact
+  Qwen3-4B model-directory check. No live Pod was applied.
+- Local gates pass: P58 renderer 40/40, sandbox/PVC probe 8/8, checked-VMA ABA
+  4/4, P57 renderer 25/25, P34 static ten suites, and pinned-image
+  renderer-to-environment integration 21/21. Python/Bash syntax and diff
+  hygiene pass. The bare-host environment attempt alone is inconclusive
+  because `metrax` is unavailable; the same gate passes in the pinned image.
+- No commit, push, image publication, Kubernetes mutation, TPU launch, or
+  remote-state change occurred.

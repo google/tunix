@@ -52,30 +52,28 @@ _EXCLUSIVE_TOPOLOGY_ANNOTATION = (
 _KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 _ADMITTED_CPU_NODEPOOLS = frozenset({
     "canon-cpu-pool",
-    "deepswe-cpu-pool-2",
-    "cpu-np",
 })
 _ADMITTED_SANDBOX_NODEPOOLS = frozenset({
     "deepswe-cpu-pool-2",
-    "deepswe-cpu-pool",
-    "canon-cpu-pool",
-    "cpu-np",
 })
 _DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
 _DEFAULT_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
 _CPU_NODEPOOL = _DEFAULT_CPU_NODEPOOL
-HEAD_GUARANTEED_RESOURCES = {
+# Keep the historical head requests and generous hard limits.  Matching every
+# request to these limits would reserve roughly 700 GB for one head Pod and can
+# make it unschedulable; the very-high PriorityClass remains the eviction lever.
+HEAD_RESOURCES = {
     "pathways-proxy": {
-        "requests": {"cpu": "8", "memory": "16Gi"},
-        "limits": {"cpu": "8", "memory": "16Gi"},
+        "requests": {"cpu": "32", "memory": "200Gi"},
+        "limits": {"cpu": "32", "memory": "350G"},
     },
     "pathways-rm": {
-        "requests": {"cpu": "8", "memory": "16Gi"},
-        "limits": {"cpu": "8", "memory": "16Gi"},
+        "requests": {"cpu": "8", "memory": "32Gi"},
+        "limits": {"cpu": "16", "memory": "150G"},
     },
     "jax-tpu": {
-        "requests": {"cpu": "14", "memory": "180Gi"},
-        "limits": {"cpu": "14", "memory": "180Gi"},
+        "requests": {"cpu": "16", "memory": "64Gi"},
+        "limits": {"cpu": "24", "memory": "200G"},
     },
 }
 _JOBSET_REPLICATEDJOB_LABEL = "jobset.sigs.k8s.io/replicatedjob-name"
@@ -373,12 +371,12 @@ def render(
   manager = p34._container(services, "pathways-rm")
   main = p34._container(head["containers"], "jax-tpu")
   proxy["resources"] = copy.deepcopy(
-      HEAD_GUARANTEED_RESOURCES["pathways-proxy"]
+      HEAD_RESOURCES["pathways-proxy"]
   )
   manager["resources"] = copy.deepcopy(
-      HEAD_GUARANTEED_RESOURCES["pathways-rm"]
+      HEAD_RESOURCES["pathways-rm"]
   )
-  main["resources"] = copy.deepcopy(HEAD_GUARANTEED_RESOURCES["jax-tpu"])
+  main["resources"] = copy.deepcopy(HEAD_RESOURCES["jax-tpu"])
   scratch = f"gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p58/{name}"
   p34._replace_arg(
       proxy["args"], "--gcs_scratch_location=", f"--gcs_scratch_location={scratch}"
@@ -975,7 +973,7 @@ def validate(
   manager = p34._container(services, "pathways-rm")
   if f"--instance_type=tpuv5:{instance_type}" not in manager["args"]:
     raise ValueError("P58 resource-manager topology drifted")
-  for container_name, expected_res in HEAD_GUARANTEED_RESOURCES.items():
+  for container_name, expected_res in HEAD_RESOURCES.items():
     if container_name == "pathways-proxy":
       target_c = proxy
     elif container_name == "pathways-rm":
@@ -986,7 +984,7 @@ def validate(
       raise ValueError(f"unknown container name: {container_name}")
     if target_c.get("resources") != expected_res:
       raise ValueError(
-          f"P58 {container_name} container drifted from Guaranteed QoS resources: "
+          f"P58 {container_name} container drifted from signed head resources: "
           f"expected={expected_res} actual={target_c.get('resources')}"
       )
   worker_pod = worker["template"]["spec"]

@@ -47,7 +47,8 @@ python3 "$script_dir/render_p58_checked_vma_aba_wave.py" \
   --source-branch yuxzhang/canon-zero-tim \
   --client-image "$client_image" \
   --wave-id "$wave_id" \
-  --cpu-nodepool cpu-np \
+  --cpu-nodepool canon-cpu-pool \
+  --sandbox-nodepool deepswe-cpu-pool-2 \
   --worker-nodepool "$worker_nodepool" \
   --model-pvc "$model_pvc"
 

@@ -39,7 +39,7 @@ class P58RendererTest(unittest.TestCase):
         run_id="pair-test",
         stage=stage,
         arm=arm,
-        cpu_nodepool="cpu-np",
+        cpu_nodepool="canon-cpu-pool",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
     )
@@ -111,7 +111,7 @@ class P58RendererTest(unittest.TestCase):
               ],
           )
           self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
-          self.assertEqual(env["NODE_SELECTOR_VAL"], "cpu-np")
+          self.assertEqual(env["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
 
   def test_production_render_does_not_reenable_retired_device_probe(self):
     for arm in ("native", "zero"):
@@ -744,7 +744,7 @@ class P58RendererTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "admitted sandbox node pool"):
       self._render("native", sandbox_nodepool="nonexistent-pool")
 
-  def test_canon_cpu_pool_and_guaranteed_qos(self):
+  def test_canon_cpu_pool_and_large_head_limits(self):
     for arm in ("native", "zero"):
       document = self._render(arm, "full", cpu_nodepool="canon-cpu-pool")
       head = renderer.p34._head(document)
@@ -759,31 +759,33 @@ class P58RendererTest(unittest.TestCase):
       manager = renderer.p34._container(services, "pathways-rm")
       main = renderer.p34._container(head["containers"], "jax-tpu")
       self.assertEqual(
-          proxy["resources"]["requests"], {"cpu": "8", "memory": "16Gi"}
+          proxy["resources"]["requests"], {"cpu": "32", "memory": "200Gi"}
       )
       self.assertEqual(
-          proxy["resources"]["limits"], {"cpu": "8", "memory": "16Gi"}
+          proxy["resources"]["limits"], {"cpu": "32", "memory": "350G"}
       )
       self.assertEqual(
-          manager["resources"]["requests"], {"cpu": "8", "memory": "16Gi"}
+          manager["resources"]["requests"], {"cpu": "8", "memory": "32Gi"}
       )
       self.assertEqual(
-          manager["resources"]["limits"], {"cpu": "8", "memory": "16Gi"}
+          manager["resources"]["limits"], {"cpu": "16", "memory": "150G"}
       )
       self.assertEqual(
-          main["resources"]["requests"], {"cpu": "14", "memory": "180Gi"}
+          main["resources"]["requests"], {"cpu": "16", "memory": "64Gi"}
       )
       self.assertEqual(
-          main["resources"]["limits"], {"cpu": "14", "memory": "180Gi"}
+          main["resources"]["limits"], {"cpu": "24", "memory": "200G"}
       )
 
-  def test_explicit_sandbox_nodepool_override(self):
-    for arm in ("native", "zero"):
-      document = self._render(
-          arm, "full", cpu_nodepool="canon-cpu-pool", sandbox_nodepool="deepswe-cpu-pool"
-      )
-      env = renderer.p34._env(document)
-      self.assertEqual(env["NODE_SELECTOR_VAL"], "deepswe-cpu-pool")
+  def test_legacy_nodepools_are_rejected(self):
+    for cpu_nodepool in ("cpu-np", "deepswe-cpu-pool-2"):
+      with self.subTest(cpu_nodepool=cpu_nodepool):
+        with self.assertRaisesRegex(ValueError, "admitted CPU node pool"):
+          self._render("native", cpu_nodepool=cpu_nodepool)
+    for sandbox_nodepool in ("cpu-np", "deepswe-cpu-pool"):
+      with self.subTest(sandbox_nodepool=sandbox_nodepool):
+        with self.assertRaisesRegex(ValueError, "admitted sandbox node pool"):
+          self._render("native", sandbox_nodepool=sandbox_nodepool)
 
   def test_head_host_network_regression_is_rejected(self):
     document = self._render("native", "full")

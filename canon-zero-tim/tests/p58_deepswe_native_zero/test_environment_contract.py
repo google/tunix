@@ -95,7 +95,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         run_id="env-test",
         stage=stage,
         arm=arm,
-        cpu_nodepool="cpu-np",
+        cpu_nodepool="canon-cpu-pool",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
         sampler_is=sampler_is,
@@ -245,6 +245,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertNotIn("CANON_FIXED_AR", values)
     self.assertIn("export R2E_K8S_QUEUE_NAME=multislice-queue", resolved)
     self.assertEqual(values["R2E_K8S_QUEUE_NAME"], "multislice-queue")
+    self.assertEqual(values["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
     deepswe_contract.validate_environment(values)
@@ -255,6 +256,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertIn("export CANON_LOGPROB_M=256", resolved)
     self.assertEqual(values["CANON_LOGPROB_M"], "256")
     self.assertEqual(values["CANON_FIXED_AR"], "1")
+    self.assertEqual(values["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
     deepswe_contract.validate_environment(values)
