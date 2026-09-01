@@ -821,6 +821,70 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_step_appends_lineage_event(self):
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True}
+      )
+      self.mock_actor.update.return_value = 1
+
+      ctx = lineage.LineageContext(
+          tracking_id="batch_0", parent_tracking_ids=["traj_p1_g0"]
+      )
+      ctx.add_event("orchestrator.assembler", "pack")
+      payload = datatypes.RLTrainerPayload(
+          advantages=np.array([1.0], dtype=np.float32),
+          loss_mask=np.array([[1]], dtype=np.int32),
+          metadata={"lineage": ctx},
+      )
+
+      res = await self.engine.train_step(
+          payload, accumulate_gradients=False, apply_optimizer=True
+      )
+      self.assertTrue(res["updated"])
+      self.assertEqual(res["train_step"], 1)
+
+      # Check TrainRequest passed to actor worker
+      self.mock_actor.fwd_bwd.assert_called_once()
+      req = self.mock_actor.fwd_bwd.call_args.kwargs["request"]
+      self.assertTrue(req.request_id.startswith("train_req_"))
+      self.assertIs(req.metadata["lineage"], ctx)
+
+      # Check lineage event appended
+      self.assertLen(ctx.events, 2)
+      self.assertEqual(ctx.events[1].component, "engine.train")
+      self.assertEqual(ctx.events[1].operation, "train_step")
+      self.assertFalse(ctx.events[1].attributes["accumulate_gradients"])
+      self.assertTrue(ctx.events[1].attributes["apply_optimizer"])
+      self.assertEqual(ctx.events[1].attributes["policy_version"], 0)
+
+    asyncio.run(_run())
+
+  def test_train_step_without_lineage_context(self):
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True}
+      )
+      self.mock_actor.update.return_value = 1
+
+      payload = datatypes.RLTrainerPayload(
+          advantages=np.array([1.0], dtype=np.float32),
+          loss_mask=np.array([[1]], dtype=np.int32),
+          metadata={},
+      )
+
+      res = await self.engine.train_step(
+          payload, accumulate_gradients=False, apply_optimizer=True
+      )
+      self.assertTrue(res["updated"])
+
+      self.mock_actor.fwd_bwd.assert_called_once()
+      req = self.mock_actor.fwd_bwd.call_args.kwargs["request"]
+      self.assertTrue(req.request_id.startswith("train_req_"))
+      self.assertNotIn("lineage", req.metadata)
+
+    asyncio.run(_run())
+
   def test_generate_stamps_lineage_context_for_rollout_requests(self):
     async def _run():
       req = datatypes.RolloutRequest(

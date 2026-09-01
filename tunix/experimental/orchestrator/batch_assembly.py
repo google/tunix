@@ -22,10 +22,13 @@ custom objects with token arrays). Supports:
 # TODO: Align SequencePackedBatchAssembler with the rest of the ecosystem and potentially move to a common library.
 """
 
-from absl import logging
+from collections.abc import Mapping, Sequence
 from typing import Any, Generic, Protocol, Sequence, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
 from tunix.rl import common as rl_common
 
 T = TypeVar("T")
@@ -34,8 +37,15 @@ T = TypeVar("T")
 class BatchAssembler(Generic[T], Protocol):
   """Universal batch assembly protocol for microbatch packing."""
 
-  def pack(self, items: Sequence[T]) -> list[Any]:
-    """Packs items into hardware-sized microbatch trainer payloads."""
+  def pack(
+      self,
+      items: Sequence[T],
+  ) -> list[Any]:
+    """Packs items into hardware-sized microbatch trainer payloads.
+
+    Args:
+      items: Sequence of unbatched items to assemble.
+    """
     ...
 
 
@@ -134,15 +144,60 @@ def with_ref_per_token_logps(
   )
 
 
+def _merge_batch_lineage(
+    items: Sequence[Any],
+    *,
+    batch_id: str,
+    attributes: Mapping[str, Any] | None = None,
+) -> lineage.LineageContext | None:
+  """Extracts and merges lineage contexts from a sequence of batch items.
+
+  Args:
+    items: Sequence of items that may carry lineage context in their metadata.
+    batch_id: Tracking ID to assign to the merged batch context.
+    attributes: Optional key-value metadata attached to the merge event.
+
+  Returns:
+    The merged LineageContext, or None if no upstream lineage contexts exist.
+  """
+  lineages = [
+      it.metadata["lineage"]
+      for it in items
+      if isinstance(getattr(it, "metadata", None), Mapping)
+      and it.metadata.get("lineage") is not None
+  ]
+  if not lineages:
+    return None
+
+  return lineage.LineageContext.merge(
+      batch_id=batch_id,
+      contexts=lineages,
+      component="orchestrator.assembler",
+      operation="pack",
+      attributes=dict(attributes) if attributes else None,
+  )
+
+
 class SequencePackedBatchAssembler:
   """1D Sequence Packing: Concatenates items into dense [1, max_packed_len] buffers."""
   # TODO: align implementation with current path.
   def __init__(self, max_packed_len: int = 8192, pad_id: int = 0):
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+    self._batch_counter = 0
 
-  def pack(self, items: Sequence[datatypes.RLTrainerPayload]) -> list[datatypes.RLTrainerPayload]:
-    """Bin-packs items into dense 1D buffers with segment boundaries."""
+  def pack(
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Bin-packs items into dense 1D buffers with segment boundaries.
+
+    Args:
+      items: Sequence of unbatched RLTrainerPayloads to pack.
+
+    Returns:
+      List of packed, segment-aligned RLTrainerPayload microbatches.
+    """
     if not items:
       return []
 
@@ -169,7 +224,7 @@ class SequencePackedBatchAssembler:
         bin_lengths.append(length)
 
     payloads: list[datatypes.RLTrainerPayload] = []
-    for b_items in bins:
+    for b_idx, b_items in enumerate(bins):
       all_tokens = []
       all_loss_masks = []
       all_action_masks = []
@@ -250,6 +305,18 @@ class SequencePackedBatchAssembler:
         concat_ref = np.concatenate(all_ref_logprobs)
         batch_ref_lp = np.pad(concat_ref[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
 
+      batch_tracking_id = f"batch_{self._batch_counter}"
+
+      merged_lineage = _merge_batch_lineage(
+          b_items,
+          batch_id=batch_tracking_id,
+          attributes={
+              "packing_type": "sequence_packed",
+              "bin_size": len(b_items),
+              "packed_len": self.max_packed_len,
+          },
+      )
+      payload_metadata = {"lineage": merged_lineage} if merged_lineage else {}
       payload = datatypes.RLTrainerPayload(
           token_ids=padded_tokens[np.newaxis, :],
           token_mask=padded_segment_ids[np.newaxis, :],
@@ -260,8 +327,10 @@ class SequencePackedBatchAssembler:
           ref_per_token_logps=batch_ref_lp,
           segment_ids=padded_segment_ids[np.newaxis, :],
           segment_positions=padded_segment_positions[np.newaxis, :],
+          metadata=payload_metadata,
       )
       payloads.append(payload)
+      self._batch_counter += 1
 
     return payloads
 
@@ -291,7 +360,8 @@ class GRPOTrainExampleAssembler:
     self.pad_id = pad_id
 
   def pack(
-      self, items: Sequence[datatypes.RLTrainerPayload]
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[rl_common.TrainExample]:
     item_list = list(items)
     if not item_list:
@@ -434,13 +504,15 @@ class PaddedBatchAssembler:
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
+    self._batch_counter = 0
 
   @property
   def max_seq_len(self) -> int:
     return self.max_prompt_length + self.max_response_length
 
   def pack(
-      self, items: Sequence[datatypes.RLTrainerPayload]
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[datatypes.RLTrainerPayload]:
     """Pads items into rectangular 2D batches `[B, P + C]`."""
     item_list = list(items)
@@ -449,7 +521,22 @@ class PaddedBatchAssembler:
 
     payloads: list[datatypes.RLTrainerPayload] = []
     for i in range(0, len(item_list), self.batch_size):
-      payloads.append(self._pack_chunk(item_list[i : i + self.batch_size]))
+      chunk = item_list[i : i + self.batch_size]
+      payload = self._pack_chunk(chunk)
+      batch_tracking_id = f"batch_{self._batch_counter}"
+      merged_lineage = _merge_batch_lineage(
+          chunk,
+          batch_id=batch_tracking_id,
+          attributes={
+              "packing_type": "padded",
+              "chunk_size": len(chunk),
+              "batch_size": self.batch_size,
+          },
+      )
+      if merged_lineage:
+        payload.metadata["lineage"] = merged_lineage
+      payloads.append(payload)
+      self._batch_counter += 1
     return payloads
 
   def _pack_chunk(

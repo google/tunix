@@ -154,6 +154,17 @@ class TrainerWorker(abstract_worker.Worker):
     """Executes one forward/backward pass."""
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
+    if request.metadata and "lineage" in request.metadata:
+      lineage_ctx = request.metadata["lineage"]
+      if hasattr(lineage_ctx, "add_event"):
+        lineage_ctx.add_event(
+            component="worker.trainer",
+            operation="fwd_bwd",
+            attributes={
+                "worker_id": self._worker_id,
+                "policy_version": self._policy_version(),
+            },
+        )
     kwargs.pop("skip_jit", None)
     try:
       self._trainer.fwd_bwd(request.payload, **kwargs)

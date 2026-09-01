@@ -499,6 +499,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         apply_optimizer,
     )
     metadata = dict(getattr(payload, "metadata", {}) or {})
+    lineage_ctx = metadata.get("lineage")
+    if lineage_ctx is not None and hasattr(lineage_ctx, "add_event"):
+      lineage_ctx.add_event(
+          component="engine.train",
+          operation="train_step",
+          attributes={
+              "accumulate_gradients": accumulate_gradients,
+              "apply_optimizer": apply_optimizer,
+              "policy_version": self._policy_version,
+          },
+      )
+
     request = datatypes.TrainRequest(
         request_id=f"train_req_{uuid.uuid4().hex[:8]}",
         payload=payload,
