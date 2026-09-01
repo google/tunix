@@ -27,7 +27,10 @@ from tunix.generate import sampler_v2
 from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import utils
+from tunix.generate import utils as generate_utils
 from tunix.rl.rollout import base_rollout
+
+import numpy as np
 
 
 class VanillaRollout(base_rollout.BaseRollout):
@@ -56,7 +59,7 @@ class VanillaRollout(base_rollout.BaseRollout):
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model seamlessly via LLMEngine."""
     req_ids = []
-    padded_prompts = []
+    padded_input_ids = []
     
     tokenizer = self.engine.sampler.tokenizer
     bos_tok = [tokenizer.bos_id()] if hasattr(tokenizer, 'bos_id') and tokenizer.bos_id() else []
@@ -68,11 +71,27 @@ class VanillaRollout(base_rollout.BaseRollout):
             input_ids = tokenizer.dedup_bos_ids(bos_tok + input_ids)
         else:
             input_ids = bos_tok + input_ids
-            
-        padded_prompts.append(input_ids)
+
+        padded_input_ids.append(input_ids)
+
         self.engine.add_request(req_id, input_ids)
         req_ids.append(req_id)
-        
+    
+    # TODO: Padding should be done somewhere under generate 
+    max_prompt_length = max(len(p) for p in padded_input_ids)
+    max_prompt_length = generate_utils.next_power_of_2(max_prompt_length)
+
+    padded_input_ids = [
+      generate_utils.pad_to_length(
+          np.array(x, dtype=np.int32),
+          target_length=max_prompt_length,
+          pad_value=tokenizer.pad_id(),
+          left=True,
+      )
+      for x in padded_input_ids 
+    ]
+    padded_input_ids = np.array(padded_input_ids, dtype=np.int32)
+
     while self.engine.has_unfinished_requests():
         self.engine.step(
             temperature=rollout_config.temperature,
@@ -80,8 +99,9 @@ class VanillaRollout(base_rollout.BaseRollout):
             top_k=rollout_config.top_k,
             return_logprobs=rollout_config.return_logprobs,
             eos_tokens=rollout_config.eos_tokens,
+            max_tokens_to_generate=rollout_config.max_tokens_to_generate
         )
-
+    
     out_tokens = []
     decoded_texts = []
     for req_id in req_ids:
@@ -94,11 +114,11 @@ class VanillaRollout(base_rollout.BaseRollout):
              decoded_texts.append("".join(str(t) for t in gen_tokens))
 
     return base_rollout.RolloutOutput(
-        text=decoded_texts,
-        logits=[],
-        tokens=out_tokens,
-        left_padded_prompt_tokens=padded_prompts,
-        logprobs=None,
+      text=decoded_texts,
+      logits=[],
+      tokens=out_tokens,
+      left_padded_prompt_tokens=padded_input_ids,
+      logprobs=None,
     )
 
   def get_per_token_logps(
