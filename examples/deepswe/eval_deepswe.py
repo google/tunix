@@ -12,6 +12,7 @@ import collections
 import gc
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -971,8 +972,17 @@ async def run_evaluation():
 # ========================== Results ==========================
 
 
+def _estimate_pass_at_k(n: int, c: int, k: int):
+  """Unbiased estimator for pass@k given n samples and c correct."""
+  if n < k:
+    return None
+  if n - c < k:
+    return 1.0
+  return 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
 def compute_pass_at_k(results):
-  """Computes and logs evaluation metrics such as Pass@1 and average reward."""
+  """Computes and logs evaluation metrics such as Pass@k (k=1, 4, 5) and average reward."""
   total = len(results)
   if total == 0:
     logger.warning("No results to evaluate.")
@@ -982,6 +992,21 @@ def compute_pass_at_k(results):
   total_reward = sum(float(r["reward"]) for r in results)
   total_steps = sum(r["num_steps"] for r in results)
   status_counts = Counter(r["status"] for r in results)
+
+  instance_groups = collections.defaultdict(list)
+  for r in results:
+    instance_groups[r["instance_id"]].append(r)
+
+  pass_at_k_metrics = {}
+  for k in (1, 4, 5):
+    scores = []
+    for inst_results in instance_groups.values():
+      n = len(inst_results)
+      c = sum(1 for r in inst_results if r["reward"] > 0)
+      score = _estimate_pass_at_k(n, c, k)
+      if score is not None:
+        scores.append(score)
+    pass_at_k_metrics[k] = sum(scores) / len(scores) if scores else None
 
   guard_blocked_trajectories = sum(
       1 for r in results if r["guard_blocked_steps"] > 0
@@ -1000,7 +1025,20 @@ def compute_pass_at_k(results):
   logger.info("=" * 50)
   logger.info("Total instances:  %d", total)
   logger.info("Resolved:         %d", correct)
-  logger.info("Pass@1:           %.4f", correct / total)
+  logger.info(
+      "Pass@1:           %.4f",
+      pass_at_k_metrics[1]
+      if pass_at_k_metrics[1] is not None
+      else correct / total,
+  )
+  if pass_at_k_metrics[4] is not None:
+    logger.info("Pass@4:           %.4f", pass_at_k_metrics[4])
+  else:
+    logger.info("Pass@4:           N/A")
+  if pass_at_k_metrics[5] is not None:
+    logger.info("Pass@5:           %.4f", pass_at_k_metrics[5])
+  else:
+    logger.info("Pass@5:           N/A")
   logger.info("Avg reward:       %.4f", avg_reward)
   logger.info("Avg steps:        %.2f", avg_steps)
   logger.info("Status counts:    %s", dict(status_counts))
