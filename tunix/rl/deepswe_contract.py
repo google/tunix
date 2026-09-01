@@ -1047,14 +1047,20 @@ def validate_environment(values: Mapping[str, str]) -> None:
           "CANON_SAMPLE_SPLIT_FUSION": "0",
           "CANON_ENGINE_LOGPROB_READBACK": "0",
           "CANON_ANCHOR_OVERLAP": "0",
-          "CANON_XPROF_PHASE": "update",
-          "CANON_XPROF_SKIP_STEPS": "2",
-          "CANON_XPROF_STEPS": "1",
-          "CANON_XPROF_PYTHON_TRACER": "0",
-          "CANON_XPROF_HOST_TRACER": "1",
-          "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
-          "CANON_XPROF_LABELS": "1",
-          "CANON_PERF_TRACE_EXPORT_STEP": "2",
+          # Production P58 full training is deliberately profiler-free.
+          # The one-host XProf carrier has a separate workload identity and
+          # contract; accepting even an explicit zero here would let a raw
+          # JobSet accidentally re-arm a presence-sensitive observer.
+          "CANON_XPROF_DIR": None,
+          "CANON_XPROF_PHASE": None,
+          "CANON_XPROF_SKIP_STEPS": None,
+          "CANON_XPROF_STEPS": None,
+          "CANON_XPROF_PYTHON_TRACER": None,
+          "CANON_XPROF_HOST_TRACER": None,
+          "CANON_XPROF_TPU_TRACE_MODE": None,
+          "CANON_XPROF_LABELS": None,
+          "CANON_PERF_TRACE_DIR": None,
+          "CANON_PERF_TRACE_EXPORT_STEP": None,
       })
       if p58_vma_diagnostic:
         expected.update({

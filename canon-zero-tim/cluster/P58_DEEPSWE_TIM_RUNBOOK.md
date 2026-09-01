@@ -1,6 +1,56 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
-## P58.36 K28 rollout-coverage repair and fresh K29
+## P58.37 K29 observer failure and profiler-free K30
+
+K29 completed the full P58.36 Step-1 rollout boundary: 128/128 trajectories,
+eight prompt groups, Rescore B, and exact A=B=C over 412,449 action tokens.
+It failed before Step-1 backward only because the production profile armed
+XProf with a local `/mnt/disks/...` directory. Pathways requires a GCS path.
+
+For production full training, remove the observer rather than adding GCS I/O.
+The following keys must all be absent from the rendered and persisted
+environment:
+
+```text
+CANON_XPROF_DIR CANON_XPROF_PHASE CANON_XPROF_SKIP_STEPS CANON_XPROF_STEPS
+CANON_XPROF_PYTHON_TRACER CANON_XPROF_HOST_TRACER
+CANON_XPROF_TPU_TRACE_MODE CANON_XPROF_LABELS
+CANON_PERF_TRACE_DIR CANON_PERF_TRACE_EXPORT_STEP
+```
+
+Do not write zero-valued substitutes: presence itself can arm an observer or
+hide configuration drift. Production postflight must contain no XProf label,
+arm/start/stop, or Perfetto marker and no XPlane/trace/Perfetto artifact. The
+runner emits `P58 full training profiler disabled; skipping XProf restore`.
+That marker is expected only for exact P58 high-performance full. It is not a
+training PASS.
+
+This change is observer-only. Keep P59 rank-parallel backward, P71 scan,
+fixed-head, TiTO, B8xG16, 16K, DP8xTP8 rollout and trainer, TPU-resident
+optimizer, 1,000 updates, 3,000/3,300/3,600 deadlines, disabled checkpoints,
+and existing numerical gates. For profiling, use the separately admitted
+one-host or P59 diagnostic carrier.
+
+K29 cannot resume. After separately approved publication and launch, render
+fresh K30 from one clean remote-read SHA and its matching image:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k30.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k30 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+K30 must cross the exact K29 Step-1 boundary, finish all sixteen reverse
+groups, pass commit and outer synchronization, and enter Step 2. Construction
+or absence of XProf does not prove that target outcome.
+
+## HISTORICAL — P58.36 K28 rollout-coverage repair and K29
 
 K28 completed and synchronized Step 0, then Step 1 exposed only 32 of the
 required 128 rows to the consumer. The downstream artifact assertion was

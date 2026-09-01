@@ -1,6 +1,49 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — P58.36 K28 partial Step-1 batch; launch fresh K29
+## START HERE — P58.37 K29 passed rollout/alignment; production full drops XProf
+
+K29 proved the P58.36 repair on 128 TPU v5p. Step 1 returned all 128
+trajectories across eight prompt groups, completed Rescore B in 105.009 s, and
+passed exact A=B=C over 412,449 action tokens. It then died before any Step-1
+backward work because the implicit XProf hook supplied a head-local
+`/mnt/disks/.../xprof-update` path to Pathways, which accepts only `gs://`.
+
+The selected repair is not to move XProf into the training path. The P58
+1,000-update production full profile is now explicitly profiler-free. The
+resolved environment must omit every `CANON_XPROF_*` and
+`CANON_PERF_TRACE_*` key. Python startup and the full-run classifier reject
+reinjection, XProf markers, XPlane/trace JSON, and Perfetto artifacts. The
+shared runner skips XProf restore only for exact P58 high-performance full;
+other V1 profiles keep their prior fail-closed capture contract.
+
+This does not disable P59/P71 or any training optimization. Rank-parallel
+backward, scan, fixed-head, TiTO, B8xG16, DP8xTP8+DP8xTP8, 16K, TPU-resident
+AdamW, 1,000 updates, deadlines, checkpoint-disabled mode, and the existing
+finite A-B warning policy are unchanged. One-host and P59 XProf diagnostics
+remain available as separate, explicitly profiled carriers.
+
+K29 has no resumable checkpoint. After separate approval to commit/push,
+publish a matching digest-pinned image, and launch, render fresh K30:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k30.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k30 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Before apply, inspect the resolved environment and require no profiler keys.
+At runtime require the K29 complete Step-1 rollout/alignment evidence, then
+all sixteen reverse groups, first update commit, outer synchronization, and
+entry into Step 2. Do not infer success merely from skipping XProf. See
+`phases/p58-37-k29-profiler-free-full-training.md`.
+
+## HISTORICAL — P58.36 K28 partial Step-1 batch; K29 proved the repair
 
 K28 completed Step 0 end to end and entered Step 1. Step 0 returned all 128
 trajectories, solved six, was strict A=B=C over 374,516 action tokens,

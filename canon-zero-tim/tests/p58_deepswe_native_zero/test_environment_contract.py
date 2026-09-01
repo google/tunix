@@ -334,8 +334,34 @@ class P58EnvironmentContractTest(unittest.TestCase):
       self.assertIn(f"export {key}={expected}", resolved)
     self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
     self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", resolved)
+    for key in (
+        "CANON_XPROF_DIR",
+        "CANON_XPROF_PHASE",
+        "CANON_XPROF_SKIP_STEPS",
+        "CANON_XPROF_STEPS",
+        "CANON_XPROF_PYTHON_TRACER",
+        "CANON_XPROF_HOST_TRACER",
+        "CANON_XPROF_TPU_TRACE_MODE",
+        "CANON_XPROF_LABELS",
+        "CANON_PERF_TRACE_DIR",
+        "CANON_PERF_TRACE_EXPORT_STEP",
+    ):
+      self.assertNotIn(key, values)
+      self.assertNotIn(key, resolved)
     deepswe_contract.validate_environment(values)
     self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
+
+  def test_zero_hp_full_rejects_profiler_reinjection(self):
+    _, _, values = self._persisted(
+        "zero", "full", high_performance=True
+    )
+    for key, replacement in (
+        ("CANON_XPROF_DIR", "gs://example/xprof"),
+        ("CANON_XPROF_LABELS", "0"),
+        ("CANON_PERF_TRACE_DIR", "/tmp/perfetto"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
 
   def test_zero_hp_partial_bundle_is_rejected_by_python_contract(self):
     _, _, values = self._persisted(

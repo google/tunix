@@ -56,14 +56,6 @@ def _env() -> dict[str, str]:
       "CANON_ANCHOR_OVERLAP": "0",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_XPROF_PHASE": "update",
-      "CANON_XPROF_SKIP_STEPS": "2",
-      "CANON_XPROF_STEPS": "1",
-      "CANON_XPROF_PYTHON_TRACER": "0",
-      "CANON_XPROF_HOST_TRACER": "1",
-      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
-      "CANON_XPROF_LABELS": "1",
-      "CANON_PERF_TRACE_EXPORT_STEP": "2",
   }
 
 
@@ -150,7 +142,6 @@ def _fixture(
       "[P56.GATHERED_LOGPROBS] installed",
       "[P56.LOGPROB_STEP_FUSION] active",
       "CANON_FIXED_AR=1 gather-ordered-sum",
-      "[CANON_XPROF_LABELS] continue-decode stage callables cached",
       "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
       "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
       "nonfinite=fatal max_norm=1.0 workload=p58-qwen4b-tim-128",
@@ -182,10 +173,6 @@ def _fixture(
           "effective_learning_rate": 1.0e-6,
           "outer_weight_sync_pending": True,
       }, sort_keys=True, separators=(",", ":")),
-      "[P51.XPROF] phase=update armed step=2",
-      "[P51.XPROF] phase=update started step=2",
-      "[P51.XPROF] phase=update stopped step=3",
-      "[V1.PERFETTO] captured training_step=2 timelines=3",
   ]
   if skip_before_first_commit:
     lines.extend((
@@ -219,13 +206,6 @@ def _fixture(
     ))
   log = root / "run.log"
   log.write_text("\n".join(lines) + "\n")
-  capture = root / "xprof-update/plugins/profile/run"
-  capture.mkdir(parents=True)
-  (capture / "device.xplane.pb").write_bytes(b"xplane")
-  (capture / "device.trace.json.gz").write_bytes(b"trace")
-  perfetto = root / "perfetto"
-  perfetto.mkdir()
-  (perfetto / "perfetto_trace_v2_1.pb").write_bytes(b"perfetto")
   (root / "p38_fixed_lm_head_receipts.json").write_text("{}\n")
   return log, updates, base
 
@@ -244,8 +224,8 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(result["verdict"], "PASS", result["reasons"])
       self.assertEqual(
-          result["timing"]["steady_steps2_plus_excluding_profile_count"],
-          998,
+          result["timing"]["steady_steps2_plus_count"],
+          999,
       )
       self.assertFalse(result["serial_adamw_trajectory_identity_claimed"])
 
@@ -263,8 +243,8 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
       self.assertEqual(result["updates"]["observed"], 1000)
       self.assertEqual(result["attempts"], {"observed": 1001, "skipped": 1})
       self.assertEqual(
-          result["timing"]["steady_steps2_plus_excluding_profile_count"],
-          998,
+          result["timing"]["steady_steps2_plus_count"],
+          999,
       )
 
   def test_partial_bundle_and_p59_serialization_are_rejected(self):
@@ -291,11 +271,19 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
       self.assertTrue(any("resolved_env" in value for value in result["reasons"]))
       self.assertTrue(any("update[0].p59" in value for value in result["reasons"]))
 
-  def test_missing_device_trace_is_capture_failure(self):
+  def test_profiler_reinjection_is_rejected(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
       log, updates, base = _fixture(root)
-      next((root / "xprof-update").rglob("*.xplane.pb")).unlink()
+      env = root / "env.sh"
+      env.write_text(
+          env.read_text() + "export CANON_XPROF_DIR=gs://example/xprof\n"
+      )
+      with log.open("a") as stream:
+        stream.write("[P51.XPROF] phase=update armed step=2\n")
+      capture = root / "xprof-update/plugins/profile/run"
+      capture.mkdir(parents=True)
+      (capture / "device.xplane.pb").write_bytes(b"xplane")
       result = classifier.classify(
           state=root,
           run_log=log,
@@ -303,7 +291,11 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
           base_classification=base,
       )
       self.assertEqual(result["verdict"], "FAIL")
-      self.assertIn("artifact.xplane", result["reasons"])
+      self.assertTrue(
+          any("profiler_env_present" in value for value in result["reasons"])
+      )
+      self.assertIn("marker.xprof_armed=1", result["reasons"])
+      self.assertIn("artifact.xplane_unexpected=1", result["reasons"])
 
   def test_missing_checked_vma_first_update_or_clip_receipt_is_rejected(self):
     with tempfile.TemporaryDirectory() as directory:

@@ -15,7 +15,18 @@ from typing import Any
 
 
 _EXPECTED_UPDATES = 1000
-_PROFILED_STEP = 2
+_PROFILER_ENV = (
+    "CANON_XPROF_DIR",
+    "CANON_XPROF_PHASE",
+    "CANON_XPROF_SKIP_STEPS",
+    "CANON_XPROF_STEPS",
+    "CANON_XPROF_PYTHON_TRACER",
+    "CANON_XPROF_HOST_TRACER",
+    "CANON_XPROF_TPU_TRACE_MODE",
+    "CANON_XPROF_LABELS",
+    "CANON_PERF_TRACE_DIR",
+    "CANON_PERF_TRACE_EXPORT_STEP",
+)
 _FIELD_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^ ]+)")
 _STEP_RE = re.compile(r"Global step (\d+) completed in ([0-9.]+) seconds\.")
 
@@ -107,7 +118,7 @@ def classify(
       reasons.append(f"missing_or_empty:{path.name}")
   if reasons:
     return {
-        "schema": "canon.p58.zero-hp-full.v2",
+        "schema": "canon.p58.zero-hp-full.v3",
         "verdict": "FAIL",
         "reasons": reasons,
     }
@@ -147,14 +158,6 @@ def classify(
       "CANON_ANCHOR_OVERLAP": "0",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_XPROF_PHASE": "update",
-      "CANON_XPROF_SKIP_STEPS": str(_PROFILED_STEP),
-      "CANON_XPROF_STEPS": "1",
-      "CANON_XPROF_PYTHON_TRACER": "0",
-      "CANON_XPROF_HOST_TRACER": "1",
-      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
-      "CANON_XPROF_LABELS": "1",
-      "CANON_PERF_TRACE_EXPORT_STEP": str(_PROFILED_STEP),
   }
   wrong_env = {
       key: env.get(key)
@@ -163,6 +166,11 @@ def classify(
   }
   if wrong_env:
     reasons.append(f"resolved_env={wrong_env}")
+  leaked_profiler_env = {
+      key: env[key] for key in _PROFILER_ENV if key in env
+  }
+  if leaked_profiler_env:
+    reasons.append(f"profiler_env_present={leaked_profiler_env}")
 
   base = json.loads(base_classification.read_text(encoding="utf-8"))
   for key, expected in {
@@ -285,7 +293,7 @@ def classify(
       "gathered_logprobs": text.count("[P56.GATHERED_LOGPROBS] installed"),
       "step_fusion": text.count("[P56.LOGPROB_STEP_FUSION] active"),
       "fixed_ar_gather": text.count("CANON_FIXED_AR=1 gather-ordered-sum"),
-      "labels": text.count(
+      "xprof_labels": text.count(
           "[CANON_XPROF_LABELS] continue-decode stage callables cached"
       ),
       "p59": text.count("[P59.DP8] gradient_reducer_ready"),
@@ -305,17 +313,15 @@ def classify(
           "[P58.COMPACT_FILTER] all_filtered=1 optimizer_commits=0"
       ),
       "xprof_armed": text.count(
-          f"[P51.XPROF] phase=update armed step={_PROFILED_STEP}"
+          "[P51.XPROF] phase=update armed"
       ),
       "xprof_started": text.count(
-          f"[P51.XPROF] phase=update started step={_PROFILED_STEP}"
+          "[P51.XPROF] phase=update started"
       ),
       "xprof_stopped": text.count(
-          f"[P51.XPROF] phase=update stopped step={_PROFILED_STEP + 1}"
+          "[P51.XPROF] phase=update stopped"
       ),
-      "perfetto": text.count(
-          f"[V1.PERFETTO] captured training_step={_PROFILED_STEP}"
-      ),
+      "perfetto": text.count("[V1.PERFETTO] captured training_step="),
   }
   for name in (
       "checkpoint_disabled",
@@ -328,7 +334,7 @@ def classify(
       reasons.append(f"marker.{name}={marker_counts[name]}")
   for name in (
       "continue_decode", "gathered_logprobs", "step_fusion",
-      "fixed_ar_gather", "labels",
+      "fixed_ar_gather",
   ):
     if marker_counts[name] < 1:
       reasons.append(f"marker.{name}={marker_counts[name]}")
@@ -357,8 +363,11 @@ def classify(
         "marker.compact_filter_outer="
         f"{marker_counts['compact_filter_outer']}"
     )
-  for name in ("xprof_armed", "xprof_started", "xprof_stopped", "perfetto"):
-    if marker_counts[name] != 1:
+  for name in (
+      "xprof_labels", "xprof_armed", "xprof_started", "xprof_stopped",
+      "perfetto",
+  ):
+    if marker_counts[name] != 0:
       reasons.append(f"marker.{name}={marker_counts[name]}")
 
   first_update = _json_markers(text, "[V1.FIRST_UPDATE] ")
@@ -422,10 +431,8 @@ def classify(
       ("trace_json_gz", traces),
       ("perfetto", perfetto),
   ):
-    if not paths or any(path.stat().st_size == 0 for path in paths):
-      reasons.append(f"artifact.{name}")
-  if len(perfetto) != 1:
-    reasons.append(f"artifact.perfetto_count={len(perfetto)}")
+    if paths:
+      reasons.append(f"artifact.{name}_unexpected={len(paths)}")
   if not fixed_head.is_file() or fixed_head.stat().st_size == 0:
     reasons.append("artifact.fixed_head_receipts")
 
@@ -493,10 +500,10 @@ def classify(
       })
   steady = [
       row for row in timing_rows
-      if row["global_step"] >= 2 and row["global_step"] != _PROFILED_STEP
+      if row["global_step"] >= 2
   ]
   return {
-      "schema": "canon.p58.zero-hp-full.v2",
+      "schema": "canon.p58.zero-hp-full.v3",
       "verdict": "PASS" if not reasons else "FAIL",
       "claim_level": (
           "optimized-convergence-only-alignment-degraded-dp8-tp8-target"
@@ -505,8 +512,9 @@ def classify(
       "attempts": {"observed": len(updates), "skipped": len(skipped)},
       "p59_acceptance": "ordinary-jax-fp64-gradient-correctness",
       "serial_adamw_trajectory_identity_claimed": False,
-      "profiled_step": _PROFILED_STEP,
-      "profiled_step_excluded_from_steady_mean": True,
+      "profiling": "disabled",
+      "profiled_step": None,
+      "profiled_step_excluded_from_steady_mean": False,
       "runtime_markers": marker_counts,
       "p63": {
           "updates": len(committed),
@@ -515,8 +523,8 @@ def classify(
       "timing": {
           "steps": timing_rows,
           "all_mean": _mean(timing_rows),
-          "steady_steps2_plus_excluding_profile_count": len(steady),
-          "steady_steps2_plus_excluding_profile_mean": _mean(steady),
+          "steady_steps2_plus_count": len(steady),
+          "steady_steps2_plus_mean": _mean(steady),
       },
       "artifacts": {
           "xplane": [str(path.relative_to(state)) for path in xplanes],

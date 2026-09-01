@@ -343,7 +343,8 @@ fi
 xprof_restore_rc=0
 xprof_local_dir=""
 xprof_restore_receipt=""
-if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+if [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+   [ -n "${CANON_XPROF_DIR:-}" ]; then
   xprof_attempt="${JOBSET_RESTART_ATTEMPT:-direct}"
   if [[ ! "$xprof_attempt" =~ ^(direct|[0-9]+)$ ]]; then
     echo "[run] FATAL: V1 XProf attempt is not direct or a non-negative integer" >&2
@@ -361,6 +362,12 @@ if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
     echo "[run] FATAL: completed V1 workload lacks a durable GCS XProf restore: rc=$xprof_restore_rc" >&2
     exit "$xprof_restore_rc"
   fi
+elif [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+     [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+  echo "[run] P58 full training profiler disabled; skipping XProf restore"
+elif [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+  echo "[run] FATAL: non-P58 V1 high-performance workload lost CANON_XPROF_DIR" >&2
+  exit 1
 fi
 if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
    [ "${CANON_P64_TRAINING_CAPSULE_MODE:-}" = "capture" ]; then

@@ -1,17 +1,16 @@
 # Plan
 
-## Active phase: P58.36 K28 shared deadline and partial consumer
+## Active phase: P58.37 K29 profiler-free production full training
 
-K28 proved P58.35 by completing a real first update and outer synchronization.
-Its Step-1 failure was a rollout-coverage error obscured by downstream
-processing: only 32/128 rows reached the consumer before the producer became
-terminal, then strict persistence reported the partial shape instead of the
-original timeout. Give all 128 collectors one absolute 3,000-second deadline,
-retain the 3,300-second sandbox and 3,600-second producer bounds, return compact
-timeout rows under bounded cleanup, and reject any partial consumer batch
-before reward, rescore, persistence, forward, backward, or update. Keep the
-128-row artifact contract strict and add lifecycle timing evidence. K28 is not
-resumable; K29 is a fresh approved full target.
+K29 proved P58.36 by returning the complete Step-1 128-row batch and exact
+A=B=C over 412,449 action tokens. It failed before Step-1 backward when the
+implicit XProf hook used a local `/mnt/disks/...` path that Pathways rejects.
+Keep the 1,000-update production carrier free of XProf and Perfetto: scrub all
+profiler variables, reject reinjection at the environment/Python/postflight
+boundaries, and skip XProf restore only for exact P58 high-performance full.
+Keep independent profiling diagnostics and every numerical/training contract
+unchanged. K29 has no checkpoint; K30 must be a fresh, separately approved
+target after clean source and matching image publication.
 
 ## Outcome
 
@@ -150,12 +149,12 @@ commit remain unreachable.
 | P58.33 | K24 precomputed-gradient checkpoint admission | Every P58 render uses exact `--ckpt_dir=none`, omits save cadence, fails before model initialization on drift, and postflight requires the disabled-checkpoint receipt | completed for checkpoint scope; K25 emitted the required marker and reached alignment-policy admission |
 | P58.34 | K25 precheck-only environment admission | The exact Zero-HP/full warning identity treats absent, empty, and `0` as precheck disabled, rejects diagnostic `1`, and fails malformed values through the common parser | completed for admission scope; K26 crossed it and reached the full optimizer path |
 | P58.35 | K26 effective-learning-rate observer | Skip state-free Optax transforms and read only actual injected optimizer hyperparameter state; missing learning rate remains fatal | completed for observer scope; K28 reported finite `1e-6`, committed Step 0, synchronized, and entered Step 1 |
-| P58.36 | K28 shared rollout deadline and partial-consumer boundary | One absolute 3,000-second clock covers all 128 collectors; normal expiries yield compact rows; partial coverage propagates producer failure before all downstream work; timing evidence is durable | active; complete construction and pinned-image PASS; K29 target not run |
+| P58.36 | K28 shared rollout deadline and partial-consumer boundary | One absolute 3,000-second clock covers all 128 collectors; normal expiries yield compact rows; partial coverage propagates producer failure before all downstream work; timing evidence is durable | completed on K29 — Step 1 returned all 128 rows and exact A=B=C |
+| P58.37 | K29 profiler-free production full training | Production full has no XProf/Perfetto env, hooks, restore, or artifacts; independent diagnostic carriers remain; K30 crosses Step-1 update entry, sixteen reverse groups, commit/sync, and enters Step 2 | active; local construction and complete pinned-image PASS; K30 target not run |
 
-At most one phase may be active. P58.36 is the active construction repair and
-K29 is the only approved next target. Commit, push, and this fresh Kubernetes
-render/application are approved for the current delivery; later source/image/
-cluster mutations remain separately user-gated.
+At most one phase may be active. P58.37 is active. No commit, push, image
+publication, render application, or Kubernetes launch is authorized by this
+ledger; each requires a separate explicit user approval.
 each later TPU execution remain separately user-gated.
 
 P58.1 and P58.2 are closed by the pinned-image marker recorded in `state.md`.

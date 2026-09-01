@@ -13,6 +13,7 @@ PKG = ROOT / "canon-zero-tim"
 PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
 CANON = PKG / "cluster/profiles/_canonical_engine.env"
 HP_PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+RUN_STEP = PKG / "cluster/steps/90_run.sh"
 
 
 def _source(
@@ -141,9 +142,30 @@ export CANON_P58_EXPECTED_UPDATES=1000
 export CANON_P32_TRAIN_ADMITTED=1
 export CANON_P32_DP_REDUCTION_ADMITTED=1
 export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+# A raw manifest must not be able to smuggle an implicit profiler into the
+# production full profile.
+export CANON_XPROF_DIR=/tmp/injected-xprof
+export CANON_XPROF_PHASE=update
+export CANON_XPROF_SKIP_STEPS=2
+export CANON_XPROF_STEPS=1
+export CANON_XPROF_PYTHON_TRACER=0
+export CANON_XPROF_HOST_TRACER=1
+export CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE
+export CANON_XPROF_LABELS=1
+export CANON_PERF_TRACE_DIR=/tmp/injected-perfetto
+export CANON_PERF_TRACE_EXPORT_STEP=2
 source {CANON}
 source {HP_PROFILE}
 printf '%s\n' "$CANON_PROFILE|$CANON_CONTINUE_DECODE|$CANON_FIXED_AR_GATHER|$CANON_PALLAS_GATHERED_LOGPROBS|$CANON_LOGPROB_STEP_FUSION|$CANON_P59_RANK_PARALLEL_BACKWARD|$CANON_P59_CHECKED_VMA|$CANON_P67_P66_VMA_P59_ONLY|$CANON_V1_HP_FIRST_UPDATE_GATE|$CANON_P63_OVERFLOW_SAFE_CLIP|$CANON_P38_FIXED_LM_HEAD|$CANON_VLLM_ENABLE_PREFIX_CACHING|$CANON_BATCHED_EVIDENCE|$CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"
+for key in CANON_XPROF_DIR CANON_XPROF_PHASE CANON_XPROF_SKIP_STEPS \
+    CANON_XPROF_STEPS CANON_XPROF_PYTHON_TRACER CANON_XPROF_HOST_TRACER \
+    CANON_XPROF_TPU_TRACE_MODE CANON_XPROF_LABELS CANON_PERF_TRACE_DIR \
+    CANON_PERF_TRACE_EXPORT_STEP; do
+  if [[ -v "$key" ]]; then
+    printf 'profiling=%s-present\n' "$key"
+  fi
+done
+printf 'profiling=absent\n'
 """
     output = subprocess.run(
         ["bash", "-c", script], check=True, text=True, capture_output=True
@@ -151,6 +173,27 @@ printf '%s\n' "$CANON_PROFILE|$CANON_CONTINUE_DECODE|$CANON_FIXED_AR_GATHER|$CAN
     self.assertIn(
         "qwen3-4b-dp8-tp8-deepswe-v1-hp|8|1|1|1|1|1|1|1|1|1|0|0|1",
         output,
+    )
+    self.assertNotIn("-present", output)
+    self.assertIn("profiling=absent", output)
+
+  def test_zero_hp_full_runner_skips_only_p58_profiler_restore(self):
+    text = RUN_STEP.read_text(encoding="utf-8")
+    self.assertIn(
+        'if [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \\\n   [ -n "${CANON_XPROF_DIR:-}" ]; then',
+        text,
+    )
+    self.assertIn(
+        'elif [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \\\n     [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then',
+        text,
+    )
+    self.assertIn(
+        "P58 full training profiler disabled; skipping XProf restore",
+        text,
+    )
+    self.assertIn(
+        "non-P58 V1 high-performance workload lost CANON_XPROF_DIR",
+        text,
     )
 
   def test_zero_hp_checked_vma_off_diagnostic_resolves_exact_tuple(self):

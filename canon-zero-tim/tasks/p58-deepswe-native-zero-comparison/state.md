@@ -1,5 +1,26 @@
 # State
 
+## P58.37 K29 profiler-free production full training (2026-09-01)
+
+- K29 proved P58.36 on 128 TPU v5p: Step 1 returned all 128 trajectories,
+  completed Rescore B, and passed exact A=B=C over 412,449 action tokens.
+- It then failed before Step-1 backward because the implicit update-entry
+  XProf hook passed a head-local `/mnt/disks/.../xprof-update` path to
+  Pathways, which requires `gs://`.
+- By operator decision, the 1,000-update P58 production full workload is now
+  profiler-free. All XProf/Perfetto variables must be absent; environment,
+  startup, and postflight gates reject reinjection and unexpected artifacts.
+  The shared runner skips XProf restore only for this P58 identity.
+- P59 rank-parallel backward, P71 scan, fixed-head, TiTO, DP8xTP8 role
+  geometry, TPU optimizer, loss, sampling, deadlines, and numerical warning
+  policy are unchanged. Independent one-host/P59 XProf diagnostics remain.
+- Focused tests and the complete pinned-image P58 gate pass. P34 static emits
+  `P34_STATIC_PASS suites=10`; the registry audit passes 409/409; syntax and
+  diff hygiene pass. No target has run after this repair; K29 is not resumable
+  and K30 must be fresh after separate source, image, and launch approval.
+- Phase: `phases/p58-37-k29-profiler-free-full-training.md`. Immutable
+  incident: `canon-zero-tim/evidence/p58_k29_xprof_gcs_path_incident/`.
+
 ## P58.36 K28 shared deadline and partial-consumer repair (2026-09-01)
 
 - K28 completed one full 128-trajectory rollout, strict A=B=C, all sixteen

@@ -2289,3 +2289,26 @@
 - Immutable evidence archived in `evidence/p58_k29_xprof_gcs_path_incident/`
   (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
 
+## 2026-09-01 UTC — P58.37 profiler-free production repair
+
+- Fast-forwarded the operator worktree from
+  `f290c6e3f00d2aa767055a56568d8641c3fb4afe` to incident source
+  `c7c49b1c5cd41d0371bf7e8a8ee1726252a5aa31`; immutable K29 checksums pass.
+- Classified K29 as an observer-only update-entry failure. Step 1 had already
+  produced all 128 rows and exact A=B=C; no Step-1 backward or optimizer
+  mutation occurred before Pathways rejected the local XProf path.
+- By operator direction, removed implicit XProf and Perfetto from P58
+  production full instead of converting the directory to GCS. Profile,
+  resolved environment, Python contract, runner restore, and postflight now
+  agree that all profiler keys/markers/artifacts are absent. Explicit zero is
+  also rejected.
+- Independent one-host/P59 profiling carriers and the complete P59/P71
+  high-performance training bundle are unchanged. No loss, sampling,
+  deadline, optimizer, checkpoint, alignment, or Zero-TIM flag semantics were
+  changed.
+- Focused profile tests pass 12/12 and profiler-free classifier tests pass
+  8/8. The complete digest-pinned dependency-image gate exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS`; P34 static emits `P34_STATIC_PASS suites=10`;
+  the flag audit passes 409/409; Python/Bash syntax and diff hygiene pass.
+- No image publication, Kubernetes mutation, TPU launch, commit, or push was
+  performed. K30 remains a fresh, separately approved target.
