@@ -59,7 +59,6 @@ def _env(
         ),
         "CANON_PROFILE": "qwen3-4b-dp8-tp8-deepswe-v1-hp",
         "CANON_V1_HP_FULL": "1",
-        "CANON_P38_PRECHECK_ONLY": "0",
         "CANON_DP_SIZE": "8",
         "CANON_TP_SIZE": "8",
         "CANON_GLOBAL_TRAJECTORIES": "128",
@@ -426,6 +425,23 @@ class P58AlignmentPolicyTest(unittest.TestCase):
             optimizer_skipped=np.asarray(0, dtype=np.int32),
             step=0,
         )
+
+  def test_zero_hp_full_admits_unset_and_zero_precheck_only(self):
+    for precheck_val in (None, "0"):
+      with self.subTest(precheck_val=precheck_val):
+        values = _env("zero", "full", zero_hp_warning=True)
+        if precheck_val is not None:
+          values["CANON_P38_PRECHECK_ONLY"] = precheck_val
+        with mock.patch.dict(os.environ, values, clear=True):
+          policy = alignment.gsm8k_ab_report_policy()
+        self.assertEqual(policy["id"], "deepswe-zero-hp-ab-warning-v1")
+
+    with mock.patch.dict(
+        os.environ,
+        {**_env("zero", "full", zero_hp_warning=True), "CANON_P38_PRECHECK_ONLY": "1"},
+        clear=True,
+    ), self.assertRaisesRegex(alignment.AlignmentGateError, "DeepSWE warning policy"):
+      alignment.gsm8k_ab_report_policy()
 
 
 if __name__ == "__main__":

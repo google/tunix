@@ -549,7 +549,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
         p34_stage == "full",
         os.environ.get("CANON_P34_NO_COMMIT", "") == "0",
         p58_expected_updates == "1000",
-        os.environ.get("CANON_P38_PRECHECK_ONLY", "") == "0",
+        os.environ.get("CANON_P38_PRECHECK_ONLY", "0") in ("", "0"),
         not os.environ.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""),
         not os.environ.get("CANON_P58_SEAM_LOCALIZATION", ""),
         os.environ.get("CANON_DP_SIZE", "") == "8",

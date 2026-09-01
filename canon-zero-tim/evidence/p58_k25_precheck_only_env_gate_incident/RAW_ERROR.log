@@ -1,0 +1,60 @@
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=223
+INFO 09-01 03:49:09 [loggers.py:273] Engine 000: Avg prompt throughput: 5532.6 tokens/s, Avg generation throughput: 0.4 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[PERF] step=0 stage=rescore_b seconds=101.548 rows=128
+INFO:absl:[CANON_ALIGN] attached host sidecar rows=128 completion_width=16384
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2055, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3793, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3093, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1961, in _process_results
+[rank0]:     precheck_record = alignment.check_pre_backward(
+[rank0]:                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 1559, in check_pre_backward
+[rank0]:     policy = gsm8k_ab_report_policy()
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 573, in gsm8k_ab_report_policy
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: DeepSWE warning policy is admitted only for committed P34 full training, a committed P39, P43, or P44 debug update, or the signed P58 native three-update/full stage, the exact P58 Zero-HP full convergence lane, or the mutation-free native one-host XProf carrier
+INFO 09-01 03:49:16 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
