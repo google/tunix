@@ -1,5 +1,31 @@
 # State
 
+## P58.34 K25 precheck-only environment admission (2026-09-01)
+
+- K25 crossed P58.33's disabled-checkpoint startup boundary, returned all 128
+  trajectories, completed Rescore B, and then failed before the first
+  alignment comparison because the Zero-HP warning identity rejected an
+  absent `CANON_P38_PRECHECK_ONLY` value.
+- The run produced 115 complete rows, five solved rows, thirteen
+  compact-filtered rows, three effective prompt groups, and 46 final nonzero
+  advantages. These are rollout/reward observations, not training evidence.
+- Root cause was representation drift: shell/profile readers treat absent,
+  empty, and `0` as disabled, while the Python policy had required literal
+  `0`. The repaired truth table admits absent/empty/`0`, keeps diagnostic `1`
+  strict, and rejects malformed values.
+- K25 made zero optimizer commits and has no trainer checkpoint. It cannot be
+  resumed. The next separately approved target is fresh K26 and must expose
+  the real alignment verdict before any backward/update claim.
+- P58.32's safety boundary is unchanged: finite A-B alone may warn for the
+  exact production identity; B-C, trainer-repeat, nonfinite, gradient,
+  replica, optimizer, OOM, and evidence failures remain fatal.
+- Local construction passes the 15-test policy truth table, P34's ten static
+  suites, the 409/409 flag audit, Python/diff hygiene, and the complete
+  digest-pinned `P58_EXACT_IMAGE_CPU_PASS` gate. The repaired target has not
+  run.
+- Phase: `phases/p58-34-k25-precheck-only-env-gate.md`. Immutable incident:
+  `canon-zero-tim/evidence/p58_k25_precheck_only_env_gate_incident/`.
+
 ## P58.33 K24 checkpoint-disabled precomputed training (2026-09-01)
 
 - K24 completed 128 rollouts, strict A=B=C over 388,328 action tokens, all 16
@@ -23,6 +49,8 @@
   `P58_EXACT_IMAGE_CPU_PASS`. No repaired target has run.
 - Phase: `phases/p58-33-k24-checkpoint-disabled.md`. Immutable incident:
   `canon-zero-tim/evidence/p58_k24_precomputed_checkpoint_contract_incident/`.
+- K25 later emitted the required disabled-checkpoint marker and crossed this
+  phase boundary; its subsequent policy-admission failure belongs to P58.34.
 
 ## P58.32 Zero-HP finite A-B warning policy (2026-09-01)
 

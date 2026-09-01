@@ -1,6 +1,46 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
-## P58.33 K24 checkpoint-disabled execution boundary
+## P58.34 K25 environment-admission boundary and fresh K26
+
+K25 proved P58.33's disabled-checkpoint startup marker, returned all 128
+trajectories, and completed Rescore B. It then failed before the first
+alignment comparison because the exact Zero-HP/full warning policy required
+literal `CANON_P38_PRECHECK_ONLY=0` while production leaves the flag absent.
+Treat this as a launcher/Python representation defect, not a numerical RED
+and not training progress.
+
+The only admitted truth table is:
+
+| Value | Interpretation | Production warning lane |
+|---|---|---|
+| absent, empty, or `0` | precheck disabled | admitted when every other exact P58 identity field matches |
+| `1` | precheck-only diagnostic | rejected; remains strict |
+| anything else | malformed | fatal |
+
+K25 has no optimizer commit and no checkpoint, so it cannot resume. Render a
+fresh K26 only from a final clean remote readback SHA and matching image:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k26.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k26 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Inspect `CANON_RUN_CMD` before apply: production must not explicitly enable
+precheck-only. Require the disabled-checkpoint marker followed by policy ID
+`deepswe-zero-hp-ab-warning-v1`, then retain the actual A-B/B-C result, all
+sixteen reverse groups, gradient/replica receipts, and the first valid
+TPU-resident optimizer transaction. P58.32's hard boundaries are unchanged.
+No checkpoint receipt is expected, and any finite A-B warning keeps the run
+at `convergence-only / alignment-degraded`.
+
+## HISTORICAL — P58.33 K24 checkpoint-disabled execution boundary
 
 K24 completed the full rollout, strict A=B=C, all forward groups, the full
 Pallas VJP, and reverse group 1/16, then failed before accumulator mutation:
@@ -18,7 +58,7 @@ initialization require:
 [P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported
 ```
 
-Render a fresh K25 only from the final clean remote readback SHA and its
+The following command was consumed by K25; do not reuse it. It was rendered from the final clean remote readback SHA and its
 matching digest-pinned image:
 
 ```bash

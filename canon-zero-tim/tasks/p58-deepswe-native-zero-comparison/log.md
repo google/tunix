@@ -1,5 +1,28 @@
 # Log
 
+## 2026-09-01 UTC — P58.34 K25 precheck-only environment incident and repair
+
+- K25 crossed the P58.33 startup marker, returned 128 trajectories, and
+  completed Rescore B. It then failed before actual alignment comparison,
+  backward, or optimizer work because the Zero-HP warning policy required
+  literal `CANON_P38_PRECHECK_ONLY=0` while production leaves it absent.
+- K25 recorded 115 complete rows, five solved rows, thirteen compact-filtered
+  rows (twelve model timeouts and one context limit), three effective prompt
+  groups, and 46 final nonzero advantages. No alignment or training verdict
+  may be inferred from those rollout metrics.
+- The repair uses the existing parser's closed truth table: absent, empty, and
+  `0` are disabled; `1` is diagnostic and cannot enter the warning lane; all
+  other values fail. The exact Zero-HP/full identity and every P58.32 hard
+  boundary remain unchanged.
+- K25 has zero optimizer commits and no resumable checkpoint. A fresh K26 is
+  the next separately approved target. No TPU/Kubernetes launch, image
+  publication, commit, or push occurred in this local completion.
+- Validation passes the 15-test policy truth table, `P34_STATIC_PASS
+  suites=10`, 409/409 `FLAG_AUDIT_PASS`, Python/diff hygiene, and the complete
+  digest-pinned `P58_EXACT_IMAGE_CPU_PASS` gate. A local K26 review render
+  passes with warning-only `1`, precheck-only absent, exactly one
+  `--ckpt_dir=none`, and no save cadence.
+
 ## 2026-09-01 UTC — P58.33 K24 checkpoint-contract incident and repair
 
 - Reconciled immutable K24 evidence. The 128-device DP8xTP8 plus DP8xTP8

@@ -497,6 +497,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     stage = "full"
   no_commit = os.environ.get("CANON_P33_NO_COMMIT", "") or "0"
   if deepswe_warning_only:
+    p38_precheck_only = precheck_only_enabled()
     p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
     p39_pilot = os.environ.get("CANON_P39_64CHIP_PILOT", "") == "1"
     p43_debug = os.environ.get("CANON_P43_DEEPSWE_DEBUG", "") == "1"
@@ -549,7 +550,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
         p34_stage == "full",
         os.environ.get("CANON_P34_NO_COMMIT", "") == "0",
         p58_expected_updates == "1000",
-        os.environ.get("CANON_P38_PRECHECK_ONLY", "0") in ("", "0"),
+        not p38_precheck_only,
         not os.environ.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""),
         not os.environ.get("CANON_P58_SEAM_LOCALIZATION", ""),
         os.environ.get("CANON_DP_SIZE", "") == "8",

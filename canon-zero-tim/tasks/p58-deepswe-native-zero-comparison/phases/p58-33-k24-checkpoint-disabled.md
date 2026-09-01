@@ -2,6 +2,10 @@
 
 Status: `LOCAL CONSTRUCTION PASS / TARGET NOT RUN`
 
+K25 later emitted the required disabled-checkpoint marker and crossed this
+phase boundary. Its subsequent precheck-only environment admission failure is
+tracked in P58.34; K25 still made zero optimizer commits and is not resumable.
+
 ## Incident
 
 K24 `canon-p58-ds4b-zero-hp-full-k24` ran on 128 TPU v5p devices as
@@ -56,9 +60,10 @@ consequences. B-C, T_old-current, nonfinite, shape, gradient, replica,
 transaction, optimizer, OOM, and evidence failures remain fatal. This is
 `convergence-only / alignment-degraded`, never a Zero-TIM certification.
 
-## Next target
+## Historical next-target instruction
 
-K25 must use a fresh run ID and final clean remote readback SHA. Before model
+This instruction was consumed by K25. K25 used a fresh run ID and crossed the
+checkpoint boundary before failing in P58.34 scope. Before model
 initialization, require the checkpoint-disabled receipt. Then require all 16
 reverse-group receipts, finite nonzero gradients, exact replicas, and the
 first valid TPU-resident optimizer transaction. No checkpoint receipt is

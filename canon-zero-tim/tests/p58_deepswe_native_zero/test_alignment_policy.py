@@ -426,22 +426,36 @@ class P58AlignmentPolicyTest(unittest.TestCase):
             step=0,
         )
 
-  def test_zero_hp_full_admits_unset_and_zero_precheck_only(self):
-    for precheck_val in (None, "0"):
+  def test_zero_hp_full_precheck_only_truth_table(self):
+    for precheck_val in (None, "", "0"):
       with self.subTest(precheck_val=precheck_val):
         values = _env("zero", "full", zero_hp_warning=True)
         if precheck_val is not None:
-          values["CANON_P38_PRECHECK_ONLY"] = precheck_val
+          values[alignment.PRECHECK_ONLY_ENV] = precheck_val
         with mock.patch.dict(os.environ, values, clear=True):
           policy = alignment.gsm8k_ab_report_policy()
         self.assertEqual(policy["id"], "deepswe-zero-hp-ab-warning-v1")
 
+    values = _env("zero", "full", zero_hp_warning=True)
+    values[alignment.PRECHECK_ONLY_ENV] = "1"
     with mock.patch.dict(
-        os.environ,
-        {**_env("zero", "full", zero_hp_warning=True), "CANON_P38_PRECHECK_ONLY": "1"},
-        clear=True,
-    ), self.assertRaisesRegex(alignment.AlignmentGateError, "DeepSWE warning policy"):
+        os.environ, values, clear=True
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "DeepSWE warning policy"
+    ):
       alignment.gsm8k_ab_report_policy()
+
+    for precheck_val in ("false", "00", " "):
+      with self.subTest(precheck_val=precheck_val):
+        values = _env("zero", "full", zero_hp_warning=True)
+        values[alignment.PRECHECK_ONLY_ENV] = precheck_val
+        with mock.patch.dict(
+            os.environ, values, clear=True
+        ), self.assertRaisesRegex(
+            alignment.AlignmentGateError,
+            "CANON_P38_PRECHECK_ONLY must be exactly 0 or 1",
+        ):
+          alignment.gsm8k_ab_report_policy()
 
 
 if __name__ == "__main__":

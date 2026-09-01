@@ -16,7 +16,7 @@ Read this reference only for
 | `CANON_RPA_VJP2` / `CANON_VJP2_MAX_SEQS` | `0 / 0` | canonical admitted values |
 | `CANON_FIXED_AR`, `CANON_FIXED_AR_EMBED`, `CANON_LOGPROB_M` | absent | canonical admitted values |
 | Pallas/segmented numerical bundle | disabled or absent as declared by profile | complete canonical bundle |
-| `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY` | `1` for every shape-valid, finite stock numerical boundary and derived ratio; mismatch is observational | `0`, strict exactness |
+| `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY` | `1` for every shape-valid, finite stock numerical boundary and derived ratio; mismatch is observational | ordinary/diagnostic Zero is `0`; exact Zero-HP/full production derives `1` for finite A-B only |
 | `CANON_P32_DP_REDUCTION_ADMITTED` | `0` | `1` |
 
 Do not delete Native's explicit zeros or absences. Do not turn on canonical
@@ -33,7 +33,9 @@ Native alignment warning admission is independently signed. Require
 `CANON_P58_TIM_ADMITTED=1`, no competing P39/P43/P44 workload mode, and an
 exact `CANON_P34_RUN_STAGE/CANON_P58_EXPECTED_UPDATES` pair of
 `three-update/3` or `full/1000`. Do not place P58 full training in a generic
-short-debug-stage branch. Zero keeps warning-only at zero and remains strict.
+short-debug-stage branch. Ordinary Zero and every diagnostic keep
+warning-only at zero and remain strict. The only Zero exception is the exact
+Zero-HP/full/1,000-update DP8xTP8 production identity registered in P58.32.
 
 For signed P58 Native, `warning_boundaries` must contain exactly
 `S_decode_vs_S_prefill`, `S_prefill_vs_T_old`, and
@@ -44,8 +46,23 @@ measurement rather than a training veto. The standalone `T_old` rescore is an
 observer and does not provide the old logprobs used by the loss when
 `use_rollout_logps=true`; stock rollout A does. Nonfinite values, invalid
 shapes, weights, replicas, transactions, and optimizer state remain
-fail-closed. Zero admits no warning boundary and requires all comparisons
-exact. Do not copy P38's diagnostic-only B-C requirement into P58 Native.
+fail-closed. Ordinary and diagnostic Zero admit no warning boundary and
+require all comparisons exact. Exact Zero-HP/full may warn only on finite
+`S_decode_vs_S_prefill` and its directly derived weight observations; B-C,
+trainer repeat, nonfinite, gradient, replica, transaction, optimizer, OOM,
+and evidence failures remain hard stops. Do not copy P38's diagnostic-only
+B-C requirement into P58 Native.
+
+## Precheck-only representation contract
+
+`CANON_P38_PRECHECK_ONLY` is a diagnostic workload-control boolean, not a
+Native/Zero numerical treatment. Its parser accepts only absent, empty, `0`,
+or `1`: absent/empty/`0` mean disabled, `1` means stop after a passing strict
+pre-backward diagnostic record, and every other spelling is fatal. Production
+renderers should leave it absent. P58's exact Zero-HP/full warning identity
+must accept the three disabled representations and must reject `1`; otherwise
+a diagnostic could leak into the convergence lane. Shell/profile admission,
+Python policy admission, and postflight must use this same truth table.
 
 ## Why the Native observer exists
 

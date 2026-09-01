@@ -1,6 +1,53 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — P58.33 K24 requires a fresh checkpoint-disabled K25
+## START HERE — P58.34 K25 crossed checkpointing; K26 is fresh
+
+K25 crossed the disabled-checkpoint receipt, returned all 128 trajectories,
+and completed Rescore B. It then stopped before the first numerical comparison
+because production left `CANON_P38_PRECHECK_ONLY` absent while the Python
+Zero-HP warning identity required the literal string `0`. This was policy
+admission drift, not an A-B/B-C numerical verdict.
+
+The repaired closed truth table is: absent/empty/`0` = precheck disabled and
+eligible for the exact Zero-HP/full warning identity; `1` = diagnostic and
+strict; every other value = malformed and fatal. Do not set the flag by hand
+for production. P58.32 remains unchanged: only finite A-B and directly
+derived observations may warn; B-C, trainer repeat, nonfinite, shape,
+gradient, replica, transaction, optimizer, OOM, and evidence failures stop.
+
+K25 made zero optimizer commits and has no trainer checkpoint. Do not resume
+it. After separately approved source/image publication and cluster launch,
+render a fresh K26 from the final clean remote-read SHA:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k26.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k26 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Before apply, inspect `CANON_RUN_CMD` and require production to leave
+`CANON_P38_PRECHECK_ONLY` absent. At runtime require, in order:
+
+```text
+[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported
+policy=deepswe-zero-hp-ab-warning-v1
+```
+
+Then capture the actual alignment verdict, all sixteen reverse-group
+receipts, finite nonzero/exact-replica gradients, and the first valid
+TPU-resident optimizer transaction. No checkpoint receipt is expected. K26
+has claim ceiling `convergence-only / alignment-degraded`; it cannot certify
+Zero-TIM if finite A-B warnings occur. See
+`phases/p58-34-k25-precheck-only-env-gate.md` and immutable evidence
+`canon-zero-tim/evidence/p58_k25_precheck_only_env_gate_incident/`.
+
+## HISTORICAL — P58.33 K24 required checkpoint-disabled K25
 
 K24 was numerically healthy through one real DP8 reverse group: 128
 trajectories, 6 solved, strict A=B=C over 388,328 action tokens, all 16
@@ -9,8 +56,8 @@ gradient. It then stopped before accumulator mutation and optimizer commit
 because the P58 command inherited P34 checkpoint arguments. P28 admits that
 precomputed-gradient checkpoint schema only for P45 FrozenLake.
 
-K24 has zero optimizer commits and no resumable trainer checkpoint. Do not
-resume it. Render K25 with a fresh run ID from the final clean remote readback
+K24 has zero optimizer commits and no resumable trainer checkpoint. K25 was
+rendered with a fresh run ID from the final clean remote readback
 SHA. Every P58 arm/stage now contains exactly `--ckpt_dir=none` and contains
 neither `--save_interval_steps` nor `--max_to_keep`. Before model
 initialization, require:

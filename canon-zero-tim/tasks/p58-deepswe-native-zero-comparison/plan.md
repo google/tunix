@@ -1,14 +1,15 @@
 # Plan
 
-## Active phase: P58.33 K24 checkpoint-disabled precomputed training
+## Active phase: P58.34 K25 precheck-only environment admission
 
-K24 proved the P58.31 accumulation repair through reverse group 1/16, then
-failed before mutation because P58 inherited checkpoint CLI that P28's
-precomputed-gradient contract does not admit. Disable trainer checkpointing
-for every P58 arm/stage with exact `--ckpt_dir=none`, remove save-cadence
-arguments, and fail before model initialization on drift. Preserve P58.32's
-narrow finite A-B warning policy and every hard numerical/optimizer boundary.
-The next target is fresh and separately approved; K24 is not resumable.
+K25 crossed P58.33, completed 128 rollouts and Rescore B, then stopped before
+the first comparison because the exact Zero-HP warning identity treated an
+absent `CANON_P38_PRECHECK_ONLY` differently from shell/profile default `0`.
+Unify the representation without broadening the program identity: absent,
+empty, and `0` mean disabled; `1` remains a strict diagnostic; malformed
+values fail. Preserve P58.32's narrow finite A-B warning policy and every hard
+numerical/optimizer boundary. K25 is not resumable; the next target is fresh
+K26 and remains separately approval-gated.
 
 ## Outcome
 
@@ -144,9 +145,10 @@ commit remain unreachable.
 | P58.30 | K22 grouped-trainer data-axis identity | Grouped reverse derives its reducer axis solely from the trainer state's admitted `dp/tp` or `data/model` mesh, never from a serving adapter alias; both positive identities and an unsupported-mesh negative pass in the complete pinned-image gate | completed for its reducer-axis scope; K23 emitted `dp`, completed group 1/16, and reached accumulator validation |
 | P58.31 | K23 gradient-accumulation geometry | P58 derives an eight-trajectory DP8 streamed microbatch and sixteen accumulation groups from the signed 128-trajectory workload; launcher and learner reject drift before backward; complete pinned-image gate and bounded direct backward replay pass | completed for accumulation scope; K24 crossed it and reached checkpoint admission after one reverse group |
 | P58.32 | Zero-HP finite A-B warning admission | Only the exact Zero-HP/full production identity may warn on a finite decode-vs-prefill A-B difference; B-C, trainer-repeat, nonfinite, gradient, replica, optimizer, and evidence boundaries remain strict | completed local construction; target not run; claim ceiling is alignment-degraded convergence only |
-| P58.33 | K24 precomputed-gradient checkpoint admission | Every P58 render uses exact `--ckpt_dir=none`, omits save cadence, fails before model initialization on drift, and postflight requires the disabled-checkpoint receipt | active; local construction and complete pinned-image gate PASS; repaired target not run |
+| P58.33 | K24 precomputed-gradient checkpoint admission | Every P58 render uses exact `--ckpt_dir=none`, omits save cadence, fails before model initialization on drift, and postflight requires the disabled-checkpoint receipt | completed for checkpoint scope; K25 emitted the required marker and reached alignment-policy admission |
+| P58.34 | K25 precheck-only environment admission | The exact Zero-HP/full warning identity treats absent, empty, and `0` as precheck disabled, rejects diagnostic `1`, and fails malformed values through the common parser | active; local construction and complete pinned-image gate PASS; repaired target not run |
 
-At most one phase may be active. P58.33 is the active construction repair and
+At most one phase may be active. P58.34 is the active construction repair and
 no target launch is active. Commit, push, image publication, Kubernetes render/application, and
 each later TPU execution remain separately user-gated.
 
