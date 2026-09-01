@@ -11,7 +11,62 @@ does not repair that lifecycle. Leaving all three variables absent skips Step
 process's exact `split_4x4x8_role_devices` admission as the authoritative
 128-device topology check. Do not reintroduce this probe in a rendered JobSet.
 
-## START HERE — K22 reached post-pullback reducer; K23 target not run
+## START HERE — K23 backward passed one DP8 group; accumulation geometry repaired locally
+
+K23 is not a backward-numerics failure. Its complete immutable log proves 128
+rollout trajectories, eight reward-one trajectories, 47 final nonzero
+advantages, three effective prompt groups, and strict A=B=C over 396,233
+action tokens. Six `MODEL_TIMEOUT` rows were compact-filtered. The incident
+report says 393,135 tokens; that summary is stale, so preserve the file but
+use 396,233 from `run.log`.
+
+The real target emitted:
+
+```text
+[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8 staging=parallel_table
+[P34.DP8] reverse_group_done group=1/16 ... replicas_exact=1 gradient_nonzero=4021619020
+ValueError: segmented update accumulation changed: 8 != 16
+```
+
+P58 has 128 global trajectories. Each streamed rank-major group contains one
+trajectory per DP rank, so its width is 8 and there are 16 groups. The old
+launcher used the 16 local groups as its microbatch width; configuration
+therefore derived only 8 accumulation steps. The safety check stopped before
+writing optimizer state.
+
+P58.31 gives those quantities separate names and validates them before any
+expensive backward. A launch source must print both exact receipts:
+
+```text
+[DEEPSWE.ACCUMULATION] PASS global_trajectories=128 trajectory_micro_batch=8 gradient_groups=16 gradient_accumulation_steps=16
+[CANON_P34_DP8] accumulator_contract_ready trajectories=128 micro=8 groups=16 gradient_accumulation_steps=16
+```
+
+Local P34 static and the complete digest-pinned P58 image gate pass.
+Development run `p58k23accumdev_20260901T004406Z` also passed the official
+direct-v5p classifier on Qwen3-4B DP1xTP4 B2xG2: A=B=C over 1,254 action
+tokens, finite/nonzero/repeat-exact gradients, device-resident optimizer
+state, unchanged model/optimizer/accumulator/reference state, and zero
+commits. The cached profiled repeat took 12.565 seconds. Artifacts live at:
+
+```text
+/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58k23accumdev_20260901T004406Z/
+```
+
+This run admitted a dirty development diff. It proves the real local
+optimized backward-no-commit path only, not clean-source acceptance or
+DP8/TP8 accumulation.
+
+Do not launch from the dirty worktree. Source commit/push is explicitly
+approved for this delivery; after publication, executors must fetch and verify
+the final clean remote readback SHA. Matching-image publication and target
+launch remain separately gated. A repaired full target must complete all 16
+groups, the first optimizer transaction, and a durable checkpoint before
+anyone says training PASS. See
+`phases/p58-31-k23-gradient-accumulation.md` and immutable evidence
+`canon-zero-tim/evidence/p58_k23_gradient_accumulation_mismatch_incident/`.
+
+## HISTORICAL — K22 reducer-axis trigger; K23 crossed this boundary
 
 K22 crossed the K15 lazy-scan failure and its committed raw tail shows the
 P59 reverse path reaching layer 0. It then failed at the post-pullback safety
@@ -37,17 +92,14 @@ trainer data/model -> data
 trainer fsdp/tp -> hard error
 ```
 
-Focused pinned-image tests pass 3/3; P34 static passes ten suites; the flag
-audit passes 409/409 with no changed names; and the complete pinned-image gate
-exits zero with `grouped_trainer_axis=3` plus
-`P58_EXACT_IMAGE_CPU_PASS`. Do not launch from this dirty worktree. After the
-user separately approves commit/push, image publication, and launch, fetch
-the final clean remote readback SHA for K23. Require
-`[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8
-staging=parallel_table`, all 16 grouped reductions, finite nonzero gradients,
-exact replicas, exactly the intended first optimizer commit, and a durable
-checkpoint. Before those receipts, this is construction evidence only—not a
-training PASS.
+Focused pinned-image tests passed 3/3; P34 static passed ten suites; the flag
+audit passed 409/409 with no changed names; and the complete pinned-image gate
+exited zero with `grouped_trainer_axis=3` plus
+`P58_EXACT_IMAGE_CPU_PASS`. K23 subsequently emitted
+`gradient_reducer_ready dp_axis=dp dp_size=8` and completed group 1/16, closing
+this axis-identity scope. Its later `8 != 16` accumulator-cadence failure is
+the active P58.31 issue described above. K23 still did not commit an optimizer
+transaction or checkpoint, so it is not a training PASS.
 
 Immutable incident:
 `canon-zero-tim/evidence/p58_k22_data_axis_mismatch_incident/`. Phase ledger:

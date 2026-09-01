@@ -1,6 +1,6 @@
 # P58.30 — K22 grouped-trainer data-axis identity
 
-Status: `LOCAL CONSTRUCTION PASS / TARGET NOT RUN`
+Status: `COMPLETED FOR REDUCER-AXIS SCOPE / K23 CROSSED`
 
 ## K22 evidence boundary
 
@@ -73,24 +73,25 @@ passes ten suites, the flag audit passes 409/409 with `changed_names=0`, and
 the complete digest-pinned P58 image gate exits zero with
 `grouped_trainer_axis=3` and `P58_EXACT_IMAGE_CPU_PASS`.
 
-## K23 promotion and claim ceiling
+## K23 closure and claim ceiling
 
-Source/image PASS is not training PASS. After separate approvals for
-commit/push, matching-image publication, and target launch, K23 must use the
-exact clean remote readback SHA and must:
+K23 used the clean published successor and crossed this phase's reducer-axis
+boundary. It emitted `gradient_reducer_ready dp_axis=dp dp_size=8` and
+completed group 1/16 with exact replicas plus a finite nonzero gradient. It
+then failed before accumulator mutation at
+`segmented update accumulation changed: 8 != 16`; that new issue belongs to
+P58.31, not this phase.
 
-1. preserve DeepSWE/TiTO, the signed 1,012-task clean selector, 128 rollout
-   rows, Rescore-B, and strict A=B=C;
-2. print `[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8
-   staging=parallel_table`;
-3. complete every one of the 16 grouped forward/reverse/reduction
+K23 preserved the DeepSWE/TiTO, clean-data, Rescore-B, and strict A=B=C
+contracts. It did not:
+
+1. complete every one of the 16 grouped forward/reverse/reduction
    transactions with finite nonzero gradients;
-4. preserve exact post-reduction replicas and all optimizer safety checks;
-5. emit exactly the intended first optimizer commit and durable checkpoint;
-6. continue only while later updates remain finite and the signed 1,000-step
+2. preserve exact post-reduction replicas and all optimizer safety checks;
+3. emit exactly the intended first optimizer commit and durable checkpoint;
+4. continue while later updates remain finite and the signed 1,000-step
    campaign contracts hold.
 
-Any reducer axis other than `dp`, missing group, nonfinite value, replica
-drift, transaction-count drift, or checkpoint failure remains fatal. Until
-K23 crosses these gates, say `TARGET NOT RUN` or `INCONCLUSIVE`, never
-“DeepSWE training PASS.”
+The reducer-axis repair is therefore complete for its scope, while the full
+training result remains `INCONCLUSIVE`. See P58.31 and the immutable K23
+incident package for the active accumulator-geometry repair.

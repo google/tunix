@@ -27,6 +27,45 @@ its timeout does not make it safe. Omission also preserves the entrypoint's
 `split_4x4x8_role_devices` admission is the authoritative device/topology
 check for this 128-device P58 geometry.
 
+## K23 gradient-accumulation geometry gate
+
+K23 crossed the K22 reducer-axis failure, completed one real 36-layer DP8
+pullback/reduction with exact replicas and a finite nonzero gradient, then
+failed before accumulator mutation at `segmented update accumulation changed:
+8 != 16`. The complete log's strict-alignment token count is 396,233; the
+incident report's 393,135 value is stale and must not override the log.
+
+The signed P58 geometry has three distinct values:
+
+```text
+global trajectories:                 128
+trajectory microbatch / group width:   8  (one row per DP rank)
+gradient accumulation groups:          16
+```
+
+Never set the trajectory microbatch to local group count 16. Before rollout
+or backward, require:
+
+```text
+[DEEPSWE.ACCUMULATION] PASS global_trajectories=128 trajectory_micro_batch=8 gradient_groups=16 gradient_accumulation_steps=16
+[CANON_P34_DP8] accumulator_contract_ready trajectories=128 micro=8 groups=16 gradient_accumulation_steps=16
+```
+
+The complete pinned-image gate must exercise the exact P58
+`RLTrainingConfig`, agentic segmented geometry, `PeftTrainer` precomputed
+transaction, and first-update contracts. Development replay
+`p58k23accumdev_20260901T004406Z` passed the separate real-Qwen3-4B DP1xTP4
+backward-no-commit classifier on the dirty P58.31 diff: strict A=B=C, finite
+nonzero repeat-exact gradients, device optimizer placement, unchanged state,
+and zero commits. Its cached profiled repeat took 12.565 seconds. This does
+not replace the clean-source or DP8 target gates.
+
+After separately approved source/image publication and launch, require all
+16 `reverse_group_done` receipts, finite nonzero gradients, exact replicas,
+exactly one first optimizer transaction, and a durable checkpoint. Any
+geometry drift must fail before backward. See
+`phases/p58-31-k23-gradient-accumulation.md`.
+
 ## K22 grouped-trainer axis identity gate
 
 K22 crossed the K15 scan boundary and reached layer-0 reverse, then stopped
@@ -52,13 +91,13 @@ The committed K22 incident contains only the final 100-line raw tail. Preserve
 its report as analysis-grade and do not silently promote the earlier
 rollout/alignment claims to full-log evidence.
 
-After separate publication and launch approvals, K23 must use the clean
-remote readback SHA and matching image. It must preserve the existing
-DeepSWE/TiTO/clean-data/strict-alignment contracts, emit
+K23 used the published successor, preserved the existing
+DeepSWE/TiTO/clean-data/strict-alignment contracts, emitted
 `[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8
-staging=parallel_table`, complete all 16 groups with finite nonzero gradients,
-and produce exactly the intended first optimizer commit plus checkpoint.
-Anything less is `INCONCLUSIVE`, not training PASS.
+staging=parallel_table`, and completed group 1/16. That closes the K22
+axis-identity gate. K23 then exposed the separate P58.31 accumulator-cadence
+failure before mutation. Follow the K23 geometry gate above; K23 remains
+`INCONCLUSIVE`, not training PASS.
 
 ## K15 disaggregated lazy-scan execution-mesh gate
 

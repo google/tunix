@@ -101,6 +101,23 @@ class DeepSWEWorkload:
   def local_trajectories(self) -> int:
     return self.global_trajectories // self.dp_size
 
+  @property
+  def gradient_groups(self) -> int:
+    """Number of rank-major gradients streamed into one optimizer update."""
+    return self.local_trajectories
+
+  @property
+  def train_trajectory_micro_batch_size(self) -> int:
+    """Global trajectory width represented by one rank-major gradient.
+
+    Each segmented reverse group contains exactly one trajectory from every
+    DP rank.  ``local_trajectories`` is therefore the *number* of streamed
+    groups, while the width of each group is ``dp_size``.  Keeping the two
+    meanings separate is required whenever they are not numerically equal
+    (for example P58 is DP8 with 16 groups).
+    """
+    return self.dp_size
+
   def validate(self) -> None:
     """Rejects any silent change to the first DeepSWE campaign."""
     expected_topology = {
@@ -187,6 +204,14 @@ class DeepSWEWorkload:
       )
     if self.dp_size * self.tp_size != self.devices_per_role:
       raise ValueError("P34 role topology arithmetic changed")
+    if (
+        self.train_trajectory_micro_batch_size * self.gradient_groups
+        != self.global_trajectories
+    ):
+      raise ValueError(
+          "DeepSWE segmented update must cover every global trajectory "
+          "exactly once"
+      )
     if (self.local_m, self.global_m) != (256, expected_global_m):
       raise ValueError(
           f"{self.contract_name} requires local M256 and global "
@@ -273,7 +298,7 @@ class DeepSWEWorkload:
       raise ValueError("P34 global scheduler token capacity changed")
 
   def rank_major_rows(self) -> tuple[tuple[int, ...], ...]:
-    """Returns four groups containing one trajectory from every DP rank."""
+    """Returns rank-major groups with one trajectory from every DP rank."""
     self.validate()
     groups = tuple(
         tuple(group * self.dp_size + rank for rank in range(self.dp_size))

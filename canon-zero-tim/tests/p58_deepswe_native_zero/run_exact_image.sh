@@ -179,9 +179,15 @@ $DOCKER run --rm \
         common_test.CommonTest
     )
     (
+      cd tests/rl
+      PYTHONPATH=/workspace python3 -m unittest \
+        rl_cluster_test.RlClusterTest.test_batch_size_config
+    )
+    (
       cd tests/sft
       PYTHONPATH=/workspace python3 -m unittest \
         sft_utils_test.StableGlobalNormTest \
+        peft_trainer_test.PeftTrainerTest.test_p58_precomputed_transaction_requires_sixteen_gradient_groups \
         peft_trainer_test.PeftTrainerTest.test_p63_finite_overflow_commits_nonzero_clipped_update \
         peft_trainer_test.PeftTrainerTest.test_denominator_weighted_accumulation_matches_concatenated_batch \
         peft_trainer_test.PeftTrainerTest.test_denominator_weighted_all_empty_skips_optimizer \
@@ -198,6 +204,7 @@ $DOCKER run --rm \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_q4_continue_kv \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_environment_is_seeded_with_policy_version_before_reset \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_replay_segmented_geometry_is_b2g2_not_batch_one \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_full_segmented_geometry_is_dp8_by_sixteen_groups \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_sandbox_timeout_blocks_after_durable_journal \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_non_infrastructure_all_filtered_batch_does_not_capacity_block \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_sandbox_capacity_evidence_is_fail_closed \

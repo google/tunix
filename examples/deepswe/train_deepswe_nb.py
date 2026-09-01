@@ -1808,6 +1808,63 @@ P58_REPLAY_UPDATE_GEOMETRY = (
     if ONEHOST_SMOKE and P58_Q4_TP4_TRAJECTORY_REPLAY
     else None
 )
+P34_UPDATE_GEOMETRY = (
+    (
+        p34.global_trajectories,
+        p34.train_trajectory_micro_batch_size,
+        p34.gradient_groups,
+    )
+    if P34_DEEPSWE
+    else None
+)
+
+training_config = rl_cluster_lib.RLTrainingConfig(
+    actor_optimizer=optimizer,
+    eval_every_n_steps=EVAL_EVERY_N_STEPS,
+    max_steps=MAX_STEPS,
+    mini_batch_size=MINI_BATCH_SIZE,
+    train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+    compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
+    rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
+    trajectory_mini_batch_size=(
+        P58_REPLAY_UPDATE_GEOMETRY[0]
+        if P58_REPLAY_UPDATE_GEOMETRY is not None
+        else P34_UPDATE_GEOMETRY[0]
+        if P34_UPDATE_GEOMETRY is not None
+        else None
+    ),
+    train_trajectory_micro_batch_size=(
+        P58_REPLAY_UPDATE_GEOMETRY[1]
+        if P58_REPLAY_UPDATE_GEOMETRY is not None
+        else P34_UPDATE_GEOMETRY[1]
+        if P34_UPDATE_GEOMETRY is not None
+        else None
+    ),
+    optimizer_offload=OPTIMIZER_OFFLOAD,
+    loss_denominator_weighted_accumulation=(
+        LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION
+    ),
+    data_sharding_axis=training_data_sharding_axis,
+    metrics_logging_options=metrics_logging_options,
+    checkpoint_root_directory=CKPT_DIR,
+    checkpointing_options=checkpointing_options,
+)
+if P34_UPDATE_GEOMETRY is not None:
+  actual_accumulation_steps = training_config.gradient_accumulation_steps
+  expected_accumulation_steps = P34_UPDATE_GEOMETRY[2]
+  if actual_accumulation_steps != expected_accumulation_steps:
+    raise ValueError(
+        "DeepSWE gradient accumulation geometry changed before training: "
+        f"{actual_accumulation_steps} != {expected_accumulation_steps}"
+    )
+  print(
+      "[DEEPSWE.ACCUMULATION] PASS "
+      f"global_trajectories={P34_UPDATE_GEOMETRY[0]} "
+      f"trajectory_micro_batch={P34_UPDATE_GEOMETRY[1]} "
+      f"gradient_groups={P34_UPDATE_GEOMETRY[2]} "
+      f"gradient_accumulation_steps={actual_accumulation_steps}",
+      flush=True,
+  )
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
@@ -1817,37 +1874,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
-        actor_optimizer=optimizer,
-        eval_every_n_steps=EVAL_EVERY_N_STEPS,
-        max_steps=MAX_STEPS,
-        mini_batch_size=MINI_BATCH_SIZE,
-        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
-        compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
-        rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
-        trajectory_mini_batch_size=(
-            P58_REPLAY_UPDATE_GEOMETRY[0]
-            if P58_REPLAY_UPDATE_GEOMETRY is not None
-            else p34.global_trajectories
-            if P34_DEEPSWE
-            else None
-        ),
-        train_trajectory_micro_batch_size=(
-            P58_REPLAY_UPDATE_GEOMETRY[1]
-            if P58_REPLAY_UPDATE_GEOMETRY is not None
-            else p34.local_trajectories
-            if P34_DEEPSWE
-            else None
-        ),
-        optimizer_offload=OPTIMIZER_OFFLOAD,
-        loss_denominator_weighted_accumulation=(
-            LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION
-        ),
-        data_sharding_axis=training_data_sharding_axis,
-        metrics_logging_options=metrics_logging_options,
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
-    ),
+    training_config=training_config,
     rollout_config=rollout_engine_config,
 )
 sft_utils.show_hbm_usage()

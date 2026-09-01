@@ -51,6 +51,8 @@ class DeepSWEContractTest(unittest.TestCase):
     self.assertEqual(workload.name, workload.contract_name)
     self.assertEqual(workload.global_trajectories, 64)
     self.assertEqual(workload.local_trajectories, 4)
+    self.assertEqual(workload.gradient_groups, 4)
+    self.assertEqual(workload.train_trajectory_micro_batch_size, 16)
     self.assertEqual(workload.max_num_seqs_per_dp, 4)
     self.assertEqual(workload.max_num_batched_tokens_per_dp, 256)
     self.assertEqual(workload.max_num_seqs_per_dp * workload.dp_size, 64)
@@ -77,11 +79,35 @@ class DeepSWEContractTest(unittest.TestCase):
     for workload in workloads:
       with self.subTest(contract=workload.contract_name):
         self.assertEqual(workload.name, workload.contract_name)
+        self.assertEqual(
+            workload.train_trajectory_micro_batch_size,
+            workload.dp_size,
+        )
+        self.assertEqual(
+            workload.gradient_groups,
+            workload.local_trajectories,
+        )
+        self.assertEqual(
+            workload.train_trajectory_micro_batch_size
+            * workload.gradient_groups,
+            workload.global_trajectories,
+        )
     self.assertNotIn(
         "name",
         deepswe_contract.p44_recipe_signature(
             deepswe_contract.P44_PARITY_128_WORKLOAD
         ),
+    )
+
+  def test_p58_accumulation_geometry_is_dp8_by_sixteen_groups(self):
+    workload = deepswe_contract.P58_Q4_TIM_128_WORKLOAD
+    workload.validate()
+    self.assertEqual(workload.global_trajectories, 128)
+    self.assertEqual(workload.train_trajectory_micro_batch_size, 8)
+    self.assertEqual(workload.gradient_groups, 16)
+    self.assertNotEqual(
+        workload.train_trajectory_micro_batch_size,
+        workload.local_trajectories,
     )
 
   def test_legal_physical_halves_are_disjoint_and_exhaustive(self):

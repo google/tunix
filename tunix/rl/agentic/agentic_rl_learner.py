@@ -358,7 +358,7 @@ def _segmented_update_geometry(environ) -> tuple[int, int, str, bool]:
     workload = deepswe_contract.active_workload(environ)
     return (
         workload.global_trajectories,
-        workload.local_trajectories,
+        workload.dp_size,
         f"[CANON_P34_DP{workload.dp_size}]",
         True,
     )
@@ -1272,7 +1272,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if p34_workload:
       deepswe_contract.validate_environment(os.environ)
       workload = deepswe_contract.active_workload(os.environ)
-      trajectory_micro = workload.local_trajectories
     elif p33_workload:
       workload = dp_workloads.active_workload()
       if workload is None:
@@ -1282,9 +1281,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       dp_workloads.validate_environment(
           workload, require_reduction_admission=True
       )
-      trajectory_micro = workload.local_trajectories
-    else:
-      trajectory_micro = expected_trajectory_micro
+    trajectory_micro = expected_trajectory_micro
     p61_capture_dir = os.environ.get(
         "CANON_P61_BACKWARD_NUMERICAL_DIR", ""
     )
@@ -1372,6 +1369,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if canonical_workload
         else num_trajectories // trajectory_micro
     )
+    derived_microbatches = num_trajectories // trajectory_micro
+    if derived_microbatches != registered_microbatches:
+      raise alignment.AlignmentGateError(
+          "segmented update rank-group geometry changed: "
+          f"trajectories={num_trajectories} micro={trajectory_micro} "
+          f"derived={derived_microbatches} "
+          f"registered={registered_microbatches}"
+      )
     expected_microbatches = (
         p64_training_capsule.reverse_group_limit(registered_microbatches)
         if p64_numeric_debug
@@ -1384,6 +1389,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "segmented update trajectory contract changed: "
           f"{num_trajectories} != {expected_trajectories}"
       )
+    configured_accumulation_steps = actor_trainer.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    if configured_accumulation_steps != registered_microbatches:
+      raise alignment.AlignmentGateError(
+          "segmented update accumulator cadence changed before backward: "
+          f"configured={configured_accumulation_steps} "
+          f"registered={registered_microbatches} "
+          f"trajectories={num_trajectories} micro={trajectory_micro}"
+      )
+    print(
+        f"{marker_prefix} accumulator_contract_ready "
+        f"trajectories={num_trajectories} micro={trajectory_micro} "
+        f"groups={registered_microbatches} "
+        f"gradient_accumulation_steps={configured_accumulation_steps}",
+        flush=True,
+    )
     _, trainer_state = nnx.split(actor_trainer.model)
     adapter = canonical_forward.require_registered()
     sharding_profile_enabled = (

@@ -2100,3 +2100,58 @@
   empty-completion gates.
 - No commit, push, image publication, Kubernetes mutation, TPU launch,
   optimizer commit, or checkpoint occurred.
+
+## 2026-09-01 UTC — P58.31 K23 accumulation-geometry repair
+
+- Fast-forwarded the operator worktree to
+  `57463f1b2867bcfae67160c7d93b8cc8c2e96c9a` and verified the immutable K23
+  package checksums. The complete log supersedes the incident report's stale
+  token summary: strict A=B=C covers 396,233 action tokens.
+- K23 proves P58.30 on the real DP8xTP8 trainer: reducer axis `dp`, all 36
+  pullback layers, and group 1/16 completed with exact replicas and a finite
+  nonzero gradient. It then failed before accumulator mutation because config
+  derived 8 accumulation steps while the segmented stream registered 16.
+- Repaired the semantic alias: 128 global trajectories use DP8 group width 8
+  and 16 gradient groups. Launcher and learner now validate 128/8/16 before
+  backward and print durable accumulation receipts.
+- Added exact P58 regressions at the DeepSWE workload, script,
+  `RLTrainingConfig`, agentic learner, and `PeftTrainer` boundaries. P34 static
+  passes all ten suites; Python compilation and diff hygiene pass; the
+  complete digest-pinned P58 image gate exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS`.
+- Direct Qwen3-4B backward replay was not started while another container owns
+  the shared TPU lane. No workload was interrupted. No flag, recipe,
+  commit/push, image publication, Kubernetes mutation, optimizer commit, or
+  checkpoint occurred.
+
+## 2026-09-01 UTC — P58.31 direct-v5p development backward PASS
+
+- On explicit user instruction, gracefully stopped the exact GSM8K XProf
+  container that owned the local TPU lane. Docker removed that stopped
+  `--rm` container; no DeepSWE container or partial artifact existed before
+  the subsequent launch.
+- With explicit approval for the historical privileged/host-network/IPC/UTS,
+  Docker-socket, and writable-disk launcher, ran development label
+  `p58k23accumdev_20260901T004406Z` on source HEAD
+  `57463f1b2867bcfae67160c7d93b8cc8c2e96c9a` plus the dirty P58.31 diff.
+- The Qwen3-4B DP1xTP4 B2xG2 replay loaded four immutable real trajectory
+  prefixes with rewards `[1,0,1,0]`, derived advantages `[1,-1,1,-1]`, and
+  passed strict A=B=C over 1,254 action tokens. The new real-path accumulator
+  receipt was `trajectories=4 micro=2 groups=2
+  gradient_accumulation_steps=2`.
+- Warmup and profiled repeat both completed backward-no-commit. The official
+  classifier reports finite, nonzero, repeat-exact gradient norms
+  `[8.544539451599121, 8.544539451599121]`, device-resident optimizer state,
+  zero changed model/optimizer/accumulator/reference paths, and zero commits.
+  Warmup segmented value-and-grad took 123.528 seconds; cached repeat took
+  12.565 seconds; peak HBM was 56,370,843,648 bytes.
+- Official outcome is
+  `ZERO_TIM_RECORDED_TRAJECTORY_BACKWARD_NO_COMMIT_PASS`. The 48,357-byte
+  return bundle checksum is
+  `cbee34f026133864f5d39674d225ec4832cde40fe1c2e32a8fbaf9d9bafcbb5b`.
+  Artifact root:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58k23accumdev_20260901T004406Z/`.
+- The container exited and released the TPU lane. Because this run admitted a
+  dirty development diff and used DP1xTP4 recorded trajectories, it does not
+  certify clean-source acceptance, DP8xTP8 accumulation, an optimizer commit,
+  checkpointing, or full training. No commit/push or remote mutation occurred.

@@ -374,6 +374,21 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       })
     self.assertEqual(geometry, (4, 2, "[P58.23.REPLAY]", False))
 
+  def test_p58_full_segmented_geometry_is_dp8_by_sixteen_groups(self):
+    workload = types.SimpleNamespace(
+        global_trajectories=128,
+        dp_size=8,
+    )
+    with mock.patch.object(
+        agentic_rl_learner.deepswe_contract,
+        "active_workload",
+        return_value=workload,
+    ):
+      geometry = agentic_rl_learner._segmented_update_geometry({  # pylint: disable=protected-access
+          "CANON_P34_DEEPSWE": "1",
+      })
+    self.assertEqual(geometry, (128, 8, "[CANON_P34_DP8]", True))
+
   @parameterized.parameters(
       ({},),
       ({"CANON_GSM8K_L3": "1"},),

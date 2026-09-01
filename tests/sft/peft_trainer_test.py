@@ -88,6 +88,13 @@ global_counter = 0
 
 class PeftTrainerTest(parameterized.TestCase):
 
+  def test_p58_precomputed_transaction_requires_sixteen_gradient_groups(self):
+    expected = peft_trainer._precomputed_expected_microbatches({  # pylint: disable=protected-access
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+    })
+    self.assertEqual(expected, 16)
+
   def test_p41_precomputed_transaction_has_one_microbatch(self):
     expected = peft_trainer._precomputed_expected_microbatches({  # pylint: disable=protected-access
         "CANON_P41_OPTIMIZER_BENCH": "1",

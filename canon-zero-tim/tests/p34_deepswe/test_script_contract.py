@@ -210,6 +210,16 @@ class DeepSWEScriptContractTest(unittest.TestCase):
         "data_sharding_axis=training_data_sharding_axis", text
     )
 
+  def test_p34_accumulation_uses_dp_width_not_group_count(self):
+    text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    self.assertIn("p34.train_trajectory_micro_batch_size", text)
+    self.assertIn("p34.gradient_groups", text)
+    self.assertIn("[DEEPSWE.ACCUMULATION] PASS", text)
+    config_start = text.index("training_config = rl_cluster_lib.RLTrainingConfig")
+    config_end = text.index("cluster_config = rl_cluster_lib.ClusterConfig")
+    config = text[config_start:config_end]
+    self.assertNotIn("else p34.local_trajectories", config)
+
   def test_backward_no_commit_requires_full_array_repeat(self):
     adapter = (ROOT / "tunix/rl/canonical_qwen3_adapter.py").read_text()
     learner = (ROOT / "tunix/rl/agentic/agentic_rl_learner.py").read_text()

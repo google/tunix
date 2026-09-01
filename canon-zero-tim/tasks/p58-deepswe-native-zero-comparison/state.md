@@ -1,5 +1,48 @@
 # State
 
+## P58.31 K23 gradient-accumulation geometry repair (2026-09-01)
+
+- K23 crossed P58.30 on the real 128-device DP8xTP8 plus DP8xTP8 target. The
+  complete log proves 128 trajectories, 8 reward-one trajectories, 47 final
+  nonzero advantages, 3 effective prompt groups, and strict A=B=C over
+  396,233 action tokens. Six `MODEL_TIMEOUT` rows were compact-filtered. The
+  immutable incident report's 393,135-token summary is stale; do not rewrite
+  it or repeat it as the authoritative complete-log value.
+- K23 emitted `[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8`,
+  completed group 1/16 across eight ranks, and reported exact replicas plus a
+  finite nonzero gradient. It then failed before accumulator mutation with
+  `segmented update accumulation changed: 8 != 16`. This closes P58.30's
+  axis-identity scope and proves one real grouped pullback/reduction, not an
+  optimizer update.
+- Root cause was a launcher/learner geometry alias. P58 has 128 global
+  trajectories, eight trajectories in each DP8 streamed group, and sixteen
+  groups. The launcher used the sixteen local groups as the trajectory
+  microbatch width, making `RLTrainingConfig` derive eight accumulation steps
+  while the segmented trainer expected sixteen.
+- `DeepSWEWorkload` now exposes `train_trajectory_micro_batch_size=dp_size`
+  and `gradient_groups=local_trajectories`. Launcher and learner both consume
+  that 128/8/16 contract and fail before backward unless derived accumulation
+  steps equal registered groups. Required receipts are
+  `[DEEPSWE.ACCUMULATION] PASS ... trajectory_micro_batch=8 ...
+  gradient_groups=16 ... gradient_accumulation_steps=16` and
+  `[CANON_P34_DP8] accumulator_contract_ready trajectories=128 micro=8
+  groups=16 gradient_accumulation_steps=16`.
+- P34 static passes ten suites; focused contract/script tests and the complete
+  digest-pinned P58 image gate pass through `RLTrainingConfig`, agentic
+  geometry, `PeftTrainer` precomputed accumulation, and first-update
+  boundaries. Development replay `p58k23accumdev_20260901T004406Z` then
+  passed the official direct-v5p Qwen3-4B DP1xTP4 classifier: strict A=B=C
+  over 1,254 action tokens, finite/nonzero/repeat-exact gradients, device
+  optimizer state, unchanged model/optimizer/accumulator/reference state, and
+  zero commits. The cached profiled repeat took 12.565 seconds. This dirty-diff
+  development result cannot certify DP8/TP8 accumulation.
+- Source commit/push is explicitly approved for this delivery. No flag,
+  recipe, optimizer placement, image publication, Kubernetes mutation,
+  target launch, optimizer commit, checkpoint, or 1,000-update completion
+  occurred in this local repair.
+- Immutable incident package:
+  `canon-zero-tim/evidence/p58_k23_gradient_accumulation_mismatch_incident/`.
+
 ## P58.30 K22 grouped-trainer axis identity repair (2026-08-31)
 
 - K22 ran the 128-device disaggregated DeepSWE target far enough to cross the
@@ -25,13 +68,11 @@
   optimizer, topology, deadline, TiTO, or Zero-HP program. Focused pinned-image
   tests pass 3/3; P34 static passes ten suites; the flag audit passes 409/409
   with `changed_names=0`; and the complete P58 image gate exits zero with
-  `grouped_trainer_axis=3` and `P58_EXACT_IMAGE_CPU_PASS`. A repaired target
-  remains pending.
-- No optimizer commit, checkpoint, 1,000-update completion, local commit/push,
-  image publication, Kubernetes mutation, or TPU launch occurred. K23 must
-  complete all 16 grouped reductions, produce finite nonzero gradients, and
-  emit the first intended optimizer/checkpoint transaction before this can be
-  called a training PASS.
+  `grouped_trainer_axis=3` and `P58_EXACT_IMAGE_CPU_PASS`. K23 later emitted
+  reducer axis `dp` and completed group 1/16, closing this phase's axis scope.
+- K23 did not complete the remaining 15 reductions, optimizer commit,
+  checkpoint, or 1,000-update campaign. Its later accumulator-cadence failure
+  is owned by active P58.31, so neither K23 nor this phase is a training PASS.
 - Immutable incident package:
   `canon-zero-tim/evidence/p58_k22_data_axis_mismatch_incident/`.
 
