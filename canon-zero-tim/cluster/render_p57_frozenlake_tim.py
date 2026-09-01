@@ -20,6 +20,7 @@ if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
 import render_p33_jobsets as p33
+from v1_full_system_optimization import full_system_optimization_additions
 from examples.frozenlake import p57_workloads
 
 
@@ -564,6 +565,13 @@ def render_all(
             "CANON_WANDB_RUN_NAME": job_name,
         },
     )
+    if high_performance:
+      _replace_env(
+          document,
+          full_system_optimization_additions(
+              f"frozenlake-{workload_candidate or 'p45'}"
+          ),
+      )
     labels = document["metadata"].setdefault("labels", {})
     labels["canon.zero-tim/tim-study"] = "p57"
     labels["canon.zero-tim/tim-arm"] = arm.name
