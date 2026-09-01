@@ -790,15 +790,23 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_2.generate.return_value = [resp]
 
       results = await engine.generate(
-          ["p1"], route_metadata={"prefix_hash": "h1"}
+          [{"prompt": "p1", "prompt_id": "pid1"}],
+          route_metadata={"prefix_hash": "h1"},
       )
 
       self.assertLen(results, 1)
-      self.assertEqual(
-          router.calls,
-          [("generate", {"route_key": "h1", "prompt": "p1"})],
-      )
-      self.mock_rollout_2.generate.assert_called_once_with(prompts=["p1"])
+      self.assertLen(router.calls, 1)
+      method_name, hints = router.calls[0]
+      self.assertEqual(method_name, "generate")
+      self.assertEqual(hints["route_key"], "h1")
+      self.assertEqual(hints["prompt"], "p1")
+      # request_id is auto-generated for dict items; only require presence.
+      self.assertTrue(hints["request_id"])
+      self.mock_rollout_2.generate.assert_called_once()
+      sent = self.mock_rollout_2.generate.call_args.kwargs["requests"]
+      self.assertLen(sent, 1)
+      self.assertEqual(sent[0].prompt, "p1")
+      self.assertEqual(sent[0].prompt_id, "pid1")
       self.mock_rollout_1.generate.assert_not_called()
 
     asyncio.run(_run())
