@@ -175,10 +175,26 @@ class TrajectoryCollectEngine:
         "step_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
         "close_latency": 0.0,
     }
+    self.sandbox_time = {
+        "sandbox_acquire_latency": 0.0,
+        "sandbox_start_latency": 0.0,
+        "environment_reset_latency": 0.0,
+    }
+    self.model_time = {
+        "generation_latency": 0.0,
+        "generation_calls": 0.0,
+    }
     self.reward_time = {
         "reward_latency": (
             0.0
         ),  # Wall-clock time (Total real-world time elapsed)
+    }
+    self.trajectory_time = {
+        "deadline_secs": float(self.timeout),
+        "collector_start_skew_secs": 0.0,
+        "trajectory_elapsed_secs": 0.0,
+        "batch_elapsed_secs": 0.0,
+        "batch_started_unix_secs": 0.0,
     }
 
     if self.max_response_length is not None and not (
@@ -268,7 +284,28 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
-    self._start_ts = time.perf_counter()
+    collector_started = time.perf_counter()
+    extra = getattr(self.env, "extra_kwargs", {}) or {}
+    shared_start = extra.get("_trajectory_batch_started_monotonic")
+    shared_start_unix = extra.get("_trajectory_batch_started_unix")
+    if shared_start is None:
+      self._start_ts = collector_started
+    else:
+      self._start_ts = float(shared_start)
+      if (
+          not np.isfinite(self._start_ts)
+          or self._start_ts <= 0.0
+          or self._start_ts > collector_started + 1.0
+      ):
+        raise ValueError("invalid shared trajectory batch start time")
+    self.trajectory_time["collector_start_skew_secs"] = max(
+        0.0, collector_started - self._start_ts
+    )
+    if shared_start_unix is not None:
+      batch_started_unix = float(shared_start_unix)
+      if not np.isfinite(batch_started_unix) or batch_started_unix <= 0.0:
+        raise ValueError("invalid shared trajectory batch wall time")
+      self.trajectory_time["batch_started_unix_secs"] = batch_started_unix
     self._response_token_count = 0
     self.agent.reset()
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
@@ -278,6 +315,7 @@ class TrajectoryCollectEngine:
       try:
         await self._reset()
       except asyncio.TimeoutError as error:
+        self._capture_sandbox_time()
         self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
         stage = (
             "sandbox_start"
@@ -343,6 +381,17 @@ class TrajectoryCollectEngine:
     finally:
       await self._close()
 
+    finished = time.perf_counter()
+    elapsed = max(0.0, finished - collector_started)
+    batch_elapsed = max(0.0, finished - self._start_ts)
+    self.trajectory_time["trajectory_elapsed_secs"] = elapsed
+    self.trajectory_time["batch_elapsed_secs"] = batch_elapsed
+    self.agent.trajectory.env_time = dict(self.env_time)
+    self.agent.trajectory.sandbox_time = dict(self.sandbox_time)
+    self.agent.trajectory.model_time = dict(self.model_time)
+    self.agent.trajectory.reward_time = dict(self.reward_time)
+    self.agent.trajectory.trajectory_time = dict(self.trajectory_time)
+
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
           f"Unsupported mode: {mode}, currently supported modes: "
@@ -350,8 +399,6 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
-      self.agent.trajectory.env_time = self.env_time
-      self.agent.trajectory.reward_time = self.reward_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -454,7 +501,10 @@ class TrajectoryCollectEngine:
               if getattr(step, "info", {}).get("action_is_effective") is False
           ),
           "env_time": self.env_time,
+          "sandbox_time": self.sandbox_time,
+          "model_time": self.model_time,
           "reward_time": self.reward_time,
+          "trajectory_time": self.trajectory_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -548,6 +598,7 @@ class TrajectoryCollectEngine:
     )
 
     self.env_time["reset_latency"] += wall_time
+    self._capture_sandbox_time()
     self.final_reward_fn = (
         self.env.final_reward_fn
         if hasattr(self.env, "final_reward_fn")
@@ -571,6 +622,16 @@ class TrajectoryCollectEngine:
           contains_generation_msg=True,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
+
+  def _capture_sandbox_time(self) -> None:
+    """Copies additive environment lifecycle timing into the trajectory."""
+    runtime_time = getattr(self.env, "runtime_time", None)
+    if isinstance(runtime_time, dict):
+      for key in self.sandbox_time:
+        value = float(runtime_time.get(key, 0.0))
+        if not np.isfinite(value) or value < 0.0:
+          raise ValueError(f"invalid sandbox timing {key}={value}")
+        self.sandbox_time[key] = value
 
   def _remaining_time(self) -> float:
     """Returns the positive or negative wall time left in this trajectory."""
@@ -762,6 +823,8 @@ class TrajectoryCollectEngine:
         logging.exception("Caught exception inside model_call: %s", e)
         raise
 
+    model_started = time.perf_counter()
+    self.model_time["generation_calls"] += 1.0
     try:
       rollout_output, _ = await self._run_with_timing(
           _safe_model_call, timeout=model_timeout
@@ -777,6 +840,10 @@ class TrajectoryCollectEngine:
           model_timeout,
       )
       return True
+    finally:
+      self.model_time["generation_latency"] += (
+          time.perf_counter() - model_started
+      )
     logging.debug("%s model_call done", self._debug_prefix)
 
     # Verify observes the rendered-text path. Exact supplies reconstructed

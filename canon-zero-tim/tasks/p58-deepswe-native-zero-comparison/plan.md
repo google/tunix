@@ -1,15 +1,17 @@
 # Plan
 
-## Active phase: P58.35 K26 effective-learning-rate observer
+## Active phase: P58.36 K28 shared deadline and partial consumer
 
-K26 crossed P58.34, completed strict A=B=C over 383,383 action tokens, all
-sixteen backward groups, and one TPU-resident trainer-local Adam transaction.
-It stopped before outer weight synchronization because the learning-rate
-observer terminated at gradient clipping's `EmptyState` and failed to inspect
-the later injected AdamW hyperparameters. Skip state-free transforms while
-keeping a missing actual hyperparameter state fatal. Do not use a config
-fallback and do not change any numerical, optimizer, warning, or workload
-semantics. K26 is not resumable; a fresh K27 remains separately approval-gated.
+K28 proved P58.35 by completing a real first update and outer synchronization.
+Its Step-1 failure was a rollout-coverage error obscured by downstream
+processing: only 32/128 rows reached the consumer before the producer became
+terminal, then strict persistence reported the partial shape instead of the
+original timeout. Give all 128 collectors one absolute 3,000-second deadline,
+retain the 3,300-second sandbox and 3,600-second producer bounds, return compact
+timeout rows under bounded cleanup, and reject any partial consumer batch
+before reward, rescore, persistence, forward, backward, or update. Keep the
+128-row artifact contract strict and add lifecycle timing evidence. K28 is not
+resumable; K29 is a fresh approved full target.
 
 ## Outcome
 
@@ -146,10 +148,14 @@ commit remain unreachable.
 | P58.31 | K23 gradient-accumulation geometry | P58 derives an eight-trajectory DP8 streamed microbatch and sixteen accumulation groups from the signed 128-trajectory workload; launcher and learner reject drift before backward; complete pinned-image gate and bounded direct backward replay pass | completed for accumulation scope; K24 crossed it and reached checkpoint admission after one reverse group |
 | P58.32 | Zero-HP finite A-B warning admission | Only the exact Zero-HP/full production identity may warn on a finite decode-vs-prefill A-B difference; B-C, trainer-repeat, nonfinite, gradient, replica, optimizer, and evidence boundaries remain strict | completed local construction; target not run; claim ceiling is alignment-degraded convergence only |
 | P58.33 | K24 precomputed-gradient checkpoint admission | Every P58 render uses exact `--ckpt_dir=none`, omits save cadence, fails before model initialization on drift, and postflight requires the disabled-checkpoint receipt | completed for checkpoint scope; K25 emitted the required marker and reached alignment-policy admission |
-| P58.34 | K25 precheck-only environment admission | The exact Zero-HP/full warning identity treats absent, empty, and `0` as precheck disabled, rejects diagnostic `1`, and fails malformed values through the common parser | active; local construction and complete pinned-image gate PASS; repaired target not run |
+| P58.34 | K25 precheck-only environment admission | The exact Zero-HP/full warning identity treats absent, empty, and `0` as precheck disabled, rejects diagnostic `1`, and fails malformed values through the common parser | completed for admission scope; K26 crossed it and reached the full optimizer path |
+| P58.35 | K26 effective-learning-rate observer | Skip state-free Optax transforms and read only actual injected optimizer hyperparameter state; missing learning rate remains fatal | completed for observer scope; K28 reported finite `1e-6`, committed Step 0, synchronized, and entered Step 1 |
+| P58.36 | K28 shared rollout deadline and partial-consumer boundary | One absolute 3,000-second clock covers all 128 collectors; normal expiries yield compact rows; partial coverage propagates producer failure before all downstream work; timing evidence is durable | active; complete construction and pinned-image PASS; K29 target not run |
 
-At most one phase may be active. P58.34 is the active construction repair and
-no target launch is active. Commit, push, image publication, Kubernetes render/application, and
+At most one phase may be active. P58.36 is the active construction repair and
+K29 is the only approved next target. Commit, push, and this fresh Kubernetes
+render/application are approved for the current delivery; later source/image/
+cluster mutations remain separately user-gated.
 each later TPU execution remain separately user-gated.
 
 P58.1 and P58.2 are closed by the pinned-image marker recorded in `state.md`.

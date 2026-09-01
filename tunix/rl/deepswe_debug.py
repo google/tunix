@@ -26,6 +26,7 @@ import math
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Iterable, Mapping, Sequence
 import uuid
 
@@ -1451,6 +1452,43 @@ def timeout_wandb_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
   return result
 
 
+def _percentile_summary(values: Sequence[float]) -> dict[str, float]:
+  array = np.asarray(values, dtype=np.float64)
+  if array.ndim != 1 or array.size == 0:
+    raise ValueError("DeepSWE timing summary requires a nonempty vector")
+  if not np.all(np.isfinite(array)) or np.any(array < 0.0):
+    raise ValueError("DeepSWE timing values must be finite and nonnegative")
+  p50, p90, p99 = np.percentile(array, [50.0, 90.0, 99.0])
+  return {
+      "p50": float(p50),
+      "p90": float(p90),
+      "p99": float(p99),
+      "max": float(np.max(array)),
+  }
+
+
+def timing_wandb_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
+  """Flattens fixed-cardinality lifecycle timing for W&B."""
+  timing = metrics.get("timing")
+  if not isinstance(timing, Mapping):
+    return {}
+  result = {
+      "deepswe/timing/batch_elapsed_seconds": float(
+          timing["batch_elapsed_seconds"]
+      )
+  }
+  for stage, summary in timing["stage_seconds"].items():
+    for statistic in ("p50", "p90", "p99", "max"):
+      result[f"deepswe/timing/{stage}_{statistic}_seconds"] = float(
+          summary[statistic]
+      )
+  for ordinal, seconds in enumerate(timing["group_completion_seconds"]):
+    result[f"deepswe/timing/group_{ordinal}_completion_seconds"] = float(
+        seconds
+    )
+  return result
+
+
 def persist_batch(
     trajectories: Sequence[Any],
     rewards: Sequence[Any],
@@ -1557,6 +1595,85 @@ def persist_batch(
     records.append(record)
     groups[group_id].append(record)
 
+  timing = None
+  p58_full_timing = (
+      _mode(environ) == "p58"
+      and environ.get("CANON_P58_TIM_ADMITTED") == "1"
+      and environ.get("CANON_P34_RUN_STAGE") == "full"
+  )
+  if p58_full_timing:
+    stage_fields = {
+        "sandbox_acquire": ("sandbox_time", "sandbox_acquire_latency"),
+        "sandbox_start": ("sandbox_time", "sandbox_start_latency"),
+        "environment_reset": (
+            "sandbox_time",
+            "environment_reset_latency",
+        ),
+        "model_generation": ("model_time", "generation_latency"),
+        "environment_step": ("env_time", "step_latency"),
+        "final_reward": ("reward_time", "reward_latency"),
+        "cleanup": ("env_time", "close_latency"),
+        "trajectory": ("trajectory_time", "trajectory_elapsed_secs"),
+        "collector_start_skew": (
+            "trajectory_time",
+            "collector_start_skew_secs",
+        ),
+        "batch_completion": (
+            "trajectory_time",
+            "batch_elapsed_secs",
+        ),
+    }
+    stage_values: dict[str, list[float]] = collections.defaultdict(list)
+    batch_started_values = []
+    deadline_values = []
+    for record in records:
+      trajectory = record["trajectory"]
+      for stage, (section_name, field_name) in stage_fields.items():
+        section = trajectory.get(section_name)
+        if not isinstance(section, Mapping) or field_name not in section:
+          raise ValueError(
+              "P58 trajectory timing is incomplete: "
+              f"section={section_name} field={field_name}"
+          )
+        stage_values[stage].append(
+            _finite_float(section[field_name], label=f"{stage} timing")
+        )
+      trajectory_time = trajectory["trajectory_time"]
+      batch_started_values.append(
+          _finite_float(
+              trajectory_time["batch_started_unix_secs"],
+              label="batch start wall time",
+          )
+      )
+      deadline_values.append(
+          _finite_float(
+              trajectory_time["deadline_secs"],
+              label="trajectory deadline",
+          )
+      )
+    if (
+        min(batch_started_values) <= 0.0
+        or max(batch_started_values) - min(batch_started_values) > 1e-6
+    ):
+      raise ValueError("P58 trajectories do not share one batch start")
+    if max(deadline_values) - min(deadline_values) > 1e-9:
+      raise ValueError("P58 trajectories do not share one deadline")
+    batch_started_unix = batch_started_values[0]
+    trajectory_deadline_secs = deadline_values[0]
+    batch_persisted_unix = time.time()
+    timing = {
+        "batch_started_unix_secs": batch_started_unix,
+        "trajectory_deadline_unix_secs": (
+            batch_started_unix + trajectory_deadline_secs
+        ),
+        "batch_persisted_unix_secs": batch_persisted_unix,
+        "batch_elapsed_seconds": max(stage_values["batch_completion"]),
+        "stage_seconds": {
+            stage: _percentile_summary(values)
+            for stage, values in sorted(stage_values.items())
+        },
+    }
+
   if len(groups) != expected_groups or any(
       len(group) != expected_generations for group in groups.values()
   ):
@@ -1604,6 +1721,16 @@ def persist_batch(
             record["raw_advantage_nonzero"] for record in group
         ),
         "raw_rewards": [record["raw_final_reward"] for record in group],
+        **({
+            "completion_seconds": max(
+                float(
+                    record["trajectory"]["trajectory_time"][
+                        "batch_elapsed_secs"
+                    ]
+                )
+                for record in group
+            ),
+        } if timing is not None else {}),
     })
 
   solved_trajectories = sum(record["solved"] for record in records)
@@ -1705,6 +1832,12 @@ def persist_batch(
     metrics["optimizer_step"] = (
         expected_step if optimizer_step is None else optimizer_step
     )
+  if p58_full_timing:
+    assert timing is not None
+    timing["group_completion_seconds"] = [
+        float(group["completion_seconds"]) for group in group_records
+    ]
+    metrics["timing"] = timing
 
   records.sort(key=lambda record: (record["group_id"], record["pair_index"]))
   trajectory_path = root / f"batch-{expected_step:06d}.trajectories.jsonl.gz"

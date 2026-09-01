@@ -206,6 +206,8 @@ $DOCKER run --rm \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_seam_localization \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_q4_continue_kv \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_p58_partial_consumer_propagates_producer_timeout \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_p58_full_batch_group_contract_rejects_missing_generation \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_environment_is_seeded_with_policy_version_before_reset \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_replay_segmented_geometry_is_b2g2_not_batch_one \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_full_segmented_geometry_is_dp8_by_sixteen_groups \
@@ -219,6 +221,7 @@ $DOCKER run --rm \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_raised_timeout_is_env_timeout \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_scheduling_gate_is_distinct_env_timeout \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_shared_batch_deadline_reduces_late_collector_budget \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_token_prefers_policy_seeded_environment_task \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_policy_seeded_original_input_missing_prompt_fails_closed \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_token_missing_original_input_fails_closed

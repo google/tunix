@@ -140,7 +140,8 @@ class P58RendererTest(unittest.TestCase):
 
   def test_rollout_timeout_geometry_is_exactly_one_concurrency_wave(self):
     document = self._render("native", "full")
-    args = shlex.split(renderer.p34._env(document)["CANON_RUN_CMD"])
+    env = renderer.p34._env(document)
+    args = shlex.split(env["CANON_RUN_CMD"])
 
     def int_arg(name: str) -> int:
       prefix = f"--{name}="
@@ -156,9 +157,15 @@ class P58RendererTest(unittest.TestCase):
         int_arg("rollout_mesh_dp") * int_arg("rollout_vllm_max_num_seqs"),
         raw_trajectories,
     )
-    self.assertGreater(
-        int_arg("rollout_batch_timeout_secs"),
-        int_arg("episode_timeout_secs") + int_arg("cleanup_timeout_secs"),
+    self.assertEqual(int_arg("episode_timeout_secs"), 3000)
+    self.assertEqual(int_arg("cleanup_timeout_secs"), 300)
+    self.assertEqual(int_arg("rollout_batch_timeout_secs"), 3600)
+    self.assertEqual(env["R2E_ACTIVE_DEADLINE_SECONDS"], "3300")
+    self.assertEqual(
+        env["CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS"], "3000"
+    )
+    self.assertEqual(
+        env["CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS"], "3600"
     )
 
   def test_fixed_seed_is_unique_and_fail_closed(self):

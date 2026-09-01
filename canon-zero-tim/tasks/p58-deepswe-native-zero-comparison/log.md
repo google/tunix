@@ -2248,3 +2248,29 @@
   checked-VMA/coarse-seam negatives.
 - No commit/push, image publication, Kubernetes mutation, or TPU launch
   occurred. Claim ceiling is `convergence-only / alignment-degraded`.
+
+## 2026-09-01 UTC — P58.36 K28 shared-deadline and partial-consumer repair
+
+- Reconciled the immutable K28 incident with its runtime boundary. K28
+  completed and synchronized Step 0, then Step 1 exposed a 32/128 consumer
+  tail. The strict artifact assertion was correct but masked the producer-side
+  rollout timeout; it is preserved unchanged.
+- All 128 P58 full collectors now share one absolute batch start. Late
+  collectors inherit only the remaining 3,000-second trajectory budget. The
+  existing 3,300-second sandbox active deadline and 3,600-second producer
+  watchdog retain cleanup and drain margins respectively.
+- Normal deadline statuses remain compact-filtered zero-mask rows. The exact
+  B8xG16 consumer validates eight unique groups and pair indices 0..15 before
+  reward/rescore/persistence/training. A partial tail first propagates the
+  producer Future's original exception and never reaches downstream work.
+- Added lifecycle timing from R2E Pod acquire/start through reset, model,
+  environment, reward, cleanup, trajectory percentiles, and all eight group
+  completions. Durable artifacts and bounded W&B keys carry the same data.
+- Focused dependency-image tests pass. P34 static emits
+  `P34_STATIC_PASS suites=10`; flag audit emits 409/409
+  `FLAG_AUDIT_PASS`; Python/Bash/diff hygiene passes. The complete pinned
+  image gate exits zero with `P58_EXACT_IMAGE_CPU_PASS` and the separately
+  rerun renderer suite passes 37/37.
+- K28 has no checkpoint and cannot resume. K29 remains the fresh target that
+  must cross Step 1; construction evidence alone does not prove the target
+  repair.

@@ -635,6 +635,54 @@ def _p58_all_filtered_no_commit_contract(
   return True
 
 
+def _p58_full_batch_runtime_contract(values: Mapping[str, str]) -> bool:
+  """Selects the exact P58 training geometry that requires 128-row batches."""
+  return (
+      values.get("CANON_P34_DEEPSWE") == "1"
+      and values.get("CANON_P58_DEEPSWE_TIM") == "1"
+      and values.get("CANON_P58_TIM_ADMITTED") == "1"
+      and values.get("CANON_P58_TIM_ARM") in ("native", "zero")
+      and values.get("CANON_P34_RUN_STAGE") == "full"
+  )
+
+
+def _validate_p58_full_batch_groups(
+    groups: Sequence[Sequence[Any]],
+    *,
+    expected_groups: int = 8,
+    expected_generations: int = 16,
+) -> None:
+  """Rejects incomplete or duplicated P58 geometry before reward processing."""
+  if len(groups) != expected_groups:
+    raise alignment.AlignmentGateError(
+        "P58 consumer requires exactly "
+        f"{expected_groups} prompt groups, got {len(groups)}"
+    )
+  group_ids = []
+  for ordinal, group in enumerate(groups):
+    if len(group) != expected_generations:
+      raise alignment.AlignmentGateError(
+          "P58 consumer generation count changed: "
+          f"group={ordinal} got={len(group)} expected={expected_generations}"
+      )
+    observed_group_ids = {item.group_id for item in group}
+    pair_indices = sorted(int(item.pair_index) for item in group)
+    if len(observed_group_ids) != 1:
+      raise alignment.AlignmentGateError(
+          f"P58 consumer group {ordinal} mixes ids: {observed_group_ids}"
+      )
+    if pair_indices != list(range(expected_generations)):
+      raise alignment.AlignmentGateError(
+          "P58 consumer pair indices must cover each generation exactly: "
+          f"group={ordinal} actual={pair_indices}"
+      )
+    group_ids.append(next(iter(observed_group_ids)))
+  if len(set(group_ids)) != expected_groups:
+    raise alignment.AlignmentGateError(
+        f"P58 consumer prompt group ids are duplicated: {group_ids}"
+    )
+
+
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
@@ -2952,6 +3000,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       A list of trajectories for a group.
     """
     is_async_iterator = hasattr(prompt_iterator, "__aiter__")
+    p58_shared_deadline = _p58_full_batch_runtime_contract(os.environ)
+    batch_clock: dict[str, float | None] = {
+        "monotonic": None,
+        "unix": None,
+        "input_done": 0.0,
+    }
+    batch_clock_ready = asyncio.Event()
 
     async def pairs_stream_generator():
       """Yield (agent, env) pairs with unique group_id per original prompt."""
@@ -2960,6 +3015,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          if p58_shared_deadline and group_id % self._full_batch_size == 0:
+            batch_clock["monotonic"] = time.perf_counter()
+            batch_clock["unix"] = time.time()
+            batch_clock_ready.set()
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -2973,10 +3032,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
+            if p58_shared_deadline:
+              env.extra_kwargs["_trajectory_batch_started_monotonic"] = (
+                  batch_clock["monotonic"]
+              )
+              env.extra_kwargs["_trajectory_batch_started_unix"] = (
+                  batch_clock["unix"]
+              )
             yield agent, env
           group_id += 1
       else:
         for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          if p58_shared_deadline and group_id % self._full_batch_size == 0:
+            batch_clock["monotonic"] = time.perf_counter()
+            batch_clock["unix"] = time.time()
+            batch_clock_ready.set()
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
                   None,
@@ -2988,8 +3058,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
+            if p58_shared_deadline:
+              env.extra_kwargs["_trajectory_batch_started_monotonic"] = (
+                  batch_clock["monotonic"]
+              )
+              env.extra_kwargs["_trajectory_batch_started_unix"] = (
+                  batch_clock["unix"]
+              )
             yield agent, env
           group_id += 1
+      batch_clock["input_done"] = 1.0
+      batch_clock_ready.set()
 
     # Start producers in the background.
     producer_task = asyncio.create_task(
@@ -3009,15 +3088,34 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         batch_size=self.algo_config.num_generations
     )
     prompt_groups_in_batch = 0
-    batch_started = self.loop.time()
+    batch_started = time.perf_counter()
     try:
       async with contextlib.aclosing(async_generator) as stream:
         while True:
+          if p58_shared_deadline and prompt_groups_in_batch == 0:
+            await batch_clock_ready.wait()
+            shared_batch_started = batch_clock["monotonic"]
+            shared_batch_unix = batch_clock["unix"]
+            if (
+                shared_batch_started is None
+                and batch_clock["input_done"] == 1.0
+            ):
+              break
+            if shared_batch_started is None or shared_batch_unix is None:
+              raise RuntimeError("P58 batch clock was signaled without a start")
+            batch_started = float(shared_batch_started)
+            print(
+                "[P58.36.BATCH] DEADLINE_START "
+                f"batch_started_unix={float(shared_batch_unix):.6f} "
+                f"trajectory_deadline_secs={self.algo_config.episode_timeout:.1f} "
+                f"batch_deadline_secs={self.algo_config.rollout_batch_timeout:.1f}",
+                flush=True,
+            )
           timeout = self.algo_config.rollout_batch_timeout
           if timeout is None:
             remaining = None
           else:
-            remaining = timeout - (self.loop.time() - batch_started)
+            remaining = timeout - (time.perf_counter() - batch_started)
             if remaining <= 0:
               raise TimeoutError(
                   "rollout batch exceeded hard timeout before completion: "
@@ -3043,16 +3141,29 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             # Retrieve the original input embedded in the task.
             yield group
             prompt_groups_in_batch += 1
+            if p58_shared_deadline:
+              print(
+                  "[P58.36.GROUP] COMPLETE "
+                  f"ordinal={prompt_groups_in_batch}/{self._full_batch_size} "
+                  f"trajectories={len(group)} "
+                  f"batch_elapsed_secs={time.perf_counter() - batch_started:.3f}",
+                  flush=True,
+              )
             if prompt_groups_in_batch == self._full_batch_size:
               logging.info(
                   "[DEEPSWE.ROLLOUT_DEADLINE] batch_complete "
                   "prompt_groups=%d elapsed_secs=%.1f deadline_secs=%s",
                   prompt_groups_in_batch,
-                  self.loop.time() - batch_started,
+                  time.perf_counter() - batch_started,
                   timeout,
               )
               prompt_groups_in_batch = 0
-              batch_started = self.loop.time()
+              if p58_shared_deadline:
+                batch_clock["monotonic"] = None
+                batch_clock["unix"] = None
+                batch_clock_ready.clear()
+              else:
+                batch_started = time.perf_counter()
     except (GeneratorExit, asyncio.CancelledError):
       # This is the normal shutdown path for a generator.
       return
@@ -3178,6 +3289,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       batch_size: int,
       *,
       require_full_batch: bool = False,
+      producer_future: Future[Any] | None = None,
+      contract_name: str = "consumer",
   ):
     """Yields micro-batches from a queue until a None is received."""
     item_iterator = iter(lambda: queue.get(block=True), None)
@@ -3186,10 +3299,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if not batch:
         return  # The iterator is exhausted.
       if require_full_batch and len(batch) != batch_size:
+        if producer_future is not None:
+          # The producer enqueues its sentinel in ``finally`` before its
+          # Future becomes terminal. Waiting here preserves the original
+          # rollout timeout/exception instead of masking it with a downstream
+          # artifact, reward, or trainer shape error.
+          producer_future.result()
         raise RuntimeError(
-            "P38 diagnostic full-coverage consumer received a partial "
+            f"{contract_name} full-coverage consumer received a partial "
             f"prompt batch: got={len(batch)} expected={batch_size}; "
-            "refusing subset alignment"
+            "refusing subset alignment, reward, rescore, artifact "
+            "persistence, and training"
         )
       yield batch
 
@@ -3702,6 +3822,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             deepswe_debug.q4_tp4_continue_kv_diagnostic(os.environ)
         ),
     )
+    p58_full_batch_runtime = _p58_full_batch_runtime_contract(os.environ)
+    if p58_full_batch_runtime:
+      expected_groups = self._full_batch_size
+      expected_trajectories = expected_groups * self._num_generations()
+      if (
+          not self._process_in_consumer
+          or consumer_batch_size != expected_groups
+          or expected_groups != 8
+          or self._num_generations() != 16
+          or expected_trajectories != 128
+      ):
+        raise alignment.AlignmentGateError(
+            "P58 full-batch runtime geometry changed: "
+            f"process_in_consumer={self._process_in_consumer} "
+            f"consumer_groups={consumer_batch_size} "
+            f"prompts={expected_groups} generations={self._num_generations()} "
+            f"trajectories={expected_trajectories}"
+        )
+      require_full_consumer_batch = True
+      print(
+          "[P58.36.BATCH] FULL_CONSUMER_PASS "
+          "prompt_groups=8 generations=16 trajectories=128 "
+          "partial=reject-before-processing",
+          flush=True,
+      )
     if p38_precheck_only:
       m15_debug_arm = os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
       if m15_debug_arm in ("off", "on"):
@@ -3735,6 +3880,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           train_data_queue,
           consumer_batch_size,
           require_full_batch=require_full_consumer_batch,
+          producer_future=(producer_future if p58_full_batch_runtime else None),
+          contract_name=("P58" if p58_full_batch_runtime else "P38 diagnostic"),
       )
     is_packed = self._training_config.max_seq_token_per_tpu is not None
     if diagnostic_replay and is_packed:
@@ -3788,6 +3935,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         merged_train_micro_batch = train_micro_batch[0]
       elif self._process_in_consumer:
         # train_micro_batch is a list of lists of trajectories.
+        if p58_full_batch_runtime:
+          _validate_p58_full_batch_groups(train_micro_batch)
         all_trajectories = [t for group in train_micro_batch for t in group]
         try:
           train_examples = self._batch_to_train_example(

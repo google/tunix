@@ -1,5 +1,28 @@
 # State
 
+## P58.36 K28 shared deadline and partial-consumer repair (2026-09-01)
+
+- K28 completed one full 128-trajectory rollout, strict A=B=C, all sixteen
+  backward groups, one TPU-resident update, outer synchronization, and entry
+  into Step 1. It then exposed only 32/128 Step-1 rows to the consumer; the
+  strict artifact check masked the producer's rollout timeout with a shape
+  error.
+- P58 full batches now use one absolute start for all 128 collectors. The
+  signed bounds remain 3,000 seconds per trajectory, 3,300 seconds for the
+  sandbox Pod, and 3,600 seconds for the producer batch watchdog. Late
+  collectors inherit only the remaining batch time.
+- Ordinary deadline expiry becomes a compact filtered row; all eight B8xG16
+  groups must still arrive before reward/rescore/persistence/training. A
+  partial consumer waits for and propagates the producer exception. The
+  128-row `persist_batch` assertion remains strict.
+- Durable artifacts and W&B now report sandbox acquire/start/reset, model,
+  environment, reward, cleanup, trajectory p50/p90/p99/max, and eight group
+  completion times.
+- Focused dependency-image regressions, P34's ten static suites, the 409/409
+  flag audit, and the complete pinned-image P58 gate pass. K28 is not
+  resumable; a fresh K29 must cross Step 1 to validate this repair. Phase:
+  `phases/p58-36-k28-batch-deadline-partial-consumer.md`.
+
 ## P58.35 K26 effective-learning-rate observer (2026-09-01)
 
 - K26 returned 128 multi-turn rollouts and reached a strict full backward:

@@ -94,6 +94,11 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env = None
+    self.runtime_time = {
+        "sandbox_acquire_latency": 0.0,
+        "sandbox_start_latency": 0.0,
+        "environment_reset_latency": 0.0,
+    }
     self.verbose = verbose
     self.scaffold = scaffold
     assert scaffold in [
@@ -136,12 +141,36 @@ class SWEEnv(BaseTaskEnv):
       )
       env_args = EnvArgs(ds=self.entry)
       started = time.perf_counter()
-      self.env = RepoEnv(
-          env_args,
-          backend=self.backend,
-          step_timeout=self.step_timeout,
-          reward_timeout=self.reward_timeout,
-          verbose=self.verbose,
+      try:
+        self.env = RepoEnv(
+            env_args,
+            backend=self.backend,
+            step_timeout=self.step_timeout,
+            reward_timeout=self.reward_timeout,
+            verbose=self.verbose,
+        )
+      except BaseException:
+        self.runtime_time["sandbox_start_latency"] += (
+            time.perf_counter() - started
+        )
+        raise
+      runtime_time = getattr(
+          getattr(self.env, "runtime", None), "_tunix_runtime_time", {}
+      )
+      if isinstance(runtime_time, dict):
+        self.runtime_time["sandbox_acquire_latency"] += float(
+            runtime_time.get("sandbox_acquire_latency", 0.0)
+        )
+        self.runtime_time["sandbox_start_latency"] += float(
+            runtime_time.get("sandbox_start_latency", 0.0)
+        )
+      lifecycle_elapsed = time.perf_counter() - started
+      classified_elapsed = (
+          self.runtime_time["sandbox_acquire_latency"]
+          + self.runtime_time["sandbox_start_latency"]
+      )
+      self.runtime_time["environment_reset_latency"] += max(
+          0.0, lifecycle_elapsed - classified_elapsed
       )
       logging.info(
           "%s RepoEnv created in %.2fs",
@@ -150,7 +179,13 @@ class SWEEnv(BaseTaskEnv):
       )
     else:
       logging.info("%s resetting existing RepoEnv", self._debug_prefix)
-      self.env.reset()
+      started = time.perf_counter()
+      try:
+        self.env.reset()
+      finally:
+        self.runtime_time["environment_reset_latency"] += (
+            time.perf_counter() - started
+        )
     self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
@@ -160,7 +195,12 @@ class SWEEnv(BaseTaskEnv):
 
     # Polls docker runtime to get task instruction.
     started = time.perf_counter()
-    instruction = self.env.get_task_instruction()
+    try:
+      instruction = self.env.get_task_instruction()
+    finally:
+      self.runtime_time["environment_reset_latency"] += (
+          time.perf_counter() - started
+      )
     logging.info(
         "%s get_task_instruction done in %.2fs chars=%d",
         self._debug_prefix,

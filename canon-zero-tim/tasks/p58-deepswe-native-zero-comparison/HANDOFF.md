@@ -1,6 +1,59 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — P58.35 K26 committed locally; K27 is fresh
+## START HERE — P58.36 K28 partial Step-1 batch; launch fresh K29
+
+K28 completed Step 0 end to end and entered Step 1. Step 0 returned all 128
+trajectories, solved six, was strict A=B=C over 374,516 action tokens,
+completed all sixteen backward groups, committed one TPU-resident update, and
+synchronized outer weights. Step 1 later delivered only two complete prompt
+groups (32 trajectories) to the consumer before the rollout path terminated.
+The strict 128-row artifact assertion then masked the original producer
+timeout. Do not weaken that assertion and do not train the 32-row tail.
+
+P58.36 gives every B8xG16 update one absolute batch clock:
+
+- 3,000 s: trajectory budget shared from the first collector start; late
+  sandbox/collector starts receive only the remaining time;
+- 3,300 s: sandbox Pod active deadline, including a 300 s cleanup margin;
+- 3,600 s: producer batch watchdog, including a final 300 s drain margin.
+
+Normal expiry yields a compact filtered row with zero policy mask. Cleanup
+failure remains fatal. The consumer requires exactly 8 groups x 16 rows,
+propagates the original producer exception on a partial tail, and cannot call
+reward, Rescore B, persistence, forward, backward, or update first.
+`persist_batch` still requires exactly 128 rows.
+
+Lifecycle timing is now durable and mirrored to W&B: sandbox
+acquire/start/reset, model generation, environment step, reward, cleanup,
+trajectory p50/p90/p99/max, collector skew, and all eight group completion
+times. Require the `P58.36.BATCH` admission/deadline markers and eight
+`P58.36.GROUP` completions.
+
+K28 cannot resume because checkpoints are disabled. Render K29 fresh from the
+final clean remote readback SHA and the existing digest-pinned dependency
+image:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k29.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k29 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Retain Qwen3-4B-Instruct-2507, 128 v5p devices split rollout/trainer as
+DP8xTP8 each, B8xG16, concurrency/max-seqs 128, 16K response, 50 turns,
+1,000 updates, TiTO, TPU-resident optimizer, disabled checkpoints, and the
+narrow finite A-B warning lane. Step 0 is necessary but not sufficient; K29
+must return a complete Step-1 128-row batch or surface the real producer error
+before downstream work. See
+`phases/p58-36-k28-batch-deadline-partial-consumer.md`.
+
+## HISTORICAL — P58.35 K26 committed locally; K27 was fresh
 
 K26 is the first P58 run to complete the full strict numerical and backward
 path plus a trainer-local TPU Adam transaction. Across 16 reverse groups it

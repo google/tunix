@@ -7,6 +7,7 @@ import gzip
 import json
 from pathlib import Path
 import tempfile
+import time
 import types
 import unittest
 
@@ -17,12 +18,13 @@ def _values(root: Path) -> dict[str, str]:
   return {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P58_DEEPSWE_TIM": "1",
+      "CANON_P58_TIM_ADMITTED": "1",
       "CANON_P58_TIM_ARM": "native",
       "CANON_P58_DEBUG_DIR": str(root),
       "CANON_EXPECT_COMMIT": "1" * 40,
       "CANON_SOURCE_BRANCH": "yuxzhang/canon-zero-tim",
       "CANON_RUN_ID": "artifact-test",
-      "CANON_P34_RUN_STAGE": "three-update",
+      "CANON_P34_RUN_STAGE": "full",
       "CANON_P34_DATASET_NAME": "R2E-Gym/R2E-Gym-Subset",
       "CANON_P34_DATASET_REVISION": "2e8108ff942f24fcb5686badfaf7f9a8808566d5",
       "CANON_P34_DATASET_SPLIT": "train",
@@ -44,9 +46,11 @@ def _batch(
   items = []
   rewards = []
   advantages = []
+  batch_started_unix = time.time() - 80.0
   for group in range(8):
     for pair in range(16):
       reward = float(pair == 0)
+      completion_seconds = float((group + 1) * 10) + pair / 100.0
       items.append(types.SimpleNamespace(
           group_id=f"group-{group}",
           pair_index=pair,
@@ -60,6 +64,28 @@ def _batch(
               "conversation_text": [
                   {"role": "assistant", "content": "redacted test"}
               ],
+              "sandbox_time": {
+                  "sandbox_acquire_latency": 1.0,
+                  "sandbox_start_latency": 2.0,
+                  "environment_reset_latency": 3.0,
+              },
+              "model_time": {
+                  "generation_latency": 4.0,
+                  "generation_calls": 1.0,
+              },
+              "env_time": {
+                  "reset_latency": 6.0,
+                  "step_latency": 5.0,
+                  "close_latency": 7.0,
+              },
+              "reward_time": {"reward_latency": 6.0},
+              "trajectory_time": {
+                  "deadline_secs": 3000.0,
+                  "collector_start_skew_secs": float(group),
+                  "trajectory_elapsed_secs": completion_seconds - group,
+                  "batch_elapsed_secs": completion_seconds,
+                  "batch_started_unix_secs": batch_started_unix,
+              },
           },
       ))
       rewards.append(reward)
@@ -99,6 +125,16 @@ class P58ArtifactTest(unittest.TestCase):
       self.assertEqual(wandb_metrics["deepswe/all_env_timeout_batch"], 1.0)
       self.assertEqual(
           wandb_metrics["deepswe/all_sandbox_start_timeout_batch"], 1.0
+      )
+      timing = metrics["timing"]
+      self.assertAlmostEqual(timing["batch_elapsed_seconds"], 80.15)
+      self.assertEqual(len(timing["group_completion_seconds"]), 8)
+      timing_wandb = deepswe_debug.timing_wandb_metrics(metrics)
+      self.assertAlmostEqual(
+          timing_wandb["deepswe/timing/group_7_completion_seconds"], 80.15
+      )
+      self.assertEqual(
+          timing_wandb["deepswe/timing/sandbox_start_p99_seconds"], 2.0
       )
 
   def test_scheduling_gated_timeouts_are_distinct_wandb_metrics(self):

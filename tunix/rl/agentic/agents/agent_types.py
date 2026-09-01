@@ -126,7 +126,10 @@ class Trajectory:
   reward: float = 0.0
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  sandbox_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  model_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  trajectory_time: dict[str, float] = dataclasses.field(default_factory=dict)
   timeout_stage: str = ""
   timeout_scheduler_reason: str = ""
   timeout_resource: str = ""
@@ -146,7 +149,10 @@ class Trajectory:
         "reward": float(self.reward),
         "status": self.status.name,
         "env_time": self.env_time,
+        "sandbox_time": self.sandbox_time,
+        "model_time": self.model_time,
         "reward_time": self.reward_time,
+        "trajectory_time": self.trajectory_time,
         "timeout_stage": self.timeout_stage,
         "timeout_scheduler_reason": self.timeout_scheduler_reason,
         "timeout_resource": self.timeout_resource,

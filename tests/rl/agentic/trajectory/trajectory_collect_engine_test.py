@@ -847,6 +847,42 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertGreater(request_timeout, 0)
     self.assertLess(request_timeout, 0.01)
 
+  def test_shared_batch_deadline_reduces_late_collector_budget(self):
+    def slow_model(*args, **kwargs):
+      del args, kwargs
+      time.sleep(0.05)
+      return RolloutOutput(
+          text=['late'],
+          logits=None,
+          tokens=[np.array([1])],
+          left_padded_prompt_tokens=np.array([[1]]),
+          logprobs=[np.array([0.0])],
+      )
+
+    self.mock_model_call.side_effect = slow_model
+    batch_started = time.perf_counter() - 0.04
+    self.mock_env.extra_kwargs = {
+        '_trajectory_batch_started_monotonic': batch_started,
+        '_trajectory_batch_started_unix': time.time() - 0.04,
+    }
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=0.06,
+        cleanup_timeout=0.1,
+    )
+    result = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(result.status, agent_types.TrajectoryStatus.MODEL_TIMEOUT)
+    self.assertGreaterEqual(
+        result.trajectory_time['collector_start_skew_secs'], 0.03
+    )
+    self.assertGreaterEqual(
+        result.trajectory_time['batch_elapsed_secs'], 0.05
+    )
+    self.assertLess(result.model_time['generation_latency'], 0.08)
+
   def test_reset_timeout_still_closes_environment(self):
     def slow_reset():
       time.sleep(0.03)

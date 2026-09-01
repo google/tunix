@@ -1232,6 +1232,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                       debug_metrics
                   ).items()
               },
+              **{
+                  key: (value, np.mean)
+                  for key, value in deepswe_debug.timing_wandb_metrics(
+                      debug_metrics
+                  ).items()
+              },
           },
           mode=mode,
           step=expected_step,

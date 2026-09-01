@@ -278,6 +278,24 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
   def start_kubernetes_pod(
       self, docker_image: str, command: str, pod_name: str, **docker_kwargs
   ):
+    runtime_time = getattr(self, "_tunix_runtime_time", None)
+    if not isinstance(runtime_time, dict):
+      runtime_time = {
+          "sandbox_acquire_latency": 0.0,
+          "sandbox_start_latency": 0.0,
+      }
+      self._tunix_runtime_time = runtime_time
+    acquire_started = time.perf_counter()
+    acquire_recorded = False
+
+    def finish_acquire() -> None:
+      nonlocal acquire_recorded
+      if not acquire_recorded:
+        runtime_time["sandbox_acquire_latency"] += max(
+            0.0, time.perf_counter() - acquire_started
+        )
+        acquire_recorded = True
+
     self._tunix_kubernetes_pod_name = pod_name
     try:
       existing = self.client.read_namespaced_pod(
@@ -288,6 +306,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
       phase = str(existing.status.phase)
       if phase == "Running":
         self.container = existing
+        finish_acquire()
         self.logger.info("Found existing Running Kubernetes pod: %s", pod_name)
         return
       self.logger.warning(
@@ -393,43 +412,50 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
         time.sleep(delay)
         delay = min(delay * 2, 60)
 
+    finish_acquire()
+    start_started = time.perf_counter()
     timeout = int(os.environ.get("R2E_POD_START_TIMEOUT_SECONDS", "1200"))
     deadline = time.monotonic() + timeout
     last_status = "phase=unobserved conditions=none"
-    while time.monotonic() < deadline:
-      pod = self.client.read_namespaced_pod(
-          name=pod_name,
-          namespace=namespace,
-          _request_timeout=60,
-      )
-      phase = str(pod.status.phase)
-      last_status = pod_status_summary(pod)
-      if phase == "Running":
-        self.container = pod
-        self.logger.info("Kubernetes pod %s is Running", pod_name)
-        return
-      if phase in ("Failed", "Succeeded", "Unknown"):
-        delete_and_confirm(self, pod_name)
-        raise RuntimeError(
-            f"Kubernetes pod {pod_name!r} entered terminal phase {phase!r}"
+    try:
+      while time.monotonic() < deadline:
+        pod = self.client.read_namespaced_pod(
+            name=pod_name,
+            namespace=namespace,
+            _request_timeout=60,
         )
-      self.logger.info(
-          "Waiting for Kubernetes pod %s; phase=%s remaining=%ss",
-          pod_name,
-          phase,
-          max(0, int(deadline - time.monotonic())),
+        phase = str(pod.status.phase)
+        last_status = pod_status_summary(pod)
+        if phase == "Running":
+          self.container = pod
+          self.logger.info("Kubernetes pod %s is Running", pod_name)
+          return
+        if phase in ("Failed", "Succeeded", "Unknown"):
+          delete_and_confirm(self, pod_name)
+          raise RuntimeError(
+              f"Kubernetes pod {pod_name!r} entered terminal phase {phase!r}"
+          )
+        self.logger.info(
+            "Waiting for Kubernetes pod %s; phase=%s remaining=%ss",
+            pod_name,
+            phase,
+            max(0, int(deadline - time.monotonic())),
+        )
+        time.sleep(5)
+      print(
+          "[P34.R2E] KUBERNETES_START_TIMEOUT "
+          f"pod={pod_name} timeout_seconds={timeout} {last_status}",
+          flush=True,
       )
-      time.sleep(5)
-    print(
-        "[P34.R2E] KUBERNETES_START_TIMEOUT "
-        f"pod={pod_name} timeout_seconds={timeout} {last_status}",
-        flush=True,
-    )
-    delete_and_confirm(self, pod_name)
-    raise TimeoutError(
-        f"Kubernetes pod {pod_name!r} did not start within {timeout}s; "
-        f"{last_status}"
-    )
+      delete_and_confirm(self, pod_name)
+      raise TimeoutError(
+          f"Kubernetes pod {pod_name!r} did not start within {timeout}s; "
+          f"{last_status}"
+      )
+    finally:
+      runtime_time["sandbox_start_latency"] += max(
+          0.0, time.perf_counter() - start_started
+      )
 
   def start_container_fail_closed(
       self, docker_image: str, command: str, ctr_name: str, **docker_kwargs

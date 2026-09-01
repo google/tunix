@@ -15,9 +15,10 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import concurrent.futures
 import inspect
-import threading
 import queue
+import threading
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -29,6 +30,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
+from tunix.rl import alignment
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.rollout import base_rollout
 
@@ -349,6 +351,39 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     )
     with self.assertRaisesRegex(RuntimeError, "refusing subset alignment"):
       next(batches)
+
+  def test_p58_partial_consumer_propagates_producer_timeout(self):
+    learner = object.__new__(DummyLearner)
+    data = queue.Queue()
+    for value in range(2):
+      data.put(value)
+    data.put(None)
+    producer_future = concurrent.futures.Future()
+    producer_future.set_exception(
+        TimeoutError("rollout batch exceeded hard timeout: 32/128")
+    )
+    batches = learner._data_consumer_batch_generator(
+        data,
+        8,
+        require_full_batch=True,
+        producer_future=producer_future,
+        contract_name="P58",
+    )
+    with self.assertRaisesRegex(TimeoutError, "32/128"):
+      next(batches)
+
+  def test_p58_full_batch_group_contract_rejects_missing_generation(self):
+    groups = []
+    for group_id in range(8):
+      width = 15 if group_id == 7 else 16
+      groups.append([
+          SimpleNamespace(group_id=group_id, pair_index=pair_index)
+          for pair_index in range(width)
+      ])
+    with self.assertRaisesRegex(
+        alignment.AlignmentGateError, "generation count changed"
+    ):
+      agentic_rl_learner._validate_p58_full_batch_groups(groups)
 
   def test_normal_consumer_keeps_legacy_partial_tail_behavior(self):
     learner = object.__new__(DummyLearner)

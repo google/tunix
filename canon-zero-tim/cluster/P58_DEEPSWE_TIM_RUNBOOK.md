@@ -1,6 +1,48 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
-## P58.35 K26 trainer-local commit and fresh K27
+## P58.36 K28 rollout-coverage repair and fresh K29
+
+K28 completed and synchronized Step 0, then Step 1 exposed only 32 of the
+required 128 rows to the consumer. The downstream artifact assertion was
+correct but obscured the producer timeout. P58.36 fixes ownership rather than
+relaxing shape: all 128 collectors share one start; late collectors receive
+only remaining time; ordinary expiries become compact zero-mask rows; partial
+coverage propagates the producer error before reward, rescore, artifact,
+forward, backward, or optimizer work.
+
+The timeout ladder is exact and must not be hand-tuned:
+
+| Value | Scope |
+|---:|---|
+| 3,000 s | shared trajectory deadline for each of the 128 collectors |
+| 3,300 s | R2E sandbox active deadline = trajectory + cleanup margin |
+| 3,600 s | rollout batch watchdog = sandbox deadline + drain margin |
+
+The 128-row artifact check remains hard. Cleanup failures remain fatal. Every
+complete batch now records stage p50/p90/p99/max plus eight group completion
+times in the durable metrics JSON and W&B `deepswe/timing/*`.
+
+Render K29 only from the final clean remote-read SHA:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k29.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k29 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Preflight must confirm B8xG16=128, max concurrency 128, rollout max sequences
+128, 3,000/3,300/3,600, disabled checkpointing, TPU optimizer, and the exact
+4x4x8 exclusive topology. Require eight `[P58.36.GROUP] COMPLETE` markers.
+Do not call the repair proved at Step 0: K28 already passed Step 0; K29 must
+cross the Step-1 coverage boundary.
+
+## HISTORICAL — P58.35 K26 trainer-local commit and fresh K27
 
 K26 completed strict A=B=C over 383,383 action tokens, all sixteen backward
 groups, finite nonzero precommit, and one TPU-resident trainer-local Adam
