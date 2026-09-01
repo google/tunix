@@ -17,11 +17,9 @@
 from __future__ import annotations
 
 import collections
-import gc
 import inspect
 import ipaddress
 import os
-import resource
 import socket
 from typing import Any, List, Optional, Tuple
 
@@ -29,14 +27,6 @@ from absl import logging
 import jax
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
-
-
-def _log_rss(tag: str) -> None:
-  """Logs process peak RSS (GB) -- pinpoints which bind() stage spikes host
-  memory, since ru_maxrss is a high-water mark that only grows.
-  """
-  rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
-  logging.info("raiden bind rss checkpoint [%s]: %.1f GB (peak)", tag, rss_gb)
 
 _ws_lib: Any = None
 try:
@@ -113,29 +103,6 @@ def unpack_ip(row: Any) -> str:
   return f"[{addr_str}]" if ":" in addr_str else addr_str
 
 
-def to_host_cpu_state(state: Any) -> Any:
-  """Pulls arrays to client host memory; proxy arrays cannot bind directly."""
-  cpu = jax.local_devices(backend="cpu")[0]
-  leaves, treedef = jax.tree_util.tree_flatten(state)
-  del state
-  new_leaves = []
-  for i in range(len(leaves)):
-    leaf = leaves[i]
-    leaves[i] = None
-    arr = getattr(leaf, "value", leaf)
-    if hasattr(arr, "shape") and hasattr(arr, "dtype"):
-      new_leaves.append(jax.device_put(jax.device_get(arr), cpu))
-    else:
-      new_leaves.append(leaf)
-    del leaf, arr
-    # Periodically run GC to release Pathways proxy transit buffers incrementally
-    if i % 4 == 3:
-      gc.collect()
-  del leaves
-  gc.collect()
-  return jax.tree_util.tree_unflatten(treedef, new_leaves)
-
-
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
   """Returns (names, arrays) for every array leaf, in stable tree order."""
   names, arrays = [], []
@@ -151,10 +118,7 @@ def _bindable(arr: Any, allow_proxy: bool = False) -> bool:
   """True if the native layer can bind this leaf.
 
   Binding an unsupported leaf (e.g. RNG keys) can SIGSEGV, so only
-  floating-point, rank>=1, fully TPU- or CPU-resident arrays qualify. CPU is
-  allowed because host_stage deliberately copies proxy-backed (Pathways)
-  arrays to host CPU memory before bind() gets here -- rejecting "not TPU"
-  would drop every leaf it just staged.
+  floating-point, rank>=1, fully TPU- or CPU-resident arrays qualify.
   """
   try:
     if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
@@ -252,7 +216,6 @@ class RaidenSynchronizer:
       *,
       worker_index: int = 0,
       auto_h2d: bool = False,
-      host_stage: bool = False,
       use_ffi: Optional[bool] = None,
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
@@ -266,7 +229,6 @@ class RaidenSynchronizer:
     self.arrays: List[Any] = []
     self.ip = bind_ip or local_ip()
     self._auto_h2d = auto_h2d
-    self._host_stage = host_stage
     self._use_ffi = use_ffi
     self._parallelism = parallelism
     self._sync: Any = None
@@ -283,6 +245,8 @@ class RaidenSynchronizer:
 
   @property
   def active(self) -> bool:
+    if self._use_ffi:
+      return bool(self.names)
     return self._sync is not None or bool(self._ips)
 
   @property
@@ -423,19 +387,11 @@ class RaidenSynchronizer:
         _raiden_ffi.multi_h2d(self.arrays, self._ffi_shard_idx, self._ffi_mesh)
     )
 
-  def bind(self, state: Any, already_staged: bool = False) -> None:
+  def bind(self, state: Any) -> None:
     """Binds this host's weights, or rebinds them after a training step."""
-    _log_rss("bind:start")
-    self.names = []
-    self.arrays = []
-    if self._host_stage and not already_staged and not self._use_ffi:
-      state = to_host_cpu_state(state)
-    _log_rss("bind:after_host_stage")
     self.names, self.arrays = _filter_bindable(
         *flatten_weights(state), allow_proxy=self._use_ffi
     )
-    del state
-    _log_rss("bind:after_flatten")
     logging.info(
         "%s bind prepared %d arrays (use_ffi=%s)",
         self.job_name,
@@ -473,7 +429,6 @@ class RaidenSynchronizer:
           bind_ip=None,
           auto_h2d=self._auto_h2d,
       )
-      _log_rss("bind:after_native_construct")
       logging.info(
           "%s native WeightSynchronizer ready: data_port=%s listener_port=%s num_shards=%s",
           self.job_name,
@@ -484,7 +439,6 @@ class RaidenSynchronizer:
     else:
       logging.info("%s rebinding %d arrays", self.job_name, len(self.arrays))
       self._sync.bind_weights(self.arrays)
-      _log_rss("bind:after_native_rebind")
 
   def _require_sync(self, op: str) -> Any:
     if self._sync is None and not self._use_ffi:
@@ -521,10 +475,6 @@ class RaidenSynchronizer:
       self._sync.h2d()
     if self.arrays:
       jax.block_until_ready(self.arrays)
-
-  def release_host_arrays(self) -> None:
-    """Drops host-staged array references to reclaim memory between sync rounds."""
-    self.arrays = []
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}

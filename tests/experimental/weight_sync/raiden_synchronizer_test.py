@@ -344,14 +344,6 @@ class RaidenSynchronizerTest(absltest.TestCase):
     )
     self.assertTrue(callable(decorator))
 
-  def test_release_host_arrays(self):
-    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
-    self.assertTrue(sync.bound)
-    self.assertNotEmpty(sync.arrays)
-    sync.release_host_arrays()
-    self.assertEmpty(sync.arrays)
-    self.assertTrue(sync.bound)
-
 
 if __name__ == "__main__":
   absltest.main()
