@@ -46,11 +46,12 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
 ```
 
 Retain Qwen3-4B-Instruct-2507, 128 v5p devices split rollout/trainer as
-DP8xTP8 each, B8xG16, concurrency/max-seqs 128, 16K response, 50 turns,
-1,000 updates, TiTO, TPU-resident optimizer, disabled checkpoints, and the
-narrow finite A-B warning lane. Step 0 is necessary but not sufficient; K29
-must return a complete Step-1 128-row batch or surface the real producer error
-before downstream work. See
+DP8xTP8 each, B8xG16, global concurrency 128, and
+`rollout_vllm_max_num_seqs=16` per rollout DP rank (DP8 x 16 = 128 aggregate
+slots). Retain 16K response, 50 turns, 1,000 updates, TiTO, TPU-resident
+optimizer, disabled checkpoints, and the narrow finite A-B warning lane. Step
+0 is necessary but not sufficient; K29 must return a complete Step-1 128-row
+batch or surface the real producer error before downstream work. See
 `phases/p58-36-k28-batch-deadline-partial-consumer.md`.
 
 ## HISTORICAL — P58.35 K26 committed locally; K27 was fresh

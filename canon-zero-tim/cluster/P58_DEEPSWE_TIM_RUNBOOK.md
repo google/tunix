@@ -36,9 +36,11 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --worker-nodepool <pool-or-auto>
 ```
 
-Preflight must confirm B8xG16=128, max concurrency 128, rollout max sequences
-128, 3,000/3,300/3,600, disabled checkpointing, TPU optimizer, and the exact
-4x4x8 exclusive topology. Require eight `[P58.36.GROUP] COMPLETE` markers.
+Preflight must confirm B8xG16=128, max concurrency 128, and
+`rollout_vllm_max_num_seqs=16` per rollout DP rank, so DP8 x 16 provides 128
+aggregate slots. Also require 3,000/3,300/3,600, disabled checkpointing, TPU
+optimizer, and the exact 4x4x8 exclusive topology. Require eight
+`[P58.36.GROUP] COMPLETE` markers.
 Do not call the repair proved at Step 0: K28 already passed Step 0; K29 must
 cross the Step-1 coverage boundary.
 
