@@ -363,6 +363,7 @@ def _create_vllm_sampler(args):
       server_id=args.worker_id,
       engine_args=engine_args,
       model_name=vllm_model,
+      weight_sync_mode=args.weight_sync_mode,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

@@ -371,7 +371,7 @@ class RolloutWorker(abstract_worker.Worker):
     if prompt_token_arr.size == 0:
       raise RuntimeError(
           "Sampler response is missing prompt_token_ids for "
-          f"{request.request_id}."
+          f"request_id={request.request_id!r} traj_id={request.traj_id!r}."
       )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)

@@ -54,12 +54,12 @@ class RolloutWorkerTest(parameterized.TestCase):
     self.service.stop()
 
   def test_sampler_config_types(self):
-    """Verifies sampler_type='vllm' raises NotImplementedError."""
+    """Verifies unknown sampler_type raises ValueError."""
     from tunix.experimental.rollout import manager as manager_lib  # pylint: disable=g-import-not-at-top
 
-    config_vllm = worker.RolloutConfig(sampler_type="vllm")
-    with self.assertRaises(NotImplementedError):
-      manager_lib.RolloutManager(config=config_vllm)
+    config_invalid = worker.RolloutConfig(sampler_type="unknown")
+    with self.assertRaises(ValueError):
+      manager_lib.RolloutManager(config=config_invalid)
 
   def test_single_trajectory_generation(self):
     """Verifies single multi-turn episode execution."""

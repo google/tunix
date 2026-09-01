@@ -25,6 +25,25 @@ import jax
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 
+
+def _log_rss(tag: str) -> None:
+  """Logs process peak RSS (GB) -- pinpoints which bind() stage spikes host
+
+  memory, since ru_maxrss is a high-water mark that only grows.
+
+  Off by default; enable with --v=1. `resource` is imported lazily because it
+  is Unix-only.
+  """
+  if not logging.vlog_is_on(1):
+    return
+  import resource  # pylint: disable=g-import-not-at-top
+
+  rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+  logging.vlog(
+      1, "raiden bind rss checkpoint [%s]: %.1f GB (peak)", tag, rss_gb
+  )
+
+
 _ws_lib: Any = None
 try:
   from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
@@ -51,16 +70,33 @@ def local_ip() -> str:
 
 
 def to_host_cpu_state(state: Any) -> Any:
-  """Pulls arrays to client host memory; proxy arrays cannot bind directly."""
-  cpu = jax.local_devices(backend="cpu")[0]
+  """Pulls arrays to client host memory; proxy arrays cannot bind directly.
 
-  def pull(leaf):
+  TODO: drop the explicit source-buffer deletion below once the FFI path is
+  enabled -- FFI releases the transit buffers itself.
+  """
+  cpu = jax.local_devices(backend="cpu")[0]
+  leaves, treedef = jax.tree_util.tree_flatten(state)
+  del state
+  new_leaves = []
+  for i in range(len(leaves)):
+    leaf = leaves[i]
+    leaves[i] = None
     arr = getattr(leaf, "value", leaf)
     if hasattr(arr, "shape") and hasattr(arr, "dtype"):
-      return jax.device_put(jax.device_get(arr), cpu)
-    return leaf
-
-  return jax.tree_util.tree_map(pull, state)
+      new_leaves.append(jax.device_put(jax.device_get(arr), cpu))
+      # Release the Pathways proxy transit buffer immediately; deleting is far
+      # cheaper than the gc.collect() sweep this replaces.
+      if hasattr(arr, "delete"):
+        try:
+          arr.delete()
+        except Exception:  # pylint: disable=broad-except
+          pass
+    else:
+      new_leaves.append(leaf)
+    del leaf, arr
+  del leaves
+  return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
@@ -75,22 +111,33 @@ def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
 
 
 def _bindable(arr: Any) -> bool:
-  """True if the native layer can bind this leaf."""
+  """True if the native layer can bind this leaf.
+
+  Binding an unsupported leaf (e.g. RNG keys) can SIGSEGV, so only
+  floating-point, rank>=1, fully TPU- or CPU-resident arrays qualify. CPU is
+  allowed because host_stage deliberately copies proxy-backed (Pathways)
+  arrays to host CPU memory before bind() gets here -- rejecting "not TPU"
+  would drop every leaf it just staged.
+  """
   try:
+    if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
+      return False
+    if arr.ndim < 1:
+      return False
+    if not jnp.issubdtype(arr.dtype, jnp.floating):
+      return False
     devices = arr.devices()
-  except AttributeError:
+    if not devices:
+      return False
+    return all(getattr(d, "platform", "?") in ("tpu", "cpu") for d in devices)
+  except Exception:
     return False
-  on_local_hw = all(
-      getattr(d, "platform", "?") in ("cpu", "tpu") for d in devices
-  )
-  return on_local_hw and jnp.issubdtype(arr.dtype, jnp.number)
 
 
 def _filter_bindable(
     names: List[str], arrays: List[Any]
 ) -> Tuple[List[str], List[Any]]:
-  """Drops leaves the native layer cannot bind; binding them is undefined
-  behavior (observed: random RuntimeError or SIGSEGV on RNG-key arrays)."""
+  """Drops leaves _bindable rejects."""
   logging.vlog(
       1,
       "raiden bind census: %s",
@@ -103,6 +150,12 @@ def _filter_bindable(
   dropped = []
   for name, arr in zip(names, arrays):
     if _bindable(arr):
+      if hasattr(arr, "block_until_ready"):
+        try:
+          # binding an in-flight buffer is part of what SIGSEGVs
+          arr.block_until_ready()
+        except Exception:
+          pass
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
@@ -184,14 +237,18 @@ class RaidenSynchronizer:
     return self._sync is not None
 
   def bind(self, state: Any) -> None:
-    """Binds this host's weights, or rebinds them after a training step.
-
-    With host_stage the arrays are copied to local CPU memory first; arrays
-    backed by the pathways proxy cannot bind in place.
-    """
+    """Binds or rebinds weights to the Raiden transport."""
+    _log_rss("bind:start")
+    # Clear previous buffers before staging to avoid holding duplicate weight
+    # copies in host memory during rebinds.
+    self.names = []
+    self.arrays = []
     if self._host_stage:
       state = to_host_cpu_state(state)
+    _log_rss("bind:after_host_stage")
     self.names, self.arrays = _filter_bindable(*flatten_weights(state))
+    del state
+    _log_rss("bind:after_flatten")
     if _ws_lib is None:
       return
     if self._sync is None:
@@ -206,8 +263,10 @@ class RaidenSynchronizer:
           bind_ip=None,
           auto_h2d=self._auto_h2d,
       )
+      _log_rss("bind:after_native_construct")
     else:
       self._sync.bind_weights(self.arrays)
+      _log_rss("bind:after_native_rebind")
 
   def _require_sync(self, op: str) -> Any:
     if self._sync is None:
@@ -225,6 +284,11 @@ class RaidenSynchronizer:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     if self._sync is not None:
       self._sync.h2d()
+      jax.block_until_ready(self.arrays)
+
+  def release_host_arrays(self) -> None:
+    """Drops host-staged array references to reclaim memory between sync rounds."""
+    self.arrays = []
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
