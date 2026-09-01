@@ -64,15 +64,15 @@ _CPU_NODEPOOL = _DEFAULT_CPU_NODEPOOL
 # make it unschedulable; the very-high PriorityClass remains the eviction lever.
 HEAD_RESOURCES = {
     "pathways-proxy": {
-        "requests": {"cpu": "32", "memory": "200Gi"},
+        "requests": {"cpu": "8", "memory": "16Gi"},
         "limits": {"cpu": "32", "memory": "350G"},
     },
     "pathways-rm": {
-        "requests": {"cpu": "8", "memory": "32Gi"},
+        "requests": {"cpu": "4", "memory": "16Gi"},
         "limits": {"cpu": "16", "memory": "150G"},
     },
     "jax-tpu": {
-        "requests": {"cpu": "16", "memory": "64Gi"},
+        "requests": {"cpu": "16", "memory": "180Gi"},
         "limits": {"cpu": "24", "memory": "200G"},
     },
 }

@@ -759,19 +759,19 @@ class P58RendererTest(unittest.TestCase):
       manager = renderer.p34._container(services, "pathways-rm")
       main = renderer.p34._container(head["containers"], "jax-tpu")
       self.assertEqual(
-          proxy["resources"]["requests"], {"cpu": "32", "memory": "200Gi"}
+          proxy["resources"]["requests"], {"cpu": "8", "memory": "16Gi"}
       )
       self.assertEqual(
           proxy["resources"]["limits"], {"cpu": "32", "memory": "350G"}
       )
       self.assertEqual(
-          manager["resources"]["requests"], {"cpu": "8", "memory": "32Gi"}
+          manager["resources"]["requests"], {"cpu": "4", "memory": "16Gi"}
       )
       self.assertEqual(
           manager["resources"]["limits"], {"cpu": "16", "memory": "150G"}
       )
       self.assertEqual(
-          main["resources"]["requests"], {"cpu": "16", "memory": "64Gi"}
+          main["resources"]["requests"], {"cpu": "16", "memory": "180Gi"}
       )
       self.assertEqual(
           main["resources"]["limits"], {"cpu": "24", "memory": "200G"}
