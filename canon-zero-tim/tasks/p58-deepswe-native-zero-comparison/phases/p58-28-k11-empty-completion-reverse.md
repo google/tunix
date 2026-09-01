@@ -1,6 +1,15 @@
 # P58.28 — K11 prompt-only row admission in grouped reverse
 
-Status: `LOCAL REPAIR / COMPLETE PINNED-IMAGE PASS / TARGET NOT RERUN`
+Status: `SUPERSEDED IN SCOPE BY V1.P4.19 / ORIGINAL PINNED-IMAGE PASS /
+TARGET NOT RERUN`
+
+> 2026-09-01 scope correction: M15 later produced the same valid prompt-only
+> row shape at Step 61. V1.P4.19 generalizes the production grouped-reverse
+> opt-in to every registered workload after the same shared action-mask-subset
+> proof. The low-level default remains false, and DeepSWE retains the
+> `[P34.EMPTY_COMPLETION]` compatibility marker. The K11 evidence and original
+> admission result remain valid; the claim that only P34 may opt in is
+> superseded.
 
 ## Incident
 

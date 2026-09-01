@@ -267,6 +267,14 @@ Immutable incident: `canon-zero-tim/evidence/p58_k15_disaggregated_mesh_scan_inc
 
 ## START HERE — K11 prompt-only grouped-reverse repair is local, not published
 
+Scope update (2026-09-01): V1.P4.19 source CL
+`813bb7c5cb229df3bf9890d19959c988c8b9341e` supersedes the P34-only caller scope after
+M15 Step 61 produced the same valid prompt-only row shape. Production grouped
+reverse now opts in for every registered workload after the shared action-mask
+subset proof; the low-level default stays false, all-prompt-only global batches
+remain fatal, and DeepSWE keeps the `[P34.EMPTY_COMPLETION]` marker. See
+`../v1-phase4-three-full-recipes/phases/v1-p4-19-shared-empty-completion.md`.
+
 K11 is not another rollout, TiTO, dataset, topology, or alignment failure.
 Source `2f61f8fc7cf073964a9adbd30e78de872426a4d2` completed all 128
 multi-turn R2E trajectories across 32 TPU hosts, produced 427,594 action

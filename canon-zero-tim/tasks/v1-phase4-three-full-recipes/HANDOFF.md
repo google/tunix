@@ -1,5 +1,57 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — P74/P4.19 M15 Step-61 prompt-only row source is committed
+
+This section supersedes the older launch instructions below. M15 run
+`canon-p57-fl-zero-m15-mw21-6c701164` reached Step 61/300 and 48.4% solve
+rate, then stopped before backward because one rank in one DP8 group had a
+valid prompt and zero completion-valid tokens. The production grouped-reverse
+caller admitted that shape only for DeepSWE, although the shared action-mask
+subset gate already proves such a row has zero policy-action loss and zero
+cotangent.
+
+P4.19 source CL `813bb7c5cb229df3bf9890d19959c988c8b9341e` admits
+prompt-only rows for every registered grouped
+workload after that shared proof. `_p32_group_spec` remains default-false for
+direct callers; prompt validity, at least two real tokens, fixed topology and
+compiled widths remain hard. A partially empty batch stays in the fixed DP
+transaction and emits `[P32.EMPTY_COMPLETION] ...
+semantics=zero-loss-zero-gradient` for M15/FrozenLake. DeepSWE retains its
+published `[P34.EMPTY_COMPLETION]` spelling. An all-prompt-only global batch
+fails before backward because there is no policy-action gradient to commit.
+No fake token, row drop/resample, loss, reward, reduction, clipping, or
+optimizer change is part of this repair.
+
+Status: `SOURCE CL 813bb7c5 / P57 184/184 / V1 93/93 / COMPLETE P58+V1
+PINNED-IMAGE PASS / REMOTE READBACK REQUIRED / TARGET NOT RUN`. P58 ended with
+`P58_EXACT_IMAGE_CPU_PASS ... p32_empty_completion=4 regressions=1`; V1 ended
+with `V1_HP_EXACT_IMAGE_PASS ... p32_empty_completion=2 ... manifests=3`.
+Those complete outputs were observed directly and were not redirected into
+new durable evidence files. The user authorized publication of the isolated
+source and ledger CLs on 2026-09-01; do not render or launch until the pushed
+tip is read back exactly and the worktree is clean.
+
+After exact remote readback, a fresh M15 full target must return:
+
+- exact source/image/YAML identities and immutable artifact hashes;
+- the expected empty-row receipt if the shape recurs, with coordinates and
+  `zero-loss-zero-gradient` semantics;
+- every normal alignment-warning, B-C, backward-health, replica, gradient,
+  first-update, optimizer, and 300-update receipt—none are relaxed;
+- complete raw `[PERF]` rows including rollout, Rescore-B, grouped forward,
+  grouped reverse, optimizer, weight sync, group `n_real`/chunk counts, and
+  total update wall time;
+- XProf/Perfetto artifacts and their SHA ledger, because the current Step-61
+  incident contains only a tail and cannot certify the Native performance
+  gap.
+
+The current performance hypothesis is recorded—not implemented—in
+`phases/v1-p4-19-shared-empty-completion.md`: chunk count strongly tracks
+historical grouped-reverse time, but TP8 still uses one pullback program per
+layer per chunk and rank-major grouping pads each group to its longest row.
+A matched frozen-trajectory Native/Zero replay is required before changing
+either path.
+
 ## START HERE — P74/P75 full-wave routing: FrozenLake P45/M15 finite A-B warning lanes
 
 This section is the authoritative launch preparation for the next optimized

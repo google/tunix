@@ -1210,3 +1210,41 @@
   was observed directly and was not redirected to a durable raw artifact.
 - Claim: `POST-REBASE HOST PASS / IMMUTABLE-IMAGE PASS / PUBLICATION PENDING /
   P45 RESTART NOT RUN / M15 TARGET NOT RUN`.
+
+## 2026-09-01T05:12:55Z — V1.P4.19: shared prompt-only row admission
+
+- Type: code change and incident analysis.
+- Fact: M15 Step 61 failed before backward because one row in one DP8 group
+  had a valid prompt and zero completion-valid/action tokens. P58 K11 had
+  already proven the same shape is zero-loss and zero-cotangent, but the
+  production opt-in was incorrectly restricted to the P34 identity.
+- Action: generalized only the production grouped-reverse admission after the
+  shared action-mask-subset proof; retained the low-level default-false guard,
+  retained the historical P34 marker, added a generic P32 marker, and made an
+  all-prompt-only global batch fatal. Added exact M15 shape and nonempty-
+  identity regressions to both image gates.
+- Result: focused pinned-image adapter tests 4/4 and P58 loss-contract tests
+  6/6 pass; P57 host gate passes 184/184; V1 Phase4 host gate passes 93/93.
+  Complete P58/V1 pinned-image aggregates and the DP8xTP8 target have not run.
+- Files/artifacts: `phases/v1-p4-19-shared-empty-completion.md`;
+  `../../evidence/m15_step61_empty_completion_incident/`;
+  `../../../tunix/rl/canonical_qwen3_adapter.py`.
+- Rollback: revert only the P4.19 production admission/marker block and its
+  focused tests/docs; do not delete the immutable incident evidence or the
+  older P58 K11 admission.
+- Next: run both complete pinned-image aggregates on the final local tree and
+  stop for publication review.
+
+## 2026-09-01T05:38:00Z — V1.P4.19 complete image admission
+
+- Complete P58 pinned-image aggregate exited zero with terminal
+  `P58_EXACT_IMAGE_CPU_PASS ... p32_empty_completion=4 regressions=1`.
+- Complete V1 pinned-image aggregate exited zero with terminal
+  `V1_HP_EXACT_IMAGE_PASS ... p32_empty_completion=2 ... manifests=3`.
+- The complete outputs were observed directly and were not redirected into
+  new durable evidence files. No target, optimizer commit, manifest render,
+  image publication, source commit, push, or other remote mutation occurred.
+- Claim: `LOCAL IMPLEMENTATION COMPLETE / PINNED-IMAGE PASS / TARGET NOT RUN`.
+  The user approved an isolated commit/push on 2026-09-01. Runtime and tests
+  are committed as `813bb7c5cb229df3bf9890d19959c988c8b9341e`; this ledger
+  remains the separate delivery CL. Performance changes stay out of both CLs.
