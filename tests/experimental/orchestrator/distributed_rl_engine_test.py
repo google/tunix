@@ -51,6 +51,8 @@ class MockActorHandle(mock.MagicMock):
     self.save_checkpoint = mock.AsyncMock()
     self.restore_checkpoint = mock.AsyncMock()
     self.get_metrics = mock.AsyncMock(return_value={})
+    self.get_target_state = mock.AsyncMock(return_value={"params": 1})
+    self.set_target_state = mock.AsyncMock()
 
   async def asubmit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -414,6 +416,41 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_prepare_rollout_policy_sets_target_state_and_bootstraps_sync(self):
+    async def _run():
+      class _FakeResult:
+        policy_version = 0
+
+      class _FakeCoordinator:
+
+        def __init__(self):
+          self.calls = []
+
+        async def sync(self, policy_version=0, **kwargs):
+          del kwargs
+          self.calls.append(policy_version)
+          _FakeResult.policy_version = policy_version
+          return _FakeResult
+
+      coordinator = _FakeCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+          weight_sync_coordinator=coordinator,
+      )
+
+      version = await engine.prepare_rollout_policy()
+
+      self.assertEqual(version, 0)
+      self.mock_rollout_1.get_target_state.assert_called_once_with()
+      self.mock_actor.set_target_state.assert_called_once_with(
+          target_state={"params": 1}
+      )
+      self.assertEqual(coordinator.calls, [0])
+
+    asyncio.run(_run())
+
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
       with self.assertRaises(RuntimeError):
@@ -617,7 +654,6 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.assertLen(requests_none, 1)
     self.assertIsNone(requests_none[0].metadata["env_config"])
 
-
     # 3. env_config is omitted
     requests_omitted = self.engine._build_rollout_requests(
         [{"prompt": "p3", "prompt_id": "p3"}],
@@ -626,7 +662,6 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
     self.assertLen(requests_omitted, 1)
     self.assertNotIn("env_config", requests_omitted[0].metadata)
-
 
   def test_dispatch_rollouts_passes_generation_args_and_route_metadata(self):
     async def _run():

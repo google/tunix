@@ -179,6 +179,10 @@ class Sampler(Protocol):
     ...
 
   # --- Weight Synchronization ---
+  def get_target_state(self) -> Any:
+    """Returns target state shape/dtype pytree for weight conversion."""
+    ...
+
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sharding specs and layout metadata across devices for policy model weights."""
     ...

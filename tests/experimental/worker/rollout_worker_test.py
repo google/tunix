@@ -15,6 +15,9 @@
 """Unit tests for RolloutWorker and lineage telemetry generation."""
 
 import asyncio
+import threading
+from unittest import mock
+
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -112,6 +115,38 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertEqual(
         resp_ctx.events[0].attributes.get("worker_id"), "rollout_worker_42"
     )
+
+  def test_initialize_only_runs_sampler_once_under_concurrency(self):
+    enter_init = threading.Event()
+    release_init = threading.Event()
+
+    def _initialize():
+      enter_init.set()
+      release_init.wait(timeout=1.0)
+
+    responses = []
+
+    def _call_initialize():
+      responses.append(self.worker.initialize())
+
+    t1 = threading.Thread(target=_call_initialize)
+    t2 = threading.Thread(target=_call_initialize)
+    with mock.patch.object(
+        self.sampler, "initialize", side_effect=_initialize
+    ) as init_mock:
+      t1.start()
+      self.assertTrue(enter_init.wait(timeout=1.0))
+      t2.start()
+      release_init.set()
+      t1.join(timeout=1.0)
+      t2.join(timeout=1.0)
+
+    self.assertFalse(t1.is_alive())
+    self.assertFalse(t2.is_alive())
+    self.assertEqual(init_mock.call_count, 1)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
+    self.assertLen(responses, 2)
+    self.assertEqual(sum(bool(r.metadata.get("ready")) for r in responses), 1)
 
 
 if __name__ == "__main__":
