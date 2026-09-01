@@ -260,6 +260,34 @@ class P58EnvironmentContractTest(unittest.TestCase):
     deepswe_contract.validate_environment(values)
     self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
 
+  def test_p58_environment_rejects_checkpoint_enablement_before_launch(self):
+    supplied = os.environ.copy()
+    rendered = self._rendered_env("zero", "full")
+    rendered["CANON_RUN_CMD"] = rendered["CANON_RUN_CMD"].replace(
+        "--ckpt_dir=none", "--ckpt_dir=/tmp/p58-checkpoints"
+    )
+    supplied.update(rendered)
+    supplied.update({
+        "CANON_PKG": str(PKG),
+        "INJECTED_HF_TOKEN": "test-hf-token",
+        "INJECTED_WANDB_API_KEY": "test-wandb-key",
+    })
+    with tempfile.TemporaryDirectory() as state_dir:
+      supplied["CANON_STATE"] = state_dir
+      completed = subprocess.run(
+          ["bash", str(PKG / "cluster/steps/00_env.sh")],
+          cwd=ROOT,
+          env=supplied,
+          check=False,
+          text=True,
+          capture_output=True,
+      )
+    self.assertNotEqual(completed.returncode, 0)
+    self.assertIn(
+        "P58 precomputed-gradient training requires exact --ckpt_dir=none",
+        completed.stderr,
+    )
+
   def test_native_is_renderer_environment_survives_authoritative_reload(self):
     completed, resolved, values = self._persisted(
         "native", "full", sampler_is=True

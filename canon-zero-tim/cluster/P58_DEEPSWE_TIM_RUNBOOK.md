@@ -1,5 +1,46 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
+## P58.33 K24 checkpoint-disabled execution boundary
+
+K24 completed the full rollout, strict A=B=C, all forward groups, the full
+Pallas VJP, and reverse group 1/16, then failed before accumulator mutation:
+P58 had inherited P34 checkpoint arguments, while P28 admits checkpointing
+for precomputed gradients only under the P45 checkpoint contract. K24 made
+zero optimizer commits and is not resumable.
+
+All P58 Native, Native+IS, Zero, diagnostic, three-update, and full renders
+must now have exactly one `--ckpt_dir=none` and no
+`--save_interval_steps`/`--max_to_keep`. This is a shared recipe field. The
+renderer, shell startup, and Python CLI fail closed on drift. Before model
+initialization require:
+
+```text
+[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported
+```
+
+Render a fresh K25 only from the final clean remote readback SHA and its
+matching digest-pinned image:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k25.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k25 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Inspect `CANON_RUN_CMD` before apply. Do not resume K24 and do not add a
+checkpoint path manually. Trajectory/debug/report/W&B durability remains;
+trainer/optimizer resume does not. Require all 16 reverse groups and the first
+valid commit, but no checkpoint receipt. P58.32 warning-only remains exactly
+as described below; the claim ceiling remains alignment-degraded convergence.
+Before publication, retain focused 57/57, `P34_STATIC_PASS suites=10`, the
+409/409 flag audit, and the terminal `P58_EXACT_IMAGE_CPU_PASS` receipt.
+
 ## P58.32 production Zero-HP warning boundary
 
 The exact Qwen3-4B Zero-HP full production profile now derives
@@ -81,8 +122,8 @@ not replace the clean-source or DP8 target gates.
 
 After separately approved source/image publication and launch, require all
 16 `reverse_group_done` receipts, finite nonzero gradients, exact replicas,
-exactly one first optimizer transaction, and a durable checkpoint. Any
-geometry drift must fail before backward. See
+exactly one first optimizer transaction, and the checkpoint-disabled startup
+receipt. Any geometry drift must fail before backward. See
 `phases/p58-31-k23-gradient-accumulation.md`.
 
 ## K22 grouped-trainer axis identity gate
@@ -987,7 +1028,8 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
 At update 0 require exactly two `[V1.FIRST_UPDATE]` JSON receipts: precommit
 must show workload `p58-qwen4b-tim-128`, DP8/TP8, 16 microsteps, denominator
 16, all-finite/nonzero stable norm in `(0,1e6]`; commit must show one valid
-optimizer transaction and `train_steps 0 -> 1` before outer sync/checkpoint.
+optimizer transaction and `train_steps 0 -> 1` before outer sync. P58.33
+requires checkpoint-disabled mode, so no trainer checkpoint write is expected.
 Also require `[P59.CHECKED_VMA]` and `[P63.STABLE_CLIP]` receipts. If these pass,
 continue the same job to 1,000 commits. Do not stop at one or three updates.
 The P59/checked-VMA marker count follows ordered backward attempts, whereas

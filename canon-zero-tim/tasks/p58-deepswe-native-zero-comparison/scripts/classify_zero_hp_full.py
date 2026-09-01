@@ -257,6 +257,9 @@ def classify(
   if re.search(r"^\[CANON_ALIGN(?:_PRE)?\].*verdict=FAIL", text, re.MULTILINE):
     reasons.append("alignment_fail")
   marker_counts = {
+      "checkpoint_disabled": text.count(
+          "[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported"
+      ),
       "trainer_placement": text.count(
           "[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint "
           "rollout_devices=64 trainer_devices=64 execution_role=trainer"
@@ -315,6 +318,7 @@ def classify(
       ),
   }
   for name in (
+      "checkpoint_disabled",
       "trainer_placement",
       "trainer_scorer",
       "trainer_model_jits",

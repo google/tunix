@@ -1,15 +1,14 @@
 # Plan
 
-## Active phase: P58.32 Zero-HP A-B warning admission
+## Active phase: P58.33 K24 checkpoint-disabled precomputed training
 
-Before the next P58 production retry, admit finite decode-vs-prefill A-B only
-for the exact Qwen3-4B Zero-HP full identity. Preserve strict B-C and
-T_old-current boundaries and every nonfinite/shape/gradient/replica/optimizer
-gate. Validate positive and negative policy controls, renderer/profile/shell
-contracts, classifiers, P34 static, flag registry, and the digest-pinned image
-before requesting publication. The next target remains separately approved
-and can measure convergence only; strict Zero-TIM certification is deferred
-until the carrier is repaired and a strict target passes.
+K24 proved the P58.31 accumulation repair through reverse group 1/16, then
+failed before mutation because P58 inherited checkpoint CLI that P28's
+precomputed-gradient contract does not admit. Disable trainer checkpointing
+for every P58 arm/stage with exact `--ckpt_dir=none`, remove save-cadence
+arguments, and fail before model initialization on drift. Preserve P58.32's
+narrow finite A-B warning policy and every hard numerical/optimizer boundary.
+The next target is fresh and separately approved; K24 is not resumable.
 
 ## Outcome
 
@@ -143,9 +142,11 @@ commit remain unreachable.
 | P58.28 | K11 prompt-only grouped-reverse admission | Only validated DeepSWE may admit prompt-only rows; their loss/output/cotangent is exactly zero, single-turn callers remain fail-closed, exact K11 DP8 geometry and complete pinned-image gates pass | completed for its grouped-reverse scope; K15 crossed that boundary and reached the first P71 scan trace |
 | P58.29 | K15 disaggregated lazy-scan execution mesh | All four lazy segmented scan JITs enter the trainer execution-mesh scope in disaggregated mode; a disjoint four-device positive executes every scan and a colocated negative preserves callable identity; complete pinned-image gate passes | completed for its scan scope; K22 crossed the former scan failure and reached the post-pullback reducer boundary |
 | P58.30 | K22 grouped-trainer data-axis identity | Grouped reverse derives its reducer axis solely from the trainer state's admitted `dp/tp` or `data/model` mesh, never from a serving adapter alias; both positive identities and an unsupported-mesh negative pass in the complete pinned-image gate | completed for its reducer-axis scope; K23 emitted `dp`, completed group 1/16, and reached accumulator validation |
-| P58.31 | K23 gradient-accumulation geometry | P58 derives an eight-trajectory DP8 streamed microbatch and sixteen accumulation groups from the signed 128-trajectory workload; launcher and learner reject drift before backward; complete pinned-image gate and bounded direct backward replay pass | active; source/host/complete pinned-image construction PASS plus dirty-diff direct-v5p DP1xTP4 classifier PASS; repaired DP8xTP8 full target not run |
+| P58.31 | K23 gradient-accumulation geometry | P58 derives an eight-trajectory DP8 streamed microbatch and sixteen accumulation groups from the signed 128-trajectory workload; launcher and learner reject drift before backward; complete pinned-image gate and bounded direct backward replay pass | completed for accumulation scope; K24 crossed it and reached checkpoint admission after one reverse group |
+| P58.32 | Zero-HP finite A-B warning admission | Only the exact Zero-HP/full production identity may warn on a finite decode-vs-prefill A-B difference; B-C, trainer-repeat, nonfinite, gradient, replica, optimizer, and evidence boundaries remain strict | completed local construction; target not run; claim ceiling is alignment-degraded convergence only |
+| P58.33 | K24 precomputed-gradient checkpoint admission | Every P58 render uses exact `--ckpt_dir=none`, omits save cadence, fails before model initialization on drift, and postflight requires the disabled-checkpoint receipt | active; local construction and complete pinned-image gate PASS; repaired target not run |
 
-At most one phase may be active. P58.31 is the active construction repair and
+At most one phase may be active. P58.33 is the active construction repair and
 no target launch is active. Commit, push, image publication, Kubernetes render/application, and
 each later TPU execution remain separately user-gated.
 
@@ -338,6 +339,7 @@ untouched.
 | Sampling | temperature 1.0; top-p and top-k must resolve identically in both arms and be printed in the signed receipt |
 | Topology per arm | 128 TPU total: rollout DP8 x TP8 = 64 and trainer DP8 x TP8 = 64, synchronous disaggregated |
 | Optimizer placement | TPU resident; host offload forbidden |
+| Checkpoint | disabled for every P58 arm/stage with exact `--ckpt_dir=none`; trainer/optimizer resume unsupported |
 | Objective | RLOO, `sequence-mean-token-scale`, epsilon 0.20 / 0.28, beta 0 |
 | Optimizer | Adam learning rate 1e-6, betas 0.9/0.99, weight decay 0.01, global grad clip 1.0 |
 | Update structure | prompt-counted `batch_size=8`, `mini_batch_size=8`; trajectory mini-batch 128; trajectory micro-batch 16; eight equal-size accumulation calls |
@@ -410,7 +412,8 @@ throughput is considered only when sandbox-start timeout metrics are zero and
 
 - Source, base checkpoint, clean-data bytes and ordering, prompt assignment,
   seed schedule, sampling parameters, topology, optimizer, objective, deadline,
-  checkpoint cadence, and observer schema are byte- or value-equal.
+  checkpoint mode, and observer schema are byte- or value-equal. P58
+  checkpoint mode is disabled in every arm/stage; there is no save cadence.
 - `native` preserves the registered stock numerical implementation bundle.
   Finite A-B, B-T_old, and T_old-T_current differences and their finite ratio
   consequences are treatment observations. Nonfinite values, invalid shapes,

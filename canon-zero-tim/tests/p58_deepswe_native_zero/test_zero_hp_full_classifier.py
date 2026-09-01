@@ -134,6 +134,7 @@ def _fixture(
       "zero_ab_warning_policy_observed": True,
   }))
   lines = [
+      "[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported",
       "[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint "
       "rollout_devices=64 trainer_devices=64 execution_role=trainer",
       "[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound "
@@ -351,6 +352,27 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(result["verdict"], "FAIL")
       self.assertIn("marker.trainer_model_jits=0", result["reasons"])
+
+  def test_missing_checkpoint_disabled_receipt_is_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      log, updates, base = _fixture(root)
+      log.write_text(
+          "\n".join(
+              line
+              for line in log.read_text().splitlines()
+              if not line.startswith("[P58.CHECKPOINT]")
+          )
+          + "\n"
+      )
+      result = classifier.classify(
+          state=root,
+          run_log=log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertIn("marker.checkpoint_disabled=0", result["reasons"])
 
   def test_missing_trainer_state_contract_receipt_is_rejected(self):
     with tempfile.TemporaryDirectory() as directory:

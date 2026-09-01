@@ -88,6 +88,17 @@ class P58RendererTest(unittest.TestCase):
           self.assertIn("--max_concurrency=128", env["CANON_RUN_CMD"])
           self.assertNotIn("--max_concurrency=64", env["CANON_RUN_CMD"])
           self.assertIn("--loss_scale_factor=16384", env["CANON_RUN_CMD"])
+          args = shlex.split(env["CANON_RUN_CMD"])
+          self.assertEqual(
+              [item for item in args if item.startswith("--ckpt_dir=")],
+              ["--ckpt_dir=none"],
+          )
+          self.assertFalse(any(
+              item.startswith((
+                  "--save_interval_steps=", "--max_to_keep="
+              ))
+              for item in args
+          ))
           self.assertIn(
               "--loss_denominator_weighted_accumulation",
               env["CANON_RUN_CMD"],
@@ -178,6 +189,36 @@ class P58RendererTest(unittest.TestCase):
           worker_nodepool="tpu-pool",
       )
 
+  def test_checkpoint_disabled_is_unique_and_fail_closed(self):
+    document = self._render("zero", "full")
+    env = renderer.p34._env(document)
+    args = shlex.split(env["CANON_RUN_CMD"])
+    self.assertEqual(
+        [item for item in args if item.startswith("--ckpt_dir=")],
+        ["--ckpt_dir=none"],
+    )
+    renderer.p34._set_env(
+        renderer.p34._container(
+            renderer.p34._head(document)["containers"], "jax-tpu"
+        ),
+        {
+            "CANON_RUN_CMD": env["CANON_RUN_CMD"].replace(
+                "--ckpt_dir=none", "--ckpt_dir=/tmp/p58-checkpoints"
+            )
+        },
+    )
+    with self.assertRaisesRegex(
+        ValueError, "requires exactly one --ckpt_dir=none"
+    ):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="zero",
+          worker_nodepool="tpu-pool",
+      )
+
   def test_pair_diff_is_registered_treatment_only(self):
     native = self._render("native")
     zero = self._render("zero")
@@ -216,6 +257,7 @@ class P58RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_V1_HP_FULL"], "1")
     self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
     self.assertEqual(env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"], "1")
+    self.assertIn("--ckpt_dir=none", shlex.split(env["CANON_RUN_CMD"]))
     self.assertEqual(
         document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
         "1",

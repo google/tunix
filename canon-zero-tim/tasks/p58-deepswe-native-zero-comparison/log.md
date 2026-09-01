@@ -1,5 +1,29 @@
 # Log
 
+## 2026-09-01 UTC — P58.33 K24 checkpoint-contract incident and repair
+
+- Reconciled immutable K24 evidence. The 128-device DP8xTP8 plus DP8xTP8
+  target returned 128 trajectories, solved 6, retained 46 nonzero-advantage
+  rows, and passed strict A=B=C over 388,328 action tokens. It completed all
+  16 forward groups, the 36-layer Pallas VJP, and reverse group 1/16 with
+  exact replicas and a finite nonzero gradient.
+- K24 then failed before accumulator mutation and optimizer commit because
+  its inherited P34 command enabled checkpointing. P28's precomputed-gradient
+  checkpoint contract admits only P45. This was a fail-closed contract error,
+  not checkpoint I/O; K24 has no resumable trainer checkpoint.
+- P58 now renders exact `--ckpt_dir=none`, strips checkpoint cadence, includes
+  checkpoint mode in paired recipe equality, and validates it in renderer,
+  shell, Python startup, CLI contract, and Zero-HP postflight. The startup
+  marker is `[P58.CHECKPOINT] PASS mode=disabled cli=none
+  resume=unsupported`.
+- P58.32 remains unchanged: only finite Zero-HP/full A-B may warn, while B-C,
+  trainer-repeat, nonfinite, gradient, replica, transaction, optimizer, and
+  evidence failures remain fatal.
+- Focused contracts pass 57/57, P34 static passes ten suites, Python/Bash/diff
+  checks pass, the flag registry passes 409/409, and the complete
+  digest-pinned gate ends with `P58_EXACT_IMAGE_CPU_PASS`. No TPU/Kubernetes
+  target was launched.
+
 ## 2026-08-30 UTC — P58.28 K11 prompt-only grouped-reverse repair, local
 
 - Root cause: the shared P32 group builder treated every zero-completion row

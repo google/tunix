@@ -1,5 +1,58 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — P58.33 K24 requires a fresh checkpoint-disabled K25
+
+K24 was numerically healthy through one real DP8 reverse group: 128
+trajectories, 6 solved, strict A=B=C over 388,328 action tokens, all 16
+forward groups, all 36 Pallas VJP layers, exact replicas, and a finite nonzero
+gradient. It then stopped before accumulator mutation and optimizer commit
+because the P58 command inherited P34 checkpoint arguments. P28 admits that
+precomputed-gradient checkpoint schema only for P45 FrozenLake.
+
+K24 has zero optimizer commits and no resumable trainer checkpoint. Do not
+resume it. Render K25 with a fresh run ID from the final clean remote readback
+SHA. Every P58 arm/stage now contains exactly `--ckpt_dir=none` and contains
+neither `--save_interval_steps` nor `--max_to_keep`. Before model
+initialization, require:
+
+```text
+[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported
+```
+
+Use the production render shape below after separately approved source/image
+publication and cluster launch:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full-k25.yaml \
+  --source-commit <final-clean-readback-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id k25 \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Inspect the rendered `CANON_RUN_CMD` before apply. Checkpoint-disabled means a
+stopped P58 campaign cannot resume trainer/optimizer state; trajectory
+journals, debug/alignment/update reports, and W&B remain durable. Require all
+16 reverse groups and the first valid TPU-resident optimizer commit; do not
+wait for or claim a checkpoint receipt.
+
+P58.32 remains in force for this exact Zero-HP/full profile. The renderer
+derives `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=1`; never hand-edit it. Only a
+finite decode-vs-prefill A-B difference and its direct consequences warn.
+B-C, T_old-current, nonfinite, shape, gradient, replica, transaction,
+optimizer, OOM, and evidence failures remain fatal. Report K25 at most as
+`convergence-only / alignment-degraded`. See
+`phases/p58-33-k24-checkpoint-disabled.md` and immutable evidence
+`canon-zero-tim/evidence/p58_k24_precomputed_checkpoint_contract_incident/`.
+Construction is green: focused contracts 57/57, P34 static ten suites, flag
+audit 409/409, and the complete digest-pinned gate ends in
+`P58_EXACT_IMAGE_CPU_PASS`. This does not authorize image publication or
+cluster launch.
+
 ## START HERE — P58.32 Zero-HP full uses narrow finite A-B warnings
 
 For the next production Zero-HP full render, the exact
@@ -79,8 +132,9 @@ Do not launch from the dirty worktree. Source commit/push is explicitly
 approved for this delivery; after publication, executors must fetch and verify
 the final clean remote readback SHA. Matching-image publication and target
 launch remain separately gated. A repaired full target must complete all 16
-groups, the first optimizer transaction, and a durable checkpoint before
-anyone says training PASS. See
+groups and the first optimizer transaction before anyone says training PASS.
+P58.33 disables trainer checkpointing, so no checkpoint receipt is expected.
+See
 `phases/p58-31-k23-gradient-accumulation.md` and immutable evidence
 `canon-zero-tim/evidence/p58_k23_gradient_accumulation_mismatch_incident/`.
 

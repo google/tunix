@@ -1,5 +1,29 @@
 # State
 
+## P58.33 K24 checkpoint-disabled precomputed training (2026-09-01)
+
+- K24 completed 128 rollouts, strict A=B=C over 388,328 action tokens, all 16
+  forward groups, the 36-layer Pallas VJP, and reverse group 1/16 with exact
+  replicas and a finite nonzero gradient. It then failed before accumulator
+  mutation and optimizer commit because P58 inherited P34 checkpoint CLI
+  while P28 admits precomputed-gradient checkpointing only for P45.
+- All P58 arm/stage renders now require exact `--ckpt_dir=none` and omit save
+  cadence arguments. Renderer, shell admission, Python startup, and postflight
+  all fail closed on drift. The startup receipt is `[P58.CHECKPOINT] PASS
+  mode=disabled cli=none resume=unsupported`.
+- K24 made zero optimizer commits and has no resumable trainer checkpoint.
+  Future P58 runs also intentionally have no trainer/optimizer resume;
+  trajectory journals, debug reports, and W&B remain durable.
+- P58.32 warning-only remains unchanged for the exact Zero-HP full identity:
+  finite A-B may warn, while B-C, trainer repeat, nonfinite, gradient,
+  replica, optimizer, and evidence failures remain fatal. Claim ceiling is
+  `convergence-only / alignment-degraded`.
+- Focused contracts pass 57/57, P34 static passes ten suites, the flag audit
+  passes 409/409, and the complete digest-pinned gate ends with
+  `P58_EXACT_IMAGE_CPU_PASS`. No repaired target has run.
+- Phase: `phases/p58-33-k24-checkpoint-disabled.md`. Immutable incident:
+  `canon-zero-tim/evidence/p58_k24_precomputed_checkpoint_contract_incident/`.
+
 ## P58.32 Zero-HP finite A-B warning policy (2026-09-01)
 
 - User decision: mirror the FrozenLake narrow warning lane so the exact P58

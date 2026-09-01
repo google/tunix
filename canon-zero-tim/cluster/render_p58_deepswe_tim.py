@@ -128,6 +128,21 @@ def _command(
     if args.count(old) != 1:
       raise ValueError(f"P34 command no longer contains exactly one {old!r}")
     args[args.index(old)] = new
+  checkpoint_args = [
+      item for item in args if item.startswith("--ckpt_dir=")
+  ]
+  if len(checkpoint_args) != 1:
+    raise ValueError(
+        "P34 command no longer contains exactly one checkpoint directory"
+    )
+  args[args.index(checkpoint_args[0])] = "--ckpt_dir=none"
+  for prefix in ("--save_interval_steps=", "--max_to_keep="):
+    inherited = [item for item in args if item.startswith(prefix)]
+    if len(inherited) != 1:
+      raise ValueError(
+          f"P34 command no longer contains exactly one {prefix!r} argument"
+      )
+    args.remove(inherited[0])
   args.extend((
       f"--seed={FIXED_SEED}",
       f"--expected_filtered_rows={CLEAN_ROWS}",
@@ -543,7 +558,6 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
   omitted_prefixes = (
       "--gold_whitelist=",
       "--metric_logger_dir=",
-      "--ckpt_dir=",
       "--sampler_is=",
       "--sampler_is_threshold=",
   )
@@ -821,12 +835,30 @@ def validate(
       f"--expected_filtered_rows={CLEAN_ROWS}",
       f"--max_steps={_STAGE_STEPS[stage]}",
       "--no-optimizer-offload",
+      "--ckpt_dir=none",
   )
   seed_args = tuple(item for item in args if item.startswith("--seed="))
   if seed_args != (f"--seed={FIXED_SEED}",):
     raise ValueError(
         "P58 command requires exactly one fixed seed: "
         f"expected=--seed={FIXED_SEED} actual={seed_args}"
+    )
+  checkpoint_args = tuple(
+      item for item in args if item.startswith("--ckpt_dir=")
+  )
+  if checkpoint_args != ("--ckpt_dir=none",):
+    raise ValueError(
+        "P58 precomputed-gradient training requires exactly one "
+        f"--ckpt_dir=none argument: actual={checkpoint_args}"
+    )
+  checkpoint_cadence_args = tuple(
+      item for item in args
+      if item.startswith(("--save_interval_steps=", "--max_to_keep="))
+  )
+  if checkpoint_cadence_args:
+    raise ValueError(
+        "P58 checkpoint-disabled command contains checkpoint cadence: "
+        f"{checkpoint_cadence_args}"
     )
   missing = [item for item in required if item not in args]
   if missing:

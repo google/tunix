@@ -1859,6 +1859,19 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       echo "[env] P58 requires a TPU-resident optimizer" >&2
       fail=1
     }
+    case " ${CANON_RUN_CMD:-} " in
+      *" --ckpt_dir=none "*) ;;
+      *)
+        echo "[env] P58 precomputed-gradient training requires exact --ckpt_dir=none" >&2
+        fail=1
+        ;;
+    esac
+    case " ${CANON_RUN_CMD:-} " in
+      *" --save_interval_steps="*|*" --max_to_keep="*)
+        echo "[env] P58 checkpoint-disabled command cannot set checkpoint cadence" >&2
+        fail=1
+        ;;
+    esac
     case "${CANON_P58_TIM_ARM:-}:${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}:${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-}" in
       native:1:1|zero:0:0) ;;
       zero:1:0)

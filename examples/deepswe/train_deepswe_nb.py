@@ -320,6 +320,18 @@ if os.environ.get("CANON_P34_STRICT_CLI", "") == "1":
   args = parser.parse_args()
 else:
   args, _ = parser.parse_known_args()
+_P58_TIM_RAW = os.environ.get("CANON_P58_DEEPSWE_TIM", "0")
+if _P58_TIM_RAW not in ("0", "1"):
+  raise ValueError("CANON_P58_DEEPSWE_TIM must be exactly 0 or 1")
+if _P58_TIM_RAW == "1":
+  if args.ckpt_dir != "none":
+    raise ValueError(
+        "P58 precomputed-gradient training requires exact --ckpt_dir=none"
+    )
+  print(
+      "[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported",
+      flush=True,
+  )
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 _ONEHOST_RAW = os.environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
@@ -809,6 +821,11 @@ if P34_DEEPSWE:
       "top_k": TOP_K in (None, 0, -1),
       "top_p": TOP_P in (None, 1.0),
       "optimizer_device_resident": OPTIMIZER_OFFLOAD is False,
+      "checkpoint_disabled": (
+          args.ckpt_dir == "none" and CKPT_DIR is None
+          if p58_tim
+          else True
+      ),
       "dataset_name": args.dataset_name == "R2E-Gym/R2E-Gym-Subset",
       "dataset_revision": (
           args.dataset_revision

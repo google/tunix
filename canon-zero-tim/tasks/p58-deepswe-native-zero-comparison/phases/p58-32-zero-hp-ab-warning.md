@@ -47,6 +47,7 @@ The full digest-pinned image gate passes with `alignment_policy=1`,
 No 128-device target has run under this policy. The first separately approved
 target must retain every K23 accumulation receipt, complete all 16 backward
 groups, keep B-C/current exact, record A-B warning dose, make the intended
-first TPU-resident optimizer commit, and write a durable checkpoint. It may
+first TPU-resident optimizer commit, and emit the P58.33 checkpoint-disabled
+startup receipt. It may
 only be reported as an alignment-degraded convergence run. A later strict
 target is still required for Zero-TIM promotion.

@@ -68,6 +68,20 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn('"enable_prefix_caching": not P34_DEEPSWE', text)
     self.assertIn("scheduler_per_dp={p34.max_num_seqs_per_dp}/", text)
 
+  def test_p58_checkpoint_contract_fails_before_model_initialization(self):
+    text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    marker = (
+        "[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported"
+    )
+    gate = text.index(
+        "P58 precomputed-gradient training requires exact --ckpt_dir=none"
+    )
+    self.assertIn(marker, text)
+    self.assertLess(gate, text.index("MODEL_VERSION = args.model_version"))
+    self.assertLess(gate, text.index("MODEL_PATH ="))
+    self.assertIn('args.ckpt_dir != "none"', text)
+    self.assertIn('"checkpoint_disabled": (', text)
+
   def test_optimizer_cli_cannot_parse_false_as_true(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
     start = text.index('"--optimizer_offload"')
