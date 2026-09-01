@@ -1,0 +1,25 @@
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2038, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 4021, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1644, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9414, in segmented_dp_grpo_value_and_grad
+[rank0]:     gradient_microbatch_sink(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1601, in consume_scaled
+[rank0]:     norm = actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/sft/peft_trainer.py", line 1054, in accumulate_precomputed_scaled_gradient_microbatch
+[rank0]:     self._validate_precomputed_gradient_contract()
+[rank0]:   File "/app/tunix/sft/peft_trainer.py", line 935, in _validate_precomputed_gradient_contract
+[rank0]:     raise ValueError(
+[rank0]: ValueError: P28 G6 canary requires checkpointing disabled unless the committed P45 checkpoint contract is admitted
