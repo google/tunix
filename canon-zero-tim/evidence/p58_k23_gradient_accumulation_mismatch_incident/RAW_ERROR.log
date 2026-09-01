@@ -1,0 +1,27 @@
+[P59.DP8] gradient_reducer_ready dp_axis=dp dp_size=8 staging=parallel_table
+[P34.DP8] reverse_group_done group=1/16 rows=(0, 1, 2, 3, 4, 5, 6, 7) rank_contributions=8 pullback_invocations=1 unique_rank_fingerprints=4/8 reduction_rounds=6 replicas_exact=1 gradient_nonzero=4021619020 repeat_exact=0
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2011, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3999, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1622, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9404, in segmented_dp_grpo_value_and_grad
+[rank0]:     gradient_microbatch_sink(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1579, in consume_scaled
+[rank0]:     norm = actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/sft/peft_trainer.py", line 1054, in accumulate_precomputed_scaled_gradient_microbatch
+[rank0]:     self._validate_precomputed_gradient_contract()
+[rank0]:   File "/app/tunix/sft/peft_trainer.py", line 924, in _validate_precomputed_gradient_contract
+[rank0]:     raise ValueError(
+[rank0]: ValueError: segmented update accumulation changed: 8 != 16
