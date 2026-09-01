@@ -2650,6 +2650,91 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     )
     self.assertEqual(spec["num_chunks"], 20)
 
+  def test_p32_m15_step61_group_spec_preserves_prompt_only_dp8_row(self):
+    adapter, _ = self._make_p32_group_adapter(sequence_bucket=256)
+    adapter._data_size = 8  # pylint: disable=protected-access
+    adapter._tp_size = 8  # pylint: disable=protected-access
+    adapter._bucket = 2048  # pylint: disable=protected-access
+    adapter._max_model_len = 12_288  # pylint: disable=protected-access
+    adapter._max_num_reqs = 8  # pylint: disable=protected-access
+    prompt_lengths = jnp.asarray(
+        [1066, 1066, 1010, 1138, 1226, 1138, 1226, 1010], jnp.int32
+    )
+    completion_lengths = jnp.asarray(
+        [3686, 4081, 3377, 5766, 7967, 5038, 0, 6402], jnp.int32
+    )
+    prompt_positions = jnp.arange(4096, dtype=jnp.int32)[None, :]
+    completion_positions = jnp.arange(8192, dtype=jnp.int32)[None, :]
+    prompt_valid = prompt_positions < prompt_lengths[:, None]
+    completion_valid = completion_positions < completion_lengths[:, None]
+    prompt = jnp.where(prompt_valid, 1, 0)
+    completion = jnp.where(completion_valid, 2, 0)
+
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "requires nonempty completion on every rank",
+    ):
+      adapter._p32_group_spec(  # pylint: disable=protected-access
+          prompt,
+          completion,
+          prompt_valid,
+          completion_valid,
+          1.0,
+      )
+
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt_valid,
+        completion_valid,
+        1.0,
+        allow_empty_completion=True,
+    )
+    self.assertEqual(
+        spec["host_n_real"],
+        (4752, 5147, 4387, 6904, 9193, 6176, 1226, 7412),
+    )
+    self.assertEqual(
+        spec["host_completion_length"],
+        (3686, 4081, 3377, 5766, 7967, 5038, 0, 6402),
+    )
+    self.assertEqual(spec["num_chunks"], 36)
+    np.testing.assert_array_equal(
+        np.asarray(spec["packed_ids"])[6, :1226],
+        np.ones((1226,), dtype=np.int32),
+    )
+
+  def test_p32_nonempty_group_is_identical_when_empty_rows_are_admitted(self):
+    adapter, _ = self._make_p32_group_adapter(sequence_bucket=256)
+    row = jnp.arange(16, dtype=jnp.int32)[:, None]
+    prompt = jnp.concatenate((1 + row, 2 + row), axis=1)
+    completion = jnp.concatenate((3 + row, 4 + row), axis=1)
+    default_spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt != 0,
+        completion != 0,
+        0.7,
+    )
+    admitted_spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt,
+        completion,
+        prompt != 0,
+        completion != 0,
+        0.7,
+        allow_empty_completion=True,
+    )
+    self.assertEqual(default_spec.keys(), admitted_spec.keys())
+    for name in default_spec:
+      left = default_spec[name]
+      right = admitted_spec[name]
+      if isinstance(left, tuple):
+        self.assertEqual(left, right, name)
+      else:
+        np.testing.assert_array_equal(
+            np.asarray(left), np.asarray(right), err_msg=name
+        )
+
   def test_p59_dp4_group_spec_requires_exact_proxy_workload(self):
     adapter, _ = self._make_p32_group_adapter()
     adapter._data_size = 4  # pylint: disable=protected-access

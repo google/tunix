@@ -7533,11 +7533,12 @@ class Qwen3EngineForwardAdapter:
   ):
     """Builds one fixed-M schedule with one sequence per DP rank.
 
-    DeepSWE can preserve a turn-zero environment failure as a prompt-only
-    row.  Its completion-valid and action masks are both empty, so the row is
-    a zero-loss, zero-cotangent participant in the fixed DP transaction.  The
-    opt-in stays explicit here so single-turn P32 workloads retain their
-    historical nonempty-completion contract.
+    A registered workload can preserve a terminal or failed rollout as a
+    prompt-only row.  When its completion-valid mask is empty, the caller's
+    action-mask-subset check proves that its action mask is empty too.  The
+    row is therefore a zero-loss, zero-cotangent participant in the fixed DP
+    transaction.  The low-level opt-in stays explicit so direct callers
+    cannot silently weaken that contract.
     """
     _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
         prompt, completion, prompt_valid, completion_valid
@@ -8639,27 +8640,37 @@ class Qwen3EngineForwardAdapter:
             grouped_inputs[2][index],
             grouped_inputs[3][index],
             algo_config.temperature,
-            allow_empty_completion=p34,
+            # D3b0 proved completion_mask is a subset of
+            # completion_valid_masks above.  A prompt-only row therefore has
+            # no policy-action token and contributes exactly zero loss and
+            # cotangent, independent of the registered workload identity.
+            allow_empty_completion=True,
         )
         for index in range(contract.local_trajectories)
     )
-    if p34:
-      empty_completion_rows = tuple(
-          (group_index, rank_index)
-          for group_index, spec in enumerate(specs)
-          for rank_index, length in enumerate(
-              spec["host_completion_length"]
-          )
-          if length == 0
+    empty_completion_rows = tuple(
+        (group_index, rank_index)
+        for group_index, spec in enumerate(specs)
+        for rank_index, length in enumerate(spec["host_completion_length"])
+        if length == 0
+    )
+    if len(empty_completion_rows) == contract.global_trajectories:
+      raise FunctionalMappingError(
+          "P32 grouped reverse received an all-prompt-only batch; there is "
+          "no policy-action loss or gradient to commit"
       )
-      if empty_completion_rows:
-        print(
-            "[P34.EMPTY_COMPLETION] "
-            f"admitted_rows={len(empty_completion_rows)} "
-            f"coordinates={empty_completion_rows} "
-            "semantics=zero-loss-zero-gradient",
-            flush=True,
-        )
+    if empty_completion_rows:
+      empty_completion_marker = (
+          "P34.EMPTY_COMPLETION" if p34 else "P32.EMPTY_COMPLETION"
+      )
+      print(
+          f"[{empty_completion_marker}] "
+          f"workload={getattr(workload, 'name', 'unknown')} "
+          f"admitted_rows={len(empty_completion_rows)} "
+          f"coordinates={empty_completion_rows} "
+          "semantics=zero-loss-zero-gradient",
+          flush=True,
+      )
     report_mode = os.environ.get("CANON_P28_BATCHED_REPORT", "")
     if report_mode not in ("", "0", "1", "verify"):
       raise FunctionalMappingError(

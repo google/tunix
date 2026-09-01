@@ -61,7 +61,7 @@ class P58LossContractTest(unittest.TestCase):
     self.assertEqual(float(metric.denominator), 0.0)
     self.assertEqual(float(metric.compute()), 0.0)
 
-  def test_empty_completion_admission_is_deepswe_scoped(self):
+  def test_empty_completion_admission_is_shared_by_grouped_reverse(self):
     tree = ast.parse(ADAPTER.read_text(encoding="utf-8"))
     functions = {
         node.name: node
@@ -86,8 +86,15 @@ class P58LossContractTest(unittest.TestCase):
     self.assertEqual(len(calls), 1)
     keywords = {item.arg: item.value for item in calls[0].keywords}
     allow_value = keywords.get("allow_empty_completion")
-    self.assertIsInstance(allow_value, ast.Name)
-    self.assertEqual(allow_value.id, "p34")
+    self.assertIsInstance(allow_value, ast.Constant)
+    self.assertIs(allow_value.value, True)
+    source = ast.unparse(segmented)
+    self.assertIn(
+        "len(empty_completion_rows) == contract.global_trajectories", source
+    )
+    self.assertIn("no policy-action loss or gradient to commit", source)
+    self.assertIn("P34.EMPTY_COMPLETION", source)
+    self.assertIn("P32.EMPTY_COMPLETION", source)
 
   def test_eight_unequal_effective_microbatches_match_full_gradient(self):
     coefficients = jnp.arange(
