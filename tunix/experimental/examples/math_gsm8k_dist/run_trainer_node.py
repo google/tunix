@@ -20,7 +20,6 @@ import argparse
 import asyncio
 import contextlib
 import logging
-import math
 import os
 from pathlib import Path
 import pickle
@@ -70,8 +69,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_expert", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
-  parser.add_argument("--mini_batch_size", type=int, default=1)
-  parser.add_argument("--train_micro_batch_size", type=int, default=1)
+  parser.add_argument(
+      "--mini_batch_size",
+      type=int,
+      default=1,
+      help="Number of trajectories per optimizer update.",
+  )
+  parser.add_argument(
+      "--train_micro_batch_size",
+      type=int,
+      default=1,
+      help="Number of trajectories per forward/backward microbatch.",
+  )
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
   parser.add_argument("--compute_logps_chunk_size", type=int, default=0)
   parser.add_argument("--eval_every_n_steps", type=int, default=1000000)
@@ -329,8 +338,16 @@ def _create_tunix_trainer_factory(args) -> Any:
   actor_model = _load_actor_model(args, mesh, lora=args.use_lora)
 
   logging.info("Building PeftTrainer v2 config...")
-  grad_accumulation_steps = max(
-      1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
+  if args.mini_batch_size <= 0:
+    raise ValueError("--mini_batch_size must be positive.")
+  if args.mini_batch_size % args.train_micro_batch_size != 0:
+    raise ValueError(
+        "--mini_batch_size must be divisible by --train_micro_batch_size; "
+        f"got mini_batch_size={args.mini_batch_size}, "
+        f"train_micro_batch_size={args.train_micro_batch_size}."
+    )
+  grad_accumulation_steps = (
+      args.mini_batch_size // args.train_micro_batch_size
   )
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=args.checkpoint_save_interval_steps,
@@ -346,8 +363,11 @@ def _create_tunix_trainer_factory(args) -> Any:
       checkpoint_root_directory=args.checkpoint_root_directory,
   )
   logging.info(
-      "PeftTrainer v2 gradient_accumulation_steps=%d.",
+      "PeftTrainer v2 gradient_accumulation_steps=%d "
+      "(mini_batch_size=%d trajectories, train_micro_batch_size=%d).",
       grad_accumulation_steps,
+      args.mini_batch_size,
+      args.train_micro_batch_size,
   )
 
   def _factory():

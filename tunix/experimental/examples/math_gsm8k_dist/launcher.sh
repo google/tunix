@@ -308,6 +308,17 @@ PY
   done
 }
 
+if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
+  echo "Error: BATCH_SIZE must be divisible by MINI_BATCH_SIZE."
+  echo "  BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  exit 1
+fi
+if (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
+  echo "Error: MINI_BATCH_SIZE * NUM_GENERATIONS must be divisible by TRAIN_MICRO_BATCH_SIZE."
+  echo "  MINI_BATCH_SIZE=$MINI_BATCH_SIZE NUM_GENERATIONS=$NUM_GENERATIONS TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
+  exit 1
+fi
+
 echo "=================================================="
 echo "Starting distributed GSM8K GRPO chain demo locally"
 echo "  rollout engine: vLLM"
@@ -315,14 +326,14 @@ echo "  model dir:      $MODEL_DIR"
 echo "  tokenizer path: $TOKENIZER_PATH"
 echo "  python:         $PYTHON_BIN"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
-echo "  batch size:     $BATCH_SIZE"
+echo "  batch size:     $BATCH_SIZE prompt groups/full step"
 echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
-echo "  mini batch:     $MINI_BATCH_SIZE"
+echo "  mini batch:     $MINI_BATCH_SIZE prompt groups/update ($((MINI_BATCH_SIZE * NUM_GENERATIONS)) trajectories)"
 echo "  beta:           $BETA"
 echo "  epsilon:        $EPSILON"
 echo "  reward mode:    $REWARD_MODE"
@@ -400,7 +411,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
-    --mini_batch_size="$MINI_BATCH_SIZE"
+    --mini_batch_size="$((MINI_BATCH_SIZE * NUM_GENERATIONS))"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --lora_rank="$LORA_RANK"
@@ -625,6 +636,7 @@ echo "Launching CPU orchestrator..."
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
     --batch_size="$BATCH_SIZE"
+    --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --max_steps="$MAX_STEPS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"

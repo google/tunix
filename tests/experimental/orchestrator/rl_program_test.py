@@ -280,6 +280,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.step, 0)
     self.assertEqual(program.group_size, 2)
     self.assertEqual(program.mini_batch_size, 1)
+    self.assertEqual(program.full_batch_size, 1)
     self.assertIsNotNone(program.raw_q)
     self.assertIsNotNone(program.scored_q)
 
@@ -757,29 +758,92 @@ class RLProgramTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_multi_group_mini_batch_gradient_accumulation(self):
+    class SingleMicrobatchAssembler:
+
+      def __init__(self):
+        self.item_counts = []
+
+      def pack(self, items):
+        self.item_counts.append(len(items))
+        return ["microbatch"]
+
     async def _run():
       self.mock_algo.mini_batch_size = 2
+      assembler = SingleMicrobatchAssembler()
       _set_mock_poll_batches(
           self.mock_engine,
           _make_trajectory_group("prompt_0"),
           _make_trajectory_group("prompt_1"),
       )
-      program = self._create_program(dataset=["p0", "p1"])
+      program = self._create_program(
+          dataset=["p0", "p1"], assembler=assembler
+      )
 
       await program.run_async(self.mock_engine)
 
-      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      self.assertEqual(assembler.item_counts, [4])
+      self.assertEqual(self.mock_engine.train_step.call_count, 1)
       calls = self.mock_engine.train_step.call_args_list
-      # First group: accumulate_gradients=True, apply_optimizer=False
       self.assertTrue(calls[0].kwargs["accumulate_gradients"])
-      self.assertFalse(calls[0].kwargs["apply_optimizer"])
-      # Second group: accumulate_gradients=True, apply_optimizer=True
-      self.assertTrue(calls[1].kwargs["accumulate_gradients"])
-      self.assertTrue(calls[1].kwargs["apply_optimizer"])
+      self.assertTrue(calls[0].kwargs["apply_optimizer"])
       self.assertEqual(program.last_step_result.num_rollouts, 4)
-      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertEqual(program.last_step_result.num_microbatches, 1)
 
     asyncio.run(_run())
+
+  def test_full_batch_sync_boundary_spans_multiple_updates(self):
+    class TwoMicrobatchAssembler:
+
+      def __init__(self):
+        self.item_counts = []
+
+      def pack(self, items):
+        self.item_counts.append(len(items))
+        return ["microbatch_0", "microbatch_1"]
+
+    async def _run():
+      self.mock_algo.mini_batch_size = 2
+      assembler = TwoMicrobatchAssembler()
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_2"),
+          _make_trajectory_group("prompt_3"),
+      )
+      program = self._create_program(
+          dataset=["p0", "p1", "p2", "p3"],
+          assembler=assembler,
+          batch_size=4,
+          sync_weights=True,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(assembler.item_counts, [4, 4])
+      self.assertEqual(self.mock_engine.train_step.call_count, 4)
+      self.assertEqual(
+          [
+              call.kwargs["apply_optimizer"]
+              for call in self.mock_engine.train_step.call_args_list
+          ],
+          [False, True, False, True],
+      )
+      self.assertEqual(self.mock_engine.save_checkpoint.call_count, 2)
+      self.mock_engine.sync_weights.assert_called_once_with(
+          role=datatypes.Role.ACTOR
+      )
+      self.assertEqual(program.step, 1)
+      self.assertEqual(program.last_step_result.num_rollouts, 8)
+      self.assertEqual(program.last_step_result.num_microbatches, 4)
+      self.assertEqual(program.last_step_result.policy_version, 1)
+
+    asyncio.run(_run())
+
+  def test_full_batch_size_must_be_divisible_by_mini_batch_size(self):
+    self.mock_algo.mini_batch_size = 2
+    with self.assertRaisesRegex(ValueError, "batch_size must be divisible"):
+      self._create_program(batch_size=3)
 
   def test_reference_kl_logprobs_scoring_in_train_stage(self):
     async def _run():
