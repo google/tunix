@@ -16,6 +16,7 @@
 
 import functools
 from functools import partial
+import typing
 from flax import nnx
 import jax
 from jax import numpy as jnp
@@ -32,12 +33,21 @@ from tunix.models.gemma4.config import K_MASK
 from tunix.models.gemma4.config import LayerCache
 from tunix.models.gemma4.config import ModelConfig
 from tunix.models.gemma4.config import RematConfig
+from tunix.models.gemma4.config import SplashAttentionImpl
 from tunix.models.gemma4.layers import apply_rope
 from tunix.models.gemma4.layers import Einsum
 from tunix.models.gemma4.layers import RMSNorm
 from tunix.utils.sharding_utils import shard
 
+if typing.TYPE_CHECKING:
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash
+
+  SplashKernel = (
+      splash.SplashAttentionKernel | tokamax_splash.SplashAttentionKernel
+  )
+
 AxisSpec = str | tuple[str, ...] | None
+MeshType = shd.Mesh | shd.AbstractMesh
 
 
 def find_last_one_index(attn_mask: jnp.ndarray) -> jnp.ndarray:
@@ -106,6 +116,57 @@ def _get_causal_mask(
 ) -> mask_lib.CausalMask:
   """Memoized CausalMask constructor that speeds up XLA JIT compilation by caching mask closure objects across unrolled decoder layers."""
   return mask_lib.CausalMask((q_len, kv_len), offset=offset)
+
+
+def _resolve_active_mesh() -> MeshType | None:
+  """Returns the mesh the caller is currently using or None."""
+  mesh = pxla.thread_resources.env.physical_mesh
+  if not mesh.empty:
+    return mesh
+
+  for getter_name in ('get_abstract_mesh', 'get_mesh'):
+    getter = getattr(jax.sharding, getter_name, None)
+    if getter is None:
+      continue
+    ctx_mesh = getter()
+    if ctx_mesh is not None and not ctx_mesh.empty:
+      return ctx_mesh
+
+  return None
+
+
+def _tokamax_splash_libs():
+  """Lazily imports Tokamax's splash-attention kernel and mask modules."""
+  try:
+    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_lib
+    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask_lib
+  except ImportError as e:
+    raise ImportError(
+        "The Tokamax splash_attention backend requires the 'tokamax'"
+        ' package.Install it with `pip install tokamax` or keep the default'
+        ' `splash_attention_impl=SplashAttentionImpl.JAX`'
+    ) from e
+  return tokamax_splash_lib, tokamax_splash_mask_lib
+
+
+@functools.lru_cache(maxsize=128)
+def _get_tokamax_local_mask(
+    q_len: int, kv_len: int, window_size: int, offset: int
+):
+  """Memoized Tokamax LocalMask, mirroring `_get_local_mask`"""
+  _, tokamax_mask_lib = _tokamax_splash_libs()
+  return tokamax_mask_lib.LocalMask(
+      (q_len, kv_len),
+      window_size=(window_size - 1, 0),
+      offset=offset,
+  )
+
+
+@functools.lru_cache(maxsize=128)
+def _get_tokamax_causal_mask(q_len: int, kv_len: int, offset: int):
+  """Memoized Tokamax CausalMask, mirroring `_get_causal_mask`."""
+  _, tokamax_mask_lib = _tokamax_splash_libs()
+  return tokamax_mask_lib.CausalMask((q_len, kv_len), offset=offset)
 
 
 class Attention(nnx.Module):
@@ -302,21 +363,29 @@ class Attention(nnx.Module):
         use_fused_bwd_kernel=use_fused,
     )
 
-  def _make_sharding_specs(self, b: int, kh: int, mesh: shd.Mesh):
+  def _make_sharding_specs(self, b: int, kh: int, mesh: MeshType | None):
     """Computes mesh/shard-axis specs for splash attention."""
     shd_b, shd_t, shd_n, shd_h = self.config.shd_config.act_btnh
-    if (
-        mesh is not None
-        and shd_b is not None
-        and shd_b in mesh.shape
-        and b % mesh.shape[shd_b] != 0
-    ):
-      shd_b = None
+    if mesh is None or not mesh.shape:
+      shd_b = shd_t = shd_n = shd_h = None
+    else:
+      if shd_b is not None and (
+          shd_b not in mesh.shape or b % mesh.shape[shd_b] != 0
+      ):
+        shd_b = None
+      shd_t, shd_n, shd_h = [
+          axis if axis in mesh.shape else None
+          for axis in (shd_t, shd_n, shd_h)
+      ]
     head_shards = (
-        mesh.shape[shd_n] if mesh is not None and shd_n in mesh.shape else 1
+        mesh.shape[shd_n]
+        if mesh is not None and shd_n is not None and shd_n in mesh.shape
+        else 1
     )
     q_seq_shards = (
-        mesh.shape[shd_t] if mesh is not None and shd_t in mesh.shape else 1
+        mesh.shape[shd_t]
+        if mesh is not None and shd_t is not None and shd_t in mesh.shape
+        else 1
     )
     shd_spec = P(shd_b, shd_n, shd_t, shd_h)
     shd_n_kv = (
@@ -346,7 +415,7 @@ class Attention(nnx.Module):
       block_sizes: splash.BlockSizes,
       head_shards: int,
       q_seq_shards: int,
-      mesh: shd.Mesh,
+      mesh: MeshType | None,
       shd_n: str | None,
       shd_t: str | None,
       save_residuals: bool = False,
@@ -359,8 +428,10 @@ class Attention(nnx.Module):
         q_seq_shards=q_seq_shards,
         save_residuals=save_residuals,
     )
-    kernel_spec = kernel.manual_sharding_spec(
-        shd.NamedSharding(mesh, P(shd_n, shd_t))
+    kernel_spec = (
+        kernel.manual_sharding_spec(shd.NamedSharding(mesh, P(shd_n, shd_t)))
+        if mesh is not None
+        else None
     )
     return kernel, kernel_spec
 
@@ -480,16 +551,10 @@ class Attention(nnx.Module):
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
-      mesh = pxla.thread_resources.env.physical_mesh
+      mesh = _resolve_active_mesh()
 
       # Offset: shifts Q positions so q[0] aligns with kv[prefix_len].
       offset = kv_len - q_len if is_rectangular else 0
-
-      mask = self._build_flash_mask(q_len, kv_len, offset)
-
-      multi_head_mask = mask_lib.MultiHeadMask([mask for _ in range(qh)])
-
-      block_sizes = self._make_block_sizes(is_rectangular)
 
       (
           shd_b,
@@ -503,15 +568,31 @@ class Attention(nnx.Module):
           unsharded_seq_kv,
       ) = self._make_sharding_specs(b, kh, mesh)
 
-      splash_attn_kernel, kernel_spec = self._make_splash_kernel(
-          multi_head_mask,
-          block_sizes,
-          head_shards,
-          q_seq_shards,
-          mesh,
-          shd_n,
-          shd_t,
-      )
+      if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
+        splash_attn_kernel, kernel_spec = self._make_tokamax_splash_kernel(
+            q_len,
+            kv_len,
+            offset,
+            q_seq_shards,
+            mesh,
+            shd_t,
+        )
+      else:
+        mask = self._build_flash_mask(q_len, kv_len, offset)
+
+        multi_head_mask = mask_lib.MultiHeadMask([mask for _ in range(qh)])
+
+        block_sizes = self._make_block_sizes(is_rectangular)
+
+        splash_attn_kernel, kernel_spec = self._make_splash_kernel(
+            multi_head_mask,
+            block_sizes,
+            head_shards,
+            q_seq_shards,
+            mesh,
+            shd_n,
+            shd_t,
+        )
 
       encoded, key_proj, value_proj = self._flash_attention_single(
           query_proj,
@@ -546,17 +627,60 @@ class Attention(nnx.Module):
         (key_proj, value_proj, kv_valid_mask, prior_end_index),
     )
 
+  def _make_tokamax_splash_kernel(
+      self,
+      q_len: int,
+      kv_len: int,
+      offset: int,
+      q_seq_shards: int,
+      mesh: MeshType | None,
+      shd_t: str | None,
+  ):
+    """Builds a Tokamax splash MHA kernel and its manual sharding spec."""
+    tokamax_splash, _ = _tokamax_splash_libs()
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      tokamax_mask = _get_tokamax_local_mask(q_len, kv_len, window_size, offset)
+    else:
+      tokamax_mask = _get_tokamax_causal_mask(q_len, kv_len, offset=offset)
+
+    bs = self.config.flash_attention_block_size
+    splash_config = tokamax_splash.SplashConfig(
+        block_q=bs,
+        block_kv=bs,
+        block_kv_compute=bs,
+        block_q_dkv=bs,
+        block_kv_dkv=bs,
+        block_kv_dkv_compute=bs,
+        # Enabling use_base2 can improve performance but reduce numeric precision.
+        use_base2_exp=False,
+    )
+    splash_attn_kernel = tokamax_splash.make_splash_mha(
+        tokamax_mask,
+        config=splash_config,
+        q_seq_shards=q_seq_shards,
+    )
+    kernel_spec = (
+        splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_t))
+        )
+        if mesh is not None
+        else None
+    )
+    return splash_attn_kernel, kernel_spec
+
   def _flash_attention_single(
       self,
       query_proj: jaxtyping.Array,
       key_proj: jaxtyping.Array,
       value_proj: jaxtyping.Array,
       segment_ids: jaxtyping.Array | None,
-      splash_attn_kernel: splash.SplashAttentionKernel,
-      kernel_spec: splash.SplashAttentionKernel | None,
+      splash_attn_kernel: 'SplashKernel',
+      kernel_spec: 'SplashKernel | None',
       shd_spec: P,
       unsharded_seq_kv: P,
-      mesh: shd.Mesh,
+      mesh: MeshType | None,
       shd_b: AxisSpec,
       shd_t: AxisSpec,
   ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array]:
@@ -565,6 +689,10 @@ class Attention(nnx.Module):
     if segment_ids is not None:
       seg_spec = P(shd_b, shd_t)
       unsharded_seg_spec = P(shd_b, None)
+      if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
+        segment_ids_cls = _tokamax_splash_libs()[0].SegmentIds
+      else:
+        segment_ids_cls = splash.SegmentIds
 
       @partial(
           shard_map,
@@ -583,7 +711,7 @@ class Attention(nnx.Module):
       def sharded_splash_attn(
           kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
       ):
-        seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+        seg_ids = segment_ids_cls(q=q_seg_block, kv=kv_seg_block)
         return jax.vmap(kernel)(q_block, k_block, v_block, segment_ids=seg_ids)
 
       qkv: jaxtyping.Array = sharded_splash_attn(

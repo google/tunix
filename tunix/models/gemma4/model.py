@@ -45,6 +45,7 @@ from tunix.models.gemma4.config import (
     PreprocessedVisionInput,
     RematConfig,
     ShardingConfig,
+    SplashAttentionImpl,
     create_kv_cache_sharing_patterns,
 )
 from tunix.models.gemma4.layers import (

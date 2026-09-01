@@ -71,6 +71,17 @@ class RematConfig(enum.Enum):
   DECODER = enum.auto()
 
 
+class SplashAttentionImpl(enum.Enum):
+  """Backend implementation to use for splash (flash) attention.
+
+  JAX: `jax.experimental.pallas.ops.tpu.splash_attention`.
+  TOKAMAX: `tokamax._src.ops.experimental.tpu.splash_attention`.
+  """
+
+  JAX = 'jax'
+  TOKAMAX = 'tokamax'
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
@@ -167,6 +178,9 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
+  # Backend implementation for splash (flash) attention when
+  # `use_flash_attention` is True.
+  splash_attention_impl: SplashAttentionImpl = SplashAttentionImpl.JAX
   flash_attention_compute_block_size: int = 256
   # Backward needs more VMEM/tile than forward; prod uses 256 (SPLASH_BLOCK_SIZES in
   # //depot/GOOGLE_INTERNAL_PACKAGE_PATH/learning/gemini/prod/serving/jet_engine/gemma4/config_utils.py).
