@@ -20,6 +20,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Upgrade pip
 RUN pip install --upgrade pip
 
+# Install uv
+RUN pip install uv
+
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
@@ -36,6 +39,28 @@ COPY . .
 RUN pip install -e .
 
 RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+
+# Build argument to conditionally install MaxText dependencies
+ARG INSTALL_MAXTEXT=false
+
+# Install MaxText specific dependencies conditionally
+RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
+      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+    fi
+
+# Build argument to conditionally install Raiden weight sync dependencies
+ARG INSTALL_RAIDEN=false
+ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
+
+# Install Raiden specific dependencies conditionally
+RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
+    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
+      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
+    else \
+      pip install keyrings.google-artifactregistry-auth && \
+      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
+    fi; \
+fi
 
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
