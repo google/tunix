@@ -90,6 +90,7 @@ def _pathways_head_anti_affinity_term() -> dict[str, Any]:
               "values": [_PATHWAYS_HEAD_REPLICATEDJOB],
           }],
       },
+      "namespaceSelector": {},
       "topologyKey": _HOSTNAME_TOPOLOGY_KEY,
   }
 

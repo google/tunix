@@ -154,6 +154,7 @@ def render_two(
                 "values": ["pathways-head"],
             }],
         },
+        "namespaceSelector": {},
         "topologyKey": "kubernetes.io/hostname",
     }
     if anti_affinity_term not in required_anti_affinity:
