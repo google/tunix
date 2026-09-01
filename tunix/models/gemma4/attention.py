@@ -780,19 +780,7 @@ class Attention(nnx.Module):
       cache_len = min(max_seq_len, sliding_window_size)
 
     cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
-    k = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
-        eager=True,
-    )
-    v = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
-        eager=True,
-    )
-    end_index = shard(
-        np.zeros((batch_size,), np.int32),
-        self.config.shd_config.act_btnh[:1],
-        eager=True,
-    )
+    k = jnp.zeros(cache_shape, dtype=dtype)
+    v = jnp.zeros(cache_shape, dtype=dtype)
+    end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
     return {'k': k, 'v': v, 'end_index': end_index}
