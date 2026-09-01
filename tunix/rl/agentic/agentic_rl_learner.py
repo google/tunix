@@ -1729,7 +1729,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   and os.environ.get("CANON_P58_TIM_ARM", "") == "zero"
                   and os.environ.get(
                       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "1"
-                  ) == "0"
+                  ) == "1"
               )
           )
       )

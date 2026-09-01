@@ -33,7 +33,7 @@ def _env() -> dict[str, str]:
       "CANON_P58_EXPECTED_UPDATES": "1000",
       "CANON_P34_RUN_STAGE": "full",
       "CANON_P34_NO_COMMIT": "0",
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
       "CANON_P38_FIXED_LM_HEAD": "1",
       "CANON_CONTINUE_DECODE": "8",
       "CANON_FIXED_AR_GATHER": "1",
@@ -130,7 +130,8 @@ def _fixture(
       "stage": "full",
       "expected_commits": 1000,
       "observed_commits": 1000,
-      "checks": {"zero_all_boundaries_exact": True},
+      "checks": {"zero_trainer_boundaries_exact": True},
+      "zero_ab_warning_policy_observed": True,
   }))
   lines = [
       "[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint "

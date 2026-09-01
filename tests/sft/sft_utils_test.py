@@ -79,7 +79,7 @@ class StableGlobalNormTest(absltest.TestCase):
       )
       profile = "qwen3-4b-dp8-tp8-deepswe-v1-hp"
       workload = None
-      warn_only = {"CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0"}
+      warn_only = {"CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1"}
       stage = {
           "CANON_P34_DEEPSWE": "1",
           "CANON_P58_DEEPSWE_TIM": "1",
@@ -246,7 +246,7 @@ class StableGlobalNormTest(absltest.TestCase):
         ("CANON_OPT_STATE_RESIDENT", "0"),
         ("CANON_P34_RUN_STAGE", "three-update"),
         ("CANON_GLOBAL_TRAJECTORIES", "64"),
-        ("CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "1"),
+        ("CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "0"),
         ("CANON_P32_WORKLOAD", "gsm8k"),
     ):
       with self.subTest(p58_key=key):

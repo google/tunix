@@ -215,6 +215,7 @@ class P58RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_PROFILE_FILE"], renderer.HP_PROFILE)
     self.assertEqual(env["CANON_V1_HP_FULL"], "1")
     self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+    self.assertEqual(env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"], "1")
     self.assertEqual(
         document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
         "1",

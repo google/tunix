@@ -1,5 +1,22 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
+## P58.32 production Zero-HP warning boundary
+
+The exact Qwen3-4B Zero-HP full production profile now derives
+`CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=1`. This is intentionally narrower than
+the Native warning policy: only a finite decode-vs-prefill A-B difference and
+its directly derived `w`/`w*r`/clip/TIS observations may warn. B-C,
+T_old-current, `r`, nonfinite/shape, gradient, replica, optimizer transaction,
+OOM, and evidence failures remain hard stops.
+
+Do not set this flag by hand. The renderer, profile, shell admission, Python
+contract, and classifier must all agree on policy ID
+`deepswe-zero-hp-ab-warning-v1`. Precheck, checked-VMA, seam, one-host, and
+ordinary Zero profiles remain strict (`0`). Before launch require the host,
+registry, P34 static, and digest-pinned image gates. A separately approved
+target is an `alignment-degraded / convergence-only` run and cannot certify
+Zero-TIM, even if all 1,000 updates complete.
+
 P58 retains a paired 128-chip study design. Each arm uses one `4x4x8` v5p
 slice, synchronously split into a 64-device rollout role and a 64-device
 trainer role. Both roles are DP8 x TP8. The two arms share data, seeds,
@@ -11,8 +28,10 @@ sampling, loss, optimizer, deadlines, artifacts, and update horizon.
   ratio differences are additional stock-program observations. Nonfinite
   values, invalid shapes, replica/transaction failures, and corrupt evidence
   remain fatal.
-- `zero` enables the complete canonical numerical bundle. A, B, and C must be
-  exact at every admitted boundary.
+- `zero` enables the complete canonical numerical bundle. Ordinary Zero and
+  every diagnostic arm require exact A=B=C. The exact production Zero-HP
+  full profile may use the P58.32 finite A-B warning policy above; B-C and
+  trainer repeat remain exact.
 
 P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and

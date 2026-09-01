@@ -2155,3 +2155,30 @@
   dirty development diff and used DP1xTP4 recorded trajectories, it does not
   certify clean-source acceptance, DP8xTP8 accumulation, an optimizer commit,
   checkpointing, or full training. No commit/push or remote mutation occurred.
+
+## 2026-09-01 UTC — P58.32 narrow Zero-HP A-B warning policy under validation
+
+- User decision: follow the FrozenLake convergence lane and prevent the exact
+  P58 Qwen3-4B Zero-HP production full run from stopping solely on a finite
+  decode-vs-prefill A-B difference.
+- Implemented closed admission using the existing
+  `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY`: only Zero/full/1,000-update,
+  `qwen3-4b-dp8-tp8-deepswe-v1-hp`, DP8xTP8 roles, 128 trajectories, and no
+  precheck/checked-VMA/seam diagnostic can enable it. Ordinary Zero and all
+  diagnostics remain strict.
+- Policy `deepswe-zero-hp-ab-warning-v1` warns only for finite A-B and its
+  direct `w`/`w*r`/clip/TIS consequences. B-C, T_old-current, `r`, nonfinite,
+  shape, gradient, replica, transaction, optimizer, OOM, and corrupt evidence
+  remain blocking.
+- Host alignment policy tests pass 14/14, profile tests pass 11/11, and the
+  Zero-HP full classifier tests pass 7/7. P34 static passes ten suites and the
+  flag registry passes 409/409.
+- The first full pinned-image run found six strict-diagnostic regressions:
+  HP subcontracts had inferred warning policy from the shared profile name.
+  The repair derives one runtime-identity expectation and makes fixed-head,
+  P59, P63, and P67 consume it. Focused environment tests then passed 19/19;
+  the complete digest-pinned P58 gate passed with
+  `P58_EXACT_IMAGE_CPU_PASS`, including production warning and strict
+  checked-VMA/coarse-seam negatives.
+- No commit/push, image publication, Kubernetes mutation, or TPU launch
+  occurred. Claim ceiling is `convergence-only / alignment-degraded`.

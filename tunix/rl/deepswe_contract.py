@@ -819,6 +819,13 @@ def validate_environment(values: Mapping[str, str]) -> None:
     raise ValueError("CANON_P58_TIM_ARM must be native or zero")
   p58_recipe = p58_sampler_recipe(values) if p58_tim else ""
   p58_hp = values.get("CANON_V1_HP_FULL", "0") == "1"
+  p58_zero_ab_warning = bool(
+      p58_hp
+      and p58_arm == "zero"
+      and values.get("CANON_P38_PRECHECK_ONLY", "0") == "0"
+      and not values.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", "")
+      and not values.get("CANON_P58_SEAM_LOCALIZATION", "")
+  )
   p58_vma_diagnostic = values.get(
       "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
   )
@@ -856,7 +863,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
       or p58_arm != "zero"
       or values.get("CANON_P34_RUN_STAGE", "") != "full"
   ):
-    raise ValueError("P58 v1-hp is admitted only for strict Zero full")
+    raise ValueError("P58 v1-hp is admitted only for Zero full")
   parity_topology = str(workload.devices_per_role * 2) if parity else "none"
   production_capture = bool(
       not pilot
@@ -1084,11 +1091,15 @@ def validate_environment(values: Mapping[str, str]) -> None:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
-          ("1" if p58_arm == "native" else "0") if p58_tim else (
-              "1" if parity or production_capture else "0"
-          )
-      ),
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+            (
+                "1"
+                if p58_arm == "native" or p58_zero_ab_warning
+                else "0"
+            ) if p58_tim else (
+                "1" if parity or production_capture else "0"
+            )
+        ),
     })
   else:
     # Production full training is convergence-first: finite alignment drift is

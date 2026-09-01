@@ -1,5 +1,23 @@
 # State
 
+## P58.32 Zero-HP finite A-B warning policy (2026-09-01)
+
+- User decision: mirror the FrozenLake narrow warning lane so the exact P58
+  Qwen3-4B Zero-HP production full run does not stop on a finite
+  `S_decode_vs_S_prefill` difference.
+- The renderer now derives `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=1` only for the
+  admitted Zero/full/1,000-update DP8xTP8+DP8xTP8 HP identity. Ordinary Zero,
+  one-host, precheck, checked-VMA, and seam diagnostics remain strict.
+- Only finite A-B plus directly derived `w`/`w*r`/clip/TIS observations warn.
+  B-C, T_old-current, `r`, nonfinite, shape, gradient, replica, transaction,
+  optimizer, and evidence failures remain hard stops.
+- Local host policy/profile/classifier tests pass. P34 static passes ten
+  suites, the registry passes 409/409, and the complete digest-pinned P58
+  image gate emits `P58_EXACT_IMAGE_CPU_PASS`. Target validation remains
+  pending. No target was launched and no Zero-TIM claim is made; this lane is
+  `convergence-only / alignment-degraded`.
+- Phase: `phases/p58-32-zero-hp-ab-warning.md`.
+
 ## P58.31 K23 gradient-accumulation geometry repair (2026-09-01)
 
 - K23 crossed P58.30 on the real 128-device DP8xTP8 plus DP8xTP8 target. The

@@ -634,7 +634,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     env = {
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_ALIGNMENT_TRAIN": "1",
-        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
         "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",

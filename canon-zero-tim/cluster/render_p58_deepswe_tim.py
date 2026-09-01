@@ -228,6 +228,7 @@ def render(
   hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
       seam_localization
   )
+  zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
   treatment = (
       f"seam{seam_localization}"
       if seam_localization
@@ -364,7 +365,9 @@ def render(
       "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
       "CANON_P38_FIXED_LM_HEAD": "1" if hp_bundle else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "1" if arm == "native" or zero_hp_ab_warning else "0"
+      ),
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
@@ -620,6 +623,7 @@ def validate(
   hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
       seam_localization
   )
+  zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
   head = p34._head(document)
   cpu_nodepool = head.get("nodeSelector", {}).get(
       "cloud.google.com/gke-nodepool", ""
@@ -685,7 +689,9 @@ def validate(
       "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
       "CANON_P38_FIXED_LM_HEAD": "1" if hp_bundle else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "1" if arm == "native" or zero_hp_ab_warning else "0"
+      ),
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "MIN_TOKEN_BUCKET": "2048",

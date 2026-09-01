@@ -271,6 +271,27 @@ case "${CANON_P58_SEAM_LOCALIZATION:-}" in
     fail=1
     ;;
 esac
+# The same HP profile also carries strict precheck/diagnostic arms.  Derive
+# alignment policy from the complete runtime identity once, then make every
+# HP sub-contract consume this value instead of inferring from profile name.
+P58_ZERO_ALIGNMENT_WARNING_EXPECTED=0
+if [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ] && \
+   [ "${CANON_PROFILE:-}" = \
+       "qwen3-4b-dp8-tp8-deepswe-v1-hp" ] && \
+   [ "${CANON_P34_DEEPSWE:-0}" = "1" ] && \
+   [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+   [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
+   [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
+   [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+   [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+   [ "${CANON_P58_EXPECTED_UPDATES:-}" = "1000" ] && \
+   [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+   [ "${CANON_P38_PRECHECK_ONLY:-0}" = "0" ] && \
+   [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ] && \
+   [ "$P58_SEAM_LOCALIZATION" = "0" ]; then
+  P58_ZERO_ALIGNMENT_WARNING_EXPECTED=1
+fi
 case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
   0) ;;
   1)
@@ -451,7 +472,8 @@ case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
              [ "${CANON_ENGINE_MODULE_C:-0}" = "1" ] && \
              [ "${CANON_OPT_STATE_RESIDENT:-0}" = "1" ] && \
              [ "${CANON_P30_OPT_STATE_OFFLOAD:-1}" = "0" ] && \
-             [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ]; then
+             [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-0}" = \
+               "$P58_ZERO_ALIGNMENT_WARNING_EXPECTED" ]; then
           _canon_p67_context=p58
         fi
         ;;
@@ -510,7 +532,8 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
         [ "${CANON_ENGINE_MODULE_C:-0}" = "1" ] && \
         [ "${CANON_OPT_STATE_RESIDENT:-0}" = "1" ] && \
         [ "${CANON_P30_OPT_STATE_OFFLOAD:-1}" = "0" ] && \
-        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-0}" = \
+          "$P58_ZERO_ALIGNMENT_WARNING_EXPECTED" ] || {
           echo "[env] P59 checked VMA P58 Zero-HP contract changed" >&2
           fail=1
         }
@@ -606,8 +629,9 @@ case "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" in
         [ "${CANON_ENGINE_MODULE_C:-0}" = "1" ] && \
         [ "${CANON_OPT_STATE_RESIDENT:-0}" = "1" ] && \
         [ "${CANON_P30_OPT_STATE_OFFLOAD:-1}" = "0" ] && \
-        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
-          echo "[env] P63 P58 overflow-safe clip requires strict Zero-HP" >&2
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-0}" = \
+          "$P58_ZERO_ALIGNMENT_WARNING_EXPECTED" ] || {
+          echo "[env] P63 P58 overflow-safe clip alignment policy drifted" >&2
           fail=1
         }
         ;;
@@ -1557,9 +1581,10 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
         [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
         [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
         [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
-        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-0}" = \
+          "$P58_ZERO_ALIGNMENT_WARNING_EXPECTED" ] && \
         [ "${CANON_P46_EVALUATION:-0}" = "0" ] || {
-          echo "[env] P58 v1-hp fixed lm-head requires strict Zero full training" >&2
+          echo "[env] P58 v1-hp fixed lm-head alignment policy drifted" >&2
           fail=1
         }
         echo "[env] P58 v1-hp Qwen3-4B TP8 fixed lm-head enabled"
@@ -1836,6 +1861,22 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     }
     case "${CANON_P58_TIM_ARM:-}:${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}:${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-}" in
       native:1:1|zero:0:0) ;;
+      zero:1:0)
+        [ "${CANON_PROFILE_FILE:-}" = \
+          "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ] && \
+        [ "${CANON_PROFILE:-}" = \
+          "qwen3-4b-dp8-tp8-deepswe-v1-hp" ] && \
+        [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+        [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+        [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+        [ "${CANON_P58_EXPECTED_UPDATES:-}" = "1000" ] && \
+        [ "${CANON_P38_PRECHECK_ONLY:-0}" = "0" ] && \
+        [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ] && \
+        [ -z "${CANON_P58_SEAM_LOCALIZATION:-}" ] || {
+          echo "[env] P58 Zero A-B warnings require the exact production Zero-HP full identity" >&2
+          fail=1
+        }
+        ;;
       *)
         echo "[env] P58 arm/alignment/stock-observer treatment drifted" >&2
         fail=1

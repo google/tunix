@@ -29,6 +29,14 @@ _COMPACT = {
     "REWARD_TIMEOUT",
 }
 _SHA = re.compile(r"[0-9a-f]{40}")
+_ZERO_HP_AB_POLICY_ID = "deepswe-zero-hp-ab-warning-v1"
+_ZERO_HP_WARNING_ITEMS = {
+    "S_decode_vs_S_prefill",
+    "w_all_exactly_1",
+    "wr_all_exactly_1",
+    "clip_hits",
+    "tis_hits",
+}
 
 
 def _records(path: Path) -> list[dict[str, Any]]:
@@ -183,6 +191,22 @@ def _boundary_valid(record: dict[str, Any], name: str) -> bool:
   )
 
 
+def _zero_hp_ab_policy_valid(record: dict[str, Any]) -> bool:
+  policy = record.get("admission_policy", {})
+  return (
+      policy.get("id") == _ZERO_HP_AB_POLICY_ID
+      and policy.get("enabled") is True
+      and policy.get("warning_only") is True
+      and tuple(policy.get("warning_boundaries", ()))
+      == ("S_decode_vs_S_prefill",)
+      and set(policy.get("warning_items", ())) == _ZERO_HP_WARNING_ITEMS
+      and policy.get("claim_level") == "convergence-only"
+      and set(record.get("warning_reds", ())).issubset(
+          _ZERO_HP_WARNING_ITEMS
+      )
+  )
+
+
 def classify(
     *,
     arm: str,
@@ -209,6 +233,37 @@ def classify(
           and record["boundaries"][name]["differing_bytes"] == 0
           for name in record.get("boundaries", {})
       )
+      for record in all_alignment
+  )
+  zero_ab_finite = all(
+      _boundary_valid(record, "S_decode_vs_S_prefill")
+      for record in all_alignment
+  )
+  zero_trainer_boundaries_exact = (
+      bool(all_alignment)
+      and all(
+          _boundary_valid(record, "S_prefill_vs_T_old")
+          and record["boundaries"]["S_prefill_vs_T_old"][
+              "differing_bytes"
+          ] == 0
+          for record in all_alignment
+      )
+      and bool(alignment)
+      and all(
+          _boundary_valid(record, "T_old_vs_T_current")
+          and record["boundaries"]["T_old_vs_T_current"][
+              "differing_bytes"
+          ] == 0
+          for record in alignment
+      )
+  )
+  zero_ab_warning_policy = stage == "full" and bool(all_alignment) and all(
+      _zero_hp_ab_policy_valid(record) for record in all_alignment
+  )
+  zero_ab_warning_dose = any(
+      _boundary_valid(record, "S_decode_vs_S_prefill")
+      and record["boundaries"]["S_decode_vs_S_prefill"]["differing_bytes"]
+      > 0
       for record in all_alignment
   )
   native_dose = any(
@@ -267,11 +322,23 @@ def classify(
           and all(_boundary_valid(record, name) for name in record.get("boundaries", {}))
           for record in all_alignment
       ),
-      "registered_treatment_observed": native_dose if arm == "native" else exact_boundaries,
+      "registered_treatment_observed": (
+          native_dose
+          if arm == "native"
+          else zero_ab_warning_policy or exact_boundaries
+      ),
       "native_trainer_program_finite": (
           native_trainer_program_finite if arm == "native" else True
       ),
-      "zero_all_boundaries_exact": exact_boundaries if arm == "zero" else True,
+      "zero_ab_finite": zero_ab_finite if arm == "zero" else True,
+      "zero_alignment_policy_valid": (
+          zero_ab_warning_policy or exact_boundaries
+          if arm == "zero"
+          else True
+      ),
+      "zero_trainer_boundaries_exact": (
+          zero_trainer_boundaries_exact if arm == "zero" else True
+      ),
       "update_records_nonempty": bool(updates),
       "update_geometry": update_geometry,
       "optimizer_commit_count": len(committed) == expected_commits,
@@ -290,12 +357,30 @@ def classify(
       "arm": arm,
       "stage": stage,
       "verdict": "PASS" if not failed else "FAIL",
-      "claim_level": "paired-systems-canary" if stage == "three-update" else "paired-training-campaign",
+      "claim_level": (
+          "alignment-degraded-convergence-canary"
+          if arm == "zero" and zero_ab_warning_policy
+          and stage == "three-update"
+          else "alignment-degraded-convergence-campaign"
+          if arm == "zero" and zero_ab_warning_policy
+          else "paired-systems-canary"
+          if stage == "three-update"
+          else "paired-training-campaign"
+      ),
       "expected_commits": expected_commits,
       "observed_commits": len(committed),
       "observed_skipped_batches": len(skipped),
       "observed_trajectory_batches": len(metrics),
       "native_mismatch_dose_observed": native_dose if arm == "native" else None,
+      "zero_ab_warning_dose_observed": (
+          zero_ab_warning_dose if arm == "zero" else None
+      ),
+      "zero_ab_warning_policy_observed": (
+          zero_ab_warning_policy if arm == "zero" else None
+      ),
+      "zero_all_boundaries_exact_observed": (
+          exact_boundaries if arm == "zero" else None
+      ),
       "checks": checks,
       "failed": failed,
   }

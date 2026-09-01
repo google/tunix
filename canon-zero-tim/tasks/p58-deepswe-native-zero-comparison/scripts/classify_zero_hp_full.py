@@ -124,7 +124,7 @@ def classify(
       "CANON_P58_EXPECTED_UPDATES": str(_EXPECTED_UPDATES),
       "CANON_P34_RUN_STAGE": "full",
       "CANON_P34_NO_COMMIT": "0",
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
       "CANON_P38_FIXED_LM_HEAD": "1",
       "CANON_CONTINUE_DECODE": "8",
       "CANON_FIXED_AR_GATHER": "1",
@@ -174,8 +174,10 @@ def classify(
   }.items():
     if base.get(key) != expected:
       reasons.append(f"base.{key}={base.get(key)!r}")
-  if base.get("checks", {}).get("zero_all_boundaries_exact") is not True:
-    reasons.append("base.zero_all_boundaries_exact")
+  if base.get("zero_ab_warning_policy_observed") is not True:
+    reasons.append("base.zero_ab_warning_policy")
+  if base.get("checks", {}).get("zero_trainer_boundaries_exact") is not True:
+    reasons.append("base.zero_trainer_boundaries_exact")
 
   updates = _jsonl(update_report)
   committed = [row for row in updates if row.get("commits") == 1]
@@ -253,7 +255,7 @@ def classify(
 
   text = run_log.read_text(encoding="utf-8", errors="replace")
   if re.search(r"^\[CANON_ALIGN(?:_PRE)?\].*verdict=FAIL", text, re.MULTILINE):
-    reasons.append("strict_alignment_fail")
+    reasons.append("alignment_fail")
   marker_counts = {
       "trainer_placement": text.count(
           "[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint "
@@ -492,7 +494,9 @@ def classify(
   return {
       "schema": "canon.p58.zero-hp-full.v2",
       "verdict": "PASS" if not reasons else "FAIL",
-      "claim_level": "optimized-strict-zero-tim-dp8-tp8-target",
+      "claim_level": (
+          "optimized-convergence-only-alignment-degraded-dp8-tp8-target"
+      ),
       "updates": {"expected": _EXPECTED_UPDATES, "observed": len(committed)},
       "attempts": {"observed": len(updates), "skipped": len(skipped)},
       "p59_acceptance": "ordinary-jax-fp64-gradient-correctness",

@@ -1,5 +1,23 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — P58.32 Zero-HP full uses narrow finite A-B warnings
+
+For the next production Zero-HP full render, the exact
+`qwen3-4b-dp8-tp8-deepswe-v1-hp` identity derives
+`CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=1`. Do not hand-edit the flag. This admits
+only finite `S_decode_vs_S_prefill` differences plus directly derived
+`w`/`w*r`/clip/TIS observations. `S_prefill_vs_T_old`,
+`T_old_vs_T_current`, `r`, nonfinite/shape, gradient, replica, optimizer, OOM,
+and evidence errors remain fatal.
+
+Checked-VMA/precheck/seam/one-host diagnostics and ordinary Zero remain
+strict with the flag at 0. A rendered diagnostic carrying 1 is invalid. The
+policy is a FrozenLake-style convergence escape lane, not a Zero-TIM pass;
+label any target `convergence-only / alignment-degraded` and retain the full
+warning dose in logs/W&B. No P58.32 target has run yet. Follow
+`phases/p58-32-zero-hp-ab-warning.md` and the runbook before requesting a
+separately approved image publication or cluster launch.
+
 ## START HERE — Step 65 timeout probe remains retired
 
 P58 production manifests must not set `CANON_EXPECTED_SLICE_DEVICES`,

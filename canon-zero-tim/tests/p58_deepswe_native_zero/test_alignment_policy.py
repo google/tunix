@@ -26,9 +26,16 @@ sys.modules[ALIGNMENT_SPEC.name] = alignment
 ALIGNMENT_SPEC.loader.exec_module(alignment)
 
 
-def _env(arm: str, stage: str = "three-update") -> dict[str, str]:
+def _env(
+    arm: str,
+    stage: str = "three-update",
+    *,
+    zero_hp_warning: bool = False,
+) -> dict[str, str]:
+  if zero_hp_warning and (arm != "zero" or stage != "full"):
+    raise ValueError("Zero-HP warning admission requires Zero full")
   expected_updates = "3" if stage == "three-update" else "1000"
-  return {
+  values = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
@@ -36,13 +43,57 @@ def _env(arm: str, stage: str = "three-update") -> dict[str, str]:
       "CANON_P58_TIM_ADMITTED": "1",
       "CANON_P58_TIM_ARM": arm,
       "CANON_P58_EXPECTED_UPDATES": expected_updates,
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "1" if arm == "native" or zero_hp_warning else "0"
+      ),
       "CANON_ALIGNMENT_GATE": "1",
       "CANON_ALIGNMENT_GATE_ONLY": "0",
       "CANON_ALIGNMENT_UPDATE_CANARY": "0",
       "CANON_ALIGNMENT_TRAIN": "1",
       alignment.PRE_GATE_ENV: "1",
   }
+  if zero_hp_warning:
+    values.update({
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+        ),
+        "CANON_PROFILE": "qwen3-4b-dp8-tp8-deepswe-v1-hp",
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P38_PRECHECK_ONLY": "0",
+        "CANON_DP_SIZE": "8",
+        "CANON_TP_SIZE": "8",
+        "CANON_GLOBAL_TRAJECTORIES": "128",
+    })
+  return values
+
+
+def _sidecar(
+    *,
+    ab_drift: bool = False,
+    bc_drift: bool = False,
+    nonfinite_ab: bool = False,
+) -> alignment.ObservedTrainExample:
+  s_prefill = np.asarray([[0.0, 0.25, 0.5]], dtype=np.float32)
+  s_decode = s_prefill.copy()
+  t_old = s_prefill.copy()
+  if ab_drift:
+    s_decode[0, 1] += np.float32(0.1)
+  if bc_drift:
+    t_old[0, 1] += np.float32(0.2)
+  if nonfinite_ab:
+    s_decode[0, 1] = np.nan
+  return alignment.ObservedTrainExample(
+      train_example=types.SimpleNamespace(),
+      s_decode=s_decode,
+      s_prefill=s_prefill,
+      t_old=t_old,
+      action_mask=np.ones_like(s_decode, dtype=np.bool_),
+      completion_valid_mask=np.ones_like(s_decode, dtype=np.bool_),
+      prompt_mask=np.zeros_like(s_decode, dtype=np.bool_),
+      tokens=np.asarray([[10, 11, 12]], dtype=np.int32),
+      policy_version=np.asarray([0], dtype=np.int32),
+      sampling_values=np.asarray([[0.7, 0.0, 1.0]], dtype=np.float32),
+  )
 
 
 class P58AlignmentPolicyTest(unittest.TestCase):
@@ -297,16 +348,84 @@ class P58AlignmentPolicyTest(unittest.TestCase):
     ):
       alignment.gsm8k_ab_report_policy()
 
-  def test_zero_cannot_enable_native_warning_policy(self):
+  def test_regular_zero_cannot_enable_warning_policy(self):
     values = _env("zero", "full")
     values["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"] = "1"
     with (
         mock.patch.dict(os.environ, values, clear=True),
         self.assertRaisesRegex(
-            alignment.AlignmentGateError, "zero requires strict alignment"
+            alignment.AlignmentGateError, "DeepSWE warning policy"
         ),
     ):
       alignment.gsm8k_ab_report_policy()
+
+  def test_zero_hp_full_warns_only_for_finite_a_b_and_derivatives(self):
+    values = _env("zero", "full", zero_hp_warning=True)
+    with tempfile.TemporaryDirectory() as root:
+      values[alignment.PRE_REPORT_ENV] = str(Path(root) / "pre.jsonl")
+      with mock.patch.dict(os.environ, values, clear=True):
+        policy = alignment.gsm8k_ab_report_policy()
+        record = alignment.check_pre_backward(
+            _sidecar(ab_drift=True), step=0
+        )
+    self.assertEqual(policy["id"], "deepswe-zero-hp-ab-warning-v1")
+    self.assertEqual(policy["claim_level"], "convergence-only")
+    self.assertEqual(
+        policy["warning_boundaries"], ("S_decode_vs_S_prefill",)
+    )
+    for item in (
+        "S_decode_vs_S_prefill",
+        "w_all_exactly_1",
+        "wr_all_exactly_1",
+        "clip_hits",
+        "tis_hits",
+    ):
+      self.assertTrue(alignment._policy_warns(policy, item), item)
+    for item in (
+        "S_prefill_vs_T_old",
+        "T_old_vs_T_current",
+        "r_all_exactly_1",
+        "gradient_nonfinite",
+    ):
+      self.assertFalse(alignment._policy_warns(policy, item), item)
+    self.assertEqual(record["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEqual(record["blocking_reds"], [])
+    self.assertEqual(record["warning_reds"], ["S_decode_vs_S_prefill"])
+
+  def test_zero_hp_full_b_c_and_nonfinite_a_b_remain_blocking(self):
+    for sidecar, expected in (
+        (_sidecar(bc_drift=True), "S_prefill_vs_T_old"),
+        (_sidecar(nonfinite_ab=True), "S_decode_vs_S_prefill"),
+    ):
+      with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
+        values = _env("zero", "full", zero_hp_warning=True)
+        values[alignment.PRE_REPORT_ENV] = str(Path(root) / "pre.jsonl")
+        with mock.patch.dict(
+            os.environ, values, clear=True
+        ), self.assertRaisesRegex(alignment.AlignmentGateError, expected):
+          alignment.check_pre_backward(sidecar, step=0)
+
+  def test_zero_hp_full_trainer_repeat_remains_blocking(self):
+    sidecar = _sidecar(ab_drift=True)
+    t_current = sidecar.t_old.copy()
+    t_current[0, 1] = np.nextafter(
+        t_current[0, 1], np.float32(np.inf)
+    )
+    with tempfile.TemporaryDirectory() as root:
+      values = _env("zero", "full", zero_hp_warning=True)
+      values[alignment.REPORT_ENV] = str(Path(root) / "post.jsonl")
+      with mock.patch.dict(
+          os.environ, values, clear=True
+      ), self.assertRaisesRegex(
+          alignment.AlignmentGateError, "T_old_vs_T_current"
+      ):
+        alignment.check_batch(
+            sidecar,
+            t_current=t_current,
+            gradient_norm=np.asarray(1.0, dtype=np.float32),
+            optimizer_skipped=np.asarray(0, dtype=np.int32),
+            step=0,
+        )
 
 
 if __name__ == "__main__":

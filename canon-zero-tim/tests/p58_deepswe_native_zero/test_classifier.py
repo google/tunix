@@ -219,7 +219,7 @@ class P58ClassifierTest(unittest.TestCase):
       self.assertIn("alignment_nonblocking_finite", failed["failed"])
       self.assertIn("native_trainer_program_finite", failed["failed"])
 
-  def test_zero_requires_all_boundaries_exact(self):
+  def test_regular_zero_requires_trainer_boundaries_exact(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
       report = self._classify(root, "zero")
@@ -236,7 +236,25 @@ class P58ClassifierTest(unittest.TestCase):
           alignment=[drift],
           updates=[_update(step, "zero") for step in range(3)],
       )
-      self.assertIn("zero_all_boundaries_exact", failed["failed"])
+      self.assertIn("zero_trainer_boundaries_exact", failed["failed"])
+
+  def test_regular_zero_requires_trainer_repeat_evidence(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(root, "zero")
+      missing_repeat = _post("zero")
+      del missing_repeat["boundaries"]["T_old_vs_T_current"]
+      failed = classifier.classify(
+          arm="zero",
+          stage="three-update",
+          log_text=_WANDB_PASS,
+          debug_dir=root,
+          weights=[{"verdict": "PASS", "equal": True}],
+          pre_alignment=[_pre("zero")],
+          alignment=[missing_repeat],
+          updates=[_update(step, "zero") for step in range(3)],
+      )
+      self.assertIn("zero_trainer_boundaries_exact", failed["failed"])
 
 if __name__ == "__main__":
   unittest.main()

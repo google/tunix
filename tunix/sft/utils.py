@@ -289,6 +289,12 @@ def canonical_overflow_safe_clip_max_norm(
   warn_only_name = context["alignment_flag"]
   expected_warn_only = "0"
   if key == (
+      "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env",
+      "qwen3-4b-dp8-tp8-deepswe-v1-hp",
+      "p58-qwen4b-tim-128",
+  ):
+    expected_warn_only = "1"
+  if key == (
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
       "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
       "frozenlake-dp8-tp8",

@@ -1,5 +1,16 @@
 # Plan
 
+## Active phase: P58.32 Zero-HP A-B warning admission
+
+Before the next P58 production retry, admit finite decode-vs-prefill A-B only
+for the exact Qwen3-4B Zero-HP full identity. Preserve strict B-C and
+T_old-current boundaries and every nonfinite/shape/gradient/replica/optimizer
+gate. Validate positive and negative policy controls, renderer/profile/shell
+contracts, classifiers, P34 static, flag registry, and the digest-pinned image
+before requesting publication. The next target remains separately approved
+and can measure convergence only; strict Zero-TIM certification is deferred
+until the carrier is repaired and a strict target passes.
+
 ## Outcome
 
 Compare two otherwise identical synchronous disaggregated DeepSWE-derived

@@ -61,7 +61,7 @@ _GSM8K_ALIGNMENT_WARNING_POLICY_ID = "gsm8k-full-alignment-warning-v2"
 _FROZENLAKE_ALIGNMENT_WARNING_POLICY_ID = (
     "frozenlake-full-alignment-warning-v1"
 )
-_FROZENLAKE_M15_ZERO_WARNING_ITEMS = (
+_NARROW_AB_WARNING_ITEMS = (
     "S_decode_vs_S_prefill",
     "w_all_exactly_1",
     "wr_all_exactly_1",
@@ -69,6 +69,9 @@ _FROZENLAKE_M15_ZERO_WARNING_ITEMS = (
     "tis_hits",
 )
 _DEEPSWE_ALIGNMENT_WARNING_POLICY_ID = "deepswe-pilot-alignment-warning-v1"
+_DEEPSWE_ZERO_HP_AB_WARNING_POLICY_ID = (
+    "deepswe-zero-hp-ab-warning-v1"
+)
 _GSM8K_AB_MAX_ABS = 1.0e-4
 _GSM8K_AB_MAX_BYTE_FRACTION = 4.0e-3
 _MAX_MISMATCH_DETAILS = 1024
@@ -460,12 +463,12 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
   p58_arm = os.environ.get("CANON_P58_TIM_ARM", "") if p58_active else ""
   p58_onehost_native = False
   p57_zero_ab_warning = False
+  p58_zero_ab_warning = False
   if p58_active and p58_arm not in ("native", "zero"):
     raise AlignmentGateError("P58 alignment arm must be native or zero")
-  if p58_active and (deepswe_warning_only != (p58_arm == "native")):
+  if p58_active and p58_arm == "native" and not deepswe_warning_only:
     raise AlignmentGateError(
-        "P58 native requires observer-only A-B warnings and zero requires "
-        "strict alignment"
+        "P58 native requires its registered broad warning policy"
     )
   warning_policies = sum(
       (warning_only, frozenlake_warning_only, deepswe_warning_only)
@@ -534,6 +537,25 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
             )
         )
     )
+    p58_zero_ab_warning = all((
+        p58_tim,
+        p58_admitted,
+        p58_arm == "zero",
+        os.environ.get("CANON_PROFILE_FILE", "")
+        == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env",
+        os.environ.get("CANON_PROFILE", "")
+        == "qwen3-4b-dp8-tp8-deepswe-v1-hp",
+        os.environ.get("CANON_V1_HP_FULL", "") == "1",
+        p34_stage == "full",
+        os.environ.get("CANON_P34_NO_COMMIT", "") == "0",
+        p58_expected_updates == "1000",
+        os.environ.get("CANON_P38_PRECHECK_ONLY", "") == "0",
+        not os.environ.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""),
+        not os.environ.get("CANON_P58_SEAM_LOCALIZATION", ""),
+        os.environ.get("CANON_DP_SIZE", "") == "8",
+        os.environ.get("CANON_TP_SIZE", "") == "8",
+        os.environ.get("CANON_GLOBAL_TRAJECTORIES", "") == "128",
+    ))
     admitted = (
         (
             os.environ.get("CANON_P34_DEEPSWE", "") == "1"
@@ -541,6 +563,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
                 production_full
                 or registered_debug_update
                 or p58_native_training
+                or p58_zero_ab_warning
             )
             and os.environ.get("CANON_P34_NO_COMMIT", "") == "0"
         )
@@ -550,8 +573,9 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
       raise AlignmentGateError(
           "DeepSWE warning policy is admitted only for committed P34 full "
           "training, a committed P39, P43, or P44 debug update, or the "
-          "signed P58 native three-update/full training stage, or its "
-          "mutation-free one-host XProf carrier"
+          "signed P58 native three-update/full stage, the exact P58 Zero-HP "
+          "full convergence lane, or the mutation-free native one-host "
+          "XProf carrier"
       )
     workload = "deepswe"
     stage = (
@@ -621,7 +645,9 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
       )
   return {
       "id": (
-          _DEEPSWE_ALIGNMENT_WARNING_POLICY_ID
+          _DEEPSWE_ZERO_HP_AB_WARNING_POLICY_ID
+          if p58_zero_ab_warning
+          else _DEEPSWE_ALIGNMENT_WARNING_POLICY_ID
           if deepswe_warning_only
           else _FROZENLAKE_ALIGNMENT_WARNING_POLICY_ID
           if frozenlake_warning_only
@@ -636,7 +662,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
       ),
       "warning_boundaries": (
           ("S_decode_vs_S_prefill",)
-          if p57_zero_ab_warning
+          if p57_zero_ab_warning or p58_zero_ab_warning
           else
           (
               "S_decode_vs_S_prefill",
@@ -647,8 +673,8 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           else None
       ),
       "warning_items": (
-          _FROZENLAKE_M15_ZERO_WARNING_ITEMS
-          if p57_zero_ab_warning
+          _NARROW_AB_WARNING_ITEMS
+          if p57_zero_ab_warning or p58_zero_ab_warning
           else None
       ),
       "bounded_ab_only": bounded_ab,
