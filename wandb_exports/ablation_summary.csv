@@ -1,0 +1,7 @@
+run_id,name,state,total_steps,peak_solve_ratio,final_solve_ratio,avg_step_time_sec,runtime_hours,log_lines
+o3k6jvb4,canon-p57-fl-zero-m15-mw21-6c701164,crashed,60,58.59%,47.66%,2469.4s,42.64h,229933
+nqwqf27j,canon-p57-fl-zero-f45w25-c8f9d4ac,crashed,138,93.36%,83.59%,1189.9s,46.84h,247566
+aia8ubon,canon-p57-fl-mism-n45k-ccbcf572,failed,301,85.94%,55.47%,140.7s,13.22h,272242
+8zjz4li7,canon-p57-fl-is-i45g-ccbcf572,finished,301,87.50%,73.83%,77.5s,7.82h,222858
+2i5f31c2,canon-p57-fl-mism-m15-n15g-ccbcf572,crashed,149,44.92%,0.39%,408.8s,17.70h,307379
+oxkvtl0d,canon-p57-fl-is-m15-i15h-65606a98,crashed,149,48.44%,5.86%,395.0s,17.20h,308685
