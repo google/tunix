@@ -463,7 +463,6 @@ class Attention(nnx.Module):
       k = key_proj.reshape(-1, self.num_kv_heads, self.head_dim)
       v = value_proj.reshape(-1, self.num_kv_heads, self.head_dim)
 
-      num_seqs = jnp.array([metadata.seq_lens.shape[0]], dtype=jnp.int32)
       mesh = pxla.thread_resources.env.physical_mesh
 
       tp_axis   = self.shd_config.act_btnh[2]  # 'tp'
@@ -494,7 +493,6 @@ class Attention(nnx.Module):
       def sharded_rpa(
           q_in, k_in, v_in, pages_in, kv_lens_in, page_idxs_in, q_lens_in, distribution_in, soft_cap_in=None
       ):
-        batch_size = metadata.seq_lens.shape[0]
         # is_decode = jnp.arange(batch_size) < decode_end
         # actual_q_lens = jnp.where(is_decode, 1, q_lens_in)
         cu_q_lens_in = jnp.pad(jnp.cumsum(q_lens_in), (1, 0))
@@ -518,9 +516,9 @@ class Attention(nnx.Module):
           k,
           v,
           cache[layer_name],
-          metadata.seq_lens,
+          metadata.kv_lens,
           metadata.page_indices.reshape(-1),
-          metadata.seq_lens,
+          metadata.query_lens,
           metadata.distribution,
           soft_cap,
       )
