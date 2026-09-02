@@ -389,10 +389,7 @@ class GradientAccumulator(nnx.Module):
 def _default_weight_sync_worker() -> Any:
   from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
 
-  return raiden_synchronizer.RaidenSynchronizer(
-      "trainer",
-      host_stage="proxy" in os.environ.get("JAX_PLATFORMS", ""),
-  )
+  return raiden_synchronizer.RaidenSynchronizer("trainer")
 
 
 class PeftTrainer(abstract_trainer.AbstractTrainer):
@@ -524,7 +521,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._target_state = None
     self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
-    self._weight_sync_worker_factory = weight_sync_worker_factory
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -1179,10 +1175,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
     del sync_request, kwargs
-    if self._weight_sync_worker is None:
-      factory = self._weight_sync_worker_factory or _default_weight_sync_worker
-      self._weight_sync_worker = factory()
     worker = self._weight_sync_worker
+    if worker is None:
+      worker = _default_weight_sync_worker()
+      self._weight_sync_worker = worker
 
     backend = (
         "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type

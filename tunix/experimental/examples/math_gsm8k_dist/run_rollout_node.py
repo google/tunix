@@ -251,7 +251,15 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   mapping_config = mappings_lib.MappingConfig(
       lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
   )
-  vllm_model = args.model_dir or args.model_id
+  vllm_model = (
+      args.model_dir
+      if (
+          args.model_dir
+          and os.path.isdir(args.model_dir)
+          and bool(os.listdir(args.model_dir))
+      )
+      else args.model_id
+  )
   rollout_mesh = _create_rollout_mesh(args)
   max_model_len = args.max_prompt_length + args.max_response_length
   logging.info(

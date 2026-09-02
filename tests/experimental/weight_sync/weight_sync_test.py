@@ -245,7 +245,6 @@ def _trainer_process_fn(
       model=toy_trainer_model,
       optimizer=optax.sgd(1e-3),
       training_config=trainer_config,
-      target_state=target_state,
       sampler_type=sampler_type,
   )
   while True:
@@ -544,7 +543,6 @@ class WeightSyncE2ETest(absltest.TestCase):
         model=self.toy_trainer_model,
         optimizer=optax.sgd(1e-3),
         training_config=trainer_config,
-        target_state=adapter.get_target_state(),
         sampler_type=adapter_config.sampler_type,
     )
 
