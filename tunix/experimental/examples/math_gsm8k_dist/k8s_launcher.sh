@@ -229,6 +229,8 @@ start_rollout() {
           --model_id=${MODEL_ID} \
           --model_dir=${MODEL_DIR} \
           --tokenizer_path=${TOKENIZER_PATH} \
+          --mesh_tp=${ROLLOUT_MESH_TP} \
+          --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
           --max_prompt_length=${MAX_PROMPT_LENGTH} \
           --max_response_length=${MAX_RESPONSE_LENGTH} \
           --lora_rank=${LORA_RANK} \
