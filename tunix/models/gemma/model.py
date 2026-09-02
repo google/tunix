@@ -22,19 +22,21 @@ from typing import Any, Callable, Tuple
 import flax
 from flax import nnx
 import jax
+from tpu_inference.kernels.ragged_paged_attention.v3 import kernel as rag_kernel
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
-
-
-LayerCache = dict[str, jaxtyping.Array]
-Cache = dict[str, LayerCache]
+from jax.experimental.shard_map import shard_map
+import functools
+# Cache = page_manager_lib.PageManager 
+Cache = dict[str, jax.Array]
 
 
 env_utils.setup_sharding_environment()
@@ -73,18 +75,18 @@ class ShardingConfig:
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        q_weight_ndh=P('tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        kv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        qkv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
-        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp',),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
     )
 
 
@@ -214,10 +216,14 @@ class ModelConfig:
     return cls.gemma2_9b()
 
 
-def shard(x: jnp.ndarray, s: Tuple[str, ...]):
+def shard(x: jnp.ndarray, s: Tuple[str | None, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
     return x
+  if getattr(x, 'ndim', len(s)) == len(s) - 1 and len(s) >= 2:
+    s = s[:1] + s[2:]
+  elif getattr(x, 'ndim', len(s)) < len(s):
+    s = s[:getattr(x, 'ndim', len(s))]
   return jax.lax.with_sharding_constraint(
       x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
   )
@@ -279,24 +285,42 @@ class Einsum(nnx.Module):
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    einsum_str = self.einsum_str
+    in_sub, out_sub = einsum_str.split('->')
+    op0_sub = in_sub.split(',')[0]
+    
+    if x.ndim < len(op0_sub):
+      einsum_str = einsum_str.replace("B","")
+
+    return jnp.einsum(einsum_str, x, self.w.value)
 
 
 @jax.named_scope('rope')
 def apply_rope(
-    inputs: jaxtyping.Array,  # [B, L]
-    positions: jaxtyping.Array,  # [B, L]
+    inputs: jaxtyping.Array,  # [B, L, N, H] or [T, N, H]
+    positions: jaxtyping.Array,  # [B, L] or [T]
     head_dim: int,
     max_wavelength: int = 10_000,
 ) -> jaxtyping.Array:
   """Applies RoPE."""
+  if inputs.ndim == 3 and positions.ndim == 2:
+    positions = positions.reshape(-1)
+
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
   timescale = max_wavelength**fraction
+  
+  # Handle missing b dim
+  if positions.ndim == 1:
+    # (i,j) = (p_i / t_j) 
+    sinusoid_inp = positions[:, jnp.newaxis] / timescale[jnp.newaxis, :] # (N, 1) / (N, D) -> (N, D)
+    # (i,0,k) = (p_i/t_k)
+    sinusoid_inp = sinusoid_inp[:, jnp.newaxis, :] # (N, D) -> (N, 1, D)
+  else:
+    sinusoid_inp = (
+        positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
+    )
+    sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
 
-  sinusoid_inp = (
-      positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
-  )
-  sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
   sin = jnp.sin(sinusoid_inp)
   cos = jnp.cos(sinusoid_inp)
 
@@ -399,9 +423,12 @@ class Attention(nnx.Module):
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      cache: Cache | None = None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,
+      metadata: Any = None,
+      soft_cap: float | None = None,
+  ) -> tuple[Cache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
     if self.use_qkv_einsum:
@@ -427,17 +454,84 @@ class Attention(nnx.Module):
     )
 
     # Cache is left aligned.
+    # Update cache
+    if cache is not None and metadata is None:
+      raise ValueError("metadata cannot be None when cache is provided.")
+
     if cache is not None:
-      end_index = cache['end_index'][0]
-      slice_indices = (0, end_index % cache['v'].shape[1], 0, 0)
-      value_proj = jax.lax.dynamic_update_slice(
-          cache['v'],
-          value_proj,
-          slice_indices,
+      q = query_scaled.reshape(-1, self.num_heads, self.head_dim)
+      k = key_proj.reshape(-1, self.num_kv_heads, self.head_dim)
+      v = value_proj.reshape(-1, self.num_kv_heads, self.head_dim)
+
+      num_seqs = jnp.array([metadata.seq_lens.shape[0]], dtype=jnp.int32)
+      mesh = pxla.thread_resources.env.physical_mesh
+
+      tp_axis   = self.shd_config.act_btnh[2]  # 'tp'
+      in_specs = (
+          shd.PartitionSpec(None, tp_axis, None),       # q: (total_tokens, num_heads, head_dim)
+          shd.PartitionSpec(None, tp_axis, None),       # k: (total_tokens, num_heads, head_dim)
+          shd.PartitionSpec(None, tp_axis, None),       # v: (total_tokens, num_heads, head_dim)
+          shd.PartitionSpec(None, None, tp_axis, None, None),  # pages: (max_pages, tokens_per_page,
+          shd.PartitionSpec(),                       # kv_lens: (batch_size,)
+          shd.PartitionSpec(),                 # page_indices: (batch_size, max_pages_per_seq)
+          shd.PartitionSpec(),                       # q_lens
+          shd.PartitionSpec(),                      # Dist
+          shd.PartitionSpec(),                      # soft cap
+
       )
-      key_proj = jax.lax.dynamic_update_slice(
-          cache['k'], key_proj, slice_indices
+      out_specs = (
+          shd.PartitionSpec(None, tp_axis, None),
+          shd.PartitionSpec(None, None, tp_axis, None, None),
       )
+
+      @functools.partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=in_specs,
+          out_specs=out_specs,
+          check_rep=False,
+      )
+      def sharded_rpa(
+          q_in, k_in, v_in, pages_in, kv_lens_in, page_idxs_in, q_lens_in, distribution_in, soft_cap_in=None
+      ):
+        batch_size = metadata.seq_lens.shape[0]
+        # is_decode = jnp.arange(batch_size) < decode_end
+        # actual_q_lens = jnp.where(is_decode, 1, q_lens_in)
+        cu_q_lens_in = jnp.pad(jnp.cumsum(q_lens_in), (1, 0))
+
+        effective_soft_cap = soft_cap_in if soft_cap_in is not None else self.attn_logits_soft_cap
+
+        return rag_kernel.ragged_paged_attention(
+            q_in,
+            k_in,
+            v_in,
+            pages_in,
+            kv_lens_in,
+            page_idxs_in,
+            cu_q_lens_in,
+            distribution_in,
+            soft_cap=effective_soft_cap,
+        )
+
+      attn_output, updated_layer_pages = sharded_rpa(
+          q,
+          k,
+          v,
+          cache[layer_name],
+          metadata.seq_lens,
+          metadata.page_indices.reshape(-1),
+          metadata.seq_lens,
+          metadata.distribution,
+          soft_cap,
+      )
+
+      attn_output = self.attn_vec_einsum(attn_output)
+      attn_output = shard(attn_output, self.shd_config.act_btd)
+     
+      new_pages = {**cache, layer_name: updated_layer_pages}
+      updated_cache = new_pages
+      
+      return updated_cache, attn_output
 
     if self.use_gqa:
       # Reshape matrices to enable einsums over groups.
@@ -457,15 +551,18 @@ class Attention(nnx.Module):
       logits = jnp.tanh(logits / self.attn_logits_soft_cap)
       logits = logits * self.attn_logits_soft_cap
 
-    if self.attn_type == AttentionType.LOCAL_SLIDING:
-      sliding_mask = _create_sliding_mask(
-          segment_pos,
-          cache_len=attn_mask.shape[-1],
-          sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
-      )
-      attn_mask = sliding_mask * attn_mask
+    if attention_mask is not None:
+      if self.attn_type == AttentionType.LOCAL_SLIDING:
+        sliding_mask = _create_sliding_mask(
+            segment_pos,
+            cache_len=attention_mask.shape[-1],
+            sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
+        )
+        attention_mask = sliding_mask * attention_mask
 
-    padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
+      padded_logits = jnp.where((jnp.expand_dims(attention_mask, -2)), logits, K_MASK)
+    else:
+      padded_logits = logits
 
     probs = jax.nn.softmax(padded_logits, axis=-1).astype(key_proj.dtype)
 
@@ -485,40 +582,42 @@ class Attention(nnx.Module):
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
 
-    if cache is not None:
-      new_cache = {
-          'v': value_proj,
-          'k': key_proj,
-          'end_index': cache['end_index'] + seq_len,
-      }
-    else:
-      new_cache = None
-
-    return new_cache, attn_output
+    return None, attn_output
 
   @jax.named_scope('attention')
   def __call__(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      cache: Cache | None = None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,
+      metadata: Any = None,
+      soft_cap: float | None = None,
+  ) -> tuple[Cache | None, jaxtyping.Array]:
     if (
         self.remat_config == RematConfig.BLOCK
         or self.remat_config == RematConfig.BLOCK.value
     ):
-      graphdef, state = nnx.split(self)
-
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
       def _checkpointed_block(state, *args, **kwargs):
         module = nnx.merge(graphdef, state)
         return module.block(*args, **kwargs)
 
       return jax.checkpoint(_checkpointed_block)(
-          state, x, segment_pos, cache, attn_mask
+          state, x, segment_pos, cache, attn_mask, metadata, soft_cap
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(
+          x,
+          segment_pos,
+          cache,
+          layer_name,
+          attention_mask=attention_mask,
+          metadata=metadata,
+          soft_cap=soft_cap,
+      )
 
   @property
   def head_dim(self):
@@ -663,15 +762,21 @@ class DecoderLayer(nnx.Module):
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      cache: Cache | None = None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,
+      metadata: Any = None,
+      soft_cap: float | None = None,
+  ) -> tuple[Cache | None, jaxtyping.Array]:
     inputs_normalized = self.pre_attention_norm(x)
     cache, attn_output = self.attn(
         inputs_normalized,
         segment_pos,
         cache,
-        attn_mask,
+        layer_name,
+        attention_mask=attention_mask,
+        metadata=metadata,
+        soft_cap=soft_cap,
     )
 
     if self.config.use_post_attn_norm:
@@ -692,9 +797,12 @@ class DecoderLayer(nnx.Module):
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      cache: Cache | None = None,
+      layer_name: str | None = None,
+      attention_mask: jaxtyping.Array | None = None,
+      metadata: Any = None,
+      soft_cap: float | None = None,
+  ) -> tuple[Cache | None, jaxtyping.Array]:
     if (
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
@@ -706,10 +814,18 @@ class DecoderLayer(nnx.Module):
         return module.block(*args, **kwargs)
 
       return jax.checkpoint(_checkpointed_block)(
-          state, x, segment_pos, cache, attn_mask
+          state, x, segment_pos, cache, attn_mask, metadata, soft_cap
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(
+          x,
+          segment_pos,
+          cache,
+          layer_name,
+          attention_mask=attention_mask,
+          metadata=metadata,
+          soft_cap=soft_cap,
+      )
 
 
 class RMSNorm(nnx.Module):
@@ -915,12 +1031,14 @@ class Gemma(BackendMappingMixin, nnx.Module):
 
   def __call__(
       self,
-      last_tokens: jaxtyping.Array,  # [B, L]
+      last_tokens: jaxtyping.Array,  # [B, L], [B * L], or [B]
       positions: jaxtyping.Array,  # [B, L]
-      cache: Cache | None,  # (sequence length L')
-      attention_mask: jaxtyping.Array,  # [B, L, L']
+      cache: Cache | None = None,  # (sequence length L')
+      attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
+      metadata: Any = None,
       output_hidden_states: bool = False,
       skip_lm_head: bool = False,
+      soft_cap: float | None = None,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Transformer forward pass.
 
@@ -939,31 +1057,30 @@ class Gemma(BackendMappingMixin, nnx.Module):
       predicted_logits, new_cache
 
       predicted_logits: output logits predicted by the model
-      new_cache: updated cache if the input cache is not None, None elsewhere.
+      new_cache: updated cache (same object modified in place) if passed, else None.
     """
-    new_cache = None if cache is None else {}
     x = self.embedder.encode(last_tokens)
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
-      layer_cache = cache[layer_name] if cache else None
-      layer_cache, x = layer(
+      cache, x = layer(
           x,
           positions,
-          layer_cache,
-          attention_mask,
+          cache,
+          layer_name,
+          attention_mask=attention_mask,
+          metadata=metadata,
+          soft_cap=soft_cap,
       )
-      if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
 
     if skip_lm_head:
-      return x, new_cache
+      return x, cache
 
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, cache
 
   def compute_final_logits(
       self,

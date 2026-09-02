@@ -20,10 +20,12 @@ import operator
 from typing import Any, Optional, Tuple
 
 from flax import nnx
+import numpy as np
 import jax
 import jaxtyping
 from tunix.experimental.generate import engine
-from tunix.experimental.generate import sampler_lib
+from tunix.experimental.generate import sampler as sampler_lib
+from tunix.experimental.generate import utils as generate_utils 
 from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import utils
@@ -39,6 +41,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig,
   ):
+    
     engine_cache_config = sampler_lib.CacheConfig()
     engine_cache_config.max_num_seqs = max(256, getattr(cache_config_or_size, "cache_size", 256))
     
@@ -55,14 +58,29 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model seamlessly via LLMEngine."""
+    # --- INJECT PROFILING START LOGIC ---
+    if not hasattr(self, '_rollout_count'):
+        self._rollout_count = 0
+    self._rollout_count += 1
+
+    if self._rollout_count == 1:
+      options = jax.profiler.ProfileOptions()
+      options.python_tracer_level = 1  # Traces every Python function call
+      options.host_tracer_level = 2    # Traces CPU XLA/JAX host operations
+      # jax.profiler.start_trace("/tmp/xprof_traces", profiler_options=options)
+      jax.profiler.start_trace("gs://yatlas-xprof-traces", profiler_options=options)
+
+    
     req_ids = []
     padded_prompts = []
     
-    tokenizer = self.engine.sampler.tokenizer
+    tokenizer = self.engine.tokenizer
     bos_tok = [tokenizer.bos_id()] if hasattr(tokenizer, 'bos_id') and tokenizer.bos_id() else []
-    
+
+        
     for i, prompt in enumerate(prompts):
         req_id = f"rl_rollout_{i}_{id(self)}"
+        """
         input_ids = tokenizer.encode(prompt)
         if hasattr(tokenizer, 'dedup_bos_ids'):
             input_ids = tokenizer.dedup_bos_ids(bos_tok + input_ids)
@@ -70,28 +88,61 @@ class VanillaRollout(base_rollout.BaseRollout):
             input_ids = bos_tok + input_ids
             
         padded_prompts.append(input_ids)
-        self.engine.add_request(req_id, input_ids)
+        """
+        self.engine.add_request(req_id, prompt)
         req_ids.append(req_id)
-        
+    
+    res = []  
+    sampling_config = sampler_lib.SamplingConfig(
+      temperature=rollout_config.temperature,
+      top_p=rollout_config.top_p,
+      top_k=rollout_config.top_k,
+      return_logprobs=rollout_config.return_logprobs,
+      # eos_tokens=rollout_config.eos_tokens,
+    )
+
+      
     while self.engine.has_unfinished_requests():
-        self.engine.step(
-            temperature=rollout_config.temperature,
-            top_p=rollout_config.top_p,
-            top_k=rollout_config.top_k,
-            return_logprobs=rollout_config.return_logprobs,
-            eos_tokens=rollout_config.eos_tokens,
+        completed = self.engine.step(
+          sampling_config,
+          # eos_tokens=rollout_config.eos_tokens
         )
+
+        res.extend(completed)
 
     out_tokens = []
     decoded_texts = []
-    for req_id in req_ids:
-        gen_tokens = self.engine.generated_tokens[req_id]
+    max_prompt_len = rollout_config.max_prompt_length
+    if max_prompt_len % 2 != 0:
+      max_prompt_len = generate_utils.next_power_of_2(max_prompt_len)
+
+    for req in res:
+        token_ids = np.array(req.token_ids)
+        prompt_tokens = token_ids[:req.prompt_length]
+        gen_tokens = token_ids[req.prompt_length:]
+        # gen_tokens = self.engine.generated_tokens[req_id]
+        padded_prompts.append(
+            generate_utils.pad_to_length(
+                np.array(prompt_tokens, dtype=np.int32),
+                target_length=max_prompt_len,
+                pad_value=tokenizer.pad_id(),
+                left=True,
+            )
+        )
         out_tokens.append(gen_tokens)
         
         if hasattr(tokenizer, "decode"):
              decoded_texts.append(tokenizer.decode(gen_tokens))
         else:
              decoded_texts.append("".join(str(t) for t in gen_tokens))
+
+    # Ensure all device operations finish before we count the step as complete
+    # --- INJECT PROFILING STOP LOGIC ---
+    if self._rollout_count == 3:
+        # Stop capturing after the 3rd rollout completes
+        jax.profiler.stop_trace()
+    # -----------------------------------
+
 
     return base_rollout.RolloutOutput(
         text=decoded_texts,
@@ -150,10 +201,10 @@ class VanillaRollout(base_rollout.BaseRollout):
     self.engine.sampler.transformer_state = nnx.variables(new_model, nnx.Param)
 
   def pad_id(self) -> int:
-    return self.engine.sampler.tokenizer.pad_id()
+    return self.engine.tokenizer.pad_id()
 
   def eos_id(self) -> int:
-    return self.engine.sampler.tokenizer.eos_id()
+    return self.engine.tokenizer.eos_id()
 
   def model(self) -> nnx.Module:
     return self.engine.sampler.transformer
