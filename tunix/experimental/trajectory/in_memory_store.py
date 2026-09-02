@@ -36,13 +36,31 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     )
 
   def get_trajectories_metadata(
-      self,
+      self, trajectory_ids: list[str] | None = None
   ) -> list[trajectory_lib.TrajectoryMetadata]:
-    """Retrieves metadata for each trajectory in the run."""
-    return [
-        meta.model_copy(deep=True)
-        for meta in self._metadata_by_trajectory_id.values()
-    ]
+    """Retrieves metadata for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metadata for these IDs is returned. If None, metadata
+        for all trajectories in the run is returned.
+
+    Returns:
+      A list of TrajectoryMetadata objects for the requested trajectories.
+
+    Raises:
+      store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
+        not exist.
+    """
+    if trajectory_ids is None:
+      trajectory_ids = list(self._metadata_by_trajectory_id.keys())
+    metas: list[trajectory_lib.TrajectoryMetadata] = []
+    for traj_id in trajectory_ids:
+      if traj_id not in self._metadata_by_trajectory_id:
+        raise store.TrajectoryMetadataNotFoundError(traj_id)
+      meta = self._metadata_by_trajectory_id[traj_id].model_copy(deep=True)
+      metas.append(meta)
+    return metas
 
   def get_trajectories(
       self, trajectory_ids: list[str]
