@@ -23,6 +23,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector
+from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker as worker
 
@@ -262,6 +263,50 @@ class RolloutWorkerTest(parameterized.TestCase):
         results.append(res)
       self.assertLen(results, 1)
       self.assertEqual(results[0].request_id, "traj_prompt_native_actor_g0")
+
+    asyncio.run(_run_test())
+
+  def test_trajectory_store_writing(self):
+    """Verifies that generated trajectories are written to trajectory_store."""
+
+    async def _run_test():
+      mem_store = in_memory_store.InMemoryTrajectoryStore()
+      svc = worker.RolloutWorker(
+          worker_id="test_store_worker",
+          sampler=self.sampler,
+          env_pool=self.env_pool,
+          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+          trajectory_store=mem_store,
+      )
+      svc.start()
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_store_test",
+          prompt="Task for store test",
+          target_policy_version=7,
+          generation_kwargs={"delay_seconds": 0.01, "force_finish": True},
+          metadata={"pair_idx": 42},
+      )
+      res = await svc.generate(req)
+      self.assertEqual(res.request_id, "traj_prompt_store_test")
+
+      metas = mem_store.get_trajectories_metadata()
+      self.assertLen(metas, 1)
+      self.assertEqual(metas[0].trajectory_id, "traj_prompt_store_test")
+      self.assertEqual(metas[0].prompt_id, "prompt_store_test")
+      self.assertEqual(metas[0].status, "SUCCEEDED")
+      self.assertEqual(metas[0].target_policy_versions, [7])
+      self.assertEqual(metas[0].extra.get("pair_idx"), 42)
+      self.assertEqual(
+          metas[0].hyperparams,
+          {"delay_seconds": 0.01, "force_finish": True},
+      )
+
+      trajs = mem_store.get_trajectories(["traj_prompt_store_test"])
+      self.assertLen(trajs, 1)
+      self.assertNotEmpty(trajs[0].steps)
+      svc.stop()
 
     asyncio.run(_run_test())
 

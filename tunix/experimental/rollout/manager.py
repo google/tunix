@@ -21,13 +21,16 @@ from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
-    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+    trajectory_lib.TunixTrajectory,
+    trajectory_lib.Trajectory,
+    trajectory_lib.TrajectoryError,
 ]
 
 
@@ -48,6 +51,7 @@ class RolloutManager:
       tokenizer: Any = None,
       chat_parser: Any = None,
       drain_timeout_s: float = 300.0,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     """Initializes the RolloutManager.
 
@@ -124,6 +128,7 @@ class RolloutManager:
     self.max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self.trajectory_store = trajectory_store
     if self.tokenizer is None or self.chat_parser is None:
       raise ValueError(
           "RolloutManager requires valid tokenizer and chat_parser arguments"
@@ -195,6 +200,7 @@ class RolloutManager:
         agent=agent,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        trajectory_store=self.trajectory_store,
     )
 
     self._active_collectors[traj_id] = collector

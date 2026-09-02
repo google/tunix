@@ -14,11 +14,15 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-from typing import Any, List
+import asyncio
+from typing import Any, Callable, List, Optional
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
 
@@ -42,6 +46,7 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     if (
         sampler is None
@@ -61,11 +66,39 @@ class TrajectoryCollectorEngine:
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self.trajectory_store = trajectory_store
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    target_policy_versions = None
+    target_policy_version = getattr(self.request, "target_policy_version", None)
+    if target_policy_version is not None:
+      target_policy_versions = [target_policy_version]
 
-  async def run_episode(self) -> trajectory_lib.Trajectory:
+    self.metadata = converter_lib.create_trajectory_metadata(
+        self.traj_id,
+        self.request,
+        self.agent,
+        target_policy_versions=target_policy_versions,
+        status=agent_types.TrajectoryStatus.RUNNING,
+    )
+
+  def _sync_metadata(
+      self, status: str | agent_types.TrajectoryStatus | None = None
+  ) -> None:
+    """Syncs metadata status and agent trajectory timing/reward in place."""
+    if self.metadata is not None:
+      policy_version = getattr(self.request, "target_policy_version", None)
+      converter_lib.update_trajectory_metadata(
+          metadata=self.metadata,
+          agent=self.agent,
+          policy_version=policy_version,
+          status=status,
+      )
+
+  async def run_episode(
+      self,
+  ) -> trajectory_lib.TunixTrajectory:
     """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -117,72 +150,53 @@ class TrajectoryCollectorEngine:
           "RolloutCollector requires valid registered agent and env instances"
           " to run an episode."
       )
+
     inner_engine = rl_collect_engine.TrajectoryCollectEngine(
         agent=self.agent,
         env=self.env,
         model_call=model_call,  # pyrefly: ignore[bad-argument-type]
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        policy_version=getattr(self.request, "target_policy_version", None),
+        trajectory_store=self.trajectory_store,
+        metadata=self.metadata,
     )
-    rl_traj = await inner_engine.collect(mode="Trajectory")
-    self.is_done = True
-    return self._convert_to_trajectory(rl_traj)
-
-  def _convert_to_trajectory(self, rl_traj: Any) -> trajectory_lib.Trajectory:
-    """Converts internal rollout trajectory to standardized Trajectory format."""
-    metadata = dict(self.request.metadata or {})
-    metadata["prompt_id"] = self.request.prompt_id
-    metadata["group_index"] = self.request.group_index
-    assistant_text = "\n".join(
-        str(getattr(step, "model_response", ""))
-        for step in getattr(rl_traj, "steps", [])
-        if getattr(step, "model_response", "")
-    )
-    metadata.setdefault("text", assistant_text)
-    metadata["prompt_tokens"] = np.asarray(
-        getattr(rl_traj, "prompt_tokens", np.zeros(0, dtype=np.int32)),
-        dtype=np.int32,
-    )
-    metadata["reward"] = float(getattr(rl_traj, "reward", 0.0) or 0.0)
-    trajectory = trajectory_lib.Trajectory(
-        trajectory_id=self.traj_id,
-        agent=trajectory_lib.Agent(
-            name=getattr(self.agent, "name", "agent"),
-            version="1.0",
-        ),
-        extra=metadata,
-    )
-    if hasattr(rl_traj, "steps"):
-      for step in rl_traj.steps:
-        obs_val = getattr(step, "observation", None)
-        obs_obj = None
-        if obs_val:
-          obs_obj = trajectory_lib.Observation(
-              results=[trajectory_lib.ObservationResult(content=str(obs_val))]
-          )
-        new_step = trajectory.add_step(
-            source=trajectory_lib.Source.AGENT,
-            message=getattr(step, "model_response", str(step)),
-            observation=obs_obj,
+    try:
+      rl_traj = await inner_engine.collect(mode="Trajectory")
+      self.is_done = True
+      self._sync_metadata()
+      steps = []
+      task = getattr(rl_traj, "task", None) or getattr(
+          self.request, "prompt", None
+      )
+      task_step = converter_lib.create_task_step(task)
+      if task_step is not None:
+        steps.append(task_step)
+      for i, step in enumerate(getattr(rl_traj, "steps", []) or []):
+        agent_step = converter_lib.create_agent_step(
+            step,
+            tunix_step_id=i,
+            policy_version=getattr(self.request, "target_policy_version", None),
         )
-        extra_dict = {}
-        for attr in (
-            "assistant_tokens",
-            "assistant_masks",
-            "env_tokens",
-            "env_masks",
-            "logprobs",
-        ):
-          val = getattr(step, attr, None)
-          if val is not None:
-            extra_dict[attr] = val
-            try:
-              setattr(new_step, attr, val)
-            except (AttributeError, ValueError):
-              pass
-        if extra_dict:
-          new_step.extra = extra_dict
-    return trajectory
+        if agent_step is not None:
+          steps.append(agent_step)
+        env_step = converter_lib.create_env_step(step, tunix_step_id=i)
+        if env_step is not None:
+          steps.append(env_step)
+      return trajectory_lib.TunixTrajectory(
+          **self.metadata.model_dump(),
+          steps=steps,
+      )
+    except asyncio.TimeoutError:
+      self._sync_metadata(status=agent_types.TrajectoryStatus.TIMEOUT)
+      raise
+    except Exception:
+      self._sync_metadata(status=agent_types.TrajectoryStatus.FAILED)
+      raise
+    finally:
+      if self.trajectory_store is not None:
+        self.trajectory_store.update_metadata(self.metadata)
+        self.trajectory_store.flush()
 
   def pause(self) -> None:
     self.is_paused = True
