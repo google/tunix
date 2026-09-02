@@ -12,9 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
 from absl.testing import absltest
+import numpy as np
+import tensorflow_datasets as tfds
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.rl.agentic import registry
+
+
+class _FakeMapDataSource:
+
+  def __init__(self, data):
+    self._data = list(data)
+
+  def __len__(self):
+    return len(self._data)
+
+  def __getitem__(self, idx):
+    return self._data[idx]
 
 
 class GSM8KTest(absltest.TestCase):
@@ -61,6 +76,72 @@ class GSM8KTest(absltest.TestCase):
     self.assertEqual(action.action, "The answer is 4.")
     self.assertEqual(agent.name, gsm8k.GSM8K_AGENT_NAME)
     self.assertLen(agent.trajectory.steps, 1)
+
+  def test_normalize_example_value(self):
+    self.assertEqual(
+        gsm8k.normalize_example_value(np.array(["test"])),
+        "test",
+    )
+    self.assertEqual(
+        gsm8k.normalize_example_value(np.bytes_(b"bytes_val")),
+        "bytes_val",
+    )
+    self.assertEqual(
+        gsm8k.normalize_example_value(b"raw_bytes"),
+        "raw_bytes",
+    )
+    self.assertEqual(
+        gsm8k.normalize_example_value(np.array(["a", "b"])),
+        ["a", "b"],
+    )
+    self.assertEqual(gsm8k.normalize_example_value("string"), "string")
+    self.assertEqual(gsm8k.normalize_example_value(42), 42)
+
+  def test_as_text(self):
+    self.assertEqual(gsm8k.as_text(b"hello"), "hello")
+    self.assertEqual(gsm8k.as_text(np.array(["world"])), "world")
+    self.assertEqual(gsm8k.as_text(123), "123")
+
+  def test_load_gsm8k_dataset(self):
+    fake_records = [
+        {
+            "question": np.array([b"What is 10 + 5?"]),
+            "answer": np.array([b"10 + 5 is 15 #### 15"]),
+        },
+        {
+            "question": "What is 3 * 7?",
+            "answer": "3 * 7 = 21 #### 21",
+        },
+    ]
+    fake_source = _FakeMapDataSource(fake_records)
+
+    with mock.patch.object(
+        tfds, "data_source", return_value=fake_source
+    ) as mock_ds:
+      dataset = gsm8k.load_gsm8k_dataset(
+          split="train",
+          data_dir="/tmp/test_dir",
+          shuffle=False,
+          seed=123,
+      )
+
+    mock_ds.assert_called_once_with(
+        "gsm8k",
+        split="train",
+        data_dir="/tmp/test_dir",
+        builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
+        download=True,
+    )
+    self.assertLen(dataset, 2)
+    first_item = dataset[0]
+    self.assertEqual(first_item["question"], "What is 10 + 5?")
+    self.assertEqual(first_item["answer"], "15")
+    self.assertIn("What is 10 + 5?", first_item["prompts"])
+    self.assertIn("<answer>\\boxed{}</answer>", first_item["prompts"])
+
+    second_item = dataset[1]
+    self.assertEqual(second_item["question"], "What is 3 * 7?")
+    self.assertEqual(second_item["answer"], "21")
 
 
 if __name__ == "__main__":

@@ -13,13 +13,23 @@
 # limitations under the License.
 """GSM8K agentic components used by the distributed GRPO example."""
 
+import logging
 import re
 from typing import Any
 
+import grain
+import numpy as np
+import tensorflow_datasets as tfds
 from tunix.experimental.rl.agentic import registry
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
+
+try:
+  # For OSS usage
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import,g-import-not-at-top
+except (ImportError, ModuleNotFoundError):
+  pass
 
 GSM8K_ENV_NAME = "gsm8kenv"
 GSM8K_AGENT_NAME = "gsm8kagent"
@@ -45,6 +55,60 @@ def extract_hash_answer(text: str) -> str | None:
 
 def build_prompt(question: str) -> str:
   return GSM8K_PROMPT_TEMPLATE.format(question)
+
+
+def normalize_example_value(value: Any) -> Any:
+  """Normalizes numpy/bytes values from dataset records to python primitives/strings."""
+  if isinstance(value, np.ndarray):
+    flat = value.reshape(-1).tolist()
+    if len(flat) == 1:
+      return normalize_example_value(flat[0])
+    return [normalize_example_value(v) for v in flat]
+  if isinstance(value, np.bytes_):
+    return value.tobytes().decode("utf-8")
+  if isinstance(value, bytes):
+    return value.decode("utf-8")
+  return value
+
+
+def as_text(value: Any) -> str:
+  """Converts a dataset field value to text string."""
+  normalized = normalize_example_value(value)
+  return normalized if isinstance(normalized, str) else str(normalized)
+
+
+def load_gsm8k_dataset(
+    split: str = "train",
+    data_dir: str = "/tmp/gsm8k_data",
+    shuffle: bool = True,
+    seed: int = 42,
+) -> grain.MapDataset:
+  """Loads the GSM8K split and maps examples to prompt/question/answer records."""
+  logging.info(
+      "Loading GSM8K TFDS split=%s data_dir=%s shuffle=%s seed=%d.",
+      split,
+      data_dir,
+      shuffle,
+      seed,
+  )
+  data = tfds.data_source(
+      "gsm8k",
+      split=split,
+      data_dir=data_dir,
+      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
+      download=True,
+  )
+  dataset = grain.MapDataset.source(data)
+  if shuffle:
+    dataset = dataset.shuffle(seed=seed)
+  logging.info("GSM8K dataset loaded successfully: %d examples.", len(dataset))
+  return dataset.map(
+      lambda x: {
+          "prompts": build_prompt(as_text(x["question"])),
+          "question": as_text(x["question"]),
+          "answer": extract_hash_answer(as_text(x["answer"])),
+      }
+  )
 
 
 def extract_boxed_answer(text: str) -> str | None:

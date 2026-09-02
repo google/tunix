@@ -28,26 +28,16 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
-from concurrent import futures
 import functools
 import logging
 import os
-import pickle
 import sys
 from types import SimpleNamespace
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import grain  # pylint: disable=g-import-not-at-top
 import jax  # pylint: disable=g-import-not-at-top
-import numpy as np  # pylint: disable=g-import-not-at-top
-import tensorflow_datasets as tfds  # pylint: disable=g-import-not-at-top
-
-try:
-  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
-except (ImportError, ModuleNotFoundError):
-  pass
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -169,53 +159,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _normalize_example_value(value: Any) -> Any:
-  if isinstance(value, np.ndarray):
-    flat = value.reshape(-1).tolist()
-    if len(flat) == 1:
-      return _normalize_example_value(flat[0])
-    return [_normalize_example_value(v) for v in flat]
-  if isinstance(value, np.bytes_):
-    return value.tobytes().decode("utf-8")
-  if isinstance(value, bytes):
-    return value.decode("utf-8")
-  return value
-
-
-def _as_text(value: Any) -> str:
-  normalized = _normalize_example_value(value)
-  return normalized if isinstance(normalized, str) else str(normalized)
-
-
-def _build_gsm8k_dataset(args: argparse.Namespace) -> grain.MapDataset:
-  """Loads the real GSM8K split and maps examples to prompt/answer records."""
-  logging.info(
-      "Loading GSM8K TFDS split=%s data_dir=%s shuffle=%s seed=%d.",
-      args.tfds_split,
-      args.tfds_data_dir,
-      args.shuffle,
-      args.seed,
-  )
-  data = tfds.data_source(
-      "gsm8k",
-      split=args.tfds_split,
-      data_dir=args.tfds_data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
-  dataset = grain.MapDataset.source(data)
-  if args.shuffle:
-    dataset = dataset.shuffle(seed=args.seed)
-  logging.info("GSM8K dataset loaded successfully: %d examples.", len(dataset))
-  return dataset.map(
-      lambda x: {
-          "prompts": gsm8k.build_prompt(_as_text(x["question"])),
-          "question": _as_text(x["question"]),
-          "answer": gsm8k.extract_hash_answer(_as_text(x["answer"])),
-      }
-  )
-
-
 def _make_reward_fn(mode: str, debug: bool = False):
   """Creates the optional orchestrator-side reward function."""
   if mode == "env":
@@ -331,9 +274,9 @@ def _build_prompt_item(
     top_p: float,
     top_k: int | None,
 ) -> dict[str, Any]:
-  prompt = _as_text(example["prompts"])
-  question = _as_text(example["question"])
-  answer = _normalize_example_value(example["answer"])
+  prompt = gsm8k.as_text(example["prompts"])
+  question = gsm8k.as_text(example["question"])
+  answer = gsm8k.normalize_example_value(example["answer"])
   prompt_id = f"prompt_{prompt_idx}"
   return {
       "prompt": prompt,
@@ -366,7 +309,12 @@ def _iter_prompt_items(
     args: argparse.Namespace,
 ) -> Iterator[dict[str, Any]]:
   top_k = None if args.top_k < 0 else args.top_k
-  dataset = _build_gsm8k_dataset(args)
+  dataset = gsm8k.load_gsm8k_dataset(
+      split=args.tfds_split,
+      data_dir=args.tfds_data_dir,
+      shuffle=args.shuffle,
+      seed=args.seed,
+  )
   dataset_size = len(dataset)
   if dataset_size == 0:
     raise ValueError("GSM8K dataset is empty.")
