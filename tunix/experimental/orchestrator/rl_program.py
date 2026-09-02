@@ -232,7 +232,8 @@ class StandardRLProgram(RLProgram):
           group = await self.raw_q.get_group()
           if not group:
             break
-        except Exception:
+        except Exception as exc:
+          logging.exception("Error in critique_stage get_group: %s", exc)
           break
 
         rewards = []
@@ -703,6 +704,8 @@ class StandardRLProgram(RLProgram):
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1
         )
+      else:
+        self.policy_version += 1
 
       self.scored_q.commit(current_step, groups=uncommitted_groups)
 

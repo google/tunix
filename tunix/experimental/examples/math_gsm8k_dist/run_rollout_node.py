@@ -113,6 +113,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--maxtext_load_parameters_path",
+      type=str,
+      default="",
+      help="Path to an unrolled MaxText checkpoint for rollout loading.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for rollout worker.",
@@ -363,6 +369,10 @@ def _create_vllm_sampler(args):
     }
     if args.maxtext_attention:
       maxtext_config_overrides["attention"] = args.maxtext_attention
+    if args.maxtext_load_parameters_path:
+      maxtext_config_overrides["load_parameters_path"] = (
+          args.maxtext_load_parameters_path
+      )
     engine_kwargs["additional_config"] = {
         "maxtext_config": maxtext_config_overrides
     }

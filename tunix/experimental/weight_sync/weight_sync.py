@@ -35,6 +35,7 @@ class WeightSyncMode(str, enum.Enum):
   """Modes for weight synchronization across workers."""
 
   NONE = "none"
+  NOOP = "noop"
   FALLBACK = "fallback"
   RAIDEN = "raiden"
 

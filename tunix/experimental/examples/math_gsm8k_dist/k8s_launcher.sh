@@ -41,7 +41,10 @@ export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-${WEIGHT_SYNC_BACKEND:-none}}
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
+export SYNC_GIT_BRANCH=${SYNC_GIT_BRANCH:-}
+export RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS:-}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -57,6 +60,8 @@ export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-4}
+export ROLLOUT_MAXTEXT_MODEL_NAME=${ROLLOUT_MAXTEXT_MODEL_NAME:-}
+export ROLLOUT_MAXTEXT_CKPT=${ROLLOUT_MAXTEXT_CKPT:-}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
@@ -87,7 +92,7 @@ export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
 }
 
 start_orchestrator() {
@@ -98,6 +103,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples &&} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
@@ -123,7 +129,7 @@ start_orchestrator() {
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" 2>/dev/null || true
 }
 
 start_trainer() {
@@ -147,7 +153,8 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples &&} \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${RAIDEN_WEIGHT_SYNC_CHUNKS:+RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -173,16 +180,26 @@ start_trainer() {
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  for i in $(seq 0 $((ROLLOUT_REPLICAS - 1))); do
+    kubectl delete jobset "${ROLLOUT_ID}-${i}" 2>/dev/null || true
+  done
+  kubectl delete jobset "${ROLLOUT_ID}" 2>/dev/null || true
 }
 
 start_rollout() {
   local maxtext_args=""                                                                                                                                                                             
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then                                                                                                                               
+  if [[ -n "${ROLLOUT_MAXTEXT_MODEL_NAME}" ]]; then                                                                                                                               
+    maxtext_args=" \
+      --maxtext_model_name=${ROLLOUT_MAXTEXT_MODEL_NAME} \
+      ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
+      ${ROLLOUT_MAXTEXT_CKPT:+--maxtext_load_parameters_path=${ROLLOUT_MAXTEXT_CKPT}} \
+    "                                                                                                                                                                                                       
+  elif [[ "${TRAINER_BACKEND}" == "maxtext" && -n "${ROLLOUT_MAXTEXT_CKPT}" ]]; then
     maxtext_args=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-    "                                                                                                                                                                                                       
+      --maxtext_load_parameters_path=${ROLLOUT_MAXTEXT_CKPT} \
+    "
   fi
   local vllm_args=""
   if [[ "$SAMPLER" == "vllm" ]]; then
@@ -190,32 +207,39 @@ start_rollout() {
     --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
     "
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
-    --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=${ROLLOUT_TPU_SLICE} \
-    --worker_container_image="${TUNIX_IMAGE}" \
-    --worker_container_port="${ROLLOUT_PORT}" \
-    --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
-        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
-        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
-        --worker_id=${ROLLOUT_ID} \
-        --port=${ROLLOUT_PORT} \
-        --model_id=${MODEL_ID} \
-        --model_dir=${MODEL_DIR} \
-        --tokenizer_path=${TOKENIZER_PATH} \
-        --max_prompt_length=${MAX_PROMPT_LENGTH} \
-        --max_response_length=${MAX_RESPONSE_LENGTH} \
-        --lora_rank=${LORA_RANK} \
-        --lora_alpha=${LORA_ALPHA} \
-        --weight_sync_mode=${WEIGHT_SYNC_MODE} \
-        ${maxtext_args} \
-        ${vllm_args} \
-        ${DEBUG:+--debug} \
-    " \
-    | kubectl apply -f -
+  for i in $(seq 0 $((ROLLOUT_REPLICAS - 1))); do
+    local replica_id="${ROLLOUT_ID}"
+    if [[ "$ROLLOUT_REPLICAS" -gt 1 ]]; then
+      replica_id="${ROLLOUT_ID}-${i}"
+    fi
+    python tunix/experimental/distributed/deployment/yaml_generator.py \
+      tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
+      --jobset_name="${replica_id}" \
+      --tpu_slice=${ROLLOUT_TPU_SLICE} \
+      --worker_container_image="${TUNIX_IMAGE}" \
+      --worker_container_port="${ROLLOUT_PORT}" \
+      --worker_startup_command=" \
+        ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples &&} \
+        SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+          --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+          --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+          --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
+          --worker_id=${replica_id} \
+          --port=${ROLLOUT_PORT} \
+          --model_id=${MODEL_ID} \
+          --model_dir=${MODEL_DIR} \
+          --tokenizer_path=${TOKENIZER_PATH} \
+          --max_prompt_length=${MAX_PROMPT_LENGTH} \
+          --max_response_length=${MAX_RESPONSE_LENGTH} \
+          --lora_rank=${LORA_RANK} \
+          --lora_alpha=${LORA_ALPHA} \
+          --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+          ${maxtext_args} \
+          ${vllm_args} \
+          ${DEBUG:+--debug} \
+      " \
+      | kubectl apply -f -
+  done
 }
 
 source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh

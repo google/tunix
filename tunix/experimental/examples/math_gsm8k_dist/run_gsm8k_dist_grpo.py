@@ -107,7 +107,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync.WeightSyncMode),
       help=(
           "Weight synchronization mode. 'none' disables post-update sync, "
-          "'raiden' uses Raiden, and 'fallback' runs protocol-only sync."
+          "'noop' runs version-only sync, 'raiden' uses Raiden, and 'fallback' "
+          "runs protocol-only sync."
       ),
   )
   parser.add_argument(

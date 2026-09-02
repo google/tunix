@@ -540,6 +540,14 @@ class RolloutWorker(abstract_worker.Worker):
     """Returns this worker's view of the current weight sync round."""
     return dict(self._sync_round, policy_version=self._policy_version)
 
+  def set_policy_version(self, version: int) -> int:
+    """Sets the policy version for subsequent rollout generations."""
+    self._policy_version = int(version)
+    logging.info(
+        "[RolloutWorker] Updated policy_version to %d.", self._policy_version
+    )
+    return self._policy_version
+
   def _record_round(self, sync_request: Any, phase: str) -> None:
     extra = getattr(sync_request, "extra_config", None) or {}
     if extra.get("req_id") is not None:
