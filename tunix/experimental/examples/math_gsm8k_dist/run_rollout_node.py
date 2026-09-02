@@ -441,7 +441,20 @@ def main(argv: list[str], context: Any = None) -> None:
       logging.info("Eagerly starting sampler engine...")
       await worker_service.sampler.start()
       logging.info("Sampler engine started.")
-      if hasattr(worker_service.sampler, "bind_weight_sync"):
+      # Binding Raiden this early dlopens its .so before the engine has run any
+      # real JAX work, and on a single host that aborts the engine process:
+      #   F message.cc:348] File is already registered:
+      #     xla/pjrt/proto/execute_options.proto
+      # Raiden and libtpu each carry that descriptor, and protobuf's C++
+      # registry treats the second registration as fatal. Deferring the bind to
+      # the first actual sync avoids it. The eager bind only buys anything on
+      # multihost, where every pod has to join the JAX distributed group at
+      # startup, so it is opt-in rather than removed.
+      eager_warmup = os.environ.get("RAIDEN_EAGER_WARMUP", "").lower() in (
+          "1",
+          "true",
+      )
+      if eager_warmup and hasattr(worker_service.sampler, "bind_weight_sync"):
         logging.info("Eagerly warming up Raiden weight sync...")
         await worker_service.sampler.bind_weight_sync()
         logging.info("Raiden weight sync warmed up.")
