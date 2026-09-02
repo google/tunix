@@ -15,7 +15,7 @@ RUN python3 -m pip install --upgrade pip
 
 # Create a virtual environment
 RUN python3.12 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Upgrade pip
 RUN pip install --upgrade pip

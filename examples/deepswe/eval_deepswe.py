@@ -597,7 +597,7 @@ if ROLLOUT_ENGINE == "vllm":
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
   logger.info("VllmSampler successfully initialized directly with model weights.")
 
-elif ROLLOUT_ENGINE == "vanilla":
+elif ROLLOUT_ENGINE in ("vanilla", "sglang_jax"):
   if MODEL_SOURCE == "maxtext":
     logger.info(
         "Loading MaxText model %s from %s (scan_layers=%s)...",
@@ -638,54 +638,55 @@ elif ROLLOUT_ENGINE == "vanilla":
 
   sft_utils.show_hbm_usage()
 
-  from tunix.generate import sampler as sampler_lib
+  if ROLLOUT_ENGINE == "vanilla":
+    from tunix.generate import sampler as sampler_lib
 
-  sampler = sampler_lib.Sampler(
-      model,
-      tokenizer,
-      sampler_lib.CacheConfig(
-          cache_size=16384,
-          num_layers=getattr(model, "config", None)
-          and getattr(model.config, "num_layers", 32)
-          or 32,
-          num_kv_heads=getattr(model, "config", None)
-          and getattr(model.config, "num_kv_heads", 8)
-          or 8,
-          head_dim=getattr(model, "config", None)
-          and getattr(model.config, "head_dim", 128)
-          or 128,
-      ),
-  )
+    sampler = sampler_lib.Sampler(
+        model,
+        tokenizer,
+        sampler_lib.CacheConfig(
+            cache_size=16384,
+            num_layers=getattr(model, "config", None)
+            and getattr(model.config, "num_layers", 32)
+            or 32,
+            num_kv_heads=getattr(model, "config", None)
+            and getattr(model.config, "num_kv_heads", 8)
+            or 8,
+            head_dim=getattr(model, "config", None)
+            and getattr(model.config, "head_dim", 128)
+            or 128,
+        ),
+    )
 
-elif ROLLOUT_ENGINE == "sglang_jax":
-  from flax import nnx
-  from tunix.generate import mappings
-  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
+  elif ROLLOUT_ENGINE == "sglang_jax":
+    from flax import nnx
+    from tunix.generate import mappings
+    from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
 
-  mapping_config = mappings.MappingConfig.build(
-      mapping_obj=None,
-      model=model,
-      backend="sglang_jax",
-  )
-  sampler = SglangJaxSampler(
-      tokenizer=tokenizer,
-      config=SglangJaxConfig(
-          mesh=mesh,
-          mapping_config=mapping_config,
-          model_version=MODEL_VERSION,
-          context_length=MAX_MODEL_LEN,
-          mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
-          init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
-          disable_radix_cache=True,
-          enable_deterministic_sampling=False,
-          precompile_token_paddings=[8192, 16384],
-          precompile_bs_paddings=[1],
-          max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
-      ),
-  )
-  if SGLANG_INIT_RANDOM_WEIGHTS:
-    sampler.load_checkpoint(nnx.state(model))
-    logger.info("Synced model weights to sglang_jax engine.")
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=None,
+        model=model,
+        backend="sglang_jax",
+    )
+    sampler = SglangJaxSampler(
+        tokenizer=tokenizer,
+        config=SglangJaxConfig(
+            mesh=mesh,
+            mapping_config=mapping_config,
+            model_version=MODEL_VERSION,
+            context_length=MAX_MODEL_LEN,
+            mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
+            init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
+            disable_radix_cache=True,
+            enable_deterministic_sampling=False,
+            precompile_token_paddings=[8192, 16384],
+            precompile_bs_paddings=[1],
+            max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
+        ),
+    )
+    if SGLANG_INIT_RANDOM_WEIGHTS:
+      sampler.load_checkpoint(nnx.state(model))
+      logger.info("Synced model weights to sglang_jax engine.")
 
 else:
   raise ValueError(

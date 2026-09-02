@@ -52,10 +52,6 @@ class SamplerOutput:
   # rollout's expert choices during training instead of re-routing.
   routed_experts: Optional[list[np.ndarray | None]] = None
 
-  @property
-  def left_padded_prompt_tokens(self) -> np.ndarray:
-    return self.padded_prompt_tokens
-
 
 class BaseSampler(ABC):
   """Base class for samplers."""

@@ -131,16 +131,10 @@ def _get_reshard_fn_jax_device_put(
     cache_resharding_plans: bool = False,  # pylint: disable=unused-argument
     use_experimental_pre_reshard: bool = False,  # pylint: disable=unused-argument
 ):
-  def _fast_device_put(source, target):
-    def _leaf_put(s, t):
-      if hasattr(s, "sharding") and hasattr(t, "spec"):
-        if s.sharding == t:
-          return s
-      return jax.device_put(s, t, donate=donate)
-
-    return jax.tree_util.tree_map(_leaf_put, source, target)
-
-  return _fast_device_put
+  return functools.partial(
+      jax.device_put,
+      donate=donate,
+  )
 
 
 def _get_reshard_fn(
@@ -217,23 +211,15 @@ def reshard_pytree(
       target,
   )
 
-  num_slices = int(os.getenv('NUM_SLICES', '1'))
-  if num_slices > 1:
-    get_reshard_fns = [
-        _get_reshard_fn_pathwaysutils,
-        _get_reshard_fn_jax_device_put,
-    ]
-  else:
-    get_reshard_fns = [
-        _get_reshard_fn_jax_device_put,
-        _get_reshard_fn_pathwaysutils,
-    ]
-
   reshard_fn = _get_reshard_fn(
       cache_resharding_plans=cache_plan,
       donate=donate_input,
       use_experimental_pre_reshard=use_experimental_pre_reshard,
-      get_reshard_fns=get_reshard_fns,
+      get_reshard_fns=[
+          #
+          _get_reshard_fn_pathwaysutils,
+          _get_reshard_fn_jax_device_put,
+      ],
   )
 
   start = time.time()

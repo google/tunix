@@ -1033,13 +1033,12 @@ def _unstack_scanned_param(
       # Handling JAX version differences where unstack might be under jnp
       try:
         if hasattr(jax, 'unstack'):
-          res = tuple(jax.unstack(src_val))
+          return jax.unstack(src_val)
         elif hasattr(jnp, 'unstack'):
-          res = tuple(jnp.unstack(src_val))
+          return jnp.unstack(src_val)
         else:
-          # Fallback for older JAX versions
-          res = tuple(src_val[i] for i in range(src_val.shape[0]))  # pyrefly: ignore[bad-return]
-        return res
+           # Fallback for older JAX versions
+          return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
       except Exception as e:
         logging.debug(
             "Failed to unstack parameter '%s'. Error: %s. Using original.",
@@ -1372,8 +1371,7 @@ def _jit_fuse_and_unstack_moe(
   fused = _interleave_moe_weights(
       wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
   )
-  res = tuple(jnp.unstack(fused, axis=scan_axis))
-  return res
+  return jnp.unstack(fused, axis=scan_axis)
 
 
 def _fuse_moe_weights(
@@ -1513,7 +1511,6 @@ def _reshard_in_chunks(
     reshard_fn: Callable[..., Mapping[str, Any]],
     chunk_size: int,
     delete_spec_buffers: bool = False,
-    dst_state: Optional[Any] = None,
 ) -> Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray]:
   """Reshards a flat weight dict in sequential chunks to reduce peak HBM pressure.
 
@@ -1566,26 +1563,9 @@ def _reshard_in_chunks(
     chunk_dst_shardings = traverse_util.unflatten_dict(chunk_spec_tuples)
     chunk_resharded = reshard_fn(source=chunk_src, target=chunk_dst_shardings)
     jax.block_until_ready(chunk_resharded)
-    if dst_state is not None:
-      nnx.update(dst_state, chunk_resharded)
-    else:
-      for k, v in traverse_util.flatten_dict(chunk_resharded).items():
-        resharded[k] = v
-
-    resharded_leaf_ids = {
-        id(x) for x in jax.tree_util.tree_leaves(chunk_resharded)
-    }
-    for src_val in chunk_src_flat.values():
-      arr = src_val.value if hasattr(src_val, 'value') else src_val
-      if id(arr) in resharded_leaf_ids:
-        continue
-      if hasattr(arr, 'delete') and not getattr(arr, 'is_deleted', lambda: False)():
-        try:
-          arr.delete()
-        except Exception:
-          pass
-
-
+    for k, v in traverse_util.flatten_dict(chunk_resharded).items():
+      resharded[k] = v
+      resharded['.'.join(str(p) for p in k)] = v
 
     del (  # pyrefly: ignore[unsupported-delete]
         chunk_src,
@@ -1594,12 +1574,7 @@ def _reshard_in_chunks(
         chunk_src_flat,
         chunk_spec_flat,
         chunk_dst_shardings_flat,
-        chunk_src_tuples,
-        chunk_spec_tuples,
     )
-    import gc
-    gc.collect()
-    jax.clear_caches()
   return resharded
 
 
@@ -1834,76 +1809,62 @@ def transfer_state_directly(
             continue
 
     # Unflatten back to nested structure
-    res_src = traverse_util.unflatten_dict(filtered_src_flat)
-    res_tgt = traverse_util.unflatten_dict(filtered_tgt_flat)
-    unstacked_cache.clear()
-    del unstacked_cache, filtered_src_flat, filtered_tgt_flat, src_flat, tgt_flat
-    import gc
-    gc.collect()
-    return res_src, res_tgt
+    return (
+        traverse_util.unflatten_dict(filtered_src_flat),
+        traverse_util.unflatten_dict(filtered_tgt_flat),
+    )
 
   # Prepare clean source and target specs
   full_source_dict = to_pure_spec(src_state)
   full_target_spec = to_pure_spec(dst_state)
-  del src_state
 
   # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
-  del full_source_dict, full_target_spec
-  import gc
-  gc.collect()
 
   # Reshard and Update
-  src_flat = traverse_util.flatten_dict(final_source)
-  spec_flat = traverse_util.flatten_dict(final_spec)
-
-  if delete_dst_buffers:
-    _delete_target_buffers(spec_flat, src_flat)
-
-  # Check if all source leaves already match target sharding and shape
-  needs_reshard = False
-  for k, src_val in src_flat.items():
-    tgt_val = spec_flat[k]
-    src_arr = src_val.value if hasattr(src_val, 'value') else src_val
-    tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
-    if not (hasattr(src_arr, 'sharding') and hasattr(tgt_arr, 'sharding') and
-            src_arr.sharding == tgt_arr.sharding and src_arr.shape == tgt_arr.shape):
-      needs_reshard = True
-      break
-
-  if not needs_reshard:
-    logging.info("Direct state transfer: all %d parameters match target sharding and shape. Applying directly without reshard RPC.", len(src_flat))
-    nnx.update(dst_state, final_source)
-    del final_source, final_spec, src_flat, spec_flat
-    import gc
-    gc.collect()
-    jax.clear_caches()
-    return
-
   if reshard_chunk_size is not None:
+    # Chunked path: split the flat weight dict into groups of reshard_chunk_size
+    # entries and reshard each group independently. This keeps peak contiguous
+    # HBM allocation proportional to chunk_size, avoiding XLA fragmentation
+    # errors on large models without needing to clear the compilation cache.
+    src_flat = traverse_util.flatten_dict(final_source)
+    spec_flat = traverse_util.flatten_dict(final_spec)
     del final_source, final_spec
-    _reshard_in_chunks(
+    resharded_flat = _reshard_in_chunks(
         src_flat,
         spec_flat,
         reshard_fn,
         reshard_chunk_size,
-        delete_spec_buffers=False,
-        dst_state=dst_state,
+        delete_dst_buffers,
     )
-    return
+    resharded_flat_tuples = {
+        k: v for k, v in resharded_flat.items() if isinstance(k, tuple)
+    }
+    resharded_weights = traverse_util.unflatten_dict(resharded_flat_tuples)
   else:
+    src_flat = traverse_util.flatten_dict(final_source)
+    spec_flat = traverse_util.flatten_dict(final_spec)
+
+    # Snapshot dst shardings before any deletion so reshard_fn never has to
+    # touch a deleted jax.Array. reshard_pytree's _get_dst_sharding accepts
+    # NamedSharding leaves directly, so this is a drop-in substitute for
+    # passing the array objects.
     dst_shardings_flat = {
         k: _snapshot_dst_sharding(
             tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
         )
         for k, tgt_val in spec_flat.items()
     }
+
+    if delete_dst_buffers:
+      _delete_target_buffers(spec_flat, src_flat)
+
     del final_spec
     resharded_weights = reshard_fn(
         source=final_source,
         target=traverse_util.unflatten_dict(dst_shardings_flat),
     )
-    nnx.update(dst_state, resharded_weights)
+  nnx.update(dst_state, resharded_weights)
 
 
 def resolve_parallelism_sizes(
