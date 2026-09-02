@@ -348,6 +348,8 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
+      f"vllm.use_weight_converter={os.environ.get('USE_WEIGHT_CONVERTER', '1').lower() in ('1', 'true', 'yes')}",
+      f"vllm.rollout_backend={os.environ.get('ROLLOUT_BACKEND', 'maxtext')}",
   ]
   padded_moe_dim = args.maxtext_padded_moe_mlp_dim
   if not padded_moe_dim and args.rollout_mesh_tp > 0:
