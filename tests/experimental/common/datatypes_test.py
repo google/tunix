@@ -509,6 +509,16 @@ class WireSerializationTest(absltest.TestCase):
     r_grouped_1 = datatypes.RolloutRequest(prompt_id="42", group_index=1)
     self.assertEqual(r_grouped_1.traj_id, "traj_42_g1")
 
+    # TrajectoryItem traj_id
+    item = datatypes.TrajectoryItem(prompt_id="42", group_index=2)
+    self.assertEqual(item.traj_id, "traj_42_g2")
+
+    # RolloutResponse traj_id
+    resp = datatypes.RolloutResponse(
+        prompt_id="42", group_index=3, status="COMPLETED"
+    )
+    self.assertEqual(resp.traj_id, "traj_42_g3")
+
   def test_from_trajectory_populates_prompt_id_and_group_index(self):
     traj = datatypes.Trajectory(
         steps=[],

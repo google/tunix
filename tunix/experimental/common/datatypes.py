@@ -43,6 +43,11 @@ Role = common_datatypes.Role
 UNSET_ROUTED_EXPERT = -1
 
 
+def format_traj_id(prompt_id: str | int = "", group_index: int = 0) -> str:
+  """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+  return f"traj_{prompt_id}_g{group_index}"
+
+
 # TODO(tunix-dev): Unify this extended TrajectoryItem back into
 # agent_types.TrajectoryItem so that all agentic workflows share the same strict
 # token array fields. Also standardize to prompt_id, group_index
@@ -62,6 +67,11 @@ class TrajectoryItem:
   routed_experts: np.ndarray | None = None
   policy_version: int = 0
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  @property
+  def traj_id(self) -> str:
+    """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+    return format_traj_id(self.prompt_id, self.group_index)
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -265,7 +275,7 @@ class RolloutRequest(Request):
   @property
   def traj_id(self) -> str:
     """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
-    return f"traj_{self.prompt_id}_g{self.group_index}"
+    return format_traj_id(self.prompt_id, self.group_index)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -353,6 +363,11 @@ class RolloutResponse(Response):
   env_reward: float = 0.0
   policy_version: int = 0
   # TODO(b/532722981): capture rollout metrics, e.g., env time.
+
+  @property
+  def traj_id(self) -> str:
+    """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+    return format_traj_id(self.prompt_id, self.group_index)
 
   @classmethod
   def from_trajectory(

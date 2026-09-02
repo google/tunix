@@ -429,6 +429,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
           group_size=algo.group_size,
+          mini_batch_size=algo.mini_batch_size,
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,

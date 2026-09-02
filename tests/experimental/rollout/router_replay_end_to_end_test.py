@@ -203,6 +203,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         max_response_length=GEN_LEN,
         pad_id=0,
         group_size=1,
+        mini_batch_size=1,
     ).pack([payload])
 
     routed = packed[0].routed_experts

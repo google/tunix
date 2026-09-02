@@ -123,16 +123,12 @@ class StandardRLProgram(RLProgram):
       raise ValueError("mini_batch_size and group_size must be positive.")
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
         group_size=self.group_size,
+        mini_batch_size=self.mini_batch_size,
         max_packed_len=getattr(algo, "max_packed_len", 8192),
     )
     self.assembler.group_size = self.group_size
-    rollouts_per_mini_batch_step = self.mini_batch_size * self.group_size
-    assembly_batch_size = self.assembler.assembly_batch_size
-    if rollouts_per_mini_batch_step % assembly_batch_size != 0:
-      raise ValueError(
-          f"Total rollouts per mini-batch step ({rollouts_per_mini_batch_step}) is "
-          f"not divisible by assembler assembly_batch_size ({assembly_batch_size})."
-      )
+
+    self.assembler.mini_batch_size = self.mini_batch_size
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
@@ -601,48 +597,38 @@ class StandardRLProgram(RLProgram):
       scored_items = []
       groups_consumed = 0
 
-      groups_per_assembly_batch = self.assembler.groups_per_assembly_batch
-
       while groups_consumed < self.mini_batch_size:
-        groups_to_fetch = min(
-            groups_per_assembly_batch, self.mini_batch_size - groups_consumed
-        )
-        scored_items = await self.scored_q.get_batch(num_groups=groups_to_fetch)
+        scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
-          break
+          assembled_batches = self.assembler.flush()
+        else:
+          if groups_consumed == 0 and self.on_step_begin:
+            self.on_step_begin(current_step)
 
-        if groups_consumed == 0 and self.on_step_begin:
-          self.on_step_begin(current_step)
+          groups_consumed += 1
+          uncommitted_groups.append(scored_items)
+          all_step_items.extend(scored_items)
+          num_rollouts += len(scored_items)
+          for item in scored_items:
+            step_rewards.append(float(item.traj.reward if item.traj else 0.0))
 
-        groups_consumed += groups_to_fetch
-        uncommitted_groups.append(scored_items)
-        all_step_items.extend(scored_items)
-        num_rollouts += len(scored_items)
-        for item in scored_items:
-          step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
+          payloads = []
+          for item in scored_items:
+            payload = getattr(item, "payload", None)
+            if isinstance(payload, datatypes.RLTrainerPayload):
+              payload = dataclasses.replace(
+                  payload,
+                  metadata={
+                      **payload.metadata,
+                      "traj_id": item.traj_id,
+                  },
+              )
+            payloads.append(payload)
+          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
 
-        prompt_ids = list(
-            dict.fromkeys(
-                item.prompt_id
-                for item in scored_items
-                if getattr(item, "prompt_id", None)
-            )
-        )
-        payloads = [getattr(item, "payload", None) for item in scored_items]
-        # TODO(tunix-dev): Implement streaming microbatch assembly to overlap
-        # packing with trainer execution.
-        microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
-        logging.info(
-            "Packed %d prompt groups into %d microbatches (total_rollouts=%d)."
-            " All prompt groups ids packed: %s",
-            len(prompt_ids),
-            len(microbatches),
-            len(payloads),
-            logging_utils.summarize_list(prompt_ids),
-        )
-        if getattr(self.algo, "requires_reference_kl", False):
-          scored_microbatches = []
-          for batch in microbatches:
+        for mb in assembled_batches:
+          batch = mb.payload
+          if getattr(self.algo, "requires_reference_kl", False):
             if not isinstance(batch, datatypes.RLTrainerPayload):
               raise TypeError(
                   "Reference KL requires an assembler that returns "
@@ -652,22 +638,21 @@ class StandardRLProgram(RLProgram):
             ref_logps = await self.engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )
-            scored_microbatches.append(
-                batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-            )
-          microbatches = scored_microbatches
+            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
 
-        num_microbatches += len(microbatches)
-        is_final_group = groups_consumed >= self.mini_batch_size
-        for batch_idx, batch in enumerate(microbatches):
-          is_final_batch = is_final_group and batch_idx == len(microbatches) - 1
+          num_microbatches += 1
+          logging.info(
+              "Packed %d trajectories into microbatch: %s",
+              len(mb.trajectory_ids),
+              logging_utils.summarize_list(list(mb.trajectory_ids)),
+          )
           step_result = await self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
-              apply_optimizer=is_final_batch,
+              apply_optimizer=mb.is_final_batch,
           )
-          if is_final_batch:
+          if mb.is_final_batch:
             # TODO(tunix-dev): Current checkpoint and metrics logic only works
             # for fully on-policy. We need to come up with a solution for
             # semi-off-policy where a single full batch has multiple mini
@@ -690,9 +675,10 @@ class StandardRLProgram(RLProgram):
                 },
             )
 
-      if not scored_items:
-        # TODO: We currently silently drop in-progress partial microbatch accumulators if
-        # the dataset ends early. We may need to force-apply gradients here instead.
+        if not scored_items:
+          break
+
+      if not all_step_items:
         logging.info(
             "Dataset exhausted at step %d before max_steps.", current_step
         )
@@ -796,6 +782,7 @@ class StandardRLProgram(RLProgram):
       logging.error("Exception in StandardRLProgram execution: %s", exc)
       await self.raw_q.abort(exc)
       await self.scored_q.abort(exc)
+      self.assembler.reset()
       raise
     finally:
       for task in tasks:
