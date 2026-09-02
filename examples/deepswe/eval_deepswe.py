@@ -76,6 +76,19 @@ from tunix.sft import utils as sft_utils
 
 Counter = collections.Counter
 
+
+def str2bool(v):
+  """Parses common string representations into boolean values."""
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ("yes", "true", "t", "y", "1"):
+    return True
+  elif v.lower() in ("no", "false", "f", "n", "0"):
+    return False
+  else:
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
 # ========================== Argument Parsing ==========================
 
 parser_cli = argparse.ArgumentParser(
@@ -117,6 +130,12 @@ parser_cli.add_argument(
     type=str,
     default=os.getenv("DATASET_CACHE", "/scratch/dataset_cache"),
     help="Dataset cache directory",
+)
+parser_cli.add_argument(
+    "--dataset_num_proc",
+    type=int,
+    default=int(os.getenv("DATASET_NUM_PROC", "32")),
+    help="Number of processes for dataset loading (0 or 1 for single-process)",
 )
 parser_cli.add_argument(
     "--max_steps",
@@ -166,7 +185,7 @@ parser_cli.add_argument(
 )
 parser_cli.add_argument(
     "--enable_guard",
-    type=bool,
+    type=str2bool,
     default=os.getenv("ENABLE_GUARD", "false").lower() == "true",
     help="Enable action guard",
 )
@@ -187,12 +206,12 @@ parser_cli.add_argument(
 )
 parser_cli.add_argument(
     "--vllm_init_random_weights",
-    type=bool,
+    type=str2bool,
     default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "false").lower() == "true",
 )
 parser_cli.add_argument(
     "--vllm_server_mode",
-    type=bool,
+    type=str2bool,
     default=os.getenv("VLLM_SERVER_MODE", "true").lower() == "true",
 )
 parser_cli.add_argument(
@@ -218,7 +237,7 @@ parser_cli.add_argument(
 )
 parser_cli.add_argument(
     "--sglang_init_random_weights",
-    type=bool,
+    type=str2bool,
     default=os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "true").lower() == "true",
 )
 parser_cli.add_argument(
@@ -240,9 +259,48 @@ parser_cli.add_argument(
 )
 parser_cli.add_argument(
     "--scan_layers",
-    type=bool,
+    type=str2bool,
     default=os.getenv("SCAN_LAYERS", "true").lower() == "true",
     help="Whether to scan layers for MaxText models",
+)
+parser_cli.add_argument(
+    "--allow_split_physical_axes",
+    type=str2bool,
+    default=os.getenv("ALLOW_SPLIT_PHYSICAL_AXES", "false").lower() == "true",
+    help=(
+        "Whether to allow splitting physical axes in MaxText (can cause"
+        " performance hit)"
+    ),
+)
+parser_cli.add_argument(
+    "--checkpoint_storage_concurrent_gb",
+    type=int,
+    default=int(os.getenv("CHECKPOINT_STORAGE_CONCURRENT_GB", "32")),
+    help="Concurrent GB limit for Orbax checkpoint storage restore",
+)
+parser_cli.add_argument(
+    "--weight_dtype",
+    type=str,
+    default=os.getenv("WEIGHT_DTYPE", "bfloat16"),
+    help="Weight data type for MaxText model",
+)
+parser_cli.add_argument(
+    "--prefuse_moe_weights",
+    type=str2bool,
+    default=os.getenv("PREFUSE_MOE_WEIGHTS", "true").lower() == "true",
+    help="Whether to prefuse MoE weights in MaxText",
+)
+parser_cli.add_argument(
+    "--maxtext_attention",
+    type=str,
+    default=os.getenv("MAXTEXT_ATTENTION", "vllm_rpa"),
+    help="Attention backend for MaxText in vLLM",
+)
+parser_cli.add_argument(
+    "--enable_continue_decode",
+    type=str2bool,
+    default=os.getenv("ENABLE_CONTINUE_DECODE", "true").lower() == "true",
+    help="Whether to enable continue decode in vLLM",
 )
 parser_cli.add_argument(
     "--node_selector_val",
@@ -270,6 +328,7 @@ args, _ = parser_cli.parse_known_args()
 DATASET_NAME = args.dataset_name
 DATASET_SPLIT = args.dataset_split
 DATASET_CACHE = args.dataset_cache
+DATASET_NUM_PROC = args.dataset_num_proc
 
 MODEL_VERSION = args.model_version
 MODEL_SOURCE = args.model_source
@@ -306,6 +365,12 @@ SGLANG_MAX_RUNNING_REQUESTS = args.sglang_max_running_requests
 MESH_FSDP = args.mesh_fsdp
 MESH_TP = args.mesh_tp
 SCAN_LAYERS = args.scan_layers
+ALLOW_SPLIT_PHYSICAL_AXES = args.allow_split_physical_axes
+CHECKPOINT_STORAGE_CONCURRENT_GB = args.checkpoint_storage_concurrent_gb
+WEIGHT_DTYPE = args.weight_dtype
+PREFUSE_MOE_WEIGHTS = args.prefuse_moe_weights
+MAXTEXT_ATTENTION = args.maxtext_attention
+ENABLE_CONTINUE_DECODE = args.enable_continue_decode
 NODE_SELECTOR_VAL = args.node_selector_val
 OUTPUT_DIR = args.output_dir
 
@@ -389,18 +454,27 @@ if MODEL_SOURCE == "maxtext":
 # ========================== Dataset ==========================
 
 logger.info("Loading dataset %s split=%s ...", DATASET_NAME, DATASET_SPLIT)
-try:
-  dataset = load_dataset(
-      DATASET_NAME,
-      split=DATASET_SPLIT,
-      cache_dir=DATASET_CACHE,
-      num_proc=32,
-  )
-except Exception as e:
-  logger.warning(
-      "load_dataset failed with num_proc=32 (%s), retrying without num_proc...",
-      e,
-  )
+if DATASET_NUM_PROC > 1:
+  try:
+    dataset = load_dataset(
+        DATASET_NAME,
+        split=DATASET_SPLIT,
+        cache_dir=DATASET_CACHE,
+        num_proc=DATASET_NUM_PROC,
+    )
+  except Exception as e:
+    logger.warning(
+        "load_dataset failed with num_proc=%d (%s), retrying without"
+        " num_proc...",
+        DATASET_NUM_PROC,
+        e,
+    )
+    dataset = load_dataset(
+        DATASET_NAME,
+        split=DATASET_SPLIT,
+        cache_dir=DATASET_CACHE,
+    )
+else:
   dataset = load_dataset(
       DATASET_NAME,
       split=DATASET_SPLIT,
@@ -548,19 +622,21 @@ if ROLLOUT_ENGINE == "vllm":
   additional_config = None
   if MODEL_SOURCE == "maxtext":
     additional_config = {
-        "enable_continue_decode": True,
+        "enable_continue_decode": ENABLE_CONTINUE_DECODE,
         "maxtext_config": {
             "model_name": MODEL_VERSION.lower().split("/")[-1],
             "model_call_mode": "inference",
             "load_parameters_path": MODEL_PATH,
             "scan_layers": SCAN_LAYERS,
             "enable_dp_attention": False,
-            "allow_split_physical_axes": True,
+            "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
             "log_config": False,
-            "weight_dtype": "bfloat16",
-            "prefuse_moe_weights": True,
-            "attention": "vllm_rpa",
-            "checkpoint_storage_concurrent_gb": 32,
+            "weight_dtype": WEIGHT_DTYPE,
+            "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
+            "attention": MAXTEXT_ATTENTION,
+            "checkpoint_storage_concurrent_gb": (
+                CHECKPOINT_STORAGE_CONCURRENT_GB
+            ),
         },
     }
 
@@ -616,9 +692,9 @@ elif ROLLOUT_ENGINE in ("vanilla", "sglang_jax"):
         model_source=ModelSource.MAXTEXT,
         model_path=MODEL_PATH,
         enable_checkpointing=True,
-        allow_split_physical_axes=True,
+        allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
         scan_layers=SCAN_LAYERS,
-        checkpoint_storage_concurrent_gb=48,
+        checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
     )
   elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
     model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
