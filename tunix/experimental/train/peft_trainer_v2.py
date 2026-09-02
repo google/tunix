@@ -391,6 +391,7 @@ def _default_weight_sync_worker() -> Any:
 
   return raiden_synchronizer.RaidenSynchronizer("trainer")
 
+# TODO: Construct the use the training config to control PW or McJax
 
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
