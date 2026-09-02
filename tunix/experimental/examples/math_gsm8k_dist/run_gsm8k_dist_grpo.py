@@ -159,33 +159,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _make_reward_fn(mode: str, debug: bool = False):
-  """Creates the optional orchestrator-side reward function."""
-  if mode == "env":
-    return None
-
-  def reward_fn(item: datatypes.TrajectoryItem) -> float:
-    metadata = dict(item.metadata or {})
-    text = str(metadata.get("text", ""))
-    reward, _ = gsm8k.score_gsm8k_completion(
-        text, metadata.get("answer", metadata.get("gold_answer"))
-    )
-    if debug:
-      prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
-      gold_answer = metadata.get("gold_answer")
-      logging.debug(
-          "[Orchestrator] Sampler response for %s:\n"
-          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-          "Gold Answer: %s, Extracted Answer: %s",
-          prompt_id,
-          text,
-          gold_answer,
-          gsm8k.extract_boxed_answer(text),
-      )
-    return reward
-
-  return reward_fn
-
 
 def _grpo_model_input(
     train_example: Any,
@@ -440,8 +413,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       },
   )
 
-  reward_fn = _make_reward_fn(args.reward_mode, debug=args.debug)
-  reward_fns = [reward_fn] if reward_fn is not None else []
+  reward_fns = (
+      [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
+      if args.reward_mode == "exact"
+      else []
+  )
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),

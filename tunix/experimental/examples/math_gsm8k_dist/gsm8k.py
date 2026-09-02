@@ -13,6 +13,7 @@
 # limitations under the License.
 """GSM8K agentic components used by the distributed GRPO example."""
 
+import collections.abc
 import logging
 import re
 from typing import Any
@@ -192,6 +193,35 @@ def gsm8k_env_reward(
   completion = action.action if hasattr(action, "action") else str(action)
   gold_answer = task.get("answer", task.get("gold_answer"))
   return score_gsm8k_completion(str(completion), gold_answer)
+
+
+def make_gsm8k_reward_fn(
+    debug: bool = False,
+) -> collections.abc.Callable[[Any], float]:
+  """Creates an orchestrator-side reward function scoring completions against gold answers."""
+
+  def reward_fn(item: Any) -> float:
+    metadata = dict(getattr(item, "metadata", None) or {})
+    text = str(metadata.get("text", ""))
+    gold_answer = metadata.get("answer", metadata.get("gold_answer"))
+    reward, _ = score_gsm8k_completion(text, gold_answer)
+    if debug:
+      prompt_id = metadata.get(
+          "prompt_id",
+          getattr(item, "group_id", getattr(item, "prompt_id", "unknown")),
+      )
+      logging.debug(
+          "[Orchestrator] Sampler response for %s:\n"
+          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
+          "Gold Answer: %s, Extracted Answer: %s",
+          prompt_id,
+          text,
+          gold_answer,
+          extract_boxed_answer(text),
+      )
+    return reward
+
+  return reward_fn
 
 
 @registry.register_env(GSM8K_ENV_NAME)

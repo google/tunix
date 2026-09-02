@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -142,6 +143,58 @@ class GSM8KTest(absltest.TestCase):
     second_item = dataset[1]
     self.assertEqual(second_item["question"], "What is 3 * 7?")
     self.assertEqual(second_item["answer"], "21")
+
+  def test_make_gsm8k_reward_fn(self):
+    reward_fn = gsm8k.make_gsm8k_reward_fn(debug=True)
+
+    # 1. Format correct and answer correct -> reward 1.0
+    item1 = types.SimpleNamespace(
+        metadata={
+            "text": "Reasoning step.</reasoning><answer>\\boxed{42}</answer>",
+            "gold_answer": "42",
+            "prompt_id": "p1",
+        }
+    )
+    self.assertEqual(reward_fn(item1), 1.0)
+
+    # 2. Format correct, wrong answer -> reward 0.1
+    item2 = types.SimpleNamespace(
+        metadata={
+            "text": "Reasoning step.</reasoning><answer>\\boxed{100}</answer>",
+            "gold_answer": "42",
+            "prompt_id": "p2",
+        }
+    )
+    self.assertEqual(reward_fn(item2), 0.1)
+
+    # 3. Format incorrect, right answer -> reward 0.5
+    item3 = types.SimpleNamespace(
+        metadata={
+            "text": "The answer is \\boxed{42}",
+            "gold_answer": "42",
+            "prompt_id": "p3",
+        }
+    )
+    self.assertEqual(reward_fn(item3), 0.5)
+
+    # 4. Format incorrect, wrong answer -> reward 0.0
+    item4 = types.SimpleNamespace(
+        metadata={
+            "text": "No answer here",
+            "gold_answer": "42",
+            "prompt_id": "p4",
+        }
+    )
+    self.assertEqual(reward_fn(item4), 0.0)
+
+    # 5. Uses 'answer' key in metadata fallback
+    item5 = types.SimpleNamespace(
+        metadata={
+            "text": "Reasoning.</reasoning><answer>\\boxed{15}</answer>",
+            "answer": "15",
+        }
+    )
+    self.assertEqual(reward_fn(item5), 1.0)
 
 
 if __name__ == "__main__":
