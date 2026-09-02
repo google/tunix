@@ -78,6 +78,59 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertAlmostEqual(payloads[0].returns[0], 2.0)
     self.assertEqual(adapter.loss_fn(), algo_core.ppo_policy_loss_fn)
 
+  def test_grpo_build_gen_model_input_fn(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        group_size=4,
+        clip_epsilon=0.25,
+        beta_kl=0.05,
+        temperature=0.8,
+        loss_agg_mode="token-mean",
+        kl_loss_mode="kld",
+        kl_clamp_value=1.5,
+    )
+    gen_fn = adapter.build_gen_model_input_fn(pad_id=10, eos_id=20)
+    self.assertTrue(callable(gen_fn))
+
+    fake_example = {"mock_payload": "data"}
+    model_inputs = gen_fn(fake_example)
+
+    self.assertIs(model_inputs["train_example"], fake_example)
+    self.assertEqual(model_inputs["pad_id"], 10)
+    self.assertEqual(model_inputs["eos_id"], 20)
+
+    algo_config = model_inputs["algo_config"]
+    self.assertEqual(algo_config.beta, 0.05)
+    self.assertEqual(algo_config.epsilon, 0.25)
+    self.assertEqual(algo_config.loss_algo, "grpo")
+    self.assertEqual(algo_config.loss_agg_mode, "token-mean")
+    self.assertEqual(algo_config.temperature, 0.8)
+    self.assertEqual(algo_config.kl_loss_mode, "kld")
+    self.assertEqual(algo_config.kl_clamp_value, 1.5)
+
+  def test_ppo_build_gen_model_input_fn(self):
+    adapter = algorithm_adapter.PPOAdapter(
+        clip_epsilon=0.3,
+        gamma=0.98,
+        lam=0.92,
+        entropy_coef=0.01,
+    )
+    gen_fn = adapter.build_gen_model_input_fn(pad_id=5, eos_id=6)
+    self.assertTrue(callable(gen_fn))
+
+    fake_example = {"mock_payload": "data"}
+    model_inputs = gen_fn(fake_example)
+
+    self.assertIs(model_inputs["train_example"], fake_example)
+    self.assertEqual(model_inputs["pad_id"], 5)
+    self.assertEqual(model_inputs["eos_id"], 6)
+
+    algo_config = model_inputs["algo_config"]
+    self.assertEqual(algo_config.epsilon_low, 0.3)
+    self.assertEqual(algo_config.epsilon_high, 0.3)
+    self.assertEqual(algo_config.entropy_coef, 0.01)
+    self.assertEqual(algo_config.gamma, 0.98)
+    self.assertEqual(algo_config.lam, 0.92)
+
 
 _ROUTING_LAYERS = 2
 _ROUTING_TOP_K = 2

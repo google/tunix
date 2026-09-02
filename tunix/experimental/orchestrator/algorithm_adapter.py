@@ -21,12 +21,33 @@ computations directly to `tunix.rl.algo_core`.
 
 import abc
 from collections.abc import Callable, Sequence
+import functools
+import types
 from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.rl import algo_core
+
+
+def _algo_model_input(
+    train_example: Any,
+    *,
+    algo_config: Any,
+    pad_id: int,
+    eos_id: int,
+) -> dict[str, Any]:
+  """Maps an RLTrainerPayload microbatch to algorithm loss kwargs (e.g.
+
+  GRPO/PPO).
+  """
+  return {
+      "train_example": train_example,
+      "algo_config": algo_config,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+  }
 
 
 def _routed_experts_for(
@@ -104,6 +125,13 @@ class AlgorithmAdapter(abc.ABC):
     """Returns the loss function executed on TrainerWorker."""
     ...
 
+  @abc.abstractmethod
+  def build_gen_model_input_fn(
+      self, pad_id: int, eos_id: int
+  ) -> Callable[[Any], dict[str, Any]]:
+    """Returns a model input generator function executed on TrainerWorker."""
+    ...
+
 
 # TODO: Align adapter classes with current path and try to refactor and reuse directly instead of copying.
 class GRPOAdapter(AlgorithmAdapter):
@@ -117,6 +145,10 @@ class GRPOAdapter(AlgorithmAdapter):
       max_packed_len: int = 8192,
       clip_epsilon: float = 0.2,
       beta_kl: float = 0.04,
+      temperature: float = 1.0,
+      loss_agg_mode: str = "sequence-mean-token-mean",
+      kl_loss_mode: str = "mse_kl",
+      kl_clamp_value: float | None = None,
   ):
     super().__init__(
         group_size=group_size,
@@ -126,6 +158,10 @@ class GRPOAdapter(AlgorithmAdapter):
     )
     self.clip_epsilon = clip_epsilon
     self.beta_kl = beta_kl
+    self.temperature = temperature
+    self.loss_agg_mode = loss_agg_mode
+    self.kl_loss_mode = kl_loss_mode
+    self.kl_clamp_value = kl_clamp_value
     self.requires_reference_kl = beta_kl != 0.0
 
   def compute_advantages(
@@ -193,6 +229,26 @@ class GRPOAdapter(AlgorithmAdapter):
     """GRPO loss function executed on TrainerWorker."""
     return algo_core.grpo_loss_fn
 
+  def build_gen_model_input_fn(
+      self, pad_id: int, eos_id: int
+  ) -> Callable[[Any], dict[str, Any]]:
+    """Returns a model input generator function for TrainerWorker."""
+    algo_config = types.SimpleNamespace(
+        beta=self.beta_kl,
+        epsilon=self.clip_epsilon,
+        loss_algo="grpo",
+        loss_agg_mode=self.loss_agg_mode,
+        temperature=self.temperature,
+        kl_loss_mode=self.kl_loss_mode,
+        kl_clamp_value=self.kl_clamp_value,
+    )
+    return functools.partial(
+        _algo_model_input,
+        algo_config=algo_config,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
 
 class PPOAdapter(AlgorithmAdapter):
   """Generalized Advantage Estimation (GAE) and PPO Actor-Critic adapter."""
@@ -206,6 +262,7 @@ class PPOAdapter(AlgorithmAdapter):
       gamma: float = 0.99,
       lam: float = 0.95,
       clip_epsilon: float = 0.2,
+      entropy_coef: float = 0.0,
   ):
     super().__init__(
         group_size=group_size,
@@ -216,6 +273,7 @@ class PPOAdapter(AlgorithmAdapter):
     self.gamma = gamma
     self.lam = lam
     self.clip_epsilon = clip_epsilon
+    self.entropy_coef = entropy_coef
     self.has_critic = True
     self.requires_reference_kl = True
     self.requires_old_logprobs = True
@@ -295,3 +353,21 @@ class PPOAdapter(AlgorithmAdapter):
   def loss_fn(self) -> Callable[..., Any]:
     """PPO policy loss function delegating directly to `algo_core.ppo_policy_loss_fn`."""
     return algo_core.ppo_policy_loss_fn
+
+  def build_gen_model_input_fn(
+      self, pad_id: int, eos_id: int
+  ) -> Callable[[Any], dict[str, Any]]:
+    """Returns a model input generator function for TrainerWorker."""
+    algo_config = types.SimpleNamespace(
+        epsilon_low=getattr(self, "epsilon_low", self.clip_epsilon),
+        epsilon_high=getattr(self, "epsilon_high", self.clip_epsilon),
+        entropy_coef=self.entropy_coef,
+        gamma=self.gamma,
+        lam=self.lam,
+    )
+    return functools.partial(
+        _algo_model_input,
+        algo_config=algo_config,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
