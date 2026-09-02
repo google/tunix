@@ -194,10 +194,6 @@ def _build_prompt_item(
     *,
     example: dict[str, Any],
     prompt_idx: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
 ) -> dict[str, Any]:
   prompt = gsm8k.as_text(example["prompts"])
   question = gsm8k.as_text(example["question"])
@@ -206,13 +202,6 @@ def _build_prompt_item(
   return {
       "prompt": prompt,
       "prompt_id": prompt_id,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
       "metadata": {
           "answer": answer,
           "gold_answer": answer,
@@ -233,7 +222,6 @@ def _build_prompt_item(
 def _iter_prompt_items(
     args: argparse.Namespace,
 ) -> Iterator[dict[str, Any]]:
-  top_k = None if args.top_k < 0 else args.top_k
   dataset = gsm8k.load_gsm8k_dataset(
       split=args.tfds_split,
       data_dir=args.tfds_data_dir,
@@ -249,10 +237,6 @@ def _iter_prompt_items(
     yield _build_prompt_item(
         example=example,
         prompt_idx=prompt_idx,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
     )
 
 
@@ -368,11 +352,19 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       if args.reward_mode == "exact"
       else []
   )
+  generation_args = datatypes.GenerationArgs(
+      max_generation_steps=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=None if args.top_k < 0 else args.top_k,
+      return_logprobs=True,
+  )
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
+      generation_args=generation_args,
       assembler=batch_assembly.PaddedBatchAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,

@@ -99,6 +99,7 @@ class StandardRLProgram(RLProgram):
       max_steps: int | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
+      generation_args: datatypes.GenerationArgs | None = None,
       group_size: int = 8,
       mini_batch_size: int = 4,
       max_staleness: int = 0,
@@ -116,6 +117,7 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
+    self.generation_args = generation_args
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
@@ -189,10 +191,15 @@ class StandardRLProgram(RLProgram):
           }
 
         self._in_flight_rollouts += self.group_size
+        dispatch_kwargs: dict[str, Any] = {
+            "group_size": self.group_size,
+            "policy_version": self.policy_version,
+        }
+        if self.generation_args is not None:
+          dispatch_kwargs["generation_args"] = self.generation_args
         await self.engine.dispatch_rollouts(
             [prompt_item],
-            group_size=self.group_size,
-            policy_version=self.policy_version,
+            **dispatch_kwargs,
         )
     finally:
       self._dispatch_done.set()

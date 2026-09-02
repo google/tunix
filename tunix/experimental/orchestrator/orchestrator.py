@@ -399,6 +399,7 @@ class ClusterOrchestrator:
       dataset: Any,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
+      generation_args: datatypes.GenerationArgs | None = None,
       program: rl_program.RLProgram | None = None,
       max_steps: int = 1000,
   ) -> None:
@@ -422,6 +423,7 @@ class ClusterOrchestrator:
         algo=algo,
         reward_fns=reward_fns,
         assembler=active_assembler,
+        generation_args=generation_args,
         metrics_logging_options=metrics_logging_options,
         metrics_prefix=metrics_prefix,
     )

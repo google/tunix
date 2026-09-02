@@ -2076,6 +2076,31 @@ class RLProgramTest(absltest.TestCase):
     ):
       self._create_program()
 
+  def test_program_passes_generation_args_to_dispatch_rollouts(self):
+    async def _run():
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="p0", group_size=2),
+          [],
+      )
+      gen_args = datatypes.GenerationArgs(
+          max_generation_steps=128,
+          temperature=0.7,
+          top_p=0.9,
+          return_logprobs=True,
+      )
+      p = self._create_program(
+          dataset=("p0",),
+          generation_args=gen_args,
+          sync_weights=False,
+      )
+      await p.run_async(self.mock_engine)
+      self.mock_engine.dispatch_rollouts.assert_called_once()
+      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      self.assertEqual(kwargs.get("generation_args"), gen_args)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()
