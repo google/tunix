@@ -102,6 +102,10 @@ fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+# The vLLM sampler builds its own mesh over the same chips, so its TP has to
+# match the ones this node was actually given. The node-side default is 4,
+# which only works on an 8-chip host.
+SAMPLER_MESH_TP=${SAMPLER_MESH_TP:-$ROLLOUT_TP}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
@@ -364,7 +368,7 @@ echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
-echo "  rollout mesh:   fsdp=$ROLLOUT_FSDP tp=$ROLLOUT_TP"
+echo "  rollout mesh:   fsdp=$ROLLOUT_FSDP tp=$ROLLOUT_TP sampler_tp=$SAMPLER_MESH_TP"
 echo "  inference:      $RUN_INFERENCE_NODE"
 echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
 echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
@@ -486,6 +490,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --sampler="$SAMPLER"
     --mesh_fsdp="$ROLLOUT_FSDP"
     --mesh_tp="$ROLLOUT_TP"
+    --sampler_mesh_tp="$SAMPLER_MESH_TP"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
