@@ -61,6 +61,7 @@ TOKENIZER_PATH="Qwen/Qwen3-1.7B"
 TRAINER_BACKEND="maxtext"
 MAXTEXT_MODEL_NAME="qwen3-1.7b"
 MAXTEXT_CKPT="gs://cloud-tpu-multipod-dev-bucket-europe-west4/users/atwigg/checkpoints/qwen3_1.7b_fixed/0/items"
+GCS_SCRATCH_LOCATION="${GCS_SCRATCH_LOCATION:-gs://cloud-tpu-multipod-dev-bucket-europe-west4/tmp}"
 
 # Container Image & Git Sync defaults
 TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/wuhaotest/tunix-maxtext-rlvllm"
@@ -288,6 +289,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ckpt=*)
       MAXTEXT_CKPT="${1#*=}"
+      shift
+      ;;
+    --gcs-scratch)
+      GCS_SCRATCH_LOCATION="$2"
+      shift 2
+      ;;
+    --gcs-scratch=*)
+      GCS_SCRATCH_LOCATION="${1#*=}"
       shift
       ;;
     --image)
@@ -570,6 +579,7 @@ start_workloads() {
   CLUSTER="${CLUSTER}" \
   REGION="${REGION}" \
   CPU_MACHINE="${CPU_MACHINE}" \
+  GCS_SCRATCH_LOCATION="${GCS_SCRATCH_LOCATION}" \
   TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML}" \
   TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE}" \
   TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP}" \
