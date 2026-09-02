@@ -100,6 +100,7 @@ class StandardRLProgram(RLProgram):
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       group_size: int = 8,
+      batch_size: int | None = None,
       mini_batch_size: int = 4,
       max_staleness: int = 0,
       sync_weights: bool = True,
@@ -121,6 +122,18 @@ class StandardRLProgram(RLProgram):
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
+    self.full_batch_size = (
+        self.mini_batch_size if batch_size is None else batch_size
+    )
+    self.batch_size = self.full_batch_size
+    if self.full_batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+    if self.full_batch_size % self.mini_batch_size != 0:
+      raise ValueError(
+          "batch_size must be divisible by mini_batch_size; got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
         group_size=self.group_size,
         max_packed_len=getattr(algo, "max_packed_len", 8192),
@@ -603,94 +616,109 @@ class StandardRLProgram(RLProgram):
 
       groups_per_assembly_batch = self.assembler.groups_per_assembly_batch
 
-      while groups_consumed < self.mini_batch_size:
-        groups_to_fetch = min(
-            groups_per_assembly_batch, self.mini_batch_size - groups_consumed
-        )
-        scored_items = await self.scored_q.get_batch(num_groups=groups_to_fetch)
-        if not scored_items:
+      num_mini_batches = self.full_batch_size // self.mini_batch_size
+      for _ in range(num_mini_batches):
+        mini_batch_groups_consumed = 0
+        while mini_batch_groups_consumed < self.mini_batch_size:
+          groups_to_fetch = min(
+              groups_per_assembly_batch,
+              self.mini_batch_size - mini_batch_groups_consumed,
+          )
+          scored_items = await self.scored_q.get_batch(
+              num_groups=groups_to_fetch
+          )
+          if not scored_items:
+            break
+
+          if groups_consumed == 0 and self.on_step_begin:
+            self.on_step_begin(current_step)
+
+          groups_fetched = len(scored_items) // self.group_size
+          mini_batch_groups_consumed += groups_fetched
+          groups_consumed += groups_fetched
+          uncommitted_groups.append(scored_items)
+          all_step_items.extend(scored_items)
+          num_rollouts += len(scored_items)
+          for item in scored_items:
+            step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
+
+          prompt_ids = list(
+              dict.fromkeys(
+                  item.prompt_id
+                  for item in scored_items
+                  if getattr(item, "prompt_id", None)
+              )
+          )
+          payloads = [getattr(item, "payload", None) for item in scored_items]
+          # TODO(tunix-dev): Implement streaming microbatch assembly to overlap
+          # packing with trainer execution.
+          microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
+          logging.info(
+              "Packed %d prompt groups into %d microbatches "
+              "(total_rollouts=%d). All prompt groups ids packed: %s",
+              len(prompt_ids),
+              len(microbatches),
+              len(payloads),
+              logging_utils.summarize_list(prompt_ids),
+          )
+          if getattr(self.algo, "requires_reference_kl", False):
+            scored_microbatches = []
+            for batch in microbatches:
+              if not isinstance(batch, datatypes.RLTrainerPayload):
+                raise TypeError(
+                    "Reference KL requires an assembler that returns "
+                    "datatypes.RLTrainerPayload microbatches; got "
+                    f"{type(batch).__name__}."
+                )
+              ref_logps = await self.engine.per_token_logps(
+                  datatypes.Role.REFERENCE, items=batch
+              )
+              scored_microbatches.append(
+                  batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+              )
+            microbatches = scored_microbatches
+
+          num_microbatches += len(microbatches)
+          is_final_assembly_batch = (
+              mini_batch_groups_consumed >= self.mini_batch_size
+          )
+          for batch_idx, batch in enumerate(microbatches):
+            is_final_batch = (
+                is_final_assembly_batch
+                and batch_idx == len(microbatches) - 1
+            )
+            step_result = await self.engine.train_step(
+                batch,
+                role=datatypes.Role.ACTOR,
+                accumulate_gradients=True,
+                apply_optimizer=is_final_batch,
+            )
+            if is_final_batch:
+              # TODO(tunix-dev): Current checkpoint and metrics logic only works
+              # for fully on-policy. We need to come up with a solution for
+              # semi-off-policy where a single full batch has multiple mini
+              # batches.
+              trainer_metrics = await self.engine.get_metrics(
+                  role=datatypes.Role.ACTOR
+              )
+              # TODO(tunix-dev): Configurable checkpointing frequency. Today we
+              # checkpoint at the same frequency as the weight update.
+              # TODO(tunix-dev): For now any failures in save_checkpoint will
+              # abort the entire program. Make it configurable on whether to
+              # fail or continue.
+              await self.engine.save_checkpoint(
+                  role=datatypes.Role.ACTOR,
+                  metadata={
+                      "step": self.step + 1,
+                      "policy_version": self.policy_version,
+                      "num_rollouts": num_rollouts,
+                      "num_microbatches": num_microbatches,
+                  },
+              )
+        if mini_batch_groups_consumed != self.mini_batch_size:
           break
 
-        if groups_consumed == 0 and self.on_step_begin:
-          self.on_step_begin(current_step)
-
-        groups_consumed += groups_to_fetch
-        uncommitted_groups.append(scored_items)
-        all_step_items.extend(scored_items)
-        num_rollouts += len(scored_items)
-        for item in scored_items:
-          step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
-
-        prompt_ids = list(
-            dict.fromkeys(
-                item.prompt_id
-                for item in scored_items
-                if getattr(item, "prompt_id", None)
-            )
-        )
-        payloads = [getattr(item, "payload", None) for item in scored_items]
-        # TODO(tunix-dev): Implement streaming microbatch assembly to overlap
-        # packing with trainer execution.
-        microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
-        logging.info(
-            "Packed %d prompt groups into %d microbatches (total_rollouts=%d)."
-            " All prompt groups ids packed: %s",
-            len(prompt_ids),
-            len(microbatches),
-            len(payloads),
-            logging_utils.summarize_list(prompt_ids),
-        )
-        if getattr(self.algo, "requires_reference_kl", False):
-          scored_microbatches = []
-          for batch in microbatches:
-            if not isinstance(batch, datatypes.RLTrainerPayload):
-              raise TypeError(
-                  "Reference KL requires an assembler that returns "
-                  "datatypes.RLTrainerPayload microbatches; got "
-                  f"{type(batch).__name__}."
-              )
-            ref_logps = await self.engine.per_token_logps(
-                datatypes.Role.REFERENCE, items=batch
-            )
-            scored_microbatches.append(
-                batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-            )
-          microbatches = scored_microbatches
-
-        num_microbatches += len(microbatches)
-        is_final_group = groups_consumed >= self.mini_batch_size
-        for batch_idx, batch in enumerate(microbatches):
-          is_final_batch = is_final_group and batch_idx == len(microbatches) - 1
-          step_result = await self.engine.train_step(
-              batch,
-              role=datatypes.Role.ACTOR,
-              accumulate_gradients=True,
-              apply_optimizer=is_final_batch,
-          )
-          if is_final_batch:
-            # TODO(tunix-dev): Current checkpoint and metrics logic only works
-            # for fully on-policy. We need to come up with a solution for
-            # semi-off-policy where a single full batch has multiple mini
-            # batches.
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
-            )
-            # TODO(tunix-dev): Configurable checkpointing frequency. Today we
-            # checkpoint at the same frequency as the weight update.
-            # TODO(tunix-dev): For now any failures in save_checkpoint will
-            # abort the entire program. Make it configurable on whether to fail
-            # or continue.
-            await self.engine.save_checkpoint(
-                role=datatypes.Role.ACTOR,
-                metadata={
-                    "step": self.step + 1,
-                    "policy_version": self.policy_version,
-                    "num_rollouts": num_rollouts,
-                    "num_microbatches": num_microbatches,
-                },
-            )
-
-      if not scored_items:
+      if groups_consumed != self.full_batch_size:
         # TODO: We currently silently drop in-progress partial microbatch accumulators if
         # the dataset ends early. We may need to force-apply gradients here instead.
         logging.info(
@@ -770,7 +798,7 @@ class StandardRLProgram(RLProgram):
           policy_version=self.policy_version,
       )
 
-    max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
+    max_groups_ahead = self.full_batch_size * (self.max_staleness + 1)
     self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
     train_task = asyncio.create_task(self.train_stage())
