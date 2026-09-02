@@ -450,6 +450,11 @@ ROLLOUT_CHIPS="$(chip_count_from_slice "$ROLLOUT_TPU_SLICE")"
 TRAINER_MESH_FSDP="${USER_SET_TRAINER_FSDP:-$TRAINER_CHIPS}"
 ROLLOUT_MESH_TP="${USER_SET_ROLLOUT_TP:-$ROLLOUT_CHIPS}"
 TRAINER_JOBSET_YAML="${USER_SET_TRAINER_YAML:-jobset.tpu.yaml}"
+# MaxText requires train_micro_batch_size to be a multiple of mesh_fsdp
+TRAIN_MICRO_BATCH_SIZE="${USER_SET_MICRO_BATCH:-$TRAINER_MESH_FSDP}"
+if (( TRAIN_MICRO_BATCH_SIZE < TRAINER_MESH_FSDP )); then
+  TRAIN_MICRO_BATCH_SIZE="$TRAINER_MESH_FSDP"
+fi
 
 # ==============================================================================
 # Helper Functions
