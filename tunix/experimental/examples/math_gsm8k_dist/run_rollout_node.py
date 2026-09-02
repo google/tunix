@@ -388,13 +388,12 @@ def main(argv: list[str], context: Any = None) -> None:
         "Require discovery API, but process context doesn't support."
     )
 
+  args = _parse_args(argv)
   logging.basicConfig(
-      level=logging.INFO,
+      level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [RolloutNode] %(message)s",
       force=True,
   )
-
-  args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
   if context and args.sampler != "vllm":

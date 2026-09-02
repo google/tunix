@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import logging
 import threading
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
@@ -271,6 +272,14 @@ class RolloutWorker(abstract_worker.Worker):
           f"Sampler returned {len(responses)} responses for"
           f" {len(prompt_list)} prompts."
       )
+    for i, response in enumerate(responses):
+      logging.debug(
+          "Model response request_id=%s prompt_index=%d policy_version=%s:\n%s",
+          response.request_id,
+          i,
+          self._policy_version,
+          response.text,
+      )
     prompt_token_ids = [
         np.asarray(response.prompt_token_ids, dtype=np.int32).reshape(-1)
         for response in responses
@@ -356,6 +365,15 @@ class RolloutWorker(abstract_worker.Worker):
       logprobs: Any | None,
   ) -> datatypes.RolloutResponse:
     """Builds the v2 rollout DTO for the direct single-turn sampler path."""
+    logging.debug(
+        "Model response request_id=%s prompt_id=%s group_index=%s "
+        "policy_version=%s:\n%s",
+        request.request_id,
+        request.prompt_id,
+        request.group_index,
+        self._policy_version,
+        text,
+    )
     completion_tokens = np.asarray(token_ids, dtype=np.int32).reshape(-1)
     completion_logps = (
         np.asarray(logprobs, dtype=np.float32).reshape(-1)

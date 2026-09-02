@@ -14,6 +14,7 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import logging
 from typing import Any, List
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -93,6 +94,13 @@ class TrajectoryCollectorEngine:
       )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
+      logging.debug(
+          "Model response request_id=%s prompt_id=%s group_index=%s:\n%s",
+          self.request.request_id,
+          self.request.prompt_id,
+          self.request.group_index,
+          text,
+      )
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
       prompt_tokens = np.asarray(

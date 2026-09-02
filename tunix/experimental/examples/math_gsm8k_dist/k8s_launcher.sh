@@ -40,6 +40,10 @@ export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
+DEBUG_ARGS=""
+if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+  DEBUG_ARGS="--debug"
+fi
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 
@@ -118,7 +122,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
-        ${DEBUG:+--debug} \
+        ${DEBUG_ARGS} \
     " \
     | kubectl apply -f -
 }
@@ -169,7 +173,6 @@ start_trainer() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         ${maxtext_args} \
-        ${DEBUG:+--debug} \
     " \
     | kubectl apply -f -
 }
@@ -215,7 +218,7 @@ start_rollout() {
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         ${maxtext_args} \
         ${vllm_args} \
-        ${DEBUG:+--debug} \
+        ${DEBUG_ARGS} \
     " \
     | kubectl apply -f -
 }
