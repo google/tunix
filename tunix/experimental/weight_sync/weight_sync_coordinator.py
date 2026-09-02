@@ -537,8 +537,8 @@ class PhaseTimeouts:
   at least this large.
   """
 
-  bind: float = 60.0
-  metadata: float = 60.0
+  bind: float = 180.0
+  metadata: float = 180.0
   source_prepare: float = 900.0
   pre: float = 180.0
   transfer: float = 1800.0

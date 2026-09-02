@@ -127,7 +127,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync_lib.WeightSyncMode),
       help="Weight sync mode (none, fallback, or raiden).",
   )
-  return parser.parse_args(argv)
+  parser.add_argument("--sampler_mesh_tp", type=int, default=1)
+  parser.add_argument("--mesh_tp", type=int, default=1)
+  parser.add_argument("--debug", action="store_true")
+  args = parser.parse_args(argv)
+  if args.tensor_parallel_size is None and (args.sampler_mesh_tp > 1 or args.mesh_tp > 1):
+    args.tensor_parallel_size = args.sampler_mesh_tp if args.sampler_mesh_tp > 1 else args.mesh_tp
+  return args
 
 
 def _create_rollout_mesh(args) -> Any:

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import collections
+import gc
 import inspect
 import ipaddress
 import os
@@ -94,6 +95,14 @@ def _ensure_ffi_compute_on_compat() -> None:
   )
 
 
+def _malloc_trim() -> None:
+  try:
+    import ctypes
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+  except Exception:
+    pass
+
+
 def local_ip() -> str:
   for family, probe in (
       (socket.AF_INET, ("8.8.8.8", 80)),
@@ -121,6 +130,58 @@ def unpack_ip(row: Any) -> str:
     return str(ipaddress.IPv4Address(raw_bytes[12:16]))
   addr_str = str(ipaddress.IPv6Address(raw_bytes))
   return f"[{addr_str}]" if ":" in addr_str else addr_str
+
+
+def to_host_cpu_state(state: Any) -> Any:
+  """Pulls arrays to client host memory; proxy arrays cannot bind directly."""
+  import gc  # pylint: disable=g-import-not-at-top
+  from flax import traverse_util  # pylint: disable=g-import-not-at-top
+
+  cpu = jax.local_devices(backend="cpu")[0]
+
+  if hasattr(state, "to_pure_dict"):
+    pure_state = state.to_pure_dict()
+  elif hasattr(state, "to_dict"):
+    pure_state = state.to_dict()
+  elif isinstance(state, dict):
+    pure_state = state
+  else:
+    pure_state = None
+
+  if isinstance(pure_state, dict):
+    flat = traverse_util.flatten_dict(pure_state)
+    cpu_flat = {}
+    for k in list(flat.keys()):
+      v = flat.pop(k)
+      arr = getattr(v, "value", v)
+      if hasattr(arr, "shape") and hasattr(arr, "dtype"):
+        if hasattr(arr, "devices") and all(getattr(d, "platform", "") == "cpu" for d in arr.devices()):
+          cpu_flat[k] = arr
+        else:
+          np_arr = jax.device_get(arr)
+          del arr, v
+          cpu_flat[k] = jax.device_put(np_arr, cpu)
+          del np_arr
+      else:
+        cpu_flat[k] = v
+    del flat
+    gc.collect()
+    return traverse_util.unflatten_dict(cpu_flat)
+
+  def pull(leaf):
+    arr = getattr(leaf, "value", leaf)
+    if hasattr(arr, "shape") and hasattr(arr, "dtype"):
+      if hasattr(arr, "devices") and all(getattr(d, "platform", "") == "cpu" for d in arr.devices()):
+        return arr
+      np_arr = jax.device_get(arr)
+      res = jax.device_put(np_arr, cpu)
+      del np_arr
+      return res
+    return leaf
+
+  res = jax.tree_util.tree_map(pull, state)
+  gc.collect()
+  return res
 
 
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
@@ -233,6 +294,7 @@ class RaidenSynchronizer:
       *,
       worker_index: int = 0,
       auto_h2d: bool = False,
+      host_stage: bool = False,
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
   ):
@@ -243,6 +305,7 @@ class RaidenSynchronizer:
     self.arrays: List[Any] = []
     self.ip = bind_ip or local_ip()
     self._auto_h2d = auto_h2d
+    self._host_stage = host_stage
     self._is_proxy = is_proxy
     self._parallelism = parallelism
     self._sync: Any = None
@@ -378,16 +441,24 @@ class RaidenSynchronizer:
       arr.block_until_ready()
 
   def bind(self, state: Any) -> None:
-    """Binds this host's weights, or rebinds them after a training step."""
+    """Binds this host's weights, or rebinds them after a training step.
+
+    With host_stage the arrays are copied to local CPU memory first; arrays
+    backed by the pathways proxy cannot bind in place.
+    """
     _log_rss("bind:start")
     # Clear previous buffers before staging to avoid holding duplicate weight
     # copies in host memory during rebinds.
     self.names = []
     self.arrays = []
+    gc.collect()
+    if self._host_stage:
+      state = to_host_cpu_state(state)
     self.names, self.arrays = _filter_bindable(
         *flatten_weights(state), allow_proxy=self._is_proxy
     )
     del state
+    gc.collect()
     _log_rss("bind:after_flatten")
     logging.info(
         "%s bind prepared %d arrays (proxy_runtime=%s)",
@@ -491,25 +562,30 @@ class RaidenSynchronizer:
     bind() has ever run.
     """
     self.arrays = []
+    gc.collect()
+    _malloc_trim()
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
 
   def checksums(self, sample: int = 3) -> dict:
     """Per-tensor float32 abs-sums for cross-process verification."""
-
-    def total(arr):
-      return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
-
-    head = {
-        name: total(arr)
-        for name, arr in list(zip(self.names, self.arrays))[:sample]
-    }
-    head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
+    import numpy as np  # pylint: disable=g-import-not-at-top
+    head = {}
+    grand_total = 0.0
+    for idx, (name, arr) in enumerate(zip(self.names, self.arrays)):
+      a = np.asarray(arr)
+      tot = float(np.sum(np.abs(a)))
+      del a
+      grand_total += tot
+      if idx < sample:
+        head[name] = tot
+    head["__grand_total__"] = float(grand_total)
     # Only comparable to the destination's grand total if both sides bound the
     # same tensors; count and element total make that checkable, not assumed.
     head["__tensor_count__"] = len(self.arrays)
     head["__element_count__"] = int(sum(a.size for a in self.arrays))
+    _malloc_trim()
     return head
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:

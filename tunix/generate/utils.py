@@ -1864,7 +1864,18 @@ def transfer_state_directly(
         source=final_source,
         target=traverse_util.unflatten_dict(dst_shardings_flat),
     )
-  nnx.update(dst_state, resharded_weights)
+  if hasattr(dst_state, "flat_state"):
+    flat_resharded = traverse_util.flatten_dict(resharded_weights)
+    for path, var in dst_state.flat_state():
+      key_tuple = tuple(path)
+      if key_tuple in flat_resharded:
+        new_val = flat_resharded[key_tuple]
+        if hasattr(var, "value"):
+          var.value = getattr(new_val, "value", new_val)
+        else:
+          var[...] = getattr(new_val, "value", new_val)
+  else:
+    nnx.update(dst_state, resharded_weights)
 
 
 def resolve_parallelism_sizes(
