@@ -19,12 +19,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 # ==============================================================================
-# Hardware & Cluster Profiles
+# Dynamic Context & Cluster Detection (No Hardcoded Cluster Names)
 # ==============================================================================
-# Supported profiles:
-#   - bodaborg: TPU v7x slice (2x2x1) on cluster bodaborg-tpu7x-nap (us-central1)
-#   - v5p:      TPU v5p slice (2x2x2 trainer, 2x2x1 rollout) on trellis-demo-0810 / mlperf-v5p
-PROFILE="bodaborg"
+# Infer target cluster, project, and region from active kubectl context
+CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+DETECTED_PROJECT=""
+DETECTED_REGION=""
+DETECTED_CLUSTER=""
+
+if [[ "$CURRENT_CONTEXT" =~ ^gke_([^_]+)_([^_]+)_(.+)$ ]]; then
+  DETECTED_PROJECT="${BASH_REMATCH[1]}"
+  DETECTED_REGION="${BASH_REMATCH[2]}"
+  DETECTED_CLUSTER="${BASH_REMATCH[3]}"
+fi
+
+# Flag overrides
+USER_SET_CLUSTER=""
+USER_SET_PROJECT=""
+USER_SET_REGION=""
+USER_SET_CPU_MACHINE=""
+USER_SET_TRAINER_TPU=""
+USER_SET_ROLLOUT_TPU=""
+USER_SET_TRAINER_FSDP=""
+USER_SET_ROLLOUT_TP=""
+USER_SET_TRAINER_YAML=""
 
 # Workload configuration defaults
 STEPS=100
@@ -54,16 +72,6 @@ WANDB_PROJECT="trellis-gsm8k"
 WANDB_RUN_NAME=""
 WANDB_API_KEY="${WANDB_API_KEY:-}"
 
-# Flag override trackers
-USER_SET_CLUSTER=""
-USER_SET_PROJECT=""
-USER_SET_REGION=""
-USER_SET_CPU_MACHINE=""
-USER_SET_TRAINER_TPU=""
-USER_SET_ROLLOUT_TPU=""
-USER_SET_TRAINER_FSDP=""
-USER_SET_ROLLOUT_TP=""
-
 USER_PREFIX="${USER:-$(whoami)}"
 ORCHESTRATOR_ID="${USER_PREFIX}-orch"
 TRAINER_ID="${USER_PREFIX}-train"
@@ -81,37 +89,50 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [SUBCOMMAND] [OPTIONS]
 
-Clean, modular submission and management tool for Distributed GSM8K GRPO training.
+Modular submission and management tool for Distributed GSM8K GRPO training.
+Automatically detects the target cluster from your active kubectl context or CLI flags.
 
 SUBCOMMANDS:
   start            Start distributed training jobsets (Default)
   stop             Stop and clean up active jobsets
   restart          Restart active jobsets (stop then start)
   status           Show live status of JobSets, Pods, and Kueue Workloads
-  logs <TARGET>    Stream logs (-f) for a component: orch, train, or roll
+  logs <TARGET>    Stream logs for a component: orch, train, or roll (add -f to follow)
   watch            Continuously monitor pods and Kueue reservation
   help, -h         Show this help message
 
-KEY OPTIONS:
+CLUSTER OPTIONS:
+  --cluster <NAME>         Target cluster name (default: detected from kubectl context)
+  --project <ID>           GCP Project ID (default: detected from kubectl context)
+  --region <REGION>        GCP Region (default: detected from kubectl context)
+  --cpu-machine <TYPE>     Instance type for CPU orchestrator node (default: auto-detected)
+  --tpu-slice <SLICE>      TPU slice topology, e.g. tpu7x:2x2x1 or tpuv5:2x2x1 (default: auto-detected)
+  --trainer-tpu-slice <S>  Custom TPU slice for trainer
+  --rollout-tpu-slice <S>  Custom TPU slice for rollout
+
+TRAINING OPTIONS:
   --steps <N>              Total training steps [Default: 100]
   --weight-sync <MODE>     Weight sync: raiden (real sync), noop (dry test), none [Default: raiden]
-  --profile <PROFILE>      Hardware profile preset: bodaborg (v7x) or v5p [Default: bodaborg]
-  --cluster <NAME>         Target cluster [Default: bodaborg-tpu7x-nap]
-  --project <ID>           GCP Project ID [Default: cloud-tpu-shared-capacity]
-  --region <REGION>        GCP Region [Default: us-central1]
-  --branch <BRANCH>        Git branch to sync inside pods [Default: current git branch]
-  --ckpt <GCS_PATH>        Orbax checkpoint path for MaxText
-  --image <IMAGE>          Container image [Default: tunix-maxtext-rlvllm]
   --batch-size <N>         Prompt groups per step [Default: 2]
   --num-generations <N>    Completions per prompt [Default: 2]
   --micro-batch <N>        Micro batch size [Default: 1]
+  --branch <BRANCH>        Git branch to sync inside pods [Default: current git branch]
+  --ckpt <GCS_PATH>        Orbax checkpoint path for MaxText
+  --image <IMAGE>          Container image [Default: tunix-maxtext-rlvllm]
   --wandb-project <NAME>   Weights & Biases project name [Default: trellis-gsm8k]
   --wandb-run <NAME>       Weights & Biases run name
   --dry-run                Display resolved configuration without executing commands
 
+LOGGING OPTIONS:
+  -f, --follow             Follow/stream logs continuously (with 'logs' subcommand)
+  -n, --tail <N>           Number of log lines to show (default: 100)
+
 EXAMPLES:
-  # Launch 100-step training with real Raiden weight sync on bodaborg-tpu7x-nap:
+  # Launch 100-step training with real Raiden weight sync on the active cluster:
   $(basename "$0") start --steps 100 --weight-sync raiden
+
+  # Target a specific cluster explicitly:
+  $(basename "$0") start --cluster my-cluster --project my-project --region us-central1
 
   # Launch a rapid 10-step dry-run with noop weight sync:
   $(basename "$0") start --steps 10 --weight-sync noop
@@ -120,7 +141,7 @@ EXAMPLES:
   $(basename "$0") status
 
   # Stream orchestrator logs:
-  $(basename "$0") logs orch
+  $(basename "$0") logs orch -f
 
   # Stop and clean up all jobsets:
   $(basename "$0") stop
@@ -155,30 +176,6 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --profile)
-      PROFILE="$2"
-      shift 2
-      ;;
-    --profile=*)
-      PROFILE="${1#*=}"
-      shift
-      ;;
-    --steps)
-      STEPS="$2"
-      shift 2
-      ;;
-    --steps=*)
-      STEPS="${1#*=}"
-      shift
-      ;;
-    --weight-sync)
-      WEIGHT_SYNC_MODE="$2"
-      shift 2
-      ;;
-    --weight-sync=*)
-      WEIGHT_SYNC_MODE="${1#*=}"
-      shift
-      ;;
     --cluster)
       USER_SET_CLUSTER="$2"
       shift 2
@@ -201,6 +198,80 @@ while [[ $# -gt 0 ]]; do
       ;;
     --region=*)
       USER_SET_REGION="${1#*=}"
+      shift
+      ;;
+    --cpu-machine)
+      USER_SET_CPU_MACHINE="$2"
+      shift 2
+      ;;
+    --cpu-machine=*)
+      USER_SET_CPU_MACHINE="${1#*=}"
+      shift
+      ;;
+    --tpu-slice)
+      USER_SET_TRAINER_TPU="$2"
+      USER_SET_ROLLOUT_TPU="$2"
+      shift 2
+      ;;
+    --tpu-slice=*)
+      USER_SET_TRAINER_TPU="${1#*=}"
+      USER_SET_ROLLOUT_TPU="${1#*=}"
+      shift
+      ;;
+    --trainer-tpu-slice)
+      USER_SET_TRAINER_TPU="$2"
+      shift 2
+      ;;
+    --trainer-tpu-slice=*)
+      USER_SET_TRAINER_TPU="${1#*=}"
+      shift
+      ;;
+    --rollout-tpu-slice)
+      USER_SET_ROLLOUT_TPU="$2"
+      shift 2
+      ;;
+    --rollout-tpu-slice=*)
+      USER_SET_ROLLOUT_TPU="${1#*=}"
+      shift
+      ;;
+    --trainer-mesh-fsdp)
+      USER_SET_TRAINER_FSDP="$2"
+      shift 2
+      ;;
+    --trainer-mesh-fsdp=*)
+      USER_SET_TRAINER_FSDP="${1#*=}"
+      shift
+      ;;
+    --rollout-mesh-tp)
+      USER_SET_ROLLOUT_TP="$2"
+      shift 2
+      ;;
+    --rollout-mesh-tp=*)
+      USER_SET_ROLLOUT_TP="${1#*=}"
+      shift
+      ;;
+    --trainer-jobset-yaml)
+      USER_SET_TRAINER_YAML="$2"
+      shift 2
+      ;;
+    --trainer-jobset-yaml=*)
+      USER_SET_TRAINER_YAML="${1#*=}"
+      shift
+      ;;
+    --steps)
+      STEPS="$2"
+      shift 2
+      ;;
+    --steps=*)
+      STEPS="${1#*=}"
+      shift
+      ;;
+    --weight-sync)
+      WEIGHT_SYNC_MODE="$2"
+      shift 2
+      ;;
+    --weight-sync=*)
+      WEIGHT_SYNC_MODE="${1#*=}"
       shift
       ;;
     --branch)
@@ -296,61 +367,93 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ==============================================================================
-# Resolve Profile Settings
+# Resolve Target Cluster & Context
 # ==============================================================================
-if [[ "$PROFILE" == "bodaborg" ]]; then
-  PROJECT="cloud-tpu-shared-capacity"
-  CLUSTER="bodaborg-tpu7x-nap"
-  REGION="us-central1"
-  CPU_MACHINE="e2-standard-16"
-  TRAINER_JOBSET_YAML="jobset.tpu.yaml"
-  TRAINER_TPU_SLICE="tpu7x:2x2x1"
-  TRAINER_MESH_FSDP=4
-  ROLLOUT_TPU_SLICE="tpu7x:2x2x1"
-  ROLLOUT_MESH_TP=4
-elif [[ "$PROFILE" == "v5p" ]]; then
-  PROJECT="cloud-tpu-multipod-dev"
-  CLUSTER="trellis-demo-0810"
-  REGION="europe-west4"
-  CPU_MACHINE="n2-standard-64"
-  TRAINER_JOBSET_YAML="jobset.tpu.yaml"
-  TRAINER_TPU_SLICE="tpuv5:2x2x2"
-  TRAINER_MESH_FSDP=8
-  ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
-  ROLLOUT_MESH_TP=4
-else
-  echo "Error: Unknown profile '$PROFILE'. Supported profiles: 'bodaborg', 'v5p'." >&2
+CLUSTER="${USER_SET_CLUSTER:-${DETECTED_CLUSTER:-${CLUSTER:-}}}"
+PROJECT="${USER_SET_PROJECT:-${DETECTED_PROJECT:-${PROJECT:-}}}"
+REGION="${USER_SET_REGION:-${DETECTED_REGION:-${REGION:-}}}"
+
+if [[ -z "$CLUSTER" ]]; then
+  echo "Error: Could not detect target cluster from active kubectl context or CLI flags." >&2
+  echo "Please connect to a cluster or pass --cluster <NAME> --project <PROJECT_ID> --region <REGION>." >&2
   exit 1
 fi
 
-# Apply explicit flag overrides
-if [[ -n "$USER_SET_CLUSTER" ]]; then CLUSTER="$USER_SET_CLUSTER"; fi
-if [[ -n "$USER_SET_PROJECT" ]]; then PROJECT="$USER_SET_PROJECT"; fi
-if [[ -n "$USER_SET_REGION" ]]; then REGION="$USER_SET_REGION"; fi
-if [[ -n "$USER_SET_CPU_MACHINE" ]]; then CPU_MACHINE="$USER_SET_CPU_MACHINE"; fi
-if [[ -n "$USER_SET_TRAINER_TPU" ]]; then TRAINER_TPU_SLICE="$USER_SET_TRAINER_TPU"; fi
-if [[ -n "$USER_SET_ROLLOUT_TPU" ]]; then ROLLOUT_TPU_SLICE="$USER_SET_ROLLOUT_TPU"; fi
-if [[ -n "$USER_SET_TRAINER_FSDP" ]]; then TRAINER_MESH_FSDP="$USER_SET_TRAINER_FSDP"; fi
-if [[ -n "$USER_SET_ROLLOUT_TP" ]]; then ROLLOUT_MESH_TP="$USER_SET_ROLLOUT_TP"; fi
-
-# ==============================================================================
-# Helper Functions
-# ==============================================================================
 ensure_kube_context() {
   local context_name="gke_${PROJECT}_${REGION}_${CLUSTER}"
   if kubectl config get-contexts "$context_name" &>/dev/null; then
     kubectl config use-context "$context_name" >/dev/null
-  else
+  elif [[ -n "$PROJECT" && -n "$REGION" ]]; then
     echo "Configuring credentials for cluster '${CLUSTER}' in project '${PROJECT}'..."
     gcloud container clusters get-credentials "${CLUSTER}" \
       --region="${REGION}" \
       --project="${PROJECT}" \
       --dns-endpoint >/dev/null
     kubectl config use-context "$context_name" >/dev/null
+  else
+    # Keep current context if valid
+    local active="$(kubectl config current-context 2>/dev/null || true)"
+    if [[ -z "$active" ]]; then
+      echo "Error: Unable to determine or switch kubectl context." >&2
+      exit 1
+    fi
   fi
   kubectl config set-context --current --namespace=default >/dev/null
 }
 
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  ensure_kube_context
+fi
+
+# ==============================================================================
+# Auto-Detect Hardware from Cluster Nodes
+# ==============================================================================
+# 1. CPU Machine Type (select an untainted node instance type)
+if [[ -n "$USER_SET_CPU_MACHINE" ]]; then
+  CPU_MACHINE="$USER_SET_CPU_MACHINE"
+else
+  DETECTED_CPU="$(kubectl get nodes -o json 2>/dev/null | jq -r '.items[] | select(.metadata.labels["cloud.google.com/gke-tpu-accelerator"] == null) | select((.spec.taints // []) | length == 0) | .metadata.labels["node.kubernetes.io/instance-type"]' | head -n 1 || true)"
+  CPU_MACHINE="${DETECTED_CPU:-e2-standard-16}"
+fi
+
+# 2. TPU Accelerator & Topology
+DETECTED_ACCEL="$(kubectl get nodes -o json 2>/dev/null | jq -r '.items[].metadata.labels["cloud.google.com/gke-tpu-accelerator"] // empty' | sort -u | head -n 1 || true)"
+DETECTED_TOPOLOGY="$(kubectl get nodes -o json 2>/dev/null | jq -r '.items[].metadata.labels["cloud.google.com/gke-tpu-topology"] // empty' | sort -V | head -n 1 || true)"
+
+AUTO_TPU_SLICE=""
+if [[ -n "$DETECTED_ACCEL" && -n "$DETECTED_TOPOLOGY" ]]; then
+  AUTO_TPU_SLICE="${DETECTED_ACCEL}:${DETECTED_TOPOLOGY}"
+elif [[ -n "$DETECTED_ACCEL" ]]; then
+  AUTO_TPU_SLICE="${DETECTED_ACCEL}:2x2x1"
+else
+  AUTO_TPU_SLICE="tpu7x:2x2x1"
+fi
+
+TRAINER_TPU_SLICE="${USER_SET_TRAINER_TPU:-$AUTO_TPU_SLICE}"
+ROLLOUT_TPU_SLICE="${USER_SET_ROLLOUT_TPU:-$AUTO_TPU_SLICE}"
+
+# 3. Mesh dimensions (derive chip count from topology if not specified)
+# Parse topology e.g. 2x2x1 -> 4 chips, 2x2x2 -> 8 chips
+chip_count_from_slice() {
+  local slice="$1"
+  local topo="${slice##*:}"
+  if [[ "$topo" =~ ^([0-9]+)x([0-9]+)x([0-9]+)$ ]]; then
+    echo $(( BASH_REMATCH[1] * BASH_REMATCH[2] * BASH_REMATCH[3] ))
+  else
+    echo 4
+  fi
+}
+
+TRAINER_CHIPS="$(chip_count_from_slice "$TRAINER_TPU_SLICE")"
+ROLLOUT_CHIPS="$(chip_count_from_slice "$ROLLOUT_TPU_SLICE")"
+
+TRAINER_MESH_FSDP="${USER_SET_TRAINER_FSDP:-$TRAINER_CHIPS}"
+ROLLOUT_MESH_TP="${USER_SET_ROLLOUT_TP:-$ROLLOUT_CHIPS}"
+TRAINER_JOBSET_YAML="${USER_SET_TRAINER_YAML:-jobset.tpu.yaml}"
+
+# ==============================================================================
+# Helper Functions
+# ==============================================================================
 show_status() {
   echo "================================================================================"
   echo "  Active Distributed GSM8K JobSets (${USER_PREFIX})"
@@ -376,8 +479,8 @@ show_status() {
   kubectl get clusterqueues -o json 2>/dev/null | jq -r '
     .items[] | 
     "\(.metadata.name): " +
-    "Nominal Quota=\(.spec.resourceGroups[0].flavors[]? | select(.name=="tpu7x-flavor") | .resources[]? | select(.name=="google.com/tpu") | .nominalQuota // 0) | " +
-    "Reserved=\(.status.flavorsReservation[]? | select(.name=="tpu7x-flavor") | .resources[]? | select(.name=="google.com/tpu") | .total // 0)"
+    "Nominal Quota=\(.spec.resourceGroups[0].flavors[]? | select(.name | test("tpu")) | .resources[]? | select(.name=="google.com/tpu") | .nominalQuota // 0) | " +
+    "Reserved=\(.status.flavorsReservation[]? | select(.name | test("tpu")) | .resources[]? | select(.name=="google.com/tpu") | .total // 0)"
   ' || true
   echo "================================================================================"
 }
@@ -431,13 +534,13 @@ start_workloads() {
   echo "================================================================================"
   echo "  Launching Distributed GSM8K GRPO Training (${STEPS} steps)"
   echo "================================================================================"
-  echo "  Profile:             ${PROFILE}"
-  echo "  Cluster:             ${CLUSTER} (${PROJECT} / ${REGION})"
+  echo "  Cluster:             ${CLUSTER} (${PROJECT:-<default>} / ${REGION:-<default>})"
   echo "  Steps:               ${STEPS}"
   echo "  Weight Sync:         ${WEIGHT_SYNC_MODE}"
   echo "  Git Branch Sync:     ${SYNC_GIT_BRANCH}"
   echo "  Trainer Backend:     ${TRAINER_BACKEND} (${TRAINER_TPU_SLICE}, FSDP=${TRAINER_MESH_FSDP})"
   echo "  Rollout Slice:       ${ROLLOUT_TPU_SLICE} (TP=${ROLLOUT_MESH_TP})"
+  echo "  CPU Node Machine:    ${CPU_MACHINE}"
   echo "  Batch / Num Gen:     ${BATCH_SIZE} prompts / ${NUM_GENERATIONS} completions per prompt"
   echo "  Micro Batch Size:    ${TRAIN_MICRO_BATCH_SIZE}"
   echo "  Max Prompt / Resp:   ${MAX_PROMPT_LENGTH} / ${MAX_RESPONSE_LENGTH}"
@@ -489,19 +592,15 @@ start_workloads() {
   echo
   echo "Useful follow-up commands:"
   echo "  Check status:        $(basename "$0") status"
-  echo "  Stream Orchestrator: $(basename "$0") logs orch"
-  echo "  Stream Trainer:      $(basename "$0") logs train"
-  echo "  Stream Rollout:      $(basename "$0") logs roll"
+  echo "  Stream Orchestrator: $(basename "$0") logs orch -f"
+  echo "  Stream Trainer:      $(basename "$0") logs train -f"
+  echo "  Stream Rollout:      $(basename "$0") logs roll -f"
   echo "  Stop training:       $(basename "$0") stop"
 }
 
 # ==============================================================================
 # Main Dispatcher
 # ==============================================================================
-if [[ "$DRY_RUN" -eq 0 ]]; then
-  ensure_kube_context
-fi
-
 case "$SUBCOMMAND" in
   start)
     start_workloads

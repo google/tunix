@@ -4,15 +4,15 @@ This directory contains the distributed implementation of **Group Relative Polic
 
 The architecture decouples the RL training loop into independent Kubernetes JobSets:
 - **CPU Orchestrator**: Coordinates the RL training loop, manages the async trajectory queue, calculates GRPO advantages, evaluates GSM8K reward accuracy, and coordinates policy-versioned weight sync.
-- **TPU Trainer Worker**: Runs [MaxText](https://github.com/google/maxtext) on a TPU slice (`tpu7x:2x2x1` or `tpuv5:2x2x2`), computing forward/backward gradient updates over streamed microbatches.
-- **TPU Rollout Worker**: Runs high-throughput [vLLM](https://github.com/vllm-project/vllm) on a TPU slice (`tpu7x:2x2x1` or `tpuv5:2x2x1`), generating response trajectories asynchronously for prompt problem batches.
+- **TPU Trainer Worker**: Runs [MaxText](https://github.com/google/maxtext) on a TPU slice, computing forward/backward gradient updates over streamed microbatches.
+- **TPU Rollout Worker**: Runs high-throughput [vLLM](https://github.com/vllm-project/vllm) on a TPU slice, generating response trajectories asynchronously for prompt problem batches.
 - **Weight Synchronization**: Transfers updated model weights across pods using high-performance [Raiden](https://github.com/google/tunix) RDMA/host-staged tensor streaming.
 
 ---
 
 ## 1. Quickstart
 
-Use `submit_gsm8k.sh` to submit, monitor, and manage training jobs with a single command.
+Use `submit_gsm8k.sh` to submit, monitor, and manage training jobs with a single command. The script **automatically detects your active GKE cluster** from your `kubectl` context.
 
 ### Run 100-Step Training for Convergence (Real Weight Sync)
 ```bash
@@ -31,9 +31,24 @@ tunix/experimental/examples/math_gsm8k_dist/submit_gsm8k.sh start \
 
 ---
 
-## 2. CLI Tool Reference (`submit_gsm8k.sh`)
+## 2. Dynamic Cluster & Hardware Detection
 
-`submit_gsm8k.sh` provides an ergonomic, unified CLI for cluster context switching, job submission, status monitoring, and log streaming.
+`submit_gsm8k.sh` does **not** hardcode any cluster names. It detects your target environment dynamically:
+
+1. **Cluster, Project, and Region**:
+   - Inferred automatically from your active `kubectl` context (`gke_${PROJECT}_${REGION}_${CLUSTER}`).
+   - Can be overridden via `--cluster <NAME>`, `--project <ID>`, and `--region <REGION>`.
+2. **CPU Node Machine Type**:
+   - Automatically selects an available, untainted CPU instance type from the cluster's CPU node pools (e.g. `e2-standard-16`, `n2-standard-64`).
+   - Can be overridden via `--cpu-machine <TYPE>`.
+3. **TPU Accelerator & Topology**:
+   - Automatically queries the cluster's node labels (`cloud.google.com/gke-tpu-accelerator` and `cloud.google.com/gke-tpu-topology`) to identify the TPU architecture (e.g. `tpu7x:2x2x1`, `tpuv5:2x2x2`).
+   - Automatically derives FSDP and TP mesh parameters based on the detected slice chip count.
+   - Can be overridden via `--tpu-slice <SLICE>`, `--trainer-tpu-slice <SLICE>`, and `--rollout-tpu-slice <SLICE>`.
+
+---
+
+## 3. CLI Tool Reference (`submit_gsm8k.sh`)
 
 ### Subcommands
 
@@ -41,7 +56,7 @@ tunix/experimental/examples/math_gsm8k_dist/submit_gsm8k.sh start \
 | :--- | :--- | :--- |
 | `start` | Launches Orchestrator, Trainer, and Rollout JobSets (default) | `./submit_gsm8k.sh start --steps 100` |
 | `status` | Displays live status of JobSets, Pods, and Kueue queue quota | `./submit_gsm8k.sh status` |
-| `logs <target>` | View logs for `orch`, `train`, or `roll` (`-f` to follow) | `./submit_gsm8k.sh logs orch -f` |
+| `logs <target>` | View logs for `orch`, `train`, or `roll` (add `-f` to follow) | `./submit_gsm8k.sh logs orch -f` |
 | `stop` | Terminates and cleans up all active JobSets for the current user | `./submit_gsm8k.sh stop` |
 | `restart` | Cleanly stops existing jobs and relaunches them | `./submit_gsm8k.sh restart --steps 100` |
 | `watch` | Continuously monitors pod states and Kueue reservations | `./submit_gsm8k.sh watch` |
@@ -52,10 +67,11 @@ tunix/experimental/examples/math_gsm8k_dist/submit_gsm8k.sh start \
 | :--- | :--- | :--- |
 | `--steps <N>` | `100` | Total GRPO training steps. |
 | `--weight-sync <MODE>` | `raiden` | Weight synchronization mode: `raiden` (real weight sync for convergence), `noop` (version advance only for control-plane testing), or `none`. |
-| `--profile <NAME>` | `bodaborg` | Preconfigured hardware profile: `bodaborg` (TPU v7x) or `v5p` (TPU v5p). |
-| `--cluster <NAME>` | `bodaborg-tpu7x-nap` | Target GKE cluster name. |
-| `--project <ID>` | `cloud-tpu-shared-capacity` | GCP Project ID. |
-| `--region <REGION>` | `us-central1` | GCP Region. |
+| `--cluster <NAME>` | Active context | Target GKE cluster name. |
+| `--project <ID>` | Active context | GCP Project ID. |
+| `--region <REGION>` | Active context | GCP Region. |
+| `--tpu-slice <SLICE>` | Auto-detected | TPU slice topology, e.g. `tpu7x:2x2x1` or `tpuv5:2x2x2`. |
+| `--cpu-machine <TYPE>` | Auto-detected | Machine type for CPU orchestrator node. |
 | `--branch <BRANCH>` | Current git branch | Git branch to fetch and run inside the containers (`atwigg/gsm8k-dist-fixes`). |
 | `--ckpt <GCS_PATH>` | Qwen3-1.7B checkpoint | GCS path to Orbax parameters checkpoint for MaxText. |
 | `--batch-size <N>` | `2` | Number of distinct prompt problems sampled per step. |
@@ -67,28 +83,6 @@ tunix/experimental/examples/math_gsm8k_dist/submit_gsm8k.sh start \
 
 ---
 
-## 3. Hardware Profiles
-
-### Profile: `bodaborg` (Default - TPU v7x)
-- **Cluster**: `bodaborg-tpu7x-nap` in project `cloud-tpu-shared-capacity` (`us-central1-c`).
-- **Orchestrator Machine**: `e2-standard-16` (runs on `default-pool` without taints).
-- **Trainer TPU Slice**: `tpu7x:2x2x1` (4 TPU chips, FSDP=4).
-- **Rollout TPU Slice**: `tpu7x:2x2x1` (4 TPU chips, TP=4).
-- **Kueue LocalQueue**: `default` (borrowing from cohort `tpu-shared-cohort`).
-
-### Profile: `v5p` (TPU v5p)
-- **Cluster**: `trellis-demo-0810` / `mlperf-v5p` in project `cloud-tpu-multipod-dev` (`europe-west4`).
-- **Orchestrator Machine**: `n2-standard-64`.
-- **Trainer TPU Slice**: `tpuv5:2x2x2` (8 TPU chips, FSDP=8).
-- **Rollout TPU Slice**: `tpuv5:2x2x1` (4 TPU chips, TP=4).
-
-To use the v5p profile:
-```bash
-./submit_gsm8k.sh start --profile v5p --steps 100 --weight-sync raiden
-```
-
----
-
 ## 4. Monitoring & Verifying Convergence (100 Steps)
 
 ### A. Checking Overall Job Status
@@ -97,8 +91,8 @@ Run `status` to inspect all components at once:
 ./submit_gsm8k.sh status
 ```
 This shows:
-1. **JobSets**: Terminal and restart status for orchestrator, trainer, and rollout.
-2. **Pods**: Host nodes, pod IPs, readiness gates, and container phases (`ContainerCreating`, `Running`, `Completed`).
+1. **JobSets**: Terminal, completion, and suspension status for orchestrator, trainer, and rollout.
+2. **Pods**: Host nodes, pod IPs, readiness gates, and container phases.
 3. **Kueue Workloads**: Admission conditions and quota reservations.
 4. **TPU Cohort Quota**: Real-time allocation across cluster queues.
 
@@ -121,8 +115,8 @@ During a healthy 100-step convergence run, you will observe the following progre
 
 1. **Worker Registration & Discovery**:
    ```
-   [Orchestrator] Discovered trainer service (atwigg-r28637-train) at atwigg-r28637-train:20002.
-   [Orchestrator] Discovered rollout service (atwigg-r28637-roll) at atwigg-r28637-roll:20001.
+   [Orchestrator] Discovered trainer service (atwigg-train) at atwigg-train:20002.
+   [Orchestrator] Discovered rollout service (atwigg-roll) at atwigg-roll:20001.
    [Orchestrator] Cluster workers ready. Starting StandardRLProgram execution...
    ```
 
@@ -146,8 +140,8 @@ During a healthy 100-step convergence run, you will observe the following progre
    ```
 
 4. **Tracking Convergence over 100 Steps**:
-   - **Step 0–10**: Base Qwen3-1.7B math accuracy begins around 25%–35% on GSM8K questions.
-   - **Step 10–50**: GRPO advantage weighting reinforces reasoning steps that lead to correct final numerical answers (`#### <answer>`). Reward mean trends upward from ~0.35 toward ~0.65.
+   - **Step 0–15**: Baseline Qwen3-1.7B math accuracy starts around **25%–35%** on GSM8K reasoning questions.
+   - **Step 15–50**: GRPO advantage weighting reinforces reasoning steps that lead to correct final numerical answers (`#### <answer>`). Reward mean trends upward from ~0.35 toward ~0.65.
    - **Step 50–100**: Responses stabilize, format compliance reaches >95%, and final mean reward converges toward 0.75–0.85+.
    - If configured with WandB (`--wandb-project`), the `reward/mean`, `reward/std`, `loss`, and `kl_divergence` curves are tracked in real-time.
 
@@ -167,7 +161,7 @@ During a healthy 100-step convergence run, you will observe the following progre
 +-------------------------------+                 +-------------------------------+
 |       TPU Rollout Worker      |                 |       TPU Trainer Worker      |
 |    (vLLM In-Process Engine)   |<================|     (MaxText Engine / JAX)    |
-|       tpu7x:2x2x1 (TP=4)      |  Raiden RDMA/   |      tpu7x:2x2x1 (FSDP=4)     |
+|     TP Slice e.g. 2x2x1       |  Raiden RDMA/   |    FSDP Slice e.g. 2x2x1      |
 |   Generates Rollout Batches   |  Host Staged    |   Forward/Backward Gradients  |
 +-------------------------------+  Weight Sync    +-------------------------------+
 ```
@@ -189,13 +183,12 @@ Always stop jobs when finished or before switching configurations to release TPU
 ```
 
 ### Insufficient TPU Quota (`QuotaReserved: False`)
-If `status` shows workloads pending with:
-`insufficient unused quota for google.com/tpu in flavor tpu7x-flavor`
+If `status` shows workloads pending with `insufficient unused quota`:
 The shared cohort is temporarily full. Once other users' workloads finish or are stopped, Kueue will automatically admit your jobset without requiring resubmission.
 
 ### Checking Initial Image Pulling
 Large container images (containing JAX, PyTorch, vLLM, and MaxText) can take 5–8 minutes to pull on newly scaled nodes:
 ```bash
-kubectl describe pod -l jobset.sigs.k8s.io/jobset-name=atwigg-r28637-orch | grep -A 5 Events:
+kubectl describe pod -l jobset.sigs.k8s.io/jobset-name=${USER}-orch | grep -A 5 Events:
 ```
 Once pulled, containers transition to `Running` immediately.
