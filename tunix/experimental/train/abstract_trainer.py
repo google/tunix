@@ -18,10 +18,11 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
+from tunix.experimental.train import config as train_config
 
 
 class AbstractTrainer(abc.ABC):
@@ -31,7 +32,7 @@ class AbstractTrainer(abc.ABC):
   """
 
   @abc.abstractmethod
-  def __init__(self, config: Any):
+  def __init__(self, config: train_config.TrainingConfig | Any):
     """Initializes the trainer with the given config.
 
     Args:
