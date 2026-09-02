@@ -62,19 +62,9 @@ from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
+from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
-
-
-def _parse_weight_sync_mode(value: str) -> str:
-  mode = value.lower()
-  if mode in ("noop", "no-op"):
-    return "fallback"
-  if mode not in ("none", "fallback", "raiden"):
-    raise argparse.ArgumentTypeError(
-        "weight_sync_mode must be one of: none, fallback, raiden"
-    )
-  return mode
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -120,8 +110,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--weight_sync_mode",
-      type=_parse_weight_sync_mode,
-      default=_parse_weight_sync_mode(os.getenv("WEIGHT_SYNC_MODE", "none")),
+      type=weight_sync.WeightSyncMode,
+      default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
+      choices=list(weight_sync.WeightSyncMode),
       help=(
           "Weight synchronization mode. 'none' disables post-update sync, "
           "'raiden' uses Raiden, and 'fallback' runs protocol-only sync."
