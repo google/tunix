@@ -390,6 +390,13 @@ class ClusterConfig:
       Alternatively, if a subclass of `BaseRollout` is provided, it will be used
       as the rollout engine.
     offload_to_cpu: Whether to offload models to CPU at each step..
+    per_step_gc_collect: Whether to run `gc.collect()` after the weight sync
+      and after the actor log-prob pass on every training step. This promptly
+      releases the host-side references those phases leave behind, which
+      matters when models are offloaded to CPU or host memory is tight. On a
+      colocated setup with no offloading, a full host garbage collection is a
+      pure stall on the training step (about one second per step observed),
+      so it can be disabled.
     training_config: RL training config.
     rollout_config: Rollout config. It may be different for different modes,
       e.g. TRAIN vs EVAL.
@@ -407,6 +414,7 @@ class ClusterConfig:
   role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
   rollout_engine: str | type["base_rollout.BaseRollout"] = "vanilla"
   offload_to_cpu: bool = False
+  per_step_gc_collect: bool = True
 
   training_config: RLTrainingConfig
   rollout_config: dict[Mode, RolloutConfig] | RolloutConfig
