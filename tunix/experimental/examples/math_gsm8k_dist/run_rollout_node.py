@@ -449,6 +449,8 @@ def main(argv: list[str], context: Any = None) -> None:
       logging.info("Eagerly starting sampler engine...")
       await worker_service.sampler.start()
       logging.info("Sampler engine started.")
+      # The bind is what brings the transport server up, so do it during
+      # startup rather than on whichever rollout happens to sync first.
       if hasattr(worker_service.sampler, "bind_weight_sync"):
         logging.info("Eagerly warming up Raiden weight sync...")
         await worker_service.sampler.bind_weight_sync()

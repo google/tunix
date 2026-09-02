@@ -53,6 +53,21 @@ import os
 import sys
 from typing import Any, Callable
 
+# Load Raiden here, in the process entry point, before jax brings the TPU
+# backend up. Each of its modules statically links its own copy of
+# `xla/pjrt/proto/execute_options.proto`; whichever is dlopened first wins the
+# protobuf registry and a later one aborts the process. All modules, not just
+# the engine: `raiden_synchronizer` imports `weight_synchronizer_ffi` at module
+# scope, so that one would otherwise land mid-run. The wheel is distributed as
+# `tpu_raiden_jax` but installs `tpu_sync`.
+for _raiden_mod in ('_tpu_raiden_jax', 'weight_synchronizer_ffi',
+                    '_kv_cache_manager_ffi'):
+  try:
+    importlib.import_module(f'tpu_sync.frameworks.jax.{_raiden_mod}')
+  except ImportError:
+    # Raiden absent, or an older build that does not ship this module.
+    pass
+
 
 @dataclasses.dataclass(frozen=True)
 class PreparedProcess:

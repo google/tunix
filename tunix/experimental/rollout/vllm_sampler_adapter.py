@@ -184,6 +184,31 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Starts the underlying sampler engine."""
     return await self._require_sampler().start(**kwargs)
 
+  async def _ensure_started(self) -> None:
+    """Brings the engine up if nothing has needed it yet.
+
+    RLVllmSampler builds its AsyncLLM lazily and `sample()` is the only caller
+    of `start()`, but weight sync needs the engine too -- it owns the TPU
+    worker, and therefore the Raiden binding -- and now runs before the first
+    sample. Without this the round finds no worker, reports an empty
+    destination manifest, and deadlocks: the engine waits for a sample that
+    dispatch is waiting on the sync to allow. Keyed off `_is_running` because
+    `start()` warns when already running and this runs every sync round.
+
+    TODO(tunix-dev): drop this once the orchestrator owns rollout-worker
+    lifecycle and can guarantee the engine is up before it issues any phase
+    call; the ordering belongs there, not in a guard on each entry point.
+    """
+    if self.sampler is None:
+      self.initialize()
+    if not getattr(self.sampler, "_is_running", False):
+      logger.info(
+          "VllmSamplerAdapter [%s] starting engine for weight sync (no"
+          " sample has forced it up yet).",
+          self.server_id,
+      )
+      await self.sampler.start()
+
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
     return await self._require_sampler().stop(**kwargs)
@@ -243,6 +268,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     del sync_request, kwargs
     if not self.enable_raiden:
       return None
+    await self._ensure_started()
     return await self._require_sampler().bind_raiden_sync(
         worker_index=self.worker_index, parallelism=self._parallelism
     )
@@ -259,6 +285,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           " get_weight_sync_metadata when Raiden is disabled"
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
+    await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
     return [weight_sync.WorkUnitMetadata.from_dict(m) for m in meta or []]
 
