@@ -162,7 +162,8 @@ start_trainer() {
         --tokenizer_path=${TOKENIZER_PATH} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
-        --mini_batch_size=$((MINI_BATCH_SIZE * NUM_GENERATIONS)) \
+        --mini_batch_size=${MINI_BATCH_SIZE} \
+        --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \

@@ -73,7 +73,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--mini_batch_size",
       type=int,
       default=1,
-      help="Number of trajectories per optimizer update.",
+      help="Number of prompt groups per optimizer update.",
+  )
+  parser.add_argument(
+      "--num_generations",
+      type=int,
+      default=8,
+      help="Number of trajectories generated for each prompt group.",
   )
   parser.add_argument(
       "--train_micro_batch_size",
@@ -340,14 +346,19 @@ def _create_tunix_trainer_factory(args) -> Any:
   logging.info("Building PeftTrainer v2 config...")
   if args.mini_batch_size <= 0:
     raise ValueError("--mini_batch_size must be positive.")
-  if args.mini_batch_size % args.train_micro_batch_size != 0:
+  if args.num_generations <= 0:
+    raise ValueError("--num_generations must be positive.")
+  update_trajectories = args.mini_batch_size * args.num_generations
+  if update_trajectories % args.train_micro_batch_size != 0:
     raise ValueError(
-        "--mini_batch_size must be divisible by --train_micro_batch_size; "
+        "--mini_batch_size * --num_generations must be divisible by "
+        "--train_micro_batch_size; "
         f"got mini_batch_size={args.mini_batch_size}, "
+        f"num_generations={args.num_generations}, "
         f"train_micro_batch_size={args.train_micro_batch_size}."
     )
   grad_accumulation_steps = (
-      args.mini_batch_size // args.train_micro_batch_size
+      update_trajectories // args.train_micro_batch_size
   )
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=args.checkpoint_save_interval_steps,
@@ -364,9 +375,12 @@ def _create_tunix_trainer_factory(args) -> Any:
   )
   logging.info(
       "PeftTrainer v2 gradient_accumulation_steps=%d "
-      "(mini_batch_size=%d trajectories, train_micro_batch_size=%d).",
+      "(mini_batch_size=%d prompt groups, num_generations=%d, "
+      "update_trajectories=%d, train_micro_batch_size=%d).",
       grad_accumulation_steps,
       args.mini_batch_size,
+      args.num_generations,
+      update_trajectories,
       args.train_micro_batch_size,
   )
 
