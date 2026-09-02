@@ -616,6 +616,7 @@ class StandardRLProgram(RLProgram):
       groups_per_assembly_batch = self.assembler.groups_per_assembly_batch
 
       num_mini_batches = self.full_batch_size // self.mini_batch_size
+      optimizer_step = current_step * num_mini_batches
       for _ in range(num_mini_batches):
         mini_batch_groups_consumed = 0
         while mini_batch_groups_consumed < self.mini_batch_size:
@@ -690,6 +691,13 @@ class StandardRLProgram(RLProgram):
                 apply_optimizer=apply_optimizer,
             )
             if apply_optimizer:
+              optimizer_step += 1
+              checkpoint_step = optimizer_step
+              if isinstance(step_result, dict):
+                train_step = step_result.get("train_step")
+                if train_step is not None:
+                  checkpoint_step = int(train_step)
+                  optimizer_step = checkpoint_step
               trainer_metrics = await self.engine.get_metrics(
                   role=datatypes.Role.ACTOR
               )
@@ -701,7 +709,7 @@ class StandardRLProgram(RLProgram):
               await self.engine.save_checkpoint(
                   role=datatypes.Role.ACTOR,
                   metadata={
-                      "step": self.step + 1,
+                      "step": checkpoint_step,
                       "policy_version": self.policy_version,
                       "num_rollouts": num_rollouts_after_chunk,
                       "num_microbatches": num_microbatches,

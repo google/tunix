@@ -830,6 +830,13 @@ class RLProgramTest(absltest.TestCase):
           [False, True, False, True],
       )
       self.assertEqual(self.mock_engine.save_checkpoint.call_count, 2)
+      self.assertEqual(
+          [
+              call.kwargs["metadata"]["step"]
+              for call in self.mock_engine.save_checkpoint.call_args_list
+          ],
+          [1, 2],
+      )
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR
       )
