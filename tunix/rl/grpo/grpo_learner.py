@@ -107,6 +107,8 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
   use_rollout_logps: bool = True
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
+  use_leave_one_out_baseline: bool = False
+
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -378,7 +380,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           self.algo_config.advantage_estimator
       )
       advantages = advantage_estimator(
-          rewards=rewards, num_generations=self.algo_config.num_generations
+          rewards=rewards,
+          num_generations=self.algo_config.num_generations,
+          use_leave_one_out_baseline=self.algo_config.use_leave_one_out_baseline,
       )
 
     # Log raw scores from the reward model fn
