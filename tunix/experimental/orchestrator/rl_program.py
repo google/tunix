@@ -678,21 +678,22 @@ class StandardRLProgram(RLProgram):
             microbatches = scored_microbatches
 
           num_microbatches += len(microbatches)
-          is_final_assembly_batch = (
-              mini_batch_groups_consumed >= self.mini_batch_size
+          # Only the last microbatch that completes a prompt-level mini batch
+          # applies the accumulated gradients.
+          optimizer_batch_idx = (
+              len(microbatches) - 1
+              if mini_batch_groups_consumed >= self.mini_batch_size
+              else None
           )
           for batch_idx, batch in enumerate(microbatches):
-            is_final_batch = (
-                is_final_assembly_batch
-                and batch_idx == len(microbatches) - 1
-            )
+            apply_optimizer = batch_idx == optimizer_batch_idx
             step_result = await self.engine.train_step(
                 batch,
                 role=datatypes.Role.ACTOR,
                 accumulate_gradients=True,
-                apply_optimizer=is_final_batch,
+                apply_optimizer=apply_optimizer,
             )
-            if is_final_batch:
+            if apply_optimizer:
               trainer_metrics = await self.engine.get_metrics(
                   role=datatypes.Role.ACTOR
               )
