@@ -289,20 +289,33 @@ class ProfilerTest(parameterized.TestCase):
           profiler_steps=0,
       ),
   )
-  def test_invalid_step_numbers(
-      self, max_step, initial_step, skip_first_n_steps, profiler_steps
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'start_trace')
+  def test_invalid_step_numbers_disable_profiling(
+      self,
+      mock_start_trace,
+      _,
+      max_step,
+      initial_step,
+      skip_first_n_steps,
+      profiler_steps,
   ):
     profiler_options = profiler.ProfilerOptions(
         log_dir=self.log_dir,
         skip_first_n_steps=skip_first_n_steps,
         profiler_steps=profiler_steps,
     )
-    with self.assertRaises(ValueError):
-      profiler.Profiler(
+    with self.assertLogs(level='WARNING') as logs:
+      p = profiler.Profiler(
           initial_step=initial_step,
           max_step=max_step,
           profiler_options=profiler_options,
       )
+    self.assertTrue(any('Profiler disabled' in line for line in logs.output))
+    self.assertTrue(p._do_not_profile)
+
+    p.maybe_activate(initial_step + skip_first_n_steps)
+    mock_start_trace.assert_not_called()
 
   def test_profiler_with_max_num_hosts_supported(self):
     def dummy_start_trace(
