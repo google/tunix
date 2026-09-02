@@ -193,14 +193,25 @@ class WorkUnitMetadata:
     """Reconstructs WorkUnitMetadata from a dictionary or returns metadata directly."""
     if isinstance(d, cls):
       return d
-    if not isinstance(d, dict):
-      raise TypeError(f"Expected WorkUnitMetadata or dict, got {type(d)}")
+    if hasattr(d, "as_dict") and callable(d.as_dict):
+      d = d.as_dict()
+    elif not isinstance(d, dict):
+      if hasattr(d, "__dataclass_fields__") or type(d).__name__ == "WorkUnitMetadata":
+        d = dataclasses.asdict(d)
+      else:
+        raise TypeError(f"Expected WorkUnitMetadata or dict, got {type(d)}")
 
     unit_raw = d.get("unit")
     if isinstance(unit_raw, dict):
       unit = WorkUnitId(**unit_raw)
     elif isinstance(unit_raw, WorkUnitId):
       unit = unit_raw
+    elif hasattr(unit_raw, "job_name"):
+      unit = WorkUnitId(
+          job_name=str(unit_raw.job_name),
+          worker_index=int(getattr(unit_raw, "worker_index", 0)),
+          role=getattr(unit_raw, "role", None),
+      )
     else:
       unit = WorkUnitId(job_name=str(unit_raw or "destination"))
 
