@@ -67,6 +67,26 @@ from tunix.experimental.worker import remote_execution  # pylint: disable=g-impo
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
 
+_RAIDEN_DEBUG_LOG_MESSAGES = (
+    "Auto-calculated expected_block_count:",
+    "Computed destination slices for ",
+    "Computed source slices for ",
+    "RaidenController acting as ",
+    "Using local registration for destination metadata",
+    "expected_block_count auto; deferring to the controller's schedule-derived count",
+)
+
+
+class _RaidenDebugLogFilter(logging.Filter):
+  """Hides verbose Raiden transfer-planning logs unless debug logging is on."""
+
+  def filter(self, record: logging.LogRecord) -> bool:
+    msg = record.getMessage()
+    if any(message in msg for message in _RAIDEN_DEBUG_LOG_MESSAGES):
+      return logging.getLogger().isEnabledFor(logging.DEBUG)
+    return True
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description="Orchestrator V2 Qwen3 GSM8K GRPO demo."
@@ -436,6 +456,9 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [Orchestrator] %(message)s",
       force=True,
   )
+  raiden_filter = _RaidenDebugLogFilter()
+  for handler in logging.getLogger().handlers:
+    handler.addFilter(raiden_filter)
 
   args = _parse_args(argv)
   if args.num_generations <= 1:
