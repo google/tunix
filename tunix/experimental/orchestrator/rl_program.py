@@ -633,13 +633,11 @@ class StandardRLProgram(RLProgram):
             self.on_step_begin(current_step)
 
           groups_fetched = len(scored_items) // self.group_size
-          mini_batch_groups_consumed += groups_fetched
-          groups_consumed += groups_fetched
-          uncommitted_groups.append(scored_items)
-          all_step_items.extend(scored_items)
-          num_rollouts += len(scored_items)
-          for item in scored_items:
-            step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
+          mini_batch_groups_after_chunk = (
+              mini_batch_groups_consumed + groups_fetched
+          )
+          groups_consumed_after_chunk = groups_consumed + groups_fetched
+          num_rollouts_after_chunk = num_rollouts + len(scored_items)
 
           prompt_ids = list(
               dict.fromkeys(
@@ -678,15 +676,13 @@ class StandardRLProgram(RLProgram):
             microbatches = scored_microbatches
 
           num_microbatches += len(microbatches)
-          # Only the last microbatch that completes a prompt-level mini batch
-          # applies the accumulated gradients.
-          optimizer_batch_idx = (
-              len(microbatches) - 1
-              if mini_batch_groups_consumed >= self.mini_batch_size
-              else None
+          completes_mini_batch = (
+              mini_batch_groups_after_chunk >= self.mini_batch_size
           )
           for batch_idx, batch in enumerate(microbatches):
-            apply_optimizer = batch_idx == optimizer_batch_idx
+            apply_optimizer = (
+                completes_mini_batch and batch_idx == len(microbatches) - 1
+            )
             step_result = await self.engine.train_step(
                 batch,
                 role=datatypes.Role.ACTOR,
@@ -707,10 +703,18 @@ class StandardRLProgram(RLProgram):
                   metadata={
                       "step": self.step + 1,
                       "policy_version": self.policy_version,
-                      "num_rollouts": num_rollouts,
+                      "num_rollouts": num_rollouts_after_chunk,
                       "num_microbatches": num_microbatches,
                   },
               )
+
+          mini_batch_groups_consumed = mini_batch_groups_after_chunk
+          groups_consumed = groups_consumed_after_chunk
+          uncommitted_groups.append(scored_items)
+          all_step_items.extend(scored_items)
+          num_rollouts = num_rollouts_after_chunk
+          for item in scored_items:
+            step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
         if mini_batch_groups_consumed != self.mini_batch_size:
           break
 
