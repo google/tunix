@@ -57,6 +57,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
+from tunix.experimental.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
@@ -66,6 +67,7 @@ from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-impo
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
+ProcessContext = runtime_context.ProcessContext
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
@@ -156,6 +158,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
@@ -164,12 +167,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable debug logging and print full sampler responses.",
   )
   return parser.parse_args(argv)
-
-
-def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
-  return remote_execution.ActorHandle.from_address(
-      f"grpc://{addr}", rpc_timeout_s=timeout_s
-  )
 
 
 def _normalize_example_value(value: Any) -> Any:
@@ -325,39 +322,6 @@ def _configure_trainer_loss(
   )
 
 
-def _register_workers(
-    args: argparse.Namespace,
-    *,
-    cluster: orchestrator.ClusterOrchestrator,
-    trainer_handle: remote_execution.ActorHandle,
-    trainer_addr: str,
-    rollout_handle: remote_execution.ActorHandle,
-    rollout_addr: str,
-    inference_handle: remote_execution.ActorHandle | None,
-    inference_addr: str | None,
-) -> None:
-  """Registers gRPC-backed workers in the Orchestrator V2 registry."""
-  cluster.register_worker_handle(
-      worker_id="trainer-0",
-      roles=[datatypes.Role.ACTOR],
-      handle=trainer_handle,
-      resources={"address": trainer_addr},
-  )
-  cluster.register_worker_handle(
-      worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
-      handle=rollout_handle,
-      resources={"address": rollout_addr},
-  )
-  if inference_handle is not None:
-    cluster.register_worker_handle(
-        worker_id="reference-0",
-        roles=[datatypes.Role.REFERENCE],
-        handle=inference_handle,
-        resources={"address": inference_addr},
-    )
-
-
 def _build_prompt_item(
     *,
     example: dict[str, Any],
@@ -408,6 +372,7 @@ def _iter_prompt_items(
     raise ValueError("GSM8K dataset is empty.")
   for prompt_idx in range(args.max_steps * args.batch_size):
     example = dataset[prompt_idx % dataset_size]
+    assert example is not None
     yield _build_prompt_item(
         example=example,
         prompt_idx=prompt_idx,
@@ -418,13 +383,10 @@ def _iter_prompt_items(
     )
 
 
-def main(argv: list[str], context: Any = None) -> None:
-  if context and context.ipc and context.ipc.discovery:
-    pass
-  else:
-    raise RuntimeError(
-        "Require discovery API, but process context doesn't support."
-    )
+def main(argv: list[str], context: ProcessContext | None = None) -> None:
+  assert (
+      context and context.ipc and context.ipc.discovery
+  ), "Require discovery API, but process context doesn't support."
 
   logging.basicConfig(
       level=logging.INFO,
@@ -482,87 +444,41 @@ def main(argv: list[str], context: Any = None) -> None:
       eos_id,
   )
 
-  trainer_addr_future = futures.Future()
-  rollout_addr_future = futures.Future()
-  inference_addr_future = futures.Future()
-
-  def accept_worker(hostname: str, _: int, metadata: bytes) -> None:
-    md = pickle.loads(metadata)
-
-    service_type = md["service_type"]
-    service_address = f"{hostname}:{md['service_port']}"
-    worker_id = md["worker_id"]
-
-    logging.info(
-        "Discovered %s service (%s) at %s.",
-        service_type,
-        worker_id,
-        service_address,
-    )
-
-    match service_type:
-      case "trainer":
-        if not trainer_addr_future.done():
-          trainer_addr_future.set_result(service_address)
-      case "rollout":
-        if not rollout_addr_future.done():
-          rollout_addr_future.set_result(service_address)
-      case "inference":
-        if not inference_addr_future.done():
-          inference_addr_future.set_result(service_address)
-      case _:
-        raise RuntimeError(f"unknown service type {service_type}")
-
-  assert context and context.ipc and context.ipc.discovery
-  context.ipc.discovery.on_register(accept_worker)
+  cluster = orchestrator.ClusterOrchestrator(
+      weight_sync_mode=args.weight_sync_mode,
+  )
+  context.ipc.discovery.on_register(
+      functools.partial(
+          cluster.register_worker_from_hostname,
+          rpc_timeout_s=args.rpc_timeout_s,
+      )
+  )
 
   logging.info("Waiting for workers to register via discovery service...")
-  trainer_addr = trainer_addr_future.result()
-  trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
-  rollout_addr = rollout_addr_future.result()
-  rollout_handle = _connect(rollout_addr, args.rpc_timeout_s)
-  inference_addr = None
-  inference_handle = None
-  if args.beta != 0.0:
-    inference_addr = (
-        args.inference_addr
-        if args.inference_addr
-        else inference_addr_future.result(timeout=args.rpc_timeout_s)
-    )
-    inference_handle = _connect(inference_addr, args.rpc_timeout_s)
-
-  logging.info(
-      "Connected to all required workers: Trainer=%s, Rollout=%s%s.",
-      trainer_addr,
-      rollout_addr,
-      f", Inference={inference_addr}" if inference_addr else "",
+  cluster.wait_for_workers(
+      min_workers={
+          datatypes.Role.ACTOR: 1,
+          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+      },
+      timeout=args.init_timeout_s,
+      poll_interval_s=1.0,
   )
+  logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
   grpo_config = _build_grpo_config(args)
+  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+  assert (
+      len(trainer_handles) == 1
+  ), f"Expected 1 trainer worker, got {len(trainer_handles)}."
   _configure_trainer_loss(
-      trainer_handle,
+      trainer_handles[0],
       algo=algo,
       grpo_config=grpo_config,
       pad_id=pad_id,
       eos_id=eos_id,
   )
-
-  cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode
-  )
-
-  _register_workers(
-      args,
-      cluster=cluster,
-      trainer_handle=trainer_handle,
-      trainer_addr=trainer_addr,
-      rollout_handle=rollout_handle,
-      rollout_addr=rollout_addr,
-      inference_handle=inference_handle,
-      inference_addr=inference_addr,
-  )
-  logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
