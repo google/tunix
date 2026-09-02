@@ -28,6 +28,10 @@ from typing import Any
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
+try:
+  from tunix.experimental.weight_sync import raiden_weight_sync_delegate
+except ImportError:
+  raiden_weight_sync_delegate = None
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
 REPO_ROOT = os.path.abspath(
@@ -295,11 +299,21 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
           "max_model_len": max_model_len,
       },
   )
+  raiden_sync_delegate = None
+  if (
+      args.weight_sync_mode == weight_sync_lib.WeightSyncMode.RAIDEN
+      and raiden_weight_sync_delegate is not None
+  ):
+    raiden_sync_delegate = (
+        raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+    )
+
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
+      raiden_sync_delegate=raiden_sync_delegate,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",

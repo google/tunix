@@ -72,13 +72,10 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
       if self.raiden_sync_delegate is None:
-        print("[DEBUG] 1: importing raiden_weight_sync_delegate", flush=True)
         from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-        print("[DEBUG] 2: instantiating RaidenWeightSyncDelegate", flush=True)
         self.raiden_sync_delegate = (
             raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
         )
-        print("[DEBUG] 3: RaidenWeightSyncDelegate created", flush=True)
 
     if not self.enable_raiden and self.raiden_sync_delegate:
       logging.warning(
@@ -88,13 +85,10 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
     if self.tokenizer is not None and self.config is not None:
-      print("[DEBUG] 4: getting vllm_lib", flush=True)
       vllm_lib = _get_vllm_sampler_cls()
-      print("[DEBUG] 5: instantiating VllmSampler", flush=True)
       self.vllm_sampler = vllm_lib.VllmSampler(
           tokenizer=self.tokenizer, config=self.config
       )
-      print("[DEBUG] 6: VllmSampler created", flush=True)
 
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""
