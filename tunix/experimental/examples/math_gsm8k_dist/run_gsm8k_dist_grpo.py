@@ -61,6 +61,7 @@ from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import remote_scheduler_router  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
@@ -82,6 +83,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
+  parser.add_argument("--trainer_addr", type=str, default="localhost:20000")
+  parser.add_argument(
+      "--rollout_addr",
+      type=str,
+      default="localhost:20001",
+      help="Comma-separated RolloutWorker addresses (one worker per address).",
+  )
+  parser.add_argument(
+      "--scheduler_url",
+      type=str,
+      default="",
+      help=(
+          "Optional py-inference-scheduler sidecar URL (e.g."
+          " http://localhost:8100). When set, rollout requests are routed by"
+          " the sidecar instead of prefix-hash/round-robin."
+      ),
+  )
+  parser.add_argument(
+      "--inference_addr",
+      type=str,
+      default="",
+      help=(
+          "Optional reference InferenceWorker address. Required when --beta is "
+          "non-zero because KL scoring needs a reference worker."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -156,7 +183,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
-  parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
       "--debug",
@@ -331,7 +357,7 @@ def _register_workers(
     cluster: orchestrator.ClusterOrchestrator,
     trainer_handle: remote_execution.ActorHandle,
     trainer_addr: str,
-    rollout_handle: remote_execution.ActorHandle,
+    rollout_handles: Sequence[tuple[str, remote_execution.ActorHandle]],
     rollout_addr: str,
     inference_handle: remote_execution.ActorHandle | None,
     inference_addr: str | None,
@@ -343,12 +369,15 @@ def _register_workers(
       handle=trainer_handle,
       resources={"address": trainer_addr},
   )
-  cluster.register_worker_handle(
-      worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
-      handle=rollout_handle,
-      resources={"address": rollout_addr},
-  )
+  for idx, (addr, handle) in enumerate(rollout_handles):
+    cluster.register_worker(
+        _RemoteWorkerRef(
+            worker_id=f"rollout-{idx}",
+            roles=[datatypes.Role.ROLLOUT],
+            handle=handle,
+            resources={"address": addr},
+        )
+    )
   if inference_handle is not None:
     cluster.register_worker_handle(
         worker_id="reference-0",
@@ -520,7 +549,10 @@ def main(argv: list[str], context: Any = None) -> None:
   trainer_addr = trainer_addr_future.result()
   trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
   rollout_addr = rollout_addr_future.result()
-  rollout_handle = _connect(rollout_addr, args.rpc_timeout_s)
+  rollout_addrs = [a.strip() for a in rollout_addr.split(",") if a.strip()]
+  rollout_handles = [
+      (addr, _connect(addr, args.rpc_timeout_s)) for addr in rollout_addrs
+  ]
   inference_addr = None
   inference_handle = None
   if args.beta != 0.0:
@@ -548,16 +580,23 @@ def main(argv: list[str], context: Any = None) -> None:
       eos_id=eos_id,
   )
 
-  cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode
-  )
+  rollout_router = None
+  if args.scheduler_url:
+    logging.info(
+        "Routing rollout requests via scheduler sidecar at %s.",
+        args.scheduler_url,
+    )
+    rollout_router = remote_scheduler_router.RemoteSchedulerRouter(
+        args.scheduler_url, target_model=args.model_id
+    )
 
+  cluster = orchestrator.ClusterOrchestrator(rollout_router=rollout_router, weight_sync_mode=args.weight_sync_mode)
   _register_workers(
       args,
       cluster=cluster,
       trainer_handle=trainer_handle,
       trainer_addr=trainer_addr,
-      rollout_handle=rollout_handle,
+      rollout_handles=rollout_handles,
       rollout_addr=rollout_addr,
       inference_handle=inference_handle,
       inference_addr=inference_addr,
@@ -618,6 +657,8 @@ def main(argv: list[str], context: Any = None) -> None:
         bring_up=False,
     )
   finally:
+    if rollout_router is not None:
+      rollout_router.stop()
     program.close()
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
