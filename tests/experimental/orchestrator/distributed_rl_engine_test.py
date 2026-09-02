@@ -700,6 +700,23 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_build_rollout_requests_offsets_seed_per_group(self):
+    requests = self.engine._build_rollout_requests(
+        [{
+            "prompt": "Solve math",
+            "prompt_id": "math_1",
+            "generation_kwargs": {"seed": 42},
+        }],
+        group_size=3,
+        policy_version=1,
+    )
+
+    self.assertEqual([req.group_index for req in requests], [0, 1, 2])
+    self.assertEqual(
+        [req.generation_kwargs["seed"] for req in requests],
+        [42, 43, 44],
+    )
+
   def test_dispatch_rollouts_handles_none_metadata(self):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(

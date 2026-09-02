@@ -1175,6 +1175,36 @@ class RLProgramTest(absltest.TestCase):
     program.close()
     internal_logger.close.assert_called_once()
 
+  def test_program_logs_consumed_trajectories_when_log_dir_configured(self):
+    async def _run():
+      options = metrics_logger_lib.MetricsLoggerOptions(
+          log_dir="/tmp/test_rl_trajectories"
+      )
+      mock_traj_logger = mock.MagicMock()
+      with mock.patch(
+          "tunix.experimental.orchestrator.rl_program.trajectory_logger.AsyncTrajectoryLogger",
+          return_value=mock_traj_logger,
+      ):
+        _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+        program = self._create_program(
+            dataset=["p0"],
+            reward_fns=[],
+            metrics_logging_options=options,
+            sync_weights=False,
+        )
+        await program.run_async(self.mock_engine)
+        program.close()
+
+      self.assertGreaterEqual(mock_traj_logger.log_item_async.call_count, 2)
+      logged_row = mock_traj_logger.log_item_async.call_args_list[0].args[0]
+      self.assertEqual(logged_row["global_step"], 0)
+      self.assertEqual(logged_row["prompt_id"], "prompt_0")
+      self.assertIn("completion", logged_row)
+      self.assertIn("trajectory", logged_row)
+      mock_traj_logger.stop.assert_called_once()
+
+    asyncio.run(_run())
+
   def test_distributed_engine_train_step_and_get_metrics(self):
     async def _run():
       mock_worker = mock.MagicMock()

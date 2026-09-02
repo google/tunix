@@ -22,6 +22,7 @@ import abc
 import asyncio
 from collections.abc import Callable, Iterable, Sequence
 import dataclasses
+import os
 import time
 from typing import Any
 
@@ -34,6 +35,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.sft import metrics_logger as metrics_logger_lib
+from tunix.utils import trajectory_logger
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
 MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
@@ -104,6 +106,7 @@ class StandardRLProgram(RLProgram):
       max_staleness: int = 0,
       sync_weights: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
+        trajectory_log_dir: str | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       on_step_begin: Callable[[int], None] | None = None,
@@ -136,6 +139,15 @@ class StandardRLProgram(RLProgram):
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
+    if trajectory_log_dir is None and metrics_logging_options is not None:
+      log_dir = getattr(metrics_logging_options, "log_dir", "")
+      if log_dir:
+        trajectory_log_dir = os.path.join(log_dir, "trajectories")
+    self.trajectory_logger = (
+        trajectory_logger.AsyncTrajectoryLogger(trajectory_log_dir)
+        if trajectory_log_dir
+        else None
+    )
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
@@ -155,8 +167,51 @@ class StandardRLProgram(RLProgram):
 
   def close(self) -> None:
     """Flushes and closes the metrics logger and associated resources."""
+    if self.trajectory_logger is not None:
+      self.trajectory_logger.stop()
     if self.metrics_logger is not None:
       self.metrics_logger.close()
+
+  def _log_consumed_trajectories(
+      self,
+      all_step_items: Sequence[datatypes.TrajectoryItem],
+      *,
+      log_step: int,
+      consumed_policy_version: int,
+  ) -> None:
+    """Persists one row per consumed rollout when trajectory logging is enabled."""
+    if self.trajectory_logger is None:
+      return
+    for item in all_step_items:
+      metadata = dict(getattr(item, "metadata", None) or {})
+      env_config = metadata.get("env_config")
+      if not isinstance(env_config, dict):
+        env_config = {}
+      traj = getattr(item, "traj", None)
+      status = getattr(traj, "status", None)
+      if isinstance(status, datatypes.TrajectoryStatus):
+        status = status.name
+      reward = getattr(traj, "reward", 0.0) if traj is not None else 0.0
+      row = {
+          "global_step": log_step,
+          "consumed_policy_version": consumed_policy_version,
+          "prompt_id": getattr(item, "prompt_id", ""),
+          "group_index": getattr(item, "group_index", 0),
+          "rollout_policy_version": getattr(item, "policy_version", 0),
+          "status": status or "UNKNOWN",
+          "reward": float(reward or 0.0),
+          "question": metadata.get("question", env_config.get("question", "")),
+          "prompt": metadata.get("prompt", env_config.get("prompt", "")),
+          "completion": metadata.get("text", ""),
+          "gold_answer": metadata.get(
+              "gold_answer", metadata.get("answer", env_config.get("gold_answer", ""))
+          ),
+          "prompt_tokens": getattr(item, "prompt_tokens", None),
+          "completion_tokens": getattr(item, "completion_tokens", None),
+          "metadata": metadata,
+          "trajectory": traj,
+      }
+      self.trajectory_logger.log_item_async(row)
 
   async def _wait_for_dispatch_window(self) -> None:
     """Applies policy-staleness backpressure utilizing token buckets."""
@@ -321,6 +376,11 @@ class StandardRLProgram(RLProgram):
     sample count), rather than forcing all worker metrics into the trainer's
     global step boundary.
     """
+    self._log_consumed_trajectories(
+      all_step_items,
+      log_step=log_step,
+      consumed_policy_version=consumed_policy_version,
+    )
     # --- 1. Rollout metrics & Ingestion Staleness ---
     prompt_lengths = []
     completion_lengths = []

@@ -75,8 +75,23 @@ class TrajectoryCollectorEngine:
     ):
       del env, kwargs
       generation_kwargs = dict(self.request.generation_kwargs)
-      if max_generation_steps is not None:
-        generation_kwargs["max_tokens"] = max_generation_steps
+      request_max_generation_steps = generation_kwargs.pop(
+          "max_generation_steps", None
+      )
+      max_tokens = generation_kwargs.pop(
+          "max_tokens", None
+      )
+
+      effective_max_generation_steps = max_generation_steps
+      if effective_max_generation_steps is None:
+        effective_max_generation_steps = request_max_generation_steps
+      if (
+          effective_max_generation_steps is not None
+          and "max_tokens" not in generation_kwargs
+      ):
+        generation_kwargs["max_tokens"] = effective_max_generation_steps
+      elif "max_tokens" not in generation_kwargs:
+        generation_kwargs["max_tokens"] = 64
 
       sampling_params = sampler_lib.SamplingParams(
           max_tokens=generation_kwargs.get("max_tokens", 64),

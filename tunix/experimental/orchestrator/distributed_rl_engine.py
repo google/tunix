@@ -252,6 +252,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
         generation_kwargs = dict(base_generation_kwargs)
         generation_kwargs.update(item_generation_kwargs)
+        if generation_kwargs.get("seed") is not None:
+          generation_kwargs["seed"] = int(generation_kwargs["seed"]) + group_index
 
         rollout_reqs.append(
             datatypes.RolloutRequest(

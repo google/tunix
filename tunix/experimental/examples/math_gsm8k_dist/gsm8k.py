@@ -114,6 +114,10 @@ def score_gsm8k_completion(
     reward = 0.5
   else:
     reward = 0.0
+
+
+  reward = 1.0 if answer_correct else 0.0
+
   return reward, {
       "format_correct": format_correct,
       "answer_correct": answer_correct,

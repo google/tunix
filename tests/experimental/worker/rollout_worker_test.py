@@ -19,11 +19,37 @@ import threading
 from unittest import mock
 
 from absl.testing import absltest
-import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.common import test_utils as mocks
+from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.worker import rollout_worker
+
+
+class _RecordingSampler(mocks.MockBaseSamplerImpl):
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.seen_max_tokens = []
+
+  async def sample(
+      self,
+      sampling_requests: (
+          sampler_lib.SamplingRequest
+          | list[sampler_lib.SamplingRequest]
+          | tuple[sampler_lib.SamplingRequest, ...]
+          | object
+      ) = None,
+      **kwargs,
+  ):
+    requests = (
+        list(sampling_requests)
+        if isinstance(sampling_requests, (list, tuple))
+        else [sampling_requests]
+    )
+    for req in requests:
+      self.seen_max_tokens.append(req.sampling_params.max_tokens)
+    return await super().sample(sampling_requests=sampling_requests, **kwargs)
 
 
 class RolloutWorkerTest(absltest.TestCase):
@@ -85,36 +111,23 @@ class RolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_sampling_to_rollout_response_appends_lineage_event(self):
-    ctx = lineage.LineageContext(
-        tracking_id="traj_p2_0",
-        parent_tracking_ids=["p2"],
-    )
-    req = datatypes.RolloutRequest(
-        request_id="req_p2_0",
-        prompt="Hello",
-        prompt_id="p2",
-        group_index=0,
-        metadata={"lineage": ctx},
-    )
+  def test_generate_request_runs_through_env_path(self):
+    async def _run():
+      req = datatypes.RolloutRequest(
+          request_id="req_env_0",
+          prompt="Solve task",
+          prompt_id="prompt_env_0",
+          group_index=0,
+          generation_kwargs={"force_finish": True, "answer": "4"},
+      )
 
-    resp = self.worker._sampling_to_rollout_response(
-        request=req,
-        text="Hello there!",
-        prompt_tokens=np.array([1, 2, 3], dtype=np.int32),
-        token_ids=np.array([4, 5, 6], dtype=np.int32),
-        logprobs=None,
-    )
+      resp = await self.worker.generate(requests=req)
 
-    self.assertIn("lineage", resp.metadata)
-    resp_ctx = resp.metadata["lineage"]
-    self.assertIs(resp_ctx, ctx)
-    self.assertLen(resp_ctx.events, 1)
-    self.assertEqual(resp_ctx.events[0].component, "worker.rollout")
-    self.assertEqual(resp_ctx.events[0].operation, "generate")
-    self.assertEqual(
-        resp_ctx.events[0].attributes.get("worker_id"), "rollout_worker_42"
-    )
+      self.assertIsInstance(resp, datatypes.RolloutResponse)
+      self.assertEqual(resp.env_reward, 1.0)
+      self.assertNotEmpty(resp.segments)
+
+    asyncio.run(_run())
 
   def test_initialize_only_runs_sampler_once_under_concurrency(self):
     enter_init = threading.Event()
@@ -147,6 +160,35 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
     self.assertLen(responses, 2)
     self.assertEqual(sum(bool(r.metadata.get("ready")) for r in responses), 1)
+
+  def test_generate_uses_request_max_generation_steps(self):
+    sampler = _RecordingSampler(
+        sampler_name="recording_sampler", default_delay=0.0
+    )
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_worker_recording",
+        sampler=sampler,
+        env_pool=self.env_pool,
+        agent_factory=mocks.MockAgent,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_max_steps_0",
+        prompt="What is 2+2?",
+        prompt_id="prompt_max_steps_0",
+        group_index=0,
+        generation_kwargs={
+            "max_generation_steps": 123,
+            "force_finish": True,
+            "answer": "4",
+        },
+    )
+
+    asyncio.run(worker.generate(requests=request))
+
+    self.assertNotEmpty(sampler.seen_max_tokens)
+    self.assertEqual(sampler.seen_max_tokens[0], 123)
 
 
 if __name__ == "__main__":

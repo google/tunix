@@ -366,6 +366,7 @@ def _build_prompt_item(
     temperature: float,
     top_p: float,
     top_k: int | None,
+    seed: int,
 ) -> dict[str, Any]:
   prompt = _as_text(example["prompts"])
   question = _as_text(example["question"])
@@ -379,6 +380,7 @@ def _build_prompt_item(
           "temperature": temperature,
           "top_p": top_p,
           "top_k": top_k,
+          "seed": seed,
           "return_logprobs": True,
       },
       "metadata": {
@@ -389,6 +391,7 @@ def _build_prompt_item(
           "env_config": {
               "prompt": prompt,
               "prompts": prompt,
+              "prompt_id": prompt_id,
               "question": question,
               "answer": answer,
               "gold_answer": answer,
@@ -415,6 +418,7 @@ def _iter_prompt_items(
         temperature=args.temperature,
         top_p=args.top_p,
         top_k=top_k,
+        seed=args.seed + prompt_idx * args.num_generations,
     )
 
 
