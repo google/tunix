@@ -75,7 +75,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--batch_size",
       type=int,
       default=4,
-      help="Number of prompt groups per step.",
+      help="Number of prompt groups per full/global step.",
+  )
+  parser.add_argument(
+      "--mini_batch_size",
+      type=int,
+      default=2,
+      help="Number of prompt groups per optimizer update.",
   )
   parser.add_argument("--num_generations", type=int, default=8)
   parser.add_argument("--max_steps", type=int, default=1)
@@ -266,8 +272,7 @@ def _grpo_model_input(
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo = algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
-      # StandardRLProgram consumes this many prompt groups per trainer update.
-      mini_batch_size=args.batch_size,
+      mini_batch_size=args.mini_batch_size,
       max_packed_len=args.max_prompt_length + args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
@@ -437,21 +442,41 @@ def main(argv: list[str], context: Any = None) -> None:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:
     raise ValueError("batch_size must be positive.")
+  if args.mini_batch_size <= 0:
+    raise ValueError("mini_batch_size must be positive.")
+  if args.batch_size % args.mini_batch_size != 0:
+    raise ValueError(
+        "batch_size must be divisible by mini_batch_size; got "
+        f"batch_size={args.batch_size}, "
+        f"mini_batch_size={args.mini_batch_size}."
+    )
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
+  update_trajectories = args.mini_batch_size * args.num_generations
+  if update_trajectories % args.train_micro_batch_size != 0:
+    raise ValueError(
+        "mini_batch_size * num_generations must be divisible by "
+        "train_micro_batch_size; got "
+        f"mini_batch_size={args.mini_batch_size}, "
+        f"num_generations={args.num_generations}, "
+        f"train_micro_batch_size={args.train_micro_batch_size}."
+    )
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
   logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
   logging.info(
-      "Configuration: model_id=%s, batch_size=%d (prompt groups), "
-      "num_generations=%d (%d rollouts/step), max_steps=%d, "
+      "Configuration: model_id=%s, batch_size=%d prompt groups/full step, "
+      "mini_batch_size=%d prompt groups/update, num_generations=%d "
+      "(%d rollouts/full step, %d rollouts/update), max_steps=%d, "
       "train_micro_batch_size=%d, beta=%.4f, epsilon=%.2f, reward_mode=%s, "
       "max_staleness=%d, weight_sync_mode=%s.",
       args.model_id,
       args.batch_size,
+      args.mini_batch_size,
       args.num_generations,
       args.batch_size * args.num_generations,
+      args.mini_batch_size * args.num_generations,
       args.max_steps,
       args.train_micro_batch_size,
       args.beta,
@@ -583,6 +608,7 @@ def main(argv: list[str], context: Any = None) -> None:
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
+      batch_size=args.batch_size,
       assembler=batch_assembly.PaddedBatchAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,

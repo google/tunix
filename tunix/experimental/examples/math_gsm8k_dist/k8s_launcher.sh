@@ -34,7 +34,7 @@ export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-1}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
@@ -108,6 +108,7 @@ start_orchestrator() {
         --model_id=${MODEL_ID} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --batch_size=${BATCH_SIZE} \
+        --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --max_steps=${MAX_STEPS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
@@ -162,6 +163,7 @@ start_trainer() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
+        --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
@@ -248,6 +250,18 @@ if [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
+  exit 1
+fi
+
+if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
+  echo "Error: BATCH_SIZE must be divisible by MINI_BATCH_SIZE."
+  echo "       BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  exit 1
+fi
+
+if (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
+  echo "Error: MINI_BATCH_SIZE * NUM_GENERATIONS must be divisible by TRAIN_MICRO_BATCH_SIZE."
+  echo "       MINI_BATCH_SIZE=$MINI_BATCH_SIZE NUM_GENERATIONS=$NUM_GENERATIONS TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
   exit 1
 fi
 
