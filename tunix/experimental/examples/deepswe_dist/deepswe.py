@@ -230,6 +230,16 @@ class DeepSWEEnv(swe_env.SWEEnv):
       group_id = prompt_id or None
     if pair_index is None:
       pair_index = group_index
+    if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
+      logging.info(
+          "Initializing DeepSWE SandboxFleet in rollout worker "
+          "(max_concurrency=%s).",
+          group_size,
+      )
+      kwargs["fleet"] = swe_env._init_global_fleet(  # pylint: disable=protected-access
+          tasks=[entry],
+          max_concurrency=group_size,
+      )
 
     super().__init__(
         entry=entry,

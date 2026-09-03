@@ -11,11 +11,20 @@ distributed GSM8K example:
    because it is already a generic PeftTrainer V2 worker.
 
 The first milestone is intentionally small: run one trainer+rollout pipeline
-step with `BETA=0.0` and `WEIGHT_SYNC_MODE=none`. Reference KL, Raiden weight
-sync, agent-sandbox prewarming, and production DeepSWE-scale settings can be
-layered on after the basic pipeline is stable.
+step with `BETA=0.0` and `WEIGHT_SYNC_MODE=none`. The default path uses the
+regular DeepSWE `SWEEnv` backend. Set `USE_AGENT_SANDBOX=1` to construct
+`SWEEnv` with `SandboxFleet` inside the rollout worker process.
 
 ```bash
 cd tunix/experimental/examples/deepswe_dist
 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
 ```
+
+```bash
+cd tunix/experimental/examples/deepswe_dist
+USE_AGENT_SANDBOX=1 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
+```
+
+For sandbox placement, set `SANDBOX_NAMESPACE`, `SANDBOX_NODE_SELECTOR_KEY`, and
+`SANDBOX_NODE_SELECTOR_VAL` before launching. The launcher forwards them to the
+rollout worker as the `agent_sandbox_rl` variables consumed by `SWEEnv`.
