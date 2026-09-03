@@ -281,6 +281,13 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--allow_split_physical_axes",
+    type=str2bool,
+    default=True,
+    help="Whether to allow splitting physical axes in device mesh creation.",
+)
+
+parser.add_argument(
     "--rollout_split_fraction",
     type=float,
     default=0.5,
@@ -957,6 +964,7 @@ trainer_config = pyconfig.initialize(
         f"checkpoint_storage_use_ocdbt={args.checkpoint_storage_use_ocdbt}",
         f"checkpoint_storage_use_zarr3={args.checkpoint_storage_use_zarr3}",
         f"checkpoint_storage_concurrent_gb={args.checkpoint_storage_concurrent_gb}",
+        f"allow_split_physical_axes={args.allow_split_physical_axes}",
         "skip_jax_distributed_system=True",
         "load_checkpoint_only_once=True",
         "use_standalone_converter=False",
@@ -979,6 +987,7 @@ sampler_config = pyconfig.initialize(
         f"max_prefill_predict_length={MAX_PROMPT_LENGTH}",
         f"dtype={args.dtype}",
         "attention=vllm_rpa",
+        f"allow_split_physical_axes={args.allow_split_physical_axes}",
         "skip_jax_distributed_system=True",
         "remat_policy=none",
         "use_standalone_converter=False",
