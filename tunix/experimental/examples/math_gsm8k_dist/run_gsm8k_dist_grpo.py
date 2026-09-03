@@ -191,6 +191,7 @@ def _build_prompt_item(
           "env_config": {
               "prompt": prompt,
               "prompts": prompt,
+              "prompt_id": prompt_id,
               "question": question,
               "answer": answer,
               "gold_answer": answer,

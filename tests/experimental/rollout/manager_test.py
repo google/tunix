@@ -18,8 +18,11 @@ import unittest
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
+from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 
 
@@ -72,6 +75,92 @@ class _FakeSyncSampler(_FakeSampler):
 
   async def post_weight_sync(self, sync_request=None, **kwargs):
     return "ok"
+
+
+class _CaptureEnv:
+
+  last_init_kwargs = None
+
+  def __init__(self, **kwargs):
+    self.init_kwargs = dict(kwargs)
+    _CaptureEnv.last_init_kwargs = self.init_kwargs
+
+
+if not registry.ENV_REGISTRY.contains("manager_capture_env"):
+  registry.ENV_REGISTRY.register("manager_capture_env")(_CaptureEnv)
+
+
+class _NoopCollector:
+
+  def __init__(
+      self,
+      traj_id,
+      request,
+      sampler,
+      env_client,
+      agent,
+      tokenizer,
+      chat_parser,
+  ):
+    del request, sampler, agent, tokenizer, chat_parser
+    self.traj_id = traj_id
+    self.env = env_client
+
+  async def run_episode(self):
+    return trajectory_lib.Trajectory(
+        trajectory_id=self.traj_id,
+        agent=trajectory_lib.Agent(name="test-agent", version="1.0"),
+    )
+
+
+class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_generate_forwards_request_metadata_to_registered_env(self):
+    _CaptureEnv.last_init_kwargs = None
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(env_name="manager_capture_env"),
+        sampler=_FakeSyncSampler([]),
+        agent_factory=lambda: object(),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_1",
+        prompt="prompt text",
+        prompt_id="prompt_1",
+        group_index=2,
+        target_policy_version=7,
+        metadata={
+            "question": "ignored top level",
+            "answer": "ignored top level",
+            "gold_answer": "ignored top level",
+            "env_config": {
+                "prompt": "prompt text",
+                "prompt_id": "prompt_1",
+                "question": "How many?",
+                "answer": "42",
+                "gold_answer": "42",
+                "max_steps": 3,
+            },
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      await manager.generate(request)
+
+    self.assertIsNotNone(_CaptureEnv.last_init_kwargs)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["prompt"], "prompt text")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["prompt_id"], "prompt_1")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["group_index"], 2)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["policy_version"], 7)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["question"], "How many?")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["answer"], "42")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["gold_answer"], "42")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["max_steps"], 3)
 
 
 class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
