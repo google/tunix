@@ -27,7 +27,6 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
-import numpy as np
 from tunix.models.gemma4.config import AttentionType
 from tunix.models.gemma4.config import K_MASK
 from tunix.models.gemma4.config import LayerCache
@@ -167,6 +166,14 @@ def _get_tokamax_causal_mask(q_len: int, kv_len: int, offset: int):
   """Memoized Tokamax CausalMask, mirroring `_get_causal_mask`."""
   _, tokamax_mask_lib = _tokamax_splash_libs()
   return tokamax_mask_lib.CausalMask((q_len, kv_len), offset=offset)
+
+
+@functools.lru_cache(maxsize=32)
+def _zeros(
+    shape: tuple[int, ...], dtype: jnp.dtype, sharding: shd.NamedSharding
+):
+  """Compiles and caches an on-device zero allocator with explicit out_shardings."""
+  return jax.jit(lambda: jnp.zeros(shape, dtype=dtype), out_shardings=sharding)
 
 
 class Attention(nnx.Module):
@@ -908,19 +915,21 @@ class Attention(nnx.Module):
       cache_len = min(max_seq_len, sliding_window_size)
 
     cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
-    k = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
-        eager=True,
-    )
-    v = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
-        eager=True,
-    )
-    end_index = shard(
-        np.zeros((batch_size,), np.int32),
-        self.config.shd_config.act_btnh[:1],
-        eager=True,
-    )
+    mesh = _resolve_active_mesh()
+
+    shd_config = getattr(self.config, 'shd_config', None)
+    act_btnh = getattr(shd_config, 'act_btnh', None) if shd_config else None
+
+    if mesh is not None and act_btnh is not None:
+      k_sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*act_btnh))
+      idx_sharding = shd.NamedSharding(mesh, shd.PartitionSpec(*act_btnh[:1]))
+
+      k = _zeros(cache_shape, dtype, k_sharding)()
+      v = _zeros(cache_shape, dtype, k_sharding)()
+      end_index = _zeros((batch_size,), jnp.int32, idx_sharding)()
+    else:
+      k = jnp.zeros(cache_shape, dtype)
+      v = jnp.zeros(cache_shape, dtype)
+      end_index = jnp.zeros((batch_size,), jnp.int32)
+
     return {'k': k, 'v': v, 'end_index': end_index}

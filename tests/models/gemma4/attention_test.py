@@ -787,6 +787,64 @@ class AttentionTest(parameterized.TestCase):
         np.array([2, 0, 0], dtype=np.int32),
     )
 
+  def test_init_cache_on_device_sharded_allocation(self):
+    """Verifies init_cache creates NamedSharding and calls _zeros on device."""
+    act_btnh = ('fsdp', None, 'tp', None)
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.shd_config = mock.MagicMock(act_btnh=act_btnh)
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+    b, max_seq_len = 2, 16
+    devices = np.array(jax.devices()[:1]).reshape(1, 1)
+    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
+    expected_k_sharding = jax.sharding.NamedSharding(mesh, P(*act_btnh))
+    expected_idx_sharding = jax.sharding.NamedSharding(mesh, P(*act_btnh[:1]))
+
+    with mesh:
+      cache = attn.init_cache(
+          batch_size=b, max_seq_len=max_seq_len, dtype=jnp.float32
+      )
+
+    self.assertEqual(
+        cache['k'].shape, (b, max_seq_len, attn.num_kv_heads, attn.head_dim)
+    )
+    self.assertEqual(
+        cache['v'].shape, (b, max_seq_len, attn.num_kv_heads, attn.head_dim)
+    )
+    self.assertEqual(cache['end_index'].shape, (b,))
+    self.assertEqual(cache['k'].sharding, expected_k_sharding)
+    self.assertEqual(cache['v'].sharding, expected_k_sharding)
+    self.assertEqual(cache['end_index'].sharding, expected_idx_sharding)
+    self.assertTrue((cache['k'] == 0.0).all())
+    self.assertTrue((cache['v'] == 0.0).all())
+    self.assertTrue((cache['end_index'] == 0).all())
+
+  def test_init_cache_unsharded_fallback(self):
+    """Verifies init_cache gracefully falls back to jnp.zeros when un-sharded."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+    b, max_seq_len = 2, 16
+    cache = attn.init_cache(
+        batch_size=b, max_seq_len=max_seq_len, dtype=jnp.float32
+    )
+    self.assertEqual(
+        cache['k'].shape, (b, max_seq_len, attn.num_kv_heads, attn.head_dim)
+    )
+    self.assertEqual(
+        cache['v'].shape, (b, max_seq_len, attn.num_kv_heads, attn.head_dim)
+    )
+    self.assertEqual(cache['end_index'].shape, (b,))
+    self.assertTrue((cache['k'] == 0.0).all())
+    self.assertTrue((cache['v'] == 0.0).all())
+    self.assertTrue((cache['end_index'] == 0).all())
+
 
 if __name__ == '__main__':
   absltest.main()
