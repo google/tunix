@@ -404,6 +404,8 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   # Before anything brings the TPU backend up. See raiden_preload for why.
+  # TODO(tunix-dev): only preload when --weight_sync_mode is raiden. Needs the
+  # flag parsed first, and the trainer and inference nodes do not take one.
   raiden_preload.import_raiden()
 
   args = _parse_args(argv)
@@ -453,8 +455,6 @@ def main(argv: list[str], context: Any = None) -> None:
       logging.info("Eagerly starting sampler engine...")
       await worker_service.sampler.start()
       logging.info("Sampler engine started.")
-      # The bind is what brings the transport server up, so do it during
-      # startup rather than on whichever rollout happens to sync first.
       if hasattr(worker_service.sampler, "bind_weight_sync"):
         logging.info("Eagerly warming up Raiden weight sync...")
         await worker_service.sampler.bind_weight_sync()

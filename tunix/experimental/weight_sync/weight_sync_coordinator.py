@@ -1017,10 +1017,6 @@ class WeightSyncCoordinator:
       preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
       if preflight_problems:
         failures.extend(preflight_problems)
-        # `WeightSyncError` carries the failures structurally, but the default
-        # renderer prints only the outer message. Sample both manifests rather
-        # than just the problems: those are name-sorted, so a naming-convention
-        # mismatch fills the head of the list with one side only.
         src_names = sorted(v.name for m in src_metadata for v in m.variables)
         dst_names = sorted(v.name for m in dst_metadata for v in m.variables)
         logging.error(

@@ -437,8 +437,6 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   if [[ -n "$MAXTEXT_CKPT" ]]; then
     TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
   fi
-  # Same value the rollout gets below, so the two sides cannot disagree about
-  # which MaxText model they are building.
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
     TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
   fi
@@ -484,7 +482,6 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --sampler="$SAMPLER"
     --mesh_fsdp="$ROLLOUT_FSDP"
     --mesh_tp="$ROLLOUT_TP"
-    # The vLLM sampler builds its own mesh over the same chips.
     --sampler_mesh_tp="$ROLLOUT_TP"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
@@ -493,8 +490,6 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
   )
-  # Only the MaxText-native rollout produces tensor names the MaxText trainer
-  # can match, so weight sync needs this whenever SAMPLER=vllm.
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
     ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
   fi

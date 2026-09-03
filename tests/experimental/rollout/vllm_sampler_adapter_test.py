@@ -265,6 +265,20 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     )
     self.assertFalse(adapter.enable_raiden)
 
+  def test_weight_sync_starts_an_idle_engine(self):
+    """RLVllmSampler builds its AsyncLLM lazily and only `sample()` starts it,
+    but the first sync lands before the first sample. Without this the round
+    finds no worker and deadlocks against the dispatch it is gating."""
+    self.mock_sampler_instance._is_running = False
+
+    asyncio.run(self.sampler_adapter.bind_weight_sync())
+    self.mock_sampler_instance.start.assert_awaited_once()
+    self.mock_sampler_instance.bind_raiden_sync.assert_awaited_once()
+
+    self.mock_sampler_instance._is_running = True
+    asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+    self.mock_sampler_instance.start.assert_awaited_once()  # not started twice
+
   def test_weight_sync_apis_fail_when_uninitialized(self):
     """Weight sync entry points fail instead of silently initializing."""
     uninit = vllm_sampler_adapter.VllmSamplerAdapter(server_id="vllm_slice_01")
