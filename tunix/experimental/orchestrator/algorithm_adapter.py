@@ -91,11 +91,13 @@ class AlgorithmAdapter(abc.ABC):
       self,
       group_size: int = 8,
       mini_batch_size: int = 4,
+      train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
   ):
     self.group_size = group_size
     self.mini_batch_size = mini_batch_size
+    self.train_micro_batch_size = train_micro_batch_size
     self.max_turns = max_turns
     self.max_packed_len = max_packed_len
     self.requires_reference_kl = False
@@ -141,6 +143,7 @@ class GRPOAdapter(AlgorithmAdapter):
       self,
       group_size: int = 8,
       mini_batch_size: int = 4,
+      train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
       clip_epsilon: float = 0.2,
@@ -153,6 +156,7 @@ class GRPOAdapter(AlgorithmAdapter):
     super().__init__(
         group_size=group_size,
         mini_batch_size=mini_batch_size,
+        train_micro_batch_size=train_micro_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,
     )

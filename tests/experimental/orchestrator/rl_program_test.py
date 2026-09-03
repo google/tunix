@@ -210,6 +210,7 @@ class RLProgramTest(absltest.TestCase):
         mock_payload,
     ]
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
         group_size=2,
         mini_batch_size=4,
         max_packed_len=16,
@@ -283,6 +284,20 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.mini_batch_size, 1)
     self.assertIsNotNone(program.raw_q)
     self.assertIsNotNone(program.scored_q)
+
+  def test_default_assembler_inherits_algo_train_micro_batch_size(self):
+    self.mock_algo.train_micro_batch_size = 2
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        group_size=2,
+        mini_batch_size=1,
+    )
+    self.assertIsInstance(
+        program.assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(program.assembler.batch_size, 2)
 
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
@@ -675,6 +690,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.group_size = 3
       self.mock_algo.mini_batch_size = 1
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
           max_packed_len=16,
           pad_id=0,
           group_size=3,
@@ -737,6 +753,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.group_size = 2
       self.mock_algo.mini_batch_size = 2
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
           max_packed_len=16,
           pad_id=0,
           group_size=2,
@@ -789,6 +806,148 @@ class RLProgramTest(absltest.TestCase):
       )
       self.assertEqual(program.last_step_result.num_microbatches, 1)
       self.assertEqual(program.last_step_result.num_rollouts, 4)
+
+    asyncio.run(_run())
+
+  def test_train_stage_sequence_packed_with_batch_size_greater_than_one(self):
+    async def _run():
+      self.mock_algo.train_micro_batch_size = 2
+      self.mock_algo.group_size = 2
+      self.mock_algo.mini_batch_size = 2
+      packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          max_packed_len=16,
+          pad_id=0,
+          group_size=2,
+          mini_batch_size=2,
+          target_occupancy=0.60,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          group_size=2,
+          mini_batch_size=2,
+          reward_fns=[lambda x: 1.0],
+          assembler=packed_assembler,
+          sync_weights=False,
+      )
+      program.engine = self.mock_engine
+
+      def _make_item(prompt_id, idx, length):
+        payload = datatypes.RLTrainerPayload(
+            token_ids=np.full(length, idx + 1, dtype=np.int32),
+            token_mask=np.ones(length, dtype=np.float32),
+            loss_mask=np.ones(length, dtype=np.float32),
+            action_mask=np.ones(length, dtype=np.float32),
+            advantages=np.ones(length, dtype=np.float32),
+        )
+        item = datatypes.TrajectoryItem(
+            group_index=idx,
+            prompt_id=prompt_id,
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = payload
+        return item
+
+      # Each item has 10 tokens. Since 10 + 10 = 20 > 16, each item requires its own bin.
+      # 4 items -> 4 bins.
+      # With batch_size=2, these 4 bins form 2 microbatches of shape [2, 16].
+      for i in range(2):
+        await program.scored_q.put(_make_item("prompt_0", i, length=10))
+      for i in range(2):
+        await program.scored_q.put(_make_item("prompt_1", i, length=10))
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      await program.train_stage()
+
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      calls = self.mock_engine.train_step.call_args_list
+      # Microbatch 0: batch_size=2, apply_optimizer=False
+      mb0 = calls[0].args[0]
+      self.assertEqual(mb0.token_ids.shape, (2, 16))
+      self.assertFalse(calls[0].kwargs["apply_optimizer"])
+      self.assertTrue(calls[0].kwargs["accumulate_gradients"])
+      # Microbatch 1: batch_size=2, apply_optimizer=True
+      mb1 = calls[1].args[0]
+      self.assertEqual(mb1.token_ids.shape, (2, 16))
+      self.assertTrue(calls[1].kwargs["apply_optimizer"])
+      self.assertTrue(calls[1].kwargs["accumulate_gradients"])
+
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertEqual(program.last_step_result.num_rollouts, 4)
+
+    asyncio.run(_run())
+
+  def test_train_stage_sequence_packed_pads_trailing_microbatch_to_batch_size(
+      self,
+  ):
+    async def _run():
+      self.mock_algo.train_micro_batch_size = 2
+      self.mock_algo.group_size = 3
+      self.mock_algo.mini_batch_size = 1
+      packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          max_packed_len=16,
+          pad_id=0,
+          group_size=3,
+          mini_batch_size=1,
+          target_occupancy=0.60,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          group_size=3,
+          mini_batch_size=1,
+          reward_fns=[lambda x: 1.0],
+          assembler=packed_assembler,
+          sync_weights=False,
+      )
+      program.engine = self.mock_engine
+
+      def _make_item(idx, length):
+        payload = datatypes.RLTrainerPayload(
+            token_ids=np.full(length, idx + 1, dtype=np.int32),
+            token_mask=np.ones(length, dtype=np.float32),
+            loss_mask=np.ones(length, dtype=np.float32),
+            action_mask=np.ones(length, dtype=np.float32),
+            advantages=np.ones(length, dtype=np.float32),
+        )
+        item = datatypes.TrajectoryItem(
+            group_index=idx,
+            prompt_id="prompt_0",
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = payload
+        return item
+
+      # 3 items of 10 tokens each. Each requires its own bin.
+      # 3 bins with batch_size=2 produces:
+      # Microbatch 0: 2 bins (shape [2, 16])
+      # Microbatch 1: 1 bin + 1 zero-padded trailing row (shape [2, 16])
+      for i in range(3):
+        await program.scored_q.put(_make_item(i, length=10))
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      await program.train_stage()
+
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      calls = self.mock_engine.train_step.call_args_list
+      mb0 = calls[0].args[0]
+      mb1 = calls[1].args[0]
+      self.assertEqual(mb0.token_ids.shape, (2, 16))
+      self.assertEqual(mb1.token_ids.shape, (2, 16))
+
+      # Trailing row in mb1 is zero-padded
+      self.assertTrue(np.all(mb1.segment_ids[1] == 0))
+      self.assertTrue(np.all(mb1.loss_mask[1] == 0.0))
+      self.assertTrue(np.all(mb1.token_ids[1] == 0))
+
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertEqual(program.last_step_result.num_rollouts, 3)
 
     asyncio.run(_run())
 
@@ -1120,6 +1279,7 @@ class RLProgramTest(absltest.TestCase):
           _make_trajectory_group("prompt_1"),
       )
       assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
           group_size=2,
           mini_batch_size=2,
           max_packed_len=8,
@@ -1138,6 +1298,36 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(calls[1].kwargs["apply_optimizer"])
       self.assertEqual(program.last_step_result.num_rollouts, 4)
       self.assertEqual(program.last_step_result.num_microbatches, 2)
+
+    asyncio.run(_run())
+
+  def test_multi_group_sequence_packed_with_batch_size_greater_than_one(self):
+    async def _run():
+      self.mock_algo.train_micro_batch_size = 2
+      self.mock_algo.mini_batch_size = 2
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          group_size=2,
+          mini_batch_size=2,
+          max_packed_len=8,
+      )
+      program = self._create_program(dataset=["p0", "p1"], assembler=assembler)
+
+      await program.run_async(self.mock_engine)
+
+      # 2 groups of 8 tokens each form 2 bins. With batch_size=2, they form 1 microbatch of shape [2, 8].
+      self.assertEqual(self.mock_engine.train_step.call_count, 1)
+      calls = self.mock_engine.train_step.call_args_list
+      self.assertEqual(calls[0].args[0].token_ids.shape, (2, 8))
+      self.assertTrue(calls[0].kwargs["accumulate_gradients"])
+      self.assertTrue(calls[0].kwargs["apply_optimizer"])
+      self.assertEqual(program.last_step_result.num_rollouts, 4)
+      self.assertEqual(program.last_step_result.num_microbatches, 1)
 
     asyncio.run(_run())
 

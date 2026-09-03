@@ -124,6 +124,7 @@ class StandardRLProgram(RLProgram):
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
+        batch_size=getattr(algo, "train_micro_batch_size", 1),
         group_size=self.group_size,
         mini_batch_size=self.mini_batch_size,
         max_packed_len=getattr(algo, "max_packed_len", 8192),

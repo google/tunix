@@ -135,7 +135,7 @@ def main():
 
   algo = algorithm_adapter.GRPOAdapter(group_size=2, mini_batch_size=1, max_packed_len=32)
   assembler = batch_assembly.SequencePackedBatchAssembler(
-      group_size=2, mini_batch_size=1, max_packed_len=32
+      batch_size=1, group_size=2, mini_batch_size=1, max_packed_len=32
   )
 
   train_dataset = [
