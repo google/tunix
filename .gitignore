@@ -10,6 +10,7 @@
 .idea
 .vscode
 .envrc
+.docker/
 
 # virtualenv/venv directories
 /venv/

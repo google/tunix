@@ -15,6 +15,13 @@
 
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
+TARGET_CLUSTER=${TARGET_CLUSTER:-}
+
+export PROJECT=${PROJECT:-cloud-tpu-multipod-dev}
+export REGION=${REGION:-us-central1}
+export ZONE=${ZONE:-us-central1-a}
+export CLUSTER=${CLUSTER:-trellis-demo-0810}
+export CLUSTER_LOCATION=${CLUSTER_LOCATION:-${REGION}}
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
@@ -56,6 +63,7 @@ export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
+export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-4}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
@@ -68,39 +76,126 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export WEIGHT_SYNC_BACKEND=${WEIGHT_SYNC_BACKEND:-none}
+export HF_TOKEN_SECRET_NAME=${HF_TOKEN_SECRET_NAME:-}
+export PYTHON_BIN=${PYTHON_BIN:-python3}
 
-export ORCHESTRATOR_ID=$USER-orch
+export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$USER-orch}
 export ORCHESTRATOR_PORT=20000
 
-export ROLLOUT_ID=$USER-roll
+export ROLLOUT_ID=${ROLLOUT_ID:-$USER-roll}
 export ROLLOUT_PORT=20001
 
-export TRAINER_ID=$USER-train
+export TRAINER_ID=${TRAINER_ID:-$USER-train}
 export TRAINER_PORT=20002
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-}
+export ROLLOUT_COMPLETIONS=${ROLLOUT_COMPLETIONS:-}
+export ROLLOUT_PARALLELISM=${ROLLOUT_PARALLELISM:-}
+
+apply_cluster_target() {
+  case "$1" in
+    multipod-rl-scaffolding)
+      PROJECT=cloud-tpu-multipod-dev
+      REGION=us-central1
+      ZONE=us-central1-a
+      CLUSTER_LOCATION=us-central1
+      CLUSTER=rl-scaffolding
+      TRAINER_TPU_SLICE=tpuv5e:4x4
+      TRAINER_MESH_FSDP=16
+      ROLLOUT_TPU_SLICE=tpuv5e:4x4
+      ;;
+    multipod-rl-v5e)
+      PROJECT=cloud-tpu-multipod-dev
+      REGION=us-central1
+      ZONE=us-central1-a
+      CLUSTER_LOCATION=us-central1
+      CLUSTER=rl-v5e-16-cluster-v2
+      TRAINER_TPU_SLICE=tpuv5e:4x4
+      TRAINER_MESH_FSDP=16
+      ROLLOUT_TPU_SLICE=tpuv5e:4x4
+      ;;
+    inference-v5e)
+      PROJECT=cloud-tpu-inference-test
+      REGION=us-west1
+      ZONE=us-west1-c
+      CLUSTER_LOCATION=us-west1-c
+      CLUSTER=lancewang-pw-v5e-4slice
+      TRAINER_TPU_SLICE=tpuv5e:4x4
+      TRAINER_MESH_FSDP=16
+      ROLLOUT_TPU_SLICE=tpuv5e:4x4
+      ;;
+    bodaborg-v5p-nap | bodaborg-v5p)
+      PROJECT=cloud-tpu-shared-capacity
+      REGION=europe-west4
+      ZONE=europe-west4-b
+      CLUSTER_LOCATION=europe-west4
+      CLUSTER=bodaborg-v5p-nap
+      TRAINER_TPU_SLICE=tpuv5:2x2x4
+      TRAINER_MESH_FSDP=8
+      TRAINER_MESH_TP=2
+      ROLLOUT_TPU_SLICE=tpuv5:2x2x1
+      ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}
+      NUM_ROLLOUT_WORKERS=1
+      ROLLOUT_COMPLETIONS=1
+      ROLLOUT_PARALLELISM=1
+      ROLLOUT_MESH_TP=2
+      ROLLOUT_MESH_FSDP=2
+      SAMPLER=${SAMPLER:-inprocess_vllm}
+      CPU_MACHINE=n2d-standard-64
+      GCS_SCRATCH_LOCATION=gs://mohitkhatwani_multipods/pathways_scratch/$USER
+      PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812}
+      PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:raiden_20260812}
+      MINI_BATCH_SIZE=8
+      TRAIN_MICRO_BATCH_SIZE=8
+      BATCH_SIZE=2
+      NUM_GENERATIONS=4
+      ;;
+    "")
+      ;;
+    *)
+      echo "Error: Unknown cluster target '$1'. Available targets: multipod-rl-scaffolding, multipod-rl-v5e, inference-v5e, bodaborg-v5p-nap." >&2
+      exit 1
+      ;;
+  esac
+}
+
+print_selected_cluster() {
+  echo "Cluster target: project=${PROJECT} location=${CLUSTER_LOCATION} region=${REGION} zone=${ZONE} cluster=${CLUSTER}"
+}
+
+print_status() {
+  print_selected_cluster
+  kubectl get jobset "${ORCHESTRATOR_ID}" "${TRAINER_ID}" "${ROLLOUT_ID}" 2>/dev/null || true
+  kubectl get pods -n default | grep -E "${ORCHESTRATOR_ID}|${TRAINER_ID}|${ROLLOUT_ID}" || true
+}
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset --ignore-not-found "${ORCHESTRATOR_ID}"
 }
 
 start_orchestrator() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  ${PYTHON_BIN} tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      HF_HUB_DISABLE_XET=1 \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/examples/math_gsm8k_dist/gsm8k.py\"); p.write_text(p.read_text().replace(\"logging.debug(\", \"logging.info(\"))' && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -116,6 +211,7 @@ start_orchestrator() {
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --reward_mode=${REWARD_MODE:-exact} \
         --stop_workers_on_exit \
         ${DEBUG:+--debug} \
     " \
@@ -123,7 +219,7 @@ start_orchestrator() {
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset --ignore-not-found "${TRAINER_ID}"
 }
 
 start_trainer() {
@@ -138,16 +234,19 @@ start_trainer() {
       --mesh_expert=${TRAINER_MESH_EXPERT} \
     "                                                                                                                                                                                                       
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  ${PYTHON_BIN} tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
+    ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image=${PATHWAYS_SERVER_IMAGE}} \
+    ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image=${PATHWAYS_PROXY_IMAGE}} \
+    ${HF_TOKEN_SECRET_NAME:+--worker_hf_token_secret_name=${HF_TOKEN_SECRET_NAME}} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      HF_HUB_DISABLE_XET=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -173,36 +272,79 @@ start_trainer() {
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  kubectl delete jobset --ignore-not-found "${ROLLOUT_ID}"
 }
 
 start_rollout() {
   local maxtext_args=""                                                                                                                                                                             
+  local rollout_mesh_fsdp="${ROLLOUT_MESH_FSDP}"
+  local rollout_mesh_tp="${ROLLOUT_MESH_TP}"
+  local rollout_jobset_yaml="${ROLLOUT_JOBSET_YAML}"
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then                                                                                                                               
     maxtext_args=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
     "                                                                                                                                                                                                       
   fi
-  local vllm_args=""
+  if [[ -z "${rollout_jobset_yaml}" ]]; then
+    if [[ "${SAMPLER}" == "inprocess_vllm" ]]; then
+      rollout_jobset_yaml="jobset.pathways.yaml"
+    else
+      rollout_jobset_yaml="jobset.tpu.yaml"
+    fi
+  fi
+  if [[ -z "${rollout_mesh_fsdp}" ]]; then
+    if [[ "${rollout_jobset_yaml}" == "jobset.pathways.yaml" ]]; then
+      local rollout_topology="${ROLLOUT_TPU_SLICE#*:}"
+      local total_rollout_devices=1
+      local dim
+      IFS='x' read -ra rollout_dims <<< "${rollout_topology}"
+      for dim in "${rollout_dims[@]}"; do
+        total_rollout_devices=$((total_rollout_devices * dim))
+      done
+      if (( rollout_mesh_tp <= 0 || total_rollout_devices % rollout_mesh_tp != 0 )); then
+        echo "Error: invalid rollout mesh for Pathways slice ${ROLLOUT_TPU_SLICE}: total_devices=${total_rollout_devices}, mesh_tp=${rollout_mesh_tp}" >&2
+        exit 1
+      fi
+      rollout_mesh_fsdp=$((total_rollout_devices / rollout_mesh_tp))
+    else
+      rollout_mesh_fsdp=1
+    fi
+  fi
+  local vllm_args="--sampler=${SAMPLER}"
   if [[ "$SAMPLER" == "vllm" ]]; then
     vllm_args="\
+    ${vllm_args} \
     --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
     "
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
+  local rollout_startup_env="HF_HUB_DISABLE_XET=1 PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}"
+  if [[ "${rollout_jobset_yaml}" == "jobset.tpu.yaml" ]]; then
+    rollout_startup_env="TPU_SKIP_MDS_QUERY=true ${rollout_startup_env}"
+  fi
+  ${PYTHON_BIN} tunix/experimental/distributed/deployment/yaml_generator.py \
+    tunix/experimental/distributed/deployment/yamls/${rollout_jobset_yaml} \
     --jobset_name="${ROLLOUT_ID}" \
     --tpu_slice=${ROLLOUT_TPU_SLICE} \
+    --cpu_machine=${CPU_MACHINE} \
+    --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
+    ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image=${PATHWAYS_SERVER_IMAGE}} \
+    ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image=${PATHWAYS_PROXY_IMAGE}} \
+    ${ROLLOUT_COMPLETIONS:+--completions=${ROLLOUT_COMPLETIONS}} \
+    ${ROLLOUT_PARALLELISM:+--parallelism=${ROLLOUT_PARALLELISM}} \
+    ${HF_TOKEN_SECRET_NAME:+--worker_hf_token_secret_name=${HF_TOKEN_SECRET_NAME}} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/examples/math_gsm8k_dist/run_rollout_node.py\"); s = p.read_text(); patch = \"import vllm.v1.kv_cache_interface\nif not hasattr(vllm.v1.kv_cache_interface.KVCacheTensor, \\\"layers\\\"):\n    vllm.v1.kv_cache_interface.KVCacheTensor.layers = property(lambda self: getattr(self, \\\"shared_by\\\", []))\n\"; p.write_text(s.replace(\"from __future__ import annotations\n\", \"from __future__ import annotations\n\" + patch))' && \
+      ${rollout_startup_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
         --worker_id=${ROLLOUT_ID} \
         --port=${ROLLOUT_PORT} \
+        --mesh_fsdp=${rollout_mesh_fsdp} \
+        --mesh_tp=${rollout_mesh_tp} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \
@@ -217,8 +359,6 @@ start_rollout() {
     " \
     | kubectl apply -f -
 }
-
-source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -238,13 +378,69 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
+    --project)
+      PROJECT="$2"
+      shift 2
+      ;;
+    --project=*)
+      PROJECT="${1#*=}"
+      shift
+      ;;
+    --region)
+      REGION="$2"
+      shift 2
+      ;;
+    --region=*)
+      REGION="${1#*=}"
+      shift
+      ;;
+    --zone)
+      ZONE="$2"
+      shift 2
+      ;;
+    --zone=*)
+      ZONE="${1#*=}"
+      shift
+      ;;
+    --cluster)
+      CLUSTER="$2"
+      shift 2
+      ;;
+    --cluster=*)
+      CLUSTER="${1#*=}"
+      shift
+      ;;
+    --location)
+      CLUSTER_LOCATION="$2"
+      shift 2
+      ;;
+    --location=*)
+      CLUSTER_LOCATION="${1#*=}"
+      shift
+      ;;
+    --target)
+      TARGET_CLUSTER="$2"
+      shift 2
+      ;;
+    --target=*)
+      TARGET_CLUSTER="${1#*=}"
+      shift
+      ;;
+    --print-target)
+      COMMAND="print-target"
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+apply_cluster_target "$TARGET_CLUSTER"
+
+source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
+
+if [[ "$COMMAND" =~ ^(start|orchestrator|trainer|rollout)$ ]] && [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -268,7 +464,11 @@ elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "status" ]]; then
+  print_status
+elif [[ "$COMMAND" == "print-target" ]]; then
+  print_selected_cluster
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'status', 'print-target'."
   exit 1
 fi

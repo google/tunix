@@ -46,6 +46,11 @@ spec:
             terminationGracePeriodSeconds: 10
             nodeSelector:
               node.kubernetes.io/instance-type: ${CPU_MACHINE}
+            tolerations:
+            - key: "cloud.google.com/gke-nodepool"
+              operator: "Equal"
+              value: "cpu-np"
+              effect: "NoSchedule"
             containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}

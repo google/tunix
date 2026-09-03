@@ -1,0 +1,26 @@
+FROM gcr.io/cloud-tpu-multipod-dev/anisha-tmvp/anisha-0825:igorts-chunk4-v2
+
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Reinstall the Raiden wheel with FFI support
+COPY .docker/tpu_sync/*.whl /tmp/tpu_sync/
+RUN pip install --force-reinstall --no-deps /tmp/tpu_sync/*.whl && rm -rf /tmp/tpu_sync
+RUN sed -i "s/def compute_on(compute_type: str):/def compute_on(compute_type: str, **kwargs):/" /opt/venv/lib/python3.12/site-packages/jax/_src/compute_on.py && \
+    sed -i "s/, out_memory_spaces=jax.memory.Space.Device//" /opt/venv/lib/python3.12/site-packages/tpu_sync/frameworks/jax/weight_synchronizer_ffi.py && \
+    python3 -c "import pathlib; p = pathlib.Path(\"/opt/venv/lib/python3.12/site-packages/tpu_sync/frameworks/jax/weight_synchronizer_ffi.py\"); s = p.read_text(); old = \"\"\"  anchor_spec = jax.sharding.PartitionSpec(\n      *axis_names, *([None] * (len(device_array.shape) - len(axis_names)))\n  )\"\"\"; assert old in s, \"anchor_spec pattern not found\"; s = s.replace(old, \"  anchor_spec = device_array.sharding.spec\"); p.write_text(s)"
+
+# Install local tpu-inference
+COPY .docker/tpu_inference /tpu-inference
+RUN pip install --no-deps -e /tpu-inference
+
+# Install local MaxText and vLLM adapter
+COPY .docker/maxtext /maxtext
+RUN pip install --no-deps -e /maxtext
+RUN pip install --no-deps -e /maxtext/src/maxtext/integration/vllm
+
+# Install local Tunix
+WORKDIR /app
+COPY . /app
+RUN pip install --no-deps -e /app
+
+CMD ["bash"]

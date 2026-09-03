@@ -1,0 +1,15 @@
+.venv
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+artifacts
+build
+dist
+*.egg-info
+.docker/maxtext/.git
+.docker/maxtext/venv
+.docker/maxtext/.venv

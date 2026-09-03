@@ -89,6 +89,23 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--completions",
+      type=int,
+      default=None,
+      help="Optional override for JobSet completions.",
+  )
+  parser.add_argument(
+      "--parallelism",
+      type=int,
+      default=None,
+      help="Optional override for JobSet parallelism.",
+  )
+  parser.add_argument(
+      "--worker_hf_token_secret_name",
+      default="",
+      help="Optional Kubernetes secret name that exposes HF_TOKEN.",
+  )
 
   args = parser.parse_args()
 
@@ -141,6 +158,23 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  completions = args.completions
+  if completions is None:
+    completions = num_chips // 4 if num_chips else None
+
+  parallelism = args.parallelism
+  if parallelism is None:
+    parallelism = num_chips // 4 if num_chips else None
+
+  hf_token_env = ""
+  if args.worker_hf_token_secret_name:
+    hf_token_env = f"""
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {args.worker_hf_token_secret_name}
+                    key: HF_TOKEN"""
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -156,14 +190,15 @@ def main() -> None:
         TPU_TOPOLOGY=tpu_topology,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
-        COMPLETIONS=num_chips // 4 if num_chips else None,
-        PARALLELISM=num_chips // 4 if num_chips else None,
+        COMPLETIONS=completions,
+        PARALLELISM=parallelism,
         PODSET_SLICE_TOPOLOGY=slice_topology,
         PODSET_SLICE_SIZE=slice_size,
         USER_CONTAINER=args.worker_container_name,
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        HF_TOKEN_ENV=hf_token_env,
     )
     print(content)
 

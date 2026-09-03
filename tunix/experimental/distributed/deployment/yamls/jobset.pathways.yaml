@@ -177,6 +177,7 @@ spec:
                 value: "grpc://localhost:29000"
               - name: VLLM_ENABLE_V1_MULTIPROCESSING
                 value: "0"
+${HF_TOKEN_ENV}
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
@@ -216,17 +217,17 @@ spec:
                       values:
                       - ${JOBSET_NAME}
               # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              # podAntiAffinity:
+              #   requiredDuringSchedulingIgnoredDuringExecution:
+              #   - topologyKey: cloud.google.com/gke-nodepool
+              #     labelSelector:
+              #       matchExpressions:
+              #       - key: jobset.sigs.k8s.io/jobset-name
+              #         operator: Exists
+              #       - key: jobset.sigs.k8s.io/jobset-name
+              #         operator: NotIn
+              #       - values:
+              #         - ${JOBSET_NAME}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"

@@ -106,6 +106,7 @@ spec:
                 value: "tpu,cpu"
               - name: VLLM_ENABLE_V1_MULTIPROCESSING
                 value: "0"
+${HF_TOKEN_ENV}
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2

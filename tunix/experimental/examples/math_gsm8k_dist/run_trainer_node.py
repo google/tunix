@@ -116,14 +116,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Orbax params-only checkpoint for the MaxText trainer, e.g. gs://...",
   )
   parser.add_argument(
-      "--maxtext_output_directory",
-      type=str,
-      default=os.getenv(
-          "MAXTEXT_OUTPUT_DIR",
-          os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext"),
-      ),
-      help="Base directory for MaxText trainer outputs.",
-  )
+        "--maxtext_output_directory",
+        type=str,
+        default=os.getenv("MAXTEXT_OUTPUT_DIR", os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext")),
+        help="Base directory for MaxText trainer outputs.",
+    )
   parser.add_argument(
       "--maxtext_warmup_steps_fraction",
       type=float,
@@ -280,6 +277,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 
+  def set_target_state(self, target_state: Any) -> None:
+    with self._mesh:
+      self._trainer.set_target_state(target_state)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -388,16 +389,15 @@ def main(argv: list[str], context: Any = None) -> None:
         "Require discovery API, but process context doesn't support."
     )
 
+  args = _parse_args(argv)
   logging.basicConfig(
-      level=logging.INFO,
+      level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
-
   # Before anything brings the TPU backend up. See raiden_preload for why.
   raiden_preload.import_raiden()
 
-  args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
   if context:
