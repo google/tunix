@@ -196,6 +196,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.mini_batch_size = 1
     self.mock_algo.max_turns = 1
     self.mock_algo.max_packed_len = 16
+    self.mock_algo.max_response_length = 1024
     self.mock_algo.requires_reference_kl = False
 
     mock_payload = datatypes.RLTrainerPayload(
@@ -333,6 +334,7 @@ class RLProgramTest(absltest.TestCase):
           [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
           group_size=2,
           policy_version=0,
+          generation_args=datatypes.GenerationArgs(max_response_length=1024),
       )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.save_checkpoint.assert_called_once_with(
@@ -1166,6 +1168,7 @@ class RLProgramTest(absltest.TestCase):
           [dict_item],
           group_size=2,
           policy_version=0,
+          generation_args=datatypes.GenerationArgs(max_response_length=1024),
       )
 
     asyncio.run(_run())
@@ -2268,6 +2271,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_passes_generation_args_to_dispatch_rollouts(self):
     async def _run():
+      self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
           self.mock_engine,
           _make_trajectory_group(prompt_id="p0", group_size=2),
@@ -2287,7 +2291,37 @@ class RLProgramTest(absltest.TestCase):
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
       _, kwargs = self.mock_engine.dispatch_rollouts.call_args
-      self.assertEqual(kwargs.get("generation_args"), gen_args)
+      expected_gen_args = datatypes.GenerationArgs(
+          max_generation_steps=128,
+          max_response_length=512,
+          temperature=0.7,
+          top_p=0.9,
+          return_logprobs=True,
+      )
+      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+
+    asyncio.run(_run())
+
+  def test_program_auto_injects_max_response_length_when_gen_args_none(self):
+    async def _run():
+      self.mock_algo.max_response_length = 512
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="p0", group_size=2),
+          [],
+      )
+      p = self._create_program(
+          dataset=("p0",),
+          generation_args=None,
+          sync_weights=False,
+      )
+      await p.run_async(self.mock_engine)
+      self.mock_engine.dispatch_rollouts.assert_called_once()
+      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      expected_gen_args = datatypes.GenerationArgs(
+          max_response_length=512,
+      )
+      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
 
     asyncio.run(_run())
 

@@ -560,5 +560,25 @@ class TokenSegmentRoutingTest(absltest.TestCase):
       )
 
 
+class GenerationArgsTest(absltest.TestCase):
+
+  def test_generation_args_as_kwargs_with_max_response_length(self):
+    args = datatypes.GenerationArgs(
+        max_generation_steps=128,
+        max_response_length=512,
+        temperature=0.7,
+        top_p=0.95,
+        return_logprobs=True,
+    )
+    expected = {
+        "max_generation_steps": 128,
+        "max_response_length": 512,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "return_logprobs": True,
+    }
+    self.assertEqual(args.as_kwargs(), expected)
+
+
 if __name__ == "__main__":
   absltest.main()

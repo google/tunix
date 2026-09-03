@@ -164,6 +164,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       # StandardRLProgram consumes this many prompt groups per trainer update.
       mini_batch_size=args.batch_size,
       max_packed_len=args.max_prompt_length + args.max_response_length,
+      max_response_length=args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
       temperature=args.temperature,
@@ -353,7 +354,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       else []
   )
   generation_args = datatypes.GenerationArgs(
-      max_generation_steps=args.max_response_length,
       temperature=args.temperature,
       top_p=args.top_p,
       top_k=None if args.top_k < 0 else args.top_k,

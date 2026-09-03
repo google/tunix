@@ -234,6 +234,7 @@ class WorkerInfo:
 class GenerationArgs:
   """Typed generation arguments used by the orchestrator generate API."""
   max_generation_steps: int | None = None
+  max_response_length: int | None = None
   temperature: float | None = None
   top_p: float | None = None
   top_k: int | None = None

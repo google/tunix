@@ -117,7 +117,18 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
-    self.generation_args = generation_args
+    algo_max_response_length = getattr(self.algo, "max_response_length", 1024)
+    if generation_args is None:
+      self.generation_args = datatypes.GenerationArgs(
+          max_response_length=algo_max_response_length,
+      )
+    elif generation_args.max_response_length is None:
+      self.generation_args = dataclasses.replace(
+          generation_args,
+          max_response_length=algo_max_response_length,
+      )
+    else:
+      self.generation_args = generation_args
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)

@@ -64,6 +64,9 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    self.max_response_length = request.generation_kwargs.get(
+        "max_response_length"
+    )
 
   async def run_episode(self) -> trajectory_lib.Trajectory:
     """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
@@ -123,6 +126,7 @@ class TrajectoryCollectorEngine:
         model_call=model_call,  # pyrefly: ignore[bad-argument-type]
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        max_response_length=self.max_response_length,
     )
     rl_traj = await inner_engine.collect(mode="Trajectory")
     self.is_done = True
