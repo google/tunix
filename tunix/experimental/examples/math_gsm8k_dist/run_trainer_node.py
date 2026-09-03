@@ -38,6 +38,7 @@ import optax
 from tunix.cli.utils import model as model_utils
 from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.train import peft_trainer_v2
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
 from tunix.utils import maxtext_utils
@@ -392,6 +393,10 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
+
+  # Before anything brings the TPU backend up. See raiden_preload for why.
+  raiden_preload.import_raiden()
+
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 

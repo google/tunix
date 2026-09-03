@@ -188,12 +188,14 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Brings the engine up if nothing has needed it yet.
 
     RLVllmSampler builds its AsyncLLM lazily and `sample()` is the only caller
-    of `start()`, but weight sync needs the engine too -- it owns the TPU
-    worker, and therefore the Raiden binding -- and now runs before the first
-    sample. Without this the round finds no worker, reports an empty
-    destination manifest, and deadlocks: the engine waits for a sample that
-    dispatch is waiting on the sync to allow. Keyed off `_is_running` because
-    `start()` warns when already running and this runs every sync round.
+    of `start()`. Weight sync needs the engine too -- it owns the TPU worker,
+    and therefore the Raiden binding -- and the first sync lands before the
+    first sample, because `prepare_rollout_policy` syncs ahead of dispatch.
+    Without this the round finds no worker, reports an empty destination
+    manifest, and deadlocks: the engine waits for a sample that dispatch is
+    waiting on the sync to allow. Guarded on `_is_running` rather than calling
+    `start()` unconditionally, because `start()` warns when the engine is
+    already up and this runs on every sync round.
 
     TODO(tunix-dev): drop this once the orchestrator owns rollout-worker
     lifecycle and can guarantee the engine is up before it issues any phase
