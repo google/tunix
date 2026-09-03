@@ -268,6 +268,8 @@ class TrainingConfig:
   eval_every_n_steps: int
   max_steps: int | None = None
   gradient_accumulation_steps: int | None = None
+  skip_first_n_steps_for_eval: int = 0
+  eval_num_generations: int | None = None
 
   # If set, the checkpoints will be saved to this path. Checkpoints
   # contains the model params and the train data iterator state.
