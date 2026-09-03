@@ -27,6 +27,7 @@ from typing import Any
 
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
@@ -401,6 +402,9 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [RolloutNode] %(message)s",
       force=True,
   )
+
+  # Before anything brings the TPU backend up. See raiden_preload for why.
+  raiden_preload.import_raiden()
 
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
