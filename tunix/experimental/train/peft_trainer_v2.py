@@ -801,14 +801,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       if self._is_single_microstep():
         # No grad_accumulator is created in this case.
-        donate_argnames = ("model",)
+        donate_argnames = ("model")
       else:
         donate_argnames = ("model", "grad_accumulator")
       self._jitted_fwd_bwd_step_fn = nnx.jit(
           fwd_bwd_step, donate_argnames=donate_argnames,
       )
       self._jitted_update_step_fn = nnx.jit(
-          update_step, donate_argnames=("optimizer", "grad_accumulator")
+          update_step, donate_argnames=("model", "optimizer", "grad_accumulator")
       )
       self._jitted_eval_step_fn = nnx.jit(eval_step)
 
@@ -822,6 +822,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
           self._jitted_fwd_bwd_step_fn,
           self.model,
+          self.grad_accumulator,
       )
       self._jitted_update_step_fn = maybe_cache_and_partial(
           self._jitted_update_step_fn,
@@ -1048,10 +1049,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
-    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(skip_jit=False, cache_nnx_graph=True)
     self._record_fwd_bwd(
         *fwd_bwd_step(
-            grad_accumulator=self.grad_accumulator,
             inputs=self._prepare_payload(payload),
         )
     )
@@ -1059,7 +1059,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def update(self, **kwargs) -> int:
     """Applies the accumulated gradients."""
-    _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
+    _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(skip_jit=False, cache_nnx_graph=True)
     return self._record_update(update_step())
 
   def train_step(
