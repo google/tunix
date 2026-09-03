@@ -68,8 +68,19 @@ Create a v5litepod-8 TPU VM in GCE:
 
 Reference: `TPU Runtime Versions <https://docs.cloud.google.com/tpu/docs/runtimes?hl=en&_gl=1*1tpeg3j*_ga*MTk1NzE5MjMyNy4xNzYwOTEwNjk3*_ga_WH2QY8WWF5*czE3NjIxNTU1OTEkbzE3JGcwJHQxNzYyMTU1NTkxJGo2MCRsMCRoMA..#training-v5p-v5e>`_
 
+```
+gcloud compute tpus tpu-vm create v5-8 \
+  --zone=us-west1-c \
+  --accelerator-type=v5litepod-8 \
+  --version=v2-alpha-tpuv5-lite
+```
+
 2. Configure VM
 ~~~~~~~~~~~~~~~~
+
+```
+gcloud compute tpus tpu-vm ssh --zone "us-west1-c" "v5-8"
+```
 
 SSH into the VM using the supplied gcloud command, then run:
 
