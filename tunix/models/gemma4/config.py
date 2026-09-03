@@ -21,6 +21,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import PartitionSpec as P
 import jaxtyping
+from tunix.models import cache_utils
 from tunix.models.gemma4 import audio
 from tunix.models.gemma4 import vision
 from tunix.utils import env_utils
@@ -192,6 +193,15 @@ class ModelConfig:
   # everything (minimum HBM).
   remat_policy: str = 'nothing_saveable'
 
+  # Prefix-length bucket ladder for chunked prefill. Each distinct bucketed
+  # prefix_length is baked as a static partial arg, so it is a separate XLA
+  # compilation; this ladder bounds the number of compiles. An empty tuple
+  # disables bucketing (passthrough, accepts recompiles). Use pow2_buckets() /
+  # linear_buckets() to build common ladders. Must be sorted and non-negative.
+  prefix_bucket_boundaries: tuple[int, ...] = cache_utils.linear_buckets(
+      step=512
+  )
+
   # When True, the splash attention backward pass uses a single fused kernel
   # for dQ+dKV instead of two separate passes, reducing VMEM round-trips.
   # When enabled, block_q_dq and block_kv_dq are ignored (set to None).
@@ -212,10 +222,13 @@ class ModelConfig:
   audio_encoder: audio.ConformerConfig | None = None
 
   def __post_init__(self):
-    # TODO(tunix-dev): support flash attention with sliding window KV cache
-    if self.use_sliding_window_kv_cache and self.use_flash_attention:
+    boundaries = self.prefix_bucket_boundaries
+    if any(b < 0 for b in boundaries) or boundaries != tuple(
+        sorted(set(boundaries))
+    ):
       raise ValueError(
-          'Flash attention and sliding window KV cache are mutually exclusive.'
+          'prefix_bucket_boundaries must be non-negative and sorted strictly '
+          f'ascending with no duplicates; got {boundaries}'
       )
 
   @classmethod

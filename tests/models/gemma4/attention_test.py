@@ -28,6 +28,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 import numpy as np
 from tunix.models.gemma4 import attention as attention_lib
+from tunix.models.gemma4 import config as config_lib
 from tunix.models.gemma4 import model as model_lib
 
 
@@ -772,19 +773,329 @@ class AttentionTest(parameterized.TestCase):
           seq_len=1,
       )
 
-  def test_find_last_one_index(self):
-    mask = jnp.array(
-        [
-            [[1, 1, 1, 0, 0]],
-            [[1, 0, 0, 0, 0]],
-            [[0, 0, 0, 0, 0]],
-        ],
-        dtype=jnp.int32,
+  def test_eager_attention_chunked_prefill_mask_construction(self):
+    """Verify _eager_attention constructs chunked prefill mask for rectangular KV."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.sliding_window_size = 8
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
     )
-    last_indices = attention_lib.find_last_one_index(mask)
-    np.testing.assert_array_equal(
-        last_indices,
-        np.array([2, 0, 0], dtype=np.int32),
+    b, q_len, kv_len = 2, 4, 12
+    h, kh, d = config.num_heads, config.num_kv_heads, config.head_dim
+    q = jnp.ones((b, q_len, h, d))
+    k = jnp.zeros((b, kv_len, kh, d))
+    v = jnp.zeros((b, kv_len, kh, d))
+
+    # Active Probe at valid prefix slot 2 (< prior_end_index=6)
+    k = k.at[:, 2, :, :].set(10.0)
+    v = v.at[:, 2, :, :].set(5.0)
+
+    # Trap Probe 1 at uninitialized prefix position 7 (> prior_end_index=6)
+    k = k.at[:, 7, :, :].set(100.0)
+    v = v.at[:, 7, :, :].set(999.0)
+
+    # Trap Probe 2 at future suffix position 11 (for query 0)
+    k = k.at[:, 11, :, :].set(100.0)
+    v = v.at[:, 11, :, :].set(999.0)
+
+    prefix_mask = jnp.ones((b, q_len, 8), dtype=jnp.bool_)
+    suffix_causal = jnp.broadcast_to(
+        jnp.tril(jnp.ones((q_len, q_len), dtype=jnp.bool_))[None, :, :],
+        (b, q_len, q_len),
+    )
+    attn_mask = jnp.concatenate([prefix_mask, suffix_causal], axis=-1)
+    segment_pos = jnp.broadcast_to(
+        jnp.arange(8, 12, dtype=jnp.int32)[None, :], (b, q_len)
+    )
+    cache = {
+        'k': jnp.zeros((b, 8, kh, d)),
+        'v': jnp.zeros((b, 8, kh, d)),
+        'end_index': jnp.array([6]),
+    }
+    out = attn._eager_attention(
+        query_proj=q,
+        key_proj=k,
+        value_proj=v,
+        attn_mask=attn_mask,
+        segment_pos=segment_pos,
+        cache=cache,
+        kv_shared_cache=None,
+        prior_end_index=jnp.array([6]),
+        prefix_length=8,
+        seq_len=q_len,
+        is_chunked_prefill=True,
+    )
+    self.assertEqual(out.shape, (b, q_len, h, d))
+    self.assertFalse(jnp.isnan(out).any())
+    np.testing.assert_allclose(out[:, 0, :, :], 5.0, atol=1e-2)
+
+  def test_flash_attention_single_with_segment_ids(self):
+    """Verify _flash_attention_single execution path with segment_ids."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.use_flash_attention = True
+    config.flash_attention_block_size = 16
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+    b, t = 2, 16
+    x = jnp.zeros((b, t, config.embed_dim))
+    segment_pos = jnp.zeros((b, t), dtype=jnp.int32)
+    attn_mask = jnp.ones((b, t, t), dtype=jnp.bool_)
+    segment_ids = jnp.zeros((b, t), dtype=jnp.int32)
+
+    kernel_called = []
+
+    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
+      kernel_called.append(segment_ids)
+      self.assertIsNotNone(segment_ids)
+      return jnp.zeros_like(q_in)
+
+    devices = np.array(jax.devices()[:1]).reshape(1, 1)
+    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
+
+    with mesh, mock.patch.object(
+        attn, '_make_splash_kernel', return_value=(mock_kernel, None)
+    ):
+      new_cache, out, (k_proj, v_proj, *_) = attn.block(
+          x,
+          segment_pos,
+          cache=None,
+          attn_mask=attn_mask,
+          segment_ids=segment_ids,
+      )
+      self.assertTrue(kernel_called)
+      self.assertEqual(out.shape, (b, t, config.embed_dim))
+      self.assertFalse(jnp.isnan(out).any())
+
+  def test_flash_attention_single_without_segment_ids(self):
+    """Verify _flash_attention_single execution path without segment_ids."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.use_flash_attention = True
+    config.flash_attention_block_size = 16
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+    b, t = 2, 16
+    x = jnp.zeros((b, t, config.embed_dim))
+    segment_pos = jnp.zeros((b, t), dtype=jnp.int32)
+    attn_mask = jnp.ones((b, t, t), dtype=jnp.bool_)
+
+    called_with_segments = []
+
+    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
+      called_with_segments.append(segment_ids)
+      return jnp.zeros_like(q_in)
+
+    devices = np.array(jax.devices()[:1]).reshape(1, 1)
+    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
+
+    with mesh, mock.patch.object(
+        attn, '_make_splash_kernel', return_value=(mock_kernel, None)
+    ):
+      new_cache, out, (k_proj, v_proj, *_) = attn.block(
+          x,
+          segment_pos,
+          cache=None,
+          attn_mask=attn_mask,
+          segment_ids=None,
+      )
+      self.assertEqual(called_with_segments, [None])
+      self.assertEqual(out.shape, (b, t, config.embed_dim))
+      self.assertEqual(k_proj.shape, (b, t, attn.num_kv_heads, attn.head_dim))
+      self.assertEqual(v_proj.shape, (b, t, attn.num_kv_heads, attn.head_dim))
+      self.assertFalse(jnp.isnan(out).any())
+
+  def test_ragged_ring_buffer_decode_matches_unbatched_ground_truth(self):
+    """Ragged LOCAL_SLIDING prefill+decode must match B=1 unpadded ground truth."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.use_sliding_window_kv_cache = True
+    config.sliding_window_size = 4
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+        rngs=nnx.Rngs(0),
+    )
+    cache_len, kh, d = 4, config.num_kv_heads, config.head_dim
+    lens = jnp.array([12, 6], dtype=jnp.int32)  # row 1 gap = 6 > window (4)
+    x_pre = jax.random.normal(jax.random.PRNGKey(0), (2, 12, config.embed_dim))
+    x_dec = jax.random.normal(jax.random.PRNGKey(1), (2, 1, config.embed_dim))
+
+    def _run(row: int | None) -> jnp.ndarray:
+      idx = slice(None) if row is None else slice(row, row + 1)
+      b, seq = (2, 12) if row is None else (1, int(lens[row]))
+      in_mask = jnp.arange(seq)[None, :] < lens[idx, None]
+      causal = jnp.tril(jnp.ones((b, seq, seq), dtype=jnp.bool_))
+      cache = {
+          'k': jnp.zeros((b, cache_len, kh, d)),
+          'v': jnp.zeros((b, cache_len, kh, d)),
+          'end_index': jnp.zeros((b,), dtype=jnp.int32),
+      }
+      cache, _, _ = attn.block(
+          x_pre[idx, :seq],
+          jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (b, seq)),
+          cache=cache,
+          attn_mask=causal & in_mask[:, None, :],
+          input_mask=in_mask,
+          is_chunked_prefill=True,
+          force_eager=True,
+      )
+      dec_mask = jnp.zeros((b, 1, seq + 1), dtype=jnp.bool_)
+      dec_mask = dec_mask.at[:, 0, :seq].set(in_mask)
+      dec_mask = dec_mask.at[:, 0, seq].set(True)
+      _, out, _ = attn.block(
+          x_dec[idx],
+          lens[idx, None],
+          cache=cache,
+          attn_mask=dec_mask,
+          force_eager=True,
+      )
+      return out
+
+    ragged_out = _run(None)
+    for r in range(len(lens)):
+      np.testing.assert_allclose(
+          ragged_out[r : r + 1],
+          _run(r),
+          atol=1e-2,
+          rtol=1e-2,
+          err_msg=f'Row {r} diverged from batch=1 ground truth!',
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='sliding_window_within_window',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          sliding_window_size=16,
+          prefix_len=8,
+          suffix_len=4,
+      ),
+      dict(
+          testcase_name='sliding_window_at_window_boundary',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          sliding_window_size=16,
+          prefix_len=16,
+          suffix_len=4,
+      ),
+      dict(
+          testcase_name='sliding_window_beyond_window_wrapped',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          sliding_window_size=16,
+          prefix_len=24,
+          suffix_len=4,
+      ),
+      dict(
+          testcase_name='global_prefix_reuse',
+          attn_type=model_lib.AttentionType.GLOBAL,
+          sliding_window_size=None,
+          prefix_len=24,
+          suffix_len=4,
+      ),
+  )
+  def test_chunked_prefill_prefix_reuse_matches_full_prefill(
+      self, attn_type, sliding_window_size, prefix_len, suffix_len
+  ):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.sliding_window_size = sliding_window_size
+    config.use_sliding_window_kv_cache = True
+    config.use_flash_attention = False
+
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=attn_type,
+        rngs=nnx.Rngs(0),
+    )
+
+    b = 2
+    total_len = prefix_len + suffix_len
+    x_full = jax.random.normal(
+        jax.random.PRNGKey(0), (b, total_len, config.embed_dim)
+    )
+    pos_full = jnp.broadcast_to(
+        jnp.arange(total_len, dtype=jnp.int32)[None, :], (b, total_len)
+    )
+    mask_full = jnp.tril(jnp.ones((b, total_len, total_len), dtype=jnp.bool_))
+
+    # 1. Full monolithic prefill
+    max_seq_len = total_len + 16
+    cache_full = attn.init_cache(b, max_seq_len, dtype=jnp.float32)
+    cache_full, out_full, _ = attn.block(
+        x_full,
+        pos_full,
+        cache=cache_full,
+        attn_mask=mask_full,
+        is_chunked_prefill=False,
+    )
+
+    # 2. Chunked prefill: Chunk 1 (prefix)
+    cache_chunked = attn.init_cache(b, max_seq_len, dtype=jnp.float32)
+    x_prefix = x_full[:, :prefix_len, :]
+    pos_prefix = pos_full[:, :prefix_len]
+    mask_prefix = mask_full[:, :prefix_len, :]
+    cache_chunked, out_prefix_chunked, _ = attn.block(
+        x_prefix,
+        pos_prefix,
+        cache=cache_chunked,
+        attn_mask=mask_prefix,
+        is_chunked_prefill=True,
+        prefix_length=0,
+        force_eager=True,
+    )
+    np.testing.assert_allclose(
+        out_prefix_chunked, out_full[:, :prefix_len, :], atol=2e-5, rtol=1e-4
+    )
+
+    # 3. Chunked prefill: Chunk 2 (suffix reusing prefix cache)
+    x_suffix = x_full[:, prefix_len:, :]
+    pos_suffix = pos_full[:, prefix_len:]
+    mask_suffix = mask_full[:, prefix_len:, :]
+    cache_chunked, out_suffix_chunked, _ = attn.block(
+        x_suffix,
+        pos_suffix,
+        cache=cache_chunked,
+        attn_mask=mask_suffix,
+        is_chunked_prefill=True,
+        prefix_length=prefix_len,
+        force_eager=True,
+    )
+
+    # Verify suffix representation matches the suffix region of monolithic prefill
+    out_suffix_expected = out_full[:, prefix_len:, :]
+    np.testing.assert_allclose(
+        out_suffix_chunked, out_suffix_expected, atol=2e-5, rtol=1e-4
+    )
+
+    # 4. Decode step at position total_len
+    x_decode = jax.random.normal(
+        jax.random.PRNGKey(1), (b, 1, config.embed_dim)
+    )
+    pos_decode = jnp.array([[total_len], [total_len]], dtype=jnp.int32)
+    mask_decode = jnp.broadcast_to(
+        (jnp.arange(max_seq_len)[None, None, :] <= total_len),
+        (b, 1, max_seq_len),
+    )
+
+    cache_full, out_decode_full, _ = attn.block(
+        x_decode,
+        pos_decode,
+        cache=cache_full,
+        attn_mask=mask_decode,
+        is_chunked_prefill=False,
+    )
+    cache_chunked, out_decode_chunked, _ = attn.block(
+        x_decode,
+        pos_decode,
+        cache=cache_chunked,
+        attn_mask=mask_decode,
+        is_chunked_prefill=False,
+    )
+    np.testing.assert_allclose(
+        out_decode_chunked, out_decode_full, atol=2e-5, rtol=1e-4
     )
 
   def test_init_cache_on_device_sharded_allocation(self):
