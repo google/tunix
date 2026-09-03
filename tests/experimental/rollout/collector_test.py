@@ -15,11 +15,14 @@
 """Tests for the trajectory collector."""
 
 import asyncio
+import types
+import unittest
 from unittest import mock
 
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rollout import collector
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.rl.agentic.agents import model_agent
@@ -186,6 +189,93 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       self.assertEqual(sampler.sampled_params[1].max_tokens, 20)
 
     asyncio.run(_run())
+
+
+class _RecordingSampler:
+
+  def __init__(self):
+    self.seen_max_tokens = []
+
+  async def sample(self, sampling_req, **kwargs):
+    del kwargs
+    self.seen_max_tokens.append(sampling_req.sampling_params.max_tokens)
+    return sampler_lib.SamplingResponse(
+        request_id=getattr(sampling_req, "request_id", "req"),
+        text="FINAL_ANSWER: 4",
+        prompt_token_ids=np.asarray([1, 2, 3], dtype=np.int32),
+        token_ids=np.asarray([4, 5], dtype=np.int32),
+        logprobs=np.asarray([0.0, 0.0], dtype=np.float32),
+    )
+
+
+class _FakeInnerEngine:
+
+  next_max_generation_steps = None
+
+  def __init__(self, *, model_call, env, **kwargs):
+    del kwargs
+    self._model_call = model_call
+    self._env = env
+
+  async def collect(self, mode="Trajectory"):
+    del mode
+    await self._model_call(
+        [{"role": "user", "content": "hi"}],
+        self._env,
+        max_generation_steps=self.next_max_generation_steps,
+    )
+    return types.SimpleNamespace(
+        steps=[],
+        prompt_tokens=np.asarray([1, 2, 3], dtype=np.int32),
+        reward=0.0,
+    )
+
+
+class RunEpisodeSamplingParamsTest(absltest.TestCase):
+
+  def _make_collector(self, generation_kwargs: dict[str, object]):
+    request = datatypes.RolloutRequest(
+        request_id="req_0",
+        prompt="What is 2+2?",
+        prompt_id="prompt_0",
+        group_index=0,
+        generation_kwargs=generation_kwargs,
+    )
+    return collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+
+  def test_run_episode_uses_request_max_generation_steps_when_unbounded(self):
+    engine = self._make_collector({"max_generation_steps": 123})
+    _FakeInnerEngine.next_max_generation_steps = None
+
+    with unittest.mock.patch.object(
+        collector.rl_collect_engine,
+        "TrajectoryCollectEngine",
+        _FakeInnerEngine,
+    ):
+      asyncio.run(engine.run_episode())
+
+    self.assertEqual(engine.sampler.seen_max_tokens, [123])
+
+  def test_run_episode_prefers_explicit_max_generation_steps(self):
+    engine = self._make_collector({"max_generation_steps": 123})
+    _FakeInnerEngine.next_max_generation_steps = 17
+
+    with unittest.mock.patch.object(
+        collector.rl_collect_engine,
+        "TrajectoryCollectEngine",
+        _FakeInnerEngine,
+    ):
+      asyncio.run(engine.run_episode())
+
+    self.assertEqual(engine.sampler.seen_max_tokens, [17])
 
 
 if __name__ == "__main__":

@@ -78,11 +78,25 @@ class TrajectoryCollectorEngine:
     ):
       del env, kwargs
       generation_kwargs = dict(self.request.generation_kwargs)
+      request_max_generation_steps = generation_kwargs.pop(
+          "max_generation_steps", None
+      )
+
       if max_generation_steps is not None:
-        generation_kwargs["max_tokens"] = max_generation_steps
+        effective_max_tokens = max_generation_steps
+      elif request_max_generation_steps is not None:
+        effective_max_tokens = request_max_generation_steps
+      else:
+        raise ValueError(
+            "TrajectoryCollectorEngine requires either"
+            " request.generation_kwargs or the model_call callback to specify"
+            " max_generation_steps."
+        )
+
+      generation_kwargs["max_tokens"] = effective_max_tokens
 
       sampling_params = sampler_lib.SamplingParams(
-          max_tokens=generation_kwargs.get("max_tokens", 64),
+          max_tokens=effective_max_tokens,
           temperature=generation_kwargs.get("temperature", 0.0),
           top_p=generation_kwargs.get("top_p", None),
           top_k=generation_kwargs.get("top_k", None),
