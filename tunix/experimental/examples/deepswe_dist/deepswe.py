@@ -19,19 +19,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 import json
 import logging
+import os
 from typing import Any
 
 import numpy as np
 from tunix.experimental.rl.agentic import registry
 
-from examples.deepswe import deepswe_data
-from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 
 
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
-DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-V1"
 
 
 def normalize_example_value(value: Any) -> Any:
@@ -86,6 +85,8 @@ def load_deepswe_dataset(
     if shuffle:
       dataset = dataset.shuffle(seed=seed)
     return dataset
+
+  from examples.deepswe import deepswe_data  # pylint: disable=g-import-not-at-top
 
   logging.info(
       "Loading DeepSWE dataset %s split=%s cache_dir=%s shuffle=%s seed=%d.",
@@ -207,7 +208,61 @@ def iter_prompt_items(
         use_agent_sandbox=use_agent_sandbox,
         scaffold=scaffold,
         env_verbose=env_verbose,
+  )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+  value = os.getenv(name)
+  if value is None:
+    return default
+  return value.lower() not in ("0", "false", "no", "off")
+
+
+def _env_int(name: str, default: int) -> int:
+  value = os.getenv(name)
+  if value is None or value == "":
+    return default
+  return int(value)
+
+
+def _sandbox_tasks_from_env() -> list[dict[str, Any]]:
+  dataset = load_deepswe_dataset(
+      dataset_name=os.getenv("DATASET_NAME", DEFAULT_DATASET_NAME),
+      dataset_split=os.getenv("DATASET_SPLIT", "train"),
+      dataset_path=os.getenv("DATASET_PATH", ""),
+      cache_dir=os.getenv("DATASET_CACHE_DIR") or None,
+      shuffle=_env_bool("SHUFFLE", True),
+      seed=_env_int("SEED", 42),
+  )
+  return [_entry_at(dataset, i) for i in range(len(dataset))]
+
+
+def _init_sandbox_fleet_from_env(
+    entry: dict[str, Any], group_size: int
+) -> Any:
+  """Initializes DeepSWE's process-wide SandboxFleet from rollout metadata."""
+  max_concurrency = _env_int(
+      "SANDBOX_MAX_CONCURRENCY",
+      _env_int("ROLLOUT_MAX_CONCURRENCY", group_size),
+  )
+  try:
+    tasks = _sandbox_tasks_from_env()
+  except Exception:  # pylint: disable=broad-exception-caught
+    logging.exception(
+        "Failed to load the full DeepSWE dataset for SandboxFleet. Falling "
+        "back to the current task only."
     )
+    tasks = [entry]
+  logging.info(
+      "Initializing DeepSWE SandboxFleet in rollout worker with %d task(s) "
+      "(max_concurrency=%d).",
+      len(tasks),
+      max_concurrency,
+  )
+  return swe_env._init_global_fleet(  # pylint: disable=protected-access
+      tasks=tasks,
+      max_concurrency=max_concurrency,
+  )
 
 
 @registry.register_env(DEEPSWE_ENV_NAME)
@@ -233,15 +288,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
     if pair_index is None:
       pair_index = group_index
     if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
-      logging.info(
-          "Initializing DeepSWE SandboxFleet in rollout worker "
-          "(max_concurrency=%s).",
-          group_size,
-      )
-      kwargs["fleet"] = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=[entry],
-          max_concurrency=group_size,
-      )
+      kwargs["fleet"] = _init_sandbox_fleet_from_env(entry, group_size)
 
     super().__init__(
         entry=entry,
@@ -259,7 +306,15 @@ class DeepSWEEnv(swe_env.SWEEnv):
 
 
 @registry.register_agent(DEEPSWE_AGENT_NAME)
-class DeepSWEAgent(swe_agent.SWEAgent):
-  """Registry adapter for the legacy DeepSWE XML-tool agent."""
+class DeepSWEAgent:
+  """Lazy registry adapter for the legacy DeepSWE XML-tool agent."""
 
   name = DEEPSWE_AGENT_NAME
+
+  def __init__(self, **kwargs: Any):
+    from examples.deepswe import swe_agent  # pylint: disable=g-import-not-at-top
+
+    self._agent = swe_agent.SWEAgent(**kwargs)
+
+  def __getattr__(self, name: str) -> Any:
+    return getattr(self._agent, name)

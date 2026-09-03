@@ -12,19 +12,23 @@ distributed GSM8K example:
 
 The first milestone is intentionally small: run one trainer+rollout pipeline
 step with `BETA=0.0` and `WEIGHT_SYNC_MODE=none`. The default path uses the
-regular DeepSWE `SWEEnv` backend. Set `USE_AGENT_SANDBOX=1` to construct
-`SWEEnv` with `SandboxFleet` inside the rollout worker process.
+real DeepSWE dataset (`R2E-Gym/R2E-Gym-V1`) and constructs `SWEEnv` with
+`SandboxFleet` inside the rollout worker process.
 
 ```bash
 cd tunix/experimental/examples/deepswe_dist
 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
 ```
 
+To run without the agent sandbox, explicitly set `USE_AGENT_SANDBOX=0`.
+
 ```bash
 cd tunix/experimental/examples/deepswe_dist
-USE_AGENT_SANDBOX=1 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
+USE_AGENT_SANDBOX=0 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
 ```
 
 For sandbox placement, set `SANDBOX_NAMESPACE`, `SANDBOX_NODE_SELECTOR_KEY`, and
 `SANDBOX_NODE_SELECTOR_VAL` before launching. The launcher forwards them to the
-rollout worker as the `agent_sandbox_rl` variables consumed by `SWEEnv`.
+rollout worker as the `agent_sandbox_rl` variables consumed by `SWEEnv`. It
+also forwards the dataset settings so the rollout worker initializes the global
+`SandboxFleet` from the same task set used by the orchestrator.
