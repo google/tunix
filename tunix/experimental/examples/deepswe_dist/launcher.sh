@@ -220,7 +220,7 @@ echo "Launching trainer node..."
   TRAINER_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main
+    --process_main=tunix.experimental.examples.common.run_trainer_node.main
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
     --mesh_tp="$TRAINER_TP"
@@ -260,7 +260,7 @@ echo "Launching DeepSWE rollout node..."
   ROLLOUT_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.deepswe_dist.run_rollout_node.main
+    --process_main=tunix.experimental.examples.common.run_rollout_node.main
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
@@ -274,7 +274,9 @@ echo "Launching DeepSWE rollout node..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
-    --scaffold="$SCAFFOLD"
+    --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
+    --env_name=deepswe_env
+    --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then

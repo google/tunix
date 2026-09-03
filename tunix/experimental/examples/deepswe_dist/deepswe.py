@@ -148,6 +148,7 @@ def build_prompt_item(
       "scaffold": scaffold,
       "verbose": env_verbose,
   }
+  agent_config = {"scaffold": scaffold}
   return {
       "prompt": problem,
       "prompt_id": prompt_id,
@@ -164,6 +165,7 @@ def build_prompt_item(
           "problem_statement": problem,
           "prefix_hash": prompt_id,
           "env_config": env_config,
+          "agent_config": agent_config,
       },
   }
 

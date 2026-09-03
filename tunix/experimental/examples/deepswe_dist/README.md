@@ -5,10 +5,10 @@ distributed RL pipeline. It follows the same control-plane shape as the
 distributed GSM8K example:
 
 1. `run_deepswe_dist.py` runs the CPU orchestrator.
-2. `run_rollout_node.py` runs a rollout worker configured with DeepSWE's
-   `SWEEnv` and `SWEAgent`.
-3. The trainer worker is reused from `math_gsm8k_dist/run_trainer_node.py`
-   because it is already a generic PeftTrainer V2 worker.
+2. `../common/run_rollout_node.py` runs a rollout worker configured with
+   DeepSWE's `SWEEnv` and `SWEAgent`.
+3. The trainer worker is reused from `../common/run_trainer_node.py` because it
+   is already a generic PeftTrainer V2 worker.
 
 The first milestone is intentionally small: run one trainer+rollout pipeline
 step with `BETA=0.0` and `WEIGHT_SYNC_MODE=none`. Reference KL, Raiden weight

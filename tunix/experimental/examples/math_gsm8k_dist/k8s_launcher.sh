@@ -150,7 +150,7 @@ start_trainer() {
       VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
+        --process_main=tunix.experimental.examples.common.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
@@ -201,7 +201,7 @@ start_rollout() {
       SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
+        --process_main=tunix.experimental.examples.common.run_rollout_node.main \
         --worker_id=${ROLLOUT_ID} \
         --port=${ROLLOUT_PORT} \
         --model_id=${MODEL_ID} \

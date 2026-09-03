@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reference inference worker process runner for the distributed GRPO demo."""
+"""Reference inference worker process runner shared by distributed RL examples."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 DEFAULT_MODEL_DOWNLOAD_DIR = os.path.join(
-    REPO_ROOT, "artifacts", "qwen3_dist_gsm8k", "models"
+    REPO_ROOT, "artifacts", "distributed_examples", "models"
 )
 
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Trainer worker process runner for the experimental distributed GRPO demo."""
+"""Trainer worker process runner shared by distributed RL examples."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from jax.sharding import Mesh
 import optax
 from orbax import checkpoint as ocp
 from tunix.cli.utils import model as model_utils
-from tunix.experimental.examples.math_gsm8k_dist import models
+from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
@@ -47,7 +47,7 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 DEFAULT_MODEL_DOWNLOAD_DIR = os.path.join(
-    REPO_ROOT, "artifacts", "qwen3_dist_gsm8k", "models"
+    REPO_ROOT, "artifacts", "distributed_examples", "models"
 )
 
 
