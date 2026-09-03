@@ -232,6 +232,7 @@ echo "Launching trainer node..."
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --sampler="$SAMPLER"
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
