@@ -879,7 +879,7 @@ class Attention(nnx.Module):
 
       def _checkpointed_block(state, *args, **kwargs):
         module = nnx.merge(graphdef, state)
-        return module.block(*args, **kwargs)
+        return module.block(*args, **kwargs, force_eager=force_eager)
 
       return jax.checkpoint(_checkpointed_block)(
           state,
@@ -889,7 +889,6 @@ class Attention(nnx.Module):
           attn_mask,
           kv_shared_cache,
           segment_ids,
-          force_eager,
       )
     else:
       return self.block(
