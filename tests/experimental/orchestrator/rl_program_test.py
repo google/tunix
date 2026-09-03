@@ -1584,6 +1584,34 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(logger.metric_exists("", "rewards/sum", "train"))
       self.assertAlmostEqual(logger.get_metric("", "rewards/sum", "train"), 5.0)
 
+      # Advantage Metrics
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/mean", "train"), 1.0
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/max", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/max", "train"), 1.0
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/min", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/min", "train"), 1.0
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/std", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/std", "train"), 0.0
+      )
+      self.assertAlmostEqual(program.last_step_result.advantage_mean, 1.0)
+      self.assertAlmostEqual(program.last_step_result.advantage_std, 0.0)
+
       # 3. Rollout Metrics (collected from RolloutWorker responses)
       self.assertTrue(
           logger.metric_exists("", "rollout/prompt_length_mean", "train")
@@ -1650,6 +1678,82 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(
           logger.metric_exists("", "orchestrator/step_time_sec", "train")
       )
+
+    asyncio.run(_run())
+
+  def test_advantage_metrics_logging(self):
+    async def _run():
+      rollout_worker = _MockWorkerHandle(role="rollout")
+      rollout_worker.responses = [
+          [
+              _create_rollout_response(
+                  "req_0", "prompt_0", group_index=0, reward=1.0
+              ),
+              _create_rollout_response(
+                  "req_1", "prompt_0", group_index=1, reward=2.0
+              ),
+          ],
+      ]
+      trainer_worker = _MockWorkerHandle(role="trainer")
+      trainer_worker.metrics_buffer = exp_metrics.MetricsBuffer(
+          id=1, scalar_metrics={"loss": 0.1}
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[rollout_worker],
+          trainer_workers={datatypes.Role.ACTOR: trainer_worker},
+      )
+      payload_0 = datatypes.RLTrainerPayload(
+          token_ids=np.array([1, 2], dtype=np.int32),
+          token_mask=np.array([1, 1], dtype=np.float32),
+          loss_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.full(2, 1.5, dtype=np.float32),
+          action_mask=np.array([1, 1], dtype=np.float32),
+      )
+      payload_1 = datatypes.RLTrainerPayload(
+          token_ids=np.array([3, 4], dtype=np.int32),
+          token_mask=np.array([1, 1], dtype=np.float32),
+          loss_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.full(2, -0.5, dtype=np.float32),
+          action_mask=np.array([1, 1], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.return_value = [
+          payload_0,
+          payload_1,
+      ]
+
+      program = self._create_program(
+          dataset=["prompt_0"], reward_fns=[], sync_weights=False
+      )
+      await program.run_async(engine, max_steps=1)
+
+      logger = program.metrics_logger
+      self.assertIsNotNone(logger)
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/mean", "train"), 0.5
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/max", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/max", "train"), 1.5
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/min", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/min", "train"), -0.5
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/std", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/std", "train"), 1.0
+      )
+      self.assertAlmostEqual(program.last_step_result.advantage_mean, 0.5)
+      self.assertAlmostEqual(program.last_step_result.advantage_std, 1.0)
 
     asyncio.run(_run())
 
