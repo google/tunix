@@ -1014,12 +1014,17 @@ class WeightSyncCoordinator:
       # the controller pairs variables by exact name and silently skips
       # mismatches, so a bad wire name or shape must stop the round HERE --
       # afterwards it degrades into a lost tensor under a green round.
-      preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
-      if preflight_problems:
-        failures.extend(preflight_problems)
-        raise fail(
-            "manifest preflight failed before any destination was quiesced;"
-            " no rollback needed"
+      if not isinstance(self._handler, NullHandler):
+        preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
+        if preflight_problems:
+          failures.extend(preflight_problems)
+          raise fail(
+              "manifest preflight failed before any destination was quiesced;"
+              " no rollback needed"
+          )
+      else:
+        logging.debug(
+            "NullHandler active; skipping manifest preflight mismatch checks."
         )
 
       loop = asyncio.get_running_loop()
@@ -1673,3 +1678,49 @@ class WeightSyncCoordinator:
       )
       return RoundState.FAILED_NEEDS_RESTART
     return RoundState.ABORTED
+
+
+class NoOpWeightSyncCoordinator:
+  """Protocol-only no-op coordinator that synchronizes policy versions without tensor transfer."""
+
+  def __init__(self, rollout_handles: Sequence[Any] | None = None):
+    self._policy_version = 0
+    self._rollout_handles = list(rollout_handles or [])
+
+  async def sync(
+      self, policy_version: int | None = None, **kwargs: Any
+  ) -> WeightSyncResult:
+    """Updates the policy version and broadcasts it to rollout workers."""
+    del kwargs
+    version = (
+        policy_version
+        if policy_version is not None
+        else self._policy_version + 1
+    )
+    self._policy_version = version
+    logging.info(
+        "[NoopWeightSyncCoordinator] Syncing policy_version -> %d (noop)...",
+        version,
+    )
+    for handle in self._rollout_handles:
+      try:
+        if hasattr(handle, "asubmit"):
+          await handle.asubmit("set_policy_version", version=version)
+        elif hasattr(handle, "submit"):
+          handle.submit("set_policy_version", version=version)
+      except Exception as exc:  # pylint: disable=broad-except
+        logging.warning(
+            "[NoopWeightSyncCoordinator] Failed to set policy_version on worker: %s",
+            exc,
+        )
+    return WeightSyncResult(
+        policy_version=version,
+        round_index=version,
+        req_id=f"noop-r{version}",
+        uuid=version,
+        state=RoundState.COMMITTED,
+        transfer=None,
+        source_units=(),
+        destination_units=(),
+    )
+

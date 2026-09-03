@@ -147,6 +147,11 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     self.assertTrue(worker.manager.admission_open)
     self.assertEqual(worker.state, WorkerState.READY)
 
+  def test_set_policy_version(self):
+    worker = self._worker()
+    self.assertEqual(worker.set_policy_version(42), 42)
+    self.assertEqual(worker._policy_version, 42)
+
 
 if __name__ == "__main__":
   absltest.main()

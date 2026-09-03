@@ -1803,5 +1803,29 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     self.assertEqual(slow_source.release_calls, 1)
 
 
+class NoOpCoordinatorTest(absltest.TestCase):
+
+  def test_noop_coordinator_updates_and_propagates_policy_version(self):
+    class FakeRolloutWorker:
+
+      def __init__(self):
+        self.policy_version = 0
+
+      async def asubmit(self, method: str, version: int = 0):
+        if method == "set_policy_version":
+          self.policy_version = version
+
+    worker = FakeRolloutWorker()
+    coord = weight_sync_coordinator.NoOpWeightSyncCoordinator(
+        rollout_handles=[worker]
+    )
+    result = asyncio.run(coord.sync(policy_version=5))
+    self.assertEqual(result.policy_version, 5)
+    self.assertEqual(
+        result.state, weight_sync_coordinator.RoundState.COMMITTED
+    )
+    self.assertEqual(worker.policy_version, 5)
+
+
 if __name__ == "__main__":
   absltest.main()
