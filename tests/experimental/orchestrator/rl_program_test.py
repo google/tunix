@@ -2357,8 +2357,6 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
-
   def test_non_positive_batch_dimensions_rejected(self):
     self.mock_algo.mini_batch_size = 0
     with self.assertRaisesRegex(
@@ -2426,6 +2424,77 @@ class RLProgramTest(absltest.TestCase):
           max_response_length=512,
       )
       self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+
+    asyncio.run(_run())
+
+  def test_run_async_auto_configures_worker_on_engine(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      mock_assembler = mock.MagicMock()
+      mock_assembler.pad_id = 11
+      mock_assembler.eos_id = 22
+      mock_assembler.assembly_batch_size = 2
+      mock_assembler.groups_per_assembly_batch = 1
+      mock_assembler.pack.return_value = [
+          mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      ]
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          assembler=mock_assembler,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.mock_engine.configure_worker.assert_called_once_with(
+          role=datatypes.Role.ACTOR,
+          algo=self.mock_algo,
+          assembler=mock_assembler,
+      )
+
+    asyncio.run(_run())
+
+  def test_run_async_configures_worker_before_prepare_rollout_policy(self):
+    async def _run():
+      call_order = []
+      self.mock_engine.configure_worker.side_effect = (
+          lambda **kwargs: call_order.append("configure_worker")
+      )
+      self.mock_engine.prepare_rollout_policy = mock.AsyncMock(
+          side_effect=lambda **kwargs: call_order.append(
+              "prepare_rollout_policy"
+          )
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          sync_weights=True,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          call_order, ["configure_worker", "prepare_rollout_policy"]
+      )
+
+    asyncio.run(_run())
+
+  def test_run_async_propagates_configure_worker_failure(self):
+    async def _run():
+      self.mock_engine.configure_worker.side_effect = ValueError(
+          "Worker configuration failed"
+      )
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+      )
+      with self.assertRaisesRegex(ValueError, "Worker configuration failed"):
+        await program.run_async(self.mock_engine)
+
+      self.mock_engine.prepare_rollout_policy.assert_not_called()
+      self.mock_engine.dispatch_rollouts.assert_not_called()
 
     asyncio.run(_run())
 

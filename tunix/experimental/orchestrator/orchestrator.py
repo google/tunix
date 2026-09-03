@@ -407,7 +407,6 @@ class ClusterOrchestrator:
     logging.info("Starting managed RL program run (max_steps=%d)...", max_steps)
     if self.engine is None:
       self.bring_up_workers()
-
     metrics_logging_options = getattr(
         self.config, "metrics_logging_options", None
     )

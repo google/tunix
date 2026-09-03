@@ -18,6 +18,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.worker import remote_execution
 
 
@@ -133,6 +135,17 @@ class AbstractRLEngine(Protocol):
       | None
   ):
     """Retrieves step metrics from the worker for the specified role."""
+    ...
+
+  def configure_worker(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      *,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      assembler: batch_assembly.BatchAssembler[Any],
+      **kwargs: Any,
+  ) -> None:
+    """Configures worker(s) under the specified role with algorithm or runtime settings."""
     ...
 
   async def prepare_rollout_policy(

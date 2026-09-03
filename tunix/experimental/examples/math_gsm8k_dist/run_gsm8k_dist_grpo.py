@@ -171,26 +171,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   )
 
 
-def _configure_trainer_loss(
-    trainer_handle: remote_execution.ActorHandle,
-    *,
-    algo: algorithm_adapter.GRPOAdapter,
-    pad_id: int,
-    eos_id: int,
-) -> None:
-  logging.info(
-      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
-      "epsilon=%s).",
-      algo.beta_kl,
-      algo.clip_epsilon,
-  )
-  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
-  trainer_handle.submit(
-      "with_gen_model_input_fn",
-      algo.build_gen_model_input_fn(pad_id=pad_id, eos_id=eos_id),
-  )
-
-
 def _build_prompt_item(
     *,
     example: dict[str, Any],
@@ -325,16 +305,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  assert (
-      len(trainer_handles) == 1
-  ), f"Expected 1 trainer worker, got {len(trainer_handles)}."
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,

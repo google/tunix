@@ -802,6 +802,12 @@ class StandardRLProgram(RLProgram):
     self.engine = engine
     logging.info("Starting StandardRLProgram concurrent stages...")
 
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=self.algo,
+        assembler=self.assembler,
+    )
+
     if self.sync_weights:
       await engine.prepare_rollout_policy(
           role=datatypes.Role.ACTOR,

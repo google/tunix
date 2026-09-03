@@ -32,6 +32,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.common import logging_utils
 from tunix.experimental.metrics import metrics as exp_metrics
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
@@ -546,6 +548,58 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if worker is None:
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
+
+  def configure_worker(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      *,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      assembler: batch_assembly.BatchAssembler[Any],
+      **kwargs: Any,
+  ) -> None:
+    """Configures worker(s) under the specified role with algorithm or runtime settings."""
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    if algo is None:
+      raise ValueError(
+          f"algo is required to configure worker for role {role_name}"
+      )
+    if assembler is None:
+      raise ValueError(
+          f"assembler is required to configure worker for role {role_name}"
+      )
+    match role:
+      case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
+        worker = self._trainer_workers.get(role)
+        if worker is None:
+          raise ValueError(f"No trainer worker registered for role {role_name}")
+        logging.info(
+            "Auto-configuring trainer loss and model input fn on %s worker...",
+            role_name,
+        )
+        worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+        pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
+        eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        gen_fn = algo.build_gen_model_input_fn(
+            pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
+            eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
+        )
+        worker.submit("with_gen_model_input_fn", gen_fn)
+
+      case datatypes.Role.ROLLOUT:
+        if not self._rollout_workers:
+          raise ValueError("No rollout workers registered on engine.")
+        logging.info("Configuring rollout workers...")
+
+      case datatypes.Role.REFERENCE:
+        worker = self._inference_workers.get(role)
+        if worker is None:
+          raise ValueError(
+              f"No inference worker registered for role {role_name}"
+          )
+        logging.info("Configuring reference inference worker...")
+
+      case _:
+        raise ValueError(f"Unsupported role for configure_worker: {role_name}")
 
   async def prepare_rollout_policy(
       self,
