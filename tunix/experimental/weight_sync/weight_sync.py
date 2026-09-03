@@ -207,11 +207,25 @@ class WorkUnitMetadata:
     variables = []
     for v in variables_raw:
       if isinstance(v, TensorMetadata):
-        variables.append(v)
-      elif isinstance(v, dict):
+        name = v.name[:-6] if v.name.endswith(".value") else v.name
         variables.append(
             TensorMetadata(
-                name=v["name"],
+                name=name,
+                shape=tuple(v.shape),
+                mesh_shape=tuple(v.mesh_shape),
+                layout=tuple(v.layout),
+                item_size=int(v.item_size),
+                layer_idx=int(getattr(v, "layer_idx", 0)),
+                sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+            )
+        )
+      elif isinstance(v, dict):
+        name = v["name"]
+        if name.endswith(".value"):
+          name = name[:-6]
+        variables.append(
+            TensorMetadata(
+                name=name,
                 shape=tuple(v["shape"]),
                 mesh_shape=tuple(v["mesh_shape"]),
                 layout=tuple(v["layout"]),
@@ -221,9 +235,10 @@ class WorkUnitMetadata:
             )
         )
       elif hasattr(v, "name"):
+        name = v.name[:-6] if v.name.endswith(".value") else v.name
         variables.append(
             TensorMetadata(
-                name=v.name,
+                name=name,
                 shape=tuple(v.shape),
                 mesh_shape=tuple(v.mesh_shape),
                 layout=tuple(v.layout),

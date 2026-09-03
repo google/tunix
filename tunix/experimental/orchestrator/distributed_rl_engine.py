@@ -22,6 +22,7 @@ Contains:
 import asyncio
 import collections
 from collections.abc import Mapping, Sequence
+from concurrent import futures
 import inspect
 from typing import Any
 import uuid
@@ -111,6 +112,23 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   raise TypeError(
       f"Unsupported response type for trajectory conversion: {type(resp)}"
   )
+
+
+def _submit_worker(
+    worker: remote_execution.ActorHandle,
+    method_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+  """Invokes worker.submit safely even when an event loop is active on the current thread."""
+  try:
+    loop = asyncio.get_running_loop()
+  except RuntimeError:
+    loop = None
+  if loop is not None and loop.is_running():
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+      return pool.submit(worker.submit, method_name, *args, **kwargs).result()
+  return worker.submit(method_name, *args, **kwargs)
 
 
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
@@ -576,14 +594,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             "Auto-configuring trainer loss and model input fn on %s worker...",
             role_name,
         )
-        worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+        _submit_worker(worker, "with_loss_fn", algo.loss_fn(), has_aux=True)
         pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
         eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
         gen_fn = algo.build_gen_model_input_fn(
             pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
             eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
         )
-        worker.submit("with_gen_model_input_fn", gen_fn)
+        _submit_worker(worker, "with_gen_model_input_fn", gen_fn)
 
       case datatypes.Role.ROLLOUT:
         if not self._rollout_workers:

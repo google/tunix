@@ -190,7 +190,10 @@ def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
   for path, leaf in jax.tree_util.tree_leaves_with_path(state):
     arr = getattr(leaf, "value", leaf)
     if hasattr(arr, "shape") and hasattr(arr, "dtype"):
-      names.append(jax.tree_util.keystr(path))
+      name = jax.tree_util.keystr(path)
+      if name.endswith(".value"):
+        name = name[:-6]
+      names.append(name)
       arrays.append(arr)
   return names, arrays
 
@@ -466,7 +469,7 @@ class RaidenSynchronizer:
         len(self.arrays),
         self._is_proxy,
     )
-    if self._is_proxy:
+    if self._is_proxy and not self._host_stage:
       self._ips = []
       self._unique_listeners = []
       if self._auto_h2d:
@@ -512,12 +515,12 @@ class RaidenSynchronizer:
       _log_rss("bind:after_native_rebind")
 
   def _require_sync(self, op: str) -> Any:
-    if self._sync is None and not self._is_proxy:
+    if self._sync is None and (not self._is_proxy or self._host_stage):
       raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
     return self._sync
 
   def d2h(self) -> None:
-    if self._is_proxy:
+    if self._is_proxy and not self._host_stage:
       try:
         self._init_ffi_transport(is_d2h=True)
         logging.info(
@@ -534,12 +537,15 @@ class RaidenSynchronizer:
         )
         raise
 
+    if self._host_stage:
+      return
+
     self._require_sync("d2h()").d2h()
 
   def h2d(self) -> None:
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
-    if self._is_proxy:
+    if self._is_proxy and not self._host_stage:
       self._ffi_h2d()
       return
     if self._sync is not None:
@@ -604,7 +610,7 @@ class RaidenSynchronizer:
     if mesh_shape is None:
       mesh_axes = ("fsdp",)
       mesh_shape = (1,)
-    if self._is_proxy:
+    if self._is_proxy and not self._host_stage:
       shards = tuple(self._ips)
       control_addr = self._unique_listeners[0] if self._unique_listeners else ""
     else:
