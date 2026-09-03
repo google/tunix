@@ -21,7 +21,6 @@ import functools
 import logging
 import os
 import sys
-from types import SimpleNamespace
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -128,41 +127,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _grpo_model_input(
-    train_example: Any,
-    *,
-    algo_config: Any,
-    pad_id: int,
-    eos_id: int,
-) -> dict[str, Any]:
-  return {
-      "train_example": train_example,
-      "algo_config": algo_config,
-      "pad_id": pad_id,
-      "eos_id": eos_id,
-  }
-
-
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   return algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
       mini_batch_size=args.batch_size,
+      train_micro_batch_size=args.train_micro_batch_size,
       max_turns=args.max_turns,
       max_packed_len=args.max_prompt_length + args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
-  )
-
-
-def _build_grpo_config(args: argparse.Namespace) -> Any:
-  return SimpleNamespace(
-      beta=args.beta,
-      epsilon=args.epsilon,
-      loss_algo="grpo",
-      loss_agg_mode="sequence-mean-token-mean",
       temperature=args.temperature,
-      kl_loss_mode="mse_kl",
-      kl_clamp_value=None,
   )
 
 
@@ -170,24 +144,19 @@ def _configure_trainer_loss(
     trainer_handle: remote_execution.ActorHandle,
     *,
     algo: algorithm_adapter.GRPOAdapter,
-    grpo_config: Any,
     pad_id: int,
     eos_id: int,
 ) -> None:
   logging.info(
-      "Configuring trainer-side GRPO loss (beta=%s, epsilon=%s).",
-      grpo_config.beta,
-      grpo_config.epsilon,
+      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
+      "epsilon=%s).",
+      algo.beta_kl,
+      algo.clip_epsilon,
   )
   trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
   trainer_handle.submit(
       "with_gen_model_input_fn",
-      functools.partial(
-          _grpo_model_input,
-          algo_config=grpo_config,
-          pad_id=pad_id,
-          eos_id=eos_id,
-      ),
+      algo.build_gen_model_input_fn(pad_id=pad_id, eos_id=eos_id),
   )
 
 
@@ -281,14 +250,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   logging.info("Registered workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
-  grpo_config = _build_grpo_config(args)
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
   _configure_trainer_loss(
       trainer_handles[0],
       algo=algo,
-      grpo_config=grpo_config,
       pad_id=pad_id,
       eos_id=eos_id,
   )
