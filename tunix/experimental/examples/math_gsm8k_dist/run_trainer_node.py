@@ -70,6 +70,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_expert", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
+  parser.add_argument("--sampler", type=str, default="vanilla")
   parser.add_argument("--mini_batch_size", type=int, default=1)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
@@ -364,6 +365,7 @@ def _create_tunix_trainer_factory(args) -> Any:
           actor_model,
           optax.adamw(learning_rate=args.learning_rate),
           training_config,
+          sampler_type=args.sampler,
       )
     return _MeshBoundTrainer(trainer, mesh)
 
