@@ -48,7 +48,7 @@ COMMANDS:
 
 OPTIONS:
   --image <IMAGE>           Container image to run
-                            Default: gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-debug-raiden-0903-1
+                            Default: gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-debug-raiden-0903-2
   --model, --preset <NAME>  Model preset to use:
                               - 'qwen3-0.6b' (Default: Qwen3-0.6B, tpuv5:2x2x2 train, tpuv5:2x2x1 roll)
                               - 'qwen3.5-35b' (Qwen3.5-35B-A3B with scanned ckpt)
@@ -124,7 +124,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-debug-raiden-0903-1"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-debug-raiden-0903-2"
       ;;
     qwen3.5-35b|35b|35B)
       PRESET_NAME="qwen3.5-35b"
@@ -176,7 +176,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=1
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-debug-raiden-0903-1"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-debug-raiden-0903-2"
       ;;
     *)
       echo "Error: Unknown preset '$preset'. Available: qwen3-0.6b, qwen3.5-35b, qwen3-1.7b" >&2
