@@ -301,7 +301,7 @@ echo "Launching CPU orchestrator..."
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_id="${ORCHESTRATOR_ID}"
     --discovery_port="${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist_grpo.main
+    --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist.main
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
     --batch_size="$BATCH_SIZE"

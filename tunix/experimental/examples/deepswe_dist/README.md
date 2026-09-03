@@ -4,7 +4,7 @@ This example is the first DeepSWE-specific version of the experimental
 distributed RL pipeline. It follows the same control-plane shape as the
 distributed GSM8K example:
 
-1. `run_deepswe_dist_grpo.py` runs the CPU orchestrator.
+1. `run_deepswe_dist.py` runs the CPU orchestrator.
 2. `run_rollout_node.py` runs a rollout worker configured with DeepSWE's
    `SWEEnv` and `SWEAgent`.
 3. The trainer worker is reused from `math_gsm8k_dist/run_trainer_node.py`
