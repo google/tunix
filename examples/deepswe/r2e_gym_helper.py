@@ -44,7 +44,24 @@ def patch_kubernetes_runtime():
           )
           val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
           body["spec"]["nodeSelector"] = {key: val}
-          logging.info("[Monkeypatch] Overrode nodeSelector to %s=%s", key, val)
+          tolerations = body["spec"].setdefault("tolerations", [])
+          if not any(t.get("key") == key for t in tolerations):
+            tolerations.append({
+                "key": key,
+                "operator": "Equal",
+                "value": val,
+                "effect": "NoSchedule",
+            })
+          body["spec"]["priorityClassName"] = os.environ.get(
+              "POD_PRIORITY_CLASS", "medium"
+          )
+          if "imagePullSecrets" in body["spec"]:
+            body["spec"]["imagePullSecrets"] = []
+          logging.info(
+              "[Monkeypatch] Overrode nodeSelector to %s=%s, added tolerations, priorityClass",
+              key,
+              val,
+          )
         return original_create_namespaced_pod(*args, **kwargs)
 
       self.client.create_namespaced_pod = patched_create_namespaced_pod
