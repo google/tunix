@@ -728,8 +728,8 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = self._external_resume_trainer(
         root, implicit_resume=implicit_resume
     )
-    trainer.fwd_bwd(self.train_ds[0])
-    train_steps = trainer.update()
+    trainer.fwd_bwd(self.train_ds[0], cache_nnx_graph=False)
+    train_steps = trainer.update(cache_nnx_graph=False)
     trainer.save_checkpoint(
         metadata={
             'step': train_steps,
@@ -737,9 +737,7 @@ class PeftTrainerTest(parameterized.TestCase):
             'num_rollouts': 8,
         }
     )
-    trained_state = jax.tree.map(
-        jnp.copy, nnx.state(trainer.model, nnx.Param)
-    )
+    trained_state = jax.tree.map(jnp.copy, nnx.state(trainer.model, nnx.Param))
     trainer.close()
     return train_steps, trained_state
 
@@ -809,12 +807,10 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = self._external_resume_trainer(root, implicit_resume=True)
     states = {}
     for _ in range(2):
-      trainer.fwd_bwd(self.train_ds[0])
-      step = trainer.update()
+      trainer.fwd_bwd(self.train_ds[0], cache_nnx_graph=False)
+      step = trainer.update(cache_nnx_graph=False)
       trainer.save_checkpoint(metadata={'step': step, 'marker': step})
-      states[step] = jax.tree.map(
-          jnp.copy, nnx.state(trainer.model, nnx.Param)
-      )
+      states[step] = jax.tree.map(jnp.copy, nnx.state(trainer.model, nnx.Param))
     trainer.close()
 
     rolled_back = self._external_resume_trainer(root, implicit_resume=False)
@@ -831,7 +827,9 @@ class PeftTrainerTest(parameterized.TestCase):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    metadata = trainer.restore_checkpoint(checkpoint_directory='/somewhere/else')
+    metadata = trainer.restore_checkpoint(
+        checkpoint_directory='/somewhere/else'
+    )
     self.assertEqual(metadata, {'step': 0})
 
   def test_restore_checkpoint_without_configured_directory_is_a_noop(self):
