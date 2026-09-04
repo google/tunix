@@ -70,6 +70,9 @@ class TrainingConfig:
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
   checkpointing_options: ocp.CheckpointManagerOptions | None = None
+  # Whether the `__init__` restores from the latest checkpoint on its own.
+  # True to preserves the historical behavior.
+  resume_from_checkpoint_on_init: bool = True
 
   # Configs for the metrics logger.
   metrics_logging_options: MetricsLoggerOptions | None = None
@@ -479,32 +482,22 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._has_aux = False
     self._pbar = None
     self._last_update_grad_norm: ArrayLike | None = None
-
-    self._train_steps, self._restored_custom_metadata = (
-        self.checkpoint_manager.maybe_restore(
-            self.model,
-            self.optimizer,
-            restore_only_lora_params=self._lora_enabled,
-        )
-    )
-    self._iter_steps = self._train_steps * self.config.get_with_default(
-        "gradient_accumulation_steps", 1
-    )
+    self._restored_custom_metadata: Mapping[str, Any] = {}
+    if self.config.get_with_default("resume_from_checkpoint_on_init", True):
+      self._train_steps, self._restored_custom_metadata = (
+          self.checkpoint_manager.maybe_restore(
+              self.model,
+              self.optimizer,
+              restore_only_lora_params=self._lora_enabled,
+          )
+      )
 
     self._jitted_fwd_bwd_step_fn = None
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
-    max_step = None
-    if self.config.max_steps is not None:
-      max_step = self.config.max_steps * self.config.get_with_default(
-          "gradient_accumulation_steps", 1
-      )
-    self._prof = profiler.Profiler(
-        initial_step=self._iter_steps,
-        max_step=max_step,
-        profiler_options=self.config.profiler_options,
-    )
+    self._prof: profiler.Profiler | None = None
+    self._sync_step_derived_state()
     self._buffered_train_metrics: MetricsBuffer | None = None
     self._prev_buffered_train_metrics: MetricsBuffer | None = None
     self._buffered_eval_metrics: MetricsBuffer | None = None
@@ -521,6 +514,22 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._target_state = None
     self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
+
+  def _sync_step_derived_state(self) -> None:
+    """Recomputes everything derived from `_train_steps`"""
+    self._iter_steps = self._train_steps * self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
+    max_step = None
+    if self.config.max_steps is not None:
+      max_step = self.config.max_steps * self.config.get_with_default(
+          "gradient_accumulation_steps", 1
+      )
+    self._prof = profiler.Profiler(
+        initial_step=self._iter_steps,
+        max_step=max_step,
+        profiler_options=self.config.profiler_options,
+    )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -1147,12 +1156,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
-    step = kwargs.pop("step", None)
-    if step is None:
-      if isinstance(metadata, (dict, Mapping)):
-        step = metadata.get("step", self._train_steps)
-      elif hasattr(metadata, "step"):
-        step = getattr(metadata, "step")
+    step = None
+    if isinstance(metadata, (dict, Mapping)):
+      step = metadata.get("step", self._train_steps)
+    elif hasattr(metadata, "step"):
+      step = getattr(metadata, "step")
     if step is None:
       step = self._train_steps
     save_only_lora_params = kwargs.pop(
@@ -1168,8 +1176,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
 
   @override
-  def restore_checkpoint(self, **kwargs) -> Any:
-    return {}
+  def restore_checkpoint(self, step: int | None = None, **kwargs) -> Any:
+    """Restores model, optimizer and step count from a checkpoint."""
+    del kwargs
+    self._train_steps, self._restored_custom_metadata = (
+        self.checkpoint_manager.maybe_restore(
+            self.model,
+            self.optimizer,
+            step=step,
+            restore_only_lora_params=self._lora_enabled,
+        )
+    )
+    self._sync_step_derived_state()
+    metadata = dict(self._restored_custom_metadata or {})
+    metadata["step"] = self._train_steps
+    logging.info(
+        "restore_checkpoint restored step=%d (requested step=%s).",
+        self._train_steps,
+        "latest" if step is None else step,
+    )
+    return metadata
 
   @override
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
@@ -1287,7 +1313,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     index = 0
     last_step_completion_time = time.perf_counter()
     while True:
-      self._prof.maybe_activate(self._iter_steps)
+      if self._prof is not None:
+        self._prof.maybe_activate(self._iter_steps)
       with jax.profiler.StepTraceAnnotation("train", step_num=self._iter_steps):
         train_example = None
         if self.data_hooks:
@@ -1403,7 +1430,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           ):
             self._run_eval(eval_ds)
 
-      self._prof.maybe_deactivate(self._iter_steps)
+      if self._prof is not None:
+        self._prof.maybe_deactivate(self._iter_steps)
 
     self._throttler.wait_for_all()
     logging.info(

@@ -70,6 +70,31 @@ class MockActorHandle(mock.MagicMock):
     return await method(*args, **kwargs)
 
 
+class _FakeSyncResult:
+  """Minimal result object exposing a `policy_version` attribute."""
+
+  def __init__(self, policy_version: int):
+    self.policy_version = policy_version
+
+
+class _FakeWeightSyncCoordinator:
+  """Records sync calls and echoes (or forces) the resulting policy version."""
+
+  def __init__(self, forced_version: int | None = None):
+    self.calls: list[int] = []
+    self._forced_version = forced_version
+
+  async def sync(self, policy_version: int = 0, **kwargs):
+    del kwargs
+    self.calls.append(policy_version)
+    version = (
+        policy_version
+        if self._forced_version is None
+        else self._forced_version
+    )
+    return _FakeSyncResult(version)
+
+
 class DistributedRLEngineTest(absltest.TestCase):
 
   def setUp(self):
@@ -318,6 +343,142 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.save_checkpoint.assert_called_once_with(
           metadata=None, step=42, force=True
       )
+
+    asyncio.run(_run())
+
+  def test_sync_weights_accepts_explicit_policy_version(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+      version = await engine.sync_weights(policy_version=5)
+      self.assertEqual(version, 5)
+      self.assertEqual(coordinator.calls, [5])
+
+    asyncio.run(_run())
+
+  def test_sync_weights_accepts_role_and_target_roles(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      version = await engine.sync_weights(
+          role=datatypes.Role.CRITIC,
+          target_roles=[datatypes.Role.ACTOR],
+      )
+      self.assertEqual(version, 1)
+      self.assertEqual(coordinator.calls, [1])
+
+    asyncio.run(_run())
+
+  def _engine_with_coordinator(self, coordinator):
+    return distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        weight_sync_coordinator=coordinator,
+    )
+
+  def test_resume_from_checkpoint_returns_step_and_resyncs_weights(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint(role=datatypes.Role.ACTOR)
+
+      self.assertEqual(result, 3)
+      # Engine aligns its own policy version and resyncs rollout weights.
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+      self.mock_actor.restore_checkpoint.assert_called_once_with()
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_uses_step_boundary_policy_version(self):
+    async def _run():
+      # Recorded mid-step policy_version is ignored in favor of the step.
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 2,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_no_checkpoint_does_not_resync(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {"step": 0}
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 0)
+      self.assertEqual(coordinator.calls, [])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_tolerates_bad_metadata(self):
+    for bad_value in (None, "not-a-dict", {"step": "bogus"}):
+      with self.subTest(bad_value=bad_value):
+        async def _run(bad_value=bad_value):
+          self.mock_actor.restore_checkpoint.return_value = bad_value
+          coordinator = _FakeWeightSyncCoordinator()
+          engine = self._engine_with_coordinator(coordinator)
+
+          result = await engine.resume_from_checkpoint()
+
+          self.assertEqual(result, 0)
+          self.assertEqual(coordinator.calls, [])
+
+        asyncio.run(_run())
+
+  def test_resume_from_checkpoint_skips_resync_when_disabled(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 2,
+          "policy_version": 2,
+      }
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      with self.assertLogs(level="WARNING") as logs:
+        result = await engine.resume_from_checkpoint(
+            resync_rollout_weights=False
+        )
+
+      self.assertEqual(result, 2)
+      self.assertEqual(engine._policy_version, 2)
+      self.assertEqual(coordinator.calls, [])
+      self.assertTrue(
+          any("base weights" in line for line in logs.output), logs.output
+      )
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_raises_on_version_mismatch(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=1)
+      engine = self._engine_with_coordinator(coordinator)
+
+      with self.assertRaisesRegex(
+          RuntimeError, "does not match synced version"
+      ):
+        await engine.resume_from_checkpoint()
 
     asyncio.run(_run())
 

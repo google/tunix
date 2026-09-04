@@ -78,6 +78,29 @@ class MeshBoundTrainerTest(absltest.TestCase):
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
 
+  def test_restore_checkpoint_runs_within_mesh_context_and_propagates_kwargs(
+      self,
+  ):
+    call_order = []
+    self.mock_mesh.__enter__.side_effect = (
+        lambda: call_order.append("enter_mesh")
+    )
+    self.mock_mesh.__exit__.side_effect = (
+        lambda *args: call_order.append("exit_mesh")
+    )
+    self.mock_trainer.restore_checkpoint.side_effect = (
+        lambda *args, **kwargs: call_order.append("restore_checkpoint")
+        or {"step": 5}
+    )
+
+    result = self.mesh_trainer.restore_checkpoint(step=5)
+
+    self.assertEqual(result, {"step": 5})
+    self.mock_trainer.restore_checkpoint.assert_called_once_with(step=5)
+    self.assertEqual(
+        call_order, ["enter_mesh", "restore_checkpoint", "exit_mesh"]
+    )
+
   def test_fwd_bwd_runs_within_mesh(self):
     self.mesh_trainer.fwd_bwd("payload", skip_jit=False)
     self.mock_mesh.__enter__.assert_called_once()

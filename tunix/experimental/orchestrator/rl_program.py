@@ -177,6 +177,34 @@ class StandardRLProgram(RLProgram):
     ), "run_async must initialize capacity."
     await self._dispatch_capacity.acquire()
 
+  async def _resume_from_checkpoint(self) -> None:
+    """Realigns program orchestration state with the engine's restored checkpoint.
+
+    Delegates the mesh-level work (restoring the trainer checkpoint and, when
+    `sync_weights` is enabled, resyncing rollout worker weights to the restored
+    policy) to the engine, then translates the restored step into program
+    orchestration state: the train-loop bound (`_step`) and the dataset prefix
+    to skip (resumed `_step` if any).
+    """
+    assert self.engine is not None
+    restored_step = (
+        await self.engine.resume_from_checkpoint(
+            role=datatypes.Role.ACTOR,
+            resync_rollout_weights=self.sync_weights,
+        )
+    )
+    if restored_step <= 0:
+      return
+    self._step = restored_step
+    self.policy_version = restored_step
+    logging.info(
+        "Resuming from checkpoint: step=%d policy_version=%d (skipping %d"
+        " already-trained dataset items).",
+        restored_step,
+        self.policy_version,
+        self._step * self.mini_batch_size,
+    )
+
   async def rollout_dispatch_stage(self) -> None:
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
 
@@ -185,15 +213,19 @@ class StandardRLProgram(RLProgram):
     satisfying the engine's strict `prompt_id` contract.
     """
     assert self.engine is not None
-    # TODO(tunix-dev): Skip already trained datasets when resuming from
-    # checkpoints.
     if self.dataset is None:
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
+    # TODO(tunix-dev): current skip logic assumes mini_batch_size is the same as
+    # global batch size. We should support the case that one global batch
+    # contains multiple mini-batches.
+    already_consumed = self._step * self.mini_batch_size
 
     try:
       for prompt_idx, prompt_item in enumerate(self.dataset):
+        if prompt_idx < already_consumed:
+          continue
         await self._wait_for_dispatch_window()
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
@@ -718,7 +750,11 @@ class StandardRLProgram(RLProgram):
                 role=datatypes.Role.ACTOR,
                 metadata={
                     "step": self.step + 1,
-                    "policy_version": self.policy_version,
+                    # TODO(tunix-dev): Current implementation assumes that
+                    # policy_version is the same as the step. We need to
+                    # decouple them once the global batch and mini batch
+                    # alignment is fixed.
+                    "policy_version": self.policy_version + 1,
                     "num_rollouts": num_rollouts,
                     "num_microbatches": num_microbatches,
                 },
@@ -800,6 +836,10 @@ class StandardRLProgram(RLProgram):
     """Launches all stages concurrently on event loop."""
     del kwargs
     self.engine = engine
+    # Must happen before any stage starts: train_stage reads `_step` for its
+    # loop bound and rollout_dipatch_stage reads resumed `_step` to skip
+    # the dataset prefix the previous run already consumed.
+    await self._resume_from_checkpoint()
     logging.info("Starting StandardRLProgram concurrent stages...")
 
     engine.configure_worker(

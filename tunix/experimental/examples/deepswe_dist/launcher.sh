@@ -50,6 +50,10 @@ LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 DEBUG=${DEBUG:-0}
 
+CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
+
 DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
 DATASET_PATH=${DATASET_PATH:-}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
@@ -204,6 +208,9 @@ echo "  trainer chips:  ${TRAINER_TPU_CHIPS}"
 echo "  rollout chips:  ${ROLLOUT_TPU_CHIPS}"
 echo "  wandb project:  ${WANDB_PROJECT:-<none>}"
 echo "  wandb run name: ${WANDB_RUN_NAME:-<auto>}"
+echo "  ckpt interval:  ${CHECKPOINT_SAVE_INTERVAL_STEPS}"
+echo "  ckpt max keep:  ${CHECKPOINT_MAX_TO_KEEP}"
+echo "  ckpt root dir:  ${CHECKPOINT_ROOT_DIRECTORY}"
 echo "=================================================="
 
 if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
@@ -239,6 +246,9 @@ echo "Launching trainer node..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --sampler="$SAMPLER"
+    --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
+    --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
+    --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)

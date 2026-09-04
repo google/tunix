@@ -181,12 +181,24 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.save_checkpoint = mock.AsyncMock(
         return_value={"checkpoint_saved": True}
     )
+    self.mock_engine.restore_checkpoint = mock.AsyncMock(
+        return_value={"step": 0}
+    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=0
+    )
 
     async def _mock_poll(*args, **kwargs):
       del args, kwargs
       await asyncio.sleep(0.01)
       return []
 
+    async def _mock_sync_weights(*args, policy_version=None, **kwargs):
+      del args, kwargs
+      return 1 if policy_version is None else policy_version
+    self.mock_engine.sync_weights = mock.AsyncMock(
+        side_effect=_mock_sync_weights
+    )
     self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
@@ -242,6 +254,7 @@ class RLProgramTest(absltest.TestCase):
         assembler=assembler if assembler is not None else self.assembler,
         **kwargs,
     )
+    program._dispatch_capacity = asyncio.Semaphore(100)
     return program
 
   def test_dataset_exhausted_before_max_steps(self):
@@ -341,7 +354,7 @@ class RLProgramTest(absltest.TestCase):
           role=datatypes.Role.ACTOR,
           metadata={
               "step": 1,
-              "policy_version": 0,
+              "policy_version": 1,
               "num_rollouts": 2,
               "num_microbatches": 1,
           },
@@ -441,6 +454,128 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(call_order, ["save_checkpoint", "sync_weights"])
 
     asyncio.run(_run())
+
+  def test_resume_sets_step_and_policy_version_from_engine(self):
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=3
+    )
+    program = self._create_program(dataset=["p0"], max_steps=5)
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+
+    asyncio.run(_run())
+    self.assertEqual(program.step, 3)
+    self.assertEqual(program.policy_version, 3)
+
+  def test_resume_forwards_role_and_resync_flag_when_sync_enabled(self):
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=3
+    )
+    program = self._create_program(
+        dataset=["p0"], max_steps=5, sync_weights=True
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+
+    asyncio.run(_run())
+    self.mock_engine.resume_from_checkpoint.assert_called_once_with(
+        role=datatypes.Role.ACTOR, resync_rollout_weights=True
+    )
+
+  def test_resume_forwards_resync_disabled_when_sync_weights_false(self):
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=2
+    )
+    program = self._create_program(
+        dataset=["p0"], max_steps=5, sync_weights=False
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+
+    asyncio.run(_run())
+    self.mock_engine.resume_from_checkpoint.assert_called_once_with(
+        role=datatypes.Role.ACTOR, resync_rollout_weights=False
+    )
+    self.assertEqual(program.step, 2)
+
+  def test_resume_skips_already_consumed_dataset_prefix(self):
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=3
+    )
+    dataset = [f"p{i}" for i in range(5)]
+    program = self._create_program(
+        dataset=dataset,
+        max_steps=5,
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+      await program.rollout_dispatch_stage()
+
+    asyncio.run(_run())
+    dispatched = [
+        call.args[0][0]["prompt_id"]
+        for call in self.mock_engine.dispatch_rollouts.call_args_list
+    ]
+    self.assertEqual(dispatched, ["prompt_3", "prompt_4",],)
+
+  def test_fresh_run_does_not_skip_dataset(self):
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=0
+    )
+    dataset = [f"p{i}" for i in range(5)]
+    program = self._create_program(
+        dataset=dataset,
+        max_steps=5,
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+      await program.rollout_dispatch_stage()
+
+    asyncio.run(_run())
+    self.assertEqual(program.step, 0)
+    self.assertEqual(self.mock_engine.dispatch_rollouts.call_count, 5)
+
+  def test_resume_runs_before_first_dispatch(self):
+    call_order = []
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        return_value=1
+    )
+
+    async def _resume(*args, **kwargs):
+      del args, kwargs
+      call_order.append("resume_from_checkpoint")
+      return 1
+
+    async def _dispatch(*args, **kwargs):
+      del args, kwargs
+      call_order.append("dispatch_rollouts")
+
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
+        side_effect=_resume
+    )
+    self.mock_engine.dispatch_rollouts = mock.AsyncMock(side_effect=_dispatch)
+    program = self._create_program(
+        dataset=["p0", "p1", "p2"], max_steps=3, sync_weights=True
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+      await program.rollout_dispatch_stage()
+
+    asyncio.run(_run())
+    self.assertEqual(call_order[0], "resume_from_checkpoint")
+    self.assertIn("dispatch_rollouts", call_order)
 
   def test_zero_staleness_dispatches_only_one_minibatch_ahead(self):
     async def _run():

@@ -686,10 +686,9 @@ class PeftTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
 
-    custom_metadata = {'policy_version': 3}
+    custom_metadata = {'step': 25, 'policy_version': 3}
     trainer.save_checkpoint(
         metadata=custom_metadata,
-        step=25,
         save_only_lora_params=True,
         force=True,
     )
@@ -702,6 +701,146 @@ class PeftTrainerTest(parameterized.TestCase):
         custom_metadata=custom_metadata,
         force=True,
     )
+
+  def _external_resume_trainer(
+      self, root, *, implicit_resume, gradient_accumulation_steps=None
+  ):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000,
+        max_steps=100,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        checkpoint_root_directory=root,
+        checkpointing_options=ocp.CheckpointManagerOptions(
+            save_interval_steps=1, max_to_keep=5
+        ),
+        resume_from_checkpoint_on_init=implicit_resume,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    optimizer = optax.inject_hyperparams(optax.adamw)(
+        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer.is_managed_externally = True
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _write_one_checkpoint(self, root, *, implicit_resume=True):
+    trainer = self._external_resume_trainer(
+        root, implicit_resume=implicit_resume
+    )
+    trainer.fwd_bwd(self.train_ds[0])
+    train_steps = trainer.update()
+    trainer.save_checkpoint(
+        metadata={
+            'step': train_steps,
+            'policy_version': train_steps,
+            'num_rollouts': 8,
+        }
+    )
+    trained_state = jax.tree.map(
+        jnp.copy, nnx.state(trainer.model, nnx.Param)
+    )
+    trainer.close()
+    return train_steps, trained_state
+
+  def test_restore_checkpoint_reports_step_and_custom_metadata(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+
+    fresh = self._external_resume_trainer(root, implicit_resume=True)
+    self.assertEqual(fresh.restore_checkpoint(), {'step': 0})
+    del fresh
+
+    train_steps, _ = self._write_one_checkpoint(root)
+
+    resumed = self._external_resume_trainer(root, implicit_resume=True)
+    self.assertEqual(resumed.train_steps, train_steps)
+    self.assertEqual(
+        resumed.restore_checkpoint(),
+        {'step': 1, 'policy_version': 1, 'num_rollouts': 8},
+    )
+
+  def test_implicit_resume_disabled_leaves_trainer_at_zero(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    train_steps, trained_state = self._write_one_checkpoint(root)
+    self.assertEqual(train_steps, 1)
+
+    trainer = self._external_resume_trainer(root, implicit_resume=False)
+    self.assertEqual(trainer.train_steps, 0)
+    self.assertEqual(trainer._iter_steps, 0)
+    # Weights are the freshly initialised ones, not the checkpoint's.
+    jax.tree.map_with_path(
+        tc.assert_not_equal, trained_state, nnx.state(trainer.model, nnx.Param)
+    )
+
+  def test_explicit_restore_after_disabled_implicit_resume(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    train_steps, trained_state = self._write_one_checkpoint(root)
+
+    trainer = self._external_resume_trainer(root, implicit_resume=False)
+    self.assertEqual(trainer.train_steps, 0)
+
+    metadata = trainer.restore_checkpoint()
+
+    self.assertEqual(metadata['step'], train_steps)
+    self.assertEqual(trainer.train_steps, train_steps)
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_state, nnx.state(trainer.model, nnx.Param)
+    )
+
+  def test_explicit_restore_refreshes_step_derived_state(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    self._write_one_checkpoint(root)
+
+    trainer = self._external_resume_trainer(
+        root, implicit_resume=False, gradient_accumulation_steps=4
+    )
+
+    self.assertEqual(trainer._iter_steps, 0)
+    profiler_before = trainer._prof
+
+    trainer.restore_checkpoint()
+
+    self.assertEqual(trainer.train_steps, 1)
+    self.assertEqual(trainer._iter_steps, 4)  # 1 update * 4 accumulation steps
+    self.assertIsNot(trainer._prof, profiler_before)
+
+  def test_restore_checkpoint_accepts_explicit_step(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    trainer = self._external_resume_trainer(root, implicit_resume=True)
+    states = {}
+    for _ in range(2):
+      trainer.fwd_bwd(self.train_ds[0])
+      step = trainer.update()
+      trainer.save_checkpoint(metadata={'step': step, 'marker': step})
+      states[step] = jax.tree.map(
+          jnp.copy, nnx.state(trainer.model, nnx.Param)
+      )
+    trainer.close()
+
+    rolled_back = self._external_resume_trainer(root, implicit_resume=False)
+    metadata = rolled_back.restore_checkpoint(step=1)
+
+    self.assertEqual(metadata['step'], 1)
+    self.assertEqual(metadata['marker'], 1)
+    self.assertEqual(rolled_back.train_steps, 1)
+    jax.tree.map_with_path(
+        tc.assert_equal, states[1], nnx.state(rolled_back.model, nnx.Param)
+    )
+
+  def test_restore_checkpoint_accepts_unexpected_kwargs(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    metadata = trainer.restore_checkpoint(checkpoint_directory='/somewhere/else')
+    self.assertEqual(metadata, {'step': 0})
+
+  def test_restore_checkpoint_without_configured_directory_is_a_noop(self):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000, resume_from_checkpoint_on_init=False
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    self.assertEqual(trainer.restore_checkpoint(), {'step': 0})
+    self.assertEqual(trainer.train_steps, 0)
 
   def test_loss_output_aux_retention(self):
     def custom_loss_fn(

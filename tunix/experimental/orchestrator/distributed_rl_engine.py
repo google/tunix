@@ -697,3 +697,83 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return await self._invoke_worker(
         worker, "save_checkpoint", metadata=metadata, **kwargs
     )
+
+  async def _restore_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> Any:
+    role_name = role.name
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role_name}")
+    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)
+
+  async def resume_from_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      resync_rollout_weights: bool = True,
+  ) -> int:
+    """Restores a checkpoint and realigns the mesh to the restored state.
+
+    See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
+    """
+    metadata = await self._restore_checkpoint(role=role)
+    if not isinstance(metadata, Mapping):
+      if metadata is not None:
+        logging.warning(
+            "restore_checkpoint returned %s, not a mapping; starting from"
+            " fresh run.",
+            type(metadata).__name__,
+        )
+      return 0
+    metadata = dict(metadata)
+    try:
+      restored_step = int(metadata.get("step", 0) or 0)
+    except (TypeError, ValueError):
+      logging.warning(
+          "restore_checkpoint returned a non-integer step %r; starting from"
+          " fresh run.",
+          metadata.get("step"),
+      )
+      return 0
+    if restored_step <= 0:
+      logging.info("No checkpoint to resume from; starting from step 0.")
+      return 0
+
+    # Resume at the step boundary; the policy version tracks the restored step.
+    restored_policy_version = restored_step
+    recorded_version = metadata.get("policy_version")
+    # TODO(tunix-dev): this is a force-fit for fully on-policy RL. Remove when
+    # async off-policy is supported.
+    if recorded_version is not None and recorded_version != restored_step:
+      logging.warning(
+          "Checkpoint recorded mid-step policy_version=%s; resuming at the"
+          " step-boundary value %d",
+          recorded_version,
+          restored_step,
+      )
+    self._policy_version = restored_policy_version
+    logging.info(
+        "Resuming from checkpoint: step=%d policy_version=%d. Metadata: %s",
+        restored_step,
+        restored_policy_version,
+        metadata,
+    )
+    if resync_rollout_weights:
+      synced_version = await self.sync_weights(
+          role=role,
+          policy_version=restored_policy_version,
+      )
+      if synced_version != restored_policy_version:
+        raise RuntimeError(
+            "Resumed policy_version=%d does not match synced version=%d"
+            % (restored_policy_version, synced_version)
+        )
+    else:
+      logging.warning(
+          "resync_rollout_weights is False. Resumed rollout workers will use"
+          " base weights instead of restored checkpoint version %d.",
+          restored_policy_version,
+      )
+    return restored_step

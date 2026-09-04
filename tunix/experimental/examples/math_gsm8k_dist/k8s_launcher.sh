@@ -46,6 +46,9 @@ export EPSILON=${EPSILON:-0.2}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -178,6 +181,9 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
+        --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
+        --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${extra_flags} \
         ${DEBUG:+--debug} \
     " \

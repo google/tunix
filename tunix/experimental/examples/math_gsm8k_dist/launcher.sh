@@ -43,6 +43,9 @@ EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
+CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 REWARD_MODE=${REWARD_MODE:-env}
 TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
 TFDS_SPLIT=${TFDS_SPLIT:-train}
@@ -353,6 +356,9 @@ echo "  tfds split:     $TFDS_SPLIT"
 echo "  tfds data dir:  $TFDS_DATA_DIR"
 echo "  shuffle:        $SHUFFLE"
 echo "  use lora:       $USE_LORA"
+echo "  ckpt interval:  $CHECKPOINT_SAVE_INTERVAL_STEPS"
+echo "  ckpt max keep:  $CHECKPOINT_MAX_TO_KEEP"
+echo "  ckpt root dir:  $CHECKPOINT_ROOT_DIRECTORY"
 echo "  sampler:        $SAMPLER"
 echo "  weight sync:    $WEIGHT_SYNC_MODE"
 echo "  trainer backend:$TRAINER_BACKEND"
@@ -433,6 +439,9 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --trainer_backend="$TRAINER_BACKEND"
+    --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
+    --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
+    --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
   if [[ -n "$MAXTEXT_CKPT" ]]; then
     TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
