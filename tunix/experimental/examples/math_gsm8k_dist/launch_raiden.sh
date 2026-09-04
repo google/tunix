@@ -215,7 +215,7 @@ EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    start|stop|restart|status|logs|triage|dry-run|render)
+    start|stop|restart|status|logs|triage|dry-run|render|start-trainer|start-rollout)
       COMMAND="$1"
       shift
       ;;
@@ -426,9 +426,13 @@ CURRENT_SYSTEM_USER="${USER:-$(whoami 2>/dev/null || echo "user")}"
 if [[ -n "${USER_RUN_ID}" ]]; then
   RUN_ID="${USER_RUN_ID}"
 elif [[ "${RANDOMIZE_ID}" == "true" ]]; then
-  RUN_ID="${CURRENT_SYSTEM_USER}-r$((RANDOM % 90000 + 10000))"
+  RUN_ID="${CURRENT_SYSTEM_USER:0:8}-r$((RANDOM % 90000 + 10000))"
 else
-  RUN_ID="${CURRENT_SYSTEM_USER}-raiden-${MODEL_TAG}"
+  # JobSet coordinator label has format "<TRAINER_ID>-proc-0-0.<TRAINER_ID>".
+  # Kubernetes label values are strictly limited to 63 characters.
+  # 2 * len(TRAINER_ID) + 10 <= 63 => len(TRAINER_ID) <= 26.
+  # TRAINER_ID is "${RUN_ID}-train", so len(RUN_ID) must be <= 20.
+  RUN_ID="${CURRENT_SYSTEM_USER:0:8}-rd-${MODEL_TAG}"
 fi
 
 export USER="${RUN_ID}"
@@ -438,6 +442,11 @@ GCS_SYNC_TAR="${GCS_SCRATCH_LOCATION}/code_sync/${USER}.tar.gz"
 ORCHESTRATOR_ID="${RUN_ID}-orch"
 TRAINER_ID="${RUN_ID}-train"
 ROLLOUT_ID="${RUN_ID}-roll"
+
+if [[ ${#TRAINER_ID} -gt 26 ]]; then
+  echo "Error: TRAINER_ID '${TRAINER_ID}' is too long (${#TRAINER_ID} chars). Maximum allowed is 26 characters due to Kubernetes 63-char label value limit on JobSet coordinator label (${TRAINER_ID}-proc-0-0.${TRAINER_ID}). Please specify a shorter --run-id." >&2
+  exit 1
+fi
 
 MODEL_DIR="${MODEL_DIR:-}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
@@ -605,7 +614,7 @@ stop_workload() {
   for js in "${jobsets[@]}"; do
     if kubectl get jobset "$js" &>/dev/null; then
       echo "  Deleting JobSet: $js..."
-      kubectl delete jobset "$js" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete jobset "$js" --ignore-not-found=true --wait=true 2>/dev/null || true
     fi
   done
   echo "✅ Teardown command sent for ${RUN_ID}."
@@ -919,6 +928,25 @@ case "$COMMAND" in
       echo "  Stop:    $0 stop --run-id=${RUN_ID}"
       echo "================================================================="
     fi
+    ;;
+
+  start-trainer)
+    connect_cluster
+    echo "Starting trainer only (${TRAINER_ID})..."
+    start_trainer
+    ;;
+
+  start-rollout)
+    connect_cluster
+    echo "Starting rollouts only (${ROLLOUT_ID})..."
+    start_all_rollouts
+    ;;
+
+  render|dry-run)
+    DRY_RUN="true"
+    start_orchestrator
+    start_trainer
+    start_all_rollouts
     ;;
 
   stop)
