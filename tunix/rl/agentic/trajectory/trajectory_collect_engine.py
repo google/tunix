@@ -543,13 +543,13 @@ class TrajectoryCollectEngine:
 
     # Align trajectory prompt tokens with the rollout worker's actual
     # tokenization on the first turn to prevent prompt token desync.
-    prompt_tokens = getattr(
-        rollout_output, "left_padded_prompt_tokens", None
-    )
-    if prompt_tokens is None:
-      prompt_tokens = getattr(rollout_output, "padded_prompt_tokens", None)
-    if not self.agent.trajectory.steps and prompt_tokens is not None:
-      self.agent.trajectory.prompt_tokens = prompt_tokens[0]
+    if (
+        not self.agent.trajectory.steps
+        and rollout_output.left_padded_prompt_tokens is not None
+    ):
+      self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
+          rollout_output.left_padded_prompt_tokens[0]
+      )
 
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
