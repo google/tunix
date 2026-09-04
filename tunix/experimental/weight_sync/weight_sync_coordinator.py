@@ -164,9 +164,12 @@ def create_default_handler(
   if mode_name == weight_sync.WeightSyncMode.RAIDEN.value:
     from tunix.experimental.weight_sync import raiden_handler
 
-    handler = raiden_handler.RaidenHandler(
-        transfer_options=raiden_handler.make_host_staged_transfer_options()
-    )
+    host_stage = os.getenv("HOST_STAGE", "0").lower() in ("1", "true", "yes")
+    if host_stage:
+      transfer_options = raiden_handler.make_host_staged_transfer_options()
+    else:
+      transfer_options = raiden_handler.RaidenTransferOptions(parallelism=16)
+    handler = raiden_handler.RaidenHandler(transfer_options=transfer_options)
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
   elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):

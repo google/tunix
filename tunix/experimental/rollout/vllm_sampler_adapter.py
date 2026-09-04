@@ -289,7 +289,17 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       )
     await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
-    return [weight_sync.WorkUnitMetadata.from_dict(m) for m in meta or []]
+    work_units = []
+    for m in meta or []:
+      if isinstance(m, dict):
+        if self.server_id:
+          unit = m.get("unit")
+          if isinstance(unit, dict):
+            unit["job_name"] = self.server_id
+          else:
+            m["unit"] = {"job_name": self.server_id, "job_replica_id": ""}
+      work_units.append(weight_sync.WorkUnitMetadata.from_dict(m))
+    return work_units
 
   async def pre_weight_sync(
       self, sync_request: Any = None, **kwargs: Any

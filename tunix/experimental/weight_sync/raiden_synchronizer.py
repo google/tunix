@@ -387,6 +387,10 @@ class RaidenSynchronizer:
     self.names, self.arrays = _filter_bindable(
         *flatten_weights(state), allow_proxy=self._is_proxy
     )
+    if self.names:
+      pairs = sorted(zip(self.names, self.arrays), key=lambda x: x[0])
+      self.names = [p[0] for p in pairs]
+      self.arrays = [p[1] for p in pairs]
     del state
     _log_rss("bind:after_flatten")
     logging.info(
