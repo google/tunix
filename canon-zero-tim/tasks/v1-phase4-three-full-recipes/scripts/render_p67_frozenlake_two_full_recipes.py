@@ -32,6 +32,7 @@ _TOKEN_CONTINUITY_MODES = (
     "m15-exact",
     "both-exact",
 )
+_TARGET_CLUSTERS = ("legacy", "bodaborg")
 _JAX_CACHE_ENV = {
     "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
     "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
@@ -122,11 +123,16 @@ def render_two(
     token_continuity: str | None = None,
     token_continuity_debug: bool = False,
     token_continuity_debug_mode: str | None = None,
+    target_cluster: str = "legacy",
 ) -> tuple[Path, ...]:
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
   if output_dir.exists():
     raise FileExistsError(f"refusing to overwrite output root: {output_dir}")
+  if target_cluster not in _TARGET_CLUSTERS:
+    raise ValueError(
+        f"target cluster must be one of {_TARGET_CLUSTERS}, got {target_cluster!r}"
+    )
   if p45_run_id == m15_run_id:
     raise ValueError("P45 and M15 run ids must be distinct")
   token_continuity = _resolve_token_continuity(
@@ -216,6 +222,36 @@ def render_two(
             document,
             {"CANON_P57_TOKEN_CONTINUITY_DEBUG": debug_mode},
         )
+    if target_cluster == "bodaborg":
+      if len(document["metadata"]["name"]) > 36:
+        raise ValueError(
+            f"JobSet name {document['metadata']['name']!r} exceeds 36 characters "
+            f"({len(document['metadata']['name'])} > 36); GKE vjobset webhook will reject pod names > 63 characters. "
+            "Use a shorter run ID (e.g. r01)."
+        )
+      head["priorityClassName"] = "medium"
+      tolerations = head.setdefault("tolerations", [])
+      cpu_np_toleration = {
+          "key": "cloud.google.com/gke-nodepool",
+          "operator": "Equal",
+          "value": "cpu-np",
+          "effect": "NoSchedule",
+      }
+      if cpu_np_toleration not in tolerations:
+        tolerations.append(cpu_np_toleration)
+
+      worker_template = document["spec"]["replicatedJobs"][1]["template"]["spec"]["template"]
+      worker_spec = worker_template["spec"]
+      worker_spec["priorityClassName"] = "medium"
+      worker_meta = worker_template.setdefault("metadata", {})
+      worker_annotations = worker_meta.setdefault("annotations", {})
+      worker_annotations["cloud.google.com/skip-tpu-webhook-check"] = "true"
+      worker_annotations["cloud.google.com/gke-tpu-slice-topology"] = "4x4x4"
+
+      document["metadata"].setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
+      head_meta = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"].setdefault("metadata", {})
+      head_meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
+      worker_meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
     _write_yaml(path, document)
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -310,6 +346,7 @@ def render_two(
   index.write_text(
       json.dumps({
           "schema": "v1-p67-frozenlake-two-full-v2",
+          "target_cluster": target_cluster,
           "token_continuity": token_continuity,
           "token_continuity_debug": debug_mode,
           "manifests": receipts,
@@ -330,6 +367,12 @@ def main() -> int:
   parser.add_argument("--p45-run-id", required=True)
   parser.add_argument("--m15-run-id", required=True)
   parser.add_argument("--campaign-root", required=True)
+  parser.add_argument(
+      "--target-cluster",
+      choices=_TARGET_CLUSTERS,
+      default="legacy",
+      help="select cluster targeting policy; default is legacy",
+  )
   parser.add_argument(
       "--m15-tito-exact",
       action="store_true",
@@ -365,6 +408,7 @@ def main() -> int:
       token_continuity=args.token_continuity,
       token_continuity_debug=args.token_continuity_debug,
       token_continuity_debug_mode=args.token_continuity_debug_mode,
+      target_cluster=args.target_cluster,
   )
   return 0
 

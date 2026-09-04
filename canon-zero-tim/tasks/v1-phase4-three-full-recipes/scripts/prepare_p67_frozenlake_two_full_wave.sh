@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 5 || "$#" -gt 9 ]]; then
-  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--token-continuity legacy|p45-exact|m15-exact|both-exact] [--token-continuity-debug|--token-continuity-debug-mode first-diff|record-full]" >&2
+if [[ "$#" -lt 5 || "$#" -gt 11 ]]; then
+  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--token-continuity legacy|p45-exact|m15-exact|both-exact] [--token-continuity-debug|--token-continuity-debug-mode first-diff|record-full] [--target-cluster legacy|bodaborg]" >&2
   exit 2
 fi
 
@@ -16,6 +16,8 @@ TOKEN_CONTINUITY_ARGS=()
 TOKEN_CONTINUITY_MODE=legacy
 TOKEN_CONTINUITY_SEEN=0
 TOKEN_CONTINUITY_DEBUG=off
+TARGET_CLUSTER_ARGS=()
+TARGET_CLUSTER_SEEN=0
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --m15-tito-exact)
@@ -65,6 +67,19 @@ while [[ "$#" -gt 0 ]]; do
       esac
       TOKEN_CONTINUITY_ARGS+=(--token-continuity-debug-mode "$2")
       TOKEN_CONTINUITY_DEBUG="$2"
+      shift 2
+      ;;
+    --target-cluster|--cluster)
+      if [[ "$TARGET_CLUSTER_SEEN" = 1 || "$#" -lt 2 ]]; then
+        echo "--target-cluster requires one non-duplicate value" >&2
+        exit 2
+      fi
+      case "$2" in
+        legacy|bodaborg) ;;
+        *) echo "target cluster must be legacy or bodaborg" >&2; exit 2 ;;
+      esac
+      TARGET_CLUSTER_ARGS+=(--target-cluster "$2")
+      TARGET_CLUSTER_SEEN=1
       shift 2
       ;;
     *)
@@ -118,7 +133,8 @@ python3 "$RENDERER" \
   --campaign-root "$CAMPAIGN_ROOT" \
   --p45-run-id "$P45_RUN_ID" \
   --m15-run-id "$M15_RUN_ID" \
-  "${TOKEN_CONTINUITY_ARGS[@]}"
+  "${TOKEN_CONTINUITY_ARGS[@]}" \
+  "${TARGET_CLUSTER_ARGS[@]}"
 
 INDEX="$OUTPUT_DIR/manifest-index.json"
 if [[ ! -s "$INDEX" ]]; then
