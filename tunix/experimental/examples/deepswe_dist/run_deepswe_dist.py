@@ -323,7 +323,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
-    cluster.run_program(
+    cluster.run(
         program=program,
         num_steps=args.max_steps,
         bring_up=False,

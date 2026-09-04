@@ -116,7 +116,7 @@ graph TD
     end
 
     subgraph T3 ["Tier 3: Novel Paradigm Researcher (Custom Program)"]
-        E3["orchestrator.run_program(MyMCTSProgram(...), algo=GRPO(...))<br/>• Custom RLProgram when inventing new DAG workflows"]
+        E3["orchestrator.run(MyMCTSProgram(...))<br/>• Custom RLProgram when inventing new DAG workflows"]
     end
 ```
 

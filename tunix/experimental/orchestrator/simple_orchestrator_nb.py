@@ -21,6 +21,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
+from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.worker import abstract_worker
 
 
@@ -143,14 +144,15 @@ def main():
       ["Solve 10 / 2", "Solve 7 - 5"],
   ]
 
-  print("Executing Tier 1 Managed Run via ClusterOrchestrator...")
-  orch.run(
+  print("Executing Run via ClusterOrchestrator...")
+  program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=train_dataset,
       reward_fns=[lambda x: 1.0],
       assembler=assembler,
       max_steps=2,
   )
+  orch.run(program=program)
   print("Execution completed successfully!")
 
 

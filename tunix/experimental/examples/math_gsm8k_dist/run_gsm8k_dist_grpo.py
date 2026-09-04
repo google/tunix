@@ -21,7 +21,7 @@ The TPU worker processes host the expensive pieces:
 
 This process only owns Orchestrator V2 control flow. It registers remote worker
 handles with ClusterOrchestrator, configures the GRPO loss on the trainer worker,
-and executes StandardRLProgram through ClusterOrchestrator.run_program().
+and executes StandardRLProgram through ClusterOrchestrator.run().
 """
 
 from __future__ import annotations
@@ -367,7 +367,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         "Cluster workers ready: %s. Starting StandardRLProgram execution...",
         [w.worker_id for w in cluster.worker_infos()],
     )
-    cluster.run_program(
+    cluster.run(
         program=program,
         num_steps=args.max_steps,
         bring_up=False,

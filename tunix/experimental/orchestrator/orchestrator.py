@@ -15,12 +15,11 @@
 """Cluster Infrastructure Coordinator (orchestrator.py) following Orchestrator V2.
 
 Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
-Provides Tier 1 Zero-Boilerplate Managed Program Submission (`run`) and Tier 3
-Custom Program Execution (`run_program`).
+Provides supervised RL program execution (`run`).
 """
 
 import collections
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Sequence
 from concurrent import futures
 import pickle
 import time
@@ -28,8 +27,6 @@ from typing import Any
 
 from absl import logging
 from tunix.experimental.common import datatypes
-from tunix.experimental.orchestrator import algorithm_adapter
-from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import health_monitor
 from tunix.experimental.orchestrator import lifecycle
@@ -372,14 +369,21 @@ class ClusterOrchestrator:
         weight_sync_coordinator=coordinator,
     )
 
-  def run_program(
+  def run(
       self,
       program: rl_program.RLProgram,
       bring_up: bool = True,
       dummy_data: Any = None,
       **kwargs: Any,
   ) -> None:
-    """Runs an RL program to completion under supervision."""
+    """Runs an RL program to completion under supervision.
+
+    Args:
+      program: The RL program instance to execute.
+      bring_up: Whether to bring up registered workers before execution.
+      dummy_data: Optional initialization data passed to worker compilation.
+      **kwargs: Additional keyword arguments forwarded to program.run.
+    """
     if bring_up:
       self.bring_up_workers(dummy_data=dummy_data)
 
@@ -392,44 +396,3 @@ class ClusterOrchestrator:
         **kwargs,
     )
     logging.info("Program %s finished.", type(program).__name__)
-
-  def run(
-      self,
-      algo: algorithm_adapter.AlgorithmAdapter,
-      dataset: Any,
-      reward_fns: Sequence[Callable[..., Any]] | None = None,
-      assembler: batch_assembly.BatchAssembler | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
-      program: rl_program.RLProgram | None = None,
-      max_steps: int = 1000,
-  ) -> None:
-    """Managed Program Submission: auto-wires Engine, Assembler, Queues & StandardRLProgram."""
-    logging.info("Starting managed RL program run (max_steps=%d)...", max_steps)
-    if self.engine is None:
-      self.bring_up_workers()
-    metrics_logging_options = getattr(
-        self.config, "metrics_logging_options", None
-    )
-    metrics_prefix = getattr(self.config, "metrics_prefix", "")
-    active_program = program or rl_program.StandardRLProgram(
-        dataset=dataset,
-        max_steps=max_steps,
-        algo=algo,
-        reward_fns=reward_fns,
-        assembler=assembler,
-        generation_args=generation_args,
-        metrics_logging_options=metrics_logging_options,
-        metrics_prefix=metrics_prefix,
-    )
-    try:
-      self.run_program(
-          program=active_program,
-          bring_up=False,
-      )
-    finally:
-      if program is None:
-        bg_task = getattr(active_program, "_bg_task", None)
-        if bg_task is not None and not bg_task.done():
-          bg_task.add_done_callback(lambda _: active_program.close())
-        else:
-          active_program.close()
