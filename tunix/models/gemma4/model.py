@@ -270,6 +270,19 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma4_e4b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Returns the E4B instruction-tuned architecture configuration.
+
+    The base and instruction-tuned checkpoints share the architecture, but
+    retain separate registry identities so callers cannot silently substitute
+    one artifact for the other.
+    """
+    return cls.gemma4_e4b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma4_12b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),

@@ -35,6 +35,7 @@ def _get_all_models_test_parameters():
       dict(testcase_name="gemma-3-27b-it", model_name="gemma-3-27b-it"),
       dict(testcase_name="gemma-4-e2b", model_name="gemma-4-e2b"),
       dict(testcase_name="gemma-4-e4b", model_name="gemma-4-e4b"),
+      dict(testcase_name="gemma-4-e4b-it", model_name="gemma-4-e4b-it"),
       dict(testcase_name="gemma-4-12b", model_name="gemma-4-12b"),
       dict(testcase_name="gemma-4-12b-it", model_name="gemma-4-12b-it"),
       dict(testcase_name="gemma-4-31b", model_name="gemma-4-31b"),

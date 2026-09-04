@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 423 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 440 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -222,6 +222,7 @@ batch/data budget when compared with historical Native/IS curves.
 |---|---|---|
 | CANON_RUN_* / STATE / PKG / PROFILE* / SHIM_ROOT / MODE | 发射管道(渲染/安装/运行合同) | phase2 三层 profile 落地时逐条核对归位 |
 | CANON_GCS_CACHE_BUCKET | JAX persistent-cache 的 GCS root；Phase4 三个 full 固定到 P33 cache root，按 resolved profile 分 namespace，restore/save 失败只生成显式性能回执，绝不替代或放宽 Zero-TIM 数值门 | 基建性能合同；三个 target 均完成可审计 cache hit/miss 与 JIT 记账后决定默认范围 |
+| CANON_GEMMA4_E4B_P1_ADMISSION | Gemma 4 E4B-IT 一宿主 stock admission 枚举选择器，仅接受 `p45|m15`；缺省/空/0 关闭。启用时固定四个本地 TPU、DP1×TP4、P0 checkpoint/tokenizer/dataset hashes、APC-off、rollout-only、零 backward/commit/checkpoint，并要求真实 trainer↔live-engine 逐 leaf equality、五阶段 HBM 与 shape ledger | P1 试验、默认 off；P45/M15 one-host target admission 完成后退役。它不启用或认证 Zero-TIM，不能进入 P4 full recipe |
 | CANON_P29_LOG_DIR | P29/P41/P48/P57 one-host trainer metrics 的 host 路径覆盖；缺省/空均回落到 recipe 的 `TB_LOG_DIR`，只由 JAX client 的 `MetricsLoggerOptions.log_dir` 读取，不进入 logits、loss、backward 或 optimizer | 观测/基建路径，默认空；相关 one-host 载具退役且日志目的地由非 CANON workload contract 接管后退役 |
 | CANON_V1_HP_FULL | workload-level execution identity；仅 Phase4 三个 renderer 与 P58.7 Zero-full renderer 设 1，并由各 workload profile 派生完整 serving/trainer/XProf bundle | 试验、默认 0；Phase4 GSM8K/P45/M15 与 P58 Zero/1000 是四种闭集；四个 full 归档并逐 workload 转正后退役此 campaign selector |
 | CANON_WANDB_* | 观测账号面(用户所有,凭据纪律) | 保留,不动 |
@@ -350,6 +351,7 @@ CANON_FROZENLAKE_L3
 CANON_FROZENLAKE_P27
 CANON_FROZENLAKE_RELEASE_GRAD_PROBE
 CANON_GCS_CACHE_BUCKET
+CANON_GEMMA4_E4B_P1_ADMISSION
 CANON_GLOBAL_PROMPTS
 CANON_GLOBAL_TRAJECTORIES
 CANON_FUSED_TREE_OPS
@@ -723,7 +725,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 439 settable names (appendix inventory above; exclusions: none).
+Count: 440 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

@@ -1083,6 +1083,18 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def attest_exact_engine_weights(self, trainer_state) -> dict[str, Any]:
     """Attests live weights without changing the selected numerical arm."""
+    from tunix.rl import gemma4_e4b_admission  # pylint: disable=g-import-not-at-top
+
+    gemma_p1_workload = gemma4_e4b_admission.active_workload()
+    if gemma_p1_workload is not None:
+      if self._canonical_engine_adapter is not None:
+        raise RuntimeError(
+            "Gemma E4B P1 stock admission forbids a canonical engine adapter"
+        )
+      return gemma4_e4b_admission.attest_exact_live_engine_weights(
+          sampler=self._sampler,
+          trainer_state=trainer_state,
+      )
     p58_native_requested = (
         os.environ.get("CANON_P58_TIM_ARM", "") == "native"
     )

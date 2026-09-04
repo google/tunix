@@ -32,6 +32,8 @@ except ImportError:
 
 import contextlib
 import datetime
+import hashlib
+import json
 import logging
 import math
 import os
@@ -71,11 +73,12 @@ from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import gemma4_e4b_admission
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
 from examples.frozenlake.agent import FrozenLakeAgent
-from examples.frozenlake.env import FrozenLakeEnv
+from examples.frozenlake.env import FrozenLakeEnv, generate_random_map
 
 _DISTRIBUTED_INITIALIZED = False
 try:
@@ -164,6 +167,26 @@ arg_parser.add_argument(
 )
 args, _ = arg_parser.parse_known_args()
 
+P1_ADMISSION_WORKLOAD = gemma4_e4b_admission.active_workload()
+P1_ADMISSION = P1_ADMISSION_WORKLOAD is not None
+P1_WORKLOAD_CONTRACT = (
+    gemma4_e4b_admission.workload_contract(P1_ADMISSION_WORKLOAD)
+    if P1_ADMISSION
+    else None
+)
+if P1_ADMISSION:
+  gemma4_e4b_admission.require_stock_invocation(tuple(sys.argv[1:]))
+  # P1 is a bounded rollout-only admission. It constructs the complete trainer
+  # and serving state but cannot silently become a training run.
+  args.batch_size = 1
+  args.mini_batch_size = 1
+  args.num_batches = 1
+  args.num_generations = 1
+  args.max_prompt_length = P1_WORKLOAD_CONTRACT["max_prompt_length"]
+  args.max_response_length = P1_WORKLOAD_CONTRACT["max_response_length"]
+  args.max_concurrency = 1
+  args.shuffle_data = False
+
 TRAIN_FRACTION = 1.0
 SEED = args.seed
 
@@ -184,6 +207,11 @@ TRAINER_MESH_SHAPE = (jax.device_count(), 1)
 # budget pinned to the 256 bucket.  Unset ⇒ byte-identical stock behaviour.
 _fl_rm = os.getenv("FL_ROLLOUT_MESH")     # e.g. "1,4"
 _fl_tm = os.getenv("FL_TRAINER_MESH")     # e.g. "1,4"
+if P1_ADMISSION:
+  if _fl_rm not in (None, "", "1,4") or _fl_tm not in (None, "", "1,4"):
+    raise ValueError("Gemma E4B P1 admits only FL_*_MESH=1,4")
+  _fl_rm = "1,4"
+  _fl_tm = "1,4"
 if _fl_rm:
   ROLLOUT_MESH_SHAPE = tuple(int(x) for x in _fl_rm.split(","))
   print(f"[P22.L3] ROLLOUT_MESH_SHAPE override -> {ROLLOUT_MESH_SHAPE}", flush=True)
@@ -206,6 +234,9 @@ NUM_GENERATIONS = args.num_generations
 # trainer needs at peak (logits + activations + optimizer state).
 VLLM_MAX_NUM_SEQS = 32
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
+if P1_ADMISSION:
+  VLLM_MAX_NUM_SEQS = 4
+  VLLM_MAX_BATCHED_TOKENS = 4096
 # P22.L3: pin the rollout's per-forward token budget to the aligned bucket (all-M-256).
 # Stock is 8192; the alignment gates only hold when EVERY forward fits one 256 bucket.
 # Unset ⇒ stock.  (Known cost, pre-declared in the ladder plan: ~32x more prefill chunks.)
@@ -235,6 +266,8 @@ ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
+TRAIN_MICRO_BATCH_SIZE = 1 if P1_ADMISSION else 2
+COMPUTE_LOGPS_MICRO_BATCH_SIZE = 1 if P1_ADMISSION else 2
 # Held-out eval pool size in batches. The frozenlake test set ships with 100
 # prompts; with BATCH_SIZE=8 a value of 13 covers one full pass per eval.
 # Each eval pass runs NUM_TEST_BATCHES * BATCH_SIZE prompts * num_generations
@@ -242,9 +275,14 @@ NUM_BATCHES = args.num_batches
 # adjust this so that NUM_TEST_BATCHES * BATCH_SIZE >= test set size to
 # evaluate the full held-out set once per eval.
 NUM_TEST_BATCHES = 2
+if P1_ADMISSION:
+  NUM_TEST_BATCHES = 1
 
 EVAL_EVERY_N_STEPS = 10
 NUM_EPOCHS = 3
+if P1_ADMISSION:
+  EVAL_EVERY_N_STEPS = 0
+  NUM_EPOCHS = 1
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 MAX_CONCURRENCY = args.max_concurrency
@@ -275,10 +313,34 @@ MAX_TO_KEEP = 50
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
+if P1_ADMISSION and ROLLOUT_ENGINE != "vllm":
+  raise ValueError("Gemma E4B P1 requires ROLLOUT_ENGINE=vllm")
 
 # ====== Paths (env-driven so the same image runs anywhere) ======
-MODEL_VERSION = "google/gemma-4-E2B-it"
-MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
+MODEL_VERSION = (
+    gemma4_e4b_admission.MODEL_ID
+    if P1_ADMISSION
+    else "google/gemma-4-E2B-it"
+)
+if P1_ADMISSION:
+  MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(
+      repo_id=MODEL_VERSION,
+      revision=gemma4_e4b_admission.CHECKPOINT_REVISION,
+      max_workers=16,
+  )
+else:
+  MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(
+      repo_id=MODEL_VERSION, max_workers=16
+  )
+if P1_ADMISSION:
+  _p1_snapshot = gemma4_e4b_admission.verify_snapshot_identity(
+      MODEL_DOWNLOAD_DIR
+  )
+  print(
+      "[GEMMA4_E4B_P1_SNAPSHOT] "
+      + json.dumps(_p1_snapshot, sort_keys=True),
+      flush=True,
+  )
 DATA_DIR = "gs://tunix/data/Frozenlake"
 
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -286,7 +348,13 @@ now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 # Orbax's CheckpointManager force-saves the first step regardless of the
 # configured save_interval_steps, so a large interval alone does not disable it.
 CKPT_DIR = os.getenv("CKPT_DIR") or None
-TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
+if P1_ADMISSION and CKPT_DIR is not None:
+  raise ValueError("Gemma E4B P1 forbids CKPT_DIR")
+TB_LOG_DIR = (
+    os.getenv("GEMMA4_P1_LOCAL_LOG_DIR", "/tmp/gemma4-e4b-p1/tensorboard")
+    if P1_ADMISSION
+    else "gs://linchai-bucket-dev/tensorboard/grpo"
+)
 
 
 # ====== Build the single shared mesh ======
@@ -316,6 +384,32 @@ trainer_mesh = jax.sharding.Mesh(
 )
 print(f"trainer_mesh.devices.shape={trainer_mesh.devices.shape}")
 
+if P1_ADMISSION:
+  _p1_runtime = gemma4_e4b_admission.require_runtime_contract(
+      workload=P1_ADMISSION_WORKLOAD,
+      device_count=jax.device_count(),
+      local_device_count=jax.local_device_count(),
+      process_count=jax.process_count(),
+      platforms=tuple(sorted({device.platform for device in jax.devices()})),
+      device_kinds=tuple(
+          sorted({str(device.device_kind) for device in jax.devices()})
+      ),
+      device_ids=tuple(int(device.id) for device in jax.devices()),
+      device_process_indices=tuple(
+          int(device.process_index) for device in jax.devices()
+      ),
+      rollout_mesh_shape=tuple(rollout_mesh.devices.shape),
+      trainer_mesh_shape=tuple(trainer_mesh.devices.shape),
+      jax_version=jax.__version__,
+      checkpoint_root=CKPT_DIR,
+      prefix_caching=False,
+  )
+  print(
+      "[GEMMA4_E4B_P1_RUNTIME] "
+      + json.dumps(_p1_runtime, sort_keys=True),
+      flush=True,
+  )
+
 # ====== Data ======
 import pandas as pd
 import datasets as datasets_lib
@@ -338,14 +432,86 @@ def create_datasets(
     train_ds_path: str = TRAIN_DATA_PATH,
     test_ds_path: str = TEST_DATA_PATH,
 ):
-  with fsspec.open(train_ds_path, "rb") as train_f, fsspec.open(
-      test_ds_path, "rb"
-  ) as test_f:
-    train_df = pd.read_parquet(train_f)
-    test_df = pd.read_parquet(test_f)
+  if P1_ADMISSION:
+    from examples.frozenlake import p57_workloads  # pylint: disable=g-import-not-at-top
 
-  train_ds = Dataset.from_pandas(train_df)
-  test_ds = Dataset.from_pandas(test_df)
+    contract = P1_WORKLOAD_CONTRACT
+    if P1_ADMISSION_WORKLOAD == "p45":
+      train_rows = p57_workloads.materialize_p45_records(
+          "train", contract["train_count"]
+      )
+      eval_rows = p57_workloads.materialize_p45_records(
+          "eval", contract["eval_count"]
+      )
+      train_sha = p57_workloads.attest_p45_records(
+          train_rows, "train", expected_count=contract["train_count"]
+      )
+      eval_sha = p57_workloads.attest_p45_records(
+          eval_rows, "eval", expected_count=contract["eval_count"]
+      )
+      # The registered P45 identity is its historical generator-row contract.
+      # Materialize the deterministic maps only after attesting that contract
+      # so rollout provenance can carry real map/shortest-path facts.
+      for role_rows in (train_rows, eval_rows):
+        for index, row in enumerate(role_rows):
+          desc, _ = generate_random_map(
+              size=row["size"], p=row["p"], seed=row["seed"]
+          )
+          row["desc_json"] = json.dumps(tuple(desc), separators=(",", ":"))
+          row["is_slippery"] = False
+          row["p57_index"] = index
+          row["shortest_path"] = p57_workloads.shortest_path_length(desc)
+          row["map_sha256"] = hashlib.sha256(
+              ("\n".join(desc) + "\n").encode("utf-8")
+          ).hexdigest()
+    else:
+      train_rows, eval_rows = p57_workloads.materialize_dataset_pair(
+          "m15",
+          "main",
+          train_count=contract["train_count"],
+          eval_count=contract["eval_count"],
+      )
+      train_sha = p57_workloads.attest_records(
+          train_rows,
+          "m15",
+          "main",
+          "train",
+          expected_count=contract["train_count"],
+      )
+      eval_sha = p57_workloads.attest_records(
+          eval_rows,
+          "m15",
+          "main",
+          "eval",
+          expected_count=contract["eval_count"],
+      )
+    if train_sha != contract["train_sha256"] or eval_sha != contract["eval_sha256"]:
+      raise RuntimeError(
+          "Gemma E4B P1 dataset identity drifted: "
+          f"train={train_sha} eval={eval_sha}"
+      )
+    print(
+        "[GEMMA4_E4B_P1_DATASET] "
+        + json.dumps({
+            "workload": P1_ADMISSION_WORKLOAD,
+            "train_count": len(train_rows),
+            "eval_count": len(eval_rows),
+            "train_sha256": train_sha,
+            "eval_sha256": eval_sha,
+        }, sort_keys=True),
+        flush=True,
+    )
+    train_ds = Dataset.from_list(train_rows)
+    test_ds = Dataset.from_list(eval_rows)
+  else:
+    with fsspec.open(train_ds_path, "rb") as train_f, fsspec.open(
+        test_ds_path, "rb"
+    ) as test_f:
+      train_df = pd.read_parquet(train_f)
+      test_df = pd.read_parquet(test_f)
+
+    train_ds = Dataset.from_pandas(train_df)
+    test_ds = Dataset.from_pandas(test_df)
   if args.shuffle_data:
     train_ds = train_ds.shuffle(SEED)
     test_ds = test_ds.shuffle(SEED)
@@ -359,7 +525,16 @@ def create_datasets(
   return train_ds, test_ds
 
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_DOWNLOAD_DIR if P1_ADMISSION else MODEL_VERSION
+)
+if P1_ADMISSION:
+  _p1_tokenizer = gemma4_e4b_admission.verify_tokenizer_identity(tokenizer)
+  print(
+      "[GEMMA4_E4B_P1_TOKENIZER] "
+      + json.dumps(_p1_tokenizer, sort_keys=True),
+      flush=True,
+  )
 # Disable Gemma4 thinking mode. The agent prompt already requests explicit
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
 # ``<|channel>..<channel|>`` tokens per turn and exhausts the response budget
@@ -386,8 +561,14 @@ test_dataset, _ = data_lib.post_init_dataset(
 
 show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
+if P1_ADMISSION:
+  gemma4_e4b_admission.hbm_receipt("dataset_ready")
 
-config = model_lib.ModelConfig.gemma4_e2b()
+config = (
+    model_lib.ModelConfig.gemma4_e4b_it()
+    if P1_ADMISSION
+    else model_lib.ModelConfig.gemma4_e2b()
+)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -402,6 +583,8 @@ gemma4_ref = params_lib.create_model_from_safe_tensors(
     MODEL_DOWNLOAD_DIR, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 show_hbm_usage("after loading gemma4_ref")
+if P1_ADMISSION:
+  gemma4_e4b_admission.hbm_receipt("reference_loaded")
 
 # Actor: storage MUST be fp32. At LR=1e-6 with typical weight magnitudes
 # ~1e-2, Adam updates are ~1e-6, well below bf16 ULP (~7.8e-5). bf16 storage
@@ -411,6 +594,8 @@ gemma4_actor = params_lib.create_model_from_safe_tensors(
     MODEL_DOWNLOAD_DIR, config, trainer_mesh, dtype=jnp.float32
 )
 show_hbm_usage("after loading gemma4_actor")
+if P1_ADMISSION:
+  gemma4_e4b_admission.hbm_receipt("actor_loaded")
 
 # ====== Checkpoint + metrics + optimizer ======
 if CKPT_DIR:
@@ -465,7 +650,9 @@ base_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": MODEL_VERSION,
+    "rollout_vllm_model_version": (
+        MODEL_DOWNLOAD_DIR if P1_ADMISSION else MODEL_VERSION
+    ),
     # Fraction of per-chip HBM that the rollout engine pre-allocates for KV
     # cache + model weights. On a shared trainer+rollout mesh this directly
     # competes with the trainer's peak (logits + activations + optimizer
@@ -545,8 +732,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # invokes the trainer ``mini_batch_size // train_micro_batch_size``
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
-        train_micro_batch_size=2,
-        compute_logps_micro_batch_size=2,
+        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -587,6 +774,17 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 show_hbm_usage("after RLCluster creation")
+if P1_ADMISSION:
+  gemma4_e4b_admission.hbm_receipt("rlcluster_serving_ready")
+  gemma4_e4b_admission.optimizer_state_receipt(
+      nnx.state(rl_cluster.actor_trainer.optimizer, nnx.optimizer.OptState)
+  )
+  _p1_weights = rl_cluster.attest_actor_anchor_matches_engine()
+  print(
+      "[GEMMA4_E4B_P1_WEIGHTS] "
+      + json.dumps(_p1_weights, sort_keys=True),
+      flush=True,
+  )
 
 
 _metric_call_idx = 0
@@ -621,14 +819,95 @@ grpo_trainer = GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,
-    env_kwargs={"max_steps": 8},
+    env_kwargs={
+        "max_steps": (
+            P1_WORKLOAD_CONTRACT["max_turns"] if P1_ADMISSION else 8
+        )
+    },
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
+if P1_ADMISSION:
+  gemma4_e4b_admission.hbm_receipt("learner_ready")
 
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
 # trajectory_reward → solve rate) separately from train metrics.
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+if P1_ADMISSION:
+  _p1_shape = gemma4_e4b_admission.shape_ledger(
+      P1_ADMISSION_WORKLOAD,
+      semantic_prompts=1,
+      generations_per_prompt=NUM_GENERATIONS,
+      mini_batch_size=MINI_BATCH_SIZE,
+      train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+      compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
+      max_num_seqs=VLLM_MAX_NUM_SEQS,
+      max_num_batched_tokens=VLLM_MAX_BATCHED_TOKENS,
+      kv_cache_size=base_rollout_dict["kv_cache_size"],
+  )
+  print(
+      "[GEMMA4_E4B_P1_SHAPE] " + json.dumps(_p1_shape, sort_keys=True),
+      flush=True,
+  )
+  _p1_train_steps = rl_cluster.actor_trainer.train_steps
+  _p1_global_steps = rl_cluster.global_steps
+  try:
+    _p1_rollout = grpo_trainer.rollout_only_evaluate(
+        test_dataset, policy_step=0
+    )
+    if (
+        rl_cluster.actor_trainer.train_steps != _p1_train_steps
+        or rl_cluster.global_steps != _p1_global_steps
+    ):
+      raise RuntimeError("Gemma E4B P1 rollout mutated training state")
+    if int(_p1_rollout.get("trajectories", 0)) != 1:
+      raise RuntimeError(
+          "Gemma E4B P1 expected exactly one trajectory, got "
+          f"{_p1_rollout.get('trajectories')}"
+      )
+    _p1_record = _p1_rollout["records"][0]
+    if (
+        int(_p1_record["prompt_tokens"]) <= 0
+        or int(_p1_record["assistant_tokens"]) <= 0
+        or int(_p1_record["completion_tokens"]) <= 0
+        or not 1
+        <= int(_p1_record["turns"])
+        <= P1_WORKLOAD_CONTRACT["max_turns"]
+        or int(_p1_record["context_tokens"])
+        > P1_WORKLOAD_CONTRACT["context_hard_cap"]
+    ):
+      raise RuntimeError(f"Gemma E4B P1 rollout envelope failed: {_p1_record}")
+    _p1_receipt = {
+        "schema": "gemma4-e4b-p1-rollout-v1",
+        "workload": P1_ADMISSION_WORKLOAD,
+        "trajectories": _p1_rollout["trajectories"],
+        "prompts": _p1_rollout["prompts"],
+        "generations": _p1_rollout["generations"],
+        "batches": _p1_rollout["batches"],
+        "wall_seconds": _p1_rollout["wall_seconds"],
+        "max_prompt_tokens": _p1_record["prompt_tokens"],
+        "max_completion_tokens": _p1_record["completion_tokens"],
+        "max_assistant_tokens": _p1_record["assistant_tokens"],
+        "max_interactions": _p1_record["turns"],
+        "max_active_rows": 1,
+        "max_kv_tokens_observed": _p1_record["context_tokens"],
+        "status": _p1_record["status"],
+        "map_sha256": _p1_record["map_sha256"],
+        "train_steps_before": _p1_train_steps,
+        "train_steps_after": rl_cluster.actor_trainer.train_steps,
+        "global_steps_before": _p1_global_steps,
+        "global_steps_after": rl_cluster.global_steps,
+        "backward": 0,
+        "optimizer_commits": 0,
+    }
+    print(
+        "[GEMMA4_E4B_P1_ROLLOUT] "
+        + json.dumps(_p1_receipt, sort_keys=True),
+        flush=True,
+    )
+  finally:
+    rl_cluster.close()
+else:
+  grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
