@@ -878,7 +878,7 @@ class M15TokenContinuityTest(unittest.TestCase):
       self.assertEqual(snapshot["alignment_updates"], 1)
       token_continuity._reset_token_collection_for_test()
 
-  def test_record_full_single_writer_and_update_zero_gate(self):
+  def test_record_full_single_writer_and_update_zero_observation(self):
     rows = [{"token_different": False}, {"token_different": False}]
     with tempfile.TemporaryDirectory() as tmp:
       values = _p57_tito_neutrality_environment("on", state=tmp)
@@ -893,17 +893,35 @@ class M15TokenContinuityTest(unittest.TestCase):
           rows, step=0, values=values
       )
       self.assertEqual(admitted["verdict"], "PASS")
+      self.assertTrue(admitted["continue_training"])
       self.assertIsNone(
           token_continuity.enforce_record_full_first_update_token_admission(
               [{"token_different": True}], step=1, values=values
           )
       )
-      with self.assertRaisesRegex(RuntimeError, "refusing backward"):
-        token_continuity.enforce_record_full_first_update_token_admission(
-            [{"token_different": True}], step=0, values=values
-        )
+      observed = token_continuity.enforce_record_full_first_update_token_admission(
+          [{"token_different": True}], step=0, values=values
+      )
+      self.assertEqual(observed["verdict"], "OBSERVED_DIFFERENT")
+      self.assertTrue(observed["continue_training"])
       with self.assertRaisesRegex(FileExistsError, "second immutable"):
         token_continuity.write_tito_single_writer_receipt(values=values)
+      token_continuity._reset_token_collection_for_test()
+
+  def test_record_full_event_reservations_are_not_collect_64_bounded(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      values = _p57_tito_neutrality_environment("on", state=tmp)
+      token_continuity._reset_token_collection_for_test()
+      token_continuity.begin_token_continuity_collection(values)
+      events = [
+          token_continuity.reserve_record_full_token_difference_event()
+          for _ in range(token_continuity.P57_TOKEN_CONTINUITY_COLLECT_LIMIT + 2)
+      ]
+      self.assertEqual(events, list(range(1, 67)))
+      snapshot = token_continuity.token_collection_snapshot()
+      self.assertEqual(snapshot["token_difference_events"], 66)
+      self.assertEqual(snapshot["capsules_reserved"], 66)
+      self.assertEqual(snapshot["capsules_omitted"], 0)
       token_continuity._reset_token_collection_for_test()
 
   def test_orbax_probe_is_independent_and_fail_closed(self):

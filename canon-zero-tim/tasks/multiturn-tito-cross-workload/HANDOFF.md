@@ -5,17 +5,19 @@
 - Worktree: `/home/yuxuan/code_rl_repro/worktrees/p57_tito_pair_0902`
 - Package: `canon-zero-tim`
 - Branch: `local/p57-tito-pair-0902`
-- Base: `6842edae88b5692c7d4c6ae4ecadfc9e2bf1e411`
+- Historical task base: `6842edae88b5692c7d4c6ae4ecadfc9e2bf1e411`
+- T9e integration base: `90fd0e55ea866c00c9084f231d5c739cfe13a233`
 - Task ledger: `tasks/multiturn-tito-cross-workload`
-- Release bundle: five straight-line CLs. The runtime chain is
+- Published baseline bundle: five straight-line CLs. The runtime chain is
   `c5d5ddd9c25c8ef00fb8bdfeac1a5e404601f510`,
   `067cf3bf7f67bd976a361b514f245d71df829d71`,
   `dcde8a9105e2e7cd82748b7c2ffac6c0d81eb05a`, and
-  `ba533dd7d8888c83d4c2ee50472a9346ccd3741c`; the fifth CL is the
-  documentation/evidence commit containing this file. Always obtain and
-  return its full SHA with `git rev-parse HEAD`, and verify the published
-  branch resolves to that same value before any target work.
-- The user approved this five-CL commit/push operation only. That approval
+  `ba533dd7d8888c83d4c2ee50472a9346ccd3741c`; the fifth CL is
+  documentation/evidence commit `a10c061a0bd768337403104069d7d50c3a261ffd`.
+  T9e is one additive follow-up concern on that baseline. Always obtain and
+  return the current full SHA with `git rev-parse HEAD`, and verify the
+  published branch resolves to that same value before any target work.
+- The user approved commit/push of the T9e follow-up only. That approval
   does not authorize TPU/Kubernetes, a durable manifest render, image
   publication, or any other remote mutation.
 - Do not edit the base JobSet topology, autoscaling, exclusive-topology
@@ -27,14 +29,17 @@ Production behavior is unchanged by default: FrozenLake uses legacy token
 transport, and an explicitly selected ordinary exact-TiTO full train remains
 fatal on its first token-continuity difference.
 
-T9c is implemented and T9d is the active evidence-completeness phase. T9c adds a
+T9c/T9d are implemented and T9e is the active evidence-completeness phase. T9c adds a
 separate `record-full` value for explicit P45/M15 300-update exact-TiTO full
-trains. A token difference writes bounded evidence and the same trajectory
+trains. T9e makes every structurally valid token-difference event write a
+complete replay capsule, including update 0, repeated differences in one
+trajectory, and events after the historical collect-64 bound. The same trajectory
 continues unchanged through GRPO. It is not masked, dropped, retried, replaced,
 or reweighted. Any such red makes the run `NON_ZERO_TIM_DATA_COLLECTION`; it
 must never be reported as strict Zero-TIM success. Missing/duplicate/swapped
-request identity and all non-whitelisted backward/numerical failures remain
-fatal.
+request identity, malformed token arrays, missing/duplicate/tampered evidence,
+capsule write failure, and all non-whitelisted backward/numerical failures
+remain fatal.
 
 T9d-3 is implemented at host construction scope. It keeps that
 runtime policy and adds host-only replay evidence: one immutable
@@ -77,7 +82,11 @@ In `collect-64` and `record-full`, raw token IDs exist only in atomic mode-0600
 mismatch capsules under `$CANON_STATE/token-continuity-first-diff/`; their
 stdout is token-free. The older immediate-fatal `first-diff` mode retains its
 historical one-per-process reconstructable worker-log chunks and is not the
-mode used by the full-record pair. Host and runner witnesses live under
+mode used by the full-record pair. `collect-64` retains its process-wide bound;
+`record-full` has no capsule bound and assigns every diff event a unique,
+contiguous event ordinal plus request/trajectory/policy/turn attribution. Its
+disk and GCS volume therefore grows with the number and length of differences,
+so it is diagnostic rather than performance evidence. Host and runner witnesses live under
 `$CANON_STATE/p57_tito_witness/`.
 
 Before rollout, the GCS worker performs a non-sensitive no-clobber upload,
@@ -153,17 +162,17 @@ bash tests/v1_phase4/run_exact_image.sh tunix_frozenlake_image:vllm-tpu0.25.0
 git diff --check
 ```
 
-Current verified result: P57 232/232, V1 102/102, APC 31/31, flag audit
-422/422, focused one-host judge 5/5, Python/shell syntax, and
-`git diff --check`. The P57 total includes poison coverage
-for all-update sidecars,
+Current verified result: P57 234/234, V1 102/102, APC 12/12, flag audit
+422/422, Python/shell syntax, and `git diff --check`. The P57 total includes
+all-event token-difference coverage plus poison coverage for all-update sidecars,
 source/image/mesh-bound actor snapshots, hidden-red rejection, complete-line
 journal reconstruction, tamper detection, and live incremental SHA reuse with
 terminal re-hash. Python compilation and shell syntax pass. The complete
-post-T9d-3 pinned-image gate exits zero on
+post-T9e pinned-image gate exits zero on
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
-with terminal `V1_HP_EXACT_IMAGE_PASS`. The durable closeout logs and their
-SHA256 ledger are under
+with terminal `V1_HP_EXACT_IMAGE_PASS`, including record-full,
+capsule-integrity, engine-witness, and GCS-durability receipts. The earlier
+  T9d durable closeout logs and their SHA256 ledger are under
 `evidence/release_closeout_20260904_r1/`; the focused installed-overlay gate
 was repeated after the patch-file whitespace-only normalization and ended in
 `P33_EXACT_IMAGE_PASS`. These gates exercise real installed code paths but
@@ -171,6 +180,12 @@ fake actor-manager/GCS transports; real storage and one-host numerical
 neutrality remain unverified. The gate caught two stale test callers missing
 the new identity fields; only those fixtures were fixed, and runtime admission
 was not weakened.
+
+Before the approved T9e push, the published branch advanced from `a10c061a`
+to `90fd0e55` through two P67 cluster-renderer commits. T9e rebased without a
+conflict because those commits do not overlap its files. The complete P57,
+V1, APC, flag-audit, and pinned-image gates above were rerun after that rebase;
+the post-rebase pinned-image run again ended in `V1_HP_EXACT_IMAGE_PASS`.
 
 ### 4.1 One-host carrier is prepared but target-unrun
 
@@ -270,7 +285,9 @@ diagnostic renderer when the requested artifacts are 300-update curves.
 
 Before training begins, require `[P57.TITO.GCS] READY_ACKNOWLEDGED`,
 `[P57.TITO.ORBAX_PROBE] PASS`, and `[P57.TITO.SINGLE_WRITER] PASS`. Update 0
-must emit `[P57.TITO.FIRST_UPDATE_TOKEN_GATE] PASS` before backward. During the
+must emit exactly one `[P57.TITO.FIRST_UPDATE_TOKEN_GATE]` observation before
+backward: `PASS` when no row differs or `OBSERVED_DIFFERENT` when replay
+capsules were preserved; both carry `continue_training=1`. During the
 run, check the local heartbeat and the normal `[PERF]`, alignment, backward,
 first-update, and optimizer receipts; a live upload retry is not allowed to
 change a row. Also require one sidecar receipt per update and, when a finite
@@ -300,8 +317,9 @@ For each executed arm return:
 - source SHA, image identity, JobSet/run ID, attempt number, profile, DP/TP,
   workload, and turn horizon;
 - classifier JSON and SHA, including mechanical verdict and token verdict;
-- summary counters: trajectories/equal/different/reserved/emitted/omitted/
-  emission failures;
+- summary counters: trajectories/equal/different/token-difference-events/
+  reserved/emitted/omitted/emission failures, with event ordinals exactly
+  `1..N` and no record-full omissions;
 - measured backward, optimizer-commit, alignment-update, checkpoint, and step
   counts appropriate to the chosen carrier;
 - host/engine-echo request counts and trajectory/request/step/row join result;
@@ -329,7 +347,7 @@ trajectory/request/step/sequence-row joins, the four separate execution/token/
 Zero-TIM/evidence verdicts, and its ordinary training curve. A completed red
 record arm is useful data but is not a Zero-TIM PASS.
 
-Claim ceiling now: T9d-3 host and pinned-image construction PASS. It does not
+Claim ceiling now: T9e host and pinned-image construction PASS. It does not
 prove one-host observer neutrality,
 real-GCS/Orbax durability, DP8xTP8
 behavior, 300-update completion/convergence, or production exact-TiTO

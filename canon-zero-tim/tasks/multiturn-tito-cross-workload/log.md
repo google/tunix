@@ -663,3 +663,43 @@
   `run_tito_onehost_neutrality_pair.sh`; return both run roots,
   pair classification, and SHA ledgers; wait for review; only then seek
   separate render/launch approval for the P45 and M15 full pair.
+
+## 2026-09-04T10:02:05Z — T9e all-event token-difference stream construction PASS
+
+- Type: implementation / host admission / fixed-image gate; no commit, push,
+  render, TPU/Kubernetes launch, or remote-state mutation.
+- User decision implemented: every structurally valid `record-full` token
+  difference, including update 0, repeated differences in one trajectory, and
+  events after ordinal 64, is recorded and the unchanged trajectory continues
+  through the full training path.  `collect-64` is deliberately unchanged.
+- Evidence contract: every difference reserves one contiguous process-wide
+  ordinal and emits one immutable mode-0600 capsule containing the complete
+  actual/expected token streams plus request, trajectory, policy-step, turn,
+  group/pair, and segment-ledger identity.  The terminal classifier and final
+  GCS inventory require a one-to-one event/capsule mapping.  Missing,
+  duplicate, foreign, malformed, tampered, or unwritten evidence is fatal.
+- Verification: P57 234/234, V1 102/102, APC 12/12, flags 422/422, Python and
+  shell syntax, and `git diff --check` pass.  The complete pinned-image gate
+  exits zero on image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  with terminal `V1_HP_EXACT_IMAGE_PASS`, including record-full, capsule
+  integrity, engine witness, and GCS durability receipts.
+- Honest boundary: these capsules fully reproduce token-transport and ledger
+  differences; they do not create a full actor checkpoint for every event.
+  Numerical A-B replay continues to use the separately bounded actor snapshot
+  categories.  One-host neutrality, real GCS/Orbax behavior, abrupt-exit
+  recovery, DeepSWE adjacency, and DP8xTP8 execution remain unrun.
+
+## 2026-09-04T10:14:32Z — T9e pre-push rebase and focused recertification PASS
+
+- Type: integration / post-rebase verification; user-approved commit/push,
+  with no render, TPU/Kubernetes launch, or remote evidence mutation.
+- The published branch moved from `a10c061a` to `90fd0e55` through two P67
+  cluster-renderer commits. Their changed files do not overlap T9e, and the
+  local T9e CL rebased without conflict.
+- Post-rebase verification: P57 234/234, V1 102/102, APC 12/12, flag audit
+  422/422, Python/diff hygiene, and the complete digest-pinned image gate
+  pass. The terminal is `V1_HP_EXACT_IMAGE_PASS` with the record-full,
+  capsule-integrity, engine-witness, and GCS-durability receipts present.
+- Target boundary is unchanged: matched one-host neutrality, real GCS/Orbax,
+  abrupt-exit recovery, DeepSWE adjacency, and DP8xTP8 remain unrun.

@@ -46,7 +46,6 @@ _FINAL_EVIDENCE_PATTERNS = (
     "updates.jsonl",
     "p57_tito_witness/journal-reconstruction.json",
 )
-_MAX_FILES = 17_000
 _APPEND_JOURNALS = (
     "p57_tito_witness/full-row-map.jsonl",
     "pre_alignment.jsonl",
@@ -289,10 +288,6 @@ def evidence_inventory(
           "bytes": payload_bytes,
           "sha256": _sha256_file(path),
       })
-  if len(records) > _MAX_FILES:
-    raise ValueError(
-        f"TiTO evidence file count exceeds {_MAX_FILES}: {len(records)}"
-    )
   if final:
     observed = {record["path"] for record in records}
     full = "p57_tito_witness/full-record-summary.json" in observed
@@ -316,6 +311,27 @@ def evidence_inventory(
         }
     )
     if full:
+      summary = json.loads(
+          (state / "p57_tito_witness/full-record-summary.json").read_text(
+              encoding="utf-8"
+          )
+      )
+      expected_capsules = summary.get("collection", {}).get(
+          "token_difference_events"
+      )
+      observed_capsules = sum(
+          path.startswith("token-continuity-first-diff/")
+          for path in observed
+      )
+      if (
+          type(expected_capsules) is not int
+          or expected_capsules < 0
+          or observed_capsules != expected_capsules
+      ):
+        raise ValueError(
+            "full TiTO token-difference inventory differs: "
+            f"observed={observed_capsules} expected={expected_capsules!r}"
+        )
       v1 = {
           "v1_hp_p45_full.classification.json",
           "v1_hp_m15_full.classification.json",

@@ -15,6 +15,7 @@
 import asyncio
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -1106,13 +1107,23 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       capsules = list(
           (Path(tmp) / 'token-continuity-first-diff').glob('*.json')
       )
-      self.assertLen(capsules, 1)
+      self.assertLen(capsules, 2)
+      event_indices = {
+          json.loads(path.read_text()).get(
+              'event_index',
+              json.loads(path.read_text()).get('header', {}).get('event_index'),
+          )
+          for path in capsules
+      }
+      self.assertEqual(event_indices, {1, 2})
       snapshot = (
           trajectory_collect_engine.token_continuity
           .token_collection_snapshot()
       )
       self.assertEqual(snapshot['different_trajectories'], 1)
-      self.assertEqual(snapshot['capsules_reserved'], 1)
+      self.assertEqual(snapshot['token_difference_events'], 2)
+      self.assertEqual(snapshot['capsules_reserved'], 2)
+      self.assertEqual(snapshot['capsules_emitted'], 2)
       self.assertEqual(snapshot['engine_echo_differences'], 1)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')

@@ -153,6 +153,7 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
       "later_turn_comparisons": 4,
       "engine_echo_comparisons": 12,
       "engine_echo_differences": 1 if red else 0,
+      "token_difference_events": 1 if red else 0,
       "capsules_reserved": 1 if red else 0,
       "capsules_emitted": 1 if red else 0,
       "capsules_omitted": 0,
@@ -275,6 +276,7 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
         state / "token-continuity-first-diff/echo.json",
         {
             "schema": "canon.p57-tito-echo-diff.v1",
+            "event_index": 1,
             "witness": {
                 "schema": "canon.p57-tito-host-witness.v1",
                 "request_id": "request-4-0",
@@ -350,7 +352,7 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
       self.assertEqual(result["zero_tim_verdict"], "FAIL")
       self.assertEqual(result["claim"], "NON_ZERO_TIM_DATA_COLLECTION")
 
-  def test_update_zero_token_red_fails_closed(self):
+  def test_update_zero_token_red_is_completed_data_collection(self):
     with tempfile.TemporaryDirectory() as tmp:
       state, base, v1 = _fixture(Path(tmp), red=True)
       row_map = state / "p57_tito_witness/full-row-map.jsonl"
@@ -358,9 +360,43 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
       rows[4]["token_different"] = False
       rows[0]["token_different"] = True
       _write_jsonl(row_map, rows)
+      capsule = state / "token-continuity-first-diff/echo.json"
+      value = json.loads(capsule.read_text())
+      value["witness"]["trajectory_id"] = f"{1:032x}"
+      value["witness"]["request_id"] = "request-0-0"
+      _write_json(capsule, value)
       result = self._classify(state, base, v1)
-      self.assertEqual(result["execution_verdict"], "FAIL")
-      self.assertIn("first_update_token_admission", result["reasons"])
+      self.assertEqual(result["execution_verdict"], "PASS")
+      self.assertEqual(result["token_verdict"], "DIFFERENT")
+      self.assertEqual(result["claim"], "NON_ZERO_TIM_DATA_COLLECTION")
+
+  def test_missing_or_duplicate_token_event_fails_evidence(self):
+    for mutation in ("missing", "duplicate"):
+      with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+        state, base, v1 = _fixture(Path(tmp), red=True)
+        capsule = state / "token-continuity-first-diff/echo.json"
+        if mutation == "missing":
+          capsule.unlink()
+        else:
+          duplicate = json.loads(capsule.read_text())
+          _write_json(
+              state / "token-continuity-first-diff/echo-duplicate.json",
+              duplicate,
+          )
+          summary_path = state / "p57_tito_witness/full-record-summary.json"
+          summary = json.loads(summary_path.read_text())
+          summary["collection"]["token_difference_events"] = 2
+          summary["collection"]["capsules_reserved"] = 2
+          summary["collection"]["capsules_emitted"] = 2
+          _write_json(summary_path, summary)
+        result = self._classify(state, base, v1)
+        self.assertEqual(result["execution_verdict"], "FAIL")
+        self.assertTrue(
+            any(
+                reason.startswith("capsule_")
+                for reason in result["reasons"]
+            )
+        )
 
   def test_missing_join_and_false_counter_claims_fail(self):
     for mutation in ("request", "step", "counter", "checkpoint"):

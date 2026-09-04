@@ -61,6 +61,7 @@ _COLLECTION_STATE = {
     "later_turn_comparisons": 0,
     "engine_echo_comparisons": 0,
     "engine_echo_differences": 0,
+    "token_difference_events": 0,
     "capsules_reserved": 0,
     "capsules_emitted": 0,
     "capsules_omitted": 0,
@@ -349,7 +350,7 @@ def enforce_record_full_first_update_token_admission(
     step: int,
     values: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
-  """Stops update zero before backward when exact token transport is red."""
+  """Reports update-zero token transport without stopping record-full."""
   env = os.environ if values is None else values
   if frozenlake_token_continuity_debug_mode(env) != (
       P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
@@ -359,23 +360,19 @@ def enforce_record_full_first_update_token_admission(
     return None
   different = sum(bool(row.get("token_different")) for row in rows)
   record = {
-      "schema": "canon.p57-tito-first-update-token-admission.v1",
+      "schema": "canon.p57-tito-first-update-token-observation.v2",
       "step": 0,
       "rows": len(rows),
       "different_rows": different,
-      "verdict": "PASS" if different == 0 else "FAIL",
+      "verdict": "PASS" if different == 0 else "OBSERVED_DIFFERENT",
+      "continue_training": True,
   }
   print(
       "[P57.TITO.FIRST_UPDATE_TOKEN_GATE] "
       f"{record['verdict']} step=0 rows={len(rows)} "
-      f"different_rows={different}",
+      f"different_rows={different} continue_training=1",
       flush=True,
   )
-  if different:
-    raise RuntimeError(
-        "P57 TiTO record-full update 0 token transport differs; refusing "
-        "backward after preserving row/capsule evidence"
-    )
   return record
 
 
@@ -546,6 +543,23 @@ def reserve_token_difference_capsule() -> int | None:
       return None
     _COLLECTION_STATE["capsules_reserved"] += 1
     return int(_COLLECTION_STATE["capsules_reserved"])
+
+
+def reserve_record_full_token_difference_event() -> int:
+  """Reserves one unbounded, replay-complete record-full diff event."""
+  with _COLLECTION_LOCK:
+    if not _COLLECTION_STATE["active"]:
+      raise RuntimeError("P57 token collection is not active")
+    if _COLLECTION_STATE["mode"] != P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL:
+      raise RuntimeError("record-full token event requires record-full mode")
+    _COLLECTION_STATE["token_difference_events"] += 1
+    _COLLECTION_STATE["capsules_reserved"] += 1
+    if (
+        _COLLECTION_STATE["token_difference_events"]
+        != _COLLECTION_STATE["capsules_reserved"]
+    ):
+      raise RuntimeError("record-full token event accounting diverged")
+    return int(_COLLECTION_STATE["token_difference_events"])
 
 
 def record_token_capsule_emission(*, succeeded: bool) -> None:
@@ -1100,6 +1114,8 @@ def continuity_debug_receipts(
     policy_step: Any = None,
     pair_index: Any = None,
     group_id: Any = None,
+    request_id: str | None = None,
+    event_index: int | None = None,
     chunk_size: int = 256,
 ) -> tuple[str, ...]:
   """Builds a complete, chunked token ledger for one exact first mismatch."""
@@ -1114,6 +1130,12 @@ def continuity_debug_receipts(
       or any(character not in "0123456789abcdef" for character in trajectory_id)
   ):
     raise ValueError("FrozenLake debug trajectory_id must be 32 lowercase hex")
+  if request_id is not None and (not isinstance(request_id, str) or not request_id):
+    raise ValueError("FrozenLake debug request_id must be a nonempty string")
+  if event_index is not None and (
+      type(event_index) is not int or event_index <= 0
+  ):
+    raise ValueError("FrozenLake debug event_index must be a positive integer")
   actual_tokens = _integer_vector(
       actual, field=f"{workload.upper()} debug actual prompt tokens"
   )
@@ -1219,6 +1241,10 @@ def continuity_debug_receipts(
       "token_chunk_records": len(records),
       "records_metadata_sha256": _debug_records_metadata_digest(records),
   }
+  if request_id is not None:
+    header["request_id"] = request_id
+  if event_index is not None:
+    header["event_index"] = event_index
   compact = {"sort_keys": True, "separators": (",", ":")}
   lines = [
       "[CANON_P57_TOKEN_CONTINUITY_DEBUG] "
@@ -1706,6 +1732,7 @@ def write_prompt_echo_difference_capsule(
     record: Mapping[str, Any],
     *,
     state_dir: str | os.PathLike[str] | None = None,
+    event_index: int | None = None,
 ) -> tuple[Path, str, int]:
   """Persists the raw submitted/echo IDs for one attributable echo red."""
   submitted = _integer_vector(
@@ -1718,6 +1745,10 @@ def write_prompt_echo_difference_capsule(
   )
   if token_streams_equal(submitted, echoed):
     raise ValueError("prompt echo difference capsule requires unequal streams")
+  if event_index is not None and (
+      type(event_index) is not int or event_index <= 0
+  ):
+    raise ValueError("prompt echo capsule event_index must be positive")
   if (
       record.get("submitted_sha256") != _prompt_witness_digest(submitted)
       or record.get("engine_echo_sha256") != _prompt_witness_digest(echoed)
@@ -1742,6 +1773,8 @@ def write_prompt_echo_difference_capsule(
       "submitted_token_ids": [int(token) for token in submitted],
       "engine_echo_token_ids": [int(token) for token in echoed],
   }
+  if event_index is not None:
+    capsule["event_index"] = event_index
   payload = (json.dumps(capsule, sort_keys=True, separators=(",", ":")) + "\n").encode()
   partial = output_dir / f".{target.name}.partial"
   descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

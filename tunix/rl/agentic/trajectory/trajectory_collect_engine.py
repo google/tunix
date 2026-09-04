@@ -996,10 +996,17 @@ class TrajectoryCollectEngine:
       )
       if not echo_equal:
         capsule_slot = None
-        if not self._frozenlake_token_continuity_debug_emitted:
+        if (
+            self._frozenlake_token_continuity_debug_mode
+            == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+        ):
+          capsule_slot = (
+              token_continuity.reserve_record_full_token_difference_event()
+          )
+        elif not self._frozenlake_token_continuity_debug_emitted:
           # Reserve at most one raw-token capsule per independent trajectory.
           # A later seam can still mark the same trajectory red, but may not
-          # consume a second process-wide evidence slot.
+          # consume a second process-wide collect-64 evidence slot.
           self._frozenlake_token_continuity_debug_emitted = True
           capsule_slot = token_continuity.reserve_token_difference_capsule()
         if capsule_slot is not None:
@@ -1007,7 +1014,14 @@ class TrajectoryCollectEngine:
           try:
             capsule_path, capsule_sha, capsule_bytes = (
                 token_continuity.write_prompt_echo_difference_capsule(
-                    witnesses[0], witness_record
+                    witnesses[0],
+                    witness_record,
+                    event_index=(
+                        capsule_slot
+                        if self._frozenlake_token_continuity_debug_mode
+                        == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+                        else None
+                    ),
                 )
             )
             print(
@@ -1026,6 +1040,13 @@ class TrajectoryCollectEngine:
                 "kind=engine-echo durability=none",
                 flush=True,
             )
+            if (
+                self._frozenlake_token_continuity_debug_mode
+                == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+            ):
+              raise RuntimeError(
+                  "P57 record-full prompt echo difference was not persisted"
+              ) from debug_error
           finally:
             token_continuity.record_token_capsule_emission(
                 succeeded=capsule_succeeded
@@ -1138,51 +1159,55 @@ class TrajectoryCollectEngine:
             self._frozenlake_token_continuity_debug_mode
             == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
         ):
-          capsule_slot = None
-          if not self._frozenlake_token_continuity_debug_emitted:
-            self._frozenlake_token_continuity_debug_emitted = True
-            capsule_slot = token_continuity.reserve_token_difference_capsule()
-          if capsule_slot is not None:
-            capsule_succeeded = False
-            try:
-              extra = getattr(self.env, "extra_kwargs", {}) or {}
-              debug_lines = token_continuity.continuity_debug_receipts(
-                  self.agent.trajectory,
-                  actual_prompt,
-                  expected_prompt,
-                  turn=len(self.agent.trajectory.steps),
-                  workload=continuity.workload,
-                  trajectory_id=self._frozenlake_token_continuity_trajectory_id,
-                  policy_step=self._original_input().get("policy_version"),
-                  pair_index=extra.get("pair_index"),
-                  group_id=extra.get("group_id"),
-              )
-              print(debug_lines[0], flush=True)
-              capsule_path, capsule_sha, capsule_bytes = (
-                  token_continuity.write_continuity_debug_capsule(debug_lines)
-              )
-              print(
-                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
-                  f"verdict=PASS slot={capsule_slot} path={capsule_path} "
-                  f"bytes={capsule_bytes} sha256={capsule_sha} "
-                  "kind=later-turn durability=mode0600-run-state+periodic-gcs",
-                  flush=True,
-              )
-              capsule_succeeded = True
-            except Exception as debug_error:  # pylint: disable=broad-exception-caught
-              logging.exception(
-                  "P57 record-full capsule emission failed: %s", debug_error
-              )
-              print(
-                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
-                  f"verdict=FAIL slot={capsule_slot} path=UNAVAILABLE "
-                  "kind=later-turn durability=none",
-                  flush=True,
-              )
-            finally:
-              token_continuity.record_token_capsule_emission(
-                  succeeded=capsule_succeeded
-              )
+          capsule_slot = (
+              token_continuity.reserve_record_full_token_difference_event()
+          )
+          capsule_succeeded = False
+          try:
+            extra = getattr(self.env, "extra_kwargs", {}) or {}
+            request_id = self._frozenlake_token_continuity_request_ids[-1]
+            debug_lines = token_continuity.continuity_debug_receipts(
+                self.agent.trajectory,
+                actual_prompt,
+                expected_prompt,
+                turn=len(self.agent.trajectory.steps),
+                workload=continuity.workload,
+                trajectory_id=self._frozenlake_token_continuity_trajectory_id,
+                policy_step=self._original_input().get("policy_version"),
+                pair_index=extra.get("pair_index"),
+                group_id=extra.get("group_id"),
+                request_id=request_id,
+                event_index=capsule_slot,
+            )
+            print(debug_lines[0], flush=True)
+            capsule_path, capsule_sha, capsule_bytes = (
+                token_continuity.write_continuity_debug_capsule(debug_lines)
+            )
+            print(
+                "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                f"verdict=PASS slot={capsule_slot} path={capsule_path} "
+                f"bytes={capsule_bytes} sha256={capsule_sha} "
+                "kind=later-turn durability=mode0600-run-state+periodic-gcs",
+                flush=True,
+            )
+            capsule_succeeded = True
+          except Exception as debug_error:  # pylint: disable=broad-exception-caught
+            logging.exception(
+                "P57 record-full capsule emission failed: %s", debug_error
+            )
+            print(
+                "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                f"verdict=FAIL slot={capsule_slot} path=UNAVAILABLE "
+                "kind=later-turn durability=none",
+                flush=True,
+            )
+            raise RuntimeError(
+                "P57 record-full later-turn difference was not persisted"
+            ) from debug_error
+          finally:
+            token_continuity.record_token_capsule_emission(
+                succeeded=capsule_succeeded
+            )
           self._frozenlake_token_continuity_different = True
           # Deliberately continue the unchanged trajectory into environment,
           # reward, loss, backward, and optimizer code.

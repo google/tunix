@@ -58,6 +58,39 @@ def _fixture(root: Path) -> Path:
 
 class TitoGcsSyncTest(unittest.TestCase):
 
+  def test_full_final_inventory_requires_every_token_event_capsule(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state = Path(tmp) / "state"
+      state.mkdir()
+      required = (
+          "p57_tito_witness/single-writer.json",
+          "p57_tito_witness/full-row-map.jsonl",
+          "p57_tito_full_record.classification.json",
+          "p33_frozenlake-dp8-tp8_full.classification.json",
+          "v1_hp_p45_full.classification.json",
+          "pre_alignment.jsonl",
+          "alignment.jsonl",
+          "updates.jsonl",
+          "p57_tito_witness/journal-reconstruction.json",
+          "p57_tito_gcs/orbax-probe.json",
+      )
+      for relative in required:
+        _write(state / relative, {"fixture": relative})
+      summary = state / "p57_tito_witness/full-record-summary.json"
+      _write(summary, {"collection": {"token_difference_events": 1}})
+      capsule = state / "token-continuity-first-diff/event-1.json"
+      _write(capsule, {"event_index": 1})
+      records = sync.evidence_inventory(state, final=True)
+      self.assertIn(
+          "token-continuity-first-diff/event-1.json",
+          {record["path"] for record in records},
+      )
+      capsule.unlink()
+      with self.assertRaisesRegex(
+          ValueError, "token-difference inventory differs"
+      ):
+        sync.evidence_inventory(state, final=True)
+
   def test_live_inventory_reuses_uploaded_sha_but_final_rehashes(self):
     with tempfile.TemporaryDirectory() as tmp:
       state = _fixture(Path(tmp))

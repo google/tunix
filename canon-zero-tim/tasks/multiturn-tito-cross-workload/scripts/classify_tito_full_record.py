@@ -491,20 +491,31 @@ def _validate_startup_receipts(
 
 def _validate_capsule(
     path: Path, reasons: list[str], *, recipe: str
-) -> tuple[str | None, str | None, int | None]:
+) -> tuple[str | None, str | None, int | None, int | None]:
   try:
     record = json.loads(path.read_text(encoding="utf-8"))
   except (OSError, json.JSONDecodeError) as error:
     reasons.append(f"capsule_unreadable:{path.name}:{error}")
-    return None, None, None
+    return None, None, None, None
   schema = record.get("schema")
   if schema == "canon.p57-tito-echo-diff.v1":
     witness = record.get("witness", {})
     submitted = record.get("submitted_token_ids")
     echoed = record.get("engine_echo_token_ids")
+    event_index = record.get("event_index")
     try:
       valid = (
-          witness.get("schema") == "canon.p57-tito-host-witness.v1"
+          set(record)
+          == {
+              "schema",
+              "event_index",
+              "witness",
+              "submitted_token_ids",
+              "engine_echo_token_ids",
+          }
+          and type(event_index) is int
+          and event_index > 0
+          and witness.get("schema") == "canon.p57-tito-host-witness.v1"
           and witness.get("workload") == recipe
           and isinstance(submitted, list)
           and isinstance(echoed, list)
@@ -532,17 +543,17 @@ def _validate_capsule(
         f"echo_capsule_request:{path.name}",
         reasons,
     )
-    return trajectory_id, request_id, None
+    return trajectory_id, request_id, None, event_index
   if schema != "p57-token-first-diff-capsule-v1":
     reasons.append(f"capsule_schema:{path.name}")
-    return None, None, None
+    return None, None, None, None
   try:
     collection_classifier._validate_capsule(
-        record, workload=recipe, path=path
+        record, workload=recipe, path=path, record_full=True
     )
   except ValueError as error:
     reasons.append(f"capsule_invalid:{path.name}:{error}")
-    return None, None, None
+    return None, None, None, None
   header = record.get("header", {})
   _require(
       isinstance(header.get("trajectory_id"), str)
@@ -551,7 +562,12 @@ def _validate_capsule(
       f"capsule_join_identity:{path.name}",
       reasons,
   )
-  return header.get("trajectory_id"), None, header.get("policy_step")
+  return (
+      header.get("trajectory_id"),
+      header.get("request_id"),
+      header.get("policy_step"),
+      header.get("event_index"),
+  )
 
 
 def classify(
@@ -606,6 +622,7 @@ def classify(
       "unexercised_single_turn_trajectories", "equal_trajectories",
       "different_trajectories", "later_turn_comparisons",
       "engine_echo_comparisons", "engine_echo_differences",
+      "token_difference_events",
       "capsules_reserved", "capsules_emitted", "capsules_omitted",
       "emission_failures", "backward_transactions",
       "gradient_microbatches", "optimizer_commits", "alignment_updates",
@@ -643,20 +660,26 @@ def classify(
         reasons,
     )
     _require(
-        collection["capsules_reserved"] + collection["capsules_omitted"]
-        == collection["different_trajectories"],
-        "capsule_difference_accounting",
+        collection["token_difference_events"]
+        == collection["capsules_reserved"],
+        "capsule_event_accounting",
         reasons,
     )
     _require(
-        collection["capsules_reserved"] <= 64,
-        "capsule_bound",
+        collection["capsules_omitted"] == 0,
+        "capsule_omission",
         reasons,
     )
     _require(
         collection["engine_echo_differences"]
-        <= collection["different_trajectories"],
+        <= collection["token_difference_events"],
         "engine_echo_difference_accounting",
+        reasons,
+    )
+    _require(
+        collection["different_trajectories"]
+        <= collection["token_difference_events"],
+        "trajectory_event_accounting",
         reasons,
     )
 
@@ -697,14 +720,6 @@ def classify(
   _require(
       all(rows == set(range(rows_per_update)) for rows in by_step.values()),
       "row_map_sequence_rows",
-      reasons,
-  )
-  _require(
-      not any(
-          row.get("policy_step") == 0 and bool(row.get("token_different"))
-          for row in row_maps
-      ),
-      "first_update_token_admission",
       reasons,
   )
   if collection:
@@ -795,9 +810,10 @@ def classify(
 
   capsules = sorted((state / "token-continuity-first-diff").glob("*.json"))
   capsule_trajectories = set()
+  capsule_event_indices = set()
   for capsule in capsules:
     _require(capsule.stat().st_mode & 0o077 == 0, f"capsule_mode:{capsule.name}", reasons)
-    trajectory_id, request_id, policy_step = _validate_capsule(
+    trajectory_id, request_id, policy_step, event_index = _validate_capsule(
         capsule, reasons, recipe=recipe
     )
     _require(
@@ -824,13 +840,38 @@ def classify(
             f"capsule_step_join:{capsule.name}",
             reasons,
         )
+    capsule_trajectories.add(trajectory_id)
     _require(
-        trajectory_id not in capsule_trajectories,
-        f"capsule_duplicate_trajectory:{capsule.name}",
+        event_index not in capsule_event_indices,
+        f"capsule_duplicate_event:{capsule.name}",
         reasons,
     )
-    capsule_trajectories.add(trajectory_id)
-  _require(len(capsules) == collection.get("capsules_emitted"), "capsule_inventory", reasons)
+    capsule_event_indices.add(event_index)
+  expected_red_trajectories = {
+      row.get("trajectory_id")
+      for row in row_maps
+      if bool(row.get("token_different"))
+  }
+  _require(
+      capsule_trajectories == expected_red_trajectories,
+      "capsule_red_trajectory_coverage",
+      reasons,
+  )
+  expected_event_indices = set(
+      range(1, int(collection.get("token_difference_events", 0)) + 1)
+  )
+  _require(
+      capsule_event_indices == expected_event_indices,
+      "capsule_event_sequence",
+      reasons,
+  )
+  _require(
+      len(capsules)
+      == collection.get("capsules_emitted")
+      == collection.get("token_difference_events"),
+      "capsule_inventory",
+      reasons,
+  )
   _require(collection.get("emission_failures") == 0, "capsule_emission_failure", reasons)
 
   try:
@@ -883,6 +924,7 @@ def classify(
           "unexercised_single_turn_trajectories", 0
       ),
       "different_trajectories": collection.get("different_trajectories", 0),
+      "token_difference_events": collection.get("token_difference_events", 0),
       "capsules": len(capsules),
       "update_sidecars": sidecar_count,
       "update_sidecar_bytes": sidecar_bytes,

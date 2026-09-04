@@ -178,7 +178,11 @@ def _unique_by_request(
 
 
 def _validate_capsule(
-    capsule: dict[str, Any], *, workload: str, path: Path
+    capsule: dict[str, Any],
+    *,
+    workload: str,
+    path: Path,
+    record_full: bool = False,
 ) -> str:
   if set(capsule) != {"schema", "header", "actual", "expected_segments"}:
     raise ValueError(f"persisted capsule fields differ: {path}")
@@ -196,7 +200,10 @@ def _validate_capsule(
     raise ValueError(f"persisted capsule structure differs: {path}")
   if header.get("workload") != workload:
     raise ValueError(f"persisted capsule workload differs: {path}")
-  if set(header) != _CAPSULE_HEADER_FIELDS:
+  expected_header_fields = _CAPSULE_HEADER_FIELDS | (
+      {"request_id", "event_index"} if record_full else set()
+  )
+  if set(header) != expected_header_fields:
     raise ValueError(f"persisted capsule header fields differ: {path}")
   if (
       header.get("schema") != "p57-token-first-diff-v1"
@@ -215,6 +222,13 @@ def _validate_capsule(
       or header["policy_step"] < 0
   ):
     raise ValueError(f"persisted capsule join identity differs: {path}")
+  if record_full and (
+      not isinstance(header.get("request_id"), str)
+      or not header["request_id"]
+      or type(header.get("event_index")) is not int
+      or header["event_index"] <= 0
+  ):
+    raise ValueError(f"persisted capsule event identity differs: {path}")
 
   for name in (
       "actual_sha256",
