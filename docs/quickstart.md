@@ -462,7 +462,6 @@ xpk workload create-pathways \
     --priority=medium
 ```
 
-
 ## Next Steps
 
 Now that you've completed the quick start, you can explore other training

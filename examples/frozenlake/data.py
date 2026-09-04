@@ -95,12 +95,12 @@ def create_dataset(
     **kwargs
 ) -> grain.MapDataset:
   """Lively generates the dataset, saves it to a local directory, and returns a MapDataset.
-  
+
   This function acts as the entry point for the Tunix GRPO pipeline.
   """
   os.makedirs(data_dir, exist_ok=True)
   filepath = os.path.join(data_dir, f"{split}.parquet")
-  
+
   if not os.path.exists(filepath):
     size = train_size if split == "train" else test_size
     print(f"Dynamically generating {size} instances for '{split}' split...")
@@ -112,15 +112,15 @@ def create_dataset(
     save_dataset(data, filepath)
   else:
     print(f"Loading existing dataset from {filepath}")
-    
+
   df = pd.read_parquet(filepath)
   hf_ds = datasets_lib.Dataset.from_pandas(df)
-  
+
   def process_item(item):
     item["prompts"] = ""
     return item
-    
-  return grain.MapDataset.source(hf_ds).map(process_item)
+
+  return grain.MapDataset.source(hf_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
 
 
 def main():

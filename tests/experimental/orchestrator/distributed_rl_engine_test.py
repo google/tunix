@@ -22,6 +22,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import distributed_rl_engine
+from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
@@ -53,6 +54,12 @@ class MockActorHandle(mock.MagicMock):
     self.get_metrics = mock.AsyncMock(return_value={})
     self.get_target_state = mock.AsyncMock(return_value={"params": 1})
     self.set_target_state = mock.AsyncMock()
+    self.with_loss_fn = mock.MagicMock()
+    self.with_gen_model_input_fn = mock.MagicMock()
+
+  def submit(self, method_name: str, *args, **kwargs):
+    method = getattr(self, method_name)
+    return method(*args, **kwargs)
 
   async def asubmit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -1109,6 +1116,205 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
 
     asyncio.run(_run())
+
+  def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 10
+    mock_assembler.eos_id = 20
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        mock_loss, has_aux=True
+    )
+    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=10, eos_id=20
+    )
+
+  def test_configure_worker_actor_raises_when_algo_none(self):
+    with self.assertRaisesRegex(ValueError, "algo is required"):
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=None,
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_actor_raises_when_assembler_none(self):
+    with self.assertRaisesRegex(ValueError, "assembler is required"):
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock.MagicMock(),
+          assembler=None,
+      )
+
+  def test_configure_worker_critic_configures_loss_and_gen_model_input_fn(self):
+    mock_critic = MockActorHandle()
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 5
+    mock_assembler.eos_id = 6
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1],
+        trainer_workers={datatypes.Role.CRITIC: mock_critic},
+    )
+    engine.configure_worker(
+        role=datatypes.Role.CRITIC,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    mock_critic.with_loss_fn.assert_called_once_with(mock_loss, has_aux=True)
+    mock_critic.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=5, eos_id=6
+    )
+
+  def test_configure_worker_fallback_pad_and_eos_kwargs(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock.MagicMock(spec=[]),
+        pad_id=42,
+        eos_id=43,
+    )
+
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=42, eos_id=43
+    )
+
+  def test_configure_worker_raises_on_missing_worker(self):
+    mock_algo = mock.MagicMock()
+    with self.assertRaises(ValueError):
+      self.engine.configure_worker(
+          role=datatypes.Role.CRITIC,
+          algo=mock_algo,
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_rollout_and_reference(self):
+    mock_algo = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    self.engine.configure_worker(
+        role=datatypes.Role.ROLLOUT,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+    self.engine.configure_worker(
+        role=datatypes.Role.REFERENCE,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    engine_no_workers = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+    )
+    with self.assertRaises(ValueError):
+      engine_no_workers.configure_worker(
+          role=datatypes.Role.ROLLOUT,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+    with self.assertRaises(ValueError):
+      engine_no_workers.configure_worker(
+          role=datatypes.Role.REFERENCE,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+  def test_configure_worker_unsupported_role(self):
+    mock_algo = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    with self.assertRaises(ValueError):
+      self.engine.configure_worker(
+          role="unsupported_role",
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+  def test_distributed_rl_engine_implements_protocol(self):
+    self.assertIsInstance(self.engine, rl_engine_interface.AbstractRLEngine)
+
+  def test_configure_worker_default_role_is_actor(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock(pad_id=1, eos_id=2)
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        mock_loss, has_aux=True
+    )
+    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=1, eos_id=2
+    )
+
+  def test_configure_worker_actor_raises_when_no_actor_worker(self):
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1],
+        trainer_workers={},
+    )
+    with self.assertRaisesRegex(
+        ValueError, "No trainer worker registered for role actor"
+    ):
+      engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock.MagicMock(),
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_pad_and_eos_defaults(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    # 1. Zero defaults when neither assembler nor kwargs define pad/eos
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock.MagicMock(spec=[]),
+    )
+    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=0, eos_id=0)
+
+    # 2. eos_id defaults to pad_id when only pad_id is set on assembler
+    mock_assembler_pad_only = mock.MagicMock(spec=["pad_id"])
+    mock_assembler_pad_only.pad_id = 7
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler_pad_only,
+    )
+    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=7, eos_id=7)
 
 
 if __name__ == "__main__":

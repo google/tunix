@@ -21,7 +21,7 @@ The TPU worker processes host the expensive pieces:
 
 This process only owns Orchestrator V2 control flow. It registers remote worker
 handles with ClusterOrchestrator, configures the GRPO loss on the trainer worker,
-and executes StandardRLProgram through ClusterOrchestrator.run_program().
+and executes StandardRLProgram through ClusterOrchestrator.run().
 """
 
 from __future__ import annotations
@@ -164,29 +164,10 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       # StandardRLProgram consumes this many prompt groups per trainer update.
       mini_batch_size=args.batch_size,
       max_packed_len=args.max_prompt_length + args.max_response_length,
+      max_response_length=args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
       temperature=args.temperature,
-  )
-
-
-def _configure_trainer_loss(
-    trainer_handle: remote_execution.ActorHandle,
-    *,
-    algo: algorithm_adapter.GRPOAdapter,
-    pad_id: int,
-    eos_id: int,
-) -> None:
-  logging.info(
-      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
-      "epsilon=%s).",
-      algo.beta_kl,
-      algo.clip_epsilon,
-  )
-  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
-  trainer_handle.submit(
-      "with_gen_model_input_fn",
-      algo.build_gen_model_input_fn(pad_id=pad_id, eos_id=eos_id),
   )
 
 
@@ -210,6 +191,7 @@ def _build_prompt_item(
           "env_config": {
               "prompt": prompt,
               "prompts": prompt,
+              "prompt_id": prompt_id,
               "question": question,
               "answer": answer,
               "gold_answer": answer,
@@ -324,16 +306,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  assert (
-      len(trainer_handles) == 1
-  ), f"Expected 1 trainer worker, got {len(trainer_handles)}."
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -353,7 +325,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       else []
   )
   generation_args = datatypes.GenerationArgs(
-      max_generation_steps=args.max_response_length,
+      max_response_length=args.max_response_length,
       temperature=args.temperature,
       top_p=args.top_p,
       top_k=None if args.top_k < 0 else args.top_k,
@@ -395,7 +367,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         "Cluster workers ready: %s. Starting StandardRLProgram execution...",
         [w.worker_id for w in cluster.worker_infos()],
     )
-    cluster.run_program(
+    cluster.run(
         program=program,
         num_steps=args.max_steps,
         bring_up=False,

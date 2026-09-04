@@ -62,6 +62,7 @@ class RolloutWorkerTest(absltest.TestCase):
           prompt="What is 2+2?",
           prompt_id="prompt_1",
           group_index=0,
+          generation_kwargs={"max_generation_steps": 64},
           metadata={"lineage": ctx},
       )
 

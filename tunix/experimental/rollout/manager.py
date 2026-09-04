@@ -168,9 +168,13 @@ class RolloutManager:
     env_name = getattr(self.config, "env_name", "")
     if env_name and registry.ENV_REGISTRY.contains(env_name):
       env_cls = registry.ENV_REGISTRY.get(env_name)
-      env_config = request.metadata.get(
-          "env_config", getattr(self.config, "env_config", {})
-      )
+      request_metadata = dict(request.metadata or {})
+      env_config = dict(getattr(self.config, "env_config", {}))
+      if isinstance(request_metadata.get("env_config"), dict):
+        env_config.update(request_metadata["env_config"])
+      env_config.setdefault("group_index", request.group_index)
+      env_config.setdefault("policy_version", request.target_policy_version)
+
       env_client = env_cls(**env_config)
     elif self.env_pool and hasattr(self.env_pool, "acquire_env"):
       env_client = self.env_pool.acquire_env(request.metadata.get("env_config"))
@@ -180,7 +184,9 @@ class RolloutManager:
     agent_name = getattr(self.config, "agent_name", "")
     if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
       agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = getattr(self.config, "agent_config", {})
+      agent_config = request.metadata.get(
+          "agent_config", getattr(self.config, "agent_config", {})
+      )
       agent = agent_cls(**agent_config)
     elif self.agent_factory and callable(self.agent_factory):
       agent = self.agent_factory()

@@ -51,6 +51,8 @@ class RLStepResult:
   num_microbatches: int
   reward_mean: float
   reward_std: float
+  advantage_mean: float = 0.0
+  advantage_std: float = 0.0
   train_result: Any = None
 
 
@@ -117,13 +119,25 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
-    self.generation_args = generation_args
+    algo_max_response_length = getattr(self.algo, "max_response_length", 1024)
+    if generation_args is None:
+      self.generation_args = datatypes.GenerationArgs(
+          max_response_length=algo_max_response_length,
+      )
+    elif generation_args.max_response_length is None:
+      self.generation_args = dataclasses.replace(
+          generation_args,
+          max_response_length=algo_max_response_length,
+      )
+    else:
+      self.generation_args = generation_args
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
+        batch_size=getattr(algo, "train_micro_batch_size", 1),
         group_size=self.group_size,
         mini_batch_size=self.mini_batch_size,
         max_packed_len=getattr(algo, "max_packed_len", 8192),
@@ -299,6 +313,7 @@ class StandardRLProgram(RLProgram):
       *,
       all_step_items: Sequence[datatypes.TrajectoryItem],
       step_rewards: Sequence[float],
+      step_advantages: Sequence[float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
       num_rollouts: int,
@@ -464,6 +479,27 @@ class StandardRLProgram(RLProgram):
             self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
         )
 
+    # --- Advantage Metrics ---
+    advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
+    advantage_std = float(np.std(step_advantages)) if step_advantages else 0.0
+    advantage_min = float(np.min(step_advantages)) if step_advantages else 0.0
+    advantage_max = float(np.max(step_advantages)) if step_advantages else 0.0
+    if step_advantages:
+      advantage_stats = {
+          "mean": advantage_mean,
+          "max": advantage_max,
+          "min": advantage_min,
+          "std": advantage_std,
+      }
+      for tag, val in advantage_stats.items():
+        self.metrics_logger.log(
+            self.metrics_prefix,
+            f"rewards/advantage/{tag}",
+            val,
+            self.mode,
+            log_step,
+        )
+
     # --- 3. Orchestrator Metrics ---
     orchestrator_stats = {
         "policy_version": float(self.policy_version),
@@ -581,6 +617,8 @@ class StandardRLProgram(RLProgram):
     return {
         "reward_mean": reward_mean,
         "reward_std": reward_std,
+        "advantage_mean": advantage_mean,
+        "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
     }
@@ -598,6 +636,7 @@ class StandardRLProgram(RLProgram):
       step_result = None
       trainer_metrics = None
       step_rewards = []
+      step_advantages = []
       num_microbatches = 0
       num_rollouts = 0
       all_step_items = []
@@ -618,6 +657,9 @@ class StandardRLProgram(RLProgram):
           num_rollouts += len(scored_items)
           for item in scored_items:
             step_rewards.append(float(item.traj.reward if item.traj else 0.0))
+            payload = getattr(item, "payload", None)
+            if payload is not None and payload.advantages is not None:
+              step_advantages.append(float(np.mean(payload.advantages)))
 
           payloads = []
           for item in scored_items:
@@ -710,6 +752,7 @@ class StandardRLProgram(RLProgram):
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
+          step_advantages=step_advantages,
           step_result=step_result,
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
@@ -726,6 +769,8 @@ class StandardRLProgram(RLProgram):
           num_microbatches=num_microbatches,
           reward_mean=metrics_summary["reward_mean"],
           reward_std=metrics_summary["reward_std"],
+          advantage_mean=metrics_summary["advantage_mean"],
+          advantage_std=metrics_summary["advantage_std"],
           train_result=step_result,
       )
 
@@ -733,11 +778,12 @@ class StandardRLProgram(RLProgram):
       perplexity_val = metrics_summary["perplexity_val"]
       if self.mode == Mode.TRAIN:
         logging.info(
-            "Train step %d - loss: %s - reward_mean: %.4f - perplexity: %s -"
-            " step_time: %.2fs",
+            "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
+            " %.4f - perplexity: %s - step_time: %.2fs",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
+            metrics_summary["advantage_mean"],
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
         )
@@ -755,6 +801,12 @@ class StandardRLProgram(RLProgram):
     del kwargs
     self.engine = engine
     logging.info("Starting StandardRLProgram concurrent stages...")
+
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=self.algo,
+        assembler=self.assembler,
+    )
 
     if self.sync_weights:
       await engine.prepare_rollout_policy(

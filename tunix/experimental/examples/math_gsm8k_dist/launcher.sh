@@ -55,6 +55,13 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+# Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
+# both the trainer and the rollout, so the two cannot drift. A disagreement is
+# not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
+# against a non-MaxText rollout matches zero of them. Set it explicitly to
+# override, or empty to put the rollout back on tpu-inference's own model.
+MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -73,6 +80,22 @@ FORCE_KILL=0
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
+
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText shards the batch dimension of every loss input across the fsdp
+  # axis, so the microbatch has to be a multiple of it. The trainer node
+  # enforces this too.
+  if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
+    TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
+  fi
+  if [[ -z "$MAXTEXT_CKPT" ]]; then
+    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+    exit 1
+  fi
+fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
@@ -332,6 +355,9 @@ echo "  shuffle:        $SHUFFLE"
 echo "  use lora:       $USE_LORA"
 echo "  sampler:        $SAMPLER"
 echo "  weight sync:    $WEIGHT_SYNC_MODE"
+echo "  trainer backend:$TRAINER_BACKEND"
+echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
+echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -389,7 +415,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   TRAINER_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main
+    --process_main=tunix.experimental.examples.common.run_trainer_node.main
 
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
@@ -397,6 +423,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
+    --sampler_type="$SAMPLER"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
@@ -405,7 +432,14 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --trainer_backend="$TRAINER_BACKEND"
   )
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
+  fi
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
@@ -439,7 +473,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   ROLLOUT_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main
+    --process_main=tunix.experimental.examples.common.run_rollout_node.main
 
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
@@ -455,6 +489,12 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
   )
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
+  fi
+  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
+    ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
@@ -577,7 +617,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     INFERENCE_CMD=(
       "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
       --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-      --process_main=tunix.experimental.examples.math_gsm8k_dist.run_inference_node.main
+      --process_main=tunix.experimental.examples.common.run_inference_node.main
 
       --port="$INFERENCE_PORT"
       --model_name="$MODEL_NAME"

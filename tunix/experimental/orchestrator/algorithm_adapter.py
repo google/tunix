@@ -91,13 +91,17 @@ class AlgorithmAdapter(abc.ABC):
       self,
       group_size: int = 8,
       mini_batch_size: int = 4,
+      train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
+      max_response_length: int = 1024,
   ):
     self.group_size = group_size
     self.mini_batch_size = mini_batch_size
+    self.train_micro_batch_size = train_micro_batch_size
     self.max_turns = max_turns
     self.max_packed_len = max_packed_len
+    self.max_response_length = max_response_length
     self.requires_reference_kl = False
     self.has_critic = False
     self.requires_old_logprobs = False
@@ -141,8 +145,10 @@ class GRPOAdapter(AlgorithmAdapter):
       self,
       group_size: int = 8,
       mini_batch_size: int = 4,
+      train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
+      max_response_length: int = 1024,
       clip_epsilon: float = 0.2,
       beta_kl: float = 0.04,
       temperature: float = 1.0,
@@ -153,8 +159,10 @@ class GRPOAdapter(AlgorithmAdapter):
     super().__init__(
         group_size=group_size,
         mini_batch_size=mini_batch_size,
+        train_micro_batch_size=train_micro_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,
+        max_response_length=max_response_length,
     )
     self.clip_epsilon = clip_epsilon
     self.beta_kl = beta_kl
@@ -259,6 +267,7 @@ class PPOAdapter(AlgorithmAdapter):
       mini_batch_size: int = 4,
       max_turns: int = 1,
       max_packed_len: int = 8192,
+      max_response_length: int = 1024,
       gamma: float = 0.99,
       lam: float = 0.95,
       clip_epsilon: float = 0.2,
@@ -269,6 +278,7 @@ class PPOAdapter(AlgorithmAdapter):
         mini_batch_size=mini_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,
+        max_response_length=max_response_length,
     )
     self.gamma = gamma
     self.lam = lam

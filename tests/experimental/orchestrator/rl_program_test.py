@@ -196,6 +196,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.mini_batch_size = 1
     self.mock_algo.max_turns = 1
     self.mock_algo.max_packed_len = 16
+    self.mock_algo.max_response_length = 1024
     self.mock_algo.requires_reference_kl = False
 
     mock_payload = datatypes.RLTrainerPayload(
@@ -210,6 +211,7 @@ class RLProgramTest(absltest.TestCase):
         mock_payload,
     ]
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
         group_size=2,
         mini_batch_size=4,
         max_packed_len=16,
@@ -284,6 +286,20 @@ class RLProgramTest(absltest.TestCase):
     self.assertIsNotNone(program.raw_q)
     self.assertIsNotNone(program.scored_q)
 
+  def test_default_assembler_inherits_algo_train_micro_batch_size(self):
+    self.mock_algo.train_micro_batch_size = 2
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        group_size=2,
+        mini_batch_size=1,
+    )
+    self.assertIsInstance(
+        program.assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(program.assembler.batch_size, 2)
+
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
@@ -318,6 +334,7 @@ class RLProgramTest(absltest.TestCase):
           [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
           group_size=2,
           policy_version=0,
+          generation_args=datatypes.GenerationArgs(max_response_length=1024),
       )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.save_checkpoint.assert_called_once_with(
@@ -675,6 +692,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.group_size = 3
       self.mock_algo.mini_batch_size = 1
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
           max_packed_len=16,
           pad_id=0,
           group_size=3,
@@ -737,6 +755,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.group_size = 2
       self.mock_algo.mini_batch_size = 2
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
           max_packed_len=16,
           pad_id=0,
           group_size=2,
@@ -789,6 +808,148 @@ class RLProgramTest(absltest.TestCase):
       )
       self.assertEqual(program.last_step_result.num_microbatches, 1)
       self.assertEqual(program.last_step_result.num_rollouts, 4)
+
+    asyncio.run(_run())
+
+  def test_train_stage_sequence_packed_with_batch_size_greater_than_one(self):
+    async def _run():
+      self.mock_algo.train_micro_batch_size = 2
+      self.mock_algo.group_size = 2
+      self.mock_algo.mini_batch_size = 2
+      packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          max_packed_len=16,
+          pad_id=0,
+          group_size=2,
+          mini_batch_size=2,
+          target_occupancy=0.60,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          group_size=2,
+          mini_batch_size=2,
+          reward_fns=[lambda x: 1.0],
+          assembler=packed_assembler,
+          sync_weights=False,
+      )
+      program.engine = self.mock_engine
+
+      def _make_item(prompt_id, idx, length):
+        payload = datatypes.RLTrainerPayload(
+            token_ids=np.full(length, idx + 1, dtype=np.int32),
+            token_mask=np.ones(length, dtype=np.float32),
+            loss_mask=np.ones(length, dtype=np.float32),
+            action_mask=np.ones(length, dtype=np.float32),
+            advantages=np.ones(length, dtype=np.float32),
+        )
+        item = datatypes.TrajectoryItem(
+            group_index=idx,
+            prompt_id=prompt_id,
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = payload
+        return item
+
+      # Each item has 10 tokens. Since 10 + 10 = 20 > 16, each item requires its own bin.
+      # 4 items -> 4 bins.
+      # With batch_size=2, these 4 bins form 2 microbatches of shape [2, 16].
+      for i in range(2):
+        await program.scored_q.put(_make_item("prompt_0", i, length=10))
+      for i in range(2):
+        await program.scored_q.put(_make_item("prompt_1", i, length=10))
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      await program.train_stage()
+
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      calls = self.mock_engine.train_step.call_args_list
+      # Microbatch 0: batch_size=2, apply_optimizer=False
+      mb0 = calls[0].args[0]
+      self.assertEqual(mb0.token_ids.shape, (2, 16))
+      self.assertFalse(calls[0].kwargs["apply_optimizer"])
+      self.assertTrue(calls[0].kwargs["accumulate_gradients"])
+      # Microbatch 1: batch_size=2, apply_optimizer=True
+      mb1 = calls[1].args[0]
+      self.assertEqual(mb1.token_ids.shape, (2, 16))
+      self.assertTrue(calls[1].kwargs["apply_optimizer"])
+      self.assertTrue(calls[1].kwargs["accumulate_gradients"])
+
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertEqual(program.last_step_result.num_rollouts, 4)
+
+    asyncio.run(_run())
+
+  def test_train_stage_sequence_packed_pads_trailing_microbatch_to_batch_size(
+      self,
+  ):
+    async def _run():
+      self.mock_algo.train_micro_batch_size = 2
+      self.mock_algo.group_size = 3
+      self.mock_algo.mini_batch_size = 1
+      packed_assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          max_packed_len=16,
+          pad_id=0,
+          group_size=3,
+          mini_batch_size=1,
+          target_occupancy=0.60,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          group_size=3,
+          mini_batch_size=1,
+          reward_fns=[lambda x: 1.0],
+          assembler=packed_assembler,
+          sync_weights=False,
+      )
+      program.engine = self.mock_engine
+
+      def _make_item(idx, length):
+        payload = datatypes.RLTrainerPayload(
+            token_ids=np.full(length, idx + 1, dtype=np.int32),
+            token_mask=np.ones(length, dtype=np.float32),
+            loss_mask=np.ones(length, dtype=np.float32),
+            action_mask=np.ones(length, dtype=np.float32),
+            advantages=np.ones(length, dtype=np.float32),
+        )
+        item = datatypes.TrajectoryItem(
+            group_index=idx,
+            prompt_id="prompt_0",
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = payload
+        return item
+
+      # 3 items of 10 tokens each. Each requires its own bin.
+      # 3 bins with batch_size=2 produces:
+      # Microbatch 0: 2 bins (shape [2, 16])
+      # Microbatch 1: 1 bin + 1 zero-padded trailing row (shape [2, 16])
+      for i in range(3):
+        await program.scored_q.put(_make_item(i, length=10))
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      await program.train_stage()
+
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      calls = self.mock_engine.train_step.call_args_list
+      mb0 = calls[0].args[0]
+      mb1 = calls[1].args[0]
+      self.assertEqual(mb0.token_ids.shape, (2, 16))
+      self.assertEqual(mb1.token_ids.shape, (2, 16))
+
+      # Trailing row in mb1 is zero-padded
+      self.assertTrue(np.all(mb1.segment_ids[1] == 0))
+      self.assertTrue(np.all(mb1.loss_mask[1] == 0.0))
+      self.assertTrue(np.all(mb1.token_ids[1] == 0))
+
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertEqual(program.last_step_result.num_rollouts, 3)
 
     asyncio.run(_run())
 
@@ -1007,6 +1168,7 @@ class RLProgramTest(absltest.TestCase):
           [dict_item],
           group_size=2,
           policy_version=0,
+          generation_args=datatypes.GenerationArgs(max_response_length=1024),
       )
 
     asyncio.run(_run())
@@ -1120,6 +1282,7 @@ class RLProgramTest(absltest.TestCase):
           _make_trajectory_group("prompt_1"),
       )
       assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
           group_size=2,
           mini_batch_size=2,
           max_packed_len=8,
@@ -1138,6 +1301,36 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(calls[1].kwargs["apply_optimizer"])
       self.assertEqual(program.last_step_result.num_rollouts, 4)
       self.assertEqual(program.last_step_result.num_microbatches, 2)
+
+    asyncio.run(_run())
+
+  def test_multi_group_sequence_packed_with_batch_size_greater_than_one(self):
+    async def _run():
+      self.mock_algo.train_micro_batch_size = 2
+      self.mock_algo.mini_batch_size = 2
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          group_size=2,
+          mini_batch_size=2,
+          max_packed_len=8,
+      )
+      program = self._create_program(dataset=["p0", "p1"], assembler=assembler)
+
+      await program.run_async(self.mock_engine)
+
+      # 2 groups of 8 tokens each form 2 bins. With batch_size=2, they form 1 microbatch of shape [2, 8].
+      self.assertEqual(self.mock_engine.train_step.call_count, 1)
+      calls = self.mock_engine.train_step.call_args_list
+      self.assertEqual(calls[0].args[0].token_ids.shape, (2, 8))
+      self.assertTrue(calls[0].kwargs["accumulate_gradients"])
+      self.assertTrue(calls[0].kwargs["apply_optimizer"])
+      self.assertEqual(program.last_step_result.num_rollouts, 4)
+      self.assertEqual(program.last_step_result.num_microbatches, 1)
 
     asyncio.run(_run())
 
@@ -1391,6 +1584,34 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(logger.metric_exists("", "rewards/sum", "train"))
       self.assertAlmostEqual(logger.get_metric("", "rewards/sum", "train"), 5.0)
 
+      # Advantage Metrics
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/mean", "train"), 1.0
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/max", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/max", "train"), 1.0
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/min", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/min", "train"), 1.0
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/std", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/std", "train"), 0.0
+      )
+      self.assertAlmostEqual(program.last_step_result.advantage_mean, 1.0)
+      self.assertAlmostEqual(program.last_step_result.advantage_std, 0.0)
+
       # 3. Rollout Metrics (collected from RolloutWorker responses)
       self.assertTrue(
           logger.metric_exists("", "rollout/prompt_length_mean", "train")
@@ -1457,6 +1678,82 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(
           logger.metric_exists("", "orchestrator/step_time_sec", "train")
       )
+
+    asyncio.run(_run())
+
+  def test_advantage_metrics_logging(self):
+    async def _run():
+      rollout_worker = _MockWorkerHandle(role="rollout")
+      rollout_worker.responses = [
+          [
+              _create_rollout_response(
+                  "req_0", "prompt_0", group_index=0, reward=1.0
+              ),
+              _create_rollout_response(
+                  "req_1", "prompt_0", group_index=1, reward=2.0
+              ),
+          ],
+      ]
+      trainer_worker = _MockWorkerHandle(role="trainer")
+      trainer_worker.metrics_buffer = exp_metrics.MetricsBuffer(
+          id=1, scalar_metrics={"loss": 0.1}
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[rollout_worker],
+          trainer_workers={datatypes.Role.ACTOR: trainer_worker},
+      )
+      payload_0 = datatypes.RLTrainerPayload(
+          token_ids=np.array([1, 2], dtype=np.int32),
+          token_mask=np.array([1, 1], dtype=np.float32),
+          loss_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.full(2, 1.5, dtype=np.float32),
+          action_mask=np.array([1, 1], dtype=np.float32),
+      )
+      payload_1 = datatypes.RLTrainerPayload(
+          token_ids=np.array([3, 4], dtype=np.int32),
+          token_mask=np.array([1, 1], dtype=np.float32),
+          loss_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.full(2, -0.5, dtype=np.float32),
+          action_mask=np.array([1, 1], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.return_value = [
+          payload_0,
+          payload_1,
+      ]
+
+      program = self._create_program(
+          dataset=["prompt_0"], reward_fns=[], sync_weights=False
+      )
+      await program.run_async(engine, max_steps=1)
+
+      logger = program.metrics_logger
+      self.assertIsNotNone(logger)
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/mean", "train"), 0.5
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/max", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/max", "train"), 1.5
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/min", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/min", "train"), -0.5
+      )
+      self.assertTrue(
+          logger.metric_exists("", "rewards/advantage/std", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/std", "train"), 1.0
+      )
+      self.assertAlmostEqual(program.last_step_result.advantage_mean, 0.5)
+      self.assertAlmostEqual(program.last_step_result.advantage_std, 1.0)
 
     asyncio.run(_run())
 
@@ -2060,8 +2357,6 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
-
   def test_non_positive_batch_dimensions_rejected(self):
     self.mock_algo.mini_batch_size = 0
     with self.assertRaisesRegex(
@@ -2078,6 +2373,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_passes_generation_args_to_dispatch_rollouts(self):
     async def _run():
+      self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
           self.mock_engine,
           _make_trajectory_group(prompt_id="p0", group_size=2),
@@ -2097,7 +2393,108 @@ class RLProgramTest(absltest.TestCase):
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
       _, kwargs = self.mock_engine.dispatch_rollouts.call_args
-      self.assertEqual(kwargs.get("generation_args"), gen_args)
+      expected_gen_args = datatypes.GenerationArgs(
+          max_generation_steps=128,
+          max_response_length=512,
+          temperature=0.7,
+          top_p=0.9,
+          return_logprobs=True,
+      )
+      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+
+    asyncio.run(_run())
+
+  def test_program_auto_injects_max_response_length_when_gen_args_none(self):
+    async def _run():
+      self.mock_algo.max_response_length = 512
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="p0", group_size=2),
+          [],
+      )
+      p = self._create_program(
+          dataset=("p0",),
+          generation_args=None,
+          sync_weights=False,
+      )
+      await p.run_async(self.mock_engine)
+      self.mock_engine.dispatch_rollouts.assert_called_once()
+      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      expected_gen_args = datatypes.GenerationArgs(
+          max_response_length=512,
+      )
+      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+
+    asyncio.run(_run())
+
+  def test_run_async_auto_configures_worker_on_engine(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      mock_assembler = mock.MagicMock()
+      mock_assembler.pad_id = 11
+      mock_assembler.eos_id = 22
+      mock_assembler.assembly_batch_size = 2
+      mock_assembler.groups_per_assembly_batch = 1
+      mock_assembler.pack.return_value = [
+          mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      ]
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          assembler=mock_assembler,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.mock_engine.configure_worker.assert_called_once_with(
+          role=datatypes.Role.ACTOR,
+          algo=self.mock_algo,
+          assembler=mock_assembler,
+      )
+
+    asyncio.run(_run())
+
+  def test_run_async_configures_worker_before_prepare_rollout_policy(self):
+    async def _run():
+      call_order = []
+      self.mock_engine.configure_worker.side_effect = (
+          lambda **kwargs: call_order.append("configure_worker")
+      )
+      self.mock_engine.prepare_rollout_policy = mock.AsyncMock(
+          side_effect=lambda **kwargs: call_order.append(
+              "prepare_rollout_policy"
+          )
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          sync_weights=True,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          call_order, ["configure_worker", "prepare_rollout_policy"]
+      )
+
+    asyncio.run(_run())
+
+  def test_run_async_propagates_configure_worker_failure(self):
+    async def _run():
+      self.mock_engine.configure_worker.side_effect = ValueError(
+          "Worker configuration failed"
+      )
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+      )
+      with self.assertRaisesRegex(ValueError, "Worker configuration failed"):
+        await program.run_async(self.mock_engine)
+
+      self.mock_engine.prepare_rollout_policy.assert_not_called()
+      self.mock_engine.dispatch_rollouts.assert_not_called()
 
     asyncio.run(_run())
 
