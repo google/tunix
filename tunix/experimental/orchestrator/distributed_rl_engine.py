@@ -138,10 +138,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       worker: remote_execution.ActorHandle,
       method_name: str,
+      *args: Any,
       **kwargs: Any,
   ) -> Any:
     """Helper invoking method on remote handle."""
-    res = worker.asubmit(method_name, **kwargs)
+    res = worker.asubmit(method_name, *args, **kwargs)
     if inspect.isawaitable(res):
       return await res
     return res
@@ -556,7 +557,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       algo: algorithm_adapter.AlgorithmAdapter,
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
-  ) -> None:
+  ) -> Any:
     """Configures worker(s) under the specified role with algorithm or runtime settings."""
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     if algo is None:
@@ -576,14 +577,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             "Auto-configuring trainer loss and model input fn on %s worker...",
             role_name,
         )
-        worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+        loss_fn = algo.loss_fn()
         pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
         eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
         gen_fn = algo.build_gen_model_input_fn(
             pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
             eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
         )
-        worker.submit("with_gen_model_input_fn", gen_fn)
+        try:
+          loop = asyncio.get_running_loop()
+        except RuntimeError:
+          loop = None
+
+        if loop is not None and loop.is_running():
+          async def _async_configure() -> None:
+            await self._invoke_worker(
+                worker, "with_loss_fn", loss_fn, has_aux=True
+            )
+            await self._invoke_worker(worker, "with_gen_model_input_fn", gen_fn)
+
+          return _async_configure()
+        else:
+          worker.submit("with_loss_fn", loss_fn, has_aux=True)
+          worker.submit("with_gen_model_input_fn", gen_fn)
 
       case datatypes.Role.ROLLOUT:
         if not self._rollout_workers:

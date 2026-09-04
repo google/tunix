@@ -46,6 +46,10 @@ spec:
             terminationGracePeriodSeconds: 10
             nodeSelector:
               node.kubernetes.io/instance-type: ${CPU_MACHINE}
+            tolerations:
+            - key: "cloud.google.com/gke-nodepool"
+              operator: "Exists"
+              effect: "NoSchedule"
             containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
@@ -83,6 +87,12 @@ spec:
                   exit $$EXIT_CODE
               env:
               # Injects the JobSet Name
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: anisha-hf-token
+                    key: HF_TOKEN
+                    optional: true
               - name: JOBSET_NAME
                 valueFrom:
                   fieldRef:

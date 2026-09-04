@@ -24,6 +24,11 @@ import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import weight_sync
 
+try:
+  from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+except ImportError:
+  raiden_weight_sync_delegate = None
+
 Sampler = base_sampler_lib.Sampler
 
 
@@ -72,8 +77,11 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
       if self.raiden_sync_delegate is None:
-        from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
+        if raiden_weight_sync_delegate is None:
+          raise RuntimeError(
+              "raiden_weight_sync_delegate could not be imported, but"
+              " weight_sync_mode is RAIDEN."
+          )
         self.raiden_sync_delegate = (
             raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
         )
@@ -86,10 +94,12 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
     if self.tokenizer is not None and self.config is not None:
+      logging.info("InprocessVllmSamplerAdapter: creating VllmSampler...")
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(
           tokenizer=self.tokenizer, config=self.config
       )
+      logging.info("InprocessVllmSamplerAdapter: created VllmSampler.")
 
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""

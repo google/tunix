@@ -353,9 +353,15 @@ class RaidenSynchronizerTest(absltest.TestCase):
           sync, "_init_ffi_transport", autospec=True
       ) as init_ffi:
         sync.bind(self._state())
-        init_ffi.assert_not_called()
+        init_ffi.assert_called_once_with(is_d2h=True)
         sync.d2h()
-    init_ffi.assert_called_once_with(is_d2h=True)
+        init_ffi.assert_called_once_with(is_d2h=True)
+
+  def test_release_host_arrays(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
+    self.assertTrue(sync.arrays)
+    sync.release_host_arrays()
+    self.assertFalse(sync.arrays)
 
   def test_ffi_destination_init_runs_at_bind(self):
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):

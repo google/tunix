@@ -35,6 +35,7 @@ WORKDIR /app
 # Copy scripts and requirements first to leverage Docker cache
 COPY scripts/install_tunix_vllm_requirement.sh scripts/
 COPY requirements/ requirements/
+COPY raiden_wheels/ raiden_wheels/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
@@ -82,6 +83,8 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
     fi
+
+RUN uv pip install ml-goodput-measurement "numpy<=2.3"
 
 # Copy the rest of the project files
 COPY . .

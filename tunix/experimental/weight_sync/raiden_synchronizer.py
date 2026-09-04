@@ -47,6 +47,76 @@ def _log_rss(tag: str) -> None:
   )
 
 
+def _ensure_ffi_compute_on_compat() -> None:
+  """Bridges TPU-sync wheels that call the newer compute_on decorator API."""
+  import inspect  # pylint: disable=g-import-not-at-top
+  import sys  # pylint: disable=g-import-not-at-top
+  try:
+    from jax.experimental import compute_on as exp_compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
+  except ImportError:
+    exp_compute_on = None
+
+  compute_on_mod = getattr(jax, "_src", None)
+  compute_on_src = getattr(compute_on_mod, "compute_on", None) if compute_on_mod else None
+
+  compute_on2 = None
+  if compute_on_src and hasattr(compute_on_src, "compute_on2"):
+    compute_on2 = compute_on_src.compute_on2
+  elif exp_compute_on and hasattr(exp_compute_on, "compute_on2"):
+    compute_on2 = exp_compute_on.compute_on2
+
+  def _make_safe_compute_on(orig_fn, fallback_fn):
+    def _wrapped(f=None, *, compute_type="device_host", out_memory_spaces=None, **kwargs):
+      if fallback_fn is not None:
+        try:
+          return fallback_fn(f, compute_type=compute_type, out_memory_spaces=out_memory_spaces, **kwargs)
+        except TypeError:
+          try:
+            return fallback_fn(f, compute_type=compute_type, **kwargs)
+          except Exception:
+            pass
+      try:
+        return orig_fn(f, compute_type=compute_type, out_memory_spaces=out_memory_spaces, **kwargs)
+      except TypeError:
+        pass
+      try:
+        if f is None:
+          return orig_fn(compute_type)
+        return orig_fn(compute_type)(f)
+      except Exception:
+        pass
+      return (lambda g: g) if f is None else f
+    return _wrapped
+
+  targets = []
+  if compute_on_src:
+    targets.append(compute_on_src)
+  if exp_compute_on:
+    targets.append(exp_compute_on)
+  if "jax.experimental.compute_on" in sys.modules:
+    targets.append(sys.modules["jax.experimental.compute_on"])
+  if "jax._src.compute_on" in sys.modules:
+    targets.append(sys.modules["jax._src.compute_on"])
+  if "tpu_sync.frameworks.jax.weight_synchronizer_ffi" in sys.modules:
+    ffi_mod = sys.modules["tpu_sync.frameworks.jax.weight_synchronizer_ffi"]
+    if hasattr(ffi_mod, "compute_on"):
+      targets.append(ffi_mod.compute_on)
+
+  for t in targets:
+    cur_fn = getattr(t, "compute_on", None)
+    if cur_fn is not None:
+      try:
+        params = inspect.signature(cur_fn).parameters
+        if "out_memory_spaces" in params:
+          continue
+      except (TypeError, ValueError):
+        pass
+      t.compute_on = _make_safe_compute_on(cur_fn, compute_on2)
+      logging.warning("Patched compute_on on %s for TPU-sync FFI compatibility.", t)
+
+
+_ensure_ffi_compute_on_compat()
+
 _ws_lib: Any = None
 try:
   from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
@@ -58,40 +128,6 @@ try:
   from tpu_sync.frameworks.jax import weight_synchronizer_ffi as _raiden_ffi  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
 except ImportError:
   _raiden_ffi = None
-
-
-def _ensure_ffi_compute_on_compat() -> None:
-  """Bridges TPU-sync wheels that call the newer compute_on decorator API."""
-  try:
-    from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
-  except ImportError:
-    pass
-  compute_on_mod = getattr(jax, "_src", None)
-  if compute_on_mod is None:
-    return
-  compute_on_mod = getattr(compute_on_mod, "compute_on", None)
-  if compute_on_mod is None:
-    return
-
-  try:
-    params = inspect.signature(compute_on_mod.compute_on).parameters
-  except (TypeError, ValueError):
-    params = {}
-  if "out_memory_spaces" in params:
-    return
-
-  compute_on2 = getattr(compute_on_mod, "compute_on2", None)
-  if compute_on2 is None:
-    raise RuntimeError(
-        "Installed JAX lacks compute_on compatibility required by the TPU-sync"
-        " FFI wheel."
-    )
-
-  compute_on_mod.compute_on = compute_on2
-  logging.warning(
-      "Patched jax._src.compute_on.compute_on to compute_on2 for TPU-sync FFI"
-      " compatibility."
-  )
 
 
 def local_ip() -> str:
@@ -233,9 +269,13 @@ class RaidenSynchronizer:
       *,
       worker_index: int = 0,
       auto_h2d: bool = False,
+      host_stage: bool = False,
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
+      mesh: Optional[Any] = None,
+      **kwargs: Any,
   ):
+    del host_stage
     is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
     self.job_name = job_name
     self.worker_index = worker_index
@@ -248,10 +288,12 @@ class RaidenSynchronizer:
     self._sync: Any = None
     self._ips: List[str] = []
     self._unique_listeners: List[str] = []
+    self._mesh: Any = mesh or kwargs.get("mesh", None)
     self._ffi_mesh: Any = None
     self._ffi_shard_idx: Any = None
+    self._is_cpu_staged: bool = False
     if state is not None:
-      self.bind(state)
+      self.bind(state, mesh=self._mesh)
 
   @property
   def bound(self) -> bool:
@@ -275,14 +317,66 @@ class RaidenSynchronizer:
     from jax.experimental import multihost_utils  # pylint: disable=g-import-not-at-top
 
     _ensure_ffi_compute_on_compat()
-    mesh = getattr(getattr(self.arrays[0], "sharding", None), "mesh", None)
+    mesh = self._mesh
+    sharded_arr = None
+    if mesh is None:
+      for arr in self.arrays:
+        m = getattr(getattr(arr, "sharding", None), "mesh", None)
+        if m is not None:
+          mesh = m
+          sharded_arr = arr
+          break
+    if mesh is None:
+      try:
+        from jax._src import mesh as jax_mesh_mod  # pylint: disable=g-import-not-at-top
+        active = getattr(getattr(jax_mesh_mod, "thread_resources", None), "env", None)
+        if active is not None and getattr(active, "physical_mesh", None) is not None:
+          mesh = active.physical_mesh
+      except Exception:
+        pass
+    if mesh is None:
+      try:
+        from jax._src.mesh import get_concrete_mesh  # pylint: disable=g-import-not-at-top
+        m = get_concrete_mesh()
+        if m is not None and getattr(m, "devices", None) is not None and m.devices.size > 0:
+          mesh = m
+      except Exception:
+        pass
+    if mesh is None:
+      try:
+        devices = np.array(jax.devices())
+        if devices.size == 64:
+          mesh = jax.sharding.Mesh(devices.reshape(16, 4), ("fsdp", "tensor"))
+        elif devices.size == 4:
+          mesh = jax.sharding.Mesh(devices.reshape(1, 4), ("fsdp", "tensor"))
+        elif devices.size > 0:
+          mesh = jax.sharding.Mesh(devices.reshape(devices.size, 1), ("fsdp", "tensor"))
+      except Exception:
+        pass
     if mesh is None:
       raise ValueError("Arrays must be sharded on a Mesh for FFI weight sync.")
+    self._mesh = mesh
 
-    slice_byte_sizes = [
-        int(np.prod(arr.sharding.shard_shape(arr.shape)) * arr.dtype.itemsize)
-        for arr in self.arrays
-    ]
+    def _get_shard_size(arr):
+      try:
+        if hasattr(arr, "on_device_size_in_bytes"):
+          return int(arr.on_device_size_in_bytes())
+      except Exception:
+        pass
+      try:
+        sharding = getattr(arr, "sharding", None)
+        if hasattr(sharding, "shard_shape"):
+          return int(np.prod(sharding.shard_shape(arr.shape)) * arr.dtype.itemsize)
+      except Exception:
+        pass
+      try:
+        if hasattr(arr, "addressable_shards") and arr.addressable_shards:
+          return int(arr.addressable_shards[0].data.size * arr.dtype.itemsize)
+      except Exception:
+        pass
+      return int(np.prod(arr.shape) * arr.dtype.itemsize)
+
+    slice_byte_sizes = [_get_shard_size(arr) for arr in self.arrays]
     sizes_sharding = jax.sharding.NamedSharding(
         mesh, jax.sharding.PartitionSpec(None)
     )
@@ -302,10 +396,22 @@ class RaidenSynchronizer:
     )
 
     src_devices = mesh.devices.flatten()
-    num_processes = len(
-        set(getattr(d, "process_index", 0) for d in src_devices)
-    )
+    try:
+      from tunix.utils import topology  # pylint: disable=g-import-not-at-top
+
+      host_keys = {topology._device_host_key(d) for d in src_devices}
+      host_keys.discard(None)
+      num_processes = len(host_keys) if host_keys else 0
+    except Exception:
+      num_processes = 0
+    if not num_processes:
+      num_processes = len(
+          set(getattr(d, "process_index", 0) for d in src_devices)
+      )
     devices_per_host = len(src_devices) // max(1, num_processes)
+    if self._is_proxy and devices_per_host > 4:
+      devices_per_host = 4
+    devices_per_host = max(1, min(devices_per_host, len(src_devices)))
 
     if is_d2h:
       logging.info(
@@ -332,7 +438,9 @@ class RaidenSynchronizer:
           devices_per_host,
       )
       ws_info = _raiden_ffi.init_weight_synchronizer(
-          device_array=self.arrays[0],
+          device_array=(
+              sharded_arr if sharded_arr is not None else self.arrays[0]
+          ),
           shard_idx=shard_idx,
           mesh=mesh,
           slice_byte_sizes=slice_byte_sizes_sharded,
@@ -377,8 +485,10 @@ class RaidenSynchronizer:
     for arr in self.arrays:
       arr.block_until_ready()
 
-  def bind(self, state: Any) -> None:
+  def bind(self, state: Any, mesh: Optional[Any] = None) -> None:
     """Binds this host's weights, or rebinds them after a training step."""
+    if mesh is not None:
+      self._mesh = mesh
     _log_rss("bind:start")
     # Clear previous buffers before staging to avoid holding duplicate weight
     # copies in host memory during rebinds.
@@ -389,19 +499,32 @@ class RaidenSynchronizer:
     )
     del state
     _log_rss("bind:after_flatten")
+    self._is_cpu_staged = bool(self.arrays) and all(
+        all(getattr(d, "platform", "") == "cpu" for d in a.devices())
+        for a in self.arrays
+    )
     logging.info(
-        "%s bind prepared %d arrays (proxy_runtime=%s)",
+        "%s bind prepared %d arrays (proxy_runtime=%s, cpu_staged=%s)",
         self.job_name,
         len(self.arrays),
         self._is_proxy,
+        self._is_cpu_staged,
     )
-    if self._is_proxy:
+    if self._is_proxy and not self._is_cpu_staged:
       self._ips = []
       self._unique_listeners = []
       if self._auto_h2d:
         self._init_ffi_transport(is_d2h=False)
         logging.info(
             "%s FFI destination transport ready: shards=%s control=%s",
+            self.job_name,
+            self._ips,
+            self._unique_listeners,
+        )
+      else:
+        self._init_ffi_transport(is_d2h=True)
+        logging.info(
+            "%s FFI source transport ready: shards=%s control=%s",
             self.job_name,
             self._ips,
             self._unique_listeners,
@@ -415,6 +538,7 @@ class RaidenSynchronizer:
           self.job_name,
           len(self.arrays),
       )
+
       self._sync = _ws_lib.WeightSynchronizer(
           self.arrays,
           local_port=0,
@@ -441,12 +565,20 @@ class RaidenSynchronizer:
       _log_rss("bind:after_native_rebind")
 
   def _require_sync(self, op: str) -> Any:
-    if self._sync is None and not self._is_proxy:
+    if self._sync is None and not (self._is_proxy and not self._is_cpu_staged):
       raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
     return self._sync
 
   def d2h(self) -> None:
-    if self._is_proxy:
+    if self._is_proxy and not self._is_cpu_staged:
+      if self._ips:
+        logging.info(
+            "FFI D2H already initialized for %s. Shards: %s, Control plane: %s",
+            self.job_name,
+            self._ips,
+            self._unique_listeners,
+        )
+        return
       try:
         self._init_ffi_transport(is_d2h=True)
         logging.info(
@@ -468,12 +600,16 @@ class RaidenSynchronizer:
   def h2d(self) -> None:
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
-    if self._is_proxy:
+    if self._is_proxy and not self._is_cpu_staged:
       self._ffi_h2d()
       return
     if self._sync is not None:
       self._sync.h2d()
       jax.block_until_ready(self.arrays)
+
+  def release_host_arrays(self) -> None:
+    """Drops host-staged array references to reclaim memory between sync rounds."""
+    self.arrays = []
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
@@ -488,7 +624,10 @@ class RaidenSynchronizer:
         name: total(arr)
         for name, arr in list(zip(self.names, self.arrays))[:sample]
     }
-    head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
+    if self._is_proxy and not self._is_cpu_staged:
+      head["__grand_total__"] = float(sum(head.values()))
+    else:
+      head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
     return head
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
@@ -507,7 +646,9 @@ class RaidenSynchronizer:
     if mesh_shape is None:
       mesh_axes = ("fsdp",)
       mesh_shape = (1,)
-    if self._is_proxy:
+    if self._is_proxy and not self._is_cpu_staged:
+      if not self._ips and self.arrays:
+        self._init_ffi_transport(is_d2h=not self._auto_h2d)
       shards = tuple(self._ips)
       control_addr = self._unique_listeners[0] if self._unique_listeners else ""
     else:

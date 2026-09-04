@@ -22,12 +22,17 @@ import importlib
 import logging
 import os
 import pickle
+import re
 import sys
 from typing import Any
 
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
+try:
+  from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=unused-import
+except ImportError:
+  pass
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
 REPO_ROOT = os.path.abspath(
@@ -47,6 +52,12 @@ CHAT_PARSERS = {
 
 
 def _import_vllm_sampler():
+  # Pre-import raiden synchronizer before vLLM / PyTorch C++ runtimes are loaded,
+  # avoiding static C++ allocator / protobuf runtime collisions (free(): invalid pointer).
+  try:
+    from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=unused-import
+  except ImportError:
+    pass
   logging.info(
       "Importing tunix.generate.vllm_sampler before rollout adapters..."
   )
@@ -71,6 +82,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
+  parser.add_argument(
+      "--worker_index",
+      type=int,
+      default=-1,
+      help="Worker index for Raiden transport disambiguation.",
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument(
       "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
@@ -165,7 +182,10 @@ def _create_vanilla_worker(args, tokenizer):
   mesh = _create_rollout_mesh(args)
   with mesh:
     model = models.create_model(
-        args.model_name, args.model_dir or args.model_id, mesh
+        args.model_name,
+        args.model_dir or args.model_id,
+        mesh,
+        model_id=args.model_id,
     )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
@@ -345,6 +365,12 @@ def _create_vllm_sampler(args):
       max_loras=1 if args.use_lora else None,
   )
   if args.maxtext_model_name:
+    try:
+      from maxtext.integration.vllm import maxtext_vllm_adapter  # pylint: disable=g-import-not-at-top
+      maxtext_vllm_adapter.register()
+      logging.info("Successfully registered MaxTextForCausalLM model with vLLM.")
+    except Exception as e:
+      logging.warning("Could not register maxtext_vllm_adapter: %s", e)
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
         " MaxTextForCausalLM (architectures override).",
@@ -367,10 +393,16 @@ def _create_vllm_sampler(args):
         "maxtext_config": maxtext_config_overrides
     }
   engine_args = AsyncEngineArgs(**engine_kwargs)
+  worker_index = args.worker_index
+  if worker_index < 0:
+    match = re.search(r"(\d+)$", args.worker_id)
+    worker_index = int(match.group(1)) if match else 0
+
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
       server_id=args.worker_id,
       engine_args=engine_args,
       model_name=vllm_model,
+      worker_index=worker_index,
       weight_sync_mode=args.weight_sync_mode,
   )
   config = rollout_worker.RolloutConfig(
@@ -405,7 +437,7 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
-  if context and args.sampler != "vllm":
+  if context and args.sampler not in ("vllm", "inprocess_vllm"):
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")

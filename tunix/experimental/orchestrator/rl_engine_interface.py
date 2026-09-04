@@ -144,7 +144,7 @@ class AbstractRLEngine(Protocol):
       algo: algorithm_adapter.AlgorithmAdapter,
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
-  ) -> None:
+  ) -> Any:
     """Configures worker(s) under the specified role with algorithm or runtime settings."""
     ...
 

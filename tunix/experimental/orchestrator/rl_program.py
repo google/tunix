@@ -22,6 +22,7 @@ import abc
 import asyncio
 from collections.abc import Callable, Iterable, Sequence
 import dataclasses
+import inspect
 import time
 from typing import Any
 
@@ -802,11 +803,13 @@ class StandardRLProgram(RLProgram):
     self.engine = engine
     logging.info("Starting StandardRLProgram concurrent stages...")
 
-    engine.configure_worker(
+    res = engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo=self.algo,
         assembler=self.assembler,
     )
+    if inspect.isawaitable(res):
+      await res
 
     if self.sync_weights:
       await engine.prepare_rollout_policy(

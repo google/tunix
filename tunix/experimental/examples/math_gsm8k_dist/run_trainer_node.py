@@ -133,11 +133,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=1,
+      help="Tensor parallel size of the rollout mesh.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
   )
-  return parser.parse_args(argv)
+  args, _ = parser.parse_known_args(argv)
+  return args
 
 
 def _nested_safetensors_dirs(model_dir: Path) -> list[str]:
@@ -273,9 +280,23 @@ class _MeshBoundTrainer:
 
   def prepare_weight_sync(self, **kwargs) -> Any:
     with self._mesh:
-      return self._trainer.prepare_weight_sync(**kwargs)
+      if hasattr(self._trainer, "_raiden_sync") and self._trainer._raiden_sync is not None:
+        self._trainer._raiden_sync._mesh = self._mesh
+      res = self._trainer.prepare_weight_sync(**kwargs)
+      if hasattr(self._trainer, "_raiden_sync") and self._trainer._raiden_sync is not None:
+        self._trainer._raiden_sync._mesh = self._mesh
+      return res
 
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+    if os.environ.get("DISABLE_CHECKPOINTING", "false").lower() in (
+        "true",
+        "1",
+    ):
+      logging.info(
+          "Checkpoint saving disabled via DISABLE_CHECKPOINTING=%s. Skipping.",
+          os.environ.get("DISABLE_CHECKPOINTING"),
+      )
+      return
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 
@@ -304,7 +325,14 @@ def _create_maxtext_trainer_factory(args) -> Any:
       warmup_steps_fraction=args.maxtext_warmup_steps_fraction,
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
-      base_output_directory=args.maxtext_output_directory,
+      base_output_directory=(
+          os.path.abspath(args.maxtext_output_directory)
+          if (
+              args.maxtext_output_directory
+              and not args.maxtext_output_directory.startswith("gs://")
+          )
+          else args.maxtext_output_directory
+      ),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -317,6 +345,13 @@ def _create_maxtext_trainer_factory(args) -> Any:
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
     )
+    if os.environ.get("DISABLE_CHECKPOINTING", "false").lower() in (
+        "true",
+        "1",
+    ):
+      engine.save_checkpoint = lambda *args, **kwargs: logging.info(
+          "engine.save_checkpoint skipped via DISABLE_CHECKPOINTING."
+      )
     return _MeshBoundTrainer(engine, mesh)
 
   return _factory
