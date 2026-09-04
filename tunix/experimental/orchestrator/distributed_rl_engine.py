@@ -343,41 +343,53 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return await self.dispatch_rollout_requests(rollout_reqs)
 
   async def poll_rollouts(
-      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
+      self, timeout_s: float = 1.0
   ) -> list[datatypes.TrajectoryItem]:
     """Concurrently long-polls completed rollout responses across all workers."""
     if not self._rollout_workers:
       return []
 
-    async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
+    async def _poll_worker(worker: remote_execution.ActorHandle) -> list[Any]:
       res = worker.poll_responses(timeout_s=timeout_s)
       if inspect.isawaitable(res):
-        return await res
-      return res
+        res = await res
+      if res is None or isinstance(res, Exception):
+        return []
+      worker_items = [res]
+      while True:
+        nxt = worker.poll_responses(timeout_s=0.0)
+        if inspect.isawaitable(nxt):
+          nxt = await nxt
+        if nxt is None or isinstance(nxt, Exception):
+          break
+        worker_items.append(nxt)
+      return worker_items
 
     tasks = [_poll_worker(w) for w in self._rollout_workers]
-    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    responses_nested = await asyncio.gather(*tasks, return_exceptions=True)
     completed: list[datatypes.TrajectoryItem] = []
 
-    for resp in responses:
+    for resp in responses_nested:
       if isinstance(resp, Exception) or resp is None:
         continue
-      unwrap_fn = getattr(resp, "unwrap", None)
-      res = (
-          unwrap_fn() if callable(unwrap_fn) else getattr(resp, "result", resp)
-      )
-      if res is not None:
-        items = res if isinstance(res, list) else [res]
-        for it in items:
-          if isinstance(it, dict):
-            it = datatypes.RolloutResponse(**it)
-          traj_item = _response_to_trajectory_item(it)
-          logging.debug(
-              "Received rollout response (prompt_id=%s, group_index=%d).",
-              traj_item.prompt_id,
-              traj_item.group_index,
-          )
-          completed.append(traj_item)
+      items_list = resp if isinstance(resp, list) else [resp]
+      for r in items_list:
+        unwrap_fn = getattr(r, "unwrap", None)
+        res = (
+            unwrap_fn() if callable(unwrap_fn) else getattr(r, "result", r)
+        )
+        if res is not None:
+          items = res if isinstance(res, list) else [res]
+          for it in items:
+            if isinstance(it, dict):
+              it = datatypes.RolloutResponse(**it)
+            traj_item = _response_to_trajectory_item(it)
+            logging.debug(
+                "Received rollout response (prompt_id=%s, group_index=%d).",
+                traj_item.prompt_id,
+                traj_item.group_index,
+            )
+            completed.append(traj_item)
     return completed
 
   async def generate(

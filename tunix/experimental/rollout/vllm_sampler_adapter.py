@@ -289,10 +289,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     meta = await self._require_sampler().get_raiden_metadata()
     work_units = []
     for m in meta or []:
-      if isinstance(m, dict) and "variables" in m:
-        for v in m["variables"]:
-          if isinstance(v, dict) and "name" in v and v["name"].endswith(".value"):
-            v["name"] = v["name"][:-6]
+      if isinstance(m, dict):
+        if self.server_id:
+          m["unit"] = self.server_id
+        if "variables" in m:
+          for v in m["variables"]:
+            if isinstance(v, dict) and "name" in v and v["name"].endswith(".value"):
+              v["name"] = v["name"][:-6]
       work_units.append(weight_sync.WorkUnitMetadata.from_dict(m))
     return work_units
 

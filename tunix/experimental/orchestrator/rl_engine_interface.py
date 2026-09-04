@@ -83,7 +83,7 @@ class AbstractRLEngine(Protocol):
     ...
 
   async def poll_rollouts(
-      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
+      self, timeout_s: float = 1.0
   ) -> list[datatypes.TrajectoryItem]:
     """Retrieves completed rollout responses from workers via long-polling."""
     ...

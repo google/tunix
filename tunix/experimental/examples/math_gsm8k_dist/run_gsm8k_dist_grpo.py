@@ -151,6 +151,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=int(os.getenv("ROLLOUT_REPLICAS", "1")),
+      help="Number of rollout worker replicas to wait for.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -296,7 +302,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
