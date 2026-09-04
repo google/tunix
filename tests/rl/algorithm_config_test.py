@@ -158,5 +158,101 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertEqual(config.kl_clamp_value, value)
 
 
+class SamplerIsOptionsTest(parameterized.TestCase):
+  """Validation of the sampler-vs-trainer options."""
+
+  def test_all_off_by_default(self):
+    config = algorithm_config.AlgorithmConfig()
+    self.assertFalse(config.overlong_loss_masking)
+    self.assertIsNone(config.seq_logprob_error_threshold)
+    self.assertIsNone(config.truncated_importance_sampling_type)
+    self.assertIsNone(config.truncated_importance_sampling_ratio_min)
+    self.assertIsNone(config.truncated_importance_sampling_ratio)
+    self.assertEqual(config.sampler_is_report_bands, ())
+    self.assertIsNone(config.sampler_is_length_buckets)
+
+  def test_grpo_loo_is_a_valid_estimator(self):
+    config = algorithm_config.AlgorithmConfig(advantage_estimator="grpo-loo")
+    self.assertEqual(config.advantage_estimator, "grpo-loo")
+
+  @parameterized.parameters("rloo", "drgrpo")
+  def test_registered_estimators_are_selectable(self, name):
+    # These are implemented in the registry; the validator used to reject
+    # them, making them unreachable.
+    self.assertEqual(
+        algorithm_config.AlgorithmConfig(
+            advantage_estimator=name
+        ).advantage_estimator,
+        name,
+    )
+
+  def test_keep_band_must_be_complete(self):
+    for kwargs in (
+        {"truncated_importance_sampling_ratio_min": 0.999},
+        {"truncated_importance_sampling_ratio": 1.002},
+    ):
+      with self.assertRaisesRegex(ValueError, "must be set together"):
+        algorithm_config.AlgorithmConfig(**kwargs)
+
+  def test_keep_band_must_be_ordered(self):
+    with self.assertRaisesRegex(ValueError, "must not exceed"):
+      algorithm_config.AlgorithmConfig(
+          truncated_importance_sampling_ratio_min=1.002,
+          truncated_importance_sampling_ratio=0.999,
+      )
+
+  def test_correction_requires_a_band(self):
+    with self.assertRaisesRegex(ValueError, "requires a keep-band"):
+      algorithm_config.AlgorithmConfig(
+          truncated_importance_sampling_type="seq-mask-tis"
+      )
+
+  def test_unknown_correction_type_rejected(self):
+    with self.assertRaisesRegex(ValueError, "only supports 'seq-mask-tis'"):
+      algorithm_config.AlgorithmConfig(
+          truncated_importance_sampling_type="tis",
+          truncated_importance_sampling_ratio_min=0.5,
+          truncated_importance_sampling_ratio=5.0,
+      )
+
+  def test_correction_accepts_a_complete_band(self):
+    config = algorithm_config.AlgorithmConfig(
+        truncated_importance_sampling_type="seq-mask-tis",
+        truncated_importance_sampling_ratio_min=0.999,
+        truncated_importance_sampling_ratio=1.002,
+    )
+    self.assertEqual(
+        config.truncated_importance_sampling_type, "seq-mask-tis"
+    )
+
+  @parameterized.parameters(
+      ((0, 512),),  # non-positive edge
+      ((512, 512),),  # not strictly increasing
+      ((1024, 512),),  # decreasing
+      ((),),  # empty means "disabled", which is None, not ()
+  )
+  def test_invalid_length_buckets_rejected(self, edges):
+    with self.assertRaises(ValueError):
+      algorithm_config.AlgorithmConfig(sampler_is_length_buckets=edges)
+
+  def test_length_buckets_normalised_to_tuple(self):
+    # Config loaders hand us lists; bucket edges end up in metric names, so
+    # they need to be a stable, hashable tuple.
+    config = algorithm_config.AlgorithmConfig(
+        sampler_is_length_buckets=[512, 1024]
+    )
+    self.assertEqual(config.sampler_is_length_buckets, (512, 1024))
+
+  def test_report_bands_normalised_and_validated(self):
+    config = algorithm_config.AlgorithmConfig(
+        sampler_is_report_bands=[[0.99, 1.01]]
+    )
+    self.assertEqual(config.sampler_is_report_bands, ((0.99, 1.01),))
+    with self.assertRaisesRegex(ValueError, "ordered"):
+      algorithm_config.AlgorithmConfig(
+          sampler_is_report_bands=[(1.01, 0.99)]
+      )
+
+
 if __name__ == "__main__":
   absltest.main()
