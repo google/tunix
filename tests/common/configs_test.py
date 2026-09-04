@@ -115,6 +115,23 @@ class ConfigsTest(absltest.TestCase):
           gradient_accumulation_steps=4,
       )
 
+  def test_eval_config_options(self):
+    cfg_default = configs.RLTrainingConfig(
+        actor_optimizer=self.actor_optimizer,
+        eval_every_n_steps=10,
+    )
+    self.assertEqual(cfg_default.skip_first_n_steps_for_eval, 0)
+    self.assertIsNone(cfg_default.eval_num_generations)
+
+    cfg_custom = configs.RLTrainingConfig(
+        actor_optimizer=self.actor_optimizer,
+        eval_every_n_steps=10,
+        skip_first_n_steps_for_eval=5,
+        eval_num_generations=4,
+    )
+    self.assertEqual(cfg_custom.skip_first_n_steps_for_eval, 5)
+    self.assertEqual(cfg_custom.eval_num_generations, 4)
+
 
 if __name__ == "__main__":
   absltest.main()
