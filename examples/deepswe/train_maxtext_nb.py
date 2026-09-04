@@ -104,6 +104,36 @@ parser.add_argument("--mini_batch_size", type=int, default=8)
 parser.add_argument("--train_fraction", type=float, default=1.0)
 parser.add_argument("--max_steps", type=int, default=50)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
+parser.add_argument(
+    "--enable_eval",
+    type=str2bool,
+    default=False,
+    help="Whether to run evaluation during training.",
+)
+parser.add_argument(
+    "--skip_first_n_steps_for_eval",
+    type=int,
+    default=0,
+    help="Number of initial training steps to skip before running evaluation.",
+)
+parser.add_argument(
+    "--eval_split",
+    type=str,
+    default="validation",
+    help="Dataset split for evaluation (default: 'validation').",
+)
+parser.add_argument(
+    "--eval_num_generations",
+    type=int,
+    default=4,
+    help="Number of generations per eval task (default: 4 for MLPerf).",
+)
+parser.add_argument(
+    "--eval_max_examples",
+    type=int,
+    default=None,
+    help="Optionally limit total examples loaded for evaluation.",
+)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
 parser.add_argument(
@@ -248,6 +278,13 @@ parser.add_argument(
     type=int,
     default=None,
     help="Optional override for train mesh SP dimension.",
+)
+
+parser.add_argument(
+    "--allow_split_physical_axes",
+    type=str2bool,
+    default=True,
+    help="Whether to allow splitting physical axes in device mesh creation.",
 )
 
 parser.add_argument(
@@ -520,6 +557,11 @@ TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
 ROLLOUT_MICRO_BATCH_SIZE = args.rollout_micro_batch_size
 
 EVAL_EVERY_N_STEPS = args.eval_every_n_steps
+ENABLE_EVAL = args.enable_eval
+SKIP_FIRST_N_STEPS_FOR_EVAL = args.skip_first_n_steps_for_eval
+EVAL_SPLIT = args.eval_split
+EVAL_NUM_GENERATIONS = args.eval_num_generations
+EVAL_MAX_EXAMPLES = args.eval_max_examples
 NUM_EPOCHS = args.num_epochs
 
 # Number of training steps.
@@ -601,22 +643,61 @@ chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
 
 print("Loading Dataset...")
 
+eval_raw_dataset = None
 if args.dataset_path:
-  dataset = datasets_lib.load_from_disk(args.dataset_path)
-  if isinstance(dataset, datasets_lib.DatasetDict):
-    dataset = dataset["train"]
+  loaded_disk = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(loaded_disk, datasets_lib.DatasetDict):
+    dataset = loaded_disk["train"]
+    if ENABLE_EVAL:
+      if EVAL_SPLIT in loaded_disk:
+        eval_raw_dataset = loaded_disk[EVAL_SPLIT]
+      elif "validation" in loaded_disk:
+        eval_raw_dataset = loaded_disk["validation"]
+      elif "test" in loaded_disk:
+        eval_raw_dataset = loaded_disk["test"]
+      else:
+        raise ValueError(
+            f"Split '{EVAL_SPLIT}' not found in {args.dataset_path}. "
+            f"Available splits: {list(loaded_disk.keys())}"
+        )
+  else:
+    dataset = loaded_disk
+    if ENABLE_EVAL:
+      eval_raw_dataset = loaded_disk
 else:
   dataset = datasets_lib.load_dataset(
       "R2E-Gym/R2E-Gym-Subset",
       split="train",
       cache_dir=DATASET_CACHE,
   )
+  if ENABLE_EVAL:
+    try:
+      eval_raw_dataset = datasets_lib.load_dataset(
+          "R2E-Gym/R2E-Gym-Subset",
+          split=EVAL_SPLIT,
+          cache_dir=DATASET_CACHE,
+      )
+    except Exception as e:
+      print(
+          f"Warning: Could not load split '{EVAL_SPLIT}' from"
+          f" R2E-Gym/R2E-Gym-Subset: {e}. Falling back to train[-20%:] slice."
+      )
+      eval_raw_dataset = datasets_lib.load_dataset(
+          "R2E-Gym/R2E-Gym-Subset",
+          split="train[-20%:]",
+          cache_dir=DATASET_CACHE,
+      )
 
 
 if args.filter_repo:
   print(f"Filtering dataset to repo: {args.filter_repo}")
   dataset = dataset.filter(lambda x: x["repo_name"] == args.filter_repo)
   print(f"Filtered dataset size: {len(dataset)}")
+  if eval_raw_dataset is not None:
+    eval_raw_dataset = eval_raw_dataset.filter(
+        lambda x: x["repo_name"] == args.filter_repo
+    )
+    print(f"Filtered eval dataset size: {len(eval_raw_dataset)}")
 
 if args.filter_available_images_only:
   import urllib.request, json
@@ -670,6 +751,11 @@ if args.filter_available_images_only:
         lambda x: x["docker_image"].split(":")[-1] in ar_tags
     )
     print(f"Dataset filtered to {len(dataset)} available instances.")
+    if eval_raw_dataset is not None:
+      eval_raw_dataset = eval_raw_dataset.filter(
+          lambda x: x["docker_image"].split(":")[-1] in ar_tags
+      )
+      print(f"Eval dataset filtered to {len(eval_raw_dataset)} available instances.")
   else:
     print("Warning: No AR tags found, proceeding without filtering.")
 
@@ -678,6 +764,11 @@ if args.max_examples:
   num_to_take = min(len(dataset), args.max_examples)
   print(f"Limiting dataset to {num_to_take} examples")
   dataset = dataset.select(range(num_to_take))
+
+if eval_raw_dataset is not None and EVAL_MAX_EXAMPLES:
+  num_eval_to_take = min(len(eval_raw_dataset), EVAL_MAX_EXAMPLES)
+  print(f"Limiting eval dataset to {num_eval_to_take} examples")
+  eval_raw_dataset = eval_raw_dataset.select(range(num_eval_to_take))
 
 
 def transform(entry):
@@ -699,6 +790,11 @@ dataset = dataset.map(
     transform,
     keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
 )
+if eval_raw_dataset is not None:
+  eval_raw_dataset = eval_raw_dataset.map(
+      transform,
+      keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
+  )
 
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
@@ -754,12 +850,30 @@ train_dataset, _ = data_lib.post_init_dataset(
     custom_batch_fn=mixed_type_batch_fn,
 )
 
+eval_dataset = None
+if eval_raw_dataset is not None:
+  eval_grain_dataset = grain.MapDataset.source(eval_raw_dataset)  # pyrefly: ignore[bad-argument-type]
+  eval_dataset, _ = data_lib.post_init_dataset(
+      eval_grain_dataset,
+      tokenizer,  # pyrefly: ignore[bad-argument-type]
+      batch_size=BATCH_SIZE,
+      num_batches=None,
+      max_prompt_length=MAX_PROMPT_LENGTH,
+      fraction=1.0,
+      num_epochs=1,
+      prompt_key="problem_statement",
+      custom_batch_fn=mixed_type_batch_fn,
+  )
+
 fleet = None
 if USE_AGENT_SANDBOX:
+  fleet_tasks = list(dataset)
+  if eval_raw_dataset is not None:
+    fleet_tasks.extend(list(eval_raw_dataset))
   fleet = swe_env._init_global_fleet(
-      tasks=dataset,
+      tasks=fleet_tasks,
       max_concurrency=MAX_CONCURRENCY,
-      num_generations=NUM_GENERATIONS,
+      num_generations=max(NUM_GENERATIONS, EVAL_NUM_GENERATIONS),
       batch_size=MINI_BATCH_SIZE,
       max_warmpool_replicas=args.max_warmpool_replicas,
   )
@@ -850,6 +964,7 @@ trainer_config = pyconfig.initialize(
         f"checkpoint_storage_use_ocdbt={args.checkpoint_storage_use_ocdbt}",
         f"checkpoint_storage_use_zarr3={args.checkpoint_storage_use_zarr3}",
         f"checkpoint_storage_concurrent_gb={args.checkpoint_storage_concurrent_gb}",
+        f"allow_split_physical_axes={args.allow_split_physical_axes}",
         "skip_jax_distributed_system=True",
         "load_checkpoint_only_once=True",
         "use_standalone_converter=False",
@@ -872,6 +987,7 @@ sampler_config = pyconfig.initialize(
         f"max_prefill_predict_length={MAX_PROMPT_LENGTH}",
         f"dtype={args.dtype}",
         "attention=vllm_rpa",
+        f"allow_split_physical_axes={args.allow_split_physical_axes}",
         "skip_jax_distributed_system=True",
         "remat_policy=none",
         "use_standalone_converter=False",
@@ -1096,6 +1212,8 @@ cluster_config = rl_engine_lib.ClusterConfig(
     training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
+        skip_first_n_steps_for_eval=SKIP_FIRST_N_STEPS_FOR_EVAL,
+        eval_num_generations=EVAL_NUM_GENERATIONS,
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
         train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
@@ -1220,4 +1338,7 @@ if (
   )
 
 print("Starting training...", flush=True)
-agentic_grpo_learner.train(train_dataset=train_dataset)
+agentic_grpo_learner.train(
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+)

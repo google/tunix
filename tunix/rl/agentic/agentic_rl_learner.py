@@ -23,6 +23,7 @@ import contextlib
 import copy
 import dataclasses
 import itertools
+import math
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
@@ -959,8 +960,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       current_eval_dataset = None
       if update_steps_since_last_sync == 0:
         current_train_step = self.rl_engine.actor_trainer.train_steps
+        skip_first_n_steps = getattr(
+            training_config, "skip_first_n_steps_for_eval", 0
+        )
         if (
             all_eval_prompts
+            and current_train_step >= skip_first_n_steps
             and current_train_step % training_config.eval_every_n_steps == 0
             and current_train_step != self._last_eval_train_step
         ):
@@ -968,12 +973,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self._eval_iter_steps = 0
           eval_orchestrator = self._build_orchestrator()
 
+          eval_gens = getattr(
+              training_config, "eval_num_generations", None
+          )
+          if eval_gens is None:
+            eval_gens = getattr(self.algo_config, "eval_num_generations", 4)
+
           async def _eval_runner_async(current_eval_orchestrator):
             eval_examples = []
             async for batch in self._orchestrator_producer(
                 current_eval_orchestrator,
                 all_eval_prompts,
-                num_generations=self._num_generations(),
+                num_generations=eval_gens,
             ):
               eval_example = self._batch_to_train_example(
                   batch,
@@ -1065,11 +1076,49 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
         if eval_rewards.size and did_eval_this_global_step:
           eval_r_mean = float(eval_rewards.mean())
-          eval_solve = float((eval_rewards > 0.1).mean())
+          pass_at_1 = float((eval_rewards > 0.1).mean())
+          eval_metrics_to_buffer = {
+              "diagnostics/reward_mean": (eval_r_mean, np.mean),
+              "diagnostics/pass_at_1": (pass_at_1, np.mean),
+              "diagnostics/reward_count": (float(eval_rewards.size), np.mean),
+          }
           eval_str = (
               f" eval_reward={eval_r_mean:.3f}"
-              f" eval_solve={eval_solve:.3f}"
-              f" eval_n={eval_rewards.size}"
+              f" pass@1={pass_at_1:.4f}"
+          )
+          eval_gens = getattr(
+              training_config, "eval_num_generations", None
+          )
+          if eval_gens is None:
+            eval_gens = getattr(self.algo_config, "eval_num_generations", 4)
+          if eval_gens >= 4 and eval_rewards.size >= eval_gens:
+            num_groups = eval_rewards.size // eval_gens
+            reshaped = eval_rewards[: num_groups * eval_gens].reshape(
+                num_groups, eval_gens
+            )
+            pass_at_4_list = []
+            for row in reshaped:
+              c = int(np.sum(row > 0.1))
+              n = eval_gens
+              if n == 4:
+                score = 1.0 if c >= 1 else 0.0
+              elif n - c < 4:
+                score = 1.0
+              else:
+                score = 1.0 - math.comb(n - c, 4) / math.comb(n, 4)
+              pass_at_4_list.append(score)
+            pass_at_4 = float(np.mean(pass_at_4_list))
+            eval_metrics_to_buffer["diagnostics/pass_at_4"] = (
+                pass_at_4,
+                np.mean,
+            )
+            eval_str += f" pass@4={pass_at_4:.4f}"
+
+          eval_str += f" eval_n={eval_rewards.size}"
+          self.rl_engine.buffer_metrics_async(
+              eval_metrics_to_buffer,
+              mode=rl_engine_lib.Mode.EVAL,
+              step=self.rl_engine.global_steps,
           )
         else:
           eval_str = ""
