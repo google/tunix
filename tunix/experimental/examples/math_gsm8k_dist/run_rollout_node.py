@@ -47,6 +47,14 @@ CHAT_PARSERS = {
 
 
 def _import_vllm_sampler():
+  # Pre-import raiden_weight_sync_delegate prior to loading vLLM to prevent
+  # allocator / static runtime conflicts between vLLM's C++ runtime and
+  # tpu_raiden_jax's C++ FFI.
+  try:
+    from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=unused-import,g-import-not-at-top
+    logging.info("Pre-imported raiden_weight_sync_delegate before vLLM.")
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
   logging.info(
       "Importing tunix.generate.vllm_sampler before rollout adapters..."
   )
