@@ -24,11 +24,22 @@ import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import weight_sync
 
+# Pre-import raiden_weight_sync_delegate prior to any vLLM imports to avoid
+# allocator conflicts between vLLM's C++ runtime and tpu_raiden_jax's C++ FFI.
+try:
+  from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+except Exception:  # pylint: disable=broad-exception-caught
+  raiden_weight_sync_delegate = None
+
 Sampler = base_sampler_lib.Sampler
 
 
 def _get_vllm_sampler_cls():
   """Lazy import of tunix.generate.vllm_sampler to avoid top-level vLLM import side-effects."""
+  try:
+    from tunix.experimental.weight_sync import raiden_weight_sync_delegate as _delegate_mod  # pylint: disable=unused-import,g-import-not-at-top
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
   from tunix.generate import vllm_sampler as generate_vllm_lib  # pylint: disable=g-import-not-at-top
   return generate_vllm_lib
 
@@ -72,11 +83,18 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
       if self.raiden_sync_delegate is None:
-        from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+        if raiden_weight_sync_delegate is not None:
+          self.raiden_sync_delegate = (
+              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+          )
+        else:
+          from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+              raiden_weight_sync_delegate as delegate_mod,
+          )
 
-        self.raiden_sync_delegate = (
-            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-        )
+          self.raiden_sync_delegate = (
+              delegate_mod.RaidenWeightSyncDelegate()
+          )
 
     if not self.enable_raiden and self.raiden_sync_delegate:
       logging.warning(
