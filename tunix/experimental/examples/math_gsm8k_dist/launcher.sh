@@ -82,7 +82,7 @@ TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
 
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
-TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
+TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
   # MaxText shards the batch dimension of every loss input across the fsdp
@@ -423,7 +423,6 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
-    --sampler="$SAMPLER"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
