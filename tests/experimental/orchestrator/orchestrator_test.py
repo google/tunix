@@ -97,7 +97,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
     self.assertIs(engine._inference_workers[datatypes.Role.REFERENCE], mock_ref)
     self.assertSequenceEqual(
-        orch.worker_infos(), [actor_info, critic_info, ref_info, rollout_info]
+        orch.worker_infos(), [rollout_info, actor_info, critic_info, ref_info]
     )
 
   def test_create_engine_with_weight_sync_shim_registrations(self):
@@ -115,11 +115,13 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
     orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
 
-    # Local handle fallback, no worker ID in _remote_worker_handles_by_id
+    # Local handle fallback
     local_actor = remote_execution.InProcessActorHandle(
         remote_execution.InProcessRemoteExecutionServer(mock.MagicMock())
     )
-    orch._remote_worker_handles[datatypes.Role.ACTOR.value].append(local_actor)
+    orch.register_worker_handle(
+        "local-actor-0", [datatypes.Role.ACTOR], local_actor
+    )
 
     engine = orch._create_engine()
     self.assertIsNotNone(engine._weight_sync_coordinator)
@@ -127,22 +129,15 @@ class ClusterOrchestratorTest(absltest.TestCase):
     # Assert they are properly shimmed in the registry
     self.assertIn("actor-0", orch.registry.worker_ids())
     self.assertIn("rollout-0", orch.registry.worker_ids())
+    self.assertIn("local-actor-0", orch.registry.worker_ids())
     self.assertEqual(
         type(orch.registry.get("actor-0")).__name__, "RemoteWorkerShim"
     )
     self.assertEqual(
         type(orch.registry.get("rollout-0")).__name__, "RemoteWorkerShim"
     )
-
-    local_actor_id = [
-        w_id
-        for w_id in orch.registry.worker_ids()
-        if w_id.startswith("local-actor-")
-    ]
-    self.assertEqual(len(local_actor_id), 1)
-
     self.assertEqual(
-        type(orch.registry.get(local_actor_id[0])).__name__, "RemoteWorkerShim"
+        type(orch.registry.get("local-actor-0")).__name__, "RemoteWorkerShim"
     )
 
   def test_bring_up_and_shutdown_remote_worker_handles(self):
