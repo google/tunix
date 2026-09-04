@@ -19,11 +19,8 @@ Provides Tier 1 Zero-Boilerplate Managed Program Submission (`run`) and Tier 3
 Custom Program Execution (`run_program`).
 """
 
-import collections
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from concurrent import futures
-import pickle
-import time
 from typing import Any
 
 from absl import logging
@@ -36,6 +33,7 @@ from tunix.experimental.orchestrator import lifecycle
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -60,13 +58,6 @@ class ClusterOrchestrator:
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
-    self._remote_worker_handles: dict[
-        str, list[remote_execution.ActorHandle]
-    ] = collections.defaultdict(list)
-    self._remote_worker_handles_by_id: dict[
-        str, remote_execution.ActorHandle
-    ] = {}
-    self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
@@ -82,43 +73,16 @@ class ClusterOrchestrator:
   def register_worker_from_hostname(
       self,
       hostname: str,
-      _: int,
+      port: int,
       metadata: bytes,
       rpc_timeout_s: float = 1800.0,
-  ) -> None:
+  ) -> datatypes.WorkerInfo:
     """Registers a remote worker handle from a hostname and metadata."""
-    md = pickle.loads(metadata)
-
-    # NB: this should align with workers
-    service_type = md["service_type"]
-    service_address = f"{hostname}:{md['service_port']}"
-    worker_id = md["worker_id"]
-
-    logging.info(
-        "Discovered %s service (%s) at %s.",
-        service_type,
-        worker_id,
-        service_address,
-    )
-
-    match service_type:
-      case "trainer":
-        role = datatypes.Role.ACTOR
-      case "rollout":
-        role = datatypes.Role.ROLLOUT
-      case "inference":
-        role = datatypes.Role.REFERENCE
-      case _:
-        raise RuntimeError(f"unknown service type {service_type}")
-
-    self.register_worker_handle(
-        worker_id=worker_id,
-        roles=[role],
-        handle=remote_execution.ActorHandle.from_address(
-            f"grpc://{service_address}",
-            rpc_timeout_s=rpc_timeout_s,
-        ),
-        resources={"address": service_address},
+    return self.registry.register_from_hostname(
+        hostname=hostname,
+        port=port,
+        metadata=metadata,
+        rpc_timeout_s=rpc_timeout_s,
     )
 
   def register_worker(
@@ -135,52 +99,15 @@ class ClusterOrchestrator:
       resources: dict[str, Any] | None = None,
   ) -> datatypes.WorkerInfo:
     """Registers a remote worker handle used directly by DistributedRLEngine."""
-    if not roles:
-      raise ValueError(f"worker {worker_id!r} declares no roles")
-    if not isinstance(handle, remote_execution.ActorHandle):
-      raise TypeError(
-          "register_worker_handle expects a remote_execution.ActorHandle, got "
-          f"{type(handle)}"
-      )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
-    role_names = frozenset(
-        role.value if isinstance(role, datatypes.Role) else role
-        for role in roles
-    )
-    info = datatypes.WorkerInfo(
+    return self.registry.register_handle(
         worker_id=worker_id,
-        roles=role_names,
+        roles=roles,
+        handle=handle,
         resources={"remote": True, **dict(resources or {})},
     )
-    for role in role_names:
-      self._remote_worker_handles[role].append(handle)
-    self._remote_worker_handles_by_id[worker_id] = handle
-    self._remote_worker_infos[worker_id] = info
-    logging.info(
-        "Registered remote worker %r with roles %s.",
-        worker_id,
-        sorted(role_names),
-    )
-    return info
 
   def unregister_worker(self, worker_id: str) -> None:
     """Unregisters a worker by its id."""
-    if worker_id in self._remote_worker_infos:
-      info = self._remote_worker_infos.pop(worker_id)
-      handle = self._remote_worker_handles_by_id.pop(worker_id)
-      for role in info.roles:
-        handles = self._remote_worker_handles.get(role)
-        if handles is not None:
-          self._remote_worker_handles[role] = [
-              h for h in handles if h is not handle
-          ]
-          if not self._remote_worker_handles[role]:
-            del self._remote_worker_handles[role]
-      return
     self.registry.unregister(worker_id)
 
   def wait_for_workers(
@@ -201,48 +128,39 @@ class ClusterOrchestrator:
     Raises:
       TimeoutError: If the required worker counts are not met within timeout.
     """
-    start_time = time.monotonic()
-    while True:
-      current_counts = {
-          role: len(self.worker_handles(role)) for role in min_workers
-      }
-      if all(
-          current_counts[role] >= target_count
-          for role, target_count in min_workers.items()
-      ):
-        logging.info(
-            "All required workers are ready. Current counts: %s",
-            current_counts,
-        )
-        return
-
-      if timeout is not None and (time.monotonic() - start_time) >= timeout:
-        raise TimeoutError(
-            f"Timed out after {timeout}s waiting for workers. "
-            f"Required: {min_workers}, Current: {current_counts}"
-        )
-
-      sleep_duration = poll_interval_s
-      if timeout is not None:
-        remaining = timeout - (time.monotonic() - start_time)
-        sleep_duration = min(poll_interval_s, max(0.0, remaining))
-
-      time.sleep(sleep_duration)
+    self.registry.wait_for_workers(
+        min_workers=min_workers,
+        timeout=timeout,
+        poll_interval_s=poll_interval_s,
+    )
 
   def worker_infos(self) -> list[datatypes.WorkerInfo]:
-    """Returns local and remote worker metadata registered with the orchestrator."""
-    registry_ids = self.registry.worker_ids()
-    return self.registry.infos() + [
-        self._remote_worker_infos[worker_id]
-        for worker_id in sorted(self._remote_worker_infos)
-        if worker_id not in registry_ids
-    ]
+    """Returns worker metadata registered with the orchestrator."""
+    return self.registry.infos()
 
   def worker_handles(
       self, role: datatypes.Role | str
   ) -> list[remote_execution.ActorHandle]:
-    """Returns handles for all workers (remote and local) registered under the given role."""
-    return self._get_actor_handles(role)
+    """Returns handles for all workers registered under the given role."""
+    return self.registry.handles(role)
+
+  @property
+  def _remote_worker_handles(
+      self,
+  ) -> dict[str, list[remote_execution.ActorHandle]]:
+    return {role: self.registry.handles(role) for role in self.registry.roles()}
+
+  @property
+  def _remote_worker_handles_by_id(
+      self,
+  ) -> dict[str, remote_execution.ActorHandle]:
+    return {
+        wid: self.registry.get_handle(wid) for wid in self.registry.worker_ids()
+    }
+
+  @property
+  def _remote_worker_infos(self) -> dict[str, datatypes.WorkerInfo]:
+    return {wid: self.registry.info(wid) for wid in self.registry.worker_ids()}
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
@@ -270,62 +188,57 @@ class ClusterOrchestrator:
     )
 
   def _get_role_members(self, role: datatypes.Role | str) -> list[Any]:
-    role_key = role.value if isinstance(role, datatypes.Role) else role
-    members = self.registry.group(role_key).members()
-
-    # Fallback in case workers were registered with the enum object directly
-    if not members and isinstance(role, datatypes.Role):
-      members = self.registry.group(role).members()
-    return members
+    return self.registry.group(role).members()
 
   def _get_actor_handles(
       self, role: datatypes.Role | str
   ) -> list[remote_execution.ActorHandle]:
-    role_key = role.value if isinstance(role, datatypes.Role) else role
-    handles = list(self._remote_worker_handles.get(role_key, ()))
-    handles.extend(
-        remote_execution.InProcessActorHandle(
-            remote_execution.InProcessRemoteExecutionServer(worker)
-        )
-        for worker in self._get_role_members(role)
-    )
-    return handles
+    return self.registry.handles(role)
 
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
-    """Runs lifecycle hooks on remote worker handles registered directly."""
-    worker_ids = sorted(self._remote_worker_infos)
+    """Runs lifecycle hooks on registered remote worker handles."""
+    worker_ids = [
+        wid
+        for wid in self.registry.worker_ids()
+        if self.registry.info(wid).resources.get("remote", False)
+    ]
     for worker_id in worker_ids:
-      logging.info("Initializing remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("initialize")
+      logging.info("Initializing worker %s.", worker_id)
+      self.registry.get_handle(worker_id).submit("initialize")
     for worker_id in worker_ids:
-      logging.info("Compiling remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("compile", dummy_data)
+      logging.info("Compiling worker %s.", worker_id)
+      self.registry.get_handle(worker_id).submit("compile", dummy_data)
     for worker_id in worker_ids:
-      logging.info("Starting remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("start")
+      logging.info("Starting worker %s.", worker_id)
+      self.registry.get_handle(worker_id).submit("start")
 
   def _shutdown_remote_workers(self) -> None:
     """Stops remote worker handles best-effort, with a hard timeout."""
+    worker_ids = [
+        wid
+        for wid in self.registry.worker_ids()
+        if self.registry.info(wid).resources.get("remote", False)
+    ]
     pool = futures.ThreadPoolExecutor(max_workers=4)
     stops = {
         worker_id: pool.submit(
-            self._remote_worker_handles_by_id[worker_id].submit, "stop"
+            self.registry.get_handle(worker_id).submit, "stop"
         )
-        for worker_id in sorted(self._remote_worker_infos)
+        for worker_id in worker_ids
     }
     for worker_id, fut in stops.items():
       try:
         fut.result(timeout=_STOP_TIMEOUT_S)
       except Exception as err:  # pylint: disable=broad-except
-        logging.warning("Failed to stop remote worker %s: %r", worker_id, err)
+        logging.warning("Failed to stop worker %s: %r", worker_id, err)
     pool.shutdown(wait=False)
 
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
-    rollout_workers = self._get_actor_handles(datatypes.Role.ROLLOUT)
-    actor_workers = self._get_actor_handles(datatypes.Role.ACTOR)
-    critic_workers = self._get_actor_handles(datatypes.Role.CRITIC)
-    reference_workers = self._get_actor_handles(datatypes.Role.REFERENCE)
+    rollout_workers = self.registry.handles(datatypes.Role.ROLLOUT)
+    actor_workers = self.registry.handles(datatypes.Role.ACTOR)
+    critic_workers = self.registry.handles(datatypes.Role.CRITIC)
+    reference_workers = self.registry.handles(datatypes.Role.REFERENCE)
 
     trainer_workers = {}
     if actor_workers:
@@ -339,14 +252,13 @@ class ClusterOrchestrator:
 
     coordinator = None
     if self._weight_sync_mode not in (None, "none"):
-      from tunix.experimental.weight_sync import weight_sync_coordinator
-
       handler = weight_sync_coordinator.create_default_handler(
           mode=self._weight_sync_mode
       )
 
       handle_to_id = {
-          v: k for k, v in self._remote_worker_handles_by_id.items()
+          self.registry.get_handle(wid): wid
+          for wid in self.registry.worker_ids()
       }
       for role, handles in [
           (datatypes.Role.ACTOR, actor_workers),
@@ -354,10 +266,17 @@ class ClusterOrchestrator:
       ]:
         for h in handles:
           w_id = handle_to_id.get(h, f"local-{role.value}-{id(h)}")
-          info = self._remote_worker_infos.get(w_id) or datatypes.WorkerInfo(
-              worker_id=w_id, roles=frozenset({role.value})
+          info = (
+              self.registry.info(w_id)
+              if w_id in self.registry
+              else datatypes.WorkerInfo(
+                  worker_id=w_id, roles=frozenset({role.value})
+              )
           )
-          self.registry.register(weight_sync_coordinator.RemoteWorkerShim(h, info), override=True)  # pyrefly: ignore[bad-argument-type]
+          self.registry.register(
+              weight_sync_coordinator.RemoteWorkerShim(h, info),  # pyrefly: ignore[bad-argument-type]
+              override=True,
+          )
 
       coordinator = weight_sync_coordinator.WeightSyncCoordinator(
           registry=self.registry,
