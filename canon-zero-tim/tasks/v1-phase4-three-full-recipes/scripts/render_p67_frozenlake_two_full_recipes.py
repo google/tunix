@@ -252,6 +252,15 @@ def render_two(
       head_meta = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"].setdefault("metadata", {})
       head_meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
       worker_meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
+
+      # Align head resource requests to fit within n2d-standard-64 (240Gi allocatable)
+      # Limits remain generous and unchanged (burstable up to full node capacity).
+      proxy = next(c for c in head["initContainers"] if c["name"] == "pathways-proxy")
+      rm = next(c for c in head["initContainers"] if c["name"] == "pathways-rm")
+      main = next(c for c in head["containers"] if c["name"] == "jax-tpu")
+      proxy["resources"]["requests"] = {"cpu": "8", "memory": "16Gi"}
+      rm["resources"]["requests"] = {"cpu": "4", "memory": "16Gi"}
+      main["resources"]["requests"] = {"cpu": "16", "memory": "64Gi"}
     _write_yaml(path, document)
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
