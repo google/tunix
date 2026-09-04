@@ -574,6 +574,7 @@ def render_all(
     _replace_env(
         document,
         {
+            "CANON_CLIENT_IMAGE": main["image"],
             "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
                 "1" if alignment_warning_only else "0"
             ),
