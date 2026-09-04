@@ -97,7 +97,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--sampler",
       type=str,
-      default=os.getenv("SAMPLER", "inprocess_vllm"),
+      default=os.getenv("SAMPLER", "vllm"),
       choices=["vllm", "inprocess_vllm", "vanilla"],
       help="Rollout sampler backend: vllm, inprocess_vllm, or vanilla.",
   )

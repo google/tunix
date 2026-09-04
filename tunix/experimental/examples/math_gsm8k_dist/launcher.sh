@@ -53,7 +53,7 @@ EPSILON=${EPSILON:-0.2}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
-SAMPLER=${SAMPLER:-inprocess_vllm}
+SAMPLER=${SAMPLER:-vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 # Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
 # both the trainer and the rollout, so the two cannot drift. A disagreement is

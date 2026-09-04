@@ -23,7 +23,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
-SAMPLER=${SAMPLER:-inprocess_vllm}
+SAMPLER=${SAMPLER:-vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 STANDALONE_INIT_WITH_RANDOM_WEIGHTS=${STANDALONE_INIT_WITH_RANDOM_WEIGHTS:-0}
 VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
@@ -143,7 +143,7 @@ then probes the worker with deterministic prompts over its gRPC interface.
 Key env vars:
   TUNIX_IMAGE             User container image that already contains the current repo state.
   WEIGHT_SYNC_MODE        Defaults to none for a pure rollout smoke test.
-  SAMPLER                 Defaults to inprocess_vllm.
+  SAMPLER                 Defaults to vllm.
   PATHWAYS_SERVER_IMAGE   Optional Pathways server image override.
   PATHWAYS_PROXY_IMAGE    Optional Pathways proxy image override.
 EOF

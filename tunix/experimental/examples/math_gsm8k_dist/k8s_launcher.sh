@@ -47,7 +47,7 @@ export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
-export SAMPLER=${SAMPLER:-inprocess_vllm}
+export SAMPLER=${SAMPLER:-vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
@@ -58,7 +58,7 @@ if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
   exit 1
 fi
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
+export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-/tmp/maxtext_output}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
@@ -140,17 +140,16 @@ apply_cluster_target() {
       ZONE=europe-west4-b
       CLUSTER_LOCATION=europe-west4
       CLUSTER=bodaborg-v5p-nap
-      TRAINER_TPU_SLICE=tpuv5:2x2x4
+      TRAINER_TPU_SLICE=tpuv5:2x2x2
       TRAINER_MESH_FSDP=8
-      TRAINER_MESH_TP=2
+      TRAINER_MESH_TP=1
       ROLLOUT_TPU_SLICE=tpuv5:2x2x1
-      ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}
       NUM_ROLLOUT_WORKERS=1
       ROLLOUT_COMPLETIONS=1
       ROLLOUT_PARALLELISM=1
       ROLLOUT_MESH_TP=2
       ROLLOUT_MESH_FSDP=2
-      SAMPLER=${SAMPLER:-inprocess_vllm}
+      SAMPLER=${SAMPLER:-vllm}
       CPU_MACHINE=n2d-standard-64
       GCS_SCRATCH_LOCATION=gs://mohitkhatwani_multipods/pathways_scratch/$USER
       PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812}
@@ -196,6 +195,7 @@ start_orchestrator() {
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/examples/math_gsm8k_dist/gsm8k.py\"); p.write_text(p.read_text().replace(\"logging.debug(\", \"logging.info(\"))' && \
+      python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/worker/remote_execution.py\"); p.write_text(p.read_text().replace(\"if _running_loop() is not None:\", \"if False and _running_loop() is not None:\"))' && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -246,6 +246,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
+      python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/examples/math_gsm8k_dist/run_trainer_node.py\"); p.write_text(p.read_text().replace(\"base_output_directory=args.maxtext_output_directory\", \"base_output_directory=os.path.abspath(args.maxtext_output_directory)\"))' && \
       HF_HUB_DISABLE_XET=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -336,7 +337,7 @@ start_rollout() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/examples/math_gsm8k_dist/run_rollout_node.py\"); s = p.read_text(); patch = \"import vllm.v1.kv_cache_interface\nif not hasattr(vllm.v1.kv_cache_interface.KVCacheTensor, \\\"layers\\\"):\n    vllm.v1.kv_cache_interface.KVCacheTensor.layers = property(lambda self: getattr(self, \\\"shared_by\\\", []))\n\"; p.write_text(s.replace(\"from __future__ import annotations\n\", \"from __future__ import annotations\n\" + patch))' && \
+      python3 -c 'import pathlib; p = pathlib.Path(\"/app/tunix/experimental/examples/math_gsm8k_dist/run_rollout_node.py\"); s = p.read_text(); patch = \"import vllm.v1.kv_cache_interface\nif not hasattr(vllm.v1.kv_cache_interface.KVCacheTensor, \\\"layers\\\"):\n    vllm.v1.kv_cache_interface.KVCacheTensor.layers = property(lambda self: getattr(self, \\\"shared_by\\\", []))\nif not hasattr(vllm.v1.kv_cache_interface.AttentionSpec, \\\"num_states\\\"):\n    vllm.v1.kv_cache_interface.AttentionSpec.num_states = property(lambda self: getattr(self, \\\"block_size\\\", 16))\n\"; p.write_text(s.replace(\"from __future__ import annotations\n\", \"from __future__ import annotations\n\" + patch))' && \
       ${rollout_startup_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
