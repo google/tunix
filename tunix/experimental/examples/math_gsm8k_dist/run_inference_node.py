@@ -30,6 +30,7 @@ from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import inference_worker as exp_inference_worker
 from tunix.experimental.worker import remote_execution
 from tunix.models.qwen3 import model as qwen3_model_lib
@@ -152,6 +153,9 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [InferenceNode] %(message)s",
       force=True,
   )
+
+  # Before anything brings the TPU backend up. See raiden_preload for why.
+  raiden_preload.import_raiden()
 
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)

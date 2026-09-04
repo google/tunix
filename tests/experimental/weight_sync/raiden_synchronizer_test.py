@@ -222,7 +222,18 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     sums = sync.checksums()
     self.assertEqual(sums["__grand_total__"], 8.0 + 3.0)
-    self.assertLen(sums, 3)  # two sampled tensors + grand total
+    self.assertLen(sums, 5)  # two sampled tensors + three totals
+
+  def test_checksums_count_every_tensor_not_just_the_sample(self):
+    """Verifies counts cover every tensor even when sampled.
+
+    `sample` caps the per-tensor entries, so the counts are what tells the
+    two sides they compared the same set of weights.
+    """
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
+    sums = sync.checksums(sample=1)
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 2 * 4 + 3)
 
   def test_work_unit_metadata_shards_and_addresses(self):
     sync = raiden_synchronizer.RaidenSynchronizer(
