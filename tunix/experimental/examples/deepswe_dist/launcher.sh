@@ -66,6 +66,7 @@ ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
+FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
@@ -198,6 +199,8 @@ echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
 echo "  trainer chips:  ${TRAINER_TPU_CHIPS}"
 echo "  rollout chips:  ${ROLLOUT_TPU_CHIPS}"
+echo "  wandb project:  ${WANDB_PROJECT:-<none>}"
+echo "  wandb run name: ${WANDB_RUN_NAME:-<auto>}"
 echo "=================================================="
 
 if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
@@ -322,6 +325,7 @@ echo "Launching CPU orchestrator..."
     --scaffold="$SCAFFOLD"
     --step_timeout_secs="$STEP_TIMEOUT_SECS"
     --reward_timeout_secs="$REWARD_TIMEOUT_SECS"
+    --flush_every_n_steps="$FLUSH_EVERY_N_STEPS"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )

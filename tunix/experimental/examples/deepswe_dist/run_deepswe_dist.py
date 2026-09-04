@@ -106,19 +106,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--use_agent_sandbox", action="store_true")
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
+      "--flush_every_n_steps",
+      type=int,
+      default=1,
+      help="Frequency in steps to flush metrics logger.",
+  )
+  parser.add_argument(
       "--log_dir",
       type=str,
       default=os.getenv("LOG_DIR", "/tmp/trellis_deepswe"),
+      help="Directory for local event logging (TensorBoard/CLU).",
   )
   parser.add_argument(
       "--wandb_project",
       type=str,
       default=os.getenv("WANDB_PROJECT", "trellis-deepswe"),
+      help="W&B project name.",
   )
   parser.add_argument(
       "--wandb_run_name",
       type=str,
       default=os.getenv("WANDB_RUN_NAME", ""),
+      help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
@@ -264,7 +273,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       log_dir=args.log_dir,
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
-      flush_every_n_steps=1,
+      flush_every_n_steps=args.flush_every_n_steps,
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
 
