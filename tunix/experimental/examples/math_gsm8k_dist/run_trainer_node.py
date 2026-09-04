@@ -306,7 +306,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
       warmup_steps_fraction=args.maxtext_warmup_steps_fraction,
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
-      base_output_directory=args.maxtext_output_directory,
+      base_output_directory=os.path.abspath(args.maxtext_output_directory),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

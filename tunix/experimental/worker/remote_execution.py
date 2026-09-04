@@ -624,13 +624,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
 
     Runs on a persistent background event loop owned by this handle, so repeated
     calls reuse a single channel rather than establishing a new one each time.
-    Cannot be called from within a running event loop (use asubmit()).
     """
-    if _running_loop() is not None:
-      raise RuntimeError(
-          "GrpcRemoteActorHandle.submit() is blocking and cannot be called from"
-          " a running event loop; use asubmit() instead."
-      )
     loop = self._ensure_sync_loop()
     future = asyncio.run_coroutine_threadsafe(
         self._invoke_on_sync_loop(method_name, args, kwargs), loop
