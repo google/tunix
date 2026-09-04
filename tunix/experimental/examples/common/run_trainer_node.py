@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Trainer worker process runner for the experimental distributed GRPO demo."""
+"""Trainer worker process runner shared by distributed RL examples."""
 
 from __future__ import annotations
 
@@ -33,12 +33,11 @@ import jax
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
-import optax
 from orbax import checkpoint as ocp
+import optax
 from tunix.cli.utils import model as model_utils
-from tunix.experimental.examples.math_gsm8k_dist import models
+from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
-from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
 from tunix.utils import maxtext_utils
@@ -47,7 +46,7 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 DEFAULT_MODEL_DOWNLOAD_DIR = os.path.join(
-    REPO_ROOT, "artifacts", "qwen3_dist_gsm8k", "models"
+    REPO_ROOT, "artifacts", "distributed_examples", "models"
 )
 
 
@@ -71,7 +70,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_expert", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
-  parser.add_argument("--sampler", type=str, default="vanilla")
   parser.add_argument("--mini_batch_size", type=int, default=1)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
@@ -366,7 +364,6 @@ def _create_tunix_trainer_factory(args) -> Any:
           actor_model,
           optax.adamw(learning_rate=args.learning_rate),
           training_config,
-          sampler_type=args.sampler,
       )
     return _MeshBoundTrainer(trainer, mesh)
 
@@ -393,10 +390,6 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
-
-  # Before anything brings the TPU backend up. See raiden_preload for why.
-  raiden_preload.import_raiden()
-
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 

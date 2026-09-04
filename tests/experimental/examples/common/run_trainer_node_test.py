@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for run_trainer_node.py."""
+"""Unit tests for the shared distributed trainer worker node."""
 
 import asyncio
 import contextlib
@@ -26,7 +26,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 from jax.sharding import Mesh
-from tunix.experimental.examples.math_gsm8k_dist import run_trainer_node
+from tunix.experimental.examples.common import run_trainer_node
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker

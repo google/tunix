@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reference inference worker process runner for the distributed GRPO demo."""
+"""Reference inference worker process runner shared by distributed RL examples."""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
-from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import inference_worker as exp_inference_worker
 from tunix.experimental.worker import remote_execution
 from tunix.models.qwen3 import model as qwen3_model_lib
@@ -41,7 +40,7 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 DEFAULT_MODEL_DOWNLOAD_DIR = os.path.join(
-    REPO_ROOT, "artifacts", "qwen3_dist_gsm8k", "models"
+    REPO_ROOT, "artifacts", "distributed_examples", "models"
 )
 
 
@@ -153,9 +152,6 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [InferenceNode] %(message)s",
       force=True,
   )
-
-  # Before anything brings the TPU backend up. See raiden_preload for why.
-  raiden_preload.import_raiden()
 
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)

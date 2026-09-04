@@ -230,6 +230,113 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     manager._active_tasks.pop("t0", None)
 
 
+class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_request_agent_config_overrides_worker_config(self):
+    created_configs = []
+
+    class FakeAgent:
+
+      def __init__(self, **kwargs):
+        created_configs.append(kwargs)
+
+    class FakeEnv:
+
+      def __init__(self, **kwargs):
+        del kwargs
+
+    config = types.SimpleNamespace(
+        agent_name="fake_agent_for_manager_test",
+        agent_config={"source": "worker"},
+        env_name="fake_env_for_manager_test",
+        env_config={},
+    )
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="p0",
+        metadata={
+            "agent_config": {"source": "request", "scaffold": "r2egym"},
+        },
+    )
+
+    with mock.patch.object(
+        registry.AGENT_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.AGENT_REGISTRY, "get", return_value=FakeAgent
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "get", return_value=FakeEnv
+    ), mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+
+      result = await manager._generate_one(request)
+
+    self.assertEqual(result, "trajectory")
+    self.assertEqual(
+        created_configs, [{"source": "request", "scaffold": "r2egym"}]
+    )
+
+  async def test_worker_agent_config_is_fallback(self):
+    created_configs = []
+
+    class FakeAgent:
+
+      def __init__(self, **kwargs):
+        created_configs.append(kwargs)
+
+    class FakeEnv:
+
+      def __init__(self, **kwargs):
+        del kwargs
+
+    config = types.SimpleNamespace(
+        agent_name="fake_agent_for_manager_test",
+        agent_config={"source": "worker"},
+        env_name="fake_env_for_manager_test",
+        env_config={},
+    )
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    with mock.patch.object(
+        registry.AGENT_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.AGENT_REGISTRY, "get", return_value=FakeAgent
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "get", return_value=FakeEnv
+    ), mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+
+      result = await manager._generate_one(request)
+
+    self.assertEqual(result, "trajectory")
+    self.assertEqual(created_configs, [{"source": "worker"}])
+
+
 class WeightSyncModeTest(absltest.TestCase):
 
   def test_config_weight_sync_mode_raiden(self):

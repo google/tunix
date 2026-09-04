@@ -184,7 +184,9 @@ class RolloutManager:
     agent_name = getattr(self.config, "agent_name", "")
     if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
       agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = getattr(self.config, "agent_config", {})
+      agent_config = request.metadata.get(
+          "agent_config", getattr(self.config, "agent_config", {})
+      )
       agent = agent_cls(**agent_config)
     elif self.agent_factory and callable(self.agent_factory):
       agent = self.agent_factory()
