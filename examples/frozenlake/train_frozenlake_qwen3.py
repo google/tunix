@@ -2264,7 +2264,9 @@ if CANON_P57_EVALUATION:
   raise SystemExit(0)
 
 if _P57_TITO_RECORD_FULL:
-  token_continuity_lib.run_tito_orbax_admission_probe(os.environ)
+  token_continuity_lib.run_tito_orbax_admission_probe(
+      os.environ, mesh=shared_mesh
+  )
   _p57_tito_starting_train_steps = int(
       grpo_trainer.rl_cluster.actor_trainer.train_steps
   )

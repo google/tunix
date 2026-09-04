@@ -379,6 +379,7 @@ def enforce_record_full_first_update_token_admission(
 def run_tito_orbax_admission_probe(
     values: Mapping[str, str] | None = None,
     *,
+    mesh: Any = None,
     state_dir: str | os.PathLike[str] | None = None,
     manager_factory: Any = None,
     model_factory: Any = None,
@@ -436,17 +437,42 @@ def run_tito_orbax_admission_probe(
 
   if model_factory is None or value_reader is None:
     from flax import nnx  # pylint: disable=g-import-not-at-top
+    import jax  # pylint: disable=g-import-not-at-top
     import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+    probe_mesh = mesh
+    if probe_mesh is None:
+      try:
+        devices = jax.devices()
+        if devices and len(devices) > 0:
+          probe_mesh = jax.sharding.Mesh(
+              np.asarray(devices).reshape(-1), ("data",)
+          )
+      except Exception:
+        probe_mesh = None
 
     class _ProbeModel(nnx.Module):
 
       def __init__(self, value):
-        self.payload = nnx.Param(jnp.asarray(value, dtype=jnp.int32))
+        arr = jnp.asarray(value, dtype=jnp.int32)
+        if probe_mesh is not None:
+          try:
+            sharding = jax.sharding.NamedSharding(
+                probe_mesh, jax.sharding.PartitionSpec()
+            )
+            arr = jax.device_put(arr, sharding)
+          except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        self.payload = nnx.Param(arr)
 
     if model_factory is None:
       model_factory = _ProbeModel
     if value_reader is None:
-      value_reader = lambda model: np.asarray(model.payload[...])
+      value_reader = lambda model: np.asarray(
+          model.payload.value
+          if hasattr(model.payload, "value")
+          else model.payload[...]
+      )
 
   manager = None
   failure_type = None
@@ -492,13 +518,18 @@ def run_tito_orbax_admission_probe(
     ):
       raise RuntimeError("Orbax admission probe restore differs")
   except Exception as exc:  # pylint: disable=broad-exception-caught
-    failure_type = type(exc).__name__
+    import traceback  # pylint: disable=g-import-not-at-top
+    traceback.print_exc()
+    failure_type = f"{type(exc).__name__}: {exc}"
   finally:
     if manager is not None:
       try:
         manager.close()
       except Exception as exc:  # pylint: disable=broad-exception-caught
-        failure_type = type(exc).__name__
+        if failure_type is None:
+          import traceback  # pylint: disable=g-import-not-at-top
+          traceback.print_exc()
+          failure_type = f"{type(exc).__name__}: {exc}"
 
   record = {
       "schema": "canon.p57-tito-orbax-admission-receipt.v1",
