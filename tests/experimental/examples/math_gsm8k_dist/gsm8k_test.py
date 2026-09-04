@@ -70,6 +70,10 @@ class GSM8KTest(absltest.TestCase):
         "<answer>\\boxed{}</answer>",
         gsm8k.build_prompt("How many clips?"),
     )
+    self.assertIn(
+        "immediately end your response and stop generating",
+        gsm8k.build_prompt("How many clips?"),
+    )
 
   def test_agent_forwards_model_response_as_action(self):
     agent = gsm8k.GSM8KAgent()
@@ -167,7 +171,7 @@ class GSM8KTest(absltest.TestCase):
     )
     self.assertEqual(reward_fn(item2), 0.1)
 
-    # 3. Format incorrect, right answer -> reward 0.5
+    # 3. Format incorrect, right answer -> reward 0.0 (strict formatting)
     item3 = types.SimpleNamespace(
         metadata={
             "text": "The answer is \\boxed{42}",
@@ -175,7 +179,7 @@ class GSM8KTest(absltest.TestCase):
             "prompt_id": "p3",
         }
     )
-    self.assertEqual(reward_fn(item3), 0.5)
+    self.assertEqual(reward_fn(item3), 0.0)
 
     # 4. Format incorrect, wrong answer -> reward 0.0
     item4 = types.SimpleNamespace(

@@ -41,7 +41,8 @@ GSM8K_PROMPT_TEMPLATE = (
     "<reasoning>...</reasoning> tags.\n"
     "Then, put your final numerical answer inside "
     "<answer>\\boxed{{}}</answer> tags. Do not put anything else in the "
-    "answer tags.\n\n"
+    "answer tags.\n"
+    "After the closing </answer> tag, immediately end your response and stop generating.\n\n"
     "Problem: {}\n"
     "<reasoning>\n"
 )
@@ -175,8 +176,6 @@ def score_gsm8k_completion(
     reward = 1.0
   elif format_correct and not answer_correct:
     reward = 0.1
-  elif not format_correct and answer_correct:
-    reward = 0.5
   else:
     reward = 0.0
   return reward, {
