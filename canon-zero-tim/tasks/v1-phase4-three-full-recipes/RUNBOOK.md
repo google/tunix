@@ -17,7 +17,7 @@ remove the proxy excess-precision pin, and enter the stock-engine branch with
 registered system tuple documented in the handoff, while
 `CANON_DP_COLLECTIVE_REDUCE` remains absent. Neither wrapper launches.
 
-## Current — render the P45/M15 fast Zero pair, never launch from here
+## Current — render the P45/M15 exact-TiTO record-full pair, never launch from here
 
 The selected wave is direct P45 plus M15/main optimized Zero full training,
 with in-process evaluation and checkpointing both disabled for speed. First
@@ -31,14 +31,18 @@ bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_froze
   /tmp/v1-p67-frozenlake-full-<fresh-wave-id> \
   <fresh-campaign-root> \
   <fresh-p45-run-id> \
-  <fresh-m15-run-id>
+  <fresh-m15-run-id> \
+  --token-continuity both-exact \
+  --token-continuity-debug-mode record-full
 ```
 
 The wrapper refuses a dirty tree, SHA mismatch, reused output root, or
 duplicate IDs. It hashes exactly two immutable manifests, preserves the P57
 64-chip autoscale/exclusive-topology carrier, emits
-`V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... launch=not-executed`, and
-only prints two unpiped `kubectl apply` commands. It never executes them.
+`V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ...
+token_continuity=both-exact token_continuity_debug=record-full
+launch=not-executed`, and only prints two unpiped `kubectl apply` commands. It
+never executes them.
 Review both; each apply still requires explicit launch approval.
 
 After reviewing `manifest-index.json`, confirm both YAMLs and their profile
@@ -55,23 +59,45 @@ CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
 ```
 
-The training-curve wave is deliberately non-TITO:
+The wrapper selector is a closed enum:
 
 ```text
-frozenlake-p45: CANON_M15_TOKEN_CONTINUITY absent
-frozenlake-m15: CANON_M15_TOKEN_CONTINUITY absent
+legacy      -> P45 off,   M15 off
+p45-exact   -> P45 exact, M15 off
+m15-exact   -> P45 off,   M15 exact
+both-exact  -> P45 exact, M15 exact
 ```
 
-This is the default. TiTO is only an optional M15 full target: append
-`--m15-tito-exact` as the wrapper's sixth argument to set
-`CANON_M15_TOKEN_CONTINUITY=exact` in M15 alone. Never use that option for the
-current P45 restart. P45 must remain selector-absent in every render.
+`legacy` is the default, but this requested treatment wave explicitly uses
+`both-exact`. It sets `CANON_P57_TOKEN_CONTINUITY=exact` in each manifest.
+The deprecated `--m15-tito-exact` alias maps to `m15-exact`; never combine the
+two argument forms. `CANON_M15_TOKEN_CONTINUITY` must be absent from all new
+P67 manifests.
 
-Reload both generated `env.sh` files and recheck absence. Empty and `0` values
-still count as presence. Reject `verify` or any unknown value everywhere, and
-reject `exact` outside explicitly selected M15 full. For default M15
-postflight require zero token receipts. For explicit exact M15 require all
-receipts to be `TOKEN_STREAM_EQUAL` plus exactly one env admission receipt;
+This pair explicitly sets `CANON_P57_TOKEN_CONTINUITY_DEBUG=record-full`; do not
+substitute the compatibility `--token-continuity-debug` switch, because that
+selects the older immediate-fatal `first-diff` carrier. In record-full, a
+same-request-ID token difference writes one bounded mode-0600 capsule per
+independent trajectory, while the unchanged row still trains—no mask, drop,
+retry, replacement, or reweighting. Missing, duplicate, swapped, or foreign
+request identity stays fatal. Raw token IDs never enter record-full stdout and
+must not be committed or pasted into review. Any token red changes the claim to
+`NON_ZERO_TIM_DATA_COLLECTION`; it is not a strict Zero-TIM pass.
+
+Before rollout, require the incremental GCS worker's no-clobber
+upload/download/SHA readiness acknowledgement. Its low-priority loop uploads
+only newly completed immutable evidence files, with bounded retry and
+heartbeat. Normal exit must prove the delta union equals the final inventory.
+Abrupt pod loss only guarantees files captured by the latest successful poll.
+
+Reload both generated `env.sh` files. Each selected recipe must contain exactly
+`CANON_P57_TOKEN_CONTINUITY=exact` and
+`CANON_P57_TOKEN_CONTINUITY_DEBUG=record-full`, with one matching admission
+receipt. The terminal classifier reconciles all expected training rows, reports
+compared/equal/different/unexercised trajectories truthfully, and requires
+stable trajectory/request/policy-step/group/sequence-row joins with no missing
+or duplicate identity. Empty, `0`, `verify`, unknown values, mixed old/new
+selectors, wrong debug mode, and a P45/M15 workload-label mismatch are fatal.
 DP8xTP8 exact remains a target gate rather than inherited certification.
 
 `CANON_DP_COLLECTIVE_REDUCE` must be absent. The command must contain
@@ -91,13 +117,27 @@ Preserve all evidence.
 
 Do not call either run complete until the in-container full classifier passes
 all 300 updates, accepts only `PASS` or the registered
-`PASS_WITH_ALIGNMENT_WARNINGS`, observes zero `FAIL`, records the complete A-B
-warning dose, and verifies both evaluation/checkpoint
-disabled runtime markers, P59/fixed-head/reduction evidence, JAX-cache
-receipts, XProf, Perfetto, and artifact hashes. These fast runs intentionally
-have no held-out evaluation JSON, no resume point, and no final checkpoint;
-an interruption requires a fresh run from step 0. Return the complete bundle
-listed in the first section of `HANDOFF.md`.
+`PASS_WITH_ALIGNMENT_WARNINGS`, observes zero fatal `FAIL`, records the complete
+A-B warning dose, and verifies evaluation/checkpoint-disabled runtime markers,
+P59/fixed-head/reduction evidence, JAX-cache receipts, XProf, Perfetto, and
+artifact hashes. Also require `[P57.TITO.FULL_RECORD] COMPLETE`,
+`P57_TITO_FULL_RECORD_CLASSIFICATION`, `[P57.TITO.FULL_RECORD] EVIDENCE`, and
+`[P57.TITO.GCS] FINAL_ACKNOWLEDGED`. The TiTO classifier reports execution,
+token, Zero-TIM, and evidence verdicts separately. These fast runs intentionally
+have no held-out evaluation JSON, resume point, or final checkpoint; an
+interruption requires a fresh run from step 0. Return the complete bundle listed
+in the first section of `HANDOFF.md` and in
+`../multiturn-tito-cross-workload/HANDOFF.md`.
+
+For `record-full`, T9d also requires one replay-complete A/B/C sidecar for
+every update, final byte-for-byte reconstruction of all four JSONL journals,
+and a matching actor-only pre-update snapshot receipt for each mechanically
+selected first-any/first-`>=1`/`>=8`/`>=32`-nat A-B red category. One policy
+step may satisfy several categories, and at most four snapshots are saved.
+Before rollout, the single-writer and Orbax save/restore admission receipts
+must pass; update 0 must show zero token differences before backward. These snapshots contain no
+optimizer and are not resume checkpoints. Report their I/O separately and do
+not use this instrumented run as performance evidence.
 
 ## Historical — render the P45 TP8 matched diagnostic pair, never launch from here
 

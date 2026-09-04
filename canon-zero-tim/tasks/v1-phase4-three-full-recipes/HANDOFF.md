@@ -1,5 +1,148 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — P74/P57 P45/M15 exact-TiTO record-full pair candidate
+
+This section supersedes every older token-continuity launch instruction below.
+The detailed evidence contract and operator checklist live in
+`tasks/multiturn-tito-cross-workload/HANDOFF.md`; use that file as the
+authoritative T9d handoff. The release is a five-CL straight-line chain on
+`local/p57-tito-pair-0902`, based on
+`6842edae88b5692c7d4c6ae4ecadfc9e2bf1e411`. Its four runtime commits end at
+`ba533dd7d8888c83d4c2ee50472a9346ccd3741c`; the fifth commit contains the
+handoff and closeout evidence. Read back the published fifth SHA and use only a
+clean checkout at that exact value. The approved publication does not
+authorize rendering or any TPU/Kubernetes launch.
+
+Host admission is green at P57 232/232, V1 102/102, APC 31/31, and flags
+422/422. This
+includes T9d replay sidecar, actor-only snapshot, journal reconstruction,
+hidden-red poison, and incremental-hash negatives. The complete
+pinned-image construction gate is green on local image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+Its final `V1_HP_EXACT_IMAGE_PASS` marker includes
+`frozenlake_tito_engine_witness=1 frozenlake_tito_collect64=1
+frozenlake_tito_record_full=1 frozenlake_tito_gcs=1
+frozenlake_tito_default=legacy manifests=3`. Its durable raw log and SHA256
+receipt are under
+`../multiturn-tito-cross-workload/evidence/release_closeout_20260904_r1/`;
+the normalized patch 38 also passed a separately logged
+`P33_EXACT_IMAGE_PASS`. One-host observer
+neutrality, real GCS/Orbax snapshot transport, P45/M15 DP8xTP8, and 300-update
+behavior remain unrun.
+
+The P67 wrapper uses one closed treatment argument:
+
+```text
+--token-continuity legacy|p45-exact|m15-exact|both-exact
+```
+
+The default remains `legacy`. The requested paired T9c wave uses
+`--token-continuity both-exact`, which writes
+`CANON_P57_TOKEN_CONTINUITY=exact` independently into both P45 and M15. The
+historical `--m15-tito-exact` spelling remains only as a compatibility alias
+for `m15-exact`; combining the alias with the new argument is fatal. New P67
+manifests never write the historical `CANON_M15_TOKEN_CONTINUITY` key. It also
+uses `--token-continuity-debug-mode record-full`; the old
+`--token-continuity-debug` spelling means `first-diff` and is not the T9c
+carrier.
+
+Only after separately approved commit and push, exact remote readback, and a
+clean checkout at that full 40-character SHA, prepare—but do not launch—the
+pair with:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+  <approved-40-character-sha> \
+  <fresh-output-dir> \
+  <fresh-campaign-root> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id> \
+  --token-continuity both-exact \
+  --token-continuity-debug-mode record-full
+```
+
+The readiness line must contain
+`token_continuity=both-exact token_continuity_debug=record-full
+launch=not-executed`. Both raw manifests and both
+resolved `env.sh` files must contain exactly one generic selector and no
+historical selector. They retain the same source, P57 recipe, DP8xTP8 mesh,
+300 updates, seed, no-eval/no-checkpoint policy, warning-only A-B policy,
+APC-off setting, system-optimization tuple, autoscaling, exclusive topology,
+node selectors, and Pathways anti-affinity as the corresponding legacy
+manifests. Only the token-continuity/debug/evidence keys and run identities may
+differ. The generated files are exactly:
+
+- `<fresh-output-dir>/manifest-index.json`;
+- `<fresh-output-dir>/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml`;
+- `<fresh-output-dir>/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml`.
+
+At runtime, turn zero stays on the ordinary chat path. Every later model call
+is submitted as the exact integer concatenation of the initial prompt tail,
+sampled assistant token IDs, and nonterminal FrozenLake environment token IDs.
+Submitted IDs and the vLLM `RequestOutput.prompt_token_ids` echo are bound by
+request ID. Trajectory ID, request ID, policy step, GRPO group, and sequence row
+are retained through the full training path.
+
+In `record-full`, an equal stream records an equal receipt. A same-request-ID
+token difference atomically writes at most one mode-0600 capsule per independent
+trajectory and the unchanged row still trains: it is not masked, dropped,
+retried, replaced, or reweighted. Missing, duplicate, swapped, or foreign
+request identity remains fatal. Any token difference makes the completed arm
+`NON_ZERO_TIM_DATA_COLLECTION`; it may supply a training curve but must not be
+called strict Zero-TIM. This observation path does not alter sampling, reward,
+loss, backward, reduction, clipping, or optimizer semantics.
+
+Raw token IDs exist only in the protected capsule files, never in record-full
+stdout. They are reversible with the matching tokenizer, so never commit them,
+paste them into review, or publish them outside the protected run-artifact
+channel. A low-priority incremental worker uploads only completed immutable
+deltas after a no-clobber upload/download/SHA readiness proof. The normal exit
+path must prove that all deltas union to the complete local inventory and emit
+the final acknowledgement. Abrupt pod loss only guarantees files present at
+the last successful poll.
+
+T9d additionally writes one immutable no-pickle A/B/C NPZ sidecar per update,
+immutable complete-line chunks for all four append journals, and at most four
+actor-only snapshots: first finite A-B red and first `max_abs >= 1`, `>= 8`,
+and `>= 32` nat reds. One step may satisfy several threshold categories.
+The trainer consumes each request at the exact pre-update policy step and
+synchronously saves the full actor with `optimizer=None` before backward.
+These artifacts do not make the run resumable and do not count as ordinary
+checkpoints. Before rollout, an O_EXCL single-controller receipt and a distinct
+Tunix CheckpointManager save/restore probe must pass. Update 0 must have zero
+token differences before backward. Live GCS polling hashes only new files;
+finalization re-hashes the entire local inventory and every prior delta tar.
+
+This source also repairs a latest-tip renderer integration regression: the
+base P57 renderer became the single writer of the seven full-system
+optimization keys. Both the two-recipe and historical three-recipe wrappers
+now validate those FrozenLake values instead of attempting a second write.
+GSM8K remains written by its own outer renderer. No YAML scheduling or
+topology field is removed by this repair.
+
+Launch remains separately approval-gated. When approved, submit the two
+generated YAML files as two unpiped `kubectl apply -f ...` commands; the arms
+may run concurrently. Never reuse a run ID, output directory, campaign root, or
+evidence attempt.
+
+Return separately for P45 and M15: immutable source/image/YAML/index identity;
+raw and resolved environment; complete raw log; normal alignment, backward,
+optimizer, update, and checkpoint counters; ordinary P57/V1 classifications;
+`p57_tito_full_record.classification.json`; compared/equal/different/
+unexercised counts; trajectory/request/step/row join result; capsule inventory
+and per-file SHA values without raw tokens; all-update sidecar count/bytes/
+write time and joins; actor snapshot trigger/inventory/pre-update receipts;
+four-journal byte reconstruction; final GCS manifest, snapshot and readback
+receipts; W&B identifiers; XProf/Perfetto artifacts; and the full SHA256
+ledger. Terminal evidence must include `[P57.TITO.FULL_RECORD] COMPLETE`,
+`P57_TITO_FULL_RECORD_CLASSIFICATION`, `[P57.TITO.FULL_RECORD] EVIDENCE`, and
+`[P57.TITO.GCS] FINAL_ACKNOWLEDGED`.
+
+Both jobs remain `convergence-only / alignment-degraded` when their independent
+finite A-B warning lane is exercised. Host or pinned-image success is
+construction evidence only; P45 exact and M15 exact each become target-
+validated only after its own DP8xTP8 full result is mechanically classified.
+
 ## START HERE — P74/P4.19 M15 Step-61 prompt-only row source is committed
 
 This section supersedes the older launch instructions below. M15 run
@@ -54,6 +197,12 @@ either path.
 
 ## START HERE — P74/P75 full-wave routing: FrozenLake P45/M15 finite A-B warning lanes
 
+**Historical record only; do not execute the token-continuity commands or
+contracts in this subsection.** The first section of this file supersedes
+them with the generic P45/M15 selector and the `both-exact` paired treatment.
+The text below is retained only to explain the older default-off/M15-only
+release and its evidence.
+
 This section is the authoritative launch preparation for the next optimized
 FrozenLake Zero full runs. The P45 and M15 manifests may both be prepared, but
 neither is applied without separate approval. P45 now uses the same narrow
@@ -92,11 +241,12 @@ bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_froze
   <fresh-m15-run-id>
 ```
 
-The wrapper never launches. The default invocation must emit
+At that historical source, the wrapper never launched. Its default invocation emitted
 `V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... m15_tito=off ...
 launch=not-executed`. To render an explicit M15 exact-TITO target instead,
 append `--m15-tito-exact`; that changes only M15 and must emit
-`m15_tito=exact`. P45 never admits TiTO.
+`m15_tito=exact`. At that historical source, P45 did not admit TiTO. These
+spellings are not the current paired-treatment instructions.
 Review both manifests. After a separate launch approval, the eligible commands
 are:
 

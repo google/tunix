@@ -1,0 +1,5 @@
+Script started on 2026-09-04 08:05:37+00:00 [<not executed on terminal>]
+FLAG_AUDIT declared=422 actual=422 unique=422 ordering_inversions=15 changed_names=57 registered_markers=19 prefixes=BASE:176,P28:15,P29:2,P3:2,P30:9,P31:4,P32:11,P33:11,P34:21,P35:12,P38:60,P39:2,P41:1,P43:3,P44:4,P45:2,P46:11,P57:26,P58:26,P59:9,P60:1,P61:1,P62:1,P63:1,P64:6,P66:3,P67:1,P71:1
+FLAG_AUDIT_PASS
+
+Script done on 2026-09-04 08:05:37+00:00 [COMMAND_EXIT_CODE="0"]

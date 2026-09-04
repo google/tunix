@@ -1,0 +1,141 @@
+Script started on 2026-09-04 08:19:49+00:00 [<not executed on terminal>]
+^@[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen1p7b)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen1p7b)
+
+Installed to: /tmp/p33-qwen1p7b.rUWwL1   (model=qwen1p7b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p33-qwen1p7b.rUWwL1:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p33-qwen1p7b.rUWwL1          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 09-04 08:19:53 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-04 08:19:58 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-04 08:19:58 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-04 08:19:58 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-04 08:19:59 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-04 08:19:59 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS chain=linear_p22xk model=qwen1p7b tp=4 K=2048 request_M=8,16,32,64,128,256 learner_M=4096 fixed_M=256 local_N=37984 fixed_N=38144 endpoint=tied_embed
+ERROR 09-04 08:20:02 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-04 08:20:02 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+WARNING 09-04 08:20:02 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/site-packages/tpu_info/device.py:33: DeprecationWarning: In 3.13 classes created inside an enum will not become a member.  Use the `member` decorator to keep the current behavior.
+  class Info(typing.NamedTuple):
+INFO 09-04 08:20:08 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-04 08:20:08 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-04 08:20:08 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 09-04 08:20:08 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+/usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py:324: DeprecationWarning: jax.core.Effect is deprecated. Use jax.extend.core.Effect.
+  class VariableEffect(jax.core.Effect): ...
+WARNING 09-04 08:20:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-04 08:20:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-04 08:20:10 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-04 08:20:11 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-04 08:20:11 [attention_interface.py:56] Using default RPA kernel
+/usr/local/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+INFO 09-04 08:20:11 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-04 08:20:11 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-04 08:20:11 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-04 08:20:11 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1664, 1792, 1920, 2048) expected_path=standard module=/tmp/p33-qwen1p7b.rUWwL1/tpu_runner_p21_l30.py
+..[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=11023
+.....[CANON_P38_KV_OBSERVER_CANDIDATE] round=2 request=candidate-a call=4223 prefix=2209
+...........[CANON_P38_REQUEST_JOURNAL] record=1 request=request-a prefix=1600 stratum=0 dp=0
+.................
+----------------------------------------------------------------------
+Ran 35 tests in 14.329s
+
+OK
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen8b)
+
+Installed to: /tmp/p33-qwen8b.E56pMj   (model=qwen8b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p33-qwen8b.E56pMj:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p33-qwen8b.E56pMj          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 09-04 08:20:20 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-04 08:20:26 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-04 08:20:26 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-04 08:20:26 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-04 08:20:27 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-04 08:20:27 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS chain=linear_p22xk model=qwen8b tp=4 K=4096 request_M=8,16,32,64,128,256 learner_M=4096 fixed_M=256 local_N=37984 fixed_N=38144 endpoint=untied_lm_head
+ERROR 09-04 08:20:31 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-04 08:20:31 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+WARNING 09-04 08:20:31 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/site-packages/tpu_info/device.py:33: DeprecationWarning: In 3.13 classes created inside an enum will not become a member.  Use the `member` decorator to keep the current behavior.
+  class Info(typing.NamedTuple):
+INFO 09-04 08:20:37 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-04 08:20:37 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-04 08:20:37 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 09-04 08:20:37 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+/usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py:324: DeprecationWarning: jax.core.Effect is deprecated. Use jax.extend.core.Effect.
+  class VariableEffect(jax.core.Effect): ...
+WARNING 09-04 08:20:40 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-04 08:20:40 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-04 08:20:40 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-04 08:20:40 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-04 08:20:40 [attention_interface.py:56] Using default RPA kernel
+/usr/local/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+INFO 09-04 08:20:40 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-04 08:20:40 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-04 08:20:40 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-04 08:20:40 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1664, 1792, 1920, 2048) expected_path=standard module=/tmp/p33-qwen8b.E56pMj/tpu_runner_p21_l30.py
+..[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=11023
+.....[CANON_P38_KV_OBSERVER_CANDIDATE] round=2 request=candidate-a call=4223 prefix=2209
+...........[CANON_P38_REQUEST_JOURNAL] record=1 request=request-a prefix=1600 stratum=0 dp=0
+.................
+----------------------------------------------------------------------
+Ran 35 tests in 16.044s
+
+OK
+[CANON_P57_TITO_RUNNER_WITNESS] record=1 request=a0 prompt_tokens=3 prompt_sha256=e6c755be63ad52f42474accd9c42d099f8272574bb4babba65bf7e8d090d04b7
+[CANON_P57_TITO_RUNNER_WITNESS] record=2 request=a1 prompt_tokens=2 prompt_sha256=6bc454331fc753a1f9646096d94d86f12876c6d9aa1898d2bec00ac693487ff0
+[CANON_P57_TITO_RUNNER_WITNESS] record=3 request=a0 prompt_tokens=3 prompt_sha256=e6c755be63ad52f42474accd9c42d099f8272574bb4babba65bf7e8d090d04b7
+P57_TITO_RUNNER_WITNESS_OVERLAY_PASS a_requests=2 b_excluded=1 negatives=3 mode0600=1
+M15_REPLAY_ROUND_PROVENANCE_PASS schema=m15-apc-serving-envelope-v1 binding=int(_p38_seam_round())
+P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=37 p57_tito_runner_witness=2 p57_tito_runner_execution=1 m15_round_provenance=1 overlays=2
+
+Script done on 2026-09-04 08:20:48+00:00 [COMMAND_EXIT_CODE="0"]
