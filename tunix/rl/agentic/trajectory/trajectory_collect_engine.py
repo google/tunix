@@ -24,6 +24,7 @@ import hashlib
 import json
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
+import uuid
 
 from absl import logging
 import numpy as np
@@ -111,9 +112,24 @@ class TrajectoryCollectEngine:
     self._deepswe_exact_token_continuity = (
         deepswe_debug.deepswe_exact_token_continuity()
     )
-    self._m15_token_continuity_mode = (
-        token_continuity.m15_token_continuity_mode()
+    self._frozenlake_token_continuity = (
+        token_continuity.frozenlake_token_continuity()
     )
+    self._frozenlake_token_continuity_debug_mode = (
+        token_continuity.frozenlake_token_continuity_debug_mode()
+    )
+    self._frozenlake_token_continuity_debug = (
+        self._frozenlake_token_continuity_debug_mode is not None
+    )
+    # first-diff is a legacy process-lifetime single-shot diagnostic.  The
+    # collect-64/record-full latch below is reset per independent trajectory.
+    self._frozenlake_token_continuity_first_diff_emitted = False
+    self._frozenlake_token_continuity_debug_emitted = False
+    self._frozenlake_token_continuity_trajectory_id = None
+    self._frozenlake_token_continuity_request_ids: list[str] = []
+    self._frozenlake_token_continuity_completed_later_calls = 0
+    self._frozenlake_token_continuity_receipt_turns: list[int] = []
+    self._frozenlake_token_continuity_different = False
     if (
         self._deepswe_exact_token_continuity
         and "prompt_token_ids" in self.model_call_kwargs
@@ -123,19 +139,19 @@ class TrajectoryCollectEngine:
           "caller-supplied override"
       )
     if (
-        self._m15_token_continuity_mode in ("verify", "exact")
+        self._frozenlake_token_continuity is not None
         and "prompt_token_ids" in self.model_call_kwargs
     ):
       raise ValueError(
-          "M15 token continuity owns prompt_token_ids; refusing a "
+          "FrozenLake token continuity owns prompt_token_ids; refusing a "
           "caller-supplied override"
       )
     if (
         self._deepswe_exact_token_continuity
-        and self._m15_token_continuity_mode is not None
+        and self._frozenlake_token_continuity is not None
     ):
       raise ValueError(
-          "DeepSWE and M15 exact-token admissions are mutually exclusive"
+          "DeepSWE and FrozenLake exact-token admissions are mutually exclusive"
       )
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
@@ -166,6 +182,7 @@ class TrajectoryCollectEngine:
         agent_types.TrajectoryStatus.ENV_TIMEOUT,
         agent_types.TrajectoryStatus.MODEL_TIMEOUT,
         agent_types.TrajectoryStatus.REWARD_TIMEOUT,
+        agent_types.TrajectoryStatus.TOKEN_CONTINUITY_DIFFERENT,
     }
 
     self.overlong_filter = overlong_filter
@@ -307,6 +324,19 @@ class TrajectoryCollectEngine:
         raise ValueError("invalid shared trajectory batch wall time")
       self.trajectory_time["batch_started_unix_secs"] = batch_started_unix
     self._response_token_count = 0
+    if (
+        self._frozenlake_token_continuity is not None
+        and self._frozenlake_token_continuity.selector
+        == token_continuity.P57_TOKEN_CONTINUITY_ENV
+    ):
+      self._frozenlake_token_continuity_trajectory_id = uuid.uuid4().hex
+    else:
+      self._frozenlake_token_continuity_trajectory_id = None
+    self._frozenlake_token_continuity_request_ids = []
+    self._frozenlake_token_continuity_completed_later_calls = 0
+    self._frozenlake_token_continuity_receipt_turns = []
+    self._frozenlake_token_continuity_different = False
+    self._frozenlake_token_continuity_debug_emitted = False
     self.agent.reset()
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
     self._record_timeout("")
@@ -352,8 +382,12 @@ class TrajectoryCollectEngine:
           break
 
       masked_out = (
-          self.overlong_filter
-          and self.agent.trajectory.status in self.filter_statuses
+          self.agent.trajectory.status
+          == agent_types.TrajectoryStatus.TOKEN_CONTINUITY_DIFFERENT
+          or (
+              self.overlong_filter
+              and self.agent.trajectory.status in self.filter_statuses
+          )
       )
       if not masked_out:
         remaining = self._remaining_time()
@@ -391,6 +425,44 @@ class TrajectoryCollectEngine:
     self.agent.trajectory.model_time = dict(self.model_time)
     self.agent.trajectory.reward_time = dict(self.reward_time)
     self.agent.trajectory.trajectory_time = dict(self.trajectory_time)
+
+    if self._frozenlake_token_continuity_trajectory_id is not None:
+      expected_turns = list(
+          range(1, self._frozenlake_token_continuity_completed_later_calls + 1)
+      )
+      if self._frozenlake_token_continuity_receipt_turns != expected_turns:
+        raise ValueError(
+            "P57 exact token-continuity receipts are not complete for this "
+            "trajectory"
+        )
+      continuity = self._frozenlake_token_continuity
+      assert continuity is not None
+      if self._frozenlake_token_continuity_debug_mode in (
+          token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT,
+          token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL,
+      ):
+        token_continuity.record_token_collection_trajectory(
+            different=self._frozenlake_token_continuity_different,
+            later_turns=self._frozenlake_token_continuity_completed_later_calls,
+        )
+      summary_verdict = (
+          "DIFFERENT"
+          if self._frozenlake_token_continuity_different
+          else "UNEXERCISED"
+          if self._frozenlake_token_continuity_completed_later_calls == 0
+          else "PASS"
+      )
+      print(
+          "[CANON_P57_TOKEN_CONTINUITY_SUMMARY] "
+          f"workload={continuity.workload} "
+          f"trajectory_id={self._frozenlake_token_continuity_trajectory_id} "
+          f"steps={len(self.agent.trajectory.steps)} "
+          "expected_later_turns="
+          f"{self._frozenlake_token_continuity_completed_later_calls} "
+          f"receipts={len(self._frozenlake_token_continuity_receipt_turns)} "
+          f"verdict={summary_verdict}",
+          flush=True,
+      )
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -511,6 +583,19 @@ class TrajectoryCollectEngine:
           "policy_version": original_input.get("policy_version"),
           "original_input": original_input,
           "group_id": self.env.extra_kwargs.get("group_id"),
+          "pair_index": self.env.extra_kwargs.get("pair_index"),
+          "p57_token_continuity_trajectory_id": (
+              self._frozenlake_token_continuity_trajectory_id
+          ),
+          "p57_token_continuity_request_ids": tuple(
+              self._frozenlake_token_continuity_request_ids
+          ),
+          "p57_token_continuity_later_turns": (
+              self._frozenlake_token_continuity_completed_later_calls
+          ),
+          "p57_token_continuity_different": (
+              self._frozenlake_token_continuity_different
+          ),
       }
     elif mode == "Conversation":
       # return raw conversation history
@@ -798,17 +883,24 @@ class TrajectoryCollectEngine:
               flush=True,
           )
         elif (
-            self._m15_token_continuity_mode == "exact"
+            self._frozenlake_token_continuity is not None
+            and self._frozenlake_token_continuity.mode == "exact"
             and self.agent.trajectory.steps
         ):
+          workload = self._frozenlake_token_continuity.workload
           prompt_token_ids = (
               token_continuity.reconstruct_continuation_prompt_tokens(
                   self.agent.trajectory,
                   self._response_token_count,
-                  contract="M15",
+                  contract=workload.upper(),
               )
           )
           continuity_kwargs["prompt_token_ids"] = prompt_token_ids
+        if self._frozenlake_token_continuity_debug_mode in (
+            token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT,
+            token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL,
+        ):
+          continuity_kwargs["return_prompt_token_witnesses"] = True
         return self.model_call(
             self.agent.chat_completions,
             self.env,
@@ -846,18 +938,122 @@ class TrajectoryCollectEngine:
       )
     logging.debug("%s model_call done", self._debug_prefix)
 
+    if self._frozenlake_token_continuity_debug_mode in (
+        token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT,
+        token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL,
+    ):
+      witnesses = rollout_output.prompt_token_witnesses
+      if witnesses is None or len(witnesses) != 1:
+        raise ValueError(
+            "P57 TiTO diagnostic expected exactly one prompt-token witness"
+        )
+      continuity = self._frozenlake_token_continuity
+      trajectory_id = self._frozenlake_token_continuity_trajectory_id
+      if continuity is None or trajectory_id is None:
+        raise RuntimeError("P57 TiTO witness lost its exact trajectory identity")
+      extra = getattr(self.env, "extra_kwargs", {}) or {}
+      witness_record = token_continuity.prompt_token_witness_record(
+          witnesses[0],
+          workload=continuity.workload,
+          trajectory_id=trajectory_id,
+          turn=len(self.agent.trajectory.steps),
+          pair_index=extra.get("pair_index"),
+          group_id=extra.get("group_id"),
+      )
+      echo_equal = bool(witness_record["submitted_equals_engine_echo"])
+      request_id = str(witness_record["request_id"])
+      if request_id in self._frozenlake_token_continuity_request_ids:
+        raise ValueError(
+            "P57 TiTO diagnostic observed a duplicate request ID within one "
+            f"trajectory: {request_id}"
+        )
+      self._frozenlake_token_continuity_request_ids.append(request_id)
+      token_continuity.record_prompt_echo_comparison(equal=echo_equal)
+      witness_path = witness_sha = "not-persisted-equal"
+      witness_bytes = 0
+      if (
+          self._frozenlake_token_continuity_debug_mode
+          == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT
+          or not echo_equal
+      ):
+        witness_path, witness_sha, witness_bytes = (
+            token_continuity.write_prompt_token_witness(witness_record)
+        )
+      print(
+          "[CANON_P57_TITO_HOST_WITNESS] "
+          f"request={witness_record['request_id']} "
+          f"trajectory_id={trajectory_id} "
+          f"turn={witness_record['turn']} "
+          f"submitted_tokens={witness_record['submitted_tokens']} "
+          f"submitted_sha256={witness_record['submitted_sha256']} "
+          f"engine_echo_tokens={witness_record['engine_echo_tokens']} "
+          f"engine_echo_sha256={witness_record['engine_echo_sha256']} "
+          "equal="
+          f"{int(witness_record['submitted_equals_engine_echo'])} "
+          f"artifact={witness_path} bytes={witness_bytes} "
+          f"artifact_sha256={witness_sha}",
+          flush=True,
+      )
+      if not echo_equal:
+        capsule_slot = None
+        if not self._frozenlake_token_continuity_debug_emitted:
+          # Reserve at most one raw-token capsule per independent trajectory.
+          # A later seam can still mark the same trajectory red, but may not
+          # consume a second process-wide evidence slot.
+          self._frozenlake_token_continuity_debug_emitted = True
+          capsule_slot = token_continuity.reserve_token_difference_capsule()
+        if capsule_slot is not None:
+          capsule_succeeded = False
+          try:
+            capsule_path, capsule_sha, capsule_bytes = (
+                token_continuity.write_prompt_echo_difference_capsule(
+                    witnesses[0], witness_record
+                )
+            )
+            print(
+                "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                f"verdict=PASS slot={capsule_slot} path={capsule_path} "
+                f"bytes={capsule_bytes} sha256={capsule_sha} "
+                "kind=engine-echo durability=mode0600-run-state+periodic-gcs",
+                flush=True,
+            )
+            capsule_succeeded = True
+          except Exception as debug_error:  # pylint: disable=broad-exception-caught
+            logging.exception("P57 prompt echo capsule failed: %s", debug_error)
+            print(
+                "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                f"verdict=FAIL slot={capsule_slot} path=UNAVAILABLE "
+                "kind=engine-echo durability=none",
+                flush=True,
+            )
+          finally:
+            token_continuity.record_token_capsule_emission(
+                succeeded=capsule_succeeded
+            )
+        self._frozenlake_token_continuity_different = True
+        if (
+            self._frozenlake_token_continuity_debug_mode
+            == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT
+        ):
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.TOKEN_CONTINUITY_DIFFERENT
+          )
+          return True
+
     # Verify observes the rendered-text path. Exact supplies reconstructed
     # integer IDs above. Both compare the prompt actually consumed by serving;
     # exact mode fails closed on any difference.
     if (
-        self._m15_token_continuity_mode in ("verify", "exact")
+        self._frozenlake_token_continuity is not None
         and self.agent.trajectory.steps
     ):
+      continuity = self._frozenlake_token_continuity
+      self._frozenlake_token_continuity_completed_later_calls += 1
       expected_prompt = (
           token_continuity.reconstruct_continuation_prompt_tokens(
               self.agent.trajectory,
               self._response_token_count,
-              contract="M15",
+              contract=continuity.workload.upper(),
           )
       )
       actual_prompt = token_continuity.unpadded_rollout_prompt_tokens(
@@ -867,18 +1063,177 @@ class TrajectoryCollectEngine:
           actual_prompt,
           expected_prompt,
           turn=len(self.agent.trajectory.steps),
-          mode=self._m15_token_continuity_mode,
+          mode=continuity.mode,
+          workload=continuity.workload,
+          selector=continuity.selector,
+          trajectory_id=self._frozenlake_token_continuity_trajectory_id,
       )
       print(receipt, flush=True)
-      if (
-          self._m15_token_continuity_mode == "exact"
-          and not token_continuity.token_streams_equal(
-              actual_prompt, expected_prompt
-          )
-      ):
-        raise ValueError(
-            "M15 exact token continuity differs from the serving prompt"
+      streams_equal = token_continuity.token_streams_equal(
+          actual_prompt, expected_prompt
+      )
+      if self._frozenlake_token_continuity_trajectory_id is not None:
+        self._frozenlake_token_continuity_receipt_turns.append(
+            len(self.agent.trajectory.steps)
         )
+      if continuity.mode == "exact" and not streams_equal:
+        if (
+            self._frozenlake_token_continuity_debug_mode
+            == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT
+        ):
+          capsule_slot = None
+          if not self._frozenlake_token_continuity_debug_emitted:
+            self._frozenlake_token_continuity_debug_emitted = True
+            capsule_slot = token_continuity.reserve_token_difference_capsule()
+          if capsule_slot is not None:
+            capsule_succeeded = False
+            try:
+              extra = getattr(self.env, "extra_kwargs", {}) or {}
+              debug_lines = token_continuity.continuity_debug_receipts(
+                  self.agent.trajectory,
+                  actual_prompt,
+                  expected_prompt,
+                  turn=len(self.agent.trajectory.steps),
+                  workload=continuity.workload,
+                  trajectory_id=self._frozenlake_token_continuity_trajectory_id,
+                  policy_step=self._original_input().get("policy_version"),
+                  pair_index=extra.get("pair_index"),
+                  group_id=extra.get("group_id"),
+              )
+              # collect-64 keeps reversible token IDs only in the mode-0600
+              # capsule.  The ordinary pod/run log receives the bounded
+              # token-free header, never the token_chunk records.
+              print(debug_lines[0], flush=True)
+              capsule_path, capsule_sha, capsule_bytes = (
+                  token_continuity.write_continuity_debug_capsule(debug_lines)
+              )
+              print(
+                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                  f"verdict=PASS slot={capsule_slot} path={capsule_path} "
+                  f"bytes={capsule_bytes} sha256={capsule_sha} "
+                  "durability=mode0600-run-state+periodic-gcs",
+                  flush=True,
+              )
+              capsule_succeeded = True
+            except Exception as debug_error:  # pylint: disable=broad-exception-caught
+              logging.exception(
+                  "P57 collect-64 capsule emission failed: %s", debug_error
+              )
+              print(
+                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                  f"verdict=FAIL slot={capsule_slot} path=UNAVAILABLE "
+                  "durability=none",
+                  flush=True,
+              )
+            finally:
+              token_continuity.record_token_capsule_emission(
+                  succeeded=capsule_succeeded
+              )
+          self._frozenlake_token_continuity_different = True
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.TOKEN_CONTINUITY_DIFFERENT
+          )
+          return True
+        if (
+            self._frozenlake_token_continuity_debug_mode
+            == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+        ):
+          capsule_slot = None
+          if not self._frozenlake_token_continuity_debug_emitted:
+            self._frozenlake_token_continuity_debug_emitted = True
+            capsule_slot = token_continuity.reserve_token_difference_capsule()
+          if capsule_slot is not None:
+            capsule_succeeded = False
+            try:
+              extra = getattr(self.env, "extra_kwargs", {}) or {}
+              debug_lines = token_continuity.continuity_debug_receipts(
+                  self.agent.trajectory,
+                  actual_prompt,
+                  expected_prompt,
+                  turn=len(self.agent.trajectory.steps),
+                  workload=continuity.workload,
+                  trajectory_id=self._frozenlake_token_continuity_trajectory_id,
+                  policy_step=self._original_input().get("policy_version"),
+                  pair_index=extra.get("pair_index"),
+                  group_id=extra.get("group_id"),
+              )
+              print(debug_lines[0], flush=True)
+              capsule_path, capsule_sha, capsule_bytes = (
+                  token_continuity.write_continuity_debug_capsule(debug_lines)
+              )
+              print(
+                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                  f"verdict=PASS slot={capsule_slot} path={capsule_path} "
+                  f"bytes={capsule_bytes} sha256={capsule_sha} "
+                  "kind=later-turn durability=mode0600-run-state+periodic-gcs",
+                  flush=True,
+              )
+              capsule_succeeded = True
+            except Exception as debug_error:  # pylint: disable=broad-exception-caught
+              logging.exception(
+                  "P57 record-full capsule emission failed: %s", debug_error
+              )
+              print(
+                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                  f"verdict=FAIL slot={capsule_slot} path=UNAVAILABLE "
+                  "kind=later-turn durability=none",
+                  flush=True,
+              )
+            finally:
+              token_continuity.record_token_capsule_emission(
+                  succeeded=capsule_succeeded
+              )
+          self._frozenlake_token_continuity_different = True
+          # Deliberately continue the unchanged trajectory into environment,
+          # reward, loss, backward, and optimizer code.
+        else:
+          if (
+              self._frozenlake_token_continuity_debug_mode
+              == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_FIRST_DIFF
+              and not self._frozenlake_token_continuity_first_diff_emitted
+          ):
+            # Set before any formatting or I/O so one broken diagnostic cannot
+            # produce an unbounded retry storm from this trajectory engine.
+            self._frozenlake_token_continuity_first_diff_emitted = True
+            try:
+              extra = getattr(self.env, "extra_kwargs", {}) or {}
+              debug_lines = token_continuity.continuity_debug_receipts(
+                  self.agent.trajectory,
+                  actual_prompt,
+                  expected_prompt,
+                  turn=len(self.agent.trajectory.steps),
+                  workload=continuity.workload,
+                  trajectory_id=self._frozenlake_token_continuity_trajectory_id,
+                  policy_step=self._original_input().get("policy_version"),
+                  pair_index=extra.get("pair_index"),
+                  group_id=extra.get("group_id"),
+              )
+              for debug_line in debug_lines:
+                print(debug_line, flush=True)
+              capsule_path, capsule_sha, capsule_bytes = (
+                  token_continuity.write_continuity_debug_capsule(debug_lines)
+              )
+              print(
+                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                  f"verdict=PASS path={capsule_path} bytes={capsule_bytes} "
+                  f"sha256={capsule_sha} "
+                  "durability=run-state+reconstructable-worker-log",
+                  flush=True,
+              )
+            except Exception as debug_error:  # pylint: disable=broad-exception-caught
+              logging.exception(
+                  "P57 first-diff capsule emission failed: %s", debug_error
+              )
+              print(
+                  "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+                  "verdict=FAIL path=UNAVAILABLE "
+                  "durability=reconstructable-worker-log-if-chunks-present",
+                  flush=True,
+              )
+          raise ValueError(
+              f"{continuity.workload.upper()} exact token continuity differs "
+              "from the serving prompt"
+            )
 
     # Align trajectory prompt tokens with the rollout worker's actual
     # tokenization on the first turn to prevent prompt token desync.

@@ -677,6 +677,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     raw_completion_lengths: List[int] = []
     trajectories_to_log = []
 
+    record_full = (
+        mode == rl_cluster_lib.Mode.TRAIN
+        and token_continuity.frozenlake_token_continuity_debug_mode(
+            os.environ
+        ) == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+    )
+    row_identity = []
+
     for item in trajectories:
       trajectories_to_log.append(item.traj)
       conversation = item.traj.get("conversation_text") or []
@@ -700,6 +708,41 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
+      if record_full:
+        if expected_step is None:
+          raise ValueError("record-full row mapping requires an expected step")
+        trajectory_id = item.traj.get(
+            "p57_token_continuity_trajectory_id"
+        )
+        group_id = int(item.group_id)
+        pair_index = int(item.pair_index)
+        first_group_id = int(expected_step) * self._full_batch_size
+        sequence_row = (
+            (group_id - first_group_id) * self.algo_config.num_generations
+            + pair_index
+        )
+        row_identity.append({
+            "trajectory_id": trajectory_id,
+            "request_ids": list(
+                item.traj.get("p57_token_continuity_request_ids", ())
+            ),
+            "policy_step": int(expected_step),
+            "group_id": group_id,
+            "pair_index": pair_index,
+            "sequence_row": sequence_row,
+            "later_turns": int(
+                item.traj.get("p57_token_continuity_later_turns", 0)
+            ),
+            "token_different": bool(
+                item.traj.get("p57_token_continuity_different", False)
+            ),
+        })
+
+    if record_full:
+      token_continuity.append_full_record_batch_map(row_identity)
+      token_continuity.enforce_record_full_first_update_token_admission(
+          row_identity, step=int(expected_step)
+      )
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -1968,6 +2011,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             combined_batch,
             step=int(expected_step),
             fail_closed=not diagnostic_only,
+            row_identity=row_identity if record_full else None,
         )
         capsule_mode = p64_training_capsule.mode()
         if capsule_mode == "capture":

@@ -66,6 +66,9 @@ class RolloutOutput:
   # Number of real prompt tokens before left padding, one per prompt.
   prompt_lengths: np.ndarray | None = None
 
+  # Optional diagnostic-only request/echo metadata from the vLLM sampler.
+  prompt_token_witnesses: list[Any] | None = None
+
 
 @dataclasses.dataclass
 class RolloutConfig:

@@ -27,8 +27,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import flax
 import numpy as np
@@ -75,6 +76,56 @@ _DEEPSWE_ZERO_HP_AB_WARNING_POLICY_ID = (
 _GSM8K_AB_MAX_ABS = 1.0e-4
 _GSM8K_AB_MAX_BYTE_FRACTION = 4.0e-3
 _MAX_MISMATCH_DETAILS = 1024
+_P57_TOKEN_CONTINUITY_DEBUG_ENV = "CANON_P57_TOKEN_CONTINUITY_DEBUG"
+_P57_TOKEN_CONTINUITY_RECORD_FULL = "record-full"
+_P57_TITO_ONEHOST_NEUTRALITY_ENV = "CANON_P57_TITO_ONEHOST_NEUTRALITY"
+_P57_ACTOR_SNAPSHOT_THRESHOLDS = {
+    "first-any": 0.0,
+    "first-ge-1": 1.0,
+    "first-ge-8": 8.0,
+    "first-ge-32": 32.0,
+}
+_P57_ACTOR_SNAPSHOT_LOCK = threading.Lock()
+
+
+def _p57_record_full_runtime_identity() -> dict[str, Any]:
+  """Returns the closed production or one-host record-full identity."""
+  workload_key = (
+      os.environ.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
+      os.environ.get("CANON_P57_DATA_SPLIT", ""),
+  )
+  if workload_key == ("", ""):
+    workload = "p45"
+  elif workload_key == ("m15", "main"):
+    workload = "m15"
+  else:
+    raise AlignmentGateError(
+        "P57 record-full evidence requires exact P45 or M15/main identity"
+    )
+  onehost = os.environ.get(_P57_TITO_ONEHOST_NEUTRALITY_ENV) == "on"
+  if onehost and workload != "p45":
+    raise AlignmentGateError("P57 one-host record-full evidence admits P45 only")
+  expected_dp = 1 if onehost else 8
+  expected_tp = 4 if onehost else 8
+  source_commit = os.environ.get("CANON_EXPECT_COMMIT", "")
+  image_identity = os.environ.get("CANON_CLIENT_IMAGE", "")
+  if (
+      os.environ.get("CANON_DP_SIZE", "") != str(expected_dp)
+      or os.environ.get("CANON_TP_SIZE", "") != str(expected_tp)
+      or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+      or not image_identity
+  ):
+    raise AlignmentGateError(
+        "P57 record-full evidence requires its registered DP/TP geometry, "
+        "a full source SHA, and an image identity"
+    )
+  return {
+      "workload": workload,
+      "dp": expected_dp,
+      "tp": expected_tp,
+      "source_commit": source_commit,
+      "image_identity": image_identity,
+  }
 
 
 class AlignmentGateError(RuntimeError):
@@ -1237,6 +1288,320 @@ def _p38_replay_row_arrays(
   return row_arrays
 
 
+def _persist_p57_full_update_sidecar(
+    sidecar: ObservedTrainExample,
+    record: dict[str, Any],
+    row_identity: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+  """Persists replay-complete host arrays for one record-full update."""
+  if os.environ.get(_P57_TOKEN_CONTINUITY_DEBUG_ENV, "") != (
+      _P57_TOKEN_CONTINUITY_RECORD_FULL
+  ):
+    if row_identity is not None:
+      raise AlignmentGateError(
+          "P57 full-update row identity leaked outside record-full"
+      )
+    return None
+  state_value = os.environ.get("CANON_STATE", "")
+  if not state_value or not os.path.isabs(state_value):
+    raise AlignmentGateError(
+        "P57 full-update sidecar requires an absolute CANON_STATE"
+    )
+  if row_identity is None:
+    raise AlignmentGateError(
+        "P57 record-full sidecar requires trajectory row identities"
+    )
+  rows = [dict(value) for value in row_identity]
+  arrays = {
+      name: np.ascontiguousarray(value)
+      for name, value in _p38_replay_row_arrays(sidecar).items()
+  }
+  batch_rows = int(arrays["completion_ids"].shape[0])
+  if len(rows) != batch_rows:
+    raise AlignmentGateError(
+        "P57 record-full row identity count differs from its A/B/C sidecar: "
+        f"{len(rows)} vs {batch_rows}"
+    )
+  step = int(record.get("step", -1))
+  sequence_rows = []
+  trajectory_ids = []
+  group_ids = []
+  pair_indices = []
+  request_ids = []
+  for index, row in enumerate(rows):
+    trajectory_id = row.get("trajectory_id")
+    requests = row.get("request_ids")
+    if (
+        row.get("policy_step") != step
+        or row.get("sequence_row") != index
+        or not isinstance(trajectory_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", trajectory_id) is None
+        or type(row.get("group_id")) is not int
+        or type(row.get("pair_index")) is not int
+        or not isinstance(requests, list)
+        or not requests
+        or any(not isinstance(value, str) or not value for value in requests)
+    ):
+      raise AlignmentGateError(
+          f"P57 record-full sidecar row identity differs at row {index}"
+      )
+    sequence_rows.append(index)
+    trajectory_ids.append(trajectory_id)
+    group_ids.append(row["group_id"])
+    pair_indices.append(row["pair_index"])
+    request_ids.append(list(requests))
+  policy_versions = np.asarray(arrays["policy_version"]).reshape(batch_rows, -1)
+  if not np.all(policy_versions == step):
+    raise AlignmentGateError(
+        "P57 record-full sidecar policy version differs from alignment step"
+    )
+  identity_arrays = {
+      "sequence_row": np.asarray(sequence_rows, dtype=np.int32),
+      "trajectory_id": np.asarray(trajectory_ids, dtype="S32"),
+      "group_id": np.asarray(group_ids, dtype=np.int64),
+      "pair_index": np.asarray(pair_indices, dtype=np.int32),
+  }
+  arrays.update(identity_arrays)
+  identity = _p57_record_full_runtime_identity()
+  record_json = json.dumps(
+      record, sort_keys=True, separators=(",", ":"), allow_nan=False
+  ).encode("utf-8")
+  metadata = {
+      "schema": "canon.p57-tito-update-sidecar.v1",
+      "workload": identity["workload"],
+      "step": step,
+      "rows": batch_rows,
+      "dp": identity["dp"],
+      "tp": identity["tp"],
+      "source_commit": identity["source_commit"],
+      "image_identity": identity["image_identity"],
+      "alignment_record_sha256": hashlib.sha256(record_json).hexdigest(),
+      "request_ids": request_ids,
+      "arrays": {
+          name: {
+              "shape": list(value.shape),
+              "dtype": str(value.dtype),
+              "sha256": _hash(value),
+          }
+          for name, value in arrays.items()
+      },
+  }
+  metadata_json = json.dumps(
+      metadata, sort_keys=True, separators=(",", ":"), allow_nan=False
+  ).encode("utf-8")
+  output_dir = (
+      os.path.join(state_value, "p57_tito_witness", "update-sidecars")
+  )
+  os.makedirs(output_dir, exist_ok=True, mode=0o700)
+  os.chmod(output_dir, 0o700)
+  path = os.path.join(output_dir, f"step-{step:06d}.npz")
+  if os.path.lexists(path):
+    raise AlignmentGateError(
+        f"P57 record-full sidecar path already exists: {path}"
+    )
+  temporary = f"{path}.partial-{os.getpid()}-{time.time_ns()}"
+  started = time.perf_counter()
+  descriptor = os.open(
+      temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+  )
+  try:
+    with os.fdopen(descriptor, "wb") as output:
+      np.savez(
+          output,
+          metadata_json=np.frombuffer(metadata_json, dtype=np.uint8),
+          **arrays,
+      )
+      output.flush()
+      os.fsync(output.fileno())
+    os.link(temporary, path)
+    os.unlink(temporary)
+  except BaseException:
+    try:
+      os.close(descriptor)
+    except OSError:
+      pass
+    if os.path.exists(temporary):
+      os.unlink(temporary)
+    raise
+  elapsed = time.perf_counter() - started
+  result = {
+      "schema": "canon.p57-tito-update-sidecar-receipt.v1",
+      "path": path,
+      "sha256": _report_sha256(path),
+      "bytes": os.path.getsize(path),
+      "logical_bytes": sum(value.nbytes for value in arrays.values()),
+      "write_seconds": elapsed,
+      "rows": batch_rows,
+      "step": step,
+  }
+  print(
+      "[P57.TITO.UPDATE_SIDECAR] PASS "
+      f"step={step} rows={batch_rows} bytes={result['bytes']} "
+      f"logical_bytes={result['logical_bytes']} "
+      f"write_seconds={elapsed:.6f} sha256={result['sha256']} "
+      f"path={path}",
+      flush=True,
+  )
+  return result
+
+
+def _reserve_p57_actor_snapshot_request(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Reserves the bounded red-policy snapshot categories for one update."""
+  if os.environ.get(_P57_TOKEN_CONTINUITY_DEBUG_ENV, "") != (
+      _P57_TOKEN_CONTINUITY_RECORD_FULL
+  ):
+    return None
+  if os.environ.get(_P57_TITO_ONEHOST_NEUTRALITY_ENV) == "on":
+    # The one-host arm proves observer neutrality only. A numerical red is
+    # already fatal there and must not open a remote checkpoint side effect.
+    return None
+  boundary = record.get("boundaries", {}).get("S_decode_vs_S_prefill", {})
+  max_abs = boundary.get("max_abs")
+  if (
+      boundary.get("valid") is not True
+      or boundary.get("finite") is not True
+      or not isinstance(boundary.get("differing_bytes"), int)
+      or boundary["differing_bytes"] <= 0
+      or not isinstance(max_abs, (int, float))
+      or not np.isfinite(max_abs)
+  ):
+    return None
+  state_value = os.environ.get("CANON_STATE", "")
+  if not state_value or not os.path.isabs(state_value):
+    raise AlignmentGateError(
+        "P57 actor snapshot request requires an absolute CANON_STATE"
+    )
+  request_dir = os.path.join(
+      state_value, "p57_tito_witness", "actor-snapshot-requests"
+  )
+  with _P57_ACTOR_SNAPSHOT_LOCK:
+    identity = _p57_record_full_runtime_identity()
+    os.makedirs(request_dir, exist_ok=True, mode=0o700)
+    os.chmod(request_dir, 0o700)
+    reserved: set[str] = set()
+    for existing in sorted(os.listdir(request_dir)):
+      if not existing.endswith(".json"):
+        continue
+      match = re.fullmatch(r"step-([0-9]{6})\.json", existing)
+      existing_path = os.path.join(request_dir, existing)
+      try:
+        with open(existing_path, encoding="utf-8") as stream:
+          previous = json.load(stream)
+      except (OSError, json.JSONDecodeError) as exc:
+        raise AlignmentGateError(
+            f"P57 actor snapshot request is unreadable: {existing}"
+        ) from exc
+      categories = previous.get("categories")
+      if (
+          match is None
+          or os.path.islink(existing_path)
+          or not os.path.isfile(existing_path)
+          or os.stat(existing_path).st_mode & 0o077
+          or previous.get("schema")
+          != "canon.p57-tito-actor-snapshot-request.v1"
+          or previous.get("status") != "PENDING"
+          or previous.get("step") != int(match.group(1))
+          or previous.get("policy_version") != previous.get("step")
+          or not isinstance(categories, list)
+          or not categories
+          or len(set(categories)) != len(categories)
+          or any(category not in _P57_ACTOR_SNAPSHOT_THRESHOLDS for category in categories)
+          or not isinstance(previous.get("max_abs"), (int, float))
+          or not np.isfinite(previous["max_abs"])
+          or any(
+              float(previous["max_abs"])
+              < _P57_ACTOR_SNAPSHOT_THRESHOLDS[category]
+              for category in categories
+          )
+          or re.fullmatch(
+              r"[0-9a-f]{64}", str(previous.get("sidecar_sha256", ""))
+          ) is None
+          or previous.get("source_commit") != identity["source_commit"]
+          or previous.get("image_identity") != identity["image_identity"]
+          or previous.get("workload") != identity["workload"]
+          or previous.get("dp") != identity["dp"]
+          or previous.get("tp") != identity["tp"]
+      ):
+        raise AlignmentGateError(
+            f"P57 actor snapshot request differs: {existing}"
+        )
+      if reserved.intersection(categories):
+        raise AlignmentGateError(
+            "P57 actor snapshot category was reserved more than once"
+        )
+      reserved.update(categories)
+    categories = [
+        category
+        for category, threshold in _P57_ACTOR_SNAPSHOT_THRESHOLDS.items()
+        if category not in reserved and float(max_abs) >= threshold
+    ]
+    if not categories:
+      return None
+    if len(reserved) + len(categories) > len(_P57_ACTOR_SNAPSHOT_THRESHOLDS):
+      raise AlignmentGateError("P57 actor snapshot request exceeded its bound")
+    step = int(record.get("step", -1))
+    sidecar = record.get("tito_update_sidecar", {})
+    request = {
+        "schema": "canon.p57-tito-actor-snapshot-request.v1",
+        "status": "PENDING",
+        "step": step,
+        "policy_version": step,
+        "categories": categories,
+        "max_abs": float(max_abs),
+        "sidecar_sha256": sidecar.get("sha256"),
+        "source_commit": identity["source_commit"],
+        "image_identity": identity["image_identity"],
+        "workload": identity["workload"],
+        "dp": identity["dp"],
+        "tp": identity["tp"],
+    }
+    path = os.path.join(request_dir, f"step-{step:06d}.json")
+    if os.path.lexists(path):
+      raise AlignmentGateError(
+          f"P57 actor snapshot request path already exists: {path}"
+      )
+    payload = (
+        json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    temporary = f"{path}.partial-{os.getpid()}-{time.time_ns()}"
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    try:
+      with os.fdopen(descriptor, "wb") as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+      os.link(temporary, path)
+      os.unlink(temporary)
+    except BaseException:
+      try:
+        os.close(descriptor)
+      except OSError:
+        pass
+      if os.path.exists(temporary):
+        os.unlink(temporary)
+      raise
+  receipt = {
+      "schema": "canon.p57-tito-actor-snapshot-request-receipt.v1",
+      "path": path,
+      "sha256": hashlib.sha256(payload).hexdigest(),
+      "bytes": len(payload),
+      "step": step,
+      "categories": categories,
+      "max_abs": float(max_abs),
+  }
+  print(
+      "[P57.TITO.ACTOR_SNAPSHOT_REQUEST] PASS "
+      f"step={step} categories={','.join(categories)} max_abs={float(max_abs)} "
+      f"sha256={receipt['sha256']} path={path}",
+      flush=True,
+  )
+  return receipt
+
+
 def _persist_m15_producer_unit_carrier(
     sidecar: ObservedTrainExample,
     record: dict[str, Any],
@@ -1546,6 +1911,7 @@ def check_pre_backward(
     *,
     step: int,
     fail_closed: bool = True,
+    row_identity: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
   """Checks decode, engine-prefill and trainer-old values before backward."""
   if not precheck_enabled():
@@ -1675,6 +2041,14 @@ def check_pre_backward(
       PRE_REPORT_ENV,
       "/mnt/disks/tunix-data/frozenlake/logs/pre_alignment_report.jsonl",
   )
+  update_sidecar = _persist_p57_full_update_sidecar(
+      sidecar, record, row_identity
+  )
+  if update_sidecar is not None:
+    record["tito_update_sidecar"] = update_sidecar
+  actor_snapshot_request = _reserve_p57_actor_snapshot_request(record)
+  if actor_snapshot_request is not None:
+    record["tito_actor_snapshot_request"] = actor_snapshot_request
   producer_unit = _persist_m15_producer_unit_carrier(sidecar, record)
   if producer_unit is not None:
     record["m15_producer_unit"] = producer_unit
@@ -1967,6 +2341,8 @@ def check_batch(
   os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
   with open(report_path, "a", encoding="utf-8") as report_file:
     report_file.write(json.dumps(record, sort_keys=True) + "\n")
+    report_file.flush()
+    os.fsync(report_file.fileno())
   print(
       "[CANON_ALIGN] "
       f"step={step} verdict={record['verdict']} N_action={n_action} "

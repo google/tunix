@@ -93,6 +93,46 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "pre-tokenized vLLM prompt"):
           sampler.tokenize(prompt)
 
+  def test_prompt_witness_distinguishes_submit_from_engine_echo(self):
+    submitted = [np.asarray([101, 102, 103], dtype=np.int32)]
+    outputs = [
+        types.SimpleNamespace(
+            request_id="request-7",
+            prompt_token_ids=[101, 999, 103],
+        )
+    ]
+    witness = vllm_sampler.build_prompt_token_witnesses(
+        submitted, outputs
+    )[0]
+
+    self.assertEqual(witness.request_id, "request-7")
+    self.assertEqual(witness.submitted_tokens, 3)
+    self.assertEqual(witness.engine_echo_tokens, 3)
+    self.assertNotEqual(
+        witness.submitted_sha256, witness.engine_echo_sha256
+    )
+
+  def test_prompt_witness_rejects_missing_duplicate_or_malformed_echo(self):
+    submitted = [np.asarray([1, 2], dtype=np.int32)]
+    bad_outputs = (
+        [],
+        [types.SimpleNamespace(request_id="", prompt_token_ids=[1, 2])],
+        [types.SimpleNamespace(request_id="r", prompt_token_ids=None)],
+        [types.SimpleNamespace(request_id="r", prompt_token_ids=[1, -2])],
+    )
+    for outputs in bad_outputs:
+      with self.subTest(outputs=outputs), self.assertRaises(ValueError):
+        vllm_sampler.build_prompt_token_witnesses(submitted, outputs)
+
+    with self.assertRaisesRegex(ValueError, "duplicate"):
+      vllm_sampler.build_prompt_token_witnesses(
+          [submitted[0], submitted[0]],
+          [
+              types.SimpleNamespace(request_id="r", prompt_token_ids=[1, 2]),
+              types.SimpleNamespace(request_id="r", prompt_token_ids=[1, 2]),
+          ],
+      )
+
   def test_canonical_adapter_registration_passes_live_trainer_state(self):
     constructor = inspect.getsource(vllm_rollout.VllmRollout.__init__)
     adapter_registration = constructor.split(
@@ -183,6 +223,50 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
       )
 
     sampler._driver.cancel.assert_called_once_with("0")
+
+  def test_server_mode_rejects_swapped_request_outputs(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.llm = None
+    sampler._request_counter = count()
+    sampler._driver = mock.Mock()
+    futures = [mock.Mock(), mock.Mock()]
+    futures[0].result.return_value = mock.Mock(
+        spec=vllm_sampler.RequestOutput, request_id="1"
+    )
+    futures[1].result.return_value = mock.Mock(
+        spec=vllm_sampler.RequestOutput, request_id="0"
+    )
+    for future in futures:
+      future.done.return_value = True
+    sampler._driver.submit_requests.return_value = futures
+
+    with self.assertRaisesRegex(ValueError, "order/request identity differs"):
+      sampler._generate_server_mode(
+          [
+              {"prompt_token_ids": [1, 2]},
+              {"prompt_token_ids": [3, 4]},
+          ],
+          object(),
+          verify_request_identity=True,
+      )
+
+  def test_server_mode_does_not_add_identity_assertion_without_witness(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.llm = None
+    sampler._request_counter = count()
+    sampler._driver = mock.Mock()
+    future = mock.Mock()
+    output = mock.Mock(spec=vllm_sampler.RequestOutput, request_id="foreign")
+    future.result.return_value = output
+    future.done.return_value = True
+    sampler._driver.submit_requests.return_value = [future]
+
+    self.assertEqual(
+        sampler._generate_server_mode(
+            [{"prompt_token_ids": [1, 2]}], object()
+        ),
+        [output],
+    )
 
   def test_prefill_rescore_uses_mode_independent_sampler_contract(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)

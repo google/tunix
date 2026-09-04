@@ -27,6 +27,21 @@ ABC = abc.ABC
 abstractmethod = abc.abstractmethod
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class PromptTokenWitness:
+  """Host metadata joining submitted IDs to one vLLM RequestOutput echo."""
+
+  request_id: str
+  submitted_tokens: int
+  submitted_sha256: str
+  engine_echo_tokens: int
+  engine_echo_sha256: str
+  # Retained only in-memory long enough to write a bounded mismatch capsule.
+  # Persistent ordinary witnesses remain length/SHA-only.
+  submitted_token_ids: tuple[int, ...] | None = None
+  engine_echo_token_ids: tuple[int, ...] | None = None
+
+
 @dataclasses.dataclass
 class SamplerOutput:
   """Output of the sampler."""
@@ -49,6 +64,10 @@ class SamplerOutput:
 
   # Number of real prompt tokens before left padding, one per prompt.
   prompt_lengths: Optional[np.ndarray] = None
+
+  # Optional diagnostic-only request/echo metadata. It contains lengths and
+  # hashes, never the full prompt IDs.
+  prompt_token_witnesses: Optional[list[PromptTokenWitness]] = None
 
 
 class BaseSampler(ABC):

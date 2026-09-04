@@ -920,6 +920,7 @@ class RLCluster:
       trace_tags: Mapping[str, Any] | None = None,
       max_generation_steps: int | None = None,
       request_timeout_s: float | None = None,
+      return_prompt_token_witnesses: bool = False,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -936,6 +937,7 @@ class RLCluster:
       max_generation_steps: Optional per-call generation-token ceiling.
       request_timeout_s: Optional hard deadline for a vLLM request. On expiry,
         the in-process driver aborts the unfinished request before raising.
+      return_prompt_token_witnesses: Return diagnostic request/echo metadata.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -998,6 +1000,10 @@ class RLCluster:
             and self.cluster_config.rollout_engine == "vllm"
         ):
           rollout_kwargs["request_timeout_s"] = request_timeout_s
+        if return_prompt_token_witnesses:
+          if self.cluster_config.rollout_engine != "vllm":
+            raise ValueError("prompt-token witnesses require the vLLM rollout")
+          rollout_kwargs["return_prompt_token_witnesses"] = True
         outputs = [
             self.rollout.generate(
                 string_prompts[s], rollout_config, **rollout_kwargs
@@ -1035,6 +1041,16 @@ class RLCluster:
           [out.prompt_lengths for out in outputs], axis=0  # pyrefly: ignore[bad-argument-type]
       )
 
+    prompt_token_witnesses = None
+    if outputs[0].prompt_token_witnesses is not None:
+      if any(out.prompt_token_witnesses is None for out in outputs):
+        raise ValueError("rollout outputs disagree on prompt-witness metadata")
+      prompt_token_witnesses = list(
+          itertools.chain.from_iterable(
+              out.prompt_token_witnesses for out in outputs  # pyrefly: ignore[bad-argument-type]
+          )
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -1046,6 +1062,7 @@ class RLCluster:
         ),
         logprobs=logprobs,
         prompt_lengths=prompt_lengths,
+        prompt_token_witnesses=prompt_token_witnesses,
     )
 
   def get_ref_per_token_logps(

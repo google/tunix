@@ -333,7 +333,12 @@ CANON_VLLM_ENABLE_PREFIX_CACHING = (
     _CANON_VLLM_PREFIX_CACHE_RAW == "1"
 )
 CANON_P57_EVALUATION = CANON_P57_RUN_KIND == "eval"
-CANON_P57_CALIBRATION = CANON_P57_RUN_KIND == "calibration"
+_P57_CALIBRATION = CANON_P57_RUN_KIND == "calibration"
+_P57_TITO_DIAGNOSTIC = CANON_P57_RUN_KIND == "tito-diagnostic"
+_P57_TITO_RECORD_FULL = (
+    os.getenv("CANON_P57_TOKEN_CONTINUITY_DEBUG", "")
+    == token_continuity_lib.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+)
 CANON_P57_STOCK_TRAIN = (
     CANON_P57_RUN_KIND == "train"
     and CANON_P57_TIM_ARM in ("mismatch", "is")
@@ -344,7 +349,11 @@ CANON_P57_STOCK_EVAL = (
     and CANON_P57_TIM_ARM in ("mismatch", "is")
     and CANON_P57_INFERENCE_REGIME == "stock-fast"
 )
-CANON_P57_NO_UPDATE = CANON_P57_EVALUATION or CANON_P57_CALIBRATION
+_P57_NO_UPDATE = (
+    CANON_P57_EVALUATION
+    or _P57_CALIBRATION
+    or _P57_TITO_DIAGNOSTIC
+)
 CANON_P57_WORKLOAD_CANDIDATE = os.getenv(
     "CANON_P57_WORKLOAD_CANDIDATE", ""
 )
@@ -355,14 +364,20 @@ CANON_P57_CALIBRATION_RECIPES = tuple(
         "CANON_P57_CALIBRATION_RECIPES", ""
     ).split(",") if value
 )
-if args.evaluation_only != CANON_P57_NO_UPDATE:
+if args.evaluation_only != _P57_NO_UPDATE:
   raise ValueError(
       "--evaluation_only must agree with P57 eval/calibration run kinds"
   )
-if CANON_P57_NO_UPDATE and os.getenv("CANON_PROFILE_FILE", "") != (
-    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
-):
-  raise ValueError("isolated FrozenLake evaluation/calibration requires P57")
+if _P57_NO_UPDATE:
+  expected_no_update_profile = (
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env"
+      if _P57_TITO_DIAGNOSTIC
+      else "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+  )
+  if os.getenv("CANON_PROFILE_FILE", "") != expected_no_update_profile:
+    raise ValueError(
+        "isolated FrozenLake no-update run requires its registered profile"
+    )
 if (
     args.p57_workload_candidate != CANON_P57_WORKLOAD_CANDIDATE
     or args.p57_data_split != CANON_P57_DATA_SPLIT
@@ -370,7 +385,7 @@ if (
   raise ValueError("P57 workload CLI arguments must match their signed env fields")
 if bool(CANON_P57_WORKLOAD_CANDIDATE) != bool(CANON_P57_DATA_SPLIT):
   raise ValueError("P57 workload candidate and data split must be set together")
-if CANON_P57_CALIBRATION:
+if _P57_CALIBRATION:
   expected_recipes = ("m10", "m15", "m20")
   if (
       CANON_P57_WORKLOAD_CANDIDATE
@@ -398,6 +413,7 @@ if CANON_P57_WORKLOAD_CANDIDATE:
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env",
   ) and not _M15_ONEHOST_TOKEN_CONTINUITY:
     raise ValueError("materialized P57 workloads require the P57 profile")
   p57_workload_spec = p57_workloads.candidate(
@@ -466,7 +482,7 @@ CANON_P33_DISABLE_EVAL = os.getenv("CANON_P33_DISABLE_EVAL", "") == "1"
 P32_WORKLOAD = dp_workloads.active_workload() if CANON_P32_WORKLOAD else None
 P57_STOCK_FAST_ATTESTATION = None
 if CANON_P32_WORKLOAD:
-  if CANON_P57_CALIBRATION:
+  if _P57_CALIBRATION:
     P57_STOCK_FAST_ATTESTATION = (
         dp_workloads.validate_p57_stock_fast_environment(
             P32_WORKLOAD, os.environ
@@ -653,7 +669,7 @@ if CANON_P32_WORKLOAD:
   expected_generations = (
       p57_workloads.GENERATIONS_PER_PROMPT if CANON_P57_RUN_KIND else 8
   )
-  if CANON_P57_CALIBRATION:
+  if _P57_CALIBRATION:
     # All recipes share one physical envelope. Their smaller preregistered
     # context caps are applied by the offline classifier to observed lengths,
     # so an engine-side truncation cannot make a recipe look artificially easy.
@@ -872,14 +888,21 @@ if CANON_P57_RUN_KIND:
       )
     except ValueError as exc:
       raise ValueError("P57 segment stop must be an integer") from exc
-    if (
-        P57_STOP_AFTER_STEP
-        not in (50, 100, 150, 200, 250, 300, 350, 400, 450)
-        or P57_STOP_AFTER_STEP > MAX_STEPS
-    ):
+    _p57_tito_onehost = os.getenv(
+        token_continuity_lib.P57_TITO_ONEHOST_NEUTRALITY_ENV
+    ) in ("off", "on")
+    if _p57_tito_onehost:
+      _p57_stop_valid = P57_STOP_AFTER_STEP == MAX_STEPS == 3
+    else:
+      _p57_stop_valid = (
+          P57_STOP_AFTER_STEP
+          in (50, 100, 150, 200, 250, 300, 350, 400, 450)
+          and P57_STOP_AFTER_STEP <= MAX_STEPS
+      )
+    if not _p57_stop_valid:
       raise ValueError(
-          "P57 segment stop must be a registered 50-step boundary within "
-          "the signed horizon"
+          "P57 segment stop must be the registered one-host three-step "
+          "identity or a registered 50-step boundary within the signed horizon"
       )
   else:
     P57_STOP_AFTER_STEP = MAX_STEPS
@@ -1329,7 +1352,7 @@ if CANON_CONTRACT_ONLY or CANON_A3_ONLY or CANON_P38_FROZENLAKE_REPLAY:
   train_dataset = test_dataset = None
   calibration_datasets = {}
   print("[CANON_L3] contract-only: dataset I/O skipped", flush=True)
-elif CANON_P57_CALIBRATION:
+elif _P57_CALIBRATION:
   train_dataset = test_dataset = None
   calibration_datasets = create_calibration_datasets()
   calibration_datasets = {
@@ -1382,6 +1405,7 @@ else:
       not CANON_P32_WORKLOAD
       or CANON_P33_ENABLE_EVAL
       or CANON_P57_EVALUATION
+      or _P57_TITO_DIAGNOSTIC
   ):
     test_dataset, _ = data_lib.post_init_dataset(
         test_dataset,
@@ -1931,7 +1955,7 @@ if CANON_P57_STOCK_TRAIN:
   )
 
 rollout_weight_sync = None
-if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
+if P45_CHECKPOINT.mode == "resume" or _P57_NO_UPDATE:
   if grpo_trainer.rl_cluster.global_steps != restored_checkpoint_step:
     raise ValueError(
         "P45 learner did not adopt the restored global step: "
@@ -1953,7 +1977,8 @@ if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
     print(
         "[P45.CHECKPOINT] ROLLOUT_SYNC_PASS "
         f"step={restored_checkpoint_step} weights_equal=1 "
-        f"reason={'evaluation' if CANON_P57_EVALUATION else 'resume'}",
+        "reason="
+        f"{'evaluation' if CANON_P57_EVALUATION else 'tito-diagnostic' if _P57_TITO_DIAGNOSTIC else 'resume'}",
         flush=True,
     )
 
@@ -1983,7 +2008,7 @@ elif CANON_L3:
 else:
   training_eval_dataset = test_dataset
 
-if CANON_P57_CALIBRATION:
+if _P57_CALIBRATION:
   output_path = os.getenv("CANON_P57_CALIBRATION_OUTPUT", "")
   if not output_path or not os.path.isabs(output_path):
     raise ValueError("P57 calibration output must be an absolute path")
@@ -1993,6 +2018,12 @@ if CANON_P57_CALIBRATION:
     )
   starting_train_steps = rl_cluster.actor_trainer.train_steps
   starting_global_steps = rl_cluster.global_steps
+  starting_checkpoint_root = (
+      rl_cluster.actor_trainer.config.checkpoint_root_directory
+  )
+  starting_checkpoint_step = (
+      rl_cluster.actor_trainer.checkpoint_manager.latest_step()
+  )
   results = {}
   try:
     for recipe_name in CANON_P57_CALIBRATION_RECIPES:
@@ -2077,6 +2108,105 @@ if CANON_P57_CALIBRATION:
     rl_cluster.close()
   raise SystemExit(0)
 
+if _P57_TITO_DIAGNOSTIC:
+  if test_dataset is None:
+    raise ValueError("P57 TiTO diagnostic dataset is missing")
+  starting_train_steps = rl_cluster.actor_trainer.train_steps
+  starting_global_steps = rl_cluster.global_steps
+  token_continuity_lib.begin_token_continuity_collection(os.environ)
+  try:
+    evaluation = grpo_trainer.rollout_only_evaluate(
+        test_dataset,
+        policy_step=starting_global_steps,
+    )
+    collection = token_continuity_lib.token_collection_snapshot()
+    ending_checkpoint_step = (
+        rl_cluster.actor_trainer.checkpoint_manager.latest_step()
+    )
+    if (
+        rl_cluster.actor_trainer.train_steps != starting_train_steps
+        or rl_cluster.global_steps != starting_global_steps
+    ):
+      raise RuntimeError("P57 TiTO diagnostic mutated training state")
+    if collection["trajectories"] != evaluation["trajectories"]:
+      raise RuntimeError(
+          "P57 TiTO collection/rollout trajectory counts differ: "
+          f"{collection['trajectories']} vs {evaluation['trajectories']}"
+      )
+    if collection["trajectories"] != (
+        collection["compared_trajectories"]
+        + collection["unexercised_single_turn_trajectories"]
+    ) or collection["compared_trajectories"] != (
+        collection["equal_trajectories"]
+        + collection["different_trajectories"]
+    ):
+      raise RuntimeError("P57 TiTO collection trajectory accounting differs")
+    if collection["different_trajectories"] != (
+        collection["capsules_reserved"] + collection["capsules_omitted"]
+    ):
+      raise RuntimeError("P57 TiTO collection diff accounting differs")
+    if collection["capsules_reserved"] != (
+        collection["capsules_emitted"] + collection["emission_failures"]
+    ):
+      raise RuntimeError("P57 TiTO collection capsule accounting differs")
+    if (
+        starting_checkpoint_root is not None
+        or starting_checkpoint_step is not None
+        or ending_checkpoint_step is not None
+        or collection["backward_transactions"] != 0
+        or collection["optimizer_commits"] != 0
+    ):
+      raise RuntimeError("P57 TiTO rollout-only execution boundary changed")
+    record = {
+        "schema": "canon.p57-tito-diagnostic.v1",
+        "workload": (
+            CANON_P57_WORKLOAD_CANDIDATE
+            if CANON_P57_WORKLOAD_CANDIDATE
+            else "p45"
+        ),
+        "source_commit": os.getenv("CANON_EXPECT_COMMIT", ""),
+        "dataset_eval_sha256": P57_DATASET_ATTESTATION.get(
+            "eval_sha256", ""
+        ),
+        "train_steps_before": starting_train_steps,
+        "train_steps_after": rl_cluster.actor_trainer.train_steps,
+        "global_steps_before": starting_global_steps,
+        "global_steps_after": rl_cluster.global_steps,
+        "backward_calls": collection["backward_transactions"],
+        "optimizer_commits": collection["optimizer_commits"],
+        "checkpoint_writes": int(
+            starting_checkpoint_step != ending_checkpoint_step
+        ),
+        "checkpoint_observation": {
+            "configured_root": starting_checkpoint_root,
+            "latest_before": starting_checkpoint_step,
+            "latest_after": ending_checkpoint_step,
+        },
+        "collection": collection,
+        "rollout": evaluation,
+    }
+    output_path, output_sha, output_bytes = (
+        token_continuity_lib.write_tito_diagnostic_summary(record)
+    )
+    print(
+        "[CANON_P57_TITO_DIAGNOSTIC] COMPLETE "
+        f"workload={record['workload']} "
+        f"trajectories={collection['trajectories']} "
+        f"equal={collection['equal_trajectories']} "
+        f"different={collection['different_trajectories']} "
+        f"capsules={collection['capsules_emitted']} "
+        f"omitted={collection['capsules_omitted']} "
+        f"emission_failures={collection['emission_failures']} "
+        f"backward={record['backward_calls']} "
+        f"optimizer_commits={record['optimizer_commits']} "
+        f"checkpoint_writes={record['checkpoint_writes']} "
+        f"artifact={output_path} bytes={output_bytes} sha256={output_sha}",
+        flush=True,
+    )
+  finally:
+    rl_cluster.close()
+  raise SystemExit(0)
+
 if CANON_P57_EVALUATION:
   if test_dataset is None:
     raise ValueError("P57 isolated evaluation dataset is missing")
@@ -2133,10 +2263,108 @@ if CANON_P57_EVALUATION:
     rl_cluster.close()
   raise SystemExit(0)
 
+if _P57_TITO_RECORD_FULL:
+  token_continuity_lib.run_tito_orbax_admission_probe(os.environ)
+  _p57_tito_starting_train_steps = int(
+      grpo_trainer.rl_cluster.actor_trainer.train_steps
+  )
+  _p57_tito_starting_global_steps = int(grpo_trainer.rl_cluster.global_steps)
+  _p57_tito_checkpoint_root = (
+      grpo_trainer.rl_cluster.actor_trainer.config.checkpoint_root_directory
+  )
+  _p57_tito_checkpoint_before = (
+      grpo_trainer.rl_cluster.actor_trainer.checkpoint_manager.latest_step()
+  )
+  token_continuity_lib.begin_token_continuity_collection(os.environ)
+
 grpo_trainer.train(
     train_dataset,
     eval_dataset=training_eval_dataset,
 )
+if _P57_TITO_RECORD_FULL:
+  _p57_tito_final_train_steps = int(
+      grpo_trainer.rl_cluster.actor_trainer.train_steps
+  )
+  _p57_tito_final_global_steps = int(grpo_trainer.rl_cluster.global_steps)
+  _p57_tito_checkpoint_after = (
+      grpo_trainer.rl_cluster.actor_trainer.checkpoint_manager.latest_step()
+  )
+  _p57_tito_collection = token_continuity_lib.token_collection_snapshot()
+  _p57_tito_measured_commits = (
+      _p57_tito_final_train_steps - _p57_tito_starting_train_steps
+  )
+  _p57_tito_measured_global_updates = (
+      _p57_tito_final_global_steps - _p57_tito_starting_global_steps
+  )
+  if (
+      _p57_tito_checkpoint_root is not None
+      or _p57_tito_checkpoint_before is not None
+      or _p57_tito_checkpoint_after is not None
+  ):
+    raise RuntimeError("P57 TiTO record-full observed checkpoint state")
+  if (
+      _p57_tito_collection["optimizer_commits"]
+      != _p57_tito_measured_commits
+      or _p57_tito_collection["backward_transactions"]
+      != _p57_tito_measured_commits
+      or _p57_tito_measured_global_updates != _p57_tito_measured_commits
+  ):
+    raise RuntimeError(
+        "P57 TiTO record-full runtime accounting differs: "
+        f"collection={_p57_tito_collection} "
+        f"train_delta={_p57_tito_measured_commits} "
+        f"global_delta={_p57_tito_measured_global_updates}"
+    )
+  if _p57_tito_collection["different_trajectories"]:
+    _p57_tito_token_verdict = "DIFFERENT"
+  elif _p57_tito_collection["compared_trajectories"]:
+    _p57_tito_token_verdict = "EQUAL"
+  else:
+    _p57_tito_token_verdict = "UNEXERCISED"
+  _p57_tito_record = {
+      "schema": "canon.p57-tito-full-record.v1",
+      "workload": CANON_P57_WORKLOAD_CANDIDATE or "p45",
+      "source_commit": os.getenv("CANON_EXPECT_COMMIT", ""),
+      "image_identity": os.getenv("CANON_CLIENT_IMAGE", ""),
+      "dp": int(os.environ["CANON_DP_SIZE"]),
+      "tp": int(os.environ["CANON_TP_SIZE"]),
+      "expected_updates": int(os.environ["CANON_P57_EXPECTED_UPDATES"]),
+      "train_steps_before": _p57_tito_starting_train_steps,
+      "train_steps_after": _p57_tito_final_train_steps,
+      "global_steps_before": _p57_tito_starting_global_steps,
+      "global_steps_after": _p57_tito_final_global_steps,
+      "optimizer_commits": _p57_tito_measured_commits,
+      "global_updates": _p57_tito_measured_global_updates,
+      "checkpoint_writes": 0,
+      "checkpoint_observation": {
+          "configured_root": None,
+          "latest_before": _p57_tito_checkpoint_before,
+          "latest_after": _p57_tito_checkpoint_after,
+      },
+      "token_verdict": _p57_tito_token_verdict,
+      "collection": _p57_tito_collection,
+  }
+  (
+      _p57_tito_output,
+      _p57_tito_output_sha,
+      _p57_tito_output_bytes,
+  ) = token_continuity_lib.write_tito_full_record_summary(_p57_tito_record)
+  print(
+      "[P57.TITO.FULL_RECORD] COMPLETE "
+      f"workload={_p57_tito_record['workload']} "
+      f"token_verdict={_p57_tito_token_verdict} "
+      f"trajectories={_p57_tito_collection['trajectories']} "
+      f"compared={_p57_tito_collection['compared_trajectories']} "
+      "unexercised="
+      f"{_p57_tito_collection['unexercised_single_turn_trajectories']} "
+      f"different={_p57_tito_collection['different_trajectories']} "
+      f"backward={_p57_tito_collection['backward_transactions']} "
+      f"optimizer_commits={_p57_tito_measured_commits} "
+      "checkpoint_writes=0 "
+      f"artifact={_p57_tito_output} bytes={_p57_tito_output_bytes} "
+      f"sha256={_p57_tito_output_sha}",
+      flush=True,
+  )
 if CANON_P57_STOCK_TRAIN:
   completed_step = int(grpo_trainer.rl_cluster.actor_trainer.train_steps)
   durable_step = (

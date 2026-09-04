@@ -28,6 +28,7 @@ from tunix.rl import dp_training
 
 
 _RUN_STAGE_STEPS = {
+    "rollout-only": 1,
     "envelope-short": 1,
     "alignment-short": 1,
     "backward-no-commit": 1,
@@ -778,7 +779,13 @@ def requested_max_steps(
   no_commit = values.get("CANON_P33_NO_COMMIT", "0")
   expected_no_commit = (
       "1"
-      if stage in ("envelope-short", "alignment-short", "backward-no-commit")
+      if stage
+      in (
+          "rollout-only",
+          "envelope-short",
+          "alignment-short",
+          "backward-no-commit",
+      )
       else "0"
   )
   if no_commit != expected_no_commit:
