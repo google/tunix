@@ -337,6 +337,101 @@ class FullClassifierTest(unittest.TestCase):
     )
     self.assertIn("unexpected_m15_token_receipt", reasons)
 
+  def test_p57_tito_accepts_exact_p45_and_m15_and_rejects_cross_labels(self):
+    digest = "b" * 64
+    trajectory_id = "1" * 32
+    for recipe in ("p45", "m15"):
+      exact = (
+          f"[env] P57 exact TITO enabled workload={recipe} "
+          "mode=exact default=off\n"
+          f"[CANON_P57_TOKEN_CONTINUITY] workload={recipe} mode=exact "
+          f"trajectory_id={trajectory_id} turn=1 "
+          "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 "
+          f"expected_tokens=5 actual_sha256={digest} "
+          f"expected_sha256={digest} first_mismatch=-1 "
+          "actual_token=NA expected_token=NA\n"
+          f"[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload={recipe} "
+          f"trajectory_id={trajectory_id} steps=2 expected_later_turns=1 "
+          "receipts=1 verdict=PASS\n"
+      )
+      exact_env = {
+          "CANON_P57_TOKEN_CONTINUITY": "exact",
+          "CANON_GLOBAL_TRAJECTORIES": "1",
+          "CANON_P57_EXPECTED_UPDATES": "1",
+      }
+      reasons = []
+      receipts, equal = classifier._validate_frozenlake_tito(
+          recipe, exact_env, exact, reasons
+      )
+      self.assertEqual(reasons, [])
+      self.assertEqual(len(receipts), 1)
+      self.assertEqual(len(equal), 1)
+
+      wrong = exact.replace(f"workload={recipe}", "workload=neighbor")
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, wrong, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_receipt_workload", reasons)
+
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, "", reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_receipts_missing", reasons)
+      self.assertIn(f"{recipe}_exact_tito_env_receipt_count", reasons)
+
+      without_summary = exact.rsplit(
+          "[CANON_P57_TOKEN_CONTINUITY_SUMMARY]", 1
+      )[0]
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, without_summary, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_summary_count", reasons)
+      self.assertIn(f"{recipe}_exact_tito_receipt_completeness", reasons)
+
+      duplicate_summary = exact + exact.splitlines(keepends=True)[-1]
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, duplicate_summary, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_summary_duplicate", reasons)
+
+      missing_turn = exact.replace(" turn=1 ", " ", 1)
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, missing_turn, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_receipt_identity", reasons)
+
+  def test_p57_tito_rejects_mixed_selectors_and_unselected_receipts(self):
+    digest = "c" * 64
+    exact = (
+        "[env] P57 exact TITO enabled workload=p45 mode=exact default=off\n"
+        "[CANON_P57_TOKEN_CONTINUITY] workload=p45 mode=exact turn=1 "
+        "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 expected_tokens=5 "
+        f"actual_sha256={digest} expected_sha256={digest} "
+        "first_mismatch=-1 actual_token=NA expected_token=NA\n"
+    )
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        {
+            "CANON_P57_TOKEN_CONTINUITY": "exact",
+            "CANON_M15_TOKEN_CONTINUITY": "exact",
+        },
+        exact,
+        reasons,
+    )
+    self.assertIn("resolved_env.token_continuity_selectors_conflict", reasons)
+    self.assertIn("unexpected_legacy_m15_selector", reasons)
+
+    reasons = []
+    classifier._validate_frozenlake_tito("p45", {}, exact, reasons)
+    self.assertIn("unexpected_m15_token_receipt", reasons)
+    self.assertIn("unexpected_p57_exact_tito_env_receipt", reasons)
+
     reasons = []
     classifier._validate_m15_tito(
         "p45", {"CANON_M15_TOKEN_CONTINUITY": "exact"}, exact, reasons
@@ -345,6 +440,84 @@ class FullClassifierTest(unittest.TestCase):
         "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected", reasons
     )
     self.assertIn("unexpected_m15_token_receipt", reasons)
+
+  def test_p57_first_diff_debug_is_armed_only_on_success_without_a_dump(self):
+    digest = "d" * 64
+    trajectory_id = "2" * 32
+    exact = (
+        "[env] P57 exact TITO enabled workload=p45 mode=exact default=off\n"
+        "[env] P57 exact TITO first-diff diagnostics armed "
+        "workload=p45 default=off\n"
+        "[CANON_P57_TOKEN_CONTINUITY] workload=p45 mode=exact turn=1 "
+        f"trajectory_id={trajectory_id} "
+        "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 expected_tokens=5 "
+        f"actual_sha256={digest} expected_sha256={digest} "
+        "first_mismatch=-1 actual_token=NA expected_token=NA\n"
+        "[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=p45 "
+        f"trajectory_id={trajectory_id} steps=2 expected_later_turns=1 "
+        "receipts=1 verdict=PASS\n"
+    )
+    exact_env = {
+        "CANON_P57_TOKEN_CONTINUITY": "exact",
+        "CANON_P57_TOKEN_CONTINUITY_DEBUG": "first-diff",
+        "CANON_GLOBAL_TRAJECTORIES": "1",
+        "CANON_P57_EXPECTED_UPDATES": "1",
+    }
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        exact_env,
+        exact,
+        reasons,
+    )
+    self.assertEqual(reasons, [])
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        exact_env,
+        exact
+        + "[CANON_P57_TOKEN_CONTINUITY_DEBUG] {}\n"
+        + "[CANON_P57_TOKEN_CONTINUITY_DEBUG_JSON] {}\n"
+        + "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] verdict=PASS\n",
+        reasons,
+    )
+    self.assertIn(
+        "successful_exact_run_contains_first_diff_debug", reasons
+    )
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        exact_env,
+        exact.replace(
+            "[env] P57 exact TITO first-diff diagnostics armed "
+            "workload=p45 default=off\n",
+            "",
+        ),
+        reasons,
+    )
+    self.assertIn("p45_exact_tito_debug_arm_receipt_count", reasons)
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        {"CANON_P57_TOKEN_CONTINUITY_DEBUG": "first-diff"},
+        "",
+        reasons,
+    )
+    self.assertIn(
+        "resolved_env.CANON_P57_TOKEN_CONTINUITY_DEBUG_unscoped", reasons
+    )
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        {},
+        "[CANON_P57_TOKEN_CONTINUITY_DEBUG] {}\n",
+        reasons,
+    )
+    self.assertIn("unexpected_p57_token_debug_receipt", reasons)
 
   def test_any_real_alignment_fail_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:

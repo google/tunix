@@ -86,6 +86,13 @@ _ALIGN_RE = re.compile(
 )
 _FIRST_UPDATE_PREFIX = "[V1.FIRST_UPDATE] "
 _M15_TOKEN_PREFIX = "[CANON_M15_TOKEN_CONTINUITY] "
+_P57_TOKEN_PREFIX = "[CANON_P57_TOKEN_CONTINUITY] "
+_P57_TOKEN_SUMMARY_PREFIX = "[CANON_P57_TOKEN_CONTINUITY_SUMMARY] "
+_P57_TOKEN_DEBUG_PREFIX = "[CANON_P57_TOKEN_CONTINUITY_DEBUG] "
+_P57_TOKEN_DEBUG_JSON_PREFIX = "[CANON_P57_TOKEN_CONTINUITY_DEBUG_JSON] "
+_P57_TOKEN_DEBUG_CAPSULE_PREFIX = (
+    "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] "
+)
 
 
 def _require(condition: bool, reason: str, reasons: list[str]) -> None:
@@ -93,23 +100,30 @@ def _require(condition: bool, reason: str, reasons: list[str]) -> None:
     reasons.append(reason)
 
 
-def _token_continuity_receipts(text: str) -> list[dict[str, str]]:
-  """Parses bounded M15 token-continuity receipt fields."""
+def _token_continuity_receipts(
+    text: str, prefix: str
+) -> list[dict[str, str]]:
+  """Parses bounded FrozenLake token-continuity receipt fields."""
   return [
-      dict(_FIELD_RE.findall(line.removeprefix(_M15_TOKEN_PREFIX)))
+      dict(_FIELD_RE.findall(line.removeprefix(prefix)))
       for line in text.splitlines()
-      if line.strip().startswith(_M15_TOKEN_PREFIX)
+      if line.strip().startswith(prefix)
   ]
 
 
-def _validate_m15_tito(
+def _validate_frozenlake_tito(
     recipe: str,
     env: dict[str, str],
     text: str,
     reasons: list[str],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-  """Validates default-off or explicitly selected exact M15 full TiTO."""
-  receipts = _token_continuity_receipts(text)
+  """Validates default-off or selected exact FrozenLake full TiTO."""
+  m15_receipts = _token_continuity_receipts(text, _M15_TOKEN_PREFIX)
+  p57_receipts = _token_continuity_receipts(text, _P57_TOKEN_PREFIX)
+  p57_summaries = _token_continuity_receipts(
+      text, _P57_TOKEN_SUMMARY_PREFIX
+  )
+  receipts = [*m15_receipts, *p57_receipts]
   exact_equal = [
       receipt
       for receipt in receipts
@@ -119,11 +133,160 @@ def _validate_m15_tito(
       and receipt.get("actual_tokens") == receipt.get("expected_tokens")
       and receipt.get("actual_sha256") == receipt.get("expected_sha256")
   ]
-  mode = env.get("CANON_M15_TOKEN_CONTINUITY")
-  if recipe == "m15" and mode == "exact":
-    _require(bool(receipts), "m15_exact_tito_receipts_missing", reasons)
+  legacy_mode = env.get("CANON_M15_TOKEN_CONTINUITY")
+  p57_mode = env.get("CANON_P57_TOKEN_CONTINUITY")
+  debug_mode = env.get("CANON_P57_TOKEN_CONTINUITY_DEBUG")
+  record_full = debug_mode == "record-full"
+  debug_headers = sum(
+      line.strip().startswith(_P57_TOKEN_DEBUG_PREFIX)
+      for line in text.splitlines()
+  )
+  debug_chunks = sum(
+      line.strip().startswith(_P57_TOKEN_DEBUG_JSON_PREFIX)
+      for line in text.splitlines()
+  )
+  debug_capsules = sum(
+      line.strip().startswith(_P57_TOKEN_DEBUG_CAPSULE_PREFIX)
+      for line in text.splitlines()
+  )
+  if legacy_mode is not None and p57_mode is not None:
+    reasons.append("resolved_env.token_continuity_selectors_conflict")
+  if p57_mode == "exact" and recipe in ("p45", "m15"):
+    _require(bool(p57_receipts), f"{recipe}_exact_tito_receipts_missing", reasons)
+    if record_full:
+      valid_record_receipts = [
+          receipt
+          for receipt in p57_receipts
+          if receipt.get("mode") == "exact"
+          and receipt.get("verdict") in (
+              "TOKEN_STREAM_EQUAL", "TOKEN_STREAM_DIFFERENT"
+          )
+          and receipt.get("first_mismatch") is not None
+      ]
+      _require(
+          len(valid_record_receipts) == len(p57_receipts) == len(receipts),
+          f"{recipe}_record_full_tito_receipt_invalid",
+          reasons,
+      )
+    else:
+      _require(
+          len(exact_equal) == len(p57_receipts) == len(receipts),
+          f"{recipe}_exact_tito_receipt_not_equal",
+          reasons,
+      )
     _require(
-        len(exact_equal) == len(receipts),
+        all(receipt.get("workload") == recipe for receipt in p57_receipts),
+        f"{recipe}_exact_tito_receipt_workload",
+        reasons,
+    )
+    _require(
+        text.count(
+            f"[env] P57 exact TITO enabled workload={recipe} "
+            "mode=exact default=off"
+        ) == 1,
+        f"{recipe}_exact_tito_env_receipt_count",
+        reasons,
+    )
+    _require(legacy_mode is None, "unexpected_legacy_m15_selector", reasons)
+    summary_ids = [summary.get("trajectory_id") for summary in p57_summaries]
+    valid_summary_ids = [
+        identifier
+        for identifier in summary_ids
+        if identifier is not None
+        and len(identifier) == 32
+        and all(character in "0123456789abcdef" for character in identifier)
+    ]
+    _require(
+        len(valid_summary_ids) == len(summary_ids),
+        f"{recipe}_exact_tito_summary_id",
+        reasons,
+    )
+    _require(
+        len(set(valid_summary_ids)) == len(valid_summary_ids),
+        f"{recipe}_exact_tito_summary_duplicate",
+        reasons,
+    )
+    expected_summary_count = None
+    try:
+      expected_summary_count = (
+          int(env["CANON_GLOBAL_TRAJECTORIES"])
+          * int(env["CANON_P57_EXPECTED_UPDATES"])
+      )
+      if expected_summary_count <= 0:
+        raise ValueError
+    except (KeyError, TypeError, ValueError):
+      reasons.append(f"{recipe}_exact_tito_expected_summary_count")
+    if expected_summary_count is not None:
+      _require(
+          len(p57_summaries) == expected_summary_count,
+          f"{recipe}_exact_tito_summary_count",
+          reasons,
+      )
+    receipts_by_id: dict[str, list[dict[str, str]]] = {}
+    receipt_identity_ok = True
+    for receipt in p57_receipts:
+      identifier = receipt.get("trajectory_id")
+      turn = receipt.get("turn")
+      if (
+          identifier is None
+          or len(identifier) != 32
+          or any(character not in "0123456789abcdef" for character in identifier)
+          or turn is None
+          or not turn.isdigit()
+          or int(turn) < 1
+      ):
+        receipt_identity_ok = False
+        continue
+      receipts_by_id.setdefault(identifier, []).append(receipt)
+    _require(
+        receipt_identity_ok,
+        f"{recipe}_exact_tito_receipt_identity",
+        reasons,
+    )
+    summary_contract_ok = True
+    summary_receipt_total = 0
+    for summary in p57_summaries:
+      identifier = summary.get("trajectory_id", "")
+      try:
+        steps = int(summary["steps"])
+        expected_later_turns = int(summary["expected_later_turns"])
+        receipt_count = int(summary["receipts"])
+      except (KeyError, TypeError, ValueError):
+        summary_contract_ok = False
+        continue
+      matched = receipts_by_id.get(identifier, [])
+      turns = sorted(int(receipt["turn"]) for receipt in matched)
+      allowed_summary_verdicts = (
+          ("PASS", "DIFFERENT", "UNEXERCISED")
+          if record_full
+          else ("PASS",)
+      )
+      if (
+          summary.get("workload") != recipe
+          or summary.get("verdict") not in allowed_summary_verdicts
+          or steps < 0
+          or expected_later_turns < 0
+          or receipt_count != expected_later_turns
+          or turns != list(range(1, expected_later_turns + 1))
+          or (steps != 0 and steps != expected_later_turns + 1)
+      ):
+        summary_contract_ok = False
+      summary_receipt_total += receipt_count
+    _require(
+        summary_contract_ok,
+        f"{recipe}_exact_tito_summary_contract",
+        reasons,
+    )
+    _require(
+        set(receipts_by_id) == set(valid_summary_ids)
+        and summary_receipt_total == len(p57_receipts),
+        f"{recipe}_exact_tito_receipt_completeness",
+        reasons,
+    )
+  elif recipe == "m15" and legacy_mode == "exact":
+    _require(bool(m15_receipts), "m15_exact_tito_receipts_missing", reasons)
+    _require(
+        len(exact_equal) == len(m15_receipts) == len(receipts),
         "m15_exact_tito_receipt_not_equal",
         reasons,
     )
@@ -132,19 +295,101 @@ def _validate_m15_tito(
         "m15_exact_tito_env_receipt_count",
         reasons,
     )
+    _require(p57_mode is None, "unexpected_p57_token_selector", reasons)
+    _require(
+        not p57_summaries,
+        "unexpected_p57_token_summary",
+        reasons,
+    )
   else:
     _require(
-        mode is None,
+        legacy_mode is None,
         "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected",
         reasons,
     )
+    _require(
+        p57_mode is None,
+        "resolved_env.CANON_P57_TOKEN_CONTINUITY_unexpected",
+        reasons,
+    )
     _require(not receipts, "unexpected_m15_token_receipt", reasons)
+    _require(
+        not p57_summaries,
+        "unexpected_p57_token_summary",
+        reasons,
+    )
     _require(
         "[env] M15 exact TITO enabled" not in text,
         "unexpected_m15_exact_tito_env_receipt",
         reasons,
     )
+    _require(
+        "[env] P57 exact TITO enabled" not in text,
+        "unexpected_p57_exact_tito_env_receipt",
+        reasons,
+    )
+  if debug_mode is not None:
+    _require(
+        debug_mode in ("first-diff", "record-full"),
+        "resolved_env.CANON_P57_TOKEN_CONTINUITY_DEBUG_malformed",
+        reasons,
+    )
+    _require(
+        p57_mode == "exact" and recipe in ("p45", "m15"),
+        "resolved_env.CANON_P57_TOKEN_CONTINUITY_DEBUG_unscoped",
+        reasons,
+    )
+    if debug_mode == "first-diff":
+      _require(
+          text.count(
+              "[env] P57 exact TITO first-diff diagnostics armed "
+              f"workload={recipe} default=off"
+          ) == 1,
+          f"{recipe}_exact_tito_debug_arm_receipt_count",
+          reasons,
+      )
+      # A completed strict exact run cannot have encountered a first diff.
+      _require(
+          debug_headers == debug_chunks == debug_capsules == 0,
+          "successful_exact_run_contains_first_diff_debug",
+          reasons,
+      )
+    else:
+      _require(
+          text.count(
+              "[env] P57 exact TITO record-full enabled "
+              f"workload={recipe} training=unchanged zero_tim_claim=disabled"
+          ) == 1,
+          f"{recipe}_record_full_arm_receipt_count",
+          reasons,
+      )
+      _require(
+          debug_chunks == 0,
+          "record_full_raw_token_chunks_leaked_to_stdout",
+          reasons,
+      )
+  else:
+    _require(
+        "[env] P57 exact TITO first-diff diagnostics armed" not in text,
+        "unexpected_p57_token_debug_arm_receipt",
+        reasons,
+    )
+    _require(
+        debug_headers == debug_chunks == debug_capsules == 0,
+        "unexpected_p57_token_debug_receipt",
+        reasons,
+    )
   return receipts, exact_equal
+
+
+def _validate_m15_tito(
+    recipe: str,
+    env: dict[str, str],
+    text: str,
+    reasons: list[str],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+  """Compatibility entry point for the published M15 classifier tests."""
+  return _validate_frozenlake_tito(recipe, env, text, reasons)
 
 
 def _sha256(path: Path) -> str:
@@ -603,7 +848,7 @@ def classify(
     )
 
   text = run_log.read_text(encoding="utf-8", errors="replace")
-  token_receipts, exact_equal_token_receipts = _validate_m15_tito(
+  token_receipts, exact_equal_token_receipts = _validate_frozenlake_tito(
       recipe, env, text, reasons
   )
   align_verdicts = [
@@ -1166,10 +1411,50 @@ def classify(
           "hit_rates_percent": hit_rates,
           "max_hit_rate_percent": max(hit_rates) if hit_rates else None,
       },
-      "m15_tito": {
-          "mode": env.get("CANON_M15_TOKEN_CONTINUITY"),
+      "frozenlake_tito": {
+          "mode": (
+              env.get("CANON_P57_TOKEN_CONTINUITY")
+              or env.get("CANON_M15_TOKEN_CONTINUITY")
+          ),
+          "selector": (
+              "p57"
+              if "CANON_P57_TOKEN_CONTINUITY" in env
+              else "m15-legacy"
+              if "CANON_M15_TOKEN_CONTINUITY" in env
+              else None
+          ),
+          "workload": recipe,
           "receipts": len(token_receipts),
           "exact_equal_receipts": len(exact_equal_token_receipts),
+          "exact_different_receipts": sum(
+              receipt.get("verdict") == "TOKEN_STREAM_DIFFERENT"
+              for receipt in token_receipts
+          ),
+          "debug_mode": env.get("CANON_P57_TOKEN_CONTINUITY_DEBUG"),
+          "first_diff_headers": sum(
+              line.strip().startswith(_P57_TOKEN_DEBUG_PREFIX)
+              for line in text.splitlines()
+          ),
+      },
+      "m15_tito": {
+          "mode": env.get("CANON_M15_TOKEN_CONTINUITY"),
+          # Historical compatibility view: generic P57 receipts belong only
+          # to frozenlake_tito above and must not masquerade as legacy M15.
+          "receipts": len(
+              _token_continuity_receipts(text, _M15_TOKEN_PREFIX)
+          ),
+          "exact_equal_receipts": sum(
+              receipt.get("mode") == "exact"
+              and receipt.get("verdict") == "TOKEN_STREAM_EQUAL"
+              and receipt.get("first_mismatch") == "-1"
+              and receipt.get("actual_tokens")
+              == receipt.get("expected_tokens")
+              and receipt.get("actual_sha256")
+              == receipt.get("expected_sha256")
+              for receipt in _token_continuity_receipts(
+                  text, _M15_TOKEN_PREFIX
+              )
+          ),
       },
       "jax_persistent_cache": {
           "configuration": {

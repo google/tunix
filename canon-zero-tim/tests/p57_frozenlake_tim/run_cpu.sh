@@ -18,6 +18,11 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_jobset_log_collector.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_m15_alignment_warning.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_tito_collection_classifier.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_tito_full_record_classifier.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_tito_onehost_neutrality.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_tito_gcs_sync.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_tito_diagnostic_renderer.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_runtime_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py \
@@ -40,6 +45,12 @@ python3 -m py_compile \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_three_arm_manifests.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_eval_schedule.py \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/extract_first_diff_capsule.py \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/classify_tito_collection.py \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/judge_tito_onehost_neutrality.py \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/sync_tito_evidence_to_gcs.py \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/render_tito_diagnostic_pair.py \
   canon-zero-tim/cluster/steps/p57_probe_stock_engine.py \
   canon-zero-tim/src/p57_stock_prompt_observer.py \
   examples/frozenlake/p57_workloads.py \
@@ -58,7 +69,10 @@ bash -n \
   canon-zero-tim/cluster/steps/p57_runtime_contract.sh \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env \
+  canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/run_perf_v2_onehost.sh \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/p57_tito_gcs_worker.sh \
+  canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/run_tito_onehost_neutrality_pair.sh \
   canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh
 echo "P57_FROZENLAKE_TIM_CPU_PASS"
