@@ -158,6 +158,7 @@ start_trainer() {
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
+        --sampler_type=${SAMPLER} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -166,7 +167,6 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --sampler=${SAMPLER} \
         ${maxtext_args} \
         ${DEBUG:+--debug} \
     " \

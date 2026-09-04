@@ -33,8 +33,8 @@ import jax
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
-from orbax import checkpoint as ocp
 import optax
+from orbax import checkpoint as ocp
 from tunix.cli.utils import model as model_utils
 from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
@@ -90,12 +90,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sampler_type",
+      type=str,
+      choices=("inprocess_vllm", "vllm", "vanilla"),
+      default="inprocess_vllm",
+      help="Sampler type for the trainer to use.",
+  )
+  parser.add_argument(
       "--trainer_backend",
       choices=("tunix", "maxtext"),
       default="tunix",
-      help=(
-          "tunix runs Tunix's PeftTrainer; maxtext runs MaxTextTrainingEngine"
-      ),
+      help="tunix runs Tunix's PeftTrainer; maxtext runs MaxTextTrainingEngine",
   )
   parser.add_argument("--maxtext_model_name", type=str, default="qwen3-0.6b")
   parser.add_argument(
@@ -111,7 +116,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--maxtext_ckpt_path",
       type=str,
       default=os.getenv("MAXTEXT_CKPT", ""),
-      help="Orbax params-only checkpoint for the MaxText trainer, e.g. gs://...",
+      help=(
+          "Orbax params-only checkpoint for the MaxText trainer, e.g. gs://..."
+      ),
   )
   parser.add_argument(
       "--maxtext_output_directory",
@@ -167,8 +174,8 @@ def _has_direct_safetensors(model_path: Path) -> bool:
 def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
   if not model_dir:
     raise ValueError(
-        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
-        "--model_dir=/path/to/local/qwen3/safetensors."
+        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
+        " --model_dir=/path/to/local/qwen3/safetensors."
     )
 
   model_path = Path(model_dir).expanduser()
@@ -205,6 +212,7 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
       f"in --model_dir: {model_path}"
   )
 
+
 def _create_mesh(args) -> Mesh:
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
@@ -219,8 +227,8 @@ def _create_mesh(args) -> Mesh:
 def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   if not args.model_dir:
     raise ValueError(
-        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
-        "--model_dir=/path/to/local/safetensors."
+        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
+        " --model_dir=/path/to/local/safetensors."
     )
   model = models.create_model(args.model_name, args.model_dir, mesh)
   if not lora:
@@ -324,9 +332,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
 def _create_tunix_trainer_factory(args) -> Any:
   """Creates the trainer factory function for Tunix's PeftTrainer."""
   logging.info("Trainer backend: Tunix's PeftTrainer.")
-  args.model_dir = _ensure_model_dir_for_trainer(
-      args.model_dir, args.model_id
-  )
+  args.model_dir = _ensure_model_dir_for_trainer(args.model_dir, args.model_id)
   logging.info("Prepared trainer safetensors directory: %s", args.model_dir)
 
   logging.info("Creating trainer mesh...")
@@ -364,6 +370,7 @@ def _create_tunix_trainer_factory(args) -> Any:
           actor_model,
           optax.adamw(learning_rate=args.learning_rate),
           training_config,
+          sampler_type=args.sampler_type,
       )
     return _MeshBoundTrainer(trainer, mesh)
 
