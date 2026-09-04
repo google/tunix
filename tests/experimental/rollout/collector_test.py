@@ -25,6 +25,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rollout import collector
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 
@@ -96,6 +97,69 @@ class _MockSampler(sampler_lib.Sampler):
         token_ids=tokens,
         prompt_token_ids=np.array([1, 2], dtype=np.int32),
     )
+
+
+class _MockVanillaSampler(vanilla_sampler_adapter.VanillaSamplerAdapter):
+
+  def __init__(self):
+    self.calls = []
+
+  async def sample(self, req, **kwargs):
+    self.calls.append((req, kwargs))
+    sp = getattr(req, "sampling_params", None)
+    seed = getattr(sp, "seed", None)
+    tok_seed = int(seed if seed is not None else 0)
+    return sampler_lib.SamplingResponse(
+        request_id=getattr(req, "request_id", ""),
+        text=f"action_seed_{seed}",
+        token_ids=np.array([tok_seed, tok_seed + 1], dtype=np.int32),
+        prompt_token_ids=np.array([1, 2], dtype=np.int32),
+    )
+
+
+class _MockVllmSampler(sampler_lib.Sampler):
+
+  def __init__(self):
+    self.calls = []
+
+  async def sample(self, req, **kwargs):
+    self.calls.append((req, kwargs))
+    return sampler_lib.SamplingResponse(
+        request_id=getattr(req, "request_id", ""),
+        text="action_vllm",
+        token_ids=np.array([10, 20], dtype=np.int32),
+        prompt_token_ids=np.array([1, 2], dtype=np.int32),
+    )
+
+
+class VanillaRolloutSeedTest(absltest.TestCase):
+
+  def test_generate_vanilla_rollout_seed_reproducible(self):
+    seed1 = collector.generate_vanilla_rollout_seed("prompt_42", group_index=0)
+    seed2 = collector.generate_vanilla_rollout_seed("prompt_42", group_index=0)
+    self.assertEqual(seed1, seed2)
+    self.assertIsInstance(seed1, int)
+    self.assertGreaterEqual(seed1, 0)
+    self.assertLessEqual(seed1, 0x7FFFFFFF)
+
+  def test_generate_vanilla_rollout_seed_intra_group_diversity(self):
+    seeds = [
+        collector.generate_vanilla_rollout_seed("gsm8k_q1", group_index=i)
+        for i in range(4)
+    ]
+    self.assertEqual(len(seeds), len(set(seeds)))
+    for s in seeds:
+      self.assertGreaterEqual(s, 0)
+      self.assertLessEqual(s, 0x7FFFFFFF)
+
+  def test_generate_vanilla_rollout_seed_arbitrary_prompt_formats(self):
+    s1 = collector.generate_vanilla_rollout_seed(42, group_index=0)
+    s2 = collector.generate_vanilla_rollout_seed("math-q1", group_index=0)
+    s3 = collector.generate_vanilla_rollout_seed("uuid-123-abc", group_index=0)
+    self.assertIsInstance(s1, int)
+    self.assertIsInstance(s2, int)
+    self.assertIsInstance(s3, int)
+    self.assertNotEqual(s2, s3)
 
 
 class BuildPromptTest(absltest.TestCase):
@@ -187,6 +251,236 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       self.assertEqual(sampler.sampled_params[0].max_tokens, 50)
       # Turn 1 generated 30 tokens, so Turn 2 remaining budget is 50 - 30 = 20.
       self.assertEqual(sampler.sampled_params[1].max_tokens, 20)
+
+    asyncio.run(_run())
+
+  def test_model_call_seeds_vanilla_sampler_deterministically(self):
+    async def _run():
+      sampler = _MockVanillaSampler()
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_42",
+          prompt="test prompt",
+          group_index=1,
+          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_1",
+          request=req,
+          sampler=sampler,
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        await model_call("prompt text")
+
+      self.assertLen(sampler.calls, 1)
+      sampling_req, _ = sampler.calls[0]
+      expected_seed = collector.generate_vanilla_rollout_seed(
+          "prompt_42", group_index=1
+      )
+      self.assertEqual(sampling_req.sampling_params.seed, expected_seed)
+
+    asyncio.run(_run())
+
+  def test_model_call_preserves_explicit_seed_in_generation_kwargs(self):
+    async def _run():
+      sampler = _MockVanillaSampler()
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_42",
+          prompt="test prompt",
+          group_index=1,
+          generation_kwargs={
+              "max_generation_steps": 128,
+              "seed": 99999,
+              "temperature": 0.7,
+          },
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_1",
+          request=req,
+          sampler=sampler,
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        await model_call("prompt text")
+
+      self.assertLen(sampler.calls, 1)
+      sampling_req, _ = sampler.calls[0]
+      self.assertEqual(sampling_req.sampling_params.seed, 99999)
+
+    asyncio.run(_run())
+
+  def test_model_call_seeds_not_passed_to_vllm(self):
+    async def _run():
+      sampler = _MockVllmSampler()
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_42",
+          prompt="test prompt",
+          group_index=1,
+          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_1",
+          request=req,
+          sampler=sampler,
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        await model_call("prompt text")
+
+      self.assertLen(sampler.calls, 1)
+      sampling_req, _ = sampler.calls[0]
+      self.assertIsNone(sampling_req.sampling_params.seed)
+
+    asyncio.run(_run())
+
+  def test_model_call_grpo_group_seeds_distinct_and_reproducible(self):
+    async def _run():
+      sampler = _MockVanillaSampler()
+      req_0 = datatypes.RolloutRequest(
+          prompt_id="prompt_42",
+          prompt="test prompt",
+          group_index=0,
+          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
+      )
+      req_1 = datatypes.RolloutRequest(
+          prompt_id="prompt_42",
+          prompt="test prompt",
+          group_index=1,
+          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
+      )
+      req_0_repeat = datatypes.RolloutRequest(
+          prompt_id="prompt_42",
+          prompt="test prompt",
+          group_index=0,
+          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
+      )
+
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+
+      outputs = []
+      for req in [req_0, req_1, req_0_repeat]:
+        engine = collector.TrajectoryCollectorEngine(
+            traj_id=f"traj_{req.prompt_id}_g{req.group_index}",
+            request=req,
+            sampler=sampler,
+            env_client=mock.MagicMock(),
+            agent=mock_agent,
+            tokenizer=mock.MagicMock(),
+            chat_parser=mock.MagicMock(),
+        )
+        with mock.patch(
+            "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+        ) as mock_engine_cls:
+          mock_instance = mock.AsyncMock()
+          mock_instance.collect.return_value = mock.MagicMock(steps=[])
+          mock_engine_cls.return_value = mock_instance
+          await engine.run_episode()
+          model_call = mock_engine_cls.call_args.kwargs["model_call"]
+          output = await model_call("prompt text")
+          outputs.append(output)
+
+      self.assertLen(sampler.calls, 3)
+      req_0_call, _ = sampler.calls[0]
+      req_1_call, _ = sampler.calls[1]
+      req_0_repeat_call, _ = sampler.calls[2]
+
+      self.assertNotEqual(
+          req_0_call.sampling_params.seed, req_1_call.sampling_params.seed
+      )
+      self.assertEqual(
+          req_0_call.sampling_params.seed,
+          req_0_repeat_call.sampling_params.seed,
+      )
+      self.assertFalse(
+          np.array_equal(outputs[0].tokens[0], outputs[1].tokens[0])
+      )
+      self.assertTrue(
+          np.array_equal(outputs[0].tokens[0], outputs[2].tokens[0])
+      )
+
+    asyncio.run(_run())
+
+  def test_model_call_raises_when_prompt_id_is_none_for_vanilla_sampler(self):
+    async def _run():
+      sampler = _MockVanillaSampler()
+      req = datatypes.RolloutRequest(
+          prompt_id=None,
+          prompt="test prompt",
+          group_index=0,
+          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_1",
+          request=req,
+          sampler=sampler,
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        with self.assertRaisesRegex(
+            ValueError, "Vanilla sampler requires a seed or valid prompt_id"
+        ):
+          await model_call("prompt text")
 
     asyncio.run(_run())
 
