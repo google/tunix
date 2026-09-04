@@ -96,7 +96,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=["vllm", "inprocess_vllm", "vanilla"],
       help="Rollout sampler backend: vllm, inprocess_vllm, or vanilla.",
   )
-  parser.add_argument("--sampler_mesh_tp", type=int, default=4)
   parser.add_argument(
       "--maxtext_model_name",
       type=str,
@@ -312,8 +311,23 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  rollout_mesh = _create_rollout_mesh(args)
   max_model_len = args.max_prompt_length + args.max_response_length
+
+  multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+  if multihost_backend:
+    assert (
+        multihost_backend != "ray" or args.mesh_tp is not None
+    ), "Must set --mesh_tp when using Ray backend."
+
+  engine_kwargs = {
+      "model": vllm_model,
+      "max_model_len": max_model_len,
+  }
+  if multihost_backend:
+    engine_kwargs["distributed_executor_backend"] = multihost_backend
+  server_mode = True if multihost_backend else None
+  rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
+
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
@@ -330,6 +344,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_loras": 1,
     }
   vllm_config = vllm_sampler.VllmConfig(
+      server_mode=server_mode,
       mesh=rollout_mesh,
       tensor_parallel_size=args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
@@ -381,13 +396,13 @@ def _create_vllm_sampler(args):
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "max_model_len=%d...",
       vllm_model,
-      args.sampler_mesh_tp,
+      args.mesh_tp,
       max_model_len,
   )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
-      tensor_parallel_size=args.sampler_mesh_tp,
+      tensor_parallel_size=args.mesh_tp,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",

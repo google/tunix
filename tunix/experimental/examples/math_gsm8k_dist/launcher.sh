@@ -482,7 +482,6 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --sampler="$SAMPLER"
     --mesh_fsdp="$ROLLOUT_FSDP"
     --mesh_tp="$ROLLOUT_TP"
-    --sampler_mesh_tp="$ROLLOUT_TP"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
