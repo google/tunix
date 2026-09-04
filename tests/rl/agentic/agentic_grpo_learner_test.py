@@ -44,6 +44,7 @@ from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
@@ -2487,6 +2488,45 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
     mock_warn.assert_called_once()
     self.assertIn("off_policy_steps", mock_warn.call_args[0][0])
+
+
+class OverlongVerdictTest(absltest.TestCase):
+  """The truncation verdict the learner reads off each trajectory."""
+
+  def test_serialised_status_matches_what_the_learner_compares_against(self):
+    """Pins the serialisation the `overlong` flag depends on.
+
+    `TrajectoryStatus` uses `auto()`, so `.value` is an opaque integer while
+    the collect engine serialises by `.name`. Comparing against the wrong one
+    silently yields `overlong = 0` everywhere -- no error, just a feature that
+    never fires -- so the two are pinned together here.
+    """
+    trajectory = agent_types.Trajectory(task={})
+    trajectory.status = agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+    self.assertEqual(
+        trajectory.to_dict()["status"],
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name,
+    )
+    self.assertEqual(
+        trajectory.to_dict()["status"], "MAX_CONTEXT_LIMIT_REACHED"
+    )
+
+  def test_other_statuses_are_not_treated_as_truncation(self):
+    # `overlong` means "ran out of response budget", which is narrower than
+    # the engine's failure statuses; conflating them would drop samples that
+    # failed for unrelated reasons.
+    for status in (
+        agent_types.TrajectoryStatus.SUCCEEDED,
+        agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
+        agent_types.TrajectoryStatus.TIMEOUT,
+        agent_types.TrajectoryStatus.FAILED,
+    ):
+      trajectory = agent_types.Trajectory(task={})
+      trajectory.status = status
+      self.assertNotEqual(
+          trajectory.to_dict()["status"],
+          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name,
+      )
 
 
 if __name__ == "__main__":

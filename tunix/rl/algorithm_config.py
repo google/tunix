@@ -38,6 +38,110 @@ class AlgorithmConfig:
   # for the rest of the step.
   kl_clamp_value: float | None = None
 
+  # --- Sampler-vs-trainer divergence -----------------------------------------
+  # The rollout engine and the trainer run the same weights through different
+  # kernels, so their log-probabilities differ slightly. Everything below is
+  # off by default and reproduces prior behaviour exactly when unset. All of it
+  # requires the rollout engine to return log-probabilities, and none of it is
+  # supported under sequence packing.
+  #
+  # Drop rollout-truncated sequences from the update. They are a prefix of a
+  # trajectory rather than a trajectory, so the reward attached to them is not
+  # the reward for the behaviour that produced them. Removes them from the loss
+  # AND its denominator, so survivors keep their full gradient magnitude and
+  # only the effective batch size shrinks.
+  overlong_loss_masking: bool = False
+  # Drop sequences whose multiplicative probability error --
+  # `mean_t exp(|log trainer_t - log sampler_t|)` -- exceeds this. 1.0 is
+  # perfect agreement; 2.0 means the typical token's probability differs by a
+  # factor of two, which indicates a fault rather than ordinary drift. Read
+  # `sample_mask/mult_prob_error_{mean,max}` before choosing a value.
+  seq_logprob_error_threshold: float | None = None
+  # Apply a truncated importance-sampling correction rather than only reporting
+  # the divergence. "seq-mask-tis" weights each token by its raw
+  # sampler-to-trainer ratio and zeroes the weights of any sequence whose
+  # geometric-mean ratio leaves the band below.
+  #
+  # NOTE dropped sequences stay in the loss denominator, so the loss -- and the
+  # gradient -- scale down with the drop fraction. That is the opposite of
+  # `overlong_loss_masking`. Watch `tis/is_oob_ratio`: a high value there is a
+  # silent learning-rate cut, not merely a smaller batch.
+  truncated_importance_sampling_type: str | None = None
+  truncated_importance_sampling_ratio_min: float | None = None
+  truncated_importance_sampling_ratio: float | None = None
+  # Keep-bands to report a would-be drop rate for, without applying them, as
+  # `sampler_is/would_drop_<lo>_<hi>`. Lets a band be chosen from data before
+  # it is switched on. No band is assumed; empty disables the reporting.
+  sampler_is_report_bands: tuple[tuple[float, float], ...] = ()
+  # Inclusive upper bounds, in completion tokens, of the length buckets used by
+  # the `sampler_is/lenscale/*` diagnostic; one open-ended bucket is appended.
+  # Bucketing the sequences already in a batch by their own length measures how
+  # the per-sequence sampler-vs-trainer offset scales with sequence length,
+  # which distinguishes iid token noise (shrinks as 1/sqrt(T)) from a
+  # systematic within-sequence bias (does not). Choose edges that split the
+  # completion-length distribution into comparably populated bins.
+  sampler_is_length_buckets: tuple[int, ...] | None = None
+
+  def validate_sampler_is_options(self):
+    """Validates the sampler-vs-trainer options above.
+
+    A separate method rather than inline in `__post_init__` because subclasses
+    override `__post_init__` without chaining to it, so inline validation would
+    silently not run for them.
+
+    Raises:
+      ValueError: If an option is set to an unsupported or incomplete value.
+    """
+    lo = self.truncated_importance_sampling_ratio_min
+    hi = self.truncated_importance_sampling_ratio
+    if (lo is None) != (hi is None):
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min and"
+          " truncated_importance_sampling_ratio must be set together (a"
+          f" keep-band needs both ends). Got min={lo}, max={hi}."
+      )
+    if lo is not None and hi is not None and lo > hi:
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min must not exceed"
+          f" truncated_importance_sampling_ratio. Got min={lo}, max={hi}."
+      )
+    if self.truncated_importance_sampling_type is not None:
+      if self.truncated_importance_sampling_type != "seq-mask-tis":
+        raise ValueError(
+            "truncated_importance_sampling_type only supports 'seq-mask-tis'."
+            f" Received: {self.truncated_importance_sampling_type!r}"
+        )
+      if lo is None:
+        raise ValueError(
+            "truncated_importance_sampling_type requires a keep-band. Set"
+            " truncated_importance_sampling_ratio_min and"
+            " truncated_importance_sampling_ratio."
+        )
+    for band in self.sampler_is_report_bands or ():
+      if len(band) != 2 or band[0] > band[1]:
+        raise ValueError(
+            "each entry of sampler_is_report_bands must be an ordered"
+            f" (min, max) pair. Received: {band!r}"
+        )
+    if self.sampler_is_length_buckets is not None:
+      edges = tuple(self.sampler_is_length_buckets)
+      if not edges:
+        raise ValueError(
+            "sampler_is_length_buckets must be non-empty when set; use None"
+            " to disable the length-scaling diagnostic."
+        )
+      if any(e <= 0 for e in edges) or any(
+          b <= a for a, b in zip(edges, edges[1:])
+      ):
+        raise ValueError(
+            "sampler_is_length_buckets must be strictly increasing positive"
+            f" token counts. Received: {edges}"
+        )
+      self.sampler_is_length_buckets = edges
+    if self.sampler_is_report_bands:
+      self.sampler_is_report_bands = tuple(
+          tuple(b) for b in self.sampler_is_report_bands
+      )
 
   def __post_init__(self):
     valid_algo_variants = [
@@ -46,7 +150,11 @@ class AlgorithmConfig:
         "ppo",
         "dapo",
     ]
-    valid_advantage_estimators = ["grpo", "gae"]
+    # "rloo" and "drgrpo" are registered estimators that this list previously
+    # rejected, so they were unreachable on any config that runs this
+    # validation. Widening the list only permits what the registry already
+    # implements.
+    valid_advantage_estimators = ["grpo", "grpo-loo", "rloo", "drgrpo", "gae"]
     valid_policy_loss_fns = ["grpo", "ppo"]
     if self.algo_variant not in valid_algo_variants:
       raise ValueError(
@@ -63,6 +171,7 @@ class AlgorithmConfig:
           f"policy_loss_fn must be one of {valid_policy_loss_fns}."
           f" Received: {self.policy_loss_fn}"
       )
+    self.validate_sampler_is_options()
 
     # Automatically prints configuration upon initialization.
     self.print_config()
