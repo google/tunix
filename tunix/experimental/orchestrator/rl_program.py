@@ -35,6 +35,13 @@ from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.sft import metrics_logger as metrics_logger_lib
 
+# Bounds on the pre-dispatch weight sync. The wait is dominated by vLLM
+# EngineCore startup (~20s locally, longer once weights come off GCS), so the
+# timeout is generous; failing here is better than silently rolling out from
+# uninitialized weights.
+_INITIAL_SYNC_TIMEOUT_S = 600.0
+_INITIAL_SYNC_RETRY_S = 5.0
+
 MetricsLogger = metrics_logger_lib.MetricsLogger
 MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
@@ -792,6 +799,56 @@ class StandardRLProgram(RLProgram):
         self.on_step_end(current_step, step_result)
       self._step += 1
 
+  async def _sync_initial_weights(self) -> None:
+    """Pushes the trainer's starting weights out before the first dispatch.
+
+    `train_stage` only syncs *after* a step, so whatever the rollout worker
+    built for itself is what generates the step-0 trajectories. That is fine
+    when the sampler loads the same checkpoint as the trainer, but the MaxText
+    -in-vLLM path does not: `MaxTextForCausalLM` is constructed with an empty
+    `load_parameters_path`, so `from_pretrained` skips the Orbax restore and
+    leaves the model randomly initialized. The resulting rollouts are
+    degenerate (one token repeated to the length cap) yet still get scored and
+    trained on, so the run looks healthy while learning from noise.
+
+    Syncing once up front makes policy version 0 mean "the trainer's starting
+    weights" on both sides. The retry loop exists because bringing up workers
+    does not wait for readiness -- the vLLM EngineCore spawns as a separate
+    process and takes ~20s to come up, well after this coroutine starts.
+    """
+    if not self.sync_weights:
+      return
+    assert self.engine is not None
+
+    deadline = time.monotonic() + _INITIAL_SYNC_TIMEOUT_S
+    attempt = 0
+    while True:
+      attempt += 1
+      try:
+        version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+      except Exception as exc:  # pylint: disable=broad-except
+        if time.monotonic() >= deadline:
+          raise RuntimeError(
+              "Initial weight sync never succeeded; rollout workers would"
+              " generate from uninitialized weights."
+          ) from exc
+        logging.info(
+            "Initial weight sync attempt %d not ready yet (%s); retrying.",
+            attempt,
+            exc,
+        )
+        await asyncio.sleep(_INITIAL_SYNC_RETRY_S)
+        continue
+      # Track the engine's counter rather than staying at 0, so the version
+      # the first rollouts are tagged with is the one they actually ran.
+      if version is not None:
+        self.policy_version = version
+      logging.info(
+          "Initial weight sync complete; rollout policy_version=%d.",
+          self.policy_version,
+      )
+      return
+
   async def run_async(
       self,
       engine: rl_engine_interface.AbstractRLEngine,
@@ -817,6 +874,8 @@ class StandardRLProgram(RLProgram):
 
     max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
     self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
+
+    await self._sync_initial_weights()
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [

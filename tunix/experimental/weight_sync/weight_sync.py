@@ -207,11 +207,25 @@ class WorkUnitMetadata:
     variables = []
     for v in variables_raw:
       if isinstance(v, TensorMetadata):
-        variables.append(v)
-      elif isinstance(v, dict):
+        name = v.name[:-6] if v.name.endswith(".value") else v.name
         variables.append(
             TensorMetadata(
-                name=v["name"],
+                name=name,
+                shape=tuple(v.shape),
+                mesh_shape=tuple(v.mesh_shape),
+                layout=tuple(v.layout),
+                item_size=int(v.item_size),
+                layer_idx=int(getattr(v, "layer_idx", 0)),
+                sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+            )
+        )
+      elif isinstance(v, dict):
+        name = v["name"]
+        if name.endswith(".value"):
+          name = name[:-6]
+        variables.append(
+            TensorMetadata(
+                name=name,
                 shape=tuple(v["shape"]),
                 mesh_shape=tuple(v["mesh_shape"]),
                 layout=tuple(v["layout"]),
@@ -221,9 +235,10 @@ class WorkUnitMetadata:
             )
         )
       elif hasattr(v, "name"):
+        name = v.name[:-6] if v.name.endswith(".value") else v.name
         variables.append(
             TensorMetadata(
-                name=v.name,
+                name=name,
                 shape=tuple(v.shape),
                 mesh_shape=tuple(v.mesh_shape),
                 layout=tuple(v.layout),
@@ -259,6 +274,80 @@ class WorkUnitMetadata:
 def dict_to_metadata(d: Any) -> WorkUnitMetadata:
   """Reconstructs WorkUnitMetadata from a dictionary (delegates to WorkUnitMetadata.from_dict)."""
   return WorkUnitMetadata.from_dict(d)
+
+
+def dict_to_metadata(d: Any) -> WorkUnitMetadata:
+  """Reconstructs WorkUnitMetadata from a dictionary or returns it unchanged.
+
+  Destinations living in this process hand back WorkUnitMetadata already (see
+  RaidenSynchronizer.work_unit_metadata). The vLLM sampler path cannot: its
+  Raiden binding lives in a separate EngineCore process, so tpu-inference's
+  RaidenWorkerSync.metadata_dict() flattens the same content to plain dicts to
+  cross that boundary. Rebuilding the dataclasses here lets both paths present
+  one type to the coordinator's manifest preflight.
+  """
+  if isinstance(d, WorkUnitMetadata):
+    return d
+  if not isinstance(d, dict):
+    raise TypeError(f"Expected WorkUnitMetadata or dict, got {type(d)}")
+
+  unit_raw = d.get("unit")
+  if isinstance(unit_raw, dict):
+    unit = WorkUnitId(**unit_raw)
+  elif isinstance(unit_raw, WorkUnitId):
+    unit = unit_raw
+  else:
+    unit = WorkUnitId(job_name=str(unit_raw or "destination"))
+
+  variables_raw = d.get("variables", ())
+  variables = []
+  for v in variables_raw:
+    if isinstance(v, TensorMetadata):
+      variables.append(v)
+    elif isinstance(v, dict):
+      variables.append(
+          TensorMetadata(
+              name=v["name"],
+              shape=tuple(v["shape"]),
+              mesh_shape=tuple(v["mesh_shape"]),
+              layout=tuple(v["layout"]),
+              item_size=int(v["item_size"]),
+              layer_idx=int(v.get("layer_idx", 0)),
+              sharding_spec=tuple(v.get("sharding_spec", ())),
+          )
+      )
+    elif hasattr(v, "name"):
+      variables.append(
+          TensorMetadata(
+              name=v.name,
+              shape=tuple(v.shape),
+              mesh_shape=tuple(v.mesh_shape),
+              layout=tuple(v.layout),
+              item_size=int(v.item_size),
+              layer_idx=int(getattr(v, "layer_idx", 0)),
+              sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+          )
+      )
+
+  return WorkUnitMetadata(
+      unit=unit,
+      shards=tuple(d.get("shards", ())),
+      control_plane_rpc_address=str(d.get("control_plane_rpc_address", "")),
+      global_shape=(
+          tuple(d["global_shape"])
+          if d.get("global_shape") is not None
+          else None
+      ),
+      mesh_shape=(
+          tuple(d["mesh_shape"]) if d.get("mesh_shape") is not None else None
+      ),
+      layout=tuple(d["layout"]) if d.get("layout") is not None else None,
+      item_size=int(d["item_size"]) if d.get("item_size") is not None else None,
+      variables=tuple(variables),
+      mesh_axes=(
+          tuple(d["mesh_axes"]) if d.get("mesh_axes") is not None else None
+      ),
+  )
 
 
 @dataclasses.dataclass(frozen=True)

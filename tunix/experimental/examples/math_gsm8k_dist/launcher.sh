@@ -55,6 +55,8 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -407,6 +409,14 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_load_parameters_path="$MAXTEXT_CKPT")
+  fi
+  # Same value the rollout gets below, so the two sides cannot disagree about
+  # which MaxText model they are building.
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
@@ -456,6 +466,14 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
   )
+  # Only the MaxText-native rollout produces tensor names the MaxText trainer
+  # can match, so weight sync needs this whenever SAMPLER=vllm.
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
+  fi
+  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
+    ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi

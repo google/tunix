@@ -133,6 +133,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=0,
+      help="Rollout tensor parallel mesh dimension for automatic MoE padding calculation.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
@@ -237,6 +243,138 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   return model_utils.apply_lora_to_model(
       model, mesh=mesh, lora_config=lora_config
   )
+
+
+def _maxtext_modules():
+  """Imports MaxText lazily, tolerating both installed layouts.
+
+  Mirrors the guarded import in `tunix/models/automodel.py`: an editable checkout exposes
+  `maxtext.configs`, while some installs nest it under `maxtext.src.maxtext`.
+  """
+  try:
+    from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
+    from maxtext.training_engine import maxtext_engine  # pylint: disable=g-import-not-at-top
+    from maxtext.utils import maxtext_utils  # pylint: disable=g-import-not-at-top
+  except ImportError:  # pragma: no cover - layout-dependent
+    from maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
+    from maxtext.src.maxtext.training_engine import maxtext_engine  # pylint: disable=g-import-not-at-top
+    from maxtext.src.maxtext.utils import maxtext_utils  # pylint: disable=g-import-not-at-top
+  return pyconfig, maxtext_engine, maxtext_utils
+
+
+def _tokenizer_pad_id(args) -> int:
+  """Resolves the pad token id the MaxText adapter masks with.
+
+  Derived exactly as the orchestrator derives it (`run_gsm8k_dist_grpo.py`), including the
+  eos fallback. The two must agree: the orchestrator pads assembled batches with its id
+  while the adapter builds `decoder_segment_ids` from this one, so a mismatch silently
+  corrupts trainer log-probs rather than raising.
+  """
+  from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
+
+  tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
+  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+  if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
+    tokenizer.pad_token = tokenizer.eos_token
+  return tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+
+def _build_maxtext_config(args, num_devices: int) -> Any:
+  """Builds the MaxText HyperParameters the training engine runs on."""
+  pyconfig, _, _ = _maxtext_modules()
+
+  load_parameters_path = args.maxtext_load_parameters_path or args.maxtext_ckpt_path
+  if not load_parameters_path:
+    raise ValueError(
+        "--trainer_backend=maxtext requires --maxtext_load_parameters_path (set "
+        "MAXTEXT_CKPT). Without it MaxText would random-initialize the model, or try to "
+        "convert one from HuggingFace."
+    )
+  # MaxText derives micro_batch_size_to_train_on = num_devices * per_device_batch_size,
+  # and shards the batch dimension of every loss input over the fsdp axis. A microbatch
+  # that is not a multiple of that axis is rejected at the jit boundary, so reconcile the
+  # two batch-size sources here rather than letting the failure surface as a sharding
+  # error deep inside the first step.
+  if args.train_micro_batch_size % args.mesh_fsdp:
+    raise ValueError(
+        f"--train_micro_batch_size={args.train_micro_batch_size} must be a multiple of "
+        f"--mesh_fsdp={args.mesh_fsdp}; MaxText shards the batch dimension across it."
+    )
+  per_device_batch_size = args.train_micro_batch_size / num_devices
+
+  base_yml = os.path.join(
+      os.path.dirname(os.path.abspath(pyconfig.__file__)), "base.yml"
+  )
+  if not os.path.exists(base_yml):
+    raise FileNotFoundError(f"MaxText base.yml not found at {base_yml}")
+  output_dir = args.maxtext_output_directory or os.path.join(REPO_ROOT, "artifacts", "qwen3_dist_gsm8k", "maxtext")
+
+  argv = [
+      "run_trainer_node.py",
+      base_yml,
+      f"model_name={args.maxtext_model_name}",
+      f"run_name={args.worker_id}",
+      f"base_output_directory={output_dir}",
+      # load_parameters_path requires enable_checkpointing=True; the config validator
+      # rejects the combination outright otherwise.
+      "enable_checkpointing=True",
+      f"load_parameters_path={load_parameters_path}",
+      # The trainer stays scanned: the checkpoint is scanned, and the Mode 1 weight-sync
+      # mapping converts scanned->unscanned for the rollout.
+      "scan_layers=True",
+      # Never reach for HuggingFace: with this off and load_parameters_path set,
+      # from_pretrained cannot take its HF->Orbax conversion path.
+      "convert_checkpoint_if_possible=False",
+      # tunix's runtime has already initialized JAX distributed.
+      "skip_jax_distributed_system=True",
+      f"per_device_batch_size={per_device_batch_size}",
+      # tunix owns gradient accumulation: the engine divides by the number of fwd_bwd
+      # calls it actually saw, so MaxText must not also accumulate.
+      "gradient_accumulation_steps=1",
+      f"max_target_length={args.max_prompt_length + args.max_response_length}",
+      # MaxText's default 'autoselected' attention picks splash attention on TPU, whose
+      # sa_block_* sizes (512) must divide the sequence length. Here that length is
+      # max_prompt_length + max_response_length, which the demo sets freely -- 512+128=640
+      # already fails, and no fixed block size divides every combination. dot_product has
+      # no such constraint; at these sequence lengths the difference does not matter.
+      "attention=dot_product",
+      f"ici_fsdp_parallelism={args.mesh_fsdp}",
+      f"ici_tensor_parallelism={args.mesh_tp}",
+      f"learning_rate={args.learning_rate}",
+      f"warmup_steps_fraction={args.maxtext_warmup_steps_fraction}",
+      f"dtype={args.maxtext_dtype}",
+      f"weight_dtype={args.maxtext_dtype}",
+      "grad_dtype=float32",
+      "enable_tensorboard=False",
+      "record_internal_nn_metrics=False",
+      "init_weights_seed=42",
+      f"vllm.use_weight_converter={os.environ.get('USE_WEIGHT_CONVERTER', '1').lower() in ('1', 'true', 'yes')}",
+      f"vllm.rollout_backend={os.environ.get('ROLLOUT_BACKEND', 'maxtext')}",
+  ]
+  padded_moe_dim = args.maxtext_padded_moe_mlp_dim
+  if not padded_moe_dim and args.rollout_mesh_tp > 0:
+    try:
+      from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim
+      tmp_cfg = pyconfig.initialize(argv)
+      base_dim = getattr(tmp_cfg, "base_moe_mlp_dim", None) or getattr(tmp_cfg, "moe_intermediate_size", None)
+      if base_dim:
+        padded_moe_dim = compute_padded_moe_mlp_dim(base_dim, args.rollout_mesh_tp)
+        logging.info("Auto-computed padded_base_moe_mlp_dim=%d for rollout_mesh_tp=%d", padded_moe_dim, args.rollout_mesh_tp)
+    except Exception as e:
+      logging.warning("Could not auto-compute padded_base_moe_mlp_dim: %s", e)
+
+  if padded_moe_dim:
+    argv.append(f"padded_base_moe_mlp_dim={padded_moe_dim}")
+
+  logging.info("MaxText config argv: %s", argv)
+  return pyconfig.initialize(argv)
+
+
+def _create_maxtext_mesh(maxtext_config) -> Mesh:
+  """Builds the mesh MaxText's own sharding annotations are written against."""
+  _, _, maxtext_utils = _maxtext_modules()
+  devices = maxtext_utils.create_device_mesh(maxtext_config)
+  return Mesh(devices, maxtext_config.mesh_axes)
 
 
 class _MeshBoundTrainer:
