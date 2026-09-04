@@ -456,7 +456,7 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Importing rollout registry module: %s", args.registry_module)
   importlib.import_module(args.registry_module)
 
-  if context and args.sampler != "vllm":
+  if context and args.sampler == "vanilla":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
