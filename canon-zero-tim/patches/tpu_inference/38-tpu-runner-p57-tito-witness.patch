@@ -1,0 +1,128 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1129,6 +1129,27 @@
+ _P38_REQUEST_JOURNALED_BANDS = set()
+ _P38_REQUEST_JOURNAL_STATE = {"calls": 0, "records": 0}
+ _P38_PAGE_OWNERSHIP = {}
++_P57_TITO_DEBUG_MODE = os.environ.get(
++    "CANON_P57_TOKEN_CONTINUITY_DEBUG", "")
++_P57_TITO_RUNNER_WITNESS_DIR = os.environ.get(
++    "CANON_P57_TITO_RUNNER_WITNESS_DIR", "")
++_P57_TITO_RUNNER_WITNESS_STATE = {"records": 0}
++_P57_TITO_RUNNER_WITNESS_MAX_RECORDS = 8192
++if bool(_P57_TITO_RUNNER_WITNESS_DIR) != (
++        _P57_TITO_DEBUG_MODE == "collect-64"):
++    raise RuntimeError(
++        "P57 TiTO runner witness and collect-64 must be enabled together")
++if _P57_TITO_RUNNER_WITNESS_DIR:
++    if os.environ.get("CANON_P57_TOKEN_CONTINUITY", "") != "exact":
++        raise RuntimeError("P57 TiTO runner witness requires exact continuity")
++    state_root = os.environ.get("CANON_STATE", "")
++    if not state_root:
++        raise RuntimeError("P57 TiTO runner witness requires CANON_STATE")
++    expected_witness_dir = os.path.realpath(os.path.join(
++        state_root, "p57_tito_witness", "runner"))
++    if os.path.realpath(_P57_TITO_RUNNER_WITNESS_DIR) != expected_witness_dir:
++        raise RuntimeError(
++            "P57 TiTO runner witness must use the registered CANON_STATE path")
+ _P38_INCIDENT_LEDGER = os.environ.get("CANON_P38_INCIDENT_LEDGER", "")
+ _P38_INCIDENT_MIN_PREFIX = int(os.environ.get(
+     "CANON_P38_INCIDENT_MIN_PREFIX", "1400"))
+@@ -3456,6 +3477,89 @@
+     return _hashlib.sha256(values.tobytes()).hexdigest()
+
+
++def _p57_tito_runner_prompt_witness(
++        runner, scheduler_output, req_ids_dp):
++    """Persist one host-only prompt hash for every new sampling request."""
++    if not _P57_TITO_RUNNER_WITNESS_DIR:
++        return
++    import hashlib as _hashlib
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++
++    dp_ranks = {}
++    for dp_rank, request_ids in req_ids_dp.items():
++        for request_id in request_ids:
++            if request_id in dp_ranks:
++                raise RuntimeError(
++                    f"P57 TiTO request appears on two DP ranks: {request_id}")
++            dp_ranks[request_id] = int(dp_rank)
++
++    for new_request in scheduler_output.scheduled_new_reqs:
++        request_id = str(new_request.req_id)
++        # B/full-rescore requests ask the engine for prompt logprobs but do not
++        # flow through SamplerOutput. They are deliberately outside this A-arm
++        # submit/echo/runner join.
++        if request_id in runner.input_batch.num_prompt_logprobs:
++            continue
++        if request_id not in dp_ranks:
++            raise RuntimeError(
++                f"P57 TiTO request has no DP-rank mapping: {request_id}")
++        state = _P57_TITO_RUNNER_WITNESS_STATE
++        if state["records"] >= _P57_TITO_RUNNER_WITNESS_MAX_RECORDS:
++            raise RuntimeError("P57 TiTO runner witness record bound exceeded")
++        request_index = int(runner.input_batch.req_id_to_index[request_id])
++        prompt_tokens = int(
++            runner.input_batch.num_prompt_tokens[request_index])
++        if prompt_tokens <= 0:
++            raise RuntimeError(
++                f"P57 TiTO request has no prompt tokens: {request_id}")
++        token_ids = np.asarray(
++            runner.input_batch.token_ids_cpu[
++                request_index, :prompt_tokens], dtype="<i8")
++        if token_ids.shape != (prompt_tokens,) or np.any(token_ids < 0):
++            raise RuntimeError(
++                f"P57 TiTO request has malformed prompt IDs: {request_id}")
++        state["records"] += 1
++        record_index = int(state["records"])
++        request_key = _hashlib.sha256(request_id.encode()).hexdigest()[:12]
++        record = {
++            "schema": "canon.p57-tito-runner-input.v1",
++            "record_index": record_index,
++            "request_id": request_id,
++            "dp_rank": dp_ranks[request_id],
++            "input_batch_index": request_index,
++            "prompt_tokens": prompt_tokens,
++            "prompt_sha256": _p38_token_history_sha256(token_ids),
++        }
++        encoded = (_json.dumps(
++            record, sort_keys=True, separators=(",", ":")) + "\n").encode()
++        directory = _Path(_P57_TITO_RUNNER_WITNESS_DIR)
++        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
++        final_path = directory / (
++            f"runner-input-{record_index:06d}-{request_key}.json")
++        temporary_path = directory / (
++            f".{final_path.name}.tmp-{_os.getpid()}")
++        if final_path.exists() or temporary_path.exists():
++            raise RuntimeError(
++                f"P57 TiTO runner witness collision: {final_path.name}")
++        descriptor = _os.open(
++            temporary_path, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
++        try:
++            _os.write(descriptor, encoded)
++            _os.fsync(descriptor)
++        finally:
++            _os.close(descriptor)
++        _os.replace(temporary_path, final_path)
++        print(
++            "[CANON_P57_TITO_RUNNER_WITNESS] "
++            f"record={record_index} request={request_id} "
++            f"prompt_tokens={prompt_tokens} "
++            f"prompt_sha256={record['prompt_sha256']}",
++            flush=True,
++        )
++
++
+ def _p38_aval_contract(value):
+     """Describe one program input without materialising its device buffer."""
+     if value is None:
+@@ -6217,6 +6321,7 @@
+          padded_num_reqs_per_dp_rank, logits_indices_selector,
+          tokens_indices_selector, max_num_reqs_per_dp_rank
+          ) = self._prepare_input_metadata(scheduler_output)
++        _p57_tito_runner_prompt_witness(self, scheduler_output, req_ids_dp)
+         # Multi-modal support
+         # Calculate M-RoPE positions.
+         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

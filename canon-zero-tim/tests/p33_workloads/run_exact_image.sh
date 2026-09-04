@@ -41,6 +41,8 @@ $DOCKER run --rm \
     grep -Fq '_p38_request_journal' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_incident_ledger' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_aval_contract' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p57_tito_runner_prompt_witness' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'canon.p57-tito-runner-input.v1' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_kv_observer_after_standard' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-live-kv-prefix-table-v1' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
@@ -82,6 +84,8 @@ $DOCKER run --rm \
     grep -Fq '_p38_request_journal' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_incident_ledger' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_aval_contract' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p57_tito_runner_prompt_witness' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'canon.p57-tito-runner-input.v1' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_kv_observer_after_standard' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-live-kv-prefix-table-v1' "$qwen8b_overlay/tpu_runner_p21_l30.py"
@@ -110,8 +114,10 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_tito_runner_witness_overlay.py \
+      --overlay "$qwen8b_overlay"
     python3 \
       canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/probe_m15_replay_round_provenance.py \
       "$qwen8b_overlay/tpu_runner_p21_l30.py"
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=35 m15_round_provenance=1 overlays=2"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=37 p57_tito_runner_witness=2 p57_tito_runner_execution=1 m15_round_provenance=1 overlays=2"
   '
