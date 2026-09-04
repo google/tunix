@@ -232,6 +232,20 @@ parser.add_argument(
     help="Optional override for rollout mesh TP dimension.",
 )
 parser.add_argument(
+    "--rollout_mesh_ep",
+    type=int,
+    default=1,
+    help=(
+        "Rollout expert parallelism. Required for large MoE models: the vLLM"
+        " adapter pads the MoE MLP dim up to a multiple of 2 * num_lanes, and"
+        " with ep=1 that padding grows at the same rate as the per-chip shard"
+        " shrinks, so per-chip weight memory is invariant under tp/dp. Expert"
+        " parallelism is the only axis that reduces experts-per-chip."
+        " Constraint: tp * ep * dcp must divide gdn_num_key_heads for models"
+        " with GatedDeltaNet layers."
+    ),
+)
+parser.add_argument(
     "--train_mesh_fsdp",
     type=int,
     default=None,
@@ -787,6 +801,7 @@ total_devices = len(devices)
 # 1. Resolve Rollout Mesh Dimensions
 rollout_fsdp = args.rollout_mesh_fsdp
 rollout_tp = args.rollout_mesh_tp
+ROLLOUT_EP = args.rollout_mesh_ep
 if rollout_fsdp is None and rollout_tp is None:
   num_rollout_devices = int(total_devices * args.rollout_split_fraction)
   rollout_tp = 2
@@ -1035,6 +1050,10 @@ vllm_rollout_dict = {
     "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": rollout_mesh.shape.get("model", 1),
     "data_parallel_size": rollout_mesh.shape.get("data", 1),
+    # RolloutConfig.expert_parallel_size defaults to 1 and was never set here,
+    # so expert parallelism was unreachable from configuration. See
+    # --rollout_mesh_ep for why large MoE models require it.
+    "expert_parallel_size": ROLLOUT_EP,
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
