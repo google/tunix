@@ -49,6 +49,7 @@ export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export REWARD_MODE=${REWARD_MODE:-env}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -183,6 +184,7 @@ start_orchestrator() {
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --reward_mode=${REWARD_MODE} \
         --stop_workers_on_exit \
         ${DEBUG:+--debug} \
     " \
