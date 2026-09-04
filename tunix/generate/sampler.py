@@ -115,6 +115,11 @@ def sample_top_p(
     return_logprobs: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   """Sample a token using top-p sampling."""
+  if temperature <= 0.0:
+    raise ValueError(
+        f'Temperature must be strictly positive in sample_top_p, got'
+        f' {temperature}'
+    )
   # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
   next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
@@ -475,6 +480,17 @@ class Sampler(base_sampler.BaseSampler):
       utils.check_sampling_mode_conflict(sampling_mode, 'top_p')  # pyrefly: ignore[bad-argument-type]
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
+      if not temperature > 0:
+        error_msg = (
+            'Temperature must be a positive number when using top_p'
+            f' sampling, got {temperature}.'
+        )
+        if temperature == 0.0 or temperature == 0:
+          error_msg += (
+              ' If you want to use greedy sampling, set top_p to None and'
+              ' beam_size to None.'
+          )
+        raise ValueError(error_msg)
 
     if sampling_mode[0] is None:
       sampling_mode[0] = 'greedy'  # pyrefly: ignore[unsupported-operation]

@@ -369,6 +369,91 @@ class SamplerTest(parameterized.TestCase):
       self.assertNotEmpty(logprobs)
       self.assertLen(logprobs, tokens.shape[0])
 
+  def test_temperature_validation_with_top_p(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # temperature=0.0 with top_p should raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, 'Temperature must be a positive number'
+    ):
+      sampler(
+          ['input string'],
+          max_generation_steps=10,
+          temperature=0.0,
+          top_p=0.9,
+      )
+
+    # default temperature (0.0) with top_p should raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, 'Temperature must be a positive number'
+    ):
+      sampler(
+          ['input string'],
+          max_generation_steps=10,
+          top_p=0.9,
+      )
+
+    # negative temperature with top_p should raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, 'Temperature must be a positive number'
+    ):
+      sampler(
+          ['input string'],
+          max_generation_steps=10,
+          temperature=-0.5,
+          top_p=0.9,
+      )
+
+    # Positive integer temperature should succeed
+    res_int = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=1,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(res_int)
+
+    # Positive float temperature should succeed
+    res_float = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=0.8,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(res_float)
+
+    # Positive numpy float temperature should succeed
+    res_np_float = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=np.float32(0.8),  # pyrefly: ignore[bad-argument-type]
+        top_p=0.9,
+    )
+    self.assertIsNotNone(res_np_float)
+
+    # temperature=0.0 with top_p=None (greedy) should succeed
+    res_greedy = sampler(
+        ['input string'],
+        max_generation_steps=10,
+        temperature=0.0,
+        top_p=None,
+    )
+    self.assertIsNotNone(res_greedy)
+
   def test_prompt_padding_bucketization(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
