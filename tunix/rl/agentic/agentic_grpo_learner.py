@@ -45,6 +45,7 @@ from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -179,6 +180,20 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
             self.off_policy_steps,
             self.off_policy_steps,
         )
+    # This override does not chain to `AlgorithmConfig.__post_init__`, so the
+    # shared sampler-vs-trainer validation has to be invoked explicitly.
+    self.validate_sampler_is_options()
+    if self.sampler_is is not None and (
+        self.truncated_importance_sampling_type is not None
+    ):
+      raise ValueError(
+          "sampler_is and truncated_importance_sampling_type are two"
+          " different importance-sampling corrections; enabling both applies"
+          f" both sets of weights to the same loss. Got"
+          f" sampler_is={self.sampler_is!r} and"
+          " truncated_importance_sampling_type="
+          f"{self.truncated_importance_sampling_type!r}."
+      )
 
 
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
@@ -296,7 +311,37 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
+    # Emitted by the loss only when the matching option is set, so register
+    # them conditionally to keep the two in step. The length-scaling
+    # diagnostic emits raw per-bucket sums, for which np.sum is the only
+    # correct aggregator; derived ratios are computed offline from those.
+    cfg = self.algo_config
+    optional_metrics: Dict[str, Any] = {
+        f"sampler_is/lenscale/{suffix}": np.sum
+        for suffix in algo_core.sampler_is_length_bucket_metric_names(
+            cfg.sampler_is_length_buckets
+        )
+    }
+    for low, high in cfg.sampler_is_report_bands or ():
+      name = f"sampler_is/would_drop_{algo_core.band_label(low, high)}"
+      optional_metrics[name] = common.mean_of_means
+    if cfg.truncated_importance_sampling_type is not None:
+      optional_metrics["tis/is_oob_ratio"] = common.mean_of_means
+    if cfg.seq_logprob_error_threshold is not None:
+      optional_metrics["sample_mask/mult_prob_error_mean"] = (
+          common.mean_of_means
+      )
+      optional_metrics["sample_mask/mult_prob_error_max"] = np.max
+
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
+        **optional_metrics,
+        "sample_mask/kept_frac": common.mean_of_means,
+        "sampler_is/token_logdiff_absmean": common.mean_of_means,
+        "sampler_is/token_weight_mean": common.mean_of_means,
+        "sampler_is/token_weight_max": np.max,
+        "sampler_is/seq_geomean_mean": common.mean_of_means,
+        "sampler_is/seq_geomean_min": np.min,
+        "sampler_is/seq_geomean_max": np.max,
         "kl": common.mean_of_means,
         "entropy": common.mean_of_means,
         "reduced_pg_loss": common.mean_of_means,
@@ -569,6 +614,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
     raw_completion_lengths: List[int] = []
+    overlong_flags: List[float] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -593,6 +639,20 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
+      # The collect engine's own verdict. "Overlong" here means the response
+      # budget was exhausted without an end-of-sequence token, i.e. a truncated
+      # prefix. Deliberately narrower than the engine's `filter_statuses`,
+      # which also covers agent and environment failures -- those are a
+      # different kind of invalid sample and should not be conflated.
+      # `.name`, because the collect engine serialises the status by name
+      # (`agent_types.py:142`, `trajectory_collect_engine.py:322`); the enum
+      # uses `auto()`, so `.value` is an opaque int that would never match.
+      overlong_flags.append(
+          1.0
+          if item.traj.get("status")
+          == agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name
+          else 0.0
+      )
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -945,6 +1005,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
+        rollout_per_token_logps=rollout_per_token_logps,
+        overlong=jnp.asarray(overlong_flags, dtype=jnp.float32),
     )
     return [combined_batch]
 
