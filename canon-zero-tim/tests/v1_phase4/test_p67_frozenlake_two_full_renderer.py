@@ -57,7 +57,15 @@ def _env(document: dict) -> dict[str, str]:
 
 class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
 
-  def _render(self, output: Path, *, m15_tito_exact: bool = False):
+  def _render(
+      self,
+      output: Path,
+      *,
+      m15_tito_exact: bool = False,
+      token_continuity: str | None = None,
+      token_continuity_debug: bool = False,
+      token_continuity_debug_mode: str | None = None,
+  ):
     return renderer.render_two(
         source_commit="b" * 40,
         output_dir=output,
@@ -66,6 +74,9 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         campaign_root="v1p67-a",
         base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
         m15_tito_exact=m15_tito_exact,
+        token_continuity=token_continuity,
+        token_continuity_debug=token_continuity_debug,
+        token_continuity_debug_mode=token_continuity_debug_mode,
     )
 
   def test_renders_exactly_two_scoped_full_recipes_without_topology_drift(self):
@@ -124,9 +135,11 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
       self.assertEqual(m15["CANON_P57_DATA_SPLIT"], "main")
       self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15)
+      self.assertNotIn("CANON_P57_TOKEN_CONTINUITY", p45)
+      self.assertNotIn("CANON_P57_TOKEN_CONTINUITY", m15)
       index = (root / "manifest-index.json").read_text(encoding="utf-8")
-      self.assertIn('"schema": "v1-p67-frozenlake-two-full-v1"', index)
-      self.assertIn('"m15_tito_exact": false', index)
+      self.assertIn('"schema": "v1-p67-frozenlake-two-full-v2"', index)
+      self.assertIn('"token_continuity": "legacy"', index)
 
   def test_explicit_exact_tito_changes_only_m15(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -137,11 +150,13 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
           for path in outputs
       ]
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
-      self.assertEqual(m15["CANON_M15_TOKEN_CONTINUITY"], "exact")
+      self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15)
+      self.assertNotIn("CANON_P57_TOKEN_CONTINUITY", p45)
+      self.assertEqual(m15["CANON_P57_TOKEN_CONTINUITY"], "exact")
       index = (root / "rendered/manifest-index.json").read_text(
           encoding="utf-8"
       )
-      self.assertIn('"m15_tito_exact": true', index)
+      self.assertIn('"token_continuity": "m15-exact"', index)
 
       state = root / "state-m15-exact"
       state.mkdir()
@@ -166,11 +181,333 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
           msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
       )
       self.assertIn(
-          "[env] M15 exact TITO enabled mode=exact default=off",
+          "[env] P57 exact TITO enabled workload=m15 mode=exact default=off",
           completed.stdout,
       )
       snapshot = (state / "env.sh").read_text(encoding="utf-8")
-      self.assertIn("export CANON_M15_TOKEN_CONTINUITY=exact", snapshot)
+      self.assertIn("export CANON_P57_TOKEN_CONTINUITY=exact", snapshot)
+
+  def test_closed_selector_routes_exact_tito_to_each_requested_workload(self):
+    expected = {
+        "legacy": (False, False),
+        "p45-exact": (True, False),
+        "m15-exact": (False, True),
+        "both-exact": (True, True),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+      for mode, selected in expected.items():
+        with self.subTest(mode=mode):
+          outputs = self._render(
+              Path(tmp) / mode, token_continuity=mode
+          )
+          envs = [
+              _env(yaml.safe_load(path.read_text(encoding="utf-8")))
+              for path in outputs
+          ]
+          self.assertEqual(
+              tuple("CANON_P57_TOKEN_CONTINUITY" in env for env in envs),
+              selected,
+          )
+          for env, enabled in zip(envs, selected, strict=True):
+            self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", env)
+            if enabled:
+              self.assertEqual(env["CANON_P57_TOKEN_CONTINUITY"], "exact")
+              recipe = (
+                  "m15"
+                  if env["CANON_P57_WORKLOAD_CANDIDATE"] == "m15"
+                  else "p45"
+              )
+              state = Path(tmp) / f"state-{mode}-{recipe}"
+              state.mkdir()
+              completed = subprocess.run(
+                  [
+                      "bash",
+                      str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh"),
+                  ],
+                  cwd=_REPO,
+                  env={
+                      **os.environ,
+                      **env,
+                      "CANON_PKG": str(_REPO / "canon-zero-tim"),
+                      "CANON_STATE": str(state),
+                      "JOBSET_RESTART_ATTEMPT": "0",
+                      "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+                  },
+                  text=True,
+                  capture_output=True,
+                  check=False,
+              )
+              self.assertEqual(
+                  completed.returncode,
+                  0,
+                  msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+              )
+              self.assertIn(
+                  f"[env] P57 exact TITO enabled workload={recipe} "
+                  "mode=exact default=off",
+                  completed.stdout,
+              )
+
+  def test_both_exact_changes_only_the_two_selector_entries(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      legacy = [
+          yaml.safe_load(path.read_text(encoding="utf-8"))
+          for path in self._render(
+              root / "legacy", token_continuity="legacy"
+          )
+      ]
+      treatment = [
+          yaml.safe_load(path.read_text(encoding="utf-8"))
+          for path in self._render(
+              root / "both-exact", token_continuity="both-exact"
+          )
+      ]
+      for control, exact in zip(legacy, treatment, strict=True):
+        exact_env = _pod(exact)["containers"][0]["env"]
+        selected = [
+            item
+            for item in exact_env
+            if item.get("name") == "CANON_P57_TOKEN_CONTINUITY"
+        ]
+        self.assertEqual(
+            selected,
+            [{"name": "CANON_P57_TOKEN_CONTINUITY", "value": "exact"}],
+        )
+        exact_env[:] = [
+            item
+            for item in exact_env
+            if item.get("name") != "CANON_P57_TOKEN_CONTINUITY"
+        ]
+        self.assertEqual(exact, control)
+
+  def test_first_diff_debug_changes_only_selected_exact_arms(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      exact = [
+          yaml.safe_load(path.read_text(encoding="utf-8"))
+          for path in self._render(
+              root / "exact", token_continuity="both-exact"
+          )
+      ]
+      debug = [
+          yaml.safe_load(path.read_text(encoding="utf-8"))
+          for path in self._render(
+              root / "debug",
+              token_continuity="both-exact",
+              token_continuity_debug=True,
+          )
+      ]
+      debug_envs = [dict(_env(document)) for document in debug]
+      for control, treatment in zip(exact, debug, strict=True):
+        treatment_env = _pod(treatment)["containers"][0]["env"]
+        selected = [
+            item
+            for item in treatment_env
+            if item.get("name") == "CANON_P57_TOKEN_CONTINUITY_DEBUG"
+        ]
+        self.assertEqual(
+            selected,
+            [{
+                "name": "CANON_P57_TOKEN_CONTINUITY_DEBUG",
+                "value": "first-diff",
+            }],
+        )
+        treatment_env[:] = [
+            item
+            for item in treatment_env
+            if item.get("name") != "CANON_P57_TOKEN_CONTINUITY_DEBUG"
+        ]
+        self.assertEqual(treatment, control)
+      index = (root / "debug/manifest-index.json").read_text(
+          encoding="utf-8"
+      )
+      self.assertIn('"token_continuity_debug": "first-diff"', index)
+
+      values = debug_envs[0]
+      state = root / "state-debug"
+      state.mkdir()
+      completed = subprocess.run(
+          ["bash", str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh")],
+          cwd=_REPO,
+          env={
+              **os.environ,
+              **values,
+              "CANON_PKG": str(_REPO / "canon-zero-tim"),
+              "CANON_STATE": str(state),
+              "JOBSET_RESTART_ATTEMPT": "0",
+              "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+          },
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+      self.assertIn(
+          "[env] P57 exact TITO first-diff diagnostics armed "
+          "workload=p45 default=off",
+          completed.stdout,
+      )
+      for label, mutation in (
+          (
+              "debug-without-exact",
+              {"CANON_P57_TOKEN_CONTINUITY": None},
+          ),
+          (
+              "malformed-debug",
+              {"CANON_P57_TOKEN_CONTINUITY_DEBUG": "0"},
+          ),
+      ):
+        rejected_env = dict(values)
+        for name, value in mutation.items():
+          if value is None:
+            rejected_env.pop(name, None)
+          else:
+            rejected_env[name] = value
+        rejected_state = root / label
+        rejected_state.mkdir()
+        rejected = subprocess.run(
+            ["bash", str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh")],
+            cwd=_REPO,
+            env={
+                **os.environ,
+                **rejected_env,
+                "CANON_PKG": str(_REPO / "canon-zero-tim"),
+                "CANON_STATE": str(rejected_state),
+                "JOBSET_RESTART_ATTEMPT": "0",
+                "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("[profile] P57", rejected.stderr)
+
+  def test_selector_rejects_unknown_and_alias_conflict(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      with self.assertRaisesRegex(ValueError, "token continuity must be"):
+        self._render(root / "unknown", token_continuity="unknown")
+      with self.assertRaisesRegex(ValueError, "cannot be combined"):
+        self._render(
+            root / "conflict",
+            token_continuity="both-exact",
+            m15_tito_exact=True,
+        )
+      with self.assertRaisesRegex(ValueError, "require.*at least one exact"):
+        self._render(
+            root / "debug-legacy",
+            token_continuity="legacy",
+            token_continuity_debug=True,
+        )
+
+  def test_record_full_is_explicit_on_both_exact_arms_and_derives_gcs(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      outputs = self._render(
+          root / "record-full",
+          token_continuity="both-exact",
+          token_continuity_debug_mode="record-full",
+      )
+      documents = [
+          yaml.safe_load(path.read_text(encoding="utf-8")) for path in outputs
+      ]
+      for document in documents:
+        values = _env(document)
+        self.assertEqual(values["CANON_P57_TOKEN_CONTINUITY"], "exact")
+        self.assertEqual(
+            values["CANON_P57_TOKEN_CONTINUITY_DEBUG"], "record-full"
+        )
+        gcs_prefix = "CANON_" + "P57_TITO_GCS_"
+        self.assertFalse(any(name.startswith(gcs_prefix) for name in values))
+
+      values = _env(documents[0])
+      state = root / "state"
+      state.mkdir()
+      completed = subprocess.run(
+          ["bash", str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh")],
+          cwd=_REPO,
+          env={
+              **os.environ,
+              **values,
+              "CANON_PKG": str(_REPO / "canon-zero-tim"),
+              "CANON_STATE": str(state),
+              "JOBSET_RESTART_ATTEMPT": "0",
+              "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+          },
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertEqual(completed.returncode, 0, completed.stderr)
+      self.assertIn(
+          "P57 exact TITO record-full enabled workload=p45 ",
+          completed.stdout,
+      )
+      resolved = (state / "env.sh").read_text(encoding="utf-8")
+      self.assertIn("CANON_P57_TITO_GCS_HEARTBEAT=", resolved)
+      index = (root / "record-full/manifest-index.json").read_text(
+          encoding="utf-8"
+      )
+      self.assertIn('"token_continuity_debug": "record-full"', index)
+
+  def test_exact_selector_rejects_malformed_mixed_and_foreign_runtime(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      p45 = _env(yaml.safe_load(self._render(
+          root / "rendered", token_continuity="p45-exact"
+      )[0].read_text(encoding="utf-8")))
+      env_step = _REPO / "canon-zero-tim/cluster/steps/00_env.sh"
+      cases = (
+          (
+              "malformed",
+              {"CANON_P57_TOKEN_CONTINUITY": "verify"},
+              "TITO option must be absent or exact",
+          ),
+          (
+              "mixed",
+              {"CANON_M15_TOKEN_CONTINUITY": "exact"},
+              "P45 forbids the M15 token-continuity selector",
+          ),
+          (
+              "wrong-topology",
+              {"CANON_DP_SIZE": "16"},
+              "raw P57 exact TITO identity drifted",
+          ),
+          (
+              "wrong-profile",
+              {
+                  "CANON_PROFILE_FILE": (
+                      "cluster/profiles/"
+                      "qwen3-8b-dp8-tp8-frozenlake-tim.env"
+                  )
+              },
+              "P45 checkpoint-disabled mode is isolated",
+          ),
+      )
+      for label, mutation, expected_error in cases:
+        with self.subTest(label=label):
+          state = root / f"state-{label}"
+          state.mkdir()
+          completed = subprocess.run(
+              ["bash", str(env_step)],
+              cwd=_REPO,
+              env={
+                  **os.environ,
+                  **p45,
+                  **mutation,
+                  "CANON_PKG": str(_REPO / "canon-zero-tim"),
+                  "CANON_STATE": str(state),
+                  "JOBSET_RESTART_ATTEMPT": "0",
+                  "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+              },
+              text=True,
+              capture_output=True,
+              check=False,
+          )
+          self.assertNotEqual(completed.returncode, 0)
+          self.assertIn(expected_error, completed.stderr)
 
   def test_both_manifests_pass_real_env_resolution(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -215,6 +552,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertIn("export CANON_P71_SCAN=fwd", snapshot)
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", snapshot)
         self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", snapshot)
+        self.assertNotIn("CANON_P57_TOKEN_CONTINUITY", snapshot)
         self.assertNotIn(
             "[env] M15 exact TITO enabled", completed.stdout
         )
@@ -265,8 +603,9 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
     self.assertIn("refusing to render from a dirty worktree", script)
     self.assertIn("V1_P67_FROZENLAKE_WAVE_READY", script)
     self.assertIn("launch=not-executed", script)
-    self.assertIn("[--m15-tito-exact]", script)
-    self.assertIn("M15_TITO_MODE=off", script)
+    self.assertIn("--token-continuity legacy|p45-exact|m15-exact|both-exact", script)
+    self.assertIn("TOKEN_CONTINUITY_MODE=legacy", script)
+    self.assertIn("--token-continuity-debug", script)
     self.assertEqual(script.count('"kubectl apply -f '), 2)
     self.assertFalse(
         any(line.strip().startswith("kubectl apply") for line in script.splitlines())

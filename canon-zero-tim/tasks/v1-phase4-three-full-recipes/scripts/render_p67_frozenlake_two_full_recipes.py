@@ -22,11 +22,16 @@ for path in (_REPO_ROOT, _CLUSTER_DIR):
     sys.path.insert(0, str(path))
 
 import render_p57_frozenlake_tim as p57
-from v1_full_system_optimization import full_system_optimization_additions
 
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _PROFILE = p57._V1_HP_PROFILE  # pylint: disable=protected-access
+_TOKEN_CONTINUITY_MODES = (
+    "legacy",
+    "p45-exact",
+    "m15-exact",
+    "both-exact",
+)
 _JAX_CACHE_ENV = {
     "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
     "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
@@ -81,6 +86,30 @@ def _write_yaml(path: Path, document: dict) -> None:
   )
 
 
+def _resolve_token_continuity(
+    token_continuity: str | None,
+    *,
+    m15_tito_exact: bool,
+) -> str:
+  if token_continuity is not None and m15_tito_exact:
+    raise ValueError(
+        "--m15-tito-exact cannot be combined with --token-continuity"
+    )
+  resolved = (
+      "m15-exact"
+      if m15_tito_exact
+      else "legacy"
+      if token_continuity is None
+      else token_continuity
+  )
+  if resolved not in _TOKEN_CONTINUITY_MODES:
+    raise ValueError(
+        "token continuity must be one of "
+        f"{_TOKEN_CONTINUITY_MODES}, got {resolved!r}"
+    )
+  return resolved
+
+
 def render_two(
     *,
     source_commit: str,
@@ -90,6 +119,9 @@ def render_two(
     campaign_root: str,
     base_path: Path,
     m15_tito_exact: bool = False,
+    token_continuity: str | None = None,
+    token_continuity_debug: bool = False,
+    token_continuity_debug_mode: str | None = None,
 ) -> tuple[Path, ...]:
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
@@ -97,6 +129,22 @@ def render_two(
     raise FileExistsError(f"refusing to overwrite output root: {output_dir}")
   if p45_run_id == m15_run_id:
     raise ValueError("P45 and M15 run ids must be distinct")
+  token_continuity = _resolve_token_continuity(
+      token_continuity, m15_tito_exact=m15_tito_exact
+  )
+  if token_continuity_debug and token_continuity_debug_mode is not None:
+    raise ValueError(
+        "--token-continuity-debug and --token-continuity-debug-mode conflict"
+    )
+  debug_mode = (
+      "first-diff" if token_continuity_debug else token_continuity_debug_mode
+  )
+  if debug_mode not in (None, "first-diff", "record-full"):
+    raise ValueError("token-continuity debug mode is not closed")
+  if debug_mode is not None and token_continuity == "legacy":
+    raise ValueError(
+        "token-continuity diagnostics require at least one exact treatment"
+    )
 
   output_dir.mkdir(parents=True)
   p45_outputs = p57.render_all(
@@ -134,10 +182,6 @@ def render_two(
   receipts = []
   for label, path in zip(("p45", "m15"), outputs, strict=True):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    additions = full_system_optimization_additions(
-        f"frozenlake-{label}"
-    )
-    _set_env(document, additions)
     head = document["spec"]["replicatedJobs"][0]["template"]["spec"][
         "template"
     ]["spec"]
@@ -159,8 +203,19 @@ def render_two(
     }
     if anti_affinity_term not in required_anti_affinity:
       required_anti_affinity.append(anti_affinity_term)
-    if label == "m15" and m15_tito_exact:
-      _set_env(document, {"CANON_M15_TOKEN_CONTINUITY": "exact"})
+    exact_workloads = {
+        "legacy": frozenset(),
+        "p45-exact": frozenset({"p45"}),
+        "m15-exact": frozenset({"m15"}),
+        "both-exact": frozenset({"p45", "m15"}),
+    }[token_continuity]
+    if label in exact_workloads:
+      _set_env(document, {"CANON_P57_TOKEN_CONTINUITY": "exact"})
+      if debug_mode is not None:
+        _set_env(
+            document,
+            {"CANON_P57_TOKEN_CONTINUITY_DEBUG": debug_mode},
+        )
     _write_yaml(path, document)
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -214,16 +269,30 @@ def render_two(
       raise ValueError(
           f"{label} rendered an uncertified DP collective reducer"
       )
-    expected_tito = "exact" if label == "m15" and m15_tito_exact else None
-    if expected_tito is None and "CANON_M15_TOKEN_CONTINUITY" in env:
+    if "CANON_M15_TOKEN_CONTINUITY" in env:
       raise ValueError(
-          f"{label} must keep the optional M15 TITO selector absent"
+          f"{label} must not render the historical M15 TITO selector"
       )
-    if (
-        expected_tito is not None
-        and env.get("CANON_M15_TOKEN_CONTINUITY") != expected_tito
-    ):
-      raise ValueError("M15 exact TITO option was not rendered exactly once")
+    expected_tito = "exact" if label in exact_workloads else None
+    if expected_tito is None and "CANON_P57_TOKEN_CONTINUITY" in env:
+      raise ValueError(f"{label} must keep the P57 TITO selector absent")
+    if expected_tito is not None and env.get(
+        "CANON_P57_TOKEN_CONTINUITY"
+    ) != expected_tito:
+      raise ValueError(f"{label} exact TITO option was not rendered exactly once")
+    expected_debug = (
+        debug_mode
+        if label in exact_workloads and debug_mode is not None
+        else None
+    )
+    if expected_debug is None and "CANON_P57_TOKEN_CONTINUITY_DEBUG" in env:
+      raise ValueError(f"{label} must keep token diagnostics absent")
+    if expected_debug is not None and env.get(
+        "CANON_P57_TOKEN_CONTINUITY_DEBUG"
+    ) != expected_debug:
+      raise ValueError(
+          f"{label} token diagnostics were not rendered exactly once"
+      )
     receipts.append({
         "recipe": label,
         "path": str(path),
@@ -240,8 +309,9 @@ def render_two(
   index = output_dir / "manifest-index.json"
   index.write_text(
       json.dumps({
-          "schema": "v1-p67-frozenlake-two-full-v1",
-          "m15_tito_exact": m15_tito_exact,
+          "schema": "v1-p67-frozenlake-two-full-v2",
+          "token_continuity": token_continuity,
+          "token_continuity_debug": debug_mode,
           "manifests": receipts,
       }, indent=2) + "\n",
       encoding="utf-8",
@@ -263,7 +333,22 @@ def main() -> int:
   parser.add_argument(
       "--m15-tito-exact",
       action="store_true",
-      help="render exact M15 token input; default keeps the selector absent",
+      help="deprecated alias for --token-continuity=m15-exact",
+  )
+  parser.add_argument(
+      "--token-continuity",
+      choices=_TOKEN_CONTINUITY_MODES,
+      help="select exact token transport per workload; default is legacy",
+  )
+  parser.add_argument(
+      "--token-continuity-debug",
+      action="store_true",
+      help="persist and log the first exact token mismatch; default is off",
+  )
+  parser.add_argument(
+      "--token-continuity-debug-mode",
+      choices=("first-diff", "record-full"),
+      help="select the closed diagnostic policy; default is absent",
   )
   parser.add_argument(
       "--base", type=Path, default=_CLUSTER_DIR / "jobset-64chip.yaml"
@@ -277,6 +362,9 @@ def main() -> int:
       campaign_root=args.campaign_root,
       base_path=args.base,
       m15_tito_exact=args.m15_tito_exact,
+      token_continuity=args.token_continuity,
+      token_continuity_debug=args.token_continuity_debug,
+      token_continuity_debug_mode=args.token_continuity_debug_mode,
   )
   return 0
 

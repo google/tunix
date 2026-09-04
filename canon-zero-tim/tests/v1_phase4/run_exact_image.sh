@@ -85,16 +85,33 @@ $docker run --rm \
     python3 tests/perf/profile_window_test.py
     python3 canon-zero-tim/tests/p57_frozenlake_tim/test_m15_alignment_warning.py
     python3 canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_tito_collection_classifier.py
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_tito_full_record_classifier.py
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_tito_gcs_sync.py
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_tito_diagnostic_renderer.py
+    python3 tests/rl/rollout/vllm_rollout_canonical_test.py \
+      VllmRolloutCanonicalTest.test_prompt_witness_distinguishes_submit_from_engine_echo \
+      VllmRolloutCanonicalTest.test_prompt_witness_rejects_missing_duplicate_or_malformed_echo \
+      VllmRolloutCanonicalTest.test_server_mode_rejects_swapped_request_outputs \
+      VllmRolloutCanonicalTest.test_server_mode_does_not_add_identity_assertion_without_witness
     python3 tests/rl/agentic/trajectory/trajectory_collect_engine_test.py \
       TrajectoryCollectEngineTest.test_m15_verify_observes_drift_without_replacing_text_prompt \
       TrajectoryCollectEngineTest.test_m15_verify_reports_exact_later_turn_prompt \
       TrajectoryCollectEngineTest.test_m15_verify_rejects_caller_prompt_token_override \
       TrajectoryCollectEngineTest.test_deepswe_and_m15_exact_admissions_are_mutually_exclusive \
       TrajectoryCollectEngineTest.test_m15_exact_reuses_and_verifies_exact_turn_tokens \
+      TrajectoryCollectEngineTest.test_p45_exact_reuses_and_verifies_exact_turn_tokens \
+      TrajectoryCollectEngineTest.test_p57_m15_exact_reuses_and_verifies_exact_turn_tokens \
+      TrajectoryCollectEngineTest.test_p57_first_diff_debug_persists_reconstructable_capsule \
+      TrajectoryCollectEngineTest.test_p57_collect_diff_stops_only_trajectory_and_masks_tokens \
+      TrajectoryCollectEngineTest.test_p57_collect_cap_is_process_wide_and_allocated_before_io \
+      TrajectoryCollectEngineTest.test_p57_record_full_diff_preserves_training_row_and_request_join \
       TrajectoryCollectEngineTest.test_m15_exact_fails_if_serving_consumes_different_tokens
     python3 tests/rl/agentic/agentic_rl_learner_test.py \
       AgenticRLLearnerTest.test_model_call_routes_signed_deepswe_pre_tokenized_prompt_exactly \
       AgenticRLLearnerTest.test_model_call_routes_signed_m15_pre_tokenized_prompt_exactly \
+      AgenticRLLearnerTest.test_model_call_routes_signed_p45_pre_tokenized_prompt_exactly \
+      AgenticRLLearnerTest.test_model_call_routes_signed_p57_m15_pre_tokenized_prompt_exactly \
       AgenticRLLearnerTest.test_model_call_rejects_simultaneous_deepswe_and_m15_admission \
       AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt
     bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
@@ -119,5 +136,5 @@ $docker run --rm \
     python3 canon-zero-tim/tests/p38_serving/test_kv_observer_classifier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_wide_durability.py
     bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 frozenlake_system_optimization=1 frozenlake_ab_warning=2 m15_token=1 m15_tito_impl=1 m15_tito_option=exact m15_tito_default=off p32_empty_completion=2 apc_m15_carrier=74 m15_d3e=1 m15_e0=30 m15_e0_kv3=3 m15_e0_kv3_return=1 m15_e0u_round0_recovery=8 m15_e0v_tito=7 m15_e0v_onehost_arm=5 m15_e0v_onehost_pair=5 m15_e0v_onehost_runner=3 m15_e0w5_recovery=5 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 frozenlake_system_optimization=1 frozenlake_ab_warning=2 m15_token=1 frozenlake_tito_impl=2 frozenlake_tito_selector=closed frozenlake_tito_summary=1 frozenlake_tito_debug=1 frozenlake_tito_capsule_integrity=1 frozenlake_tito_engine_witness=1 frozenlake_tito_collect64=1 frozenlake_tito_record_full=1 frozenlake_tito_gcs=1 frozenlake_tito_default=legacy p32_empty_completion=2 apc_m15_carrier=74 m15_d3e=1 m15_e0=30 m15_e0_kv3=3 m15_e0_kv3_return=1 m15_e0u_round0_recovery=8 m15_e0v_tito=7 m15_e0v_onehost_arm=5 m15_e0v_onehost_pair=5 m15_e0v_onehost_runner=3 m15_e0w5_recovery=5 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3"
   '

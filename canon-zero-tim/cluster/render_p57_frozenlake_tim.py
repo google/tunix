@@ -28,6 +28,9 @@ _PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
 _V1_HP_PROFILE = (
     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
 )
+_TITO_DIAGNOSTIC_PROFILE = (
+    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env"
+)
 _CHECKPOINT_ROOT = (
     "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
 )
@@ -214,6 +217,18 @@ def _spec(
       command.append("--eval_every_n_steps=0")
     key_suffix = str(expected_updates)
     job_prefix = f"canon-p57-fl-{arm.name[:4]}"
+  elif run_kind == "tito-diagnostic":
+    command.extend((
+        "--num_test_batches=1",
+        "--eval_every_n_steps=0",
+        "--evaluation_only",
+    ))
+    key_suffix = "tito-diagnostic"
+    job_prefix = (
+        "canon-p57-tito-m15"
+        if workload_candidate == "m15"
+        else "canon-p57-tito-p45"
+    )
   elif run_kind == "eval":
     if checkpoint_step is None:
       raise ValueError("P57 eval spec requires a checkpoint step")
@@ -246,9 +261,15 @@ def _spec(
   return p33.JobSpec(
       key=f"p57-frozenlake-{arm.name}-{workload_suffix}{key_suffix}",
       workload="frozenlake",
-      stage="full",
-      profile=_V1_HP_PROFILE if high_performance else _PROFILE,
-      no_commit=False,
+      stage="rollout-only" if run_kind == "tito-diagnostic" else "full",
+      profile=(
+          _TITO_DIAGNOSTIC_PROFILE
+          if run_kind == "tito-diagnostic"
+          else _V1_HP_PROFILE
+          if high_performance
+          else _PROFILE
+      ),
+      no_commit=run_kind == "tito-diagnostic",
       job_prefix=job_prefix,
       command=tuple(command),
       enable_evaluation=enable_train_evaluation,
@@ -334,8 +355,9 @@ def render_all(
     )
   if checkpoint_mode not in ("disabled", "new", "resume"):
     raise ValueError("P57 checkpoint mode must be disabled, new, or resume")
-  if run_kind not in ("train", "eval"):
-    raise ValueError("P57 run kind must be train or eval")
+  if run_kind not in ("train", "eval", "tito-diagnostic"):
+    raise ValueError("P57 run kind must be train, eval, or tito-diagnostic")
+  tito_diagnostic = run_kind == "tito-diagnostic"
   if high_performance and (
       run_kind != "train"
       or arm != "zero"
@@ -346,18 +368,30 @@ def render_all(
         "P57 v1 high-performance mode requires a checkpoint-disabled "
         "300-update zero train"
     )
-  if checkpoint_mode == "disabled" and not high_performance:
+  if checkpoint_mode == "disabled" and not (high_performance or tito_diagnostic):
     raise ValueError(
         "P57 checkpoint-disabled mode is admitted only for the v1 "
         "high-performance zero train"
     )
-  if disable_eval and not high_performance:
+  if disable_eval and not (high_performance or tito_diagnostic):
     raise ValueError(
         "P57 disable-eval is admitted only for the v1 high-performance zero train"
     )
   if high_performance and not disable_eval:
     raise ValueError(
-        "P57 v1 high-performance zero train requires in-process evaluation disabled"
+      "P57 v1 high-performance zero train requires in-process evaluation disabled"
+    )
+  if tito_diagnostic and (
+      expected_updates != 1
+      or checkpoint_mode != "disabled"
+      or arm != "zero"
+      or high_performance
+      or not disable_eval
+      or stock_only
+  ):
+    raise ValueError(
+        "P57 TiTO diagnostic requires one rollout-only zero arm with "
+        "checkpoint/evaluation disabled"
     )
   primary_zero_requested = (
       not stock_only
@@ -370,7 +404,7 @@ def render_all(
         "P57 primary zero reference requires the registered v1 "
         "high-performance path"
     )
-  if run_kind == "train" and checkpoint_step is not None:
+  if run_kind in ("train", "tito-diagnostic") and checkpoint_step is not None:
     raise ValueError("P57 training must not name an evaluation checkpoint")
   if bool(workload_candidate) != bool(data_split):
     raise ValueError("P57 workload candidate and data split must be set together")
@@ -395,13 +429,19 @@ def render_all(
     raise ValueError(
         f"P57 arm must be one of {tuple(_ARM_BY_NAME)}, got {arm!r}"
     )
-  if arm and not workload_candidate and expected_updates != _PAIRED_ARM_UPDATES:
+  if (
+      arm
+      and not tito_diagnostic
+      and not workload_candidate
+      and expected_updates != _PAIRED_ARM_UPDATES
+  ):
     raise ValueError(
         "P57 original P45 workload is frozen to "
         f"{_PAIRED_ARM_UPDATES} updates"
     )
   if (
       arm
+      and not tito_diagnostic
       and workload_candidate == "m15"
       and expected_updates != _PAIRED_ARM_UPDATES
   ):
@@ -453,6 +493,10 @@ def render_all(
           "P57 primary 300-update arms must run the full horizon because the "
           "only durable checkpoint is the final step"
       )
+  elif tito_diagnostic:
+    stop_after_step = 1 if stop_after_step is None else stop_after_step
+    if stop_after_step != 1:
+      raise ValueError("P57 TiTO diagnostic stop boundary must be one")
   elif stop_after_step is not None:
     raise ValueError("P57 evaluation does not accept a training stop boundary")
   base = p33.load_base(base_path)
@@ -542,7 +586,9 @@ def render_all(
             ),
             "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
             "CANON_P57_STOP_AFTER_STEP": (
-                str(stop_after_step) if run_kind == "train" else ""
+                str(stop_after_step)
+                if run_kind in ("train", "tito-diagnostic")
+                else ""
             ),
             "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
             "CANON_P57_DATA_SPLIT": data_split,
@@ -567,6 +613,18 @@ def render_all(
             "CANON_WANDB_RUN_NAME": job_name,
         },
     )
+    if tito_diagnostic:
+      _replace_env(
+          document,
+          {
+              "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+              "CANON_DP_SIZE": "8",
+              "CANON_TP_SIZE": "8",
+              "CANON_P57_TOKEN_CONTINUITY": "exact",
+              "CANON_P57_TOKEN_CONTINUITY_DEBUG": "collect-64",
+              "CANON_P57_TITO_ROLLOUT_ONLY": "1",
+          },
+      )
     if high_performance:
       _replace_env(
           document,
@@ -597,7 +655,11 @@ def render_all(
     env = _env(document)
     expected = {
         "CANON_PROFILE_FILE": (
-            _V1_HP_PROFILE if high_performance else _PROFILE
+            _TITO_DIAGNOSTIC_PROFILE
+            if tito_diagnostic
+            else _V1_HP_PROFILE
+            if high_performance
+            else _PROFILE
         ),
         "CANON_V1_HP_FULL": "1" if high_performance else "0",
         "CANON_P57_TIM_ARM": arm.name,
@@ -629,6 +691,17 @@ def render_all(
       })
     else:
       expected["CANON_P57_STOP_AFTER_STEP"] = str(stop_after_step)
+    if tito_diagnostic:
+      expected.update({
+          "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+          "CANON_DP_SIZE": "8",
+          "CANON_TP_SIZE": "8",
+          "CANON_P57_TOKEN_CONTINUITY": "exact",
+          "CANON_P57_TOKEN_CONTINUITY_DEBUG": "collect-64",
+          "CANON_P57_TITO_ROLLOUT_ONLY": "1",
+          "CANON_P33_RUN_STAGE": "rollout-only",
+          "CANON_P33_NO_COMMIT": "1",
+      })
     if "CANON_M15_TOKEN_CONTINUITY" in env:
       raise ValueError(
           "P57 production recipes must not render experimental M15 TITO"
@@ -693,7 +766,11 @@ def main() -> int:
       default="new",
   )
   parser.add_argument("--expected-updates", type=int, required=True)
-  parser.add_argument("--run-kind", choices=("train", "eval"), default="train")
+  parser.add_argument(
+      "--run-kind",
+      choices=("train", "eval", "tito-diagnostic"),
+      default="train",
+  )
   parser.add_argument("--checkpoint-step", type=int)
   parser.add_argument("--workload-candidate", choices=tuple(p57_workloads.CANDIDATES), default="")
   parser.add_argument("--data-split", choices=("calibration", "selection", "main"), default="")

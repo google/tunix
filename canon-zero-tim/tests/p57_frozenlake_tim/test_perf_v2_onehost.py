@@ -43,6 +43,9 @@ class PerfV2OnehostContractTest(unittest.TestCase):
     self.assertIn("--mesh_dp=1 --mesh_tp=4", text)
     self.assertIn("--max_concurrency=2", text)
     self.assertIn("--beta=0", text)
+    self.assertIn("CANON_P57_TITO_ONEHOST_NEUTRALITY", text)
+    self.assertIn("CANON_P57_TOKEN_CONTINUITY_DEBUG=record-full", text)
+    self.assertIn("--max_steps=3", text)
     self.assertIn("--reference-inference disabled", text)
     self.assertIn("refusing existing evidence root", text)
     self.assertIn("refusing a host with a non-system privileged container", text)
@@ -81,6 +84,14 @@ class PerfV2OnehostContractTest(unittest.TestCase):
     launch = text.split("sudo docker run --rm --privileged", 1)[1]
     launch = launch.split("docker_wait_pid=$!", 1)[0]
     self.assertNotIn(" | ", launch)
+    pair = (
+        ROOT
+        / "canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/"
+        "run_tito_onehost_neutrality_pair.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn('while [ "$idle_samples" -lt 12 ]', pair)
+    self.assertIn("sleep 10", pair)
+    self.assertNotIn("docker kill", pair)
 
   def test_classifier_accepts_complete_gate_and_rejects_tracer_red(self):
     classifier = _load_classifier()
@@ -166,6 +177,70 @@ class PerfV2OnehostContractTest(unittest.TestCase):
           docker_exit=0,
       )
       self.assertEqual(result["verdict"], "PASS")
+
+      tito_state = root / "tito-off"
+      tito_state.mkdir()
+      raw.write_text(
+          "neutrality_arm=tito-off\n" + raw.read_text(encoding="utf-8"),
+          encoding="utf-8",
+      )
+      off = classifier.classify(
+          raw_path=raw,
+          alignment_path=align,
+          update_path=updates,
+          semantic_path=semantic,
+          docker_exit=0,
+          neutrality_arm="tito-off",
+          tito_state=tito_state,
+      )
+      self.assertEqual(off["verdict"], "PASS")
+
+      raw.write_text(
+          raw.read_text(encoding="utf-8").replace(
+              "neutrality_arm=tito-off", "neutrality_arm=tito-on"
+          )
+          + "[P57.TITO.FIRST_UPDATE_TOKEN_GATE] PASS step=0 rows=8 "
+          "different_rows=0\n",
+          encoding="utf-8",
+      )
+      tito_state = root / "tito-on"
+      witness = tito_state / "p57_tito_witness"
+      witness.mkdir(parents=True)
+      writer = witness / "single-writer.json"
+      writer.write_text(json.dumps({
+          "schema": "canon.p57-tito-single-writer.v1",
+          "status": "PASS",
+          "workload": "p45",
+          "dp": 1,
+          "tp": 4,
+          "neutrality_arm": "on",
+      }))
+      writer.chmod(0o600)
+      summary = witness / "full-record-summary.json"
+      summary.write_text(json.dumps({
+          "schema": "canon.p57-tito-full-record.v1",
+          "workload": "p45",
+          "dp": 1,
+          "tp": 4,
+          "expected_updates": 3,
+          "optimizer_commits": 3,
+          "global_updates": 3,
+          "checkpoint_writes": 0,
+      }))
+      sidecars = witness / "update-sidecars"
+      sidecars.mkdir()
+      for step in range(3):
+        (sidecars / f"step-{step:06d}.npz").write_bytes(b"npz")
+      on = classifier.classify(
+          raw_path=raw,
+          alignment_path=align,
+          update_path=updates,
+          semantic_path=semantic,
+          docker_exit=0,
+          neutrality_arm="tito-on",
+          tito_state=tito_state,
+      )
+      self.assertEqual(on["verdict"], "PASS")
 
       raw.write_text(
           raw.read_text(encoding="utf-8")

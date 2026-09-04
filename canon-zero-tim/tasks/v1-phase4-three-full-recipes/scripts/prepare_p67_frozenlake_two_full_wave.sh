@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 5 || "$#" -gt 6 ]]; then
-  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--m15-tito-exact]" >&2
+if [[ "$#" -lt 5 || "$#" -gt 9 ]]; then
+  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--token-continuity legacy|p45-exact|m15-exact|both-exact] [--token-continuity-debug|--token-continuity-debug-mode first-diff|record-full]" >&2
   exit 2
 fi
 
@@ -11,15 +11,72 @@ OUTPUT_DIR="$2"
 CAMPAIGN_ROOT="$3"
 P45_RUN_ID="$4"
 M15_RUN_ID="$5"
-M15_TITO_ARGS=()
-M15_TITO_MODE=off
-if [[ "$#" -eq 6 ]]; then
-  if [[ "$6" != "--m15-tito-exact" ]]; then
-    echo "optional sixth argument must be --m15-tito-exact" >&2
-    exit 2
-  fi
-  M15_TITO_ARGS=(--m15-tito-exact)
-  M15_TITO_MODE=exact
+shift 5
+TOKEN_CONTINUITY_ARGS=()
+TOKEN_CONTINUITY_MODE=legacy
+TOKEN_CONTINUITY_SEEN=0
+TOKEN_CONTINUITY_DEBUG=off
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --m15-tito-exact)
+      if [[ "$TOKEN_CONTINUITY_SEEN" = 1 ]]; then
+        echo "token-continuity selector may be supplied only once" >&2
+        exit 2
+      fi
+      TOKEN_CONTINUITY_ARGS+=(--m15-tito-exact)
+      TOKEN_CONTINUITY_MODE=m15-exact
+      TOKEN_CONTINUITY_SEEN=1
+      shift
+      ;;
+    --token-continuity)
+      if [[ "$TOKEN_CONTINUITY_SEEN" = 1 || "$#" -lt 2 ]]; then
+        echo "--token-continuity requires one non-duplicate mode" >&2
+        exit 2
+      fi
+      case "$2" in
+      legacy|p45-exact|m15-exact|both-exact) ;;
+      *)
+        echo "token continuity must be legacy, p45-exact, m15-exact, or both-exact" >&2
+        exit 2
+        ;;
+      esac
+      TOKEN_CONTINUITY_ARGS+=(--token-continuity "$2")
+      TOKEN_CONTINUITY_MODE="$2"
+      TOKEN_CONTINUITY_SEEN=1
+      shift 2
+      ;;
+    --token-continuity-debug)
+      if [[ "$TOKEN_CONTINUITY_DEBUG" = on ]]; then
+        echo "--token-continuity-debug may be supplied only once" >&2
+        exit 2
+      fi
+      TOKEN_CONTINUITY_ARGS+=(--token-continuity-debug)
+      TOKEN_CONTINUITY_DEBUG=on
+      shift
+      ;;
+    --token-continuity-debug-mode)
+      if [[ "$TOKEN_CONTINUITY_DEBUG" != off || "$#" -lt 2 ]]; then
+        echo "--token-continuity-debug-mode requires one non-duplicate value" >&2
+        exit 2
+      fi
+      case "$2" in
+        first-diff|record-full) ;;
+        *) echo "debug mode must be first-diff or record-full" >&2; exit 2 ;;
+      esac
+      TOKEN_CONTINUITY_ARGS+=(--token-continuity-debug-mode "$2")
+      TOKEN_CONTINUITY_DEBUG="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown optional argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ "$TOKEN_CONTINUITY_DEBUG" != off && \
+      "$TOKEN_CONTINUITY_MODE" = legacy ]]; then
+  echo "token-continuity diagnostics require an exact treatment" >&2
+  exit 2
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +118,7 @@ python3 "$RENDERER" \
   --campaign-root "$CAMPAIGN_ROOT" \
   --p45-run-id "$P45_RUN_ID" \
   --m15-run-id "$M15_RUN_ID" \
-  "${M15_TITO_ARGS[@]}"
+  "${TOKEN_CONTINUITY_ARGS[@]}"
 
 INDEX="$OUTPUT_DIR/manifest-index.json"
 if [[ ! -s "$INDEX" ]]; then
@@ -71,7 +128,7 @@ fi
 
 sha256sum "$INDEX"
 printf '%s\n' \
-  "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR m15_tito=$M15_TITO_MODE launch=not-executed" \
+  "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR token_continuity=$TOKEN_CONTINUITY_MODE token_continuity_debug=$TOKEN_CONTINUITY_DEBUG launch=not-executed" \
   "Review manifest-index.json and verify the pushed SHA by remote read-back before launch." \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml" \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml"
