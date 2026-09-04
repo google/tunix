@@ -68,6 +68,7 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -115,6 +116,7 @@ start_orchestrator() {
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
+        --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
         ${DEBUG:+--debug} \

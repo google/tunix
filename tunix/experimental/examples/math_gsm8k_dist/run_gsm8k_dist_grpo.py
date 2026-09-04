@@ -135,6 +135,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Directory for local event logging (TensorBoard/CLU).",
   )
   parser.add_argument(
+      "--flush_every_n_steps",
+      type=int,
+      default=1,
+      help="Frequency in steps to flush metrics logger.",
+  )
+  parser.add_argument(
       "--wandb_project",
       type=str,
       default=os.getenv("WANDB_PROJECT", "trellis-gsm8k"),
@@ -311,7 +317,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       log_dir=args.log_dir,
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
-      flush_every_n_steps=1,
+      flush_every_n_steps=args.flush_every_n_steps,
       backend_kwargs={
           "wandb": {
               "config": vars(args),
