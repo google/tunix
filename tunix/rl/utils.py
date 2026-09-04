@@ -513,158 +513,107 @@ def pack_sequences(
   # Real segments per row are bounded by the token budget (each segment >= 1
   # token). `None` uses that safe bound so `num_segments = budget + 1` never
   # overflows; a smaller override shrinks the loss buckets and is enforced by
-  # the raise in `_flush_pack`.
+  # the raise in `_emit`.
   effective_max_segments = (
       max_segments_per_packed_row
       if max_segments_per_packed_row is not None
       else max_token_budget
   )
 
-  def _flush_pack(pack_items, example_cls, first_item) -> common.TrainExample:
-    first_item = first_item or {}
+  def _emit(chunk):
+    """Merges one chunk (pack_size bins) into a [pack_size, budget] example.
+
+    Every row is assembled in numpy and moved to device once per feature.
+    Building each bin with its own jnp ops and concatenating afterwards costs
+    ~18 device dispatches per bin, which with hundreds of bins per step made
+    the packer itself a visible part of the training step.
+    """
+    first_item = first_item_for_dummy or {}
     has_policy_version = first_item.get("policy_version") is not None
-    kwargs = {}
-    tracked_per_token_keys = []
+    tracked_per_token_keys = [
+        k
+        for k in (
+            "ref_per_token_logps",
+            "old_per_token_logps",
+            "returns",
+            "old_values",
+        )
+        if first_item.get(k) is not None
+    ]
 
-    if first_item.get("ref_per_token_logps") is not None:
-      tracked_per_token_keys.append("ref_per_token_logps")
-    if first_item.get("old_per_token_logps") is not None:
-      tracked_per_token_keys.append("old_per_token_logps")
-    if first_item.get("returns") is not None:
-      tracked_per_token_keys.append("returns")
-    if first_item.get("old_values") is not None:
-      tracked_per_token_keys.append("old_values")
+    num_rows = len(chunk)
+    budget = max_token_budget
+    c_ids = np.full((num_rows, budget), pad_id, dtype=np.int32)
+    c_mask = np.zeros((num_rows, budget), dtype=np.int32)
+    adv = np.zeros((num_rows, budget), dtype=np.float32)
+    seg = np.zeros((num_rows, budget), dtype=np.int32)
+    pos = np.zeros((num_rows, budget), dtype=np.int32)
+    per_token_features = {
+        k: np.zeros((num_rows, budget), dtype=np.float32)
+        for k in tracked_per_token_keys
+    }
 
-    if not pack_items:
-      p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-      p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-      c_ids_arr = jnp.full((1, max_token_budget), pad_id, dtype=jnp.int32)
-      c_mask_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
-      adv_arr = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
-      seg_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
-      pos_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
-
-      kwargs.update(
-          prompt_ids=p_ids_arr,
-          prompt_mask=p_mask_arr,
-          completion_ids=c_ids_arr,
-          completion_mask=c_mask_arr,
-          advantages=adv_arr,
-          ref_per_token_logps=None,
-          old_per_token_logps=None,
-          segment_ids=seg_arr,
-          segment_positions=pos_arr,
-      )
-      for k in tracked_per_token_keys:
-        kwargs[k] = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
-      if has_policy_version:
-        kwargs["policy_version"] = first_item["policy_version"]
-      return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
-
-    # `len(pack_items)` is the real segment count of this row. It cannot exceed
-    # the token budget (each segment >= 1 token), so the default bound never
-    # trips; a too-small `max_segments_per_packed_row` override does, and we
-    # fail loud rather than let `segment_sum` silently drop the overflow.
-    if len(pack_items) > effective_max_segments:
-      raise ValueError(
-          f"pack_sequences: a packed row has {len(pack_items)} segments, "
-          f"exceeding max_segments_per_packed_row={effective_max_segments}; "
-          "increase it (or leave it None for the budget-derived safe default)."
-      )
-
-    current_tokens = sum(
-        len(it["prompt_ids"]) + len(it["completion_ids"]) for it in pack_items
-    )
-    pad_len = max_token_budget - current_tokens
-
-    packed_c_ids = []
-    packed_c_mask = []
-    packed_adv = []
-    packed_segment_ids = []
-    packed_positions = []
-
-    per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
-
-    for i, item in enumerate(pack_items, start=1):
-      p_ids = item["prompt_ids"]
-      c_ids = item["completion_ids"]
-      seq_len = len(p_ids) + len(c_ids)
-
-      packed_c_ids.extend([p_ids, c_ids])
-      packed_c_mask.extend([np.zeros_like(p_ids), item["completion_mask"]])
-
-      if item["adv_is_per_token"]:
-        packed_adv.extend([
-            np.zeros_like(p_ids, dtype=np.float32),
-            item["advantages"],
-        ])
-      else:
-        packed_adv.extend([
-            np.zeros_like(p_ids, dtype=np.float32),
-            np.full(len(c_ids), item["advantages"], dtype=np.float32),
-        ])
-
-      for k in tracked_per_token_keys:
-        per_token_feature_buffers[k].extend([
-            np.zeros_like(p_ids, dtype=np.float32),
-            item[k],
-        ])
-
-      packed_segment_ids.append(np.full(seq_len, i, dtype=np.int32))
-      packed_positions.append(np.arange(seq_len, dtype=np.int32))
-
-    def _pad(arr_list, val, length):
-      arr = np.concatenate(arr_list) if arr_list else np.array([])
-      return np.pad(arr, (0, length), constant_values=val)
-
-    p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-    p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-
-    c_ids_arr = jnp.array(_pad(packed_c_ids, pad_id, pad_len))[None, :]
-    c_mask_arr = jnp.array(_pad(packed_c_mask, 0, pad_len))[None, :]
-    adv_arr = jnp.array(_pad(packed_adv, 0.0, pad_len))[None, :]
-    seg_arr = jnp.array(_pad(packed_segment_ids, 0, pad_len))[None, :]
-    pos_arr = jnp.array(_pad(packed_positions, 0, pad_len))[None, :]
-
-    per_token_features = {}
-    for k in tracked_per_token_keys:
-      per_token_features[k] = jnp.array(
-          _pad(per_token_feature_buffers[k], 0.0, pad_len)
-      )[None, :]
+    for row, pack_items in enumerate(chunk):
+      # `len(pack_items)` is the real segment count of this row. It cannot
+      # exceed the token budget (each segment >= 1 token), so the default
+      # bound never trips; a too-small `max_segments_per_packed_row` override
+      # does, and we fail loud rather than let `segment_sum` silently drop the
+      # overflow. An empty bin stays a dummy row of padding.
+      if len(pack_items) > effective_max_segments:
+        raise ValueError(
+            f"pack_sequences: a packed row has {len(pack_items)} segments, "
+            f"exceeding max_segments_per_packed_row={effective_max_segments}; "
+            "increase it (or leave it None for the budget-derived safe"
+            " default)."
+        )
+      offset = 0
+      for i, item in enumerate(pack_items, start=1):
+        p_ids = item["prompt_ids"]
+        c_ids_item = item["completion_ids"]
+        prompt_len = len(p_ids)
+        seq_len = prompt_len + len(c_ids_item)
+        completion = slice(offset + prompt_len, offset + seq_len)
+        c_ids[row, offset : offset + prompt_len] = p_ids
+        c_ids[row, completion] = c_ids_item
+        c_mask[row, completion] = item["completion_mask"]
+        # A scalar advantage broadcasts over the completion tokens.
+        adv[row, completion] = item["advantages"]
+        for k in tracked_per_token_keys:
+          per_token_features[k][row, completion] = item[k]
+        seg[row, offset : offset + seq_len] = i
+        pos[row, offset : offset + seq_len] = np.arange(seq_len, dtype=np.int32)
+        offset += seq_len
 
     kwargs = dict(
-        prompt_ids=p_ids_arr,
-        prompt_mask=p_mask_arr,
-        completion_ids=c_ids_arr,
-        completion_mask=c_mask_arr,
-        advantages=adv_arr,
+        prompt_ids=jnp.zeros((num_rows, 0), dtype=jnp.int32),
+        prompt_mask=jnp.zeros((num_rows, 0), dtype=jnp.int32),
+        completion_ids=jnp.asarray(c_ids),
+        completion_mask=jnp.asarray(c_mask),
+        advantages=jnp.asarray(adv),
         ref_per_token_logps=None,
         old_per_token_logps=None,
-        segment_ids=seg_arr,
-        segment_positions=pos_arr,
+        segment_ids=jnp.asarray(seg),
+        segment_positions=jnp.asarray(pos),
     )
     for k in tracked_per_token_keys:
-      kwargs[k] = per_token_features[k]
-
+      kwargs[k] = jnp.asarray(per_token_features[k])
     if has_policy_version:
-      kwargs["policy_version"] = pack_items[0]["policy_version"]
-
+      # Each row carries the policy version of its first sequence; a dummy
+      # (empty) row inherits the first item's.
+      kwargs["policy_version"] = jnp.concatenate(
+          [
+              jnp.asarray(
+                  pack_items[0]["policy_version"]
+                  if pack_items
+                  else first_item["policy_version"]
+              )
+              for pack_items in chunk
+          ],
+          axis=0,
+      )
     return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
 
   chunk_capacity = pack_size * max_token_budget
-
-  def _emit(chunk):
-    """Merges one chunk (pack_size bins) into a [pack_size, budget] example."""
-    chunk_examples = [
-        _flush_pack(bin_items, example_cls, first_item_for_dummy)
-        for bin_items in chunk
-    ]
-    return jax.tree.map(
-        lambda first_x, *rest_xs: None
-        if first_x is None
-        else jnp.concatenate((first_x, *rest_xs), axis=0),
-        *chunk_examples,
-    )
 
   def _mark(merged, is_update):
     # `num_segments = effective_max_segments + 1` (+1 = padding bucket) is a
