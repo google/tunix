@@ -77,6 +77,28 @@ def is_lora_enabled(model: nnx.Module) -> bool:
   return False
 
 
+def is_beft_enabled(model: nnx.Module) -> bool:
+  from tunix.sft.peft.beft import BEFTParam  # pylint: disable=g-import-not-at-top
+  for _, value in nnx.iter_graph(model):
+    if isinstance(value, BEFTParam):
+      return True
+  return False
+
+
+def is_peft_enabled(model: nnx.Module) -> bool:
+  return is_lora_enabled(model) or is_beft_enabled(model)
+
+
+def get_peft_param_type(model: nnx.Module) -> type[nnx.Variable] | None:
+  """Returns the active PEFT parameter type or None if full fine-tuning."""
+  from tunix.sft.peft.beft import BEFTParam  # pylint: disable=g-import-not-at-top
+  if is_beft_enabled(model):
+    return BEFTParam
+  if is_lora_enabled(model):
+    return nnx.LoRAParam
+  return None
+
+
 @contextlib.contextmanager
 def time_measure(context: str = "", suppress_logging: bool = False):
   start = time.perf_counter()

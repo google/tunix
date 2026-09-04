@@ -269,6 +269,10 @@ class TrainingConfig:
   max_steps: int | None = None
   gradient_accumulation_steps: int | None = None
 
+  # Target variable type(s) for optimizer updates and gradient differentiation.
+  # If None, automatically inferred from model (e.g. BEFTParam, LoRAParam, or Param).
+  wrt: Any | None = None
+
   # If set, the checkpoints will be saved to this path. Checkpoints
   # contains the model params and the train data iterator state.
   checkpoint_root_directory: str | None = None

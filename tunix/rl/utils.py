@@ -126,8 +126,10 @@ def is_sharing_backbone(
     m2: nnx.Module,
 ) -> bool:
   """Returns whether two models are sharing same copy of backbone."""
-  s1 = nnx.state(m1, filterlib.Not(nnx.LoRAParam))
-  s2 = nnx.state(m2, filterlib.Not(nnx.LoRAParam))
+  from tunix.sft import utils as sft_utils  # pylint: disable=g-import-not-at-top
+  peft_param_type = sft_utils.get_peft_param_type(m1) or nnx.LoRAParam
+  s1 = nnx.state(m1, filterlib.Not(peft_param_type))
+  s2 = nnx.state(m2, filterlib.Not(peft_param_type))
   return _is_same_state(s1, s2)
 
 
