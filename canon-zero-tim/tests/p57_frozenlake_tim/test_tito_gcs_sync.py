@@ -428,6 +428,42 @@ shutil.copyfile(source_path, destination_path)
       )
       self.assertTrue(remote_manifest.is_file())
 
+  def test_python_storage_fallback_when_cli_missing(self):
+    mock_blob = mock.MagicMock()
+    mock_bucket = mock.MagicMock()
+    mock_bucket.blob.return_value = mock_blob
+    mock_client = mock.MagicMock()
+    mock_client.bucket.return_value = mock_bucket
+
+    with (
+        mock.patch.object(sync.shutil, "which", return_value=None),
+        mock.patch.object(sync, "_get_gcs_client", return_value=mock_client),
+    ):
+      # Test upload with no_clobber=True
+      rc = sync._run_gcloud_cp(
+          "/local/file.txt", "gs://my-bucket/path/file.txt", no_clobber=True
+      )
+      self.assertEqual(rc, 0)
+      mock_client.bucket.assert_called_with("my-bucket")
+      mock_bucket.blob.assert_called_with("path/file.txt")
+      mock_blob.upload_from_filename.assert_called_with(
+          "/local/file.txt", if_generation_match=0
+      )
+
+      # Test download
+      rc = sync._run_gcloud_cp(
+          "gs://my-bucket/path/file.txt", "/local/dest.txt", no_clobber=False
+      )
+      self.assertEqual(rc, 0)
+      mock_blob.download_to_filename.assert_called_with("/local/dest.txt")
+
+      # Test exception handling returns 1
+      mock_blob.download_to_filename.side_effect = RuntimeError("network fail")
+      rc = sync._run_gcloud_cp(
+          "gs://my-bucket/path/file.txt", "/local/dest.txt", no_clobber=False
+      )
+      self.assertEqual(rc, 1)
+
 
 if __name__ == "__main__":
   unittest.main()

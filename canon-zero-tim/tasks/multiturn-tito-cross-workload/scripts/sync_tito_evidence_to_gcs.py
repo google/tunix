@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -440,19 +441,74 @@ def create_snapshot(
   return inventory_sha, _sha256_file(output), output.stat().st_size
 
 
+def _parse_gcs_url(url: str) -> tuple[str, str]:
+  if not url.startswith("gs://"):
+    raise ValueError(f"invalid GCS URL: {url}")
+  parts = url[5:].split("/", 1)
+  return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+_GCS_CLIENT: Any = None
+
+
+def _get_gcs_client() -> Any:
+  global _GCS_CLIENT
+  if _GCS_CLIENT is None:
+    from google.cloud import storage  # pylint: disable=import-outside-toplevel
+
+    _GCS_CLIENT = storage.Client()
+  return _GCS_CLIENT
+
+
 def _run_gcloud_cp(source: str, destination: str, *, no_clobber: bool) -> int:
-  command = ["gcloud", "storage", "cp"]
-  if no_clobber:
-    command.append("--no-clobber")
-  command.extend((source, destination))
-  completed = subprocess.run(
-      command,
-      stdin=subprocess.DEVNULL,
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
-      check=False,
-  )
-  return completed.returncode
+  if shutil.which("gcloud"):
+    command = ["gcloud", "storage", "cp"]
+    if no_clobber:
+      command.append("--no-clobber")
+    command.extend((source, destination))
+    completed = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode
+
+  if shutil.which("gsutil"):
+    command = ["gsutil", "-q", "cp"]
+    if no_clobber:
+      command.append("-n")
+    command.extend((source, destination))
+    completed = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode
+
+  try:
+    client = _get_gcs_client()
+    if destination.startswith("gs://"):
+      bucket_name, blob_name = _parse_gcs_url(destination)
+      blob = client.bucket(bucket_name).blob(blob_name)
+      if no_clobber:
+        blob.upload_from_filename(source, if_generation_match=0)
+      else:
+        blob.upload_from_filename(source)
+      return 0
+    if source.startswith("gs://"):
+      bucket_name, blob_name = _parse_gcs_url(source)
+      blob = client.bucket(bucket_name).blob(blob_name)
+      blob.download_to_filename(destination)
+      return 0
+    raise ValueError(
+        f"neither source nor destination is gs://: {source} -> {destination}"
+    )
+  except Exception:  # pylint: disable=broad-exception-caught
+    return 1
 
 
 def _upload_and_verify(
