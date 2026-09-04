@@ -415,7 +415,7 @@ ROLLOUT_BACKEND="${ROLLOUT_BACKEND:-${PRESET_ROLLOUT_BACKEND}}"
 VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-${PRESET_VERIFY_WEIGHTS}}"
 DISABLE_CHECKPOINTING="${DISABLE_CHECKPOINTING:-${PRESET_DISABLE_CHECKPOINTING}}"
 
-SYNC_CODE="${USER_SYNC_CODE:-${SYNC_CODE:-false}}"  # Default: false for given-image reproducibility
+SYNC_CODE="${USER_SYNC_CODE:-${SYNC_CODE:-true}}"  # Default: true to patch local tunix/maxtext changes
 PROJECT="${USER_PROJECT:-${PROJECT:-cloud-tpu-shared-capacity}}"
 REGION="${USER_REGION:-${REGION:-europe-west4}}"
 ZONE="${USER_ZONE:-${ZONE:-europe-west4-b}}"
@@ -615,6 +615,7 @@ stop_workload() {
     if kubectl get jobset "$js" &>/dev/null; then
       echo "  Deleting JobSet: $js..."
       kubectl delete jobset "$js" --ignore-not-found=true --wait=true 2>/dev/null || true
+      kubectl delete jobs -l "jobset.sigs.k8s.io/jobset-name=$js" --ignore-not-found=true 2>/dev/null || true
     fi
   done
   echo "✅ Teardown command sent for ${RUN_ID}."
@@ -870,11 +871,11 @@ triage_workload() {
   echo "TRIAGE REPORT FOR: ${RUN_ID}"
   echo "================================================================================"
 
-  if grep -E "(WeightConverterError|UnscanShapeMismatch|WeightSyncBindError|ConversionPlanError|ShapeMismatchError|Push range out of bounds)" "${log_file}"; then
+  if grep -E "(WeightConverterError|ConversionPlanError|ShapeMismatchError|Push range out of bounds)" "${log_file}"; then
     echo "--------------------------------------------------------------------------------"
     echo "❌ [CONVERSION_FAILURE] Weight conversion logic failed."
     echo "Inspect conversion trace in ${log_file}:"
-    grep -n -C 3 -E "(WeightConverterError|UnscanShapeMismatch|WeightSyncBindError|ConversionPlanError|ShapeMismatchError)" "${log_file}" | head -n 30
+    grep -n -C 3 -E "(WeightConverterError|ConversionPlanError|ShapeMismatchError)" "${log_file}" | head -n 30
     echo "--------------------------------------------------------------------------------"
     return 1
   elif grep -E "(TPU driver fault|ICI timeout|DMA error|Heartbeat timeout|OutOfMemoryError|SIGKILL|Killed)" "${log_file}"; then

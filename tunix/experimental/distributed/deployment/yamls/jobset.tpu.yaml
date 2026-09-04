@@ -19,6 +19,7 @@ metadata:
   namespace: default
 spec:
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true

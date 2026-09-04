@@ -63,8 +63,10 @@ except ImportError:
 
 def _ensure_ffi_compute_on_compat() -> None:
   """Bridges TPU-sync wheels that call the newer compute_on decorator API."""
+  import sys  # pylint: disable=g-import-not-at-top
+  exp_compute_on = None
   try:
-    from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
+    from jax.experimental import compute_on as exp_compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
   except ImportError:
     pass
   compute_on_mod = getattr(jax, "_src", None)
@@ -89,10 +91,129 @@ def _ensure_ffi_compute_on_compat() -> None:
     )
 
   compute_on_mod.compute_on = compute_on2
+  if exp_compute_on is not None:
+    exp_compute_on.compute_on = compute_on2
+  if "jax.experimental.compute_on" in sys.modules:
+    sys.modules["jax.experimental.compute_on"].compute_on = compute_on2
+  if _raiden_ffi is not None and hasattr(_raiden_ffi, "compute_on"):
+    _raiden_ffi.compute_on.compute_on = compute_on2
   logging.warning(
       "Patched jax._src.compute_on.compute_on to compute_on2 for TPU-sync FFI"
       " compatibility."
   )
+  _ensure_ffi_targets_registered()
+
+
+_ffi_targets_registered = False
+
+
+def _ensure_ffi_targets_registered() -> None:
+  """Registers TPU-sync FFI handlers with JAX using libraiden_ffi_bridge."""
+  global _ffi_targets_registered
+  if _ffi_targets_registered or _raiden_ffi is None:
+    return
+
+  import ctypes  # pylint: disable=g-import-not-at-top
+  try:
+    from jax._src import ffi as jax_ffi  # pylint: disable=g-import-not-at-top
+  except ImportError:
+    return
+
+  bridge_candidates = [
+      os.path.join(os.path.dirname(__file__), "libraiden_ffi_bridge.so"),
+      os.path.join(
+          os.path.dirname(__file__),
+          "..",
+          "..",
+          "..",
+          "raiden_wheels",
+          "libraiden_ffi_bridge.so",
+      ),
+      "/app/raiden_wheels/libraiden_ffi_bridge.so",
+      "/app/tunix/experimental/weight_sync/libraiden_ffi_bridge.so",
+  ]
+  bridge_path = None
+  for candidate in bridge_candidates:
+    if os.path.exists(candidate):
+      bridge_path = candidate
+      break
+
+  if not bridge_path:
+    logging.warning(
+        "libraiden_ffi_bridge.so not found, skipping explicit FFI registration."
+    )
+    _ffi_targets_registered = True
+    return
+
+  try:
+    from jax._src.lib import xla_client  # pylint: disable=g-import-not-at-top
+    try:
+      xla_client.make_cpu_client()
+    except Exception:
+      try:
+        import jax  # pylint: disable=g-import-not-at-top
+        _ = jax.devices("cpu")
+      except Exception:
+        pass
+
+    bridge = ctypes.CDLL(bridge_path)
+    bridge.raiden_get_ffi_handler_by_path.restype = ctypes.c_void_p
+    bridge.raiden_get_ffi_handler_by_path.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+    ]
+
+    ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
+    ctypes.pythonapi.PyCapsule_New.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+    ]
+
+    so_module = getattr(_raiden_ffi, "_weight_synchronizer_ffi", None)
+    if so_module is None or not hasattr(so_module, "__file__"):
+      logging.warning(
+          "_weight_synchronizer_ffi module not found on _raiden_ffi."
+      )
+      _ffi_targets_registered = True
+      return
+    so_path = so_module.__file__.encode("utf-8")
+
+    targets = [
+        "init_weight_synchronizer",
+        "init_weight_synchronizer_and_d2h",
+        "ws_h2d",
+        "ws_multi_h2d",
+        "ws_d2h",
+    ]
+    for target_name in targets:
+      ptr = bridge.raiden_get_ffi_handler_by_path(
+          so_path, target_name.encode("utf-8"), b"Host"
+      )
+      if ptr:
+        for platform in ("cpu", "Host", "host", "tpu", "TPU"):
+          capsule = ctypes.pythonapi.PyCapsule_New(
+              ptr, b"xla._CUSTOM_CALL_TARGET", None
+          )
+          try:
+            jax_ffi.register_ffi_target(target_name, capsule, platform=platform)
+          except Exception:
+            pass
+          try:
+            xla_client.register_custom_call_target(
+                target_name.encode("utf-8"), capsule, platform, 1
+            )
+          except Exception:
+            pass
+    _ffi_targets_registered = True
+    logging.info(
+        "Explicitly registered Raiden FFI handlers with JAX via %s",
+        bridge_path,
+    )
+  except Exception:
+    logging.exception("Failed to register Raiden FFI targets via bridge.")
+
 
 
 def _malloc_trim() -> None:
@@ -435,6 +556,7 @@ class RaidenSynchronizer:
       raise RuntimeError(
           "weight_synchronizer_ffi is not available for FFI weight sync."
       )
+    _ensure_ffi_compute_on_compat()
     if self._ffi_mesh is None or self._ffi_shard_idx is None:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     self.arrays = list(

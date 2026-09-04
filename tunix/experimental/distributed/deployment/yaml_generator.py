@@ -89,6 +89,11 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--hf_token_secret_name",
+      default=os.environ.get("HF_TOKEN_SECRET_NAME", "hf-token-secret"),
+      help="Kubernetes secret name containing HF_TOKEN",
+  )
 
   args = parser.parse_args()
 
@@ -164,6 +169,7 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        HF_TOKEN_SECRET_NAME=args.hf_token_secret_name,
     )
     print(content)
 

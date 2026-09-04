@@ -21,6 +21,7 @@ spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -155,7 +156,7 @@ spec:
               - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
-                    name: anisha-hf-token
+                    name: ${HF_TOKEN_SECRET_NAME}
                     key: HF_TOKEN
                     optional: true
               - name: JOBSET_NAME

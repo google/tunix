@@ -222,7 +222,9 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     sums = sync.checksums()
     self.assertEqual(sums["__grand_total__"], 8.0 + 3.0)
-    self.assertLen(sums, 3)  # two sampled tensors + grand total
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 11)
+    self.assertLen(sums, 5)  # two sampled tensors + grand total + tensor/element counts
 
   def test_work_unit_metadata_shards_and_addresses(self):
     sync = raiden_synchronizer.RaidenSynchronizer(
