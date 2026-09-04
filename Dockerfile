@@ -43,6 +43,9 @@ COPY pyproject.toml README.md /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
 RUN uv pip install .
 
+# Copy the rest of the project files
+COPY . .
+
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install --upgrade flax && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
@@ -82,9 +85,6 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
     fi
-
-# Copy the rest of the project files
-COPY . .
 
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .
