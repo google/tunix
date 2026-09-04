@@ -24,6 +24,8 @@ import logging
 import os
 import pickle
 import sys
+
+import jax
 from typing import Any
 
 from tunix.experimental.examples.common import models
@@ -95,6 +97,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("SAMPLER", "inprocess_vllm"),
       choices=["vllm", "inprocess_vllm", "vanilla"],
       help="Rollout sampler backend: vllm, inprocess_vllm, or vanilla.",
+  )
+  parser.add_argument(
+      "--sampler_data_parallel",
+      type=int,
+      default=1,
+      help=(
+          "Rollout data-parallel degree; total devices are tp x this. Use it to"
+          " match the trainer's shard count when raising tp would change the"
+          " MoE padding -- Raiden transfers only the overlap of the two index"
+          " spaces."
+      ),
+  )
+  parser.add_argument(
+      "--sampler_dp_attention",
+      action="store_true",
+      help=(
+          "Split TP into tp x attn_dp instead of replicating KV heads. Needed"
+          " when num_kv_heads < tp: replication changes the key/value kernel"
+          " shapes and breaks weight sync against the unreplicated trainer."
+          " moe_mlp_tp_size (tp*attn_dp) is unchanged."
+      ),
   )
   parser.add_argument(
       "--maxtext_model_name",
@@ -403,6 +426,12 @@ def _create_vllm_sampler(args):
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
       tensor_parallel_size=args.mesh_tp,
+      # A mesh axis, not separate engines (tpu-inference only splits DP across
+      # processes under TPU_MULTIPROCESS_DP). Weights are replicated over it,
+      # so it grows the shard count Raiden sees without raising
+      # moe_mlp_tp_size -- which is what forces MoE padding, and with it a
+      # matching inflation of every expert weight on the trainer.
+      data_parallel_size=args.sampler_data_parallel,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
@@ -422,7 +451,7 @@ def _create_vllm_sampler(args):
     maxtext_config_overrides = {
         "model_name": args.maxtext_model_name,
         "model_call_mode": "inference",
-        "enable_dp_attention": False,
+        "enable_dp_attention": args.sampler_dp_attention,
         "allow_split_physical_axes": True,
         "log_config": False,
         "weight_dtype": "bfloat16",
@@ -432,6 +461,12 @@ def _create_vllm_sampler(args):
     engine_kwargs["additional_config"] = {
         "maxtext_config": maxtext_config_overrides
     }
+    if args.sampler_dp_attention:
+      # The MaxText flag above only configures MaxText; the mesh itself comes
+      # from tpu-inference's ShardingConfigManager, which reads this.
+      engine_kwargs["additional_config"]["sharding"] = {
+          "sharding_strategy": {"enable_dp_attention": True}
+      }
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
       server_id=args.worker_id,
@@ -462,6 +497,13 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   args = _parse_args(argv)
+  if args.debug:
+    logging.getLogger().setLevel(logging.DEBUG)
+  # Match MaxText's default (remove_size_one_mesh_axis_from_type=True) so the
+  # rollout's sharding types agree with the trainer's. The rollout mesh carries
+  # six singleton axes next to `model`, and Raiden's FFI shard_map rejects a
+  # PartitionSpec longer than the array rank.
+  jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   logging.info("Parsed args: %s", args)
 
   if REPO_ROOT not in sys.path:

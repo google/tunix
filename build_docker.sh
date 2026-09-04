@@ -10,13 +10,33 @@
 set -e
 
 INSTALL_DEEPSWE_DEPS=false
+INSTALL_MAXTEXT=false
+INSTALL_RAIDEN=false
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        --maxtext) INSTALL_MAXTEXT=true; shift ;;
+        --raiden) INSTALL_RAIDEN=true; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
 done
+
+# The Dockerfile globs raiden_wheels/*.whl, so more than one wheel there silently
+# installs whichever pip resolves last. Fail early instead.
+if [ "$INSTALL_RAIDEN" = "true" ]; then
+    WHEEL_COUNT=$(ls raiden_wheels/*.whl 2>/dev/null | wc -l)
+    if [ "$WHEEL_COUNT" -gt 1 ]; then
+        echo "Error: ${WHEEL_COUNT} wheels in raiden_wheels/; keep exactly one:"
+        ls raiden_wheels/*.whl
+        exit 1
+    fi
+    if [ "$WHEEL_COUNT" -eq 0 ]; then
+        echo "No wheel in raiden_wheels/; installing tpu-raiden-jax from Artifact Registry."
+    else
+        echo "Using raiden wheel: $(ls raiden_wheels/*.whl)"
+    fi
+fi
 
 DOCKERFILE=./Dockerfile
 
@@ -63,6 +83,8 @@ MSG
     $DOCKER_COMMAND build \
         --network=host \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
+        --build-arg INSTALL_MAXTEXT=${INSTALL_MAXTEXT} \
+        --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }

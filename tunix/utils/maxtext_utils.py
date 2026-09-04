@@ -59,6 +59,7 @@ def build_maxtext_config(
     warmup_steps_fraction: float = 0.0,
     load_parameters_path: str = "",
     padded_moe_mlp_dim: int = 0,
+    base_num_kv_heads: int = 0,
     base_output_directory: str = "",
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
@@ -105,6 +106,12 @@ def build_maxtext_config(
           if padded_moe_mlp_dim
           else []
       ),
+      # The vLLM rollout replicates KV heads up to kv_tp_size (tp*ep) when the
+      # model has fewer -- see maxtext_vllm_adapter. Weight sync pairs by name,
+      # so the trainer must build the same shape. Prefer attention DP on the
+      # rollout instead, which avoids the replication entirely; this is the
+      # fallback when that is not available.
+      *([f"base_num_kv_heads={base_num_kv_heads}"] if base_num_kv_heads else []),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
       f"learning_rate={learning_rate}",

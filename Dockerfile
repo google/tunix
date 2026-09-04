@@ -56,20 +56,6 @@ RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
       uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
     fi
 
-# Build argument to conditionally install Raiden weight sync dependencies
-ARG INSTALL_RAIDEN=false
-ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
-
-# Install Raiden specific dependencies conditionally
-RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
-    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
-      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
-    else \
-      pip install keyrings.google-artifactregistry-auth && \
-      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
-    fi; \
-fi
-
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
 
@@ -100,8 +86,45 @@ RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
 # Copy the rest of the project files
 COPY . .
 
+# Must run after `COPY . .`: RAIDEN_WHEEL_DIR is /app/raiden_wheels, which does
+# not exist until the project files are copied.
+ARG INSTALL_RAIDEN=false
+ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
+
+# Install Raiden specific dependencies conditionally
+RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
+    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
+      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
+    else \
+      pip install keyrings.google-artifactregistry-auth && \
+      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
+    fi; \
+    # --no-deps discards the wheel's own pins, but its native extension is
+    # compiled against a specific jax/jaxlib/libtpu ABI; a mismatch surfaces as
+    # `MemoryError: std::bad_alloc` from the native constructor.
+    RAIDEN_PINS=$(python -c "import importlib.metadata as m;print(' '.join(r.split(';')[0].strip() for r in m.metadata('tpu_raiden_jax').get_all('Requires-Dist') if r.split(';')[0].strip().startswith(('jax==','jaxlib==','libtpu=='))))" 2>/dev/null || true); \
+    if [ -n "$RAIDEN_PINS" ]; then \
+      echo "raiden ABI pins: $RAIDEN_PINS"; \
+      pip install --no-deps $RAIDEN_PINS; \
+    fi; \
+fi
+
+
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .
+
+# The checked-in .protos are never compiled, so workers die on
+# `ImportError: cannot import name 'discovery_service_pb2'`. Runs last so
+# protobuf is final, and pins grpcio-tools 1.76 because newer releases emit 7.x
+# gencode that the 6.33.x runtime vLLM/MaxText pin refuses to load.
+RUN pip install --no-deps grpcio-tools==1.76.0 && \
+    python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
+      tunix/experimental/distributed/runtime/discovery/discovery_service.proto \
+      tunix/experimental/distributed/examples/rl/service.proto
+
+# numba <=0.63 caps numpy<2.4 while the stack resolves 2.5. Move numba forward
+# rather than dragging numpy back under already-built native extensions.
+RUN pip install "numba==0.67.0"
 
 # Set the default command to bash
 CMD ["bash"]

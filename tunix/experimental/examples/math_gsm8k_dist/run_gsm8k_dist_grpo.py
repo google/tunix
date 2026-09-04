@@ -234,6 +234,30 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   args = _parse_args(argv)
+  if args.debug:
+    # basicConfig above pins INFO, so the logging.debug() call that prints full
+    # sampler responses is filtered out unless the level is raised here.
+    logging.getLogger().setLevel(logging.DEBUG)
+    # ...but raising the root logger also turns on every library's debug
+    # stream, and httpx/tensorstore/absl bury the sampler responses under
+    # thousands of lines. Keep the third-party loggers at WARNING.
+    for _noisy in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "absl",
+        "jax",
+        "jax._src",
+        "tensorstore",
+        "orbax",
+        "filelock",
+        "huggingface_hub",
+        "fsspec",
+        "gcsfs",
+        "google",
+        "grpc",
+    ):
+      logging.getLogger(_noisy).setLevel(logging.WARNING)
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:

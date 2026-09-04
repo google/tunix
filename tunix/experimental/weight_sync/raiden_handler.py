@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 import threading
 from typing import Any, Mapping, Optional, Sequence
 
@@ -273,16 +274,23 @@ class _RaidenTransport:
                 f" of {tensor.name!r} must have logical mesh size 1, got"
                 f" {logical_size}"
             )
-        elif axis not in physical_axes:
+          continue
+        # A dimension may be sharded over the product of several axes, which
+        # the wire form spells comma-joined; the controller splits it the same
+        # way to fold the sub-axis coordinates into one tensor coordinate.
+        sub_axes = axis.split(",")
+        unknown = [a for a in sub_axes if a not in physical_axes]
+        if unknown:
           raise ValueError(
               f"work unit {metadata.unit}: variable {tensor.name!r} names"
               f" unknown mesh axis {axis!r}"
           )
-        elif logical_size != physical_axes[axis]:
+        physical_size = math.prod(physical_axes[a] for a in sub_axes)
+        if logical_size != physical_size:
           raise ValueError(
               f"work unit {metadata.unit}: variable {tensor.name!r} maps axis"
               f" {axis!r} to logical size {logical_size}, but the physical"
-              f" mesh has size {physical_axes[axis]}"
+              f" mesh has size {physical_size}"
           )
 
   def transfer(

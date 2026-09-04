@@ -76,9 +76,13 @@ class TensorMetadata:
     layout: Layout mapping.
     item_size: Bytes per element.
     layer_idx: Stable batching ordinal.
-    sharding_spec: One mesh axis name per TENSOR dimension, empty string where
-      that dimension is replicated. This is the subset of JAX `PartitionSpec`
-      used by the Tunix/JAX adapters: `P(None, "y")` is `("", "y")`. Together
+    sharding_spec: The mesh axis name sharding each TENSOR dimension, empty
+      string where that dimension is replicated. This is the subset of JAX
+      `PartitionSpec` used by the Tunix/JAX adapters: `P(None, "y")` is
+      `("", "y")`. A dimension sharded over the product of several axes -- JAX
+      `P(("x", "y"))`, as MoE weights get when tensor and attention-data
+      parallelism are combined -- is the axes joined by commas, major first:
+      `("x,y",)`. Together
       with the work unit's physical `mesh_axes`, it maps device coordinates onto
       the variable's logical mesh. A concrete transport must reject forms its
       wire representation cannot encode.
@@ -129,7 +133,8 @@ class TensorMetadata:
           f"variable {self.name!r}: sharding_spec {self.sharding_spec} must"
           f" have rank {rank}"
       )
-    named_axes = [axis for axis in self.sharding_spec if axis]
+    named_axes = [a for axis in self.sharding_spec for a in axis.split(",")
+                  if a]
     if len(named_axes) != len(set(named_axes)):
       raise ValueError(
           f"variable {self.name!r}: a mesh axis may not shard two tensor"

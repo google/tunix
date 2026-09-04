@@ -104,6 +104,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--maxtext_model_name", type=str, default="qwen3-0.6b")
   parser.add_argument(
+      "--maxtext_base_num_kv_heads",
+      type=int,
+      default=0,
+      help=(
+          "Replicate KV heads up to this count to match the rollout's"
+          " tensor-parallel padding. Needed when num_kv_heads < rollout tp*ep."
+      ),
+  )
+  parser.add_argument(
       "--maxtext_padded_moe_mlp_dim",
       type=int,
       default=0,
@@ -311,6 +320,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
       warmup_steps_fraction=args.maxtext_warmup_steps_fraction,
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
+      base_num_kv_heads=args.maxtext_base_num_kv_heads,
       base_output_directory=args.maxtext_output_directory,
   )
   logging.info("Creating MaxText device mesh...")
@@ -398,6 +408,8 @@ def main(argv: list[str], context: Any = None) -> None:
       force=True,
   )
   args = _parse_args(argv)
+  if args.debug:
+    logging.getLogger().setLevel(logging.DEBUG)
   logging.info("Parsed args: %s", args)
 
   if context:

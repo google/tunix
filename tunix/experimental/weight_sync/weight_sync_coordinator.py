@@ -1009,6 +1009,34 @@ class WeightSyncCoordinator:
         raise fail("metadata collection returned an empty side")
       source_units = tuple(m.unit for m in src_metadata)
       destination_units = tuple(m.unit for m in dst_metadata)
+      # Log the identities: Raiden partitions the weights across units sharing
+      # a job_name and broadcasts across distinct ones, so this is what decides
+      # whether a replica gets a copy or a slice. warning, not info -- absl
+      # drops INFO at its default verbosity and nothing else records the split.
+      for side, metas in (("src", src_metadata), ("dst", dst_metadata)):
+        for m in metas:
+          logging.warning(
+              "%s unit job_name=%r job_replica_id=%r shards=%d %s",
+              side,
+              m.unit.job_name,
+              m.unit.job_replica_id,
+              len(m.shards),
+              list(m.shards),
+          )
+      src_shards = sum(len(m.shards) for m in src_metadata)
+      for m in dst_metadata:
+        if src_shards and len(m.shards) != src_shards:
+          logging.warning(
+              "destination %r has %d shard(s) against the source's %d. Raiden"
+              " intersects the two global index spaces, so an unequal pair can"
+              " transfer only the overlap -- a green round that delivers part"
+              " of the model, with every tensor that did arrive checksumming"
+              " correctly. Compare __grand_total__ on both sides before"
+              " trusting this round.",
+              m.unit.job_name,
+              len(m.shards),
+              src_shards,
+          )
 
       # Manifest preflight, before registration and before any downtime:
       # the controller pairs variables by exact name and silently skips
@@ -1041,7 +1069,8 @@ class WeightSyncCoordinator:
         )
         raise fail(
             "manifest preflight failed before any destination was quiesced;"
-            " no rollback needed"
+            f" no rollback needed ({len(preflight_problems)} problems, first:"
+            f" {preflight_problems[0]})"
         )
 
       loop = asyncio.get_running_loop()

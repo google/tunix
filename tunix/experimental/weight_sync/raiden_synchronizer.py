@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import collections
+import dataclasses
+import gc
 import inspect
 import ipaddress
 import os
@@ -89,9 +91,20 @@ def _ensure_ffi_compute_on_compat() -> None:
     )
 
   compute_on_mod.compute_on = compute_on2
+  # The wheel does `from jax.experimental import compute_on` and then calls
+  # `compute_on.compute_on(...)`. jax.experimental.compute_on binds the name at
+  # import time, so patching jax._src alone leaves the caller on the old
+  # two-arg version and the decorator dies with
+  #   TypeError: compute_on() got an unexpected keyword argument 'out_memory_spaces'
+  try:
+    from jax.experimental import compute_on as _public_compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
+
+    _public_compute_on.compute_on = compute_on2
+  except ImportError:
+    pass
   logging.warning(
-      "Patched jax._src.compute_on.compute_on to compute_on2 for TPU-sync FFI"
-      " compatibility."
+      "Patched jax._src.compute_on.compute_on (and jax.experimental."
+      "compute_on) to compute_on2 for TPU-sync FFI compatibility."
   )
 
 
@@ -122,6 +135,32 @@ def unpack_ip(row: Any) -> str:
     return str(ipaddress.IPv4Address(raw_bytes[12:16]))
   addr_str = str(ipaddress.IPv6Address(raw_bytes))
   return f"[{addr_str}]" if ":" in addr_str else addr_str
+
+
+def to_host_cpu_state(state: Any) -> Any:
+  """Copies arrays to client host memory; proxy arrays cannot bind directly.
+
+  The legacy transport needs real host buffers, which is what lets a Pathways
+  trainer feed a destination that has no FFI handlers (an mcjax sampler).
+  """
+  cpu = jax.local_devices(backend="cpu")[0]
+  leaves, treedef = jax.tree_util.tree_flatten(state)
+  new_leaves = []
+  for i, leaf in enumerate(leaves):
+    leaves[i] = None  # drop our ref as we go, so the copy peaks at one model
+    arr = getattr(leaf, "value", leaf)
+    # Single hop: device_get + device_put would make two host copies.
+    new_leaves.append(
+        jax.device_put(arr, cpu)
+        if hasattr(arr, "shape") and hasattr(arr, "dtype")
+        else leaf
+    )
+    # Proxy transit buffers land in reference cycles, so refcounting alone
+    # does not reclaim them between leaves.
+    if i % 4 == 3:
+      gc.collect()
+  gc.collect()
+  return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
@@ -197,6 +236,58 @@ def _axis_name(axis: Any) -> str:
   return ",".join(axis)
 
 
+def _devices_per_host(devices: List[Any]) -> int:
+  """Devices sharing one physical host, i.e. Raiden's `num_shards`.
+
+  The native layer derives `submanager_idx = shard_idx / num_shards` and
+  `slot = shard_idx % num_shards`, so this must be the real per-host device
+  count. Overstate it and every host allocates staging for the whole slice but
+  fills only its own share, leaving the rest of its SetGlobalShardIndices at
+  -1 -- the transfer then completes green while delivering only the shards one
+  host happened to own.
+
+  `process_index` alone is wrong under Pathways: the client is a single process
+  driving every worker, so all proxy devices report 0 and this collapses to
+  len(devices). Prefer whichever attribute actually distinguishes the workers,
+  and fall back to the per-host hardware ordinal.
+  """
+  env = os.environ.get("RAIDEN_DEVICES_PER_HOST")
+  if env:
+    n = int(env)
+    if n > 0 and len(devices) % n == 0:
+      return n
+    logging.warning(
+        "ignoring RAIDEN_DEVICES_PER_HOST=%s: not a divisor of %d devices",
+        env, len(devices))
+  for attr in ("task_id", "process_index"):
+    groups = {getattr(d, attr, None) for d in devices}
+    groups.discard(None)
+    if len(groups) > 1 and len(devices) % len(groups) == 0:
+      return len(devices) // len(groups)
+  local_ids = {getattr(d, "local_hardware_id", None) for d in devices}
+  local_ids.discard(None)
+  if 1 < len(local_ids) < len(devices) and len(devices) % len(local_ids) == 0:
+    return len(local_ids)
+  return len(devices)
+
+
+def _reduce_mesh(mesh: Any) -> Any:
+  """Drops size-1 axes from a mesh for Raiden's FFI shard_map.
+
+  `init_weight_synchronizer` specs its inputs as `P(*mesh.axis_names)`, so a
+  MaxText mesh -- twelve axes, most of them singletons -- yields a spec longer
+  than any operand's rank and shard_map rejects it. Only the trivial axes go;
+  the real sharding is preserved. Mirrors tpu-inference's `_reduce_mesh`.
+  """
+  keep = [a for a in mesh.axis_names if int(mesh.shape[a]) > 1]
+  if not keep or len(keep) == len(mesh.axis_names):
+    return mesh
+  return jax.sharding.Mesh(
+      mesh.devices.reshape(tuple(int(mesh.shape[a]) for a in keep)),
+      axis_names=tuple(keep),
+  )
+
+
 def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
@@ -222,9 +313,8 @@ class RaidenSynchronizer:
 
   Used by both the trainer and the sampler. Construct with a state to bind
   right away, or leave it out and call `bind` when the weights exist; every
-  later `bind` rebinds the same transport. Known limits: one mesh axis per
-  tensor dim, and without the tpu_sync wheel the metadata carries no shard
-  addresses, so the handler refuses registration.
+  later `bind` rebinds the same transport. Without the tpu_sync wheel the
+  metadata carries no shard addresses, so the handler refuses registration.
   """
 
   def __init__(
@@ -234,10 +324,32 @@ class RaidenSynchronizer:
       *,
       worker_index: int = 0,
       auto_h2d: bool = False,
+      host_stage: Optional[bool] = None,
+      use_ffi: Optional[bool] = None,
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
   ):
     is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
+    # Pathways says where the arrays live; FFI says which transport moves them.
+    # An FFI source only feeds an FFI destination, so a Pathways trainer
+    # serving an mcjax sampler runs RAIDEN_USE_FFI=0 on both sides and host
+    # stages instead. Same rule as tpu-inference's use_ffi(): proxy picks the
+    # default, an explicit env var wins, and no wheel means no FFI.
+    default_ffi = "1" if is_proxy else "0"
+    if use_ffi is None:
+      use_ffi = (os.environ.get("RAIDEN_USE_FFI", default_ffi) == "1"
+                 and _raiden_ffi is not None)
+    # host_stage and use_ffi are mutually exclusive -- FFI binds the proxy
+    # arrays in place, and staged CPU arrays carry no mesh for
+    # _init_ffi_transport -- but they DO arrive in contradiction: the pinned
+    # MaxText in our image passes host_stage=is_pathways unconditionally
+    # (site-packages/maxtext/training_engine/maxtext_engine.py:1086). Normalise
+    # here rather than guarding at each use. Grep the *pinned* MaxText, not the
+    # maxtext checkout, before concluding these parameters are unused.
+    if use_ffi:
+      host_stage = False
+    elif host_stage is None:
+      host_stage = is_proxy
     self.job_name = job_name
     self.worker_index = worker_index
     self.names: List[str] = []
@@ -245,10 +357,13 @@ class RaidenSynchronizer:
     self.ip = bind_ip or local_ip()
     self._auto_h2d = auto_h2d
     self._is_proxy = is_proxy
+    self._use_ffi = use_ffi
+    self._host_stage = host_stage
     self._parallelism = parallelism
     self._sync: Any = None
     self._ips: List[str] = []
     self._unique_listeners: List[str] = []
+    self._listeners: List[str] = []
     self._ffi_mesh: Any = None
     self._ffi_shard_idx: Any = None
     if state is not None:
@@ -260,6 +375,10 @@ class RaidenSynchronizer:
 
   @property
   def active(self) -> bool:
+    # Under FFI there is no native `_sync` and `_ips` fill only in d2h(), so
+    # bound arrays are the only pre-d2h signal. MaxText gates d2h() on this.
+    if self._use_ffi:
+      return self.bound
     return self._sync is not None or bool(self._ips)
 
   def _init_ffi_transport(self, *, is_d2h: bool) -> None:
@@ -279,6 +398,7 @@ class RaidenSynchronizer:
     mesh = getattr(getattr(self.arrays[0], "sharding", None), "mesh", None)
     if mesh is None:
       raise ValueError("Arrays must be sharded on a Mesh for FFI weight sync.")
+    mesh = _reduce_mesh(mesh)
 
     slice_byte_sizes = [
         int(np.prod(arr.sharding.shard_shape(arr.shape)) * arr.dtype.itemsize)
@@ -292,8 +412,17 @@ class RaidenSynchronizer:
     )
 
     task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    global_ids = jnp.array(
-        [d.id for d in mesh.devices.flatten()], dtype=jnp.int32
+    # Mesh POSITION, not device id. The controller indexes a source shard by
+    # its position in the mesh (`_get_global_indices` walks
+    # physical_mesh_shape), while the native layer keys staging off whatever we
+    # pass here -- slot = shard_idx % num_shards, submanager = shard_idx /
+    # num_shards, and SetGlobalShardIndices records it as the global index.
+    # create_device_mesh reorders devices for topology (a 2x2x2 v5p slice comes
+    # back as ids [0,1,3,2,6,7,5,4]), so keying off d.id labels each slice with
+    # the wrong global index. A 2x2x1 slice happens to be identity-ordered,
+    # which is why this only ever showed up multi-host.
+    global_ids = jnp.arange(
+        mesh.devices.size, dtype=jnp.int32
     ).reshape(task_mesh_shape)
     shard_idx = jax.device_put(
         global_ids,
@@ -303,10 +432,19 @@ class RaidenSynchronizer:
     )
 
     src_devices = mesh.devices.flatten()
-    num_processes = len(
-        set(getattr(d, "process_index", 0) for d in src_devices)
+    devices_per_host = _devices_per_host(list(src_devices))
+    # Loud on purpose: a wrong value here is silent, and costs exactly the
+    # shards of every host but one.
+    logging.warning(
+        "raiden ffi: %d device(s), devices_per_host=%d (task_id=%s"
+        " process_index=%s local_hardware_id=%s)",
+        len(src_devices),
+        devices_per_host,
+        sorted({getattr(d, "task_id", None) for d in src_devices}),
+        sorted({getattr(d, "process_index", None) for d in src_devices}),
+        sorted({getattr(d, "local_hardware_id", None) for d in src_devices},
+               key=str),
     )
-    devices_per_host = len(src_devices) // max(1, num_processes)
 
     if is_d2h:
       logging.info(
@@ -393,11 +531,24 @@ class RaidenSynchronizer:
       ip = unpack_ip(row)
       self._ips.append(f"{ip}:{int(row[4])}")
       listeners.append(f"{ip}:{int(row[5])}")
+    self._listeners = listeners
 
     self._unique_listeners = []
     for listener in listeners:
       if listener not in self._unique_listeners:
         self._unique_listeners.append(listener)
+    # The controller addresses source shard j by shards[j], indexing by MESH
+    # position; this list is assembled by process_allgather, which orders by
+    # PROCESS. Under Pathways there is a single client process, so verify both
+    # that all devices reported and that entry j lines up with mesh device j.
+    logging.warning(
+        "raiden ffi endpoints: %d row(s) for %d mesh device(s); mesh ids=%s;"
+        " endpoints=%s",
+        len(gathered_ws_info),
+        len(src_devices),
+        [d.id for d in src_devices],
+        self._ips,
+    )
     self._ffi_mesh = mesh
     self._ffi_shard_idx = shard_idx
 
@@ -411,8 +562,7 @@ class RaidenSynchronizer:
     self.arrays = list(
         _raiden_ffi.multi_h2d(self.arrays, self._ffi_shard_idx, self._ffi_mesh)
     )
-    for arr in self.arrays:
-      arr.block_until_ready()
+    jax.block_until_ready(self.arrays)
 
   def bind(self, state: Any) -> None:
     """Binds this host's weights, or rebinds them after a training step."""
@@ -421,8 +571,14 @@ class RaidenSynchronizer:
     # copies in host memory during rebinds.
     self.names = []
     self.arrays = []
+    if self._host_stage:
+      state = to_host_cpu_state(state)
+      _log_rss("bind:after_host_stage")
     self.names, self.arrays = _filter_bindable(
-        *flatten_weights(state), allow_proxy=self._is_proxy
+        # Proxy arrays are bindable only under FFI, which binds them in place.
+        # Host staging turns them into CPU arrays, and a non-Pathways process
+        # should not be seeing them at all.
+        *flatten_weights(state), allow_proxy=self._use_ffi
     )
     del state
     _log_rss("bind:after_flatten")
@@ -432,7 +588,7 @@ class RaidenSynchronizer:
         len(self.arrays),
         self._is_proxy,
     )
-    if self._is_proxy:
+    if self._use_ffi:
       self._ips = []
       self._unique_listeners = []
       if self._auto_h2d:
@@ -478,12 +634,12 @@ class RaidenSynchronizer:
       _log_rss("bind:after_native_rebind")
 
   def _require_sync(self, op: str) -> Any:
-    if self._sync is None and not self._is_proxy:
+    if self._sync is None and not self._use_ffi:
       raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
     return self._sync
 
   def d2h(self) -> None:
-    if self._is_proxy:
+    if self._use_ffi:
       try:
         self._init_ffi_transport(is_d2h=True)
         logging.info(
@@ -505,12 +661,66 @@ class RaidenSynchronizer:
   def h2d(self) -> None:
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
-    if self._is_proxy:
+    if self._use_ffi:
       self._ffi_h2d()
       return
     if self._sync is not None:
       self._sync.h2d()
       jax.block_until_ready(self.arrays)
+
+  def release_host_arrays(self) -> None:
+    """Drops the staged host copy between rounds.
+
+    Called by the pinned MaxText (maxtext_engine.py:1129), not by anything in
+    this repo -- grep site-packages before deleting. Host-staged path only; a
+    no-op under FFI, which binds device arrays in place. Clears `names`
+    alongside `arrays` so `bound`/`active` and every zip(names, arrays)
+    consumer stay consistent; the next round rebinds.
+    """
+    if not self._host_stage:
+      return
+    self.names = []
+    self.arrays = []
+    gc.collect()
+
+  def work_unit_metadata_all(self) -> List[weight_sync.WorkUnitMetadata]:
+    """One work unit per physical host.
+
+    `control_plane_rpc_address` is a single string on the wire, so a unit can
+    name exactly one listener. A multi-host Pathways source has one listener
+    per host, and registering just the first leaves every other host holding
+    shards the controller never tells it to push -- a green round that delivers
+    only the first host's slices. Splitting into one unit per host, keyed by
+    job_replica_id, is the shape the controller already assumes:
+    `num_src_hosts = len({job_replica_id})` and
+    `global_device_id = replica_id * devices_per_host + j`.
+    """
+    base = self.work_unit_metadata()
+    if not self._use_ffi or len(self._unique_listeners) <= 1:
+      return [base]
+    by_listener: dict[str, List[str]] = {}
+    for ip, listener in zip(self._ips, self._listeners):
+      by_listener.setdefault(listener, []).append(ip)
+    units = []
+    for host_idx, listener in enumerate(self._unique_listeners):
+      units.append(
+          dataclasses.replace(
+              base,
+              unit=weight_sync.WorkUnitId(
+                  job_name=self.job_name,
+                  job_replica_id=str(host_idx) if host_idx else "",
+              ),
+              shards=tuple(by_listener[listener]),
+              control_plane_rpc_address=listener,
+          )
+      )
+    logging.warning(
+        "raiden: registering %d work unit(s), one per host: %s",
+        len(units),
+        [(u.unit.job_replica_id or "0", len(u.shards),
+          u.control_plane_rpc_address) for u in units],
+    )
+    return units
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
@@ -526,28 +736,30 @@ class RaidenSynchronizer:
         for name, arr in list(zip(self.names, self.arrays))[:sample]
     }
     head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
-    # Metadata for cross-checking the weight-sync result.
+    # Registration pairs tensors by position, so the totals only compare when
+    # both sides bound the same set. Check these before trusting a mismatch.
     head["__tensor_count__"] = len(self.arrays)
     head["__element_count__"] = int(sum(a.size for a in self.arrays))
     return head
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
+    mesh = None
+    for arr in self.arrays:
+      mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
+      if mesh is not None:
+        break
+    if mesh is None:
+      mesh_axes, mesh_shape = ("fsdp",), (1,)
+    else:
+      # Advertise the same mesh the shards were built on; see _reduce_mesh.
+      mesh = _reduce_mesh(mesh)
+      mesh_axes = tuple(mesh.axis_names)
+      mesh_shape = tuple(int(mesh.shape[a]) for a in mesh.axis_names)
     variables = tuple(
         _tensor_metadata(name, arr, idx)
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
-    mesh_axes: tuple = ()
-    mesh_shape = None
-    for arr in self.arrays:
-      mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
-      if mesh is not None:
-        mesh_axes = tuple(mesh.axis_names)
-        mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-        break
-    if mesh_shape is None:
-      mesh_axes = ("fsdp",)
-      mesh_shape = (1,)
-    if self._is_proxy:
+    if self._use_ffi:
       shards = tuple(self._ips)
       control_addr = self._unique_listeners[0] if self._unique_listeners else ""
     else:
