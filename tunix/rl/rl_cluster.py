@@ -1156,8 +1156,11 @@ class RLEngine:
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
       if not anchor_on_device:
         del anchor_policy_state
-      gc.collect()
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        # Release the host-side references the log-prob pass leaves behind
+        # before the model moves back; without offloading there is nothing
+        # to reclaim and a full collection is a pure stall.
+        gc.collect()
         self._put_model_on_memory_kind(
             self.actor_trainer.model, self._default_memory_kind
         )
@@ -1179,7 +1182,8 @@ class RLEngine:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
-      gc.collect()
+      if self.cluster_config.gc_collect_after_weight_sync:
+        gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"

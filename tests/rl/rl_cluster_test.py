@@ -341,6 +341,47 @@ class RlEngineTest(parameterized.TestCase):
         actor=model, tokenizer=vocab, cluster_config=cluster_config
     )
 
+  @parameterized.named_parameters(
+      dict(testcase_name='enabled_by_default', gc_collect_after_weight_sync=True),
+      dict(testcase_name='disabled', gc_collect_after_weight_sync=False),
+  )
+  def test_sync_weights_gc_collect_after_weight_sync(
+      self, gc_collect_after_weight_sync
+  ):
+    mesh = Mesh(np.array(jax.devices()).reshape(-1, 1), ('fsdp', 'tp'))
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        gc_collect_after_weight_sync=gc_collect_after_weight_sync,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model, tokenizer=vocab, cluster_config=cluster_config
+    )
+    with mock.patch.object(rl_engine_lib.gc, 'collect') as mock_collect:
+      rl_engine.sync_weights()
+    self.assertEqual(mock_collect.called, gc_collect_after_weight_sync)
+
   def test_init_engine_invalid_engine_string(self):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_engine` should be one of'
