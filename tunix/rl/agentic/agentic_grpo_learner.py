@@ -51,6 +51,7 @@ from tunix.rl import perf_log
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
+from tunix.rl.agentic import token_continuity
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
