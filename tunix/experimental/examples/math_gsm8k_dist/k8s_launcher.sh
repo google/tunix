@@ -253,7 +253,7 @@ start_rollout() {
     | kubectl apply -f -
 }
 
-source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
+source tunix/experimental/examples/common/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
