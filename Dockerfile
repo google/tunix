@@ -54,13 +54,16 @@ ARG INSTALL_MAXTEXT=false
 # Install MaxText specific dependencies conditionally
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
       uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
-    fi
+    else \
+      uv pip install numpy==2.3.5; \
+fi
 
 # Build argument to conditionally install Raiden weight sync dependencies
 ARG INSTALL_RAIDEN=false
 ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
 
 # Install Raiden specific dependencies conditionally
+COPY raiden_wheels/ ${RAIDEN_WHEEL_DIR}/
 RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
     if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
       pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
@@ -100,8 +103,14 @@ RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
 # Copy the rest of the project files
 COPY . .
 
+# Compile proto buffer for discovery service, this has to be the last step.
+RUN uv pip install grpcio-tools
+RUN cd /app && find tunix/experimental/distributed -name "*.proto" -exec python -m grpc_tools.protoc -I/app --python_out=/app --grpc_python_out=/app {} +
+
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .
+
+
 
 # Set the default command to bash
 CMD ["bash"]

@@ -9,12 +9,42 @@
 
 set -e
 
+INSTALL_MAXTEXT=false
+INSTALL_RAIDEN=false
+RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
+
+usage() {
+    cat <<'MSG'
+Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe]
+
+Options:
+  --maxtext               Install MaxText-specific dependencies.
+  --raiden                Install Raiden-specific dependencies.
+  --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
+  --deepswe               Install DeepSWE evaluation dependencies.
+MSG
+}
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
+        --maxtext) INSTALL_MAXTEXT=true; shift ;;
+        --raiden) INSTALL_RAIDEN=true; shift ;;
+        --raiden-wheel-dir)
+            if [[ -z "$2" ]]; then
+                echo "Error: --raiden-wheel-dir requires a path"
+                usage
+                exit 1
+            fi
+            RAIDEN_WHEEL_DIR="$2"
+            shift 2
+            ;;
         --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
-        *) echo "Unknown parameter: $1"; exit 1 ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *) echo "Unknown parameter: $1"; usage; exit 1 ;;
     esac
 done
 
@@ -62,6 +92,9 @@ MSG
 
     $DOCKER_COMMAND build \
         --network=host \
+        --build-arg INSTALL_MAXTEXT=${INSTALL_MAXTEXT} \
+        --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
+        --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
