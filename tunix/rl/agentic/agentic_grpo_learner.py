@@ -684,6 +684,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             os.environ
         ) == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
     )
+    if record_full:
+      trajectories = sorted(
+          trajectories,
+          key=lambda item: (int(item.group_id), int(item.pair_index)),
+      )
     row_identity = []
 
     for item in trajectories:
