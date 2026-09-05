@@ -25,13 +25,15 @@ import jax
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
   """Options for configuring the JAX profiler."""
+
   # Directory to write the profile to.
   log_dir: str
   # Number of steps to skip before profiling.
   skip_first_n_steps: int
   # Number of steps to profile.
   profiler_steps: int
-  # Whether to set the profile options.
+  # Whether to set tracer level options (host_tracer_level,
+  # python_tracer_level).
   set_profile_options: bool = True
   # https://github.com/jax-ml/jax/blob/0b1b909dd66a113ee0d7e54e55d0efef480e2a8a/docs/profiling.md?plain=1#L285
   host_tracer_level: int = 2  # set to 2 to capture HBM profiles.
@@ -40,6 +42,8 @@ class ProfilerOptions:
   # Maximum number of hosts to profile. Only supported for Pathways workloads
   # using pathwaysutils.
   max_num_hosts: int | None = None
+  # Whether to enable continuous profiling via JAX advanced_configuration.
+  enable_continuous_profiling: bool = False
 
 
 class Profiler:
@@ -127,19 +131,22 @@ class Profiler:
         )
         return
       logging.info("Starting JAX profiler at step %d.", step)
+      profile_options = jax.profiler.ProfileOptions()
       if self._profiler_options.set_profile_options:
-        profile_options = jax.profiler.ProfileOptions()
         profile_options.host_tracer_level = (
             self._profiler_options.host_tracer_level
         )
         profile_options.python_tracer_level = (
             self._profiler_options.python_tracer_level
         )
-        self._start_trace(
-            log_dir=self._output_path, profiler_options=profile_options
-        )
-      else:
-        self._start_trace(log_dir=self._output_path)
+      if self._profiler_options.enable_continuous_profiling:
+        profile_options.advanced_configuration = {
+            "enable_continuous_profiling": True
+        }
+      self._start_trace(
+          log_dir=self._output_path, profiler_options=profile_options
+      )
+
       Profiler._is_active = True
       self._started_by_this_instance = True
 
