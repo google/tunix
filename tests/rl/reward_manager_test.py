@@ -14,6 +14,8 @@
 
 import dataclasses
 import inspect
+import multiprocessing
+import os
 from typing import Any, List
 from unittest import mock
 from absl import logging
@@ -278,6 +280,128 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
     self.assertIn("trajectory_rewards/sum", log_metrics)
     self.assertIn("trajectory_rewards/mean", log_metrics)
     self.assertNotIn("rewards/sum", log_metrics)
+
+
+def answer_reward(
+    prompts: List[str],
+    completions: List[str],
+    answer: List[str],
+    **kwargs: Any,
+) -> List[float]:
+  del completions, kwargs  # Unused
+  assert len(answer) == len(prompts)
+  return [float(a) for a in answer]
+
+
+answer_reward.__name__ = "answer_reward"
+
+
+def _noop():
+  pass
+
+
+def child_spawning_reward(
+    prompts: List[str], completions: List[str], **kwargs: Any
+) -> List[float]:
+  """Spawns a subprocess of its own, which a daemonic pool worker forbids."""
+  del completions, kwargs  # Unused
+  p = multiprocessing.get_context("fork").Process(target=_noop)
+  p.start()
+  p.join()
+  return [7.0] * len(prompts)
+
+
+child_spawning_reward.__name__ = "child_spawning_reward"
+
+
+@absltest.skipIf(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    "parallel reward evaluation requires the fork start method",
+)
+class ParallelSequenceRewardManagerTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.serial_config = TestAlgoConfig()
+    self.parallel_config = TestAlgoConfig(reward_num_workers=4)
+    self.prompts = [f"p{i}" for i in range(10)]
+    self.completions = [f"c{i}" * (i + 1) for i in range(10)]
+    self.answers = [str(float(i)) for i in range(10)]
+    self._managers = []
+
+  def tearDown(self):
+    for m in self._managers:
+      m.close()
+    super().tearDown()
+
+  def _make(self, reward_fns, config):
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=reward_fns, algo_config=config
+    )
+    self._managers.append(manager)
+    return manager
+
+  def test_parallel_matches_serial(self):
+    fns = [len_reward, prompt_len_reward, answer_reward, nan_reward]
+    serial = self._make(fns, self.serial_config)(
+        self.prompts, self.completions, answer=self.answers
+    )
+    parallel = self._make(fns, self.parallel_config)(
+        self.prompts, self.completions, answer=self.answers
+    )
+    np.testing.assert_array_equal(serial["rewards"], parallel["rewards"])
+    for name in (
+        "rewards/len_reward",
+        "rewards/prompt_len_reward",
+        "rewards/answer_reward",
+    ):
+      np.testing.assert_array_equal(
+          serial["log_metrics"][name][0],
+          parallel["log_metrics"][name][0],
+          err_msg=f"{name} mismatch",
+      )
+
+  def test_per_example_kwargs_sliced_in_order(self):
+    manager = self._make([answer_reward], self.parallel_config)
+    rewards_info = manager(self.prompts, self.completions, answer=self.answers)
+    np.testing.assert_array_equal(
+        rewards_info["rewards"], np.array([float(i) for i in range(10)])
+    )
+
+  def test_unpicklable_fn_evaluated_in_parent(self):
+    unpicklable = lambda prompts, completions, **kw: [2.0] * len(prompts)
+    unpicklable.__name__ = "unpicklable_fn"
+    manager = self._make([unpicklable], self.parallel_config)
+    rewards_info = manager(self.prompts, self.completions)
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 2.0))
+    self.assertIn("unpicklable_fn", manager._parent_only_fns)
+
+  def test_subprocess_spawning_fn_evaluated_in_parent(self):
+    manager = self._make([child_spawning_reward], self.parallel_config)
+    rewards_info = manager(self.prompts, self.completions)
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 7.0))
+    self.assertIn("child_spawning_reward", manager._parent_only_fns)
+    # Subsequent calls still succeed (fn now runs in the parent).
+    rewards_info = manager(self.prompts, self.completions)
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 7.0))
+
+  def test_minus_one_uses_one_worker_per_cpu(self):
+    manager = self._make([len_reward], TestAlgoConfig(reward_num_workers=-1))
+    rewards_info = manager(self.prompts, self.completions)
+    self.assertEqual(manager._pool._processes, os.cpu_count() or 1)
+    expected = np.array([float(len(c)) for c in self.completions])
+    np.testing.assert_array_equal(rewards_info["rewards"], expected)
+
+  def test_empty_batch_skips_the_pool(self):
+    manager = self._make([len_reward], self.parallel_config)
+    rewards_info = manager([], [])
+    self.assertEqual(rewards_info["rewards"].shape[0], 0)
+    self.assertIsNone(manager._pool)
+
+  def test_serial_default_creates_no_pool(self):
+    manager = self._make([len_reward], self.serial_config)
+    manager(self.prompts, self.completions)
+    self.assertIsNone(manager._pool)
 
 
 if __name__ == "__main__":

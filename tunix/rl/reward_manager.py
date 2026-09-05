@@ -17,6 +17,7 @@
 import abc
 from dataclasses import asdict
 import inspect
+import multiprocessing
 import os
 from typing import Any, Callable, Dict, List, Sequence
 from absl import logging
@@ -26,6 +27,10 @@ from tunix.rl import function_registry
 
 
 RewardFn = Callable[..., Any]
+
+# How long to wait for one reward-fn chunk before treating the worker pool as
+# unusable for that fn and re-evaluating it in the parent process.
+_REWARD_WORKER_TIMEOUT_SECONDS = 180
 
 
 def _calculate_scalar_reward_log_metrics(
@@ -101,6 +106,132 @@ class SequenceRewardManager(AbstractRewardManager):
   ):
     """Initializes the manager with a list of callable reward function objects."""
     super().__init__(reward_fns, algo_config)
+    self._pool = None
+    # Reward fns that must be evaluated in the parent process, learned at
+    # runtime: fns that are unpicklable, or that spawn subprocesses of their
+    # own (which the pool's daemonic workers forbid).
+    self._parent_only_fns = set()
+    self._parallel_disabled = False
+
+  def _parallel_enabled(self) -> bool:
+    return (
+        self._num_workers() > 1
+        and not self._parallel_disabled
+        and "fork" in multiprocessing.get_all_start_methods()
+    )
+
+  def _num_workers(self) -> int:
+    """Resolves `reward_num_workers`; -1 means one worker per CPU."""
+    n = getattr(self.algo_config, "reward_num_workers", 0)
+    cpus = os.cpu_count() or 1
+    if n == -1:
+      return cpus
+    if n > cpus:
+      logging.warning(
+          "reward_num_workers=%d exceeds the %d CPUs available; the extra"
+          " workers will only contend for cores.",
+          n,
+          cpus,
+      )
+    return n
+
+  def _get_pool(self):
+    """Lazily creates the fork-based reward worker pool."""
+    if self._pool is None:
+      # Some launchers run the trainer as a daemonic child process, and
+      # multiprocessing forbids daemons from having children. The flag is
+      # launcher plumbing this code does not rely on: clear it so the pool
+      # can fork. The workers are reaped with the trainer on teardown.
+      cur = multiprocessing.current_process()
+      if getattr(cur, "_config", {}).get("daemon"):
+        cur._config["daemon"] = False  # pylint: disable=protected-access
+      self._pool = multiprocessing.get_context("fork").Pool(
+          processes=self._num_workers()
+      )
+    return self._pool
+
+  def close(self):
+    """Shuts down the reward worker pool, if one was created."""
+    if getattr(self, "_pool", None) is not None:
+      self._pool.terminate()
+      self._pool = None
+
+  def _call_reward_fn(
+      self,
+      reward_fn: RewardFn,
+      prompts: List[str],
+      completions: List[str],
+      call_kwargs: Dict[str, Any],
+  ) -> Any:
+    """Evaluates one reward fn over the batch, using workers when enabled."""
+    fn_name = getattr(reward_fn, "__name__", str(reward_fn))
+    if (
+        not prompts
+        or not self._parallel_enabled()
+        or fn_name in self._parent_only_fns
+    ):
+      # An empty batch has nothing to spread over workers; let the fn see
+      # it exactly as the serial path would.
+      return reward_fn(prompts=prompts, completions=completions, **call_kwargs)
+
+    try:
+      pool = self._get_pool()
+    except Exception as e:  # pylint: disable=broad-except
+      self._parallel_disabled = True
+      logging.warning(
+          "Could not create the reward worker pool (%r); using the serial"
+          " implementation.",
+          e,
+      )
+      return reward_fn(prompts=prompts, completions=completions, **call_kwargs)
+
+    num_prompts = len(prompts)
+    try:
+      # Two chunks per worker, not one: reward cost varies a lot across
+      # completions (e.g. long answers under a verifier), and the smaller
+      # chunks let a worker that finished early pick up more work instead of
+      # idling behind the slowest chunk. The pool size itself is exactly
+      # `reward_num_workers`.
+      n_chunks = min(
+          pool._processes * 2, num_prompts  # pylint: disable=protected-access
+      )
+      bounds = [num_prompts * c // n_chunks for c in range(n_chunks + 1)]
+      jobs = []
+      for c in range(n_chunks):
+        lo, hi = bounds[c], bounds[c + 1]
+        chunk_kwargs = {}
+        for k, v in call_kwargs.items():
+          # A list/tuple/array kwarg with exactly one entry per prompt is
+          # treated as a per-example column (e.g. ground-truth answers) and
+          # sliced in lockstep with the batch, because that is the contract
+          # `__call__` already relies on for such kwargs. Anything else --
+          # scalars, configs, sequences of another length -- is passed to
+          # every chunk unchanged.
+          if isinstance(v, (list, tuple)) and len(v) == num_prompts:
+            chunk_kwargs[k] = list(v[lo:hi])
+          elif isinstance(v, np.ndarray) and len(v) == num_prompts:
+            chunk_kwargs[k] = v[lo:hi]
+          else:
+            chunk_kwargs[k] = v
+        chunk_kwargs["prompts"] = list(prompts[lo:hi])
+        chunk_kwargs["completions"] = list(completions[lo:hi])
+        jobs.append(pool.apply_async(reward_fn, kwds=chunk_kwargs))
+      parts = [j.get(timeout=_REWARD_WORKER_TIMEOUT_SECONDS) for j in jobs]
+      if any(p is None for p in parts):
+        raise RuntimeError(f"{fn_name} returned None in a worker.")
+      return [x for part in parts for x in list(part)]
+    except Exception as e:  # pylint: disable=broad-except
+      # Unpicklable fns and fns that spawn their own subprocesses land here,
+      # as does any worker crash. Evaluate this fn in the parent from now on
+      # -- its own internal parallelism, if any, works there.
+      self._parent_only_fns.add(fn_name)
+      logging.warning(
+          "Reward fn %s failed in worker processes (%r); evaluating it in the"
+          " parent process from now on.",
+          fn_name,
+          e,
+      )
+      return reward_fn(prompts=prompts, completions=completions, **call_kwargs)
 
   def __call__(
       self,
@@ -145,7 +276,7 @@ class SequenceRewardManager(AbstractRewardManager):
       call_kwargs = base_kwargs.copy()
       call_kwargs.update(reward_fn_config_params)
 
-      r = reward_fn(prompts=prompts, completions=completions, **call_kwargs)
+      r = self._call_reward_fn(reward_fn, prompts, completions, call_kwargs)
 
       if r is None:
         raise RuntimeError(

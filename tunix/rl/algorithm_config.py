@@ -15,6 +15,7 @@
 import dataclasses
 from absl import logging
 
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class AlgorithmConfig:
   """Configuration for RL algorithms.
@@ -37,7 +38,17 @@ class AlgorithmConfig:
   # `exp(diff)` term saturates bf16 / overflows fp32 and poisons the loss
   # for the rest of the step.
   kl_clamp_value: float | None = None
-
+  # Number of worker processes `SequenceRewardManager` uses to evaluate
+  # reward functions over the batch. `0` (default) keeps the serial
+  # implementation and preserves prior behavior bit-for-bit. Values > 1
+  # chunk the (prompts, completions) batch across a fork-based process
+  # pool — reward functions are called with contiguous slices, so
+  # per-sequence reward functions produce identical results. Functions
+  # that cannot run in a worker (unpicklable, or spawning subprocesses of
+  # their own) are detected at runtime and evaluated in the parent
+  # process instead; any other failure falls back to the serial path.
+  # `-1` uses one worker per CPU.
+  reward_num_workers: int = 0
 
   def __post_init__(self):
     valid_algo_variants = [
@@ -62,6 +73,11 @@ class AlgorithmConfig:
       raise ValueError(
           f"policy_loss_fn must be one of {valid_policy_loss_fns}."
           f" Received: {self.policy_loss_fn}"
+      )
+    if self.reward_num_workers < -1:
+      raise ValueError(
+          "reward_num_workers must be >= 0, or -1 for one worker per CPU."
+          f" Received: {self.reward_num_workers}"
       )
 
     # Automatically prints configuration upon initialization.
