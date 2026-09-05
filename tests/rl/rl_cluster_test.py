@@ -342,10 +342,12 @@ class RlEngineTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      dict(testcase_name='enabled_by_default', per_step_gc_collect=True),
-      dict(testcase_name='disabled', per_step_gc_collect=False),
+      dict(testcase_name='enabled_by_default', gc_collect_after_weight_sync=True),
+      dict(testcase_name='disabled', gc_collect_after_weight_sync=False),
   )
-  def test_sync_weights_per_step_gc_collect(self, per_step_gc_collect):
+  def test_sync_weights_gc_collect_after_weight_sync(
+      self, gc_collect_after_weight_sync
+  ):
     mesh = Mesh(np.array(jax.devices()).reshape(-1, 1), ('fsdp', 'tp'))
     cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
@@ -355,7 +357,7 @@ class RlEngineTest(parameterized.TestCase):
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        per_step_gc_collect=per_step_gc_collect,
+        gc_collect_after_weight_sync=gc_collect_after_weight_sync,
         training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
@@ -378,7 +380,7 @@ class RlEngineTest(parameterized.TestCase):
     )
     with mock.patch.object(rl_engine_lib.gc, 'collect') as mock_collect:
       rl_engine.sync_weights()
-    self.assertEqual(mock_collect.called, per_step_gc_collect)
+    self.assertEqual(mock_collect.called, gc_collect_after_weight_sync)
 
   def test_init_engine_invalid_engine_string(self):
     with self.assertRaisesRegex(
