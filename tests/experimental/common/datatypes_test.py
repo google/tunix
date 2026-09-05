@@ -18,6 +18,7 @@ import time
 
 from absl.testing import absltest
 import cloudpickle
+import jax
 import numpy as np
 from tunix.experimental.common import datatypes
 
@@ -81,8 +82,11 @@ class WireSerializationTest(absltest.TestCase):
 
   def test_train_request_round_trips_through_cloudpickle(self):
     payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1], [2]], dtype=np.int32),
+        prompt_mask=np.ones((2, 1), dtype=np.float32),
+        completion_ids=np.array([[3], [4]], dtype=np.int32),
+        completion_mask=np.ones((2, 1), dtype=np.float32),
         advantages=np.array([1.0, 2.0], dtype=np.float32),
-        loss_mask=np.array([[1, 1], [1, 0]], dtype=np.int32),
         metadata={"step": 42},
     )
     original = datatypes.TrainRequest(
@@ -98,9 +102,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.target_policy_version, 2)
     self.assertEqual(restored.metadata, {"lineage_id": "batch_0"})
     np.testing.assert_allclose(restored.payload.advantages, [1.0, 2.0])
-    np.testing.assert_array_equal(
-        restored.payload.loss_mask, [[1, 1], [1, 0]]
-    )
+    np.testing.assert_array_equal(restored.payload.completion_mask, [[1], [1]])
 
   def test_trajectory_response_round_trips_through_cloudpickle(self):
     original = _rollout_response_dto()
@@ -157,9 +159,7 @@ class WireSerializationTest(absltest.TestCase):
           loss_mask=np.array([1]),
       )
 
-    with self.assertRaisesRegex(
-        ValueError, "logps shape .* != tokens shape"
-    ):
+    with self.assertRaisesRegex(ValueError, "logps shape .* != tokens shape"):
       datatypes.TokenSegment(
           source="assistant",
           tokens=np.array([1, 2]),
@@ -543,6 +543,66 @@ class WireSerializationTest(absltest.TestCase):
     item_default = datatypes.TrajectoryItem(prompt_id="prompt_99")
     self.assertEqual(item_default.prompt_id, "prompt_99")
     self.assertEqual(item_default.group_index, 0)
+
+
+class RLTrainerPayloadTest(absltest.TestCase):
+
+  def test_rl_trainer_payload_fields_and_replace(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([1.5, 1.5], dtype=np.float32),
+        num_segments=3,
+        metadata={"step": 1},
+    )
+    self.assertEqual(payload.num_segments, 3)
+    self.assertEqual(payload.metadata, {"step": 1})
+
+    replaced = payload.replace(num_segments=4)
+    self.assertEqual(replaced.num_segments, 4)
+    np.testing.assert_array_equal(replaced.prompt_ids, payload.prompt_ids)
+
+  def test_rl_trainer_payload_pytree_structure(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([1.0, 2.0], dtype=np.float32),
+        num_segments=5,
+        metadata={"key": "value"},
+    )
+    leaves, treedef = jax.tree_util.tree_flatten(payload)
+    # num_segments and metadata are pytree_node=False, so they are not in leaves
+    for leaf in leaves:
+      if leaf is not None:
+        self.assertIsInstance(leaf, np.ndarray)
+
+    # Tree unflatten restores full object
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    self.assertEqual(restored.num_segments, 5)
+    self.assertEqual(restored.metadata, {"key": "value"})
+    np.testing.assert_allclose(restored.advantages, [1.0, 2.0])
+
+  def test_rl_trainer_payload_cloudpickle_roundtrip(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([10, 20], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([30, 40], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([0.5, -0.5], dtype=np.float32),
+        segment_ids=np.array([1, 1], dtype=np.int32),
+        segment_positions=np.array([0, 1], dtype=np.int32),
+        num_segments=2,
+        metadata={"tag": "eval"},
+    )
+    restored = cloudpickle.loads(cloudpickle.dumps(payload))
+    self.assertEqual(restored.num_segments, 2)
+    self.assertEqual(restored.metadata, {"tag": "eval"})
+    np.testing.assert_array_equal(restored.prompt_ids, payload.prompt_ids)
+    np.testing.assert_allclose(restored.advantages, payload.advantages)
 
 
 class TokenSegmentRoutingTest(absltest.TestCase):

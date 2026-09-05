@@ -87,8 +87,11 @@ class TrainerWorkerTest(absltest.TestCase):
 
   def test_fwd_bwd_with_train_request(self):
     payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2], [1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((2, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4], [3, 4]], dtype=np.int32),
+        completion_mask=np.array([[1, 1], [1, 0]], dtype=np.float32),
         advantages=np.array([1.0, 2.0], dtype=np.float32),
-        loss_mask=np.array([[1, 1], [1, 0]], dtype=np.int32),
         metadata={"step": 1},
     )
     request = datatypes.TrainRequest(
@@ -110,8 +113,11 @@ class TrainerWorkerTest(absltest.TestCase):
 
   def test_eval_step_with_train_request(self):
     payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1]], dtype=np.int32),
+        prompt_mask=np.ones((1, 1), dtype=np.float32),
+        completion_ids=np.array([[2]], dtype=np.int32),
+        completion_mask=np.array([[1]], dtype=np.float32),
         advantages=np.array([1.0], dtype=np.float32),
-        loss_mask=np.array([[1]], dtype=np.int32),
     )
     request = datatypes.TrainRequest(
         request_id="req-eval-456",

@@ -200,31 +200,43 @@ class GRPOAdapter(AlgorithmAdapter):
     payloads = []
 
     for i, item in enumerate(group):
-      prompt_tokens = item.prompt_tokens if item.prompt_tokens is not None else np.zeros(0, dtype=np.int32)
-      completion_tokens = item.completion_tokens if item.completion_tokens is not None else np.zeros(0, dtype=np.int32)
-      action_mask = item.action_mask if item.action_mask is not None else np.zeros(0, dtype=np.float32)
+      prompt_tokens = (
+          item.prompt_tokens
+          if item.prompt_tokens is not None
+          else np.zeros(0, dtype=np.int32)
+      )
+      completion_tokens = (
+          item.completion_tokens
+          if item.completion_tokens is not None
+          else np.zeros(0, dtype=np.int32)
+      )
+      action_mask = (
+          item.action_mask
+          if item.action_mask is not None
+          else np.zeros(0, dtype=np.float32)
+      )
 
       adv_val = float(advs[i]) if i < len(advs) else 0.0
-      ref_lp = ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      ref_lp = (
+          ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      )
 
       p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
       c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
       act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
 
-      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
-      seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
-      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
-
+      seq_tokens = (
+          np.concatenate([p_arr, c_arr])
+          if (len(p_arr) > 0 or len(c_arr) > 0)
+          else np.zeros(0, dtype=np.int32)
+      )
+      seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
       payload = datatypes.RLTrainerPayload(
-          token_ids=seq_tokens,
-          token_mask=np.ones_like(seq_tokens, dtype=np.float32),
-          loss_mask=seq_loss_mask,
-          advantages=seq_adv,
-          action_mask=seq_loss_mask,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
+          advantages=seq_adv,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,
@@ -326,35 +338,54 @@ class PPOAdapter(AlgorithmAdapter):
     )
 
     for i, item in enumerate(trajectories):
-      prompt_tokens = item.prompt_tokens if item.prompt_tokens is not None else np.zeros(0, dtype=np.int32)
-      completion_tokens = item.completion_tokens if item.completion_tokens is not None else np.zeros(0, dtype=np.int32)
-      action_mask = item.action_mask if item.action_mask is not None else np.ones(len(completion_tokens), dtype=np.float32)
+      prompt_tokens = (
+          item.prompt_tokens
+          if item.prompt_tokens is not None
+          else np.zeros(0, dtype=np.int32)
+      )
+      completion_tokens = (
+          item.completion_tokens
+          if item.completion_tokens is not None
+          else np.zeros(0, dtype=np.int32)
+      )
+      action_mask = (
+          item.action_mask
+          if item.action_mask is not None
+          else np.ones(len(completion_tokens), dtype=np.float32)
+      )
 
       adv_val = float(advs[i]) if i < len(advs) else 0.0
       vt_val = float(val_targets[i]) if i < len(val_targets) else 0.0
-      ref_lp = ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
-      old_lp = old_logps[i] if old_logps is not None and i < len(old_logps) else None
+      ref_lp = (
+          ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      )
+      old_lp = (
+          old_logps[i] if old_logps is not None and i < len(old_logps) else None
+      )
 
       p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
       c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
       act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
 
-      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
-      seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
-      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
+      seq_tokens = (
+          np.concatenate([p_arr, c_arr])
+          if (len(p_arr) > 0 or len(c_arr) > 0)
+          else np.zeros(0, dtype=np.int32)
+      )
+      seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
 
       payload = datatypes.RLTrainerPayload(
-          token_ids=seq_tokens,
-          token_mask=np.ones_like(seq_tokens, dtype=np.float32),
-          loss_mask=seq_loss_mask,
-          advantages=seq_adv,
-          action_mask=seq_loss_mask,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
-          old_per_token_logps=np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None,
-          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
+          advantages=seq_adv,
+          old_per_token_logps=np.asarray(old_lp, dtype=np.float32)
+          if old_lp is not None
+          else None,
+          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
+          if ref_lp is not None
+          else None,
           returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
       )
       payloads.append(payload)

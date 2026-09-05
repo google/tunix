@@ -26,7 +26,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
     rewards = [1.0, 2.0, 3.0, 4.0]
     advs = adapter.compute_advantages(rewards, num_generations=4)
 
-    self.assertEqual(len(advs), 4)
+    self.assertLen(advs, 4)
     # Mean should be 0.0
     self.assertAlmostEqual(float(np.mean(advs)), 0.0, places=4)
     # Std should be 1.0
@@ -54,10 +54,23 @@ class AlgorithmAdapterTest(absltest.TestCase):
     item2.completion_tokens = np.array([5, 6], dtype=np.int32)
     item2.action_mask = np.array([1, 1], dtype=np.float32)
 
-    payloads = adapter.create_trainer_payloads([item1, item2], rewards=[1.0, 2.0])
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
     self.assertLen(payloads, 2)
     self.assertIsInstance(payloads[0], datatypes.RLTrainerPayload)
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [1, 2])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0, 1.0])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [3, 4])
+    np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
+    self.assertLen(payloads[0].advantages, 2)
     self.assertLess(payloads[0].advantages[0], 0.0)
+
+    np.testing.assert_array_equal(payloads[1].prompt_ids, [1, 2])
+    np.testing.assert_array_equal(payloads[1].prompt_mask, [1.0, 1.0])
+    np.testing.assert_array_equal(payloads[1].completion_ids, [5, 6])
+    np.testing.assert_array_equal(payloads[1].completion_mask, [1.0, 1.0])
+    self.assertLen(payloads[1].advantages, 2)
     self.assertGreater(payloads[1].advantages[0], 0.0)
     self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
 
@@ -72,8 +85,16 @@ class AlgorithmAdapterTest(absltest.TestCase):
     item.prompt_tokens = np.array([10], dtype=np.int32)
     item.completion_tokens = np.array([20], dtype=np.int32)
 
-    payloads = adapter.create_trainer_payloads([item], rewards=[2.0], values=[1.0])
+    payloads = adapter.create_trainer_payloads(
+        [item], rewards=[2.0], values=[1.0]
+    )
     self.assertLen(payloads, 1)
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [10])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [20])
+    np.testing.assert_array_equal(payloads[0].completion_mask, [1.0])
+    self.assertLen(payloads[0].advantages, 1)
+    self.assertLen(payloads[0].returns, 2)
     self.assertAlmostEqual(payloads[0].advantages[0], 1.0)
     self.assertAlmostEqual(payloads[0].returns[0], 2.0)
     self.assertEqual(adapter.loss_fn(), algo_core.ppo_policy_loss_fn)
@@ -130,6 +151,125 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(algo_config.entropy_coef, 0.01)
     self.assertEqual(algo_config.gamma, 0.98)
     self.assertEqual(algo_config.lam, 0.92)
+
+  def test_grpo_with_ref_logps(self):
+    adapter = algorithm_adapter.GRPOAdapter(group_size=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=1.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=2.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([5, 6], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+    )
+    ref_logps = [
+        np.array([-0.1, -0.2], dtype=np.float32),
+        np.array([-0.3, -0.4], dtype=np.float32),
+    ]
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], ref_logps=ref_logps
+    )
+    np.testing.assert_allclose(payloads[0].ref_per_token_logps, [-0.1, -0.2])
+    np.testing.assert_allclose(payloads[1].ref_per_token_logps, [-0.3, -0.4])
+
+  def test_ppo_with_ref_and_old_logps(self):
+    adapter = algorithm_adapter.PPOAdapter(group_size=1)
+    item = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=1.0),
+        prompt_tokens=np.array([10], dtype=np.int32),
+        completion_tokens=np.array([20], dtype=np.int32),
+        action_mask=np.array([0.0], dtype=np.float32),
+    )
+    payloads = adapter.create_trainer_payloads(
+        [item],
+        rewards=[2.0],
+        values=[1.0],
+        ref_logps=[np.array([-0.5], dtype=np.float32)],
+        old_logps=[np.array([-0.6], dtype=np.float32)],
+    )
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [10])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [20])
+    np.testing.assert_array_equal(payloads[0].completion_mask, [0.0])
+    np.testing.assert_allclose(payloads[0].ref_per_token_logps, [-0.5])
+    np.testing.assert_allclose(payloads[0].old_per_token_logps, [-0.6])
+
+  def test_empty_tokens_handling(self):
+    for adapter in [
+        algorithm_adapter.GRPOAdapter(group_size=1),
+        algorithm_adapter.PPOAdapter(group_size=1),
+    ]:
+      # 1. Both prompt_tokens and completion_tokens are None.
+      item = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="g1",
+          start_step=0,
+          traj=datatypes.Trajectory(reward=1.0),
+          prompt_tokens=None,
+          completion_tokens=None,
+          action_mask=None,
+      )
+      payloads = adapter.create_trainer_payloads([item], rewards=[1.0])
+      self.assertLen(payloads, 1)
+      self.assertEqual(payloads[0].prompt_ids.shape, (0,))
+      self.assertEqual(payloads[0].completion_ids.shape, (0,))
+      self.assertEqual(payloads[0].prompt_mask.shape, (0,))
+      self.assertEqual(payloads[0].completion_mask.shape, (0,))
+      self.assertEqual(payloads[0].advantages.shape, (0,))
+      if adapter.has_critic:
+        self.assertEqual(payloads[0].returns.shape, (0,))
+
+      # 2. prompt_tokens provided, completion_tokens is None.
+      item_prompt_only = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="g1",
+          start_step=0,
+          traj=datatypes.Trajectory(reward=1.0),
+          prompt_tokens=np.array([1, 2], dtype=np.int32),
+          completion_tokens=None,
+          action_mask=None,
+      )
+      payloads = adapter.create_trainer_payloads(
+          [item_prompt_only], rewards=[1.0]
+      )
+      self.assertLen(payloads, 1)
+      np.testing.assert_array_equal(payloads[0].prompt_ids, [1, 2])
+      np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0, 1.0])
+      self.assertEqual(payloads[0].completion_ids.shape, (0,))
+      self.assertEqual(payloads[0].completion_mask.shape, (0,))
+      self.assertEqual(payloads[0].advantages.shape, (0,))
+
+      # 3. prompt_tokens is None, completion_tokens provided.
+      item_completion_only = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="g1",
+          start_step=0,
+          traj=datatypes.Trajectory(reward=1.0),
+          prompt_tokens=None,
+          completion_tokens=np.array([3, 4], dtype=np.int32),
+          action_mask=None,
+      )
+      payloads = adapter.create_trainer_payloads(
+          [item_completion_only], rewards=[1.0]
+      )
+      self.assertLen(payloads, 1)
+      self.assertEqual(payloads[0].prompt_ids.shape, (0,))
+      self.assertEqual(payloads[0].prompt_mask.shape, (0,))
+      np.testing.assert_array_equal(payloads[0].completion_ids, [3, 4])
+      self.assertLen(payloads[0].advantages, 2)
 
 
 _ROUTING_LAYERS = 2

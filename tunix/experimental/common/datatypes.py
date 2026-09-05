@@ -564,23 +564,7 @@ class WeightSyncMetadata:
 
 @flax.struct.dataclass(frozen=True, kw_only=True)
 class TrainerPayload:
-  """Base class for generic trainer payloads.
-
-  Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
-      right-padded completion tokens.
-    token_mask: [B, T] token mask to differentiate padding tokens from valid
-      tokens.
-    segment_ids: Optional [B, T] packing segment ids.
-    segment_positions: Optional [B, T] position indices within each segment.
-  """
-  # TODO(tunix-dev): We need to remove the dependency on token_ids and
-  # token_mask as they are not used in RL training.
-  token_ids: ArrayLike | None = None
-  token_mask: ArrayLike | None = None
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
+  """Base abstract class for generic trainer payloads. """
 
 
 @flax.struct.dataclass(frozen=True, kw_only=True)
@@ -588,8 +572,8 @@ class SFTTrainerPayload(TrainerPayload):
   """Supervised Fine-Tuning (SFT) trainer payload.
 
   Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
+    token_ids: [B, T] token IDs for a batched trainer payload. By default, each
+      row is structured as left-padded prompt tokens concatenated with
       right-padded completion tokens.
     token_mask: [B, T] token mask to differentiate padding tokens from valid
       tokens.
@@ -599,6 +583,8 @@ class SFTTrainerPayload(TrainerPayload):
 
   token_ids: ArrayLike
   token_mask: ArrayLike
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
 
 
 # TODO(tunix-dev): Introduce PPOTrainerPayload to replace generic
@@ -609,14 +595,15 @@ class RLTrainerPayload(TrainerPayload):
 
   Attributes:
     advantages: [B] or [B, C] advantages.
-    loss_mask: [B, T], 1 where the position contributes to the loss.
-    action_mask: Optional [B, T] or [B, C] mask of policy actions.
     prompt_ids: Optional prompt token ids for GRPO-style losses. Unbatched
       payloads may carry 1D unpadded rows; batch assembly pads them to [B, P].
     prompt_mask: Optional [B, P] prompt mask.
     completion_ids: Optional completion token ids. Unbatched payloads may carry
       1D unpadded rows; batch assembly pads them to [B, C].
     completion_mask: Optional [B, C] completion/action mask.
+    segment_ids: Optional [B, T] or [B, C] packing segment ids.
+    segment_positions: Optional [B, T] or [B, C] position indices within each
+      segment.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
@@ -627,24 +614,25 @@ class RLTrainerPayload(TrainerPayload):
       padded or unused slot.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
+    num_segments: Optional static upper bound on number of segments in packed
+      rows.
     metadata: Extra payload metadata dictionary.
   """
 
-  advantages: ArrayLike | None = None
-  loss_mask: ArrayLike | None = None
-  action_mask: ArrayLike | None = None
-  # TODO(tunix-dev): make prompt_ids/mask and completion_ids/mask required after
-  # SequencePackedBatchAssembler refactor is done.
-  prompt_ids: ArrayLike | None = None
-  prompt_mask: ArrayLike | None = None
-  completion_ids: ArrayLike | None = None
-  completion_mask: ArrayLike | None = None
+  prompt_ids: ArrayLike
+  prompt_mask: ArrayLike
+  completion_ids: ArrayLike
+  completion_mask: ArrayLike
+  advantages: ArrayLike
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
   routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
+  num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
   metadata: dict[str, Any] = flax.struct.field(
       default_factory=dict, pytree_node=False
   )

@@ -28,6 +28,7 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 from tunix.rl import common
+from tunix.rl import packing
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
@@ -248,13 +249,14 @@ def put_params_on_memory_kind(
   logging.debug("params_on_memory_kind shardings: %s", shardings)
   return params_on_memory_kind
 
+
 def create_critic_model(
     actor_model: nnx.Module, seed: int = 0, rngs: nnx.Rngs = None, lm_head_to_replace: str = "lm_head"  # pyrefly: ignore[bad-function-definition]
 ) -> nnx.Module:
   """Creates a critic model from an actor model."""
 
   if rngs is None:
-    rngs=nnx.Rngs(seed)
+    rngs = nnx.Rngs(seed)
 
   g, state = nnx.split(actor_model)
   # TODO(tsbao): if actor model is a LoRA model, then we can potentially share
@@ -266,25 +268,22 @@ def create_critic_model(
       lm_head.shape[0] if hasattr(lm_head, "shape") else lm_head.in_features
   )
   new_head = nnx.Linear(
-          in_features=hidden_dim,
-          out_features=1,
-          use_bias=False,
-          rngs=rngs,
-      )
+      in_features=hidden_dim,
+      out_features=1,
+      use_bias=False,
+      rngs=rngs,
+  )
 
   # If Qwix is active for the model, also assign qwix_path for the new head
   if hasattr(critic_model, "qwix_path"):
     new_head.qwix_path = getattr(lm_head, "qwix_path", (lm_head_to_replace,))  # pyrefly: ignore[missing-attribute]
-  setattr(
-      critic_model,
-      lm_head_to_replace,
-      new_head
-  )
+  setattr(critic_model, lm_head_to_replace, new_head)
 
   return critic_model
 
 
 class TransformerWithScoreHead(nnx.Module):
+
   def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
     """Initializes the transformer with a score head.
 
@@ -292,9 +291,9 @@ class TransformerWithScoreHead(nnx.Module):
       transformer: The transformer backbone.
       rngs: The random number generator.
     """
-    if hasattr(transformer, 'embed_dim'):
+    if hasattr(transformer, "embed_dim"):
       embed_dim = transformer.embed_dim
-    elif hasattr(transformer.config, 'embed_dim'):  # pyrefly: ignore[missing-attribute]
+    elif hasattr(transformer.config, "embed_dim"):  # pyrefly: ignore[missing-attribute]
       embed_dim = transformer.config.embed_dim  # pyrefly: ignore[missing-attribute]
     else:
       raise ValueError("Could not determine embed dim for the transformer.")
@@ -314,7 +313,7 @@ class TransformerWithScoreHead(nnx.Module):
   def __call__(self, *args, **kwargs):
     self.transformer(*args, **kwargs, output_hidden_states=True)
     hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
-        'all_hidden_states'
+        "all_hidden_states"
     ].value[-1]
     score = self.score(hidden_states)
     return score
@@ -437,40 +436,81 @@ def _ceildiv(a: int, b: int) -> int:
   return -(-a // b)
 
 
-def _item_tokens(item: Mapping[str, Any]) -> int:
-  return len(item["prompt_ids"]) + len(item["completion_ids"])
+def train_example_to_pack_items(
+    example: common.TrainExample,
+) -> list[packing.PackItem]:
+  """Converts a TrainExample to a list of PackItems."""
+  items = [
+      packing.PackItem(
+          prompt_ids=np.asarray(item["prompt_ids"], dtype=np.int32),
+          completion_ids=np.asarray(item["completion_ids"], dtype=np.int32),
+          completion_mask=np.asarray(item["completion_mask"], dtype=np.float32),
+          advantages=(
+              np.asarray(item["advantages"], dtype=np.float32)
+              if item["adv_is_per_token"]
+              else np.full(
+                  len(item["completion_ids"]),
+                  float(np.asarray(item["advantages"]).reshape(-1)[0]),
+                  dtype=np.float32,
+              )
+          ),
+          per_token={
+              k: np.asarray(item[k], dtype=np.float32)
+              for k in packing.PER_TOKEN_FIELDS
+              if item.get(k) is not None
+          },
+          policy_version=(
+              np.asarray(item["policy_version"])
+              if item.get("policy_version") is not None
+              else None
+          ),
+      )
+      for item in unpad_train_example(example)
+  ]
+  return items
 
 
-def _fill_one_chunk(
-    items: Sequence[Mapping[str, Any]],
-    pack_size: int,
-    budget: int,
-    max_segments: int,
-) -> tuple[list[list[Mapping[str, Any]]], list[Mapping[str, Any]]]:
-  """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
-
-  Sorts the items by token length descending and greedily places each into the
-  first bin with room, where a bin has room only if it stays within both the
-  token `budget` AND `max_segments` sequences (so the loss's static
-  `num_segments = max_segments + 1` buckets never overflow). Items that fit no
-  bin are returned as `leftover` (in their original order) for a later chunk.
-
-  Returns (bins, leftover): `bins` is exactly `pack_size` lists (some may be
-  empty); `leftover` are the items that did not fit.
-  """
-  bins: list[list[Mapping[str, Any]]] = [[] for _ in range(pack_size)]
-  loads = [0] * pack_size
-  leftover: list[Mapping[str, Any]] = []
-  for item in sorted(items, key=_item_tokens, reverse=True):
-    n = _item_tokens(item)
-    for b in range(pack_size):
-      if loads[b] + n <= budget and len(bins[b]) < max_segments:
-        bins[b].append(item)
-        loads[b] += n
-        break
-    else:
-      leftover.append(item)
-  return bins, leftover
+def pack_rows_to_train_examples(
+    rows: list[packing.PackedRow],
+    example_cls: type[Any],
+    *,
+    mask_dtype: Any,
+    num_segments: int,
+    is_update_step: bool,
+) -> Any:
+  """Converts a list of PackedRows to a list of TrainExamples."""
+  n = len(rows)
+  stack = lambda attr: jnp.asarray(np.stack([getattr(r, attr) for r in rows]))
+  kwargs: dict[str, Any] = dict(
+      prompt_ids=jnp.zeros((n, 0), dtype=np.int32),
+      prompt_mask=jnp.zeros((n, 0), dtype=mask_dtype),
+      completion_ids=stack("ids"),
+      completion_mask=jnp.asarray(
+          np.stack([r.completion_mask for r in rows]).astype(mask_dtype),
+          copy=False,
+      ),
+      advantages=stack("advantages"),
+      segment_ids=stack("segment_ids"),
+      segment_positions=stack("segment_positions"),
+      ref_per_token_logps=None,
+      old_per_token_logps=None,
+  )
+  for name in rows[0].per_token:
+    kwargs[name] = jnp.asarray(np.stack([r.per_token[name] for r in rows]))
+  versions = [r.policy_version for r in rows]
+  if any(v is not None for v in versions):
+    fallback = next(v for v in versions if v is not None)
+    kwargs["policy_version"] = jnp.concatenate([
+        jnp.asarray(v if v is not None else fallback).reshape(-1)
+        for v in versions
+    ])
+  example = example_cls(**kwargs)
+  replacements: dict[str, Any] = {
+      "is_update_step": jnp.array([is_update_step], dtype=jnp.bool_)
+  }
+  if hasattr(example, "num_segments"):
+    replacements["num_segments"] = num_segments
+  return example.replace(**replacements)
 
 
 def pack_sequences(
@@ -509,180 +549,51 @@ def pack_sequences(
       max_token_budget, a mid-mini-batch stream end, or a boundary inside an
       input example.
   """
-
-  # Real segments per row are bounded by the token budget (each segment >= 1
-  # token). `None` uses that safe bound so `num_segments = budget + 1` never
-  # overflows; a smaller override shrinks the loss buckets and is enforced by
-  # the raise in `_flush_pack`.
-  effective_max_segments = (
-      max_segments_per_packed_row
-      if max_segments_per_packed_row is not None
-      else max_token_budget
+  max_segments = packing.effective_max_segments(
+      max_token_budget, max_segments_per_packed_row
   )
 
-  def _flush_pack(pack_items, example_cls, first_item) -> common.TrainExample:
-    first_item = first_item or {}
-    has_policy_version = first_item.get("policy_version") is not None
-    kwargs = {}
-    tracked_per_token_keys = []
-
-    if first_item.get("ref_per_token_logps") is not None:
-      tracked_per_token_keys.append("ref_per_token_logps")
-    if first_item.get("old_per_token_logps") is not None:
-      tracked_per_token_keys.append("old_per_token_logps")
-    if first_item.get("returns") is not None:
-      tracked_per_token_keys.append("returns")
-    if first_item.get("old_values") is not None:
-      tracked_per_token_keys.append("old_values")
-
-    if not pack_items:
-      p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-      p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-      c_ids_arr = jnp.full((1, max_token_budget), pad_id, dtype=jnp.int32)
-      c_mask_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
-      adv_arr = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
-      seg_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
-      pos_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
-
-      kwargs.update(
-          prompt_ids=p_ids_arr,
-          prompt_mask=p_mask_arr,
-          completion_ids=c_ids_arr,
-          completion_mask=c_mask_arr,
-          advantages=adv_arr,
-          ref_per_token_logps=None,
-          old_per_token_logps=None,
-          segment_ids=seg_arr,
-          segment_positions=pos_arr,
-      )
-      for k in tracked_per_token_keys:
-        kwargs[k] = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
-      if has_policy_version:
-        kwargs["policy_version"] = first_item["policy_version"]
-      return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
-
-    # `len(pack_items)` is the real segment count of this row. It cannot exceed
-    # the token budget (each segment >= 1 token), so the default bound never
-    # trips; a too-small `max_segments_per_packed_row` override does, and we
-    # fail loud rather than let `segment_sum` silently drop the overflow.
-    if len(pack_items) > effective_max_segments:
-      raise ValueError(
-          f"pack_sequences: a packed row has {len(pack_items)} segments, "
-          f"exceeding max_segments_per_packed_row={effective_max_segments}; "
-          "increase it (or leave it None for the budget-derived safe default)."
-      )
-
-    current_tokens = sum(
-        len(it["prompt_ids"]) + len(it["completion_ids"]) for it in pack_items
-    )
-    pad_len = max_token_budget - current_tokens
-
-    packed_c_ids = []
-    packed_c_mask = []
-    packed_adv = []
-    packed_segment_ids = []
-    packed_positions = []
-
-    per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
-
-    for i, item in enumerate(pack_items, start=1):
-      p_ids = item["prompt_ids"]
-      c_ids = item["completion_ids"]
-      seq_len = len(p_ids) + len(c_ids)
-
-      packed_c_ids.extend([p_ids, c_ids])
-      packed_c_mask.extend([np.zeros_like(p_ids), item["completion_mask"]])
-
-      if item["adv_is_per_token"]:
-        packed_adv.extend([
-            np.zeros_like(p_ids, dtype=np.float32),
-            item["advantages"],
-        ])
-      else:
-        packed_adv.extend([
-            np.zeros_like(p_ids, dtype=np.float32),
-            np.full(len(c_ids), item["advantages"], dtype=np.float32),
-        ])
-
-      for k in tracked_per_token_keys:
-        per_token_feature_buffers[k].extend([
-            np.zeros_like(p_ids, dtype=np.float32),
-            item[k],
-        ])
-
-      packed_segment_ids.append(np.full(seq_len, i, dtype=np.int32))
-      packed_positions.append(np.arange(seq_len, dtype=np.int32))
-
-    def _pad(arr_list, val, length):
-      arr = np.concatenate(arr_list) if arr_list else np.array([])
-      return np.pad(arr, (0, length), constant_values=val)
-
-    p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-    p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
-
-    c_ids_arr = jnp.array(_pad(packed_c_ids, pad_id, pad_len))[None, :]
-    c_mask_arr = jnp.array(_pad(packed_c_mask, 0, pad_len))[None, :]
-    adv_arr = jnp.array(_pad(packed_adv, 0.0, pad_len))[None, :]
-    seg_arr = jnp.array(_pad(packed_segment_ids, 0, pad_len))[None, :]
-    pos_arr = jnp.array(_pad(packed_positions, 0, pad_len))[None, :]
-
-    per_token_features = {}
-    for k in tracked_per_token_keys:
-      per_token_features[k] = jnp.array(
-          _pad(per_token_feature_buffers[k], 0.0, pad_len)
-      )[None, :]
-
-    kwargs = dict(
-        prompt_ids=p_ids_arr,
-        prompt_mask=p_mask_arr,
-        completion_ids=c_ids_arr,
-        completion_mask=c_mask_arr,
-        advantages=adv_arr,
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
-        segment_ids=seg_arr,
-        segment_positions=pos_arr,
-    )
-    for k in tracked_per_token_keys:
-      kwargs[k] = per_token_features[k]
-
-    if has_policy_version:
-      kwargs["policy_version"] = pack_items[0]["policy_version"]
-
-    return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
-
-  chunk_capacity = pack_size * max_token_budget
-
-  def _emit(chunk):
-    """Merges one chunk (pack_size bins) into a [pack_size, budget] example."""
-    chunk_examples = [
-        _flush_pack(bin_items, example_cls, first_item_for_dummy)
-        for bin_items in chunk
-    ]
-    return jax.tree.map(
-        lambda first_x, *rest_xs: None
-        if first_x is None
-        else jnp.concatenate((first_x, *rest_xs), axis=0),
-        *chunk_examples,
-    )
-
-  def _mark(merged, is_update):
-    # `num_segments = effective_max_segments + 1` (+1 = padding bucket) is a
-    # static upper bound, fixed every step so the segment-aware loss compiles
-    # once. Set here (not per bin) so every emitted chunk carries it.
-    kwargs = dict(is_update_step=jnp.array([is_update], dtype=jnp.bool_))
-    if hasattr(merged, "num_segments"):
-      kwargs["num_segments"] = effective_max_segments + 1  # pyrefly: ignore[bad-assignment]
-    return [merged.replace(**kwargs)]
-
+  num_segments = max_segments + 1
   # See the docstring: buffer sequences, emit a chunk once it holds a chunk's
   # worth of tokens, and mark the mini-batch's last chunk as the update.
-  buffered = []  # unpacked sequences
+  buffered: list[packing.PackItem] = []  # unpacked sequences
   received = 0  # sequences received this mini-batch (incl. emitted)
   tokens_in_mini = 0  # for the dummy_ratio log
   chunks_in_mini = 0
-  example_cls = common.TrainExample
-  first_item_for_dummy = None
+  chunk_capacity = pack_size * max_token_budget
+  example_cls: type[Any] = common.TrainExample
+  mask_dtype: Any = jnp.float32
+  first_item_for_dummy: packing.PackItem | None = None
+
+  def _emit_chunk(bins, is_update):
+    """Packs one chunk's bins and conver them to a TrainExample."""
+    real = [it for b in bins for it in b]
+    if first_item_for_dummy is not None:
+      real = real + [first_item_for_dummy]
+    carried = packing.carried_per_token_fields(real)
+    rows = packing.pack_chunk(
+        bins, budget=max_token_budget, pad_id=pad_id, carried=carried
+    )
+    return [
+        pack_rows_to_train_examples(
+            rows,
+            example_cls,
+            mask_dtype=mask_dtype,
+            num_segments=num_segments,
+            is_update_step=is_update,
+        )
+    ]
+
+  def _take_chunk():
+    nonlocal buffered, chunks_in_mini
+    bins, buffered = packing.fill_one_chunk(
+        buffered,
+        pack_size=pack_size,
+        budget=max_token_budget,
+        max_segments=max_segments,
+    )
+    chunks_in_mini += 1
+    return bins
 
   def _final_flush():
     nonlocal buffered, received, tokens_in_mini, chunks_in_mini
@@ -692,11 +603,8 @@ def pack_sequences(
           " no packed example would be produced, dropping a gradient update."
       )
     while buffered:
-      chunk, buffered = _fill_one_chunk(
-          buffered, pack_size, max_token_budget, effective_max_segments
-      )
-      chunks_in_mini += 1
-      yield _mark(_emit(chunk), not buffered)  # last chunk (empty leftover).
+      bins = _take_chunk()
+      yield _emit_chunk(bins, not buffered)
     total_cap = chunks_in_mini * chunk_capacity
     logging.info(
         "pack_sequences: %d seqs -> %d chunks, dummy_ratio=%.3f",
@@ -711,8 +619,10 @@ def pack_sequences(
   for item_list in item_iterator:
     for example in item_list:
       example_cls = type(example)
-      for item in unpad_train_example(example):
-        n = _item_tokens(item)
+      if getattr(example, "completion_mask", None) is not None:
+        mask_dtype = np.asarray(example.completion_mask).dtype
+      for item in train_example_to_pack_items(example):
+        n = item.num_tokens
         if n > max_token_budget:
           raise ValueError(
               f"pack_sequences: a single sequence has {n} tokens, exceeding"
@@ -734,12 +644,9 @@ def pack_sequences(
       yield from _final_flush()
     else:
       # Not the boundary yet: emit whole chunks eagerly, keep the remainder.
-      while sum(_item_tokens(it) for it in buffered) >= chunk_capacity:
-        chunk, buffered = _fill_one_chunk(
-            buffered, pack_size, max_token_budget, effective_max_segments
-        )
-        chunks_in_mini += 1
-        yield _mark(_emit(chunk), False)
+      while sum(it.num_tokens for it in buffered) >= chunk_capacity:
+        bins = _take_chunk()
+        yield _emit_chunk(bins, False)
 
   if buffered or received:
     raise ValueError("pack_sequences stream ended mid-mini-batch.")

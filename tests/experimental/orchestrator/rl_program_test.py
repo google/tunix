@@ -212,11 +212,11 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.requires_reference_kl = False
 
     mock_payload = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-        advantages=np.full(4, 1.0, dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.float32),
+        advantages=np.array([1.0, 1.0], dtype=np.float32),
     )
     self.mock_algo.create_trainer_payloads.return_value = [
         mock_payload,
@@ -847,11 +847,11 @@ class RLProgramTest(absltest.TestCase):
 
       def _make_item(item_idx):
         payload = datatypes.RLTrainerPayload(
-            token_ids=np.array([1, 2, 3, 4, 5, 6, 7], dtype=np.int32),
-            token_mask=np.ones(7, dtype=np.float32),
-            loss_mask=np.ones(7, dtype=np.float32),
-            action_mask=np.ones(7, dtype=np.float32),
-            advantages=np.ones(7, dtype=np.float32),
+            prompt_ids=np.array([1, 2, 3], dtype=np.int32),
+            prompt_mask=np.ones(3, dtype=np.float32),
+            completion_ids=np.array([4, 5, 6, 7], dtype=np.int32),
+            completion_mask=np.ones(4, dtype=np.float32),
+            advantages=np.ones(4, dtype=np.float32),
         )
         item = datatypes.TrajectoryItem(
             group_index=item_idx,
@@ -895,7 +895,6 @@ class RLProgramTest(absltest.TestCase):
           pad_id=0,
           group_size=2,
           mini_batch_size=2,
-          target_occupancy=0.60,
       )
       program = rl_program.StandardRLProgram(
           dataset=[],
@@ -911,11 +910,11 @@ class RLProgramTest(absltest.TestCase):
 
       def _make_item(group_idx, item_idx, length):
         payload = datatypes.RLTrainerPayload(
-            token_ids=np.full(length, group_idx + 1, dtype=np.int32),
-            token_mask=np.ones(length, dtype=np.float32),
-            loss_mask=np.ones(length, dtype=np.float32),
-            action_mask=np.ones(length, dtype=np.float32),
-            advantages=np.ones(length, dtype=np.float32),
+            prompt_ids=np.full(1, group_idx + 1, dtype=np.int32),
+            prompt_mask=np.ones(1, dtype=np.float32),
+            completion_ids=np.full(length - 1, group_idx + 1, dtype=np.int32),
+            completion_mask=np.ones(length - 1, dtype=np.float32),
+            advantages=np.ones(length - 1, dtype=np.float32),
         )
         item = datatypes.TrajectoryItem(
             group_index=item_idx,
@@ -957,7 +956,6 @@ class RLProgramTest(absltest.TestCase):
           pad_id=0,
           group_size=2,
           mini_batch_size=2,
-          target_occupancy=0.60,
       )
       program = rl_program.StandardRLProgram(
           dataset=[],
@@ -973,11 +971,11 @@ class RLProgramTest(absltest.TestCase):
 
       def _make_item(prompt_id, idx, length):
         payload = datatypes.RLTrainerPayload(
-            token_ids=np.full(length, idx + 1, dtype=np.int32),
-            token_mask=np.ones(length, dtype=np.float32),
-            loss_mask=np.ones(length, dtype=np.float32),
-            action_mask=np.ones(length, dtype=np.float32),
-            advantages=np.ones(length, dtype=np.float32),
+            prompt_ids=np.full(1, idx + 1, dtype=np.int32),
+            prompt_mask=np.ones(1, dtype=np.float32),
+            completion_ids=np.full(length - 1, idx + 1, dtype=np.int32),
+            completion_mask=np.ones(length - 1, dtype=np.float32),
+            advantages=np.ones(length - 1, dtype=np.float32),
         )
         item = datatypes.TrajectoryItem(
             group_index=idx,
@@ -1003,12 +1001,12 @@ class RLProgramTest(absltest.TestCase):
       calls = self.mock_engine.train_step.call_args_list
       # Microbatch 0: batch_size=2, apply_optimizer=False
       mb0 = calls[0].args[0]
-      self.assertEqual(mb0.token_ids.shape, (2, 16))
+      self.assertEqual(mb0.completion_ids.shape, (2, 16))
       self.assertFalse(calls[0].kwargs["apply_optimizer"])
       self.assertTrue(calls[0].kwargs["accumulate_gradients"])
       # Microbatch 1: batch_size=2, apply_optimizer=True
       mb1 = calls[1].args[0]
-      self.assertEqual(mb1.token_ids.shape, (2, 16))
+      self.assertEqual(mb1.completion_ids.shape, (2, 16))
       self.assertTrue(calls[1].kwargs["apply_optimizer"])
       self.assertTrue(calls[1].kwargs["accumulate_gradients"])
 
@@ -1030,7 +1028,6 @@ class RLProgramTest(absltest.TestCase):
           pad_id=0,
           group_size=3,
           mini_batch_size=1,
-          target_occupancy=0.60,
       )
       program = rl_program.StandardRLProgram(
           dataset=[],
@@ -1046,11 +1043,11 @@ class RLProgramTest(absltest.TestCase):
 
       def _make_item(idx, length):
         payload = datatypes.RLTrainerPayload(
-            token_ids=np.full(length, idx + 1, dtype=np.int32),
-            token_mask=np.ones(length, dtype=np.float32),
-            loss_mask=np.ones(length, dtype=np.float32),
-            action_mask=np.ones(length, dtype=np.float32),
-            advantages=np.ones(length, dtype=np.float32),
+            prompt_ids=np.full(1, idx + 1, dtype=np.int32),
+            prompt_mask=np.ones(1, dtype=np.float32),
+            completion_ids=np.full(length - 1, idx + 1, dtype=np.int32),
+            completion_mask=np.ones(length - 1, dtype=np.float32),
+            advantages=np.ones(length - 1, dtype=np.float32),
         )
         item = datatypes.TrajectoryItem(
             group_index=idx,
@@ -1075,13 +1072,13 @@ class RLProgramTest(absltest.TestCase):
       calls = self.mock_engine.train_step.call_args_list
       mb0 = calls[0].args[0]
       mb1 = calls[1].args[0]
-      self.assertEqual(mb0.token_ids.shape, (2, 16))
-      self.assertEqual(mb1.token_ids.shape, (2, 16))
+      self.assertEqual(mb0.completion_ids.shape, (2, 16))
+      self.assertEqual(mb1.completion_ids.shape, (2, 16))
 
       # Trailing row in mb1 is zero-padded
       self.assertTrue(np.all(mb1.segment_ids[1] == 0))
-      self.assertTrue(np.all(mb1.loss_mask[1] == 0.0))
-      self.assertTrue(np.all(mb1.token_ids[1] == 0))
+      self.assertTrue(np.all(mb1.completion_mask[1] == 0.0))
+      self.assertTrue(np.all(mb1.completion_ids[1] == 0))
 
       self.assertEqual(program.last_step_result.num_microbatches, 2)
       self.assertEqual(program.last_step_result.num_rollouts, 3)
@@ -1311,14 +1308,20 @@ class RLProgramTest(absltest.TestCase):
   def test_prompt_id_and_group_index_propagation_end_to_end(self):
     """Verifies that prompt_id and group_index are automatically built and propagated:
 
-    1. Raw dataset string prompt (without manual prompt_id) -> RLProgram builds prompt_0
-    2. Engine dispatch -> assigns group_index (0, 1) and creates deterministic request_ids
-    3. Rollout worker -> creates RolloutResponse inheriting prompt_id and group_index
+    1. Raw dataset string prompt (without manual prompt_id) -> RLProgram builds
+    prompt_0
+    2. Engine dispatch -> assigns group_index (0, 1) and creates deterministic
+    request_ids
+    3. Rollout worker -> creates RolloutResponse inheriting prompt_id and
+    group_index
     4. Queue manager -> groups by prompt_0, delivers complete group
-    5. Reward function -> receives items with prompt_id='prompt_0' and group_index=(0, 1)
-    6. Batch assembly -> receives reconstructed items with prompt_id and group_index preserved
+    5. Reward function -> receives items with prompt_id='prompt_0' and
+    group_index=(0, 1)
+    6. Batch assembly -> receives reconstructed items with prompt_id and
+    group_index preserved
     7. Trainer step -> executed with batch
     """
+
     async def _run():
       mock_rollout = _MockWorkerHandle(role=datatypes.Role.ROLLOUT)
       mock_actor = _MockWorkerHandle(role=datatypes.Role.ACTOR)
@@ -1337,6 +1340,7 @@ class RLProgramTest(absltest.TestCase):
 
       # 2. Track items observed in reward_fn
       observed_in_reward = []
+
       def tracking_reward_fn(it: datatypes.TrajectoryItem) -> float:
         observed_in_reward.append({
             "prompt_id": it.prompt_id,
@@ -1346,6 +1350,7 @@ class RLProgramTest(absltest.TestCase):
 
       # 3. Track items passed to algo.create_trainer_payloads
       passed_to_algo = []
+
       def tracking_create_payloads(step_items, **kwargs):
         del kwargs
         for it in step_items:
@@ -1354,11 +1359,11 @@ class RLProgramTest(absltest.TestCase):
               "group_index": it.group_index,
           })
         mock_p = datatypes.RLTrainerPayload(
-            token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-            token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-            loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
-            advantages=np.full(4, 1.0, dtype=np.float32),
-            action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+            prompt_ids=np.array([1, 2], dtype=np.int32),
+            prompt_mask=np.array([1, 1], dtype=np.float32),
+            completion_ids=np.array([3, 4], dtype=np.int32),
+            completion_mask=np.array([1, 1], dtype=np.float32),
+            advantages=np.array([1.0, 1.0], dtype=np.float32),
         )
         return [mock_p, mock_p]
 
@@ -1461,7 +1466,7 @@ class RLProgramTest(absltest.TestCase):
       # 2 groups of 8 tokens each form 2 bins. With batch_size=2, they form 1 microbatch of shape [2, 8].
       self.assertEqual(self.mock_engine.train_step.call_count, 1)
       calls = self.mock_engine.train_step.call_args_list
-      self.assertEqual(calls[0].args[0].token_ids.shape, (2, 8))
+      self.assertEqual(calls[0].args[0].completion_ids.shape, (2, 8))
       self.assertTrue(calls[0].kwargs["accumulate_gradients"])
       self.assertTrue(calls[0].kwargs["apply_optimizer"])
       self.assertEqual(program.last_step_result.num_rollouts, 4)
@@ -1838,18 +1843,18 @@ class RLProgramTest(absltest.TestCase):
           trainer_workers={datatypes.Role.ACTOR: trainer_worker},
       )
       payload_0 = datatypes.RLTrainerPayload(
-          token_ids=np.array([1, 2], dtype=np.int32),
-          token_mask=np.array([1, 1], dtype=np.float32),
-          loss_mask=np.array([1, 1], dtype=np.float32),
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
           advantages=np.full(2, 1.5, dtype=np.float32),
-          action_mask=np.array([1, 1], dtype=np.float32),
       )
       payload_1 = datatypes.RLTrainerPayload(
-          token_ids=np.array([3, 4], dtype=np.int32),
-          token_mask=np.array([1, 1], dtype=np.float32),
-          loss_mask=np.array([1, 1], dtype=np.float32),
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([5, 6], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
           advantages=np.full(2, -0.5, dtype=np.float32),
-          action_mask=np.array([1, 1], dtype=np.float32),
       )
       self.mock_algo.create_trainer_payloads.return_value = [
           payload_0,
@@ -1999,11 +2004,11 @@ class RLProgramTest(absltest.TestCase):
           trainer_workers={datatypes.Role.ACTOR: mock_worker},
       )
       payload = datatypes.RLTrainerPayload(
-          token_ids=np.array([1, 2], dtype=np.int32),
-          token_mask=np.array([1, 1], dtype=np.float32),
-          loss_mask=np.array([1, 1], dtype=np.float32),
-          advantages=np.array([1.0, 1.0], dtype=np.float32),
-          action_mask=np.array([1, 1], dtype=np.float32),
+          prompt_ids=np.array([1], dtype=np.int32),
+          prompt_mask=np.array([1], dtype=np.float32),
+          completion_ids=np.array([2], dtype=np.int32),
+          completion_mask=np.array([1], dtype=np.float32),
+          advantages=np.array([1.0], dtype=np.float32),
       )
       res = await engine.train_step(
           payload, role=datatypes.Role.ACTOR, apply_optimizer=True
@@ -2058,18 +2063,18 @@ class RLProgramTest(absltest.TestCase):
   def test_token_mask_and_loss_mask_fallback(self):
     async def _run():
       payload_0 = datatypes.RLTrainerPayload(
-          token_ids=np.arange(10, dtype=np.int32),
-          token_mask=np.ones(10, dtype=np.float32),
-          loss_mask=np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1], dtype=np.float32),
-          advantages=np.ones(10, dtype=np.float32),
-          action_mask=np.ones(10, dtype=np.float32),
+          prompt_ids=np.arange(4, dtype=np.int32),
+          prompt_mask=np.ones(4, dtype=np.float32),
+          completion_ids=np.arange(6, dtype=np.int32),
+          completion_mask=np.ones(6, dtype=np.float32),
+          advantages=np.ones(6, dtype=np.float32),
       )
       payload_1 = datatypes.RLTrainerPayload(
-          token_ids=np.arange(10, dtype=np.int32),
-          token_mask=np.ones(10, dtype=np.float32),
-          loss_mask=np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1], dtype=np.float32),
-          advantages=np.ones(10, dtype=np.float32),
-          action_mask=np.ones(10, dtype=np.float32),
+          prompt_ids=np.arange(4, dtype=np.int32),
+          prompt_mask=np.ones(4, dtype=np.float32),
+          completion_ids=np.arange(6, dtype=np.int32),
+          completion_mask=np.ones(6, dtype=np.float32),
+          advantages=np.ones(6, dtype=np.float32),
       )
       traj_item_0 = datatypes.TrajectoryItem(
           group_index=0,
@@ -2108,6 +2113,67 @@ class RLProgramTest(absltest.TestCase):
       )
       self.assertAlmostEqual(
           logger.get_metric("", "rollout/total_tokens_mean", "train"), 10.0
+      )
+
+    asyncio.run(_run())
+
+  def test_sequence_packed_payload_metric_computation(self):
+    async def _run():
+      # Sequence-packed payload where prompts are masked with 0 in completion_mask
+      # and identified via segment_ids > 0.
+      payload_0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros(0, dtype=np.int32),
+          prompt_mask=np.zeros(0, dtype=np.float32),
+          completion_ids=np.arange(7, dtype=np.int32),
+          completion_mask=np.array([0, 0, 1, 1, 1, 0, 0], dtype=np.float32),
+          segment_ids=np.array([1, 1, 1, 1, 1, 0, 0], dtype=np.int32),
+          advantages=np.ones(7, dtype=np.float32),
+      )
+      payload_1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros(0, dtype=np.int32),
+          prompt_mask=np.zeros(0, dtype=np.float32),
+          completion_ids=np.arange(7, dtype=np.int32),
+          completion_mask=np.array([0, 0, 1, 1, 1, 0, 0], dtype=np.float32),
+          segment_ids=np.array([1, 1, 1, 1, 1, 0, 0], dtype=np.int32),
+          advantages=np.ones(7, dtype=np.float32),
+      )
+      traj_item_0 = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="prompt_0",
+          start_step=0,
+          prompt_tokens=None,
+          completion_tokens=None,
+          traj=datatypes.Trajectory(reward=1.0),
+      )
+      traj_item_0.payload = payload_0
+      traj_item_1 = datatypes.TrajectoryItem(
+          group_index=1,
+          prompt_id="prompt_0",
+          start_step=0,
+          prompt_tokens=None,
+          completion_tokens=None,
+          traj=datatypes.Trajectory(reward=1.0),
+      )
+      traj_item_1.payload = payload_1
+      self.mock_algo.create_trainer_payloads.return_value = [
+          payload_0,
+          payload_1,
+      ]
+
+      _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
+      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+
+      await program.run_async(self.mock_engine)
+
+      logger = program.metrics_logger
+      self.assertAlmostEqual(
+          logger.get_metric("", "rollout/prompt_length_mean", "train"), 2.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rollout/completion_length_mean", "train"), 3.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rollout/total_tokens_mean", "train"), 5.0
       )
 
     asyncio.run(_run())
@@ -2384,8 +2450,9 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.mini_batch_size = 4
       mock_payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
           completion_ids=np.array([3, 4], dtype=np.int32),
-          loss_mask=np.array([1, 1], dtype=np.float32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
           advantages=np.array([1.0, 1.0], dtype=np.float32),
       )
       self.mock_algo.create_trainer_payloads.side_effect = (
@@ -2444,8 +2511,9 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.mini_batch_size = 1
       mock_payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
           completion_ids=np.array([3, 4], dtype=np.int32),
-          loss_mask=np.array([1, 1], dtype=np.float32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
           advantages=np.array([1.0, 1.0], dtype=np.float32),
       )
       self.mock_algo.create_trainer_payloads.side_effect = (

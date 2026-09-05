@@ -28,6 +28,7 @@ from tunix.rl.rollout import base_rollout
 
 
 class DummyLearner(agentic_rl_learner.AgenticRLLearner):
+
   def _process_results(self, **kwargs):
     return []
 
@@ -51,7 +52,9 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     )
 
     with self.assertRaisesRegex(
-        ValueError, r"max_tokens_to_generate \(10\) must match AgenticRLConfig max_response_length \(20\)"
+        ValueError,
+        r"max_tokens_to_generate \(10\) must match AgenticRLConfig"
+        r" max_response_length \(20\)",
     ):
       DummyLearner(
           rl_engine=rl_engine,
@@ -75,9 +78,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         use_rollout_logps=True,
     )
 
-    with self.assertRaisesRegex(
-        ValueError, r"must have return_logprobs=True"
-    ):
+    with self.assertRaisesRegex(ValueError, r"must have return_logprobs=True"):
       DummyLearner(
           rl_engine=rl_engine,
           reward_fns=mock.Mock(),
@@ -146,9 +147,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       )
 
   def test_train_batch_size_mismatch_raises_error(self):
-    with mock.patch.object(
-        rl_utils, "is_sharing_weights", return_value=False
-    ):
+    with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
       rl_engine = mock.Mock()
       rl_engine.cluster_config = mock.Mock()
       rl_engine.cluster_config.role_to_mesh = {
@@ -176,22 +175,20 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           reward_fns=mock.Mock(),
           algo_config=algo_config,
       )
-      train_dataset = [{'prompt': ['p1']}]
+      train_dataset = [{"prompt": ["p1"]}]
       with self.assertRaisesRegex(
           ValueError,
-          r'compute_logps_micro_batch_size \(2\) must be equal to'
-          r' train_micro_batch_size \(1\)',
+          r"compute_logps_micro_batch_size \(2\) must be equal to"
+          r" train_micro_batch_size \(1\)",
       ):
         learner.train(train_dataset)
 
   def test_train_with_packing_executes_end_to_end(self):
-    with mock.patch.object(
-        rl_utils, "is_sharing_weights", return_value=False
-    ):
+    with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
       rl_engine = mock.Mock()
       rl_engine.cluster_config = mock.Mock()
       mesh = mock.Mock()
-      mesh.shape = {'fsdp': 1, 'dp': 1}
+      mesh.shape = {"fsdp": 1, "dp": 1}
       rl_engine.cluster_config.role_to_mesh = {
           rl_engine_lib.Role.ACTOR: mesh,
           rl_engine_lib.Role.ROLLOUT: mesh,
@@ -201,6 +198,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.train_micro_batch_size = 1
       training_config.mini_batch_size = None
       training_config.max_seq_token_per_tpu = 16  # Enable packing
+      training_config.max_segments_per_packed_row = None
       training_config.max_steps = 100
       rl_engine.cluster_config.training_config = training_config
       rl_engine.cluster_config.rollout_config = base_rollout.RolloutConfig(
@@ -219,13 +217,15 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           reward_fns=mock.Mock(),
           algo_config=algo_config,
       )
-      train_dataset = [{'prompt': ['p1']}]
+      train_dataset = [{"prompt": ["p1"]}]
 
       async def mock_producer(*args, **kwargs):
         if False:
           yield
 
-      with mock.patch.object(learner, "_orchestrator_producer", side_effect=mock_producer):
+      with mock.patch.object(
+          learner, "_orchestrator_producer", side_effect=mock_producer
+      ):
         learner.train(train_dataset)
 
 

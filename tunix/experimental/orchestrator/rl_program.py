@@ -383,16 +383,19 @@ class StandardRLProgram(RLProgram):
       prompt_tokens = getattr(item, "prompt_tokens", None)
       if prompt_tokens is not None:
         p_len = len(prompt_tokens)
-      elif (
-          hasattr(item, "payload")
-          and getattr(item.payload, "token_ids", None) is not None
-      ):
-        token_mask = getattr(item.payload, "token_mask", None)
-        loss_mask = getattr(item.payload, "loss_mask", None)
-        if token_mask is not None and loss_mask is not None:
-          p_len = int(np.sum((token_mask > 0) & (loss_mask == 0)))
-        elif token_mask is not None:
-          p_len = int(np.sum(token_mask > 0))
+      elif hasattr(item, "payload"):
+        segment_ids = getattr(item.payload, "segment_ids", None)
+        prompt_mask = getattr(item.payload, "prompt_mask", None)
+        completion_mask = getattr(item.payload, "completion_mask", None)
+        if segment_ids is not None and completion_mask is not None:
+          p_len = int(
+              np.sum(
+                  (np.asarray(segment_ids) > 0)
+                  & (np.asarray(completion_mask) == 0)
+              )
+          )
+        elif prompt_mask is not None and np.size(prompt_mask):
+          p_len = int(np.sum(np.asarray(prompt_mask) > 0))
 
       c_len = None
       completion_tokens = getattr(item, "completion_tokens", None)
@@ -400,9 +403,9 @@ class StandardRLProgram(RLProgram):
         c_len = len(completion_tokens)
       elif (
           hasattr(item, "payload")
-          and getattr(item.payload, "loss_mask", None) is not None
+          and getattr(item.payload, "completion_mask", None) is not None
       ):
-        c_len = int(np.sum(item.payload.loss_mask > 0))
+        c_len = int(np.sum(np.asarray(item.payload.completion_mask) > 0))
 
       if p_len is not None:
         prompt_lengths.append(p_len)
