@@ -115,11 +115,25 @@ class SequenceRewardManager(AbstractRewardManager):
 
   def _parallel_enabled(self) -> bool:
     return (
-        getattr(self.algo_config, "reward_num_workers", 0) > 1
+        self._num_workers() > 1
         and not self._parallel_disabled
-        and os.getenv("TUNIX_REWARD_PARALLEL", "1") != "0"
         and "fork" in multiprocessing.get_all_start_methods()
     )
+
+  def _num_workers(self) -> int:
+    """Resolves `reward_num_workers`; -1 means one worker per CPU."""
+    n = getattr(self.algo_config, "reward_num_workers", 0)
+    cpus = os.cpu_count() or 1
+    if n == -1:
+      return cpus
+    if n > cpus:
+      logging.warning(
+          "reward_num_workers=%d exceeds the %d CPUs available; the extra"
+          " workers will only contend for cores.",
+          n,
+          cpus,
+      )
+    return n
 
   def _get_pool(self):
     """Lazily creates the fork-based reward worker pool."""
@@ -128,14 +142,11 @@ class SequenceRewardManager(AbstractRewardManager):
       # multiprocessing forbids daemons from having children. The flag is
       # launcher plumbing this code does not rely on: clear it so the pool
       # can fork. The workers are reaped with the trainer on teardown.
-      try:
-        cur = multiprocessing.current_process()
-        if cur._config.get("daemon"):  # pylint: disable=protected-access
-          cur._config["daemon"] = False
-      except Exception:  # pylint: disable=broad-except
-        pass
+      cur = multiprocessing.current_process()
+      if getattr(cur, "_config", {}).get("daemon"):
+        cur._config["daemon"] = False  # pylint: disable=protected-access
       self._pool = multiprocessing.get_context("fork").Pool(
-          processes=self.algo_config.reward_num_workers
+          processes=self._num_workers()
       )
     return self._pool
 
@@ -154,7 +165,13 @@ class SequenceRewardManager(AbstractRewardManager):
   ) -> Any:
     """Evaluates one reward fn over the batch, using workers when enabled."""
     fn_name = getattr(reward_fn, "__name__", str(reward_fn))
-    if not self._parallel_enabled() or fn_name in self._parent_only_fns:
+    if (
+        not prompts
+        or not self._parallel_enabled()
+        or fn_name in self._parent_only_fns
+    ):
+      # An empty batch has nothing to spread over workers; let the fn see
+      # it exactly as the serial path would.
       return reward_fn(prompts=prompts, completions=completions, **call_kwargs)
 
     try:
@@ -170,21 +187,26 @@ class SequenceRewardManager(AbstractRewardManager):
 
     num_prompts = len(prompts)
     try:
-      n_chunks = max(
-          1,
-          min(pool._processes * 2, num_prompts),  # pylint: disable=protected-access
+      # Two chunks per worker, not one: reward cost varies a lot across
+      # completions (e.g. long answers under a verifier), and the smaller
+      # chunks let a worker that finished early pick up more work instead of
+      # idling behind the slowest chunk. The pool size itself is exactly
+      # `reward_num_workers`.
+      n_chunks = min(
+          pool._processes * 2, num_prompts  # pylint: disable=protected-access
       )
       bounds = [num_prompts * c // n_chunks for c in range(n_chunks + 1)]
       jobs = []
       for c in range(n_chunks):
         lo, hi = bounds[c], bounds[c + 1]
-        if lo == hi:
-          continue
         chunk_kwargs = {}
         for k, v in call_kwargs.items():
-          # kwargs that are per-example columns (one entry per prompt, e.g.
-          # ground-truth answers) are sliced in lockstep with the batch;
-          # everything else passes through unchanged.
+          # A list/tuple/array kwarg with exactly one entry per prompt is
+          # treated as a per-example column (e.g. ground-truth answers) and
+          # sliced in lockstep with the batch, because that is the contract
+          # `__call__` already relies on for such kwargs. Anything else --
+          # scalars, configs, sequences of another length -- is passed to
+          # every chunk unchanged.
           if isinstance(v, (list, tuple)) and len(v) == num_prompts:
             chunk_kwargs[k] = list(v[lo:hi])
           elif isinstance(v, np.ndarray) and len(v) == num_prompts:

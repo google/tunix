@@ -47,6 +47,7 @@ class AlgorithmConfig:
   # that cannot run in a worker (unpicklable, or spawning subprocesses of
   # their own) are detected at runtime and evaluated in the parent
   # process instead; any other failure falls back to the serial path.
+  # `-1` uses one worker per CPU.
   reward_num_workers: int = 0
 
   def __post_init__(self):
@@ -73,9 +74,9 @@ class AlgorithmConfig:
           f"policy_loss_fn must be one of {valid_policy_loss_fns}."
           f" Received: {self.policy_loss_fn}"
       )
-    if self.reward_num_workers < 0:
+    if self.reward_num_workers < -1:
       raise ValueError(
-          "reward_num_workers must be >= 0."
+          "reward_num_workers must be >= 0, or -1 for one worker per CPU."
           f" Received: {self.reward_num_workers}"
       )
 

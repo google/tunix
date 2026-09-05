@@ -385,13 +385,18 @@ class ParallelSequenceRewardManagerTest(parameterized.TestCase):
     rewards_info = manager(self.prompts, self.completions)
     np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 7.0))
 
-  def test_kill_switch_disables_pool(self):
-    with mock.patch.dict(os.environ, {"TUNIX_REWARD_PARALLEL": "0"}):
-      manager = self._make([len_reward], self.parallel_config)
-      rewards_info = manager(self.prompts, self.completions)
-      self.assertIsNone(manager._pool)
+  def test_minus_one_uses_one_worker_per_cpu(self):
+    manager = self._make([len_reward], TestAlgoConfig(reward_num_workers=-1))
+    rewards_info = manager(self.prompts, self.completions)
+    self.assertEqual(manager._pool._processes, os.cpu_count() or 1)
     expected = np.array([float(len(c)) for c in self.completions])
     np.testing.assert_array_equal(rewards_info["rewards"], expected)
+
+  def test_empty_batch_skips_the_pool(self):
+    manager = self._make([len_reward], self.parallel_config)
+    rewards_info = manager([], [])
+    self.assertEqual(rewards_info["rewards"].shape[0], 0)
+    self.assertIsNone(manager._pool)
 
   def test_serial_default_creates_no_pool(self):
     manager = self._make([len_reward], self.serial_config)
