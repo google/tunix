@@ -113,6 +113,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--maxtext_ckpt_path",
+      type=str,
+      default=os.getenv("MAXTEXT_CKPT", ""),
+      help="Path to MaxText checkpoint to load initial parameters from.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for rollout worker.",
@@ -367,6 +373,10 @@ def _create_vllm_sampler(args):
     }
     if args.maxtext_attention:
       maxtext_config_overrides["attention"] = args.maxtext_attention
+    # Note: load_parameters_path is intentionally NOT set here.
+    # Checkpoints on disk are scanned (layers.mlp.wi_0...), whereas MaxTextForCausalLM
+    # is unscanned (layers_0.mlp.wi_0...). Initial weights are pushed via Raiden
+    # weight sync (_sync_initial_weights) from the trainer after unstacking.
     engine_kwargs["additional_config"] = {
         "maxtext_config": maxtext_config_overrides
     }
@@ -393,6 +403,11 @@ def _create_vllm_sampler(args):
 
 
 def main(argv: list[str], context: Any = None) -> None:
+  from tunix.experimental.weight_sync.raiden_synchronizer import (  # pylint: disable=g-import-not-at-top
+      patch_raiden_worker_sync,
+  )
+  patch_raiden_worker_sync()
+
   if context and context.ipc and context.ipc.discovery:
     pass
   else:

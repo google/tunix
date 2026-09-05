@@ -22,6 +22,7 @@ import abc
 import asyncio
 from collections.abc import Callable, Iterable, Sequence
 import dataclasses
+import os
 import time
 from typing import Any
 
@@ -721,15 +722,18 @@ class StandardRLProgram(RLProgram):
             # TODO(tunix-dev): For now any failures in save_checkpoint will
             # abort the entire program. Make it configurable on whether to fail
             # or continue.
-            await self.engine.save_checkpoint(
-                role=datatypes.Role.ACTOR,
-                metadata={
-                    "step": self.step + 1,
-                    "policy_version": self.policy_version,
-                    "num_rollouts": num_rollouts,
-                    "num_microbatches": num_microbatches,
-                },
-            )
+            if os.environ.get("DISABLE_CHECKPOINTING", "false").lower() in ("true", "1"):
+              logging.info("Skipping save_checkpoint as DISABLE_CHECKPOINTING is set.")
+            else:
+              await self.engine.save_checkpoint(
+                  role=datatypes.Role.ACTOR,
+                  metadata={
+                      "step": self.step + 1,
+                      "policy_version": self.policy_version,
+                      "num_rollouts": num_rollouts,
+                      "num_microbatches": num_microbatches,
+                  },
+              )
 
         if not scored_items:
           break

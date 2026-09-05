@@ -94,6 +94,16 @@ def main() -> None:
       default=os.environ.get("HF_TOKEN_SECRET_NAME", "hf-token-secret"),
       help="Kubernetes secret name containing HF_TOKEN",
   )
+  parser.add_argument(
+      "--namespace",
+      default=os.environ.get("K8S_NAMESPACE", "default"),
+      help="Kubernetes namespace (default: default)",
+  )
+  parser.add_argument(
+      "--queue_name",
+      default=os.environ.get("KUEUE_QUEUE_NAME", ""),
+      help="Kueue local queue name (optional)",
+  )
 
   args = parser.parse_args()
 
@@ -170,6 +180,8 @@ def main() -> None:
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
         HF_TOKEN_SECRET_NAME=args.hf_token_secret_name,
+        NAMESPACE=args.namespace or "default",
+        QUEUE_NAME=args.queue_name,
     )
     print(content)
 

@@ -94,6 +94,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       model_name: str = "",
       sampler_instance: Any = None,
       worker_index: int = 0,
+      raiden_job_name: str = "",
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       **kwargs,
@@ -103,6 +104,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self.model_name = model_name or (engine_args.model if engine_args else "")
     self.sampler = sampler_instance
     self.worker_index = worker_index
+    # Raiden treats units sharing a job_name as hosts of ONE job and splits the
+    # weights across them (`num_dst_physical_hosts` in raiden_controller), so
+    # independent rollout replicas each need their own job_name to be sent a
+    # full copy. server_id already has that granularity; worker_index stays the
+    # host index *within* one replica.
+    self.raiden_job_name = raiden_job_name or self.server_id
     self._parallelism = parallelism
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
@@ -187,22 +194,25 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   async def _ensure_started(self) -> None:
     """Brings the engine up if nothing has needed it yet.
 
-    RLVllmSampler builds its AsyncLLM lazily, and `sample()` is the only thing
-    that calls `start()`. Weight sync needs the engine too -- it owns the TPU
-    worker, and therefore the Raiden binding -- and it can legitimately run
-    before the first sample, because the orchestrator pushes the trainer's
-    starting weights out before dispatching any rollouts. Without this the
-    round finds no worker, reports an empty destination manifest, and the run
-    deadlocks: the engine is waiting for a sample that dispatch is waiting on
-    the sync to allow.
+    RLVllmSampler builds its AsyncLLM lazily and `sample()` is the only caller
+    of `start()`. Weight sync needs the engine too -- it owns the TPU worker,
+    and therefore the Raiden binding -- and the first sync lands before the
+    first sample, because `prepare_rollout_policy` syncs ahead of dispatch.
+    Without this the round finds no worker, reports an empty destination
+    manifest, and deadlocks: the engine waits for a sample that dispatch is
+    waiting on the sync to allow. Guarded on `_is_running` rather than calling
+    `start()` unconditionally, because `start()` warns when the engine is
+    already up and this runs on every sync round.
 
-    Keys off the sampler's own `_is_running` rather than calling `start()`
-    unconditionally, since `start()` logs a warning when already running and
-    this runs on every sync round.
+    TODO(tunix-dev): drop this once the orchestrator owns rollout-worker
+    lifecycle and can guarantee the engine is up before it issues any phase
+    call; the ordering belongs there, not in a guard on each entry point.
     """
+    if self.sampler is None:
+      self.initialize()
     sampler = self._require_sampler()
     if not getattr(sampler, "_is_running", False):
-      logging.info(
+      logger.info(
           "VllmSamplerAdapter [%s] starting engine for weight sync (no"
           " sample has forced it up yet).",
           self.server_id,
@@ -270,7 +280,9 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       return None
     await self._ensure_started()
     return await self._require_sampler().bind_raiden_sync(
-        worker_index=self.worker_index, parallelism=self._parallelism
+        worker_index=self.worker_index,
+        parallelism=self._parallelism,
+        job_name=self.raiden_job_name,
     )
 
   async def get_weight_sync_metadata(
@@ -287,17 +299,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       )
     await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
-    work_units = []
-    for m in meta or []:
-      if isinstance(m, dict):
-        if self.server_id:
-          m["unit"] = self.server_id
-        if "variables" in m:
-          for v in m["variables"]:
-            if isinstance(v, dict) and "name" in v and v["name"].endswith(".value"):
-              v["name"] = v["name"][:-6]
-      work_units.append(weight_sync.WorkUnitMetadata.from_dict(m))
-    return work_units
+    return [weight_sync.WorkUnitMetadata.from_dict(m) for m in meta or []]
 
   async def pre_weight_sync(
       self, sync_request: Any = None, **kwargs: Any
@@ -343,6 +345,16 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         result = sampler.refresh_model_state_leaves()
         if asyncio.iscoroutine(result):
           await result
+      else:
+        # Never silently skip this: the sampler's runner dispatches through a
+        # `state_leaves` view derived from `state` at load time, so without the
+        # refresh it keeps serving pre-sync weights and the only symptom is
+        # garbage completions.
+        logger.warning(
+            "sampler %s has no refresh_model_state_leaves(); the rollout's"
+            " state_leaves are not re-pointed after h2d.",
+            type(sampler).__name__,
+        )
 
       self._tracker.complete(sync_request, "h2d_done")
       return True
@@ -418,6 +430,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     if hasattr(sampler, "get_transfer_status"):
       return await sampler.get_transfer_status(req_id, **kwargs)
     return "UNKNOWN"
+
+  def get_target_state(self) -> Any:
+    """Returns target state shape/dtype pytree for weight conversion."""
+    sampler = self._require_sampler()
+    if hasattr(sampler, "get_target_state"):
+      return sampler.get_target_state()
+    return None
 
   async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
     """Returns load information from the underlying engine."""

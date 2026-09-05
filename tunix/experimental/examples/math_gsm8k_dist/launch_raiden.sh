@@ -70,8 +70,9 @@ OPTIONS:
   --batch-size <N>          Batch size (default: 4)
   --rollout-replicas <N>    Number of rollout TPU workers (default: 2)
   --trainer-slice <SLICE>   TPU slice for trainer (default: tpuv5:2x2x2)
-  --rollout-slice <SLICE>   TPU slice for rollout (default: tpuv5:2x2x1)
   --no-cluster-connect      Skip automatic gcloud cluster authentication check
+  --use-ffi                 Enable Raiden FFI weight synchronization on Pathways TPU workers
+  --pathways-server-image <IMAGE> Pathways server container image (for FFI weight sync)
 
 EXAMPLES:
   # 1. Quick reproduction with verified default image:
@@ -125,6 +126,9 @@ load_preset_defaults() {
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
       PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_USE_FFI="false"
+      PRESET_PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
+      PRESET_PATHWAYS_PROXY_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904"
       ;;
     qwen3.5-35b|35b|35B)
       PRESET_NAME="qwen3.5-35b"
@@ -147,10 +151,13 @@ load_preset_defaults() {
       PRESET_WEIGHT_SYNC_MODE="raiden"
       PRESET_USE_WEIGHT_CONVERTER=1
       PRESET_ROLLOUT_BACKEND="maxtext"
-      PRESET_VERIFY_WEIGHTS="true"
+      PRESET_VERIFY_WEIGHTS="false"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_USE_FFI="true"
+      PRESET_PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
+      PRESET_PATHWAYS_PROXY_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904"
       ;;
     qwen3-1.7b|1.7b|1.7B)
       PRESET_NAME="qwen3-1.7b"
@@ -177,6 +184,8 @@ load_preset_defaults() {
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=1
       PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_USE_FFI="false"
+      PRESET_PATHWAYS_SERVER_IMAGE=""
       ;;
     *)
       echo "Error: Unknown preset '$preset'. Available: qwen3-0.6b, qwen3.5-35b, qwen3-1.7b" >&2
@@ -207,6 +216,15 @@ USER_REGION=""
 USER_ZONE=""
 USER_PROJECT=""
 USER_CPU_MACHINE=""
+USER_USE_FFI=""
+USER_PATHWAYS_SERVER_IMAGE=""
+USER_PATHWAYS_PROXY_SERVER_IMAGE=""
+USER_WANDB_API_KEY=""
+USER_WANDB_PROJECT=""
+USER_WANDB_RUN_NAME=""
+USER_WANDB_ENTITY=""
+USER_NAMESPACE=""
+USER_QUEUE=""
 
 RANDOMIZE_ID=false
 DRY_RUN="${DRY_RUN:-false}"
@@ -274,6 +292,30 @@ while [[ $# -gt 0 ]]; do
     --no-sync-code)
       USER_SYNC_CODE=false
       shift
+      ;;
+    --use-ffi)
+      USER_USE_FFI=true
+      shift
+      ;;
+    --no-use-ffi)
+      USER_USE_FFI=false
+      shift
+      ;;
+    --pathways-server-image=*)
+      USER_PATHWAYS_SERVER_IMAGE="${1#*=}"
+      shift
+      ;;
+    --pathways-server-image)
+      USER_PATHWAYS_SERVER_IMAGE="$2"
+      shift 2
+      ;;
+    --pathways-proxy-server-image=*|--pathways-proxy-image=*)
+      USER_PATHWAYS_PROXY_SERVER_IMAGE="${1#*=}"
+      shift
+      ;;
+    --pathways-proxy-server-image|--pathways-proxy-image)
+      USER_PATHWAYS_PROXY_SERVER_IMAGE="$2"
+      shift 2
       ;;
     --cluster=*)
       USER_CLUSTER="${1#*=}"
@@ -375,9 +417,73 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
+    --namespace=*)
+      USER_NAMESPACE="${1#*=}"
+      shift
+      ;;
+    --namespace)
+      USER_NAMESPACE="$2"
+      shift 2
+      ;;
+    --queue=*|--kueue-queue=*)
+      USER_QUEUE="${1#*=}"
+      shift
+      ;;
+    --queue|--kueue-queue)
+      USER_QUEUE="$2"
+      shift 2
+      ;;
     --no-cluster-connect)
       CONNECT_CLUSTER=false
       shift
+      ;;
+    --verify-weights)
+      USER_VERIFY_WEIGHTS="true"
+      shift
+      ;;
+    --no-verify-weights)
+      USER_VERIFY_WEIGHTS="false"
+      shift
+      ;;
+    --sync-tpu-inference)
+      USER_SYNC_TPU_INFERENCE="true"
+      shift
+      ;;
+    --no-sync-tpu-inference)
+      USER_SYNC_TPU_INFERENCE="false"
+      shift
+      ;;
+    --wandb-api-key=*)
+      USER_WANDB_API_KEY="${1#*=}"
+      shift
+      ;;
+    --wandb-api-key)
+      USER_WANDB_API_KEY="$2"
+      shift 2
+      ;;
+    --wandb-project=*)
+      USER_WANDB_PROJECT="${1#*=}"
+      shift
+      ;;
+    --wandb-project)
+      USER_WANDB_PROJECT="$2"
+      shift 2
+      ;;
+    --wandb-run-name=*)
+      USER_WANDB_RUN_NAME="${1#*=}"
+      shift
+      ;;
+    --wandb-run-name)
+      USER_WANDB_RUN_NAME="$2"
+      shift 2
+      ;;
+    --wandb-entity=*)
+      USER_WANDB_ENTITY="${1#*=}"
+      shift
+      ;;
+    --wandb-entity)
+      USER_WANDB_ENTITY="$2"
+      shift 2
       ;;
     *)
       EXTRA_ARGS+=("$1")
@@ -412,10 +518,21 @@ SAMPLER="${SAMPLER:-${PRESET_SAMPLER}}"
 WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-${PRESET_WEIGHT_SYNC_MODE}}"
 USE_WEIGHT_CONVERTER="${USE_WEIGHT_CONVERTER:-${PRESET_USE_WEIGHT_CONVERTER}}"
 ROLLOUT_BACKEND="${ROLLOUT_BACKEND:-${PRESET_ROLLOUT_BACKEND}}"
-VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-${PRESET_VERIFY_WEIGHTS}}"
+VERIFY_WEIGHTS="${USER_VERIFY_WEIGHTS:-${VERIFY_WEIGHTS:-${PRESET_VERIFY_WEIGHTS}}}"
 DISABLE_CHECKPOINTING="${DISABLE_CHECKPOINTING:-${PRESET_DISABLE_CHECKPOINTING}}"
+USE_FFI="${USER_USE_FFI:-${USE_FFI:-${PRESET_USE_FFI:-false}}}"
+DEFAULT_FFI_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
+DEFAULT_FFI_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904"
+if [[ "${USE_FFI}" == "true" ]]; then
+  PATHWAYS_SERVER_IMAGE="${USER_PATHWAYS_SERVER_IMAGE:-${PATHWAYS_SERVER_IMAGE:-${PRESET_PATHWAYS_SERVER_IMAGE:-${DEFAULT_FFI_SERVER_IMAGE}}}}"
+  PATHWAYS_PROXY_SERVER_IMAGE="${USER_PATHWAYS_PROXY_SERVER_IMAGE:-${PATHWAYS_PROXY_SERVER_IMAGE:-${PRESET_PATHWAYS_PROXY_SERVER_IMAGE:-${DEFAULT_FFI_PROXY_IMAGE}}}}"
+else
+  PATHWAYS_SERVER_IMAGE="${USER_PATHWAYS_SERVER_IMAGE:-${PATHWAYS_SERVER_IMAGE:-${PRESET_PATHWAYS_SERVER_IMAGE:-}}}"
+  PATHWAYS_PROXY_SERVER_IMAGE="${USER_PATHWAYS_PROXY_SERVER_IMAGE:-${PATHWAYS_PROXY_SERVER_IMAGE:-${PRESET_PATHWAYS_PROXY_SERVER_IMAGE:-}}}"
+fi
 
 SYNC_CODE="${USER_SYNC_CODE:-${SYNC_CODE:-true}}"  # Default: true to patch local tunix/maxtext changes
+SYNC_TPU_INFERENCE="${USER_SYNC_TPU_INFERENCE:-${SYNC_TPU_INFERENCE:-true}}"
 PROJECT="${USER_PROJECT:-${PROJECT:-cloud-tpu-shared-capacity}}"
 REGION="${USER_REGION:-${REGION:-europe-west4}}"
 ZONE="${USER_ZONE:-${ZONE:-europe-west4-b}}"
@@ -448,6 +565,9 @@ if [[ ${#TRAINER_ID} -gt 26 ]]; then
   exit 1
 fi
 
+NAMESPACE="${USER_NAMESPACE:-${K8S_NAMESPACE:-default}}"
+QUEUE_NAME="${USER_QUEUE:-${KUEUE_QUEUE:-}}"
+
 MODEL_DIR="${MODEL_DIR:-}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-128}"
@@ -465,8 +585,10 @@ ROLLOUT_USE_BATCHED_RPA="${ROLLOUT_USE_BATCHED_RPA:-}"
 ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-}"
 TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
 
-WANDB_PROJECT="${WANDB_PROJECT:-trellis-gsm8k}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-}"
+WANDB_API_KEY="${USER_WANDB_API_KEY:-${WANDB_API_KEY:-}}"
+WANDB_PROJECT="${USER_WANDB_PROJECT:-${WANDB_PROJECT:-trellis-gsm8k}}"
+WANDB_RUN_NAME="${USER_WANDB_RUN_NAME:-${WANDB_RUN_NAME:-}}"
+WANDB_ENTITY="${USER_WANDB_ENTITY:-${WANDB_ENTITY:-google-trellis}}"
 
 ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
@@ -526,7 +648,7 @@ sync_code_to_gcs() {
     maxtext_parent="$(cd "${MAXTEXT_DIR}/.." && pwd)"
     extra_dirs+=("-C" "${maxtext_parent}" "maxtext")
   fi
-  if [[ "${SYNC_TPU_INFERENCE:-false}" == "true" ]] && [ -d "${TPU_INFERENCE_DIR}" ]; then
+  if [[ "${SYNC_TPU_INFERENCE:-true}" == "true" ]] && [ -d "${TPU_INFERENCE_DIR}" ]; then
     local tpu_inf_parent
     tpu_inf_parent="$(cd "${TPU_INFERENCE_DIR}/.." && pwd)"
     extra_dirs+=("-C" "${tpu_inf_parent}" "tpu-inference")
@@ -575,13 +697,8 @@ sync_code_to_gcs() {
 
 get_sync_prefix() {
   if [[ "${SYNC_CODE}" == "true" ]]; then
-    local tpu_inf_cmd=""
-    local python_path="/app/maxtext/src:/app:\${PYTHONPATH:-}"
-    if [[ "${SYNC_TPU_INFERENCE:-false}" == "true" ]]; then
-      tpu_inf_cmd="(pip install --no-deps -e /app/tpu-inference 2>/dev/null || true) && (cp -rf /app/tpu-inference/tpu_inference /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true) && "
-      python_path="/app/tpu-inference:/app/maxtext/src:/app:\${PYTHONPATH:-}"
-    fi
-    echo "echo '==> Syncing code from ${GCS_SYNC_TAR}...'; (gcloud storage cp ${GCS_SYNC_TAR} /tmp/code_sync.tar.gz 2>/dev/null || gsutil cp ${GCS_SYNC_TAR} /tmp/code_sync.tar.gz 2>/dev/null || python3 -c \"import json, urllib.request, urllib.parse; token = json.loads(urllib.request.urlopen(urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', headers={'Metadata-Flavor': 'Google'})).read())['access_token']; b, p = '${GCS_SYNC_TAR}'.replace('gs://', '').split('/', 1); req = urllib.request.Request(f'https://storage.googleapis.com/storage/v1/b/{b}/o/{urllib.parse.quote(p, safe=\\\"\\\")}?alt=media', headers={'Authorization': f'Bearer {token}'}); open('/tmp/code_sync.tar.gz', 'wb').write(urllib.request.urlopen(req).read())\" 2>/dev/null || python3 -c \"import gcsfs; gcsfs.GCSFileSystem().get('${GCS_SYNC_TAR}', '/tmp/code_sync.tar.gz')\") && tar -xzf /tmp/code_sync.tar.gz -C /app && rm -f /tmp/code_sync.tar.gz && (pip install --force-reinstall --no-deps /app/raiden_wheels/*.whl 2>/dev/null || true) && ${tpu_inf_cmd}(cp -rf /app/tunix /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true) && (cp -rf /app/maxtext/src/maxtext /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true) && export PYTHONPATH=\"${python_path}\" && echo '==> Code sync and Raiden wheel applied to /app and site-packages.';"
+    local python_path="/app/maxtext/src:/app/tpu-inference:/app:\${PYTHONPATH:-}"
+    echo "echo '==> Syncing code from ${GCS_SYNC_TAR}...'; (gcloud storage cp ${GCS_SYNC_TAR} /tmp/code_sync.tar.gz 2>/dev/null || gsutil cp ${GCS_SYNC_TAR} /tmp/code_sync.tar.gz 2>/dev/null || python3 -c \"import json, urllib.request, urllib.parse; token = json.loads(urllib.request.urlopen(urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', headers={'Metadata-Flavor': 'Google'})).read())['access_token']; b, p = '${GCS_SYNC_TAR}'.replace('gs://', '').split('/', 1); req = urllib.request.Request(f'https://storage.googleapis.com/storage/v1/b/{b}/o/{urllib.parse.quote(p, safe=\\\"\\\")}?alt=media', headers={'Authorization': f'Bearer {token}'}); open('/tmp/code_sync.tar.gz', 'wb').write(urllib.request.urlopen(req).read())\" 2>/dev/null || python3 -c \"import gcsfs; gcsfs.GCSFileSystem().get('${GCS_SYNC_TAR}', '/tmp/code_sync.tar.gz')\") && tar -xzf /tmp/code_sync.tar.gz -C /app && rm -f /tmp/code_sync.tar.gz && (pip install --force-reinstall --no-deps /app/raiden_wheels/*.whl 2>/dev/null || true) && (cp -rf /app/tunix /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true) && (cp -rf /app/maxtext/src/maxtext /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true) && ([ -d /app/tpu-inference/tpu_inference ] && cp -rf /app/tpu-inference/tpu_inference /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true) && export PYTHONPATH=\"${python_path}\" && echo '==> Code sync and Raiden wheel applied to /app and site-packages.';"
   else
     echo ""
   fi
@@ -592,7 +709,7 @@ apply_or_print() {
     echo "---"
     cat
   else
-    kubectl apply -f -
+    kubectl apply -n "${NAMESPACE}" -f -
   fi
 }
 
@@ -610,12 +727,12 @@ stop_workload() {
     return 0
   fi
 
-  echo "Stopping workload (${RUN_ID})..."
+  echo "Stopping workload (${RUN_ID}) in namespace ${NAMESPACE}..."
   for js in "${jobsets[@]}"; do
-    if kubectl get jobset "$js" &>/dev/null; then
-      echo "  Deleting JobSet: $js..."
-      kubectl delete jobset "$js" --ignore-not-found=true --wait=true 2>/dev/null || true
-      kubectl delete jobs -l "jobset.sigs.k8s.io/jobset-name=$js" --ignore-not-found=true 2>/dev/null || true
+    if kubectl get jobset "$js" -n "${NAMESPACE}" &>/dev/null; then
+      echo "  Deleting JobSet: $js in namespace ${NAMESPACE}..."
+      kubectl delete jobset "$js" -n "${NAMESPACE}" --ignore-not-found=true --wait=true 2>/dev/null || true
+      kubectl delete jobs -n "${NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=$js" --ignore-not-found=true 2>/dev/null || true
     fi
   done
   echo "✅ Teardown command sent for ${RUN_ID}."
@@ -625,18 +742,22 @@ start_orchestrator() {
   local sync_prefix
   sync_prefix=$(get_sync_prefix)
 
-  echo "Rendering & Starting orchestrator (${ORCHESTRATOR_ID})..."
+  echo "Rendering & Starting orchestrator (${ORCHESTRATOR_ID}) in namespace ${NAMESPACE}..."
   python3 "${YAML_GENERATOR}" \
     "${YAMLS_DIR}/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
+    --namespace="${NAMESPACE}" \
+    ${QUEUE_NAME:+--queue_name="${QUEUE_NAME}"} \
     --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
       ${sync_prefix} \
+      ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       ${WANDB_PROJECT:+WANDB_PROJECT=\"${WANDB_PROJECT}\"} \
       ${WANDB_RUN_NAME:+WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\"} \
-      PYTHONUNBUFFERED=1 python -m tunix.experimental.distributed.runtime.main \
+      ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
+      PYTHONUNBUFFERED=1 DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main \
@@ -674,18 +795,36 @@ start_trainer() {
   local sync_prefix
   sync_prefix=$(get_sync_prefix)
 
-  echo "Rendering & Starting trainer (${TRAINER_ID})..."
+  local ffi_env=""
+  if [[ "${USE_FFI}" == "true" ]]; then
+    ffi_env="USE_RAIDEN_FFI=true RAIDEN_USE_FFI=1 RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-4}"
+  else
+    ffi_env="USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0"
+  fi
+
+  local pw_server_arg=()
+  if [[ -n "${PATHWAYS_SERVER_IMAGE}" ]]; then
+    pw_server_arg+=("--pathways_server_image=${PATHWAYS_SERVER_IMAGE}")
+  fi
+  if [[ -n "${PATHWAYS_PROXY_SERVER_IMAGE}" ]]; then
+    pw_server_arg+=("--pathways_proxy_server_image=${PATHWAYS_PROXY_SERVER_IMAGE}")
+  fi
+
+  echo "Rendering & Starting trainer (${TRAINER_ID}) in namespace ${NAMESPACE}..."
   python3 "${YAML_GENERATOR}" \
     "${YAMLS_DIR}/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
+    --namespace="${NAMESPACE}" \
+    ${QUEUE_NAME:+--queue_name="${QUEUE_NAME}"} \
     --tpu_slice="${TRAINER_TPU_SLICE}" \
     --cpu_machine="${CPU_MACHINE}" \
     --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
+    "${pw_server_arg[@]}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      PYTHONUNBUFFERED=1 DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} ROLLOUT_BACKEND=${ROLLOUT_BACKEND} python -m tunix.experimental.distributed.runtime.main \
+      PYTHONUNBUFFERED=1 ${ffi_env} DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} ROLLOUT_BACKEND=${ROLLOUT_BACKEND} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -731,17 +870,21 @@ start_rollout_instance() {
   local sync_prefix
   sync_prefix=$(get_sync_prefix)
 
-  echo "Rendering & Starting rollout (${target_id})..."
+  local rollout_ffi_env="USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0"
+
+  echo "Rendering & Starting rollout (${target_id}) in namespace ${NAMESPACE}..."
   python3 "${YAML_GENERATOR}" \
     "${YAMLS_DIR}/jobset.tpu.yaml" \
     --jobset_name="${target_id}" \
+    --namespace="${NAMESPACE}" \
+    ${QUEUE_NAME:+--queue_name="${QUEUE_NAME}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
     --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      PYTHONUNBUFFERED=1 SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      PYTHONUNBUFFERED=1 ${rollout_ffi_env} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
@@ -779,31 +922,31 @@ start_all_rollouts() {
 show_status() {
   connect_cluster
   echo "================================================================================"
-  echo "JobSets for Run: ${RUN_ID}"
+  echo "JobSets for Run: ${RUN_ID} in namespace ${NAMESPACE}"
   echo "================================================================================"
   local js_all
-  js_all=$(kubectl get jobset 2>/dev/null || true)
+  js_all=$(kubectl get jobset -n "${NAMESPACE}" 2>/dev/null || true)
   local js_output
   js_output=$(echo "$js_all" | grep "${RUN_ID}" || true)
   if [[ -n "$js_output" ]]; then
     echo "$js_all" | { head -n 1 || true; }
     echo "$js_output"
   else
-    echo "No active JobSets found for ${RUN_ID}."
+    echo "No active JobSets found for ${RUN_ID} in namespace ${NAMESPACE}."
   fi
   echo ""
   echo "================================================================================"
-  echo "Pods for Run: ${RUN_ID}"
+  echo "Pods for Run: ${RUN_ID} in namespace ${NAMESPACE}"
   echo "================================================================================"
   local pod_all
-  pod_all=$(kubectl get pods -o wide 2>/dev/null || true)
+  pod_all=$(kubectl get pods -n "${NAMESPACE}" -o wide 2>/dev/null || true)
   local pod_output
   pod_output=$(echo "$pod_all" | grep "${RUN_ID}" || true)
   if [[ -n "$pod_output" ]]; then
     echo "$pod_all" | { head -n 1 || true; }
     echo "$pod_output"
   else
-    echo "No active Pods found for ${RUN_ID}."
+    echo "No active Pods found for ${RUN_ID} in namespace ${NAMESPACE}."
   fi
 }
 
@@ -837,35 +980,35 @@ show_logs() {
   esac
 
   local pod_name
-  pod_name=$(kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${target_jobset},jobset.sigs.k8s.io/replicatedjob-name=proc" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  pod_name=$(kubectl get pods -n "${NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=${target_jobset},jobset.sigs.k8s.io/replicatedjob-name=proc" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   if [[ -z "$pod_name" ]]; then
-    pod_name=$(kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${target_jobset}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    pod_name=$(kubectl get pods -n "${NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=${target_jobset}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   fi
 
   if [[ -z "$pod_name" ]]; then
-    echo "Error: No pod found for JobSet ${target_jobset}." >&2
-    echo "Check current status with: $0 status" >&2
+    echo "Error: No pod found for JobSet ${target_jobset} in namespace ${NAMESPACE}." >&2
+    echo "Check current status with: $0 status --namespace=${NAMESPACE}" >&2
     exit 1
   fi
 
-  echo "Fetching logs from pod ${pod_name} (${container_flag})..."
-  kubectl logs "${pod_name}" ${container_flag} "${log_args[@]}"
+  echo "Fetching logs from pod ${pod_name} (${container_flag}) in namespace ${NAMESPACE}..."
+  kubectl logs -n "${NAMESPACE}" "${pod_name}" ${container_flag} "${log_args[@]}"
 }
 
 triage_workload() {
   connect_cluster
   local pod_name
-  pod_name=$(kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID},jobset.sigs.k8s.io/replicatedjob-name=proc" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  pod_name=$(kubectl get pods -n "${NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID},jobset.sigs.k8s.io/replicatedjob-name=proc" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
   if [[ -z "$pod_name" ]]; then
-    echo "Error: Trainer proc pod not found for ${TRAINER_ID}." >&2
-    echo "Workload might not be running. Run '$0 status' to inspect." >&2
+    echo "Error: Trainer proc pod not found for ${TRAINER_ID} in namespace ${NAMESPACE}." >&2
+    echo "Workload might not be running. Run '$0 status --namespace=${NAMESPACE}' to inspect." >&2
     exit 1
   fi
 
   local log_file="/tmp/triage-${RUN_ID}-trainer.log"
-  echo "Downloading recent trainer logs from ${pod_name} to ${log_file}..."
-  kubectl logs "${pod_name}" -c main --tail=1000 > "${log_file}" 2>&1 || true
+  echo "Downloading recent trainer logs from ${pod_name} to ${log_file} in namespace ${NAMESPACE}..."
+  kubectl logs -n "${NAMESPACE}" "${pod_name}" -c main --tail=1000 > "${log_file}" 2>&1 || true
 
   echo "================================================================================"
   echo "TRIAGE REPORT FOR: ${RUN_ID}"

@@ -414,6 +414,9 @@ class _MeshBoundTrainer:
       return self._trainer.prepare_weight_sync(**kwargs)
 
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+    if os.environ.get("DISABLE_CHECKPOINTING", "false").lower() in ("true", "1"):
+      logging.info("Checkpoint saving disabled by DISABLE_CHECKPOINTING env var.")
+      return
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 

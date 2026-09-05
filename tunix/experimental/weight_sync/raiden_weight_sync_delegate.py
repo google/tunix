@@ -38,9 +38,15 @@ class RaidenWeightSyncDelegate:
 
   def __init__(self, *args, worker_index: int = 0, **kwargs):
     super().__init__(*args, **kwargs)
+    # Raiden partitions the weights across every unit sharing a job_name, so
+    # replicas that all call themselves "rollout" get a slice each instead of a
+    # copy each. server_id is already unique per replica and shared across the
+    # hosts within one, which is exactly the grouping job_name needs.
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
-            "rollout", worker_index=worker_index, auto_h2d=True
+            getattr(self, "server_id", None) or "rollout",
+            worker_index=worker_index,
+            auto_h2d=True,
         )
     ]
     self._version = 0
