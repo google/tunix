@@ -93,6 +93,9 @@ export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
@@ -141,6 +144,10 @@ stop_trainer() {
 start_trainer() {
   local extra_flags=""
 
+  if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
+  fi
+
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
     extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
@@ -157,11 +164,13 @@ start_trainer() {
     --jobset_name="${TRAINER_ID}" \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
+    --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
+    --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -201,6 +210,10 @@ stop_rollout() {
 start_rollout() {
   local extra_flags=""
 
+  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
+  fi
+
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
     extra_flags+="\
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
@@ -212,10 +225,12 @@ start_rollout() {
     tunix/experimental/distributed/deployment/yamls/${ROLLOUT_JOBSET_YAML} \
     --jobset_name="${ROLLOUT_ID}" \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
+    --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
+    --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      HF_TOKEN=${HF_TOKEN} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
