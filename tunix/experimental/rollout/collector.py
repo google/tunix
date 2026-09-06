@@ -68,6 +68,7 @@ class TrajectoryCollectorEngine:
     self.max_response_length = request.generation_kwargs.get(
         "max_response_length"
     )
+    self._accumulated_token_ids: List[int] = []
 
   async def run_episode(self) -> trajectory_lib.Trajectory:
     """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
@@ -121,6 +122,11 @@ class TrajectoryCollectorEngine:
           "none" if logprobs is None else np.asarray(logprobs).size,
           text[:160],
       )
+
+      if not self._accumulated_token_ids and prompt_tokens.size:
+        self._accumulated_token_ids.extend([int(x) for x in prompt_tokens.reshape(-1)])
+      if np.asarray(tokens).size:
+        self._accumulated_token_ids.extend([int(x) for x in np.asarray(tokens).reshape(-1)])
 
       return base_rollout.RolloutOutput(
           text=[text],
@@ -215,4 +221,8 @@ class TrajectoryCollectorEngine:
 
   def get_accumulated_token_ids(self) -> List[int]:
     """Returns token IDs of historical turns for Raiden KV-cache transfer."""
+    if self._accumulated_token_ids:
+      return list(self._accumulated_token_ids)
+    if hasattr(self.request, "prompt_tokens") and self.request.prompt_tokens:
+      return list(self.request.prompt_tokens)
     return []

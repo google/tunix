@@ -59,7 +59,7 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     elif isinstance(weight_sync_mode, str):
       self.weight_sync_mode = weight_sync.WeightSyncMode(weight_sync_mode)
     else:
-      self.weight_sync_mode = weight_sync.WeightSyncMode.FALLBACK
+      self.weight_sync_mode = weight_sync.DEFAULT_WEIGHT_SYNC_MODE
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
@@ -75,7 +75,9 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
         from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
         self.raiden_sync_delegate = (
-            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+            raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                server_id=self.server_id
+            )
         )
 
     if not self.enable_raiden and self.raiden_sync_delegate:
@@ -452,6 +454,19 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       return await self.raiden_sync_delegate.post_weight_sync(
           sync_request=sync_request, **kwargs
       )
+    return True
+
+  async def abort_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Safely aborts weight sync round."""
+    if self.enable_raiden and self.raiden_sync_delegate:
+      if hasattr(self.raiden_sync_delegate, "abort_weight_sync"):
+        return await self.raiden_sync_delegate.abort_weight_sync(
+            sync_request=sync_request, **kwargs
+        )
     return True
 
   async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:

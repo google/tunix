@@ -465,9 +465,11 @@ class RolloutResponse(Response):
     if raw_reward is None:
       raw_reward = getattr(traj, "reward", 0.0)
     try:
-      env_reward = float(raw_reward or 0.0)
-    except (ValueError, TypeError):
-      env_reward = 0.0
+      env_reward = float(0.0 if raw_reward is None else raw_reward)
+    except (ValueError, TypeError) as exc:
+      raise ValueError(
+          f"Invalid reward '{raw_reward}' for request '{request_id}': must be a float."
+      ) from exc
 
     return cls(
         request_id=request_id,

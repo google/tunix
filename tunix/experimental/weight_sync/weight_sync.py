@@ -39,6 +39,9 @@ class WeightSyncMode(str, enum.Enum):
   RAIDEN = "raiden"
 
 
+DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkUnitId:
   """Transport-neutral identity for one participant's data work unit.

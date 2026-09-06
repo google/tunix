@@ -65,7 +65,7 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     self.config = config
     self.raiden_sync_delegate = raiden_sync_delegate
     self.weight_sync_mode = getattr(
-        config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
+        config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
     )
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
@@ -75,7 +75,9 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
       from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
       self.raiden_sync_delegate = (
-          raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+          raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+              server_id=self.server_id
+          )
       )
 
     if not self.enable_raiden and self.raiden_sync_delegate:
@@ -233,7 +235,8 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           if hasattr(req, "sampling_params") and req.sampling_params is not None
           else base_sampler_lib.SamplingParams()
       )
-      assert sp is not None
+      if sp is None:
+        raise ValueError("SamplingParams cannot be None")
 
       max_gen_steps_list.append(sp.max_tokens)
       temps.append(sp.temperature)
@@ -469,6 +472,19 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           sync_request=sync_request, **kwargs
       )
     # Fallback mode: acts as a no-op returning True.
+    return True
+
+  async def abort_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Safely aborts weight sync round."""
+    if self.enable_raiden and self.raiden_sync_delegate:
+      if hasattr(self.raiden_sync_delegate, "abort_weight_sync"):
+        return await self.raiden_sync_delegate.abort_weight_sync(
+            sync_request=sync_request, **kwargs
+        )
     return True
 
   # --- KV-cache Migration ---

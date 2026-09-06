@@ -433,8 +433,8 @@ def main(argv: list[str], context: Any = None) -> None:
     ):
       if not hasattr(_vllm_modelopt, _name):
         setattr(_vllm_modelopt, _name, _DummyModelOpt)
-  except Exception:
-    pass
+  except (ImportError, AttributeError) as e:
+    logging.debug("Optional vllm modelopt patch skipped: %s", e)
 
   try:
     import re  # pylint: disable=g-import-not-at-top
@@ -443,8 +443,8 @@ def main(argv: list[str], context: Any = None) -> None:
       def _is_equal_or_regex_match(target_str: str, pattern: str) -> bool:
         return target_str == pattern or bool(re.match(pattern, target_str))
       _vllm_config_utils.is_equal_or_regex_match = _is_equal_or_regex_match
-  except Exception:
-    pass
+  except (ImportError, AttributeError) as e:
+    logging.debug("Optional vllm config_utils patch skipped: %s", e)
 
   from tunix.experimental.weight_sync.raiden_synchronizer import (  # pylint: disable=g-import-not-at-top
       patch_raiden_worker_sync,

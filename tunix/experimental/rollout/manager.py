@@ -66,7 +66,7 @@ class RolloutManager:
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
+          config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
       )
 
       if sampler_type == "vllm":
@@ -85,7 +85,9 @@ class RolloutManager:
           from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
           raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                  server_id="inprocess_vllm_sampler"
+              )
           )
 
         sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
@@ -101,7 +103,9 @@ class RolloutManager:
           from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
           raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                  server_id="vanilla_sampler"
+              )
           )
 
         sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
@@ -335,6 +339,17 @@ class RolloutManager:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
+    return res
+
+  async def abort_weight_sync(
+      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Discards the round, delegates to sampler if available, and resumes serving."""
+    res = None
+    if self.sampler and hasattr(self.sampler, "abort_weight_sync"):
+      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    self.resume_all()
+    self.reopen_admission()
     return res
 
   def reopen_admission(self) -> bool:

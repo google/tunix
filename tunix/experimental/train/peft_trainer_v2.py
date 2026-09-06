@@ -1194,7 +1194,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         mapping_config = mappings_lib.MappingConfig.build(
             model=self.model, backend=backend
         )
-      except Exception:  # pylint: disable=broad-exception-caught
+      except (ImportError, AttributeError, ValueError) as e:
+        logging.warning("Failed to build mapping_config for backend %s: %s", backend, e)
         mapping_config = None
 
     if (

@@ -50,42 +50,32 @@ def _log_rss(tag: str) -> None:
   )
 
 
-_cached_ws_lib: Any = None
-_WS_IMPORT_TRIED = False
+_lazy_modules: dict[str, Any] = {}
+
+
+def _lazy_import_module(module_path: str) -> Any:
+  """Imports a module lazily by path, caching the result."""
+  if module_path not in _lazy_modules:
+    try:
+      import importlib  # pylint: disable=g-import-not-at-top
+      _lazy_modules[module_path] = importlib.import_module(module_path)
+    except ImportError:
+      _lazy_modules[module_path] = None
+  return _lazy_modules[module_path]
 
 
 def _get_ws_lib() -> Any:
   """Imports tpu_sync weight_synchronizer lazily to prevent early C++ library symbol collisions."""
-  global _cached_ws_lib, _WS_IMPORT_TRIED
   if "_ws_lib" in globals():
     return globals()["_ws_lib"]
-  if not _WS_IMPORT_TRIED:
-    _WS_IMPORT_TRIED = True
-    try:
-      from tpu_sync.api.jax import weight_synchronizer as mod  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
-      _cached_ws_lib = mod
-    except ImportError:
-      _cached_ws_lib = None
-  return _cached_ws_lib
-
-
-_cached_raiden_ffi: Any = None
-_FFI_IMPORT_TRIED = False
+  return _lazy_import_module("tpu_sync.api.jax.weight_synchronizer")
 
 
 def _get_raiden_ffi() -> Any:
   """Imports tpu_sync weight_synchronizer_ffi lazily to avoid loading XLA runtime early."""
-  global _cached_raiden_ffi, _FFI_IMPORT_TRIED
   if "_raiden_ffi" in globals():
     return globals()["_raiden_ffi"]
-  if not _FFI_IMPORT_TRIED:
-    _FFI_IMPORT_TRIED = True
-    try:
-      from tpu_sync.frameworks.jax import weight_synchronizer_ffi as mod  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
-      _cached_raiden_ffi = mod
-    except ImportError:
-      _cached_raiden_ffi = None
-  return _cached_raiden_ffi
+  return _lazy_import_module("tpu_sync.frameworks.jax.weight_synchronizer_ffi")
 
 
 def __getattr__(name: str) -> Any:
@@ -346,10 +336,18 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
-  try:
-    local = sharding.shard_shape(tuple(arr.shape))
-    mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
-  except Exception:  # pylint: disable=broad-exception-caught
+  if sharding is not None and hasattr(sharding, "shard_shape"):
+    try:
+      local = sharding.shard_shape(tuple(arr.shape))
+      mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning(
+          "Could not compute mesh_shape for %s from sharding: %s, falling back to 1D",
+          name,
+          e,
+      )
+      mesh_shape = (1,) * arr.ndim
+  else:
     mesh_shape = (1,) * arr.ndim
   return weight_sync.TensorMetadata(
       name=name,
@@ -911,6 +909,8 @@ def patch_raiden_worker_sync() -> None:
   """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync to delegate apply_to_runner."""
   try:
     import tpu_inference.rl.raiden_worker_sync as rws
+    if getattr(rws.RaidenWorkerSync, "_patched_by_tunix", False):
+      return
     orig_apply = getattr(rws.RaidenWorkerSync, "apply_to_runner", None)
 
     def _patched_apply_to_runner(self, runner: Any) -> None:
