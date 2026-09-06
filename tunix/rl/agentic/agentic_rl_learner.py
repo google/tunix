@@ -19,6 +19,7 @@ import abc
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 import contextlib
 import copy
 import dataclasses
@@ -117,7 +118,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       return self
 
     async def __anext__(self):
-      item = await self.loop.run_in_executor(None, self.q.get)
+      try:
+        item = await self.loop.run_in_executor(None, self.q.get)
+      except (RuntimeError, asyncio.CancelledError, concurrent.futures.CancelledError):
+        raise StopAsyncIteration
       if item is None:
         raise StopAsyncIteration
       return item
@@ -230,13 +234,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._full_batch_size = 0
     self._process_in_consumer: bool = False
 
+    self._closed = False
     loop_queue = queue.Queue()
+    self.executor = ThreadPoolExecutor(
+        max_workers=algo_config.max_concurrency + 1
+    )
 
     def run_loop_forever():
       loop = agentic_utils.get_or_create_loop()
-      loop.set_default_executor(
-          ThreadPoolExecutor(max_workers=algo_config.max_concurrency + 1)
-      )
+      loop.set_default_executor(self.executor)
       loop_queue.put(loop)
       loop.run_forever()
 
@@ -254,6 +260,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._train_rewards_window: List[float] = []
     self._eval_rewards_window: List[float] = []
     self._rewards_window_lock = threading.Lock()
+
+  def close(self):
+    """Cleanly shuts down the learner, event loop, and thread pool executor."""
+    if hasattr(self, "_closed") and self._closed:
+      return
+    self._closed = True
+    if hasattr(self, "executor") and self.executor is not None:
+      self.executor.shutdown(wait=False, cancel_futures=True)
+    if hasattr(self, "loop") and self.loop is not None and self.loop.is_running():
+      self.loop.call_soon_threadsafe(self.loop.stop)
+    if hasattr(self, "rl_engine") and self.rl_engine is not None:
+      self.rl_engine.close()
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -1233,7 +1251,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()
-    self.rl_engine.close()
+    self.close()
 
   def _put_prompts_to_queue(
       self,

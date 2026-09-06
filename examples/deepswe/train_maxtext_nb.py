@@ -1342,3 +1342,5 @@ agentic_grpo_learner.train(
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
 )
+print("Training completed successfully. Exiting.", flush=True)
+os._exit(0)
