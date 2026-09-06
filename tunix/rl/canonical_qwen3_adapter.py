@@ -3296,6 +3296,95 @@ def _p59_program_tree_signature(tree):
   )
 
 
+def _p59_static_structure_surrogate(value, _depth=0):
+  """Hashable structural stand-in for an identity-compared static object.
+
+  Engine layers keep plain helper objects as static attributes (every
+  ``JaxLinear`` owns its own ``UnquantizedLinearMethod`` whose
+  ``QuantLinearConfig`` carries the features, shardings and output sizes).
+  Those classes compare by identity, so 36 otherwise identical decoder
+  layers produced 36 distinct GraphDef keys and no layer program was ever
+  reused.  Their behaviour is fixed by their fields, so the key compares
+  the fields instead.  Everything that can hide behaviour outside its
+  fields stays fail-closed by identity: arrays, callables, objects deeper
+  than the bound, and objects the surrogate cannot hash.
+  """
+  if _depth > 8:
+    return ("p59-structural-depth-limit", id(value))
+  if isinstance(value, (str, bytes, int, float, bool, type(None))):
+    return value
+  if isinstance(value, (jax.Array, np.ndarray)):
+    return ("p59-array-identity", id(value))
+  if isinstance(value, type):
+    return ("p59-type", value.__module__, value.__qualname__)
+  if callable(value):
+    return ("p59-callable-identity", id(value))
+  if isinstance(value, Mapping):
+    return (
+        "p59-mapping",
+        tuple(
+            (key, _p59_static_structure_surrogate(item, _depth + 1))
+            for key, item in sorted(value.items(), key=lambda kv: repr(kv[0]))
+        ),
+    )
+  if isinstance(value, (list, tuple)):
+    return (
+        "p59-sequence",
+        type(value).__qualname__,
+        tuple(
+            _p59_static_structure_surrogate(item, _depth + 1) for item in value
+        ),
+    )
+  if isinstance(value, (set, frozenset)):
+    return (
+        "p59-set",
+        frozenset(
+            _p59_static_structure_surrogate(item, _depth + 1) for item in value
+        ),
+    )
+  if dataclasses.is_dataclass(value):
+    return (
+        "p59-dataclass",
+        type(value).__module__,
+        type(value).__qualname__,
+        tuple(
+            (
+                field.name,
+                _p59_static_structure_surrogate(
+                    getattr(value, field.name), _depth + 1
+                ),
+            )
+            for field in dataclasses.fields(value)
+        ),
+    )
+  if _p59_is_identity_compared_object(value):
+    return (
+        "p59-structural",
+        type(value).__module__,
+        type(value).__qualname__,
+        tuple(
+            (name, _p59_static_structure_surrogate(item, _depth + 1))
+            for name, item in sorted(vars(value).items())
+        ),
+    )
+  try:
+    hash(value)
+  except TypeError:
+    return ("p59-unhashable-identity", id(value))
+  return value
+
+
+def _p59_is_identity_compared_object(value):
+  """True for a plain object whose equality is object identity."""
+  return (
+      not isinstance(value, type)
+      and not callable(value)
+      and not dataclasses.is_dataclass(value)
+      and isinstance(getattr(value, "__dict__", None), dict)
+      and type(value).__eq__ is object.__eq__
+  )
+
+
 def _p59_layer_graph_program_key(graphdef, layer_index):
   """Normalizes only non-execution layer metadata in an NNX GraphDef.
 
@@ -3335,6 +3424,12 @@ def _p59_layer_graph_program_key(graphdef, layer_index):
           attribute, value="p59-construction-only-uniform-init"
       )
       initializer_occurrences += 1
+    elif _p59_is_identity_compared_object(value):
+      # e.g. JaxLinear.quant_method: one UnquantizedLinearMethod per layer,
+      # identical in every field.  Key it by those fields.
+      attribute = dataclasses.replace(
+          attribute, value=_p59_static_structure_surrogate(value)
+      )
     normalized_attributes.append((name, attribute))
   return (
       dataclasses.replace(graphdef, attributes=normalized_attributes),

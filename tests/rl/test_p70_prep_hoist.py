@@ -421,6 +421,143 @@ class _ProgramKeyLayer(nnx.Module):
     self.weight = nnx.Param(jnp.asarray(1.0, jnp.float32))
 
 
+class _LinearConfig:
+  """Identity-compared plain object, like tpu_inference's QuantLinearConfig."""
+
+  def __init__(self, output_sizes, fuse_matmuls):
+    self.output_sizes = output_sizes
+    self.fuse_matmuls = fuse_matmuls
+
+
+class _LinearMethod:
+  """One per layer in the live engine (JaxLinear.quant_method)."""
+
+  def __init__(self, config, hook=None):
+    self.linear_config = config
+    if hook is not None:
+      self.hook = hook
+
+
+class _ValueComparedSpec:
+
+  def __init__(self, axes):
+    self.axes = axes
+
+  def __eq__(self, other):
+    return isinstance(other, _ValueComparedSpec) and self.axes == other.axes
+
+  def __hash__(self):
+    return hash(self.axes)
+
+
+class _MethodKeyLayer(nnx.Module):
+
+  def __init__(self, prefix, method, spec=None):
+    self.prefix = prefix
+    self.quant_method = method
+    if spec is not None:
+      self.spec = spec
+    self.weight = nnx.Param(jnp.asarray(1.0, jnp.float32))
+
+
+def _method_key(layer, layer_index):
+  graphdef, _ = nnx.split(layer)
+  key, _, _ = canonical_qwen3_adapter._p59_layer_graph_program_key(  # pylint: disable=protected-access
+      graphdef, layer_index
+  )
+  return key
+
+
+def test_layer_program_key_compares_identity_objects_by_structure():
+  # Two layers, two freshly built method objects with equal fields: the live
+  # engine builds one UnquantizedLinearMethod per JaxLinear, so 36 layers
+  # split into 36 keys while the field walker saw no difference.
+  left = _MethodKeyLayer(
+      "model.layers.0.x", _LinearMethod(_LinearConfig([4096], True))
+  )
+  right = _MethodKeyLayer(
+      "model.layers.1.x", _LinearMethod(_LinearConfig([4096], True))
+  )
+  assert _method_key(left, 0) == _method_key(right, 1)
+  assert hash(_method_key(left, 0)) == hash(_method_key(right, 1))
+  # A field that changes the program still fails closed.
+  changed = _MethodKeyLayer(
+      "model.layers.1.x", _LinearMethod(_LinearConfig([4096], False))
+  )
+  assert _method_key(changed, 1) != _method_key(left, 0)
+  wider = _MethodKeyLayer(
+      "model.layers.1.x", _LinearMethod(_LinearConfig([8192], True))
+  )
+  assert _method_key(wider, 1) != _method_key(left, 0)
+  # Behaviour that can hide outside the fields keeps identity semantics:
+  # distinct callables split, and the same callable object shares.
+  hook = lambda x: x  # pylint: disable=unnecessary-lambda-assignment
+  hooked_left = _MethodKeyLayer(
+      "model.layers.0.x", _LinearMethod(_LinearConfig([4096], True), hook)
+  )
+  hooked_right = _MethodKeyLayer(
+      "model.layers.1.x", _LinearMethod(_LinearConfig([4096], True), hook)
+  )
+  other_hook = _MethodKeyLayer(
+      "model.layers.1.x",
+      _LinearMethod(_LinearConfig([4096], True), lambda x: x + 1),
+  )
+  assert _method_key(hooked_left, 0) == _method_key(hooked_right, 1)
+  assert _method_key(other_hook, 1) != _method_key(hooked_left, 0)
+  # Value-compared objects are left to their own equality.
+  spec_left = _MethodKeyLayer(
+      "model.layers.0.x",
+      _LinearMethod(_LinearConfig([4096], True)),
+      _ValueComparedSpec(("model", None)),
+  )
+  spec_right = _MethodKeyLayer(
+      "model.layers.1.x",
+      _LinearMethod(_LinearConfig([4096], True)),
+      _ValueComparedSpec(("model", None)),
+  )
+  spec_other = _MethodKeyLayer(
+      "model.layers.1.x",
+      _LinearMethod(_LinearConfig([4096], True)),
+      _ValueComparedSpec((None, "model")),
+  )
+  assert _method_key(spec_left, 0) == _method_key(spec_right, 1)
+  assert _method_key(spec_other, 1) != _method_key(spec_left, 0)
+
+
+def test_static_structure_surrogate_is_value_free_and_fail_closed():
+  surrogate = canonical_qwen3_adapter._p59_static_structure_surrogate  # pylint: disable=protected-access
+  array = np.asarray([1], np.int32)
+  # Arrays and callables are identity, never contents.
+  assert surrogate(array) == ("p59-array-identity", id(array))
+  device = jnp.asarray([1.0], jnp.float32)
+  with jax.transfer_guard("disallow"):
+    assert surrogate(device) == ("p59-array-identity", id(device))
+  assert surrogate(len) == ("p59-callable-identity", id(len))
+  assert surrogate(_LinearConfig) == (
+      "p59-type", _LinearConfig.__module__, _LinearConfig.__qualname__
+  )
+  # Containers and dataclasses recurse; mappings sort their keys.
+  assert surrogate({"b": 1, "a": (2, 3)}) == (
+      "p59-mapping",
+      (("a", ("p59-sequence", "tuple", (2, 3))), ("b", 1)),
+  )
+
+  @dataclasses.dataclass(frozen=True)
+  class Point:
+    x: int
+    y: int
+
+  assert surrogate(Point(1, 2)) == surrogate(Point(1, 2))
+  assert surrogate(Point(1, 2)) != surrogate(Point(2, 1))
+  # Depth is bounded: a self-referential chain falls back to identity
+  # instead of recursing forever.
+  chain = _LinearConfig([1], True)
+  chain.next = chain
+  deep = surrogate(chain)
+  assert hash(deep) == hash(surrogate(chain))
+  assert "p59-structural-depth-limit" in repr(deep)
+
+
 def test_layer_program_key_normalizes_only_non_execution_metadata():
   left_graphdef, _ = nnx.split(_ProgramKeyLayer("model.layers.0.x", "silu"))
   right_graphdef, _ = nnx.split(_ProgramKeyLayer("model.layers.1.x", "silu"))
