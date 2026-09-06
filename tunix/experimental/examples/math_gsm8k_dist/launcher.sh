@@ -53,6 +53,7 @@ SEED=${SEED:-42}
 SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
+FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
@@ -682,6 +683,7 @@ echo "Launching CPU orchestrator..."
     --beta="$BETA"
     --epsilon="$EPSILON"
     --reward_mode="$REWARD_MODE"
+    --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
     --seed="$SEED"
