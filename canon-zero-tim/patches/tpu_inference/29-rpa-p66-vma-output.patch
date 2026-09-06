@@ -1,76 +1,27 @@
 --- a/kernels/ragged_paged_attention/v3/kernel.py
 +++ b/kernels/ragged_paged_attention/v3/kernel.py
-@@ -21,2 +21,3 @@
- import functools
-+import os
- from enum import Enum
-@@ -1854,9 +1855,67 @@
+@@ -27,3 +27,4 @@
+ from jax import lax
+ from jax.experimental import pallas as pl
++from p22_pallas_matmul import p66_vma_output_manual_axis_type
+ from jax.experimental.pallas import tpu as pltpu
+@@ -1854,9 +1855,16 @@
                  pltpu.HBM(shape=q.shape, dtype=q.dtype),
                  pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
              ] if tpu_version >= 7 else [
 -                jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
+-                jax.ShapeDtypeStruct(shape=kv_cache.shape,
+-                                     dtype=kv_cache.dtype),
 +                jax.ShapeDtypeStruct(
 +                    shape=q.shape,
 +                    dtype=q.dtype,
-+                    manual_axis_type=(
-+                        jax.typeof(q).mat
-+                        if (
-+                            os.environ.get(
-+                                "CANON_P66_P59_CHECK_VMA", "0") == "1"
-+                            and (
-+                                os.environ.get(
-+                                    "CANON_P67_P66_VMA_P59_ONLY", "0") != "1"
-+                                or (
-+                                    os.environ.get(
-+                                        "CANON_P59_RANK_PARALLEL_BACKWARD", "")
-+                                    == "1"
-+                                    and tuple(
-+                                        jax.sharding.get_abstract_mesh().axis_names)
-+                                    == ("data", "model")
-+                                    and all(
-+                                        axis_type
-+                                        is jax.sharding.AxisType.Manual
-+                                        for axis_type in
-+                                        jax.sharding.get_abstract_mesh().axis_types)
-+                                    and int(
-+                                        jax.sharding.get_abstract_mesh().shape[
-+                                            "data"]) > 1
-+                                    and int(
-+                                        jax.sharding.get_abstract_mesh().shape[
-+                                            "model"]) > 1)))
-+                        else None)),
-                 jax.ShapeDtypeStruct(shape=kv_cache.shape,
--                                     dtype=kv_cache.dtype),
-+                                     dtype=kv_cache.dtype,
-+                                     manual_axis_type=(
-+                                         jax.typeof(kv_cache).mat
-+                                         if (
-+                                             os.environ.get(
-+                                                 "CANON_P66_P59_CHECK_VMA", "0"
-+                                             ) == "1"
-+                                             and (
-+                                                 os.environ.get(
-+                                                     "CANON_P67_P66_VMA_P59_ONLY",
-+                                                     "0") != "1"
-+                                                 or (
-+                                                     os.environ.get(
-+                                                         "CANON_P59_RANK_PARALLEL_BACKWARD",
-+                                                         "") == "1"
-+                                                     and tuple(
-+                                                         jax.sharding.get_abstract_mesh().axis_names)
-+                                                     == ("data", "model")
-+                                                     and all(
-+                                                         axis_type
-+                                                         is jax.sharding.AxisType.Manual
-+                                                         for axis_type in
-+                                                         jax.sharding.get_abstract_mesh().axis_types)
-+                                                     and int(
-+                                                         jax.sharding.get_abstract_mesh().shape[
-+                                                             "data"]) > 1
-+                                                     and int(
-+                                                         jax.sharding.get_abstract_mesh().shape[
-+                                                             "model"]) > 1)))
-+                                         else None)),
++                    manual_axis_type=p66_vma_output_manual_axis_type(jax, q),
++                ),
++                jax.ShapeDtypeStruct(
++                    shape=kv_cache.shape,
++                    dtype=kv_cache.dtype,
++                    manual_axis_type=p66_vma_output_manual_axis_type(jax, kv_cache),
++                ),
              ],
              input_output_aliases={
                  7: 0,

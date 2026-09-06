@@ -25,6 +25,9 @@ INNER = PKG / "tasks/p59-dp16-parallel-backward/scripts/run_dp4_inner.sh"
 PAIR = PKG / "tasks/p66-onehost-gsm8k-convergence/scripts/run_backward_ab.sh"
 TP4_RUNNER = PKG / "tasks/p66-onehost-gsm8k-convergence/scripts/run_onehost_tp4_arm.sh"
 TP4_CAMPAIGN = PKG / "tasks/p66-onehost-gsm8k-convergence/scripts/run_tp4_campaign.sh"
+EXACT_IMAGE_RUNNER = (
+    PKG / "tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh"
+)
 LEARNER = ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
 GSM8K_DEMO = ROOT / "examples/math_gsm8k/qwen3_grpo_demo.py"
 ADAPTER = ROOT / "tunix/rl/canonical_qwen3_adapter.py"
@@ -297,14 +300,34 @@ class P66ContractTest(unittest.TestCase):
     rpa_vma_patch = (
         PKG / "patches/tpu_inference/29-rpa-p66-vma-output.patch"
     ).read_text(encoding="utf-8")
-    self.assertIn("manual_axis_type", rpa_vma_patch)
-    self.assertIn("jax.typeof(q).mat", rpa_vma_patch)
-    self.assertIn("jax.typeof(kv_cache).mat", rpa_vma_patch)
-    self.assertIn("CANON_P66_P59_CHECK_VMA", rpa_vma_patch)
+    self.assertIn(
+        "from p22_pallas_matmul import p66_vma_output_manual_axis_type",
+        rpa_vma_patch,
+    )
+    self.assertEqual(
+        rpa_vma_patch.count("p66_vma_output_manual_axis_type(jax,"), 2
+    )
+    self.assertIn(
+        "manual_axis_type=p66_vma_output_manual_axis_type(jax, q)",
+        rpa_vma_patch,
+    )
+    self.assertIn(
+        "manual_axis_type=p66_vma_output_manual_axis_type(jax, kv_cache)",
+        rpa_vma_patch,
+    )
+    self.assertNotIn("jax.typeof(q).mat", rpa_vma_patch)
+    self.assertNotIn("jax.typeof(kv_cache).mat", rpa_vma_patch)
+    self.assertNotIn("get_abstract_mesh", rpa_vma_patch)
+    self.assertNotIn("CANON_P66_P59_CHECK_VMA", rpa_vma_patch)
+    self.assertNotIn("import os", rpa_vma_patch)
     install = (PKG / "install.sh").read_text(encoding="utf-8")
     self.assertIn("rpa_kernel_p66.py", install)
     self.assertIn("29-rpa-p66-vma-output.patch", install)
     self.assertIn("rpa_kernel_p66.py", runner)
+    exact_image_runner = EXACT_IMAGE_RUNNER.read_text(encoding="utf-8")
+    self.assertIn(
+        "probe_p59_rpa_vma_output_context.py", exact_image_runner
+    )
     self.assertIn(
         'os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"',
         adapter,

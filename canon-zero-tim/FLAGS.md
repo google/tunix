@@ -86,6 +86,13 @@ Bypass runs. This entry extends the P57 family row below.
   data、model size > 1 与 live engine data/model size 精确相等时识别已经
   DP/TP-local 的 Q/K/V/cache。它不改变 RPA 算术或 local-KV shape 检查；
   ordinary serving、flag-off 与 topology mismatch 继续不选或 fail-closed。
+- RPA Pallas 的 q 与 KV-cache 输出不再各自复制第三份环境变量/mesh 判定，
+  两个 `ShapeDtypeStruct` 都调用同一个
+  `p66_vma_output_manual_axis_type()`。因此已准入的 DP1×TP4 与 DP2×TP2
+  checked outer map 都取得与输入相同的非空 MAT，而 ordinary serving 与
+  flag-off 仍取得 `None`；kernel 算术、shape、dtype、alias map 均未改变。
+  固定镜像 probe 已在两种几何下用 `transfer_guard('disallow')` 和 raw bytes
+  通过；完整 Qwen3-8B reverse、POST、梯度锚、HBM 与性能仍等待 fresh R7。
 
 ## B 层 · perf/仪器类(observational;发布协议 = 每负载 =verify 首步绿 → =1)
 
