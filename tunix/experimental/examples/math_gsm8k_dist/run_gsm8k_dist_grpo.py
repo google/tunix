@@ -376,6 +376,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         num_steps=args.max_steps,
         bring_up=False,
     )
+  except BaseException as exc:
+    logging.exception("FATAL: StandardRLProgram execution failed: %s", exc)
+    raise
   finally:
     program.close()
     if args.stop_workers_on_exit:

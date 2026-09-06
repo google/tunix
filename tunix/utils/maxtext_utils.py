@@ -61,6 +61,8 @@ def build_maxtext_config(
     padded_moe_mlp_dim: int = 0,
     base_num_kv_heads: int = 0,
     base_output_directory: str = "",
+    rollout_mesh_tp: int = 0,
+    prefuse_moe_weights: bool | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -87,13 +89,35 @@ def build_maxtext_config(
       f"run_name={worker_id or 'tunix_maxtext'}",
       f"base_output_directory={output_dir}",
       f"enable_checkpointing={enable_checkpointing}",
+      "skip_jax_distributed_system=True",
   ]
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
+
+  if rollout_mesh_tp <= 0:
+    rollout_mesh_tp = int(
+        os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+        or os.environ.get("ROLLOUT_MESH_TP", 0)
+        or 0
+    )
+
+  if not padded_moe_mlp_dim and rollout_mesh_tp > 0:
+    try:
+      from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim
+      tmp_cfg = pyconfig.initialize(argv)
+      base_dim = getattr(tmp_cfg, "base_moe_mlp_dim", None) or getattr(tmp_cfg, "moe_intermediate_size", None)
+      if base_dim:
+        padded_moe_mlp_dim = compute_padded_moe_mlp_dim(base_dim, rollout_mesh_tp)
+        logging.info("Auto-computed padded_base_moe_mlp_dim=%d for rollout_mesh_tp=%d", padded_moe_mlp_dim, rollout_mesh_tp)
+    except Exception as e:
+      logging.warning("Could not auto-compute padded_base_moe_mlp_dim: %s", e)
+
+  if prefuse_moe_weights is None:
+    prefuse_moe_weights = os.environ.get("PREFUSE_MOE_WEIGHTS", "false").lower() in ("1", "true", "yes")
+
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
-      "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
       "gradient_accumulation_steps=1",
       f"max_target_length={max_prompt_length + max_response_length}",
@@ -122,6 +146,7 @@ def build_maxtext_config(
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
+      f"prefuse_moe_weights={prefuse_moe_weights}",
   ])
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)

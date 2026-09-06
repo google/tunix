@@ -139,6 +139,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout tensor parallel mesh dimension for automatic MoE padding calculation.",
   )
   parser.add_argument(
+      "--prefuse_moe_weights",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=os.getenv("PREFUSE_MOE_WEIGHTS", "false").lower() in ("true", "1", "yes"),
+      help="Whether to prefuse MoE weights (gate + up projection).",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
@@ -348,8 +354,7 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
-      f"vllm.use_weight_converter={os.environ.get('USE_WEIGHT_CONVERTER', '1').lower() in ('1', 'true', 'yes')}",
-      f"vllm.rollout_backend={os.environ.get('ROLLOUT_BACKEND', 'maxtext')}",
+      f"prefuse_moe_weights={args.prefuse_moe_weights}",
   ]
   padded_moe_dim = args.maxtext_padded_moe_mlp_dim
   if not padded_moe_dim and args.rollout_mesh_tp > 0:
@@ -446,6 +451,8 @@ def _create_maxtext_trainer_factory(args) -> Any:
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
       base_output_directory=args.maxtext_output_directory,
+      rollout_mesh_tp=args.rollout_mesh_tp,
+      prefuse_moe_weights=args.prefuse_moe_weights,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

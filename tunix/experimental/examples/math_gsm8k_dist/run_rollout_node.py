@@ -133,6 +133,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync_lib.WeightSyncMode),
       help="Weight sync mode (none, fallback, or raiden).",
   )
+  parser.add_argument(
+      "--prefuse_moe_weights",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=os.getenv("PREFUSE_MOE_WEIGHTS", "false").lower() in ("true", "1", "yes"),
+      help="Whether to prefuse MoE weights (gate + up projection).",
+  )
   parser.add_argument("--tensor_parallel_size", type=int, default=None)
   args = parser.parse_args(argv)
   if args.tensor_parallel_size is None and (args.sampler_mesh_tp > 1 or args.mesh_tp > 1):
@@ -361,8 +367,8 @@ def _create_vllm_sampler(args):
         args.maxtext_model_name,
     )
     engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
-    # MaxText inference config. prefuse_moe_weights is left False so rollout
-    # variable names match unfused trainer parameters during weight sync.
+    # MaxText inference config. When prefuse_moe_weights is True, MoE weights
+    # are prefused and interleaved per-shard for tensor parallel rollout.
     maxtext_config_overrides = {
         "model_name": args.maxtext_model_name,
         "model_call_mode": "inference",
@@ -370,6 +376,7 @@ def _create_vllm_sampler(args):
         "allow_split_physical_axes": True,
         "log_config": False,
         "weight_dtype": "bfloat16",
+        "prefuse_moe_weights": args.prefuse_moe_weights,
     }
     if args.maxtext_attention:
       maxtext_config_overrides["attention"] = args.maxtext_attention
@@ -403,6 +410,42 @@ def _create_vllm_sampler(args):
 
 
 def main(argv: list[str], context: Any = None) -> None:
+  try:
+    import vllm.model_executor.layers.quantization.modelopt as _vllm_modelopt  # pylint: disable=g-import-not-at-top
+
+    class _DummyModelOpt:
+
+      def __init__(self, *args, **kwargs):
+        pass
+
+      def create_weights(self, *args, **kwargs):
+        pass
+
+    for _name in (
+        "ACT",
+        "WEIGHT",
+        "CkptCtx",
+        "KNvfp4Dynamic",
+        "KNvfp4Static",
+        "ModelOptNvFp4Config",
+        "ModelOptNvFp4FusedMoE",
+        "Shapes",
+    ):
+      if not hasattr(_vllm_modelopt, _name):
+        setattr(_vllm_modelopt, _name, _DummyModelOpt)
+  except Exception:
+    pass
+
+  try:
+    import re  # pylint: disable=g-import-not-at-top
+    import vllm.model_executor.layers.quantization.utils.config_utils as _vllm_config_utils  # pylint: disable=g-import-not-at-top
+    if not hasattr(_vllm_config_utils, "is_equal_or_regex_match"):
+      def _is_equal_or_regex_match(target_str: str, pattern: str) -> bool:
+        return target_str == pattern or bool(re.match(pattern, target_str))
+      _vllm_config_utils.is_equal_or_regex_match = _is_equal_or_regex_match
+  except Exception:
+    pass
+
   from tunix.experimental.weight_sync.raiden_synchronizer import (  # pylint: disable=g-import-not-at-top
       patch_raiden_worker_sync,
   )

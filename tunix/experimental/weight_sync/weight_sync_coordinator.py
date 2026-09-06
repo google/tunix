@@ -985,6 +985,7 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
+        logging.error("pre-quiesce setup failed: %s", e, exc_info=True)
         failures.append(f"pre-quiesce setup: {e!r}")
         raise fail(
             "bind/metadata/source-prepare failed before any destination was"
@@ -1210,7 +1211,7 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
-        # The call returned (by raising): the thread is done, rollback is safe.
+        logging.error("transfer raised exception: %s", e, exc_info=True)
         transfer_in_flight = False
         failures.append(f"transfer: {e!r}")
         state = await self._rollback(destinations, prepared_request, failures)

@@ -50,17 +50,50 @@ def _log_rss(tag: str) -> None:
   )
 
 
-_ws_lib: Any = None
-try:
-  from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
-except ImportError:
-  _ws_lib = None
+_cached_ws_lib: Any = None
+_WS_IMPORT_TRIED = False
 
-_raiden_ffi: Any = None
-try:
-  from tpu_sync.frameworks.jax import weight_synchronizer_ffi as _raiden_ffi  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
-except ImportError:
-  _raiden_ffi = None
+
+def _get_ws_lib() -> Any:
+  """Imports tpu_sync weight_synchronizer lazily to prevent early C++ library symbol collisions."""
+  global _cached_ws_lib, _WS_IMPORT_TRIED
+  if "_ws_lib" in globals():
+    return globals()["_ws_lib"]
+  if not _WS_IMPORT_TRIED:
+    _WS_IMPORT_TRIED = True
+    try:
+      from tpu_sync.api.jax import weight_synchronizer as mod  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
+      _cached_ws_lib = mod
+    except ImportError:
+      _cached_ws_lib = None
+  return _cached_ws_lib
+
+
+_cached_raiden_ffi: Any = None
+_FFI_IMPORT_TRIED = False
+
+
+def _get_raiden_ffi() -> Any:
+  """Imports tpu_sync weight_synchronizer_ffi lazily to avoid loading XLA runtime early."""
+  global _cached_raiden_ffi, _FFI_IMPORT_TRIED
+  if "_raiden_ffi" in globals():
+    return globals()["_raiden_ffi"]
+  if not _FFI_IMPORT_TRIED:
+    _FFI_IMPORT_TRIED = True
+    try:
+      from tpu_sync.frameworks.jax import weight_synchronizer_ffi as mod  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
+      _cached_raiden_ffi = mod
+    except ImportError:
+      _cached_raiden_ffi = None
+  return _cached_raiden_ffi
+
+
+def __getattr__(name: str) -> Any:
+  if name == "_raiden_ffi":
+    return _get_raiden_ffi()
+  if name == "_ws_lib":
+    return _get_ws_lib()
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _ensure_ffi_compute_on_compat() -> None:
@@ -359,7 +392,7 @@ class RaidenSynchronizer:
     default_ffi = "1" if is_proxy else "0"
     if use_ffi is None:
       use_ffi = (os.environ.get("RAIDEN_USE_FFI", default_ffi) == "1"
-                 and _raiden_ffi is not None)
+                 and _get_raiden_ffi() is not None)
     # host_stage and use_ffi are mutually exclusive -- FFI binds the proxy
     # arrays in place, and staged CPU arrays carry no mesh for
     # _init_ffi_transport -- but they DO arrive in contradiction: the pinned
@@ -407,7 +440,8 @@ class RaidenSynchronizer:
       raise RuntimeError(
           f"{self.job_name}: bind() must stage arrays before FFI init"
       )
-    if _raiden_ffi is None:
+    raiden_ffi = _get_raiden_ffi()
+    if raiden_ffi is None:
       raise RuntimeError(
           "weight_synchronizer_ffi is not available for FFI weight sync."
       )
@@ -453,7 +487,15 @@ class RaidenSynchronizer:
     )
 
     src_devices = mesh.devices.flatten()
-    devices_per_host = _devices_per_host(list(src_devices))
+    devices_per_host_env = os.environ.get("RAIDEN_DEVICES_PER_HOST")
+    if devices_per_host_env:
+      devices_per_host = int(devices_per_host_env)
+    elif self._is_proxy:
+      # In Pathways, process_index is always 0 for proxy devices. Default to
+      # 4 devices/host for standard Cloud TPU VM topologies.
+      devices_per_host = min(4, len(src_devices))
+    else:
+      devices_per_host = _devices_per_host(list(src_devices))
     # Loud on purpose: a wrong value here is silent, and costs exactly the
     # shards of every host but one.
     logging.warning(
@@ -474,7 +516,7 @@ class RaidenSynchronizer:
           len(self.arrays),
           devices_per_host,
       )
-      ws_info = _raiden_ffi.init_weight_synchronizer_and_d2h(
+      ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
           device_arrays=self.arrays,
           shard_idx=shard_idx,
           mesh=mesh,
@@ -574,14 +616,15 @@ class RaidenSynchronizer:
     self._ffi_shard_idx = shard_idx
 
   def _ffi_h2d(self) -> None:
-    if _raiden_ffi is None:
+    raiden_ffi = _get_raiden_ffi()
+    if raiden_ffi is None:
       raise RuntimeError(
           "weight_synchronizer_ffi is not available for FFI weight sync."
       )
     if self._ffi_mesh is None or self._ffi_shard_idx is None:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     self.arrays = list(
-        _raiden_ffi.multi_h2d(self.arrays, self._ffi_shard_idx, self._ffi_mesh)
+        raiden_ffi.multi_h2d(self.arrays, self._ffi_shard_idx, self._ffi_mesh)
     )
     jax.block_until_ready(self.arrays)
 
@@ -621,7 +664,8 @@ class RaidenSynchronizer:
             self._unique_listeners,
         )
       return
-    if _ws_lib is None:
+    ws_lib = _get_ws_lib()
+    if ws_lib is None:
       return
     if self._sync is None:
       logging.info(
@@ -629,7 +673,7 @@ class RaidenSynchronizer:
           self.job_name,
           len(self.arrays),
       )
-      self._sync = _ws_lib.WeightSynchronizer(
+      self._sync = ws_lib.WeightSynchronizer(
           self.arrays,
           local_port=0,
           parallelism=self._parallelism,
@@ -787,43 +831,13 @@ class RaidenSynchronizer:
     gc.collect()
 
   def work_unit_metadata_all(self) -> List[weight_sync.WorkUnitMetadata]:
-    """One work unit per physical host.
+    """Returns work unit metadata for registration.
 
-    `control_plane_rpc_address` is a single string on the wire, so a unit can
-    name exactly one listener. A multi-host Pathways source has one listener
-    per host, and registering just the first leaves every other host holding
-    shards the controller never tells it to push -- a green round that delivers
-    only the first host's slices. Splitting into one unit per host, keyed by
-    job_replica_id, is the shape the controller already assumes:
-    `num_src_hosts = len({job_replica_id})` and
-    `global_device_id = replica_id * devices_per_host + j`.
+    In proxy/FFI mode, control_addr contains all comma-separated unique listener
+    addresses. The coordinator registers a single work unit and the Raiden
+    controller broadcasts to all listeners in parallel.
     """
-    base = self.work_unit_metadata()
-    if not self._use_ffi or len(self._unique_listeners) <= 1:
-      return [base]
-    by_listener: dict[str, List[str]] = {}
-    for ip, listener in zip(self._ips, self._listeners):
-      by_listener.setdefault(listener, []).append(ip)
-    units = []
-    for host_idx, listener in enumerate(self._unique_listeners):
-      units.append(
-          dataclasses.replace(
-              base,
-              unit=weight_sync.WorkUnitId(
-                  job_name=self.job_name,
-                  job_replica_id=str(host_idx) if host_idx else "",
-              ),
-              shards=tuple(by_listener[listener]),
-              control_plane_rpc_address=listener,
-          )
-      )
-    logging.warning(
-        "raiden: registering %d work unit(s), one per host: %s",
-        len(units),
-        [(u.unit.job_replica_id or "0", len(u.shards),
-          u.control_plane_rpc_address) for u in units],
-    )
-    return units
+    return [self.work_unit_metadata()]
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
@@ -862,9 +876,11 @@ class RaidenSynchronizer:
         _tensor_metadata(name, arr, idx)
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
-    if self._use_ffi:
+    if self._use_ffi or self._is_proxy:
       shards = tuple(self._ips)
-      control_addr = self._unique_listeners[0] if self._unique_listeners else ""
+      control_addr = (
+          ",".join(self._unique_listeners) if self._unique_listeners else ""
+      )
     else:
       data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
       control_addr = (

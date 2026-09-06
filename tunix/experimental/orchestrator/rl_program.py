@@ -872,7 +872,7 @@ class StandardRLProgram(RLProgram):
     if self.sync_weights:
       await engine.prepare_rollout_policy(
           role=datatypes.Role.ACTOR,
-          sync_weights=True,
+          sync_weights=False,
           policy_version=self.policy_version,
       )
 
