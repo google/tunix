@@ -8,6 +8,9 @@ metadata:
     xpk.google.com/workload: sb-35b-v5p-01
   name: sb-35b-v5p-01
 spec:
+  failurePolicy:
+    maxRestarts: 3
+    restartStrategy: Recreate
   coordinator:
     replicatedJob: pathways-head
   network:
@@ -280,7 +283,7 @@ spec:
     replicas: 1
     template:
       spec:
-        backoffLimit: 32
+        backoffLimit: 0
         completionMode: Indexed
         completions: 32
         parallelism: 32

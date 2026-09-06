@@ -164,11 +164,22 @@ class TrajectoryCollectEngine:
     loop = asyncio.get_running_loop()
     wall_start = time.perf_counter()
 
-    fut = loop.run_in_executor(None, func, *args)
-    if timeout is not None:
-      result = await asyncio.wait_for(fut, timeout=timeout)
-    else:
-      result = await fut
+    try:
+      fut = loop.run_in_executor(None, func, *args)
+      if timeout is not None:
+        result = await asyncio.wait_for(fut, timeout=timeout)
+      else:
+        result = await fut
+    except RuntimeError as e:
+      if "cannot schedule new futures" in str(e):
+        logging.warning(
+            "%s Thread pool executor shut down, executing synchronously: %s",
+            self._debug_prefix,
+            e,
+        )
+        result = func(*args)
+      else:
+        raise
 
     wall_delta = time.perf_counter() - wall_start
     return result, wall_delta
@@ -535,10 +546,21 @@ class TrajectoryCollectEngine:
           logging.exception("Caught exception inside model_call: %s", e)
           raise
 
-      rollout_output = await asyncio.get_running_loop().run_in_executor(
-          None,
-          _safe_model_call,
-      )
+      try:
+        rollout_output = await asyncio.get_running_loop().run_in_executor(
+            None,
+            _safe_model_call,
+        )
+      except RuntimeError as e:
+        if "cannot schedule new futures" in str(e):
+          logging.warning(
+              "%s Thread pool executor shut down, calling _safe_model_call synchronously: %s",
+              self._debug_prefix,
+              e,
+          )
+          rollout_output = _safe_model_call()
+        else:
+          raise
     logging.debug("%s model_call done", self._debug_prefix)
 
     # Align trajectory prompt tokens with the rollout worker's actual
@@ -754,6 +776,12 @@ class TrajectoryCollectEngine:
           "%s env.close() timed out after 150s — executor thread may be"
           " leaked. This will starve the thread pool over time.",
           self._debug_prefix,
+      )
+    except Exception as e:
+      logging.warning(
+          "%s Exception occurred while closing environment (ignored): %s",
+          self._debug_prefix,
+          e,
       )
     finally:
       for k, v in self.env_time.items():
