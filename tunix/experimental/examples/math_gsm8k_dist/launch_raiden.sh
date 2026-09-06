@@ -74,6 +74,7 @@ OPTIONS:
   --no-cluster-connect      Skip automatic gcloud cluster authentication check
   --use-ffi                 Enable Raiden FFI weight synchronization on Pathways TPU workers
   --prefuse-moe-weights     Prefuse MoE weights (gate + up projection) for rollout TP
+  --enable-prefix-caching   Enable prefix caching in vLLM rollout (default: false)
   --pathways-server-image <IMAGE> Pathways server container image (for FFI weight sync)
 
 EXAMPLES:
@@ -232,6 +233,7 @@ USER_WANDB_ENTITY=""
 USER_NAMESPACE=""
 USER_QUEUE=""
 USER_PREFUSE_MOE_WEIGHTS=""
+USER_ENABLE_PREFIX_CACHING=""
 USER_TRAINER_MESH_FSDP=""
 USER_TRAINER_MESH_TP=""
 USER_USE_WEIGHT_CONVERTER=""
@@ -321,6 +323,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-prefuse-moe-weights)
       USER_PREFUSE_MOE_WEIGHTS="false"
+      shift
+      ;;
+    --enable-prefix-caching|--enable_prefix_caching)
+      USER_ENABLE_PREFIX_CACHING="true"
+      shift
+      ;;
+    --no-enable-prefix-caching|--no_enable_prefix_caching|--disable-prefix-caching|--disable_prefix_caching)
+      USER_ENABLE_PREFIX_CACHING="false"
       shift
       ;;
     --use-weight-converter|--use_weight_converter)
@@ -576,6 +586,7 @@ VERIFY_WEIGHTS="${USER_VERIFY_WEIGHTS:-${VERIFY_WEIGHTS:-${PRESET_VERIFY_WEIGHTS
 DISABLE_CHECKPOINTING="${DISABLE_CHECKPOINTING:-${PRESET_DISABLE_CHECKPOINTING}}"
 USE_FFI="${USER_USE_FFI:-${USE_FFI:-${PRESET_USE_FFI:-false}}}"
 PREFUSE_MOE_WEIGHTS="${USER_PREFUSE_MOE_WEIGHTS:-${PREFUSE_MOE_WEIGHTS:-${PRESET_PREFUSE_MOE_WEIGHTS:-false}}}"
+ENABLE_PREFIX_CACHING="${USER_ENABLE_PREFIX_CACHING:-${ENABLE_PREFIX_CACHING:-${PRESET_ENABLE_PREFIX_CACHING:-false}}}"
 DEFAULT_FFI_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
 DEFAULT_FFI_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904"
 if [[ "${USE_FFI}" == "true" ]]; then
@@ -941,7 +952,7 @@ start_rollout_instance() {
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      PYTHONUNBUFFERED=1 ${rollout_ffi_env} PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      PYTHONUNBUFFERED=1 ${rollout_ffi_env} PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
@@ -956,6 +967,7 @@ start_rollout_instance() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
         ${maxtext_args} \
         ${vllm_args} \
         ${DEBUG:+--debug} \

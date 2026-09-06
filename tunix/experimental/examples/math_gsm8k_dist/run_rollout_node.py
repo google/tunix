@@ -139,6 +139,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("PREFUSE_MOE_WEIGHTS", "false").lower() in ("true", "1", "yes"),
       help="Whether to prefuse MoE weights (gate + up projection).",
   )
+  parser.add_argument(
+      "--enable_prefix_caching",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=os.getenv("ENABLE_PREFIX_CACHING", "false").lower() in ("true", "1", "yes"),
+      help="Whether to enable prefix caching in vLLM (defaults to false).",
+  )
   parser.add_argument("--tensor_parallel_size", type=int, default=None)
   args = parser.parse_args(argv)
   if args.tensor_parallel_size is None and (args.sampler_mesh_tp > 1 or args.mesh_tp > 1):
@@ -303,6 +309,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       engine_kwargs={
           "model": vllm_model,
           "max_model_len": max_model_len,
+          "enable_prefix_caching": args.enable_prefix_caching,
       },
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
@@ -359,6 +366,7 @@ def _create_vllm_sampler(args):
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
+      enable_prefix_caching=args.enable_prefix_caching,
   )
   if args.maxtext_model_name:
     logging.info(
