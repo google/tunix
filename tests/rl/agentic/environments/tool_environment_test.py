@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,9 +26,7 @@ class ExtractLlmAnswerTest(absltest.TestCase):
     self.assertEqual(ToolEnvironment._extract_llm_answer("42"), "42")
 
   def test_finish_with_dict_arguments(self):
-    action = [
-        {"function": {"name": "finish", "arguments": {"response": "42"}}}
-    ]
+    action = [{"function": {"name": "finish", "arguments": {"response": "42"}}}]
     self.assertEqual(ToolEnvironment._extract_llm_answer(action), "42")
 
   def test_finish_with_json_string_arguments(self):
@@ -46,9 +44,7 @@ class ExtractLlmAnswerTest(absltest.TestCase):
 
   def test_finish_with_non_json_string_arguments(self):
     action = [{"function": {"name": "finish", "arguments": "plain text"}}]
-    self.assertEqual(
-        ToolEnvironment._extract_llm_answer(action), "plain text"
-    )
+    self.assertEqual(ToolEnvironment._extract_llm_answer(action), "plain text")
 
 
 class ToolEnvironmentStepTest(absltest.TestCase):
