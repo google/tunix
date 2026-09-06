@@ -220,7 +220,7 @@ run_case() (
     elif [ "$mode" = capture-error ]; then
       grep -q 'P38 serving capture reported internal errors: 1' "$state/driver.log"
     elif [ "$mode" = missing-coverage ]; then
-      grep -q 'P38 diagnostic did not attest full 32-prompt coverage: 0' "$state/driver.log"
+      grep -q 'P38 diagnostic did not attest its full prompt coverage: 0' "$state/driver.log"
     elif [ "$mode" = missing-journal ]; then
       grep -q 'P38 request journal is absent: markers=1' "$state/driver.log"
     elif [ "$mode" = missing-incident ]; then
