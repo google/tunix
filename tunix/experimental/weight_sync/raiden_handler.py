@@ -215,10 +215,12 @@ class _RaidenTransport:
           " so its assigned ports are known"
       )
     self._validate_metadata(metadata)
+    control_addr = metadata.control_plane_rpc_address
+    first_addr = control_addr.split(",")[0].strip() if control_addr else ""
     self._controller.register_work_unit(
         unit=self._to_raiden_id(metadata.unit),
         shards=list(metadata.shards),
-        control_plane_rpc_address=metadata.control_plane_rpc_address,
+        control_plane_rpc_address=first_addr or None,
         mesh_shape=metadata.mesh_shape,
         layout=metadata.layout,
         global_shape=metadata.global_shape,
@@ -230,6 +232,17 @@ class _RaidenTransport:
             else None
         ),
     )
+    if control_addr and "," in control_addr:
+      rpc_client = getattr(self._controller, "worker_rpc_client", None)
+      if rpc_client is not None and hasattr(
+          rpc_client, "register_worker_endpoint"
+      ):
+        for addr in control_addr.split(",")[1:]:
+          addr = addr.strip()
+          if addr:
+            rpc_client.register_worker_endpoint(
+                self._to_raiden_id(metadata.unit), addr
+            )
     with self._registered_lock:
       self._registered.add(metadata.unit)
 
