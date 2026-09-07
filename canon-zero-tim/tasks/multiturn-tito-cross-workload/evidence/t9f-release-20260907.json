@@ -1,0 +1,43 @@
+{
+  "schema": "canon.p57-tito-t9f-source-freeze.v1",
+  "date_utc": "2026-09-07",
+  "source_commit": "89a58e24d02ed42b2bc39126eb592ca0a1426bd3",
+  "source_tree": "dfc70cf2150328d1e1c354a4ac4855acf56bb573",
+  "source_base": "2833977c1daae9971330e9be9bf16e546b9f0f4f",
+  "prepublication_remote_tip": "2833977c1daae9971330e9be9bf16e546b9f0f4f",
+  "delivery_branch": "yuxzhang/canon-zero-tim",
+  "publication_authorized": true,
+  "target_launch_authorized": false,
+  "source_files_changed": 13,
+  "ledger_cl_scope": "documentation and immutable local evidence only",
+  "verification_receipt": "t9f-host-20260906/receipt.json",
+  "verification_receipt_sha256": "88d28ed4fa4aea68ad1ec330903431b91e5f5e934a0fc7636ae2dab8fbbc5fe0",
+  "prepublication_host": {
+    "p57_tests": 238,
+    "v1_tests": 102,
+    "flags_declared": 422,
+    "flags_actual": 422,
+    "verdict": "PASS"
+  },
+  "runtime_and_gate_sha256": {
+    "tunix/rl/agentic/token_continuity.py": "80d3f6910e03da3b123d3f0cbac4a69383adddf937a1d4d5642bb8dfb153608b",
+    "tunix/rl/agentic/trajectory/trajectory_collect_engine.py": "5ccd24064d90ded8cb889f02e9e5f1e11a2fd25c13919c05b80d2d80d51ed2ce",
+    "tunix/rl/agentic/agentic_grpo_learner.py": "9bfba8fbf4cc5d0a29166866b36b550c09df390395387a37496d53ff4dac4bd1",
+    "tunix/rl/alignment.py": "848ef814757f3f9df6594f47657aee022f3c116e3498682b5519654524091046",
+    "canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py": "6d1a5c74ef8f3ed48abacd92bb327ec78043d435735fb06b415a49955e472e21",
+    "canon-zero-tim/tests/v1_phase4/run_exact_image.sh": "704ae34b98b3b0064742e3460854e4ed17e54bb7288d770e2f4f9c05327e2e70"
+  },
+  "runtime_matches_passing_image_receipt": true,
+  "image_rerun_in_closeout": false,
+  "image_evidence_grade": "prior complete gate PASS; retained console partial; admission receipt only",
+  "whitespace_audit": {
+    "source_and_documentation_diff_check": "PASS",
+    "full_ledger_diff_check": "Two trailing-space warnings in immutable raw evidence; preserved, not normalized",
+    "raw_artifact": "t9f-host-20260906/exact-image-console-partial.log",
+    "raw_line_numbers": [284, 305],
+    "raw_sha256": "0adf278a1ea75113df242dc1af2e033e1719a891ac0a615cf58be6c2b93be8ac"
+  },
+  "target": "NOT RUN",
+  "unchanged": ["production YAML", "overlay manifests", "timeout policy", "numerical gates", "training algorithm"],
+  "rollback": "Revert only source CL after separate approval; preserve evidence and existing TiTO all-diff recording."
+}

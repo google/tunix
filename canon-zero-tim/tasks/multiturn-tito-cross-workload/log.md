@@ -703,3 +703,79 @@
   capsule-integrity, engine-witness, and GCS-durability receipts present.
 - Target boundary is unchanged: matched one-host neutrality, real GCS/Orbax,
   abrupt-exit recovery, DeepSWE adjacency, and DP8xTP8 remain unrun.
+
+## 2026-09-06 — T9f r09 pre-response timeout repair
+
+- Pulled `2833977c1daae9971330e9be9bf16e546b9f0f4f`; its only additions
+  are immutable r09 error evidence. All three `SHA256SUMS` entries verify.
+  The head tail at lines 13520–13522 records first-turn MODEL_TIMEOUT with
+  zero steps/receipts; lines 13560–13572 end at the row-map assertion. Policy
+  40 was synchronized; this is a post-rollout host failure, not a new
+  nonfinite-gradient exception. The report's complete-run claims are not
+  independently certified by this partial tail.
+- Reproduced the assertion, then repaired the collector/learner/row-map/
+  sidecar/classifier chain with an explicit zero-response receipt. Existing
+  training arrays, trajectory order, rewards, timeouts, defaults, launch
+  configuration and numerical/backward gates are unchanged. No response is
+  UNEXERCISED, not EQUAL; returned data still requires attributable IDs.
+- Host checks: P57 238/238, V1 102/102, flags 422/422, syntax and diff pass.
+  Focused pinned-CPU checks execute the real timeout, learner batch and NPZ
+  writer; off/on training tensor leaves match. The complete image suite is
+  in progress. The standalone host import fixture correction and focused
+  invocation failures are documented in the T9f phase; the failed host log
+  is retained alongside the successful one.
+- Evidence: `evidence/t9f-host-20260906/`; implementation/verification and
+  claim boundaries are in `phases/t9f-empty-response-identity.md`. Prior
+  sorting/observer-neutrality and Orbax exception concerns remain separate.
+- Rollback: remove only the T9f receipt/validator/sidecar/classifier and test
+  hunks. Preserve r09 logs and the prior TiTO all-diff implementation; do not
+  revert the published branch or any workload YAML.
+- Authorization: local repair/testing only. No commit, push, TPU/Kubernetes
+  launch, image publication, remote storage writes or evidence deletion.
+
+## 2026-09-06 — T9f complete pinned-image gate PASS
+
+- `bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits 0 and emits `V1_HP_EXACT_IMAGE_PASS`. The new collector timeout,
+  learner off/on and sidecar controls are included in that gate. Runtime
+  hashes are unchanged after the focused tests; only the standalone host
+  test import harness and documentation were subsequently updated.
+- Receipt SHA256:
+  `88d28ed4fa4aea68ad1ec330903431b91e5f5e934a0fc7636ae2dab8fbbc5fe0`.
+  Host outputs and the partial image console are retained under
+  `evidence/t9f-host-20260906/`. Image output was truncated by one tool
+  response, so this is an admission receipt, not a complete raw-log claim.
+- Local implementation is ready for review. No patched one-host/DP8xTP8
+  execution, real-storage recovery, complete training horizon or generation
+  latency repair is claimed. Publication and target actions require separate
+  user approval; no commit/push was performed.
+
+## 2026-09-07 — T9f approved source freeze and publication gates
+
+- Type: release / authorization. User approved this repair's commit/push,
+  not TPU/Kubernetes, target rendering, remote storage or timeout changes.
+- Source CL: `89a58e24d02ed42b2bc39126eb592ca0a1426bd3`; tree
+  `dfc70cf2150328d1e1c354a4ac4855acf56bb573`. Its 13 files contain
+  the one empty-response concern, flag documentation and regression tests.
+  The accompanying CL contains only task/registry docs and retained evidence.
+- Fetch matched baseline `2833977c1daae9971330e9be9bf16e546b9f0f4f`.
+  The first sandbox fetch could not resolve the host; the approved network
+  retry succeeded. No rebase or published-history rewrite was needed.
+- Repeated `bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh`
+  (238/238), `bash canon-zero-tim/tests/v1_phase4/run_cpu.sh` (102/102)
+  and the registered flag audit (422/422): all PASS. Diff/syntax checks pass.
+  Six runtime/gate SHA256 values exactly match the previous passing image
+  receipt, so the docs-only closeout does not require another image/TPU run.
+- The original six local evidence files retain their hashes. The image
+  console remains explicitly partial; no stronger evidence claim is made.
+  Release audit: `evidence/t9f-release-20260907.json`.
+- Full ledger `git diff --cached --check` reports two trailing spaces in
+  the unchanged raw image console, lines 284/305. Preserve its original
+  bytes and SHA rather than normalize evidence. The scoped code/document
+  whitespace check passes; all six evidence hashes verify. This is an
+  explicit raw-artifact formatting exception, not a numerical-gate waiver.
+- Rollback: after separate approval, revert only source CL `89a58e24`;
+  preserve this ledger, all failed logs and the all-diff TiTO implementation.
+- Next: fast-forward push the approved source+ledger stack and compare the
+  full remote readback SHA to delivered HEAD; target work stays separate.

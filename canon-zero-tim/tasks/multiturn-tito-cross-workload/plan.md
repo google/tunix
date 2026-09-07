@@ -38,9 +38,21 @@ TiTO. No phase may infer DP8xTP8 certification from host or one-host evidence.
 | T9d-2 | Bounded red-policy actor snapshots | first-any and first-`>=1`/`>=8`/`>=32` A-B policy versions save at most four actor-only, pre-update, non-resumable snapshots | complete with fake manager and installed-code gate; real Orbax/GCS save unrun |
 | T9d-3 | Observer-neutral and durable target admission | matched exact-TiTO off/on carrier, host suites, real-path Orbax startup probe, single-writer/update-0 gates, renderer, and pinned image pass before a separately approved DP8xTP8 pair | release committed — P57 232/232, V1 102/102, APC 31/31, flags 422/422, full pinned image PASS; carrier/judge implemented, matched one-host/real GCS unrun |
 | T9e | All-event token-difference stream | every structurally valid token diff, including update 0 and repeated diffs in one trajectory, persists a replay capsule and continues the unchanged full-training row; evidence accounting is bijective and collect-64 remains bounded | complete for host and pinned-image construction — P57 234/234, V1 102/102, APC 12/12, flags 422/422, full pinned image PASS; one-host/real GCS/DP8xTP8 unrun |
+| T9f | Pre-response termination identity through row map/sidecar/classifier | actual collector timeout and unchanged learner tensors; zero-response receipt and mask poison controls; host and pinned-image regression | source frozen as `89a58e24`; publication approved 2026-09-07 — P57 238/238, V1 102/102, flags 422/422 and complete pinned-image PASS; patched target unrun |
 | T10 | DP8xTP8 treatment run | explicit P45-exact and M15-exact full runs return complete token receipts and their existing alignment/training classifications | pending — separate launch approval required |
 
 ## Decisions
+
+- 2026-09-07 authorization: commit/push the T9f source and evidence/handoff
+  CLs to `yuxzhang/canon-zero-tim`. This does not authorize a target render,
+  TPU/Kubernetes launch, timeout-policy change or production YAML edit.
+
+- 2026-09-06 correction: r09 on `dfd5e79f` reached policy 40 but failed after
+  a first-turn model timeout. Request IDs enumerate completed response
+  witnesses, not every submission. Preserve the normal zero-response row with
+  an explicit terminal/zero-data receipt; do not fabricate request IDs or
+  classify absence as token equality. Fix the sidecar and final coverage
+  equation together. Timeout, training and launch configuration are unchanged.
 
 - Confirmed: DeepSWE TiTO is a common transport invariant selected by the DeepSWE workload identity and has real DP1xTP4 evidence.
 - Confirmed: M15 `verify|exact` currently admits only the production DP8xTP8 full identity, so it cannot honestly be used on one host without a dedicated diagnostic identity.

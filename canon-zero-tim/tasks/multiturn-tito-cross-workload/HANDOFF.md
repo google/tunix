@@ -1,5 +1,67 @@
 # TiTO full-record and data-extraction handoff
 
+## 0. Current repair status — 2026-09-07 (supersedes historical status below)
+
+T9f source is committed as `89a58e24d02ed42b2bc39126eb592ca0a1426bd3`
+on baseline `2833977c1daae9971330e9be9bf16e546b9f0f4f`, followed by
+the evidence/handoff CL containing this section. The user approved this
+repair's commit/push on 2026-09-07 to `yuxzhang/canon-zero-tim`.
+That approval does not authorize TPU/Kubernetes or a target render. Read
+`phases/t9f-empty-response-identity.md` before resuming. Resolve the full
+delivered HEAD and prove remote readback before using Section 5; do not use
+the historical five-CL or r09 SHA as the new launch source.
+
+M15 r09 (`dfd5e79f`) synchronized policy 40, then a first-turn MODEL_TIMEOUT
+returned no completed response. The record-full row-map assertion incorrectly
+required a request ID for it. The original evidence remains under repository
+root `debug_logs/canon_p57_fl_zero_m15_r09_crash_20260906/`; all three SHA256
+checks pass. The partial tail proves this failure, not a complete 300-update
+run. Update 38/39 finite-gradient receipts do not certify every past update.
+
+T9f keeps the existing training row unchanged. Empty request lists require an
+explicit zero-response receipt (terminal reason, independently counted zero
+completed calls, zero steps/completion/action tokens). The sidecar binds it
+and checks the actual validity/action masks; the final classifier joins it
+and excludes that row from the expected completed-response count. It remains
+UNEXERCISED and is separately counted as `no_completed_response_trajectories`.
+A submitted-but-timed-out request may exist: do not claim no request was sent,
+and do not fabricate a vLLM ID or a token-diff capsule for an absent response.
+All real token-diff events continue to be recorded and trained as before.
+
+Local verification: P57 238/238, V1 102/102, flags 422/422 PASS; actual
+collector timeout, learner off/on tensor equality and sidecar tests pass in
+the pinned CPU image. The complete image gate exits 0 with
+`V1_HP_EXACT_IMAGE_PASS`. See `evidence/t9f-host-20260906/receipt.json`
+(SHA256 `88d28ed4fa4aea68ad1ec330903431b91e5f5e934a0fc7636ae2dab8fbbc5fe0`).
+The retained image console is partial because one tool output was truncated;
+do not describe it as a complete signed raw-log artifact. Patched TPU,
+real-GCS recovery and a fresh full run remain unverified. Existing sorting and
+Orbax review concerns are separate and have not been changed by this repair.
+
+Pre-publication host gates were rerun on 2026-09-07: P57 238/238,
+V1 102/102 and flags 422/422 PASS. All six runtime/gate hashes still match
+the passing pinned-image receipt, so no image or TPU rerun was needed for
+the documentation-only closeout. See `evidence/t9f-release-20260907.json`.
+The raw image console retains two trailing-space lines (284/305); the audit
+records them rather than changing evidence bytes. Code/document whitespace
+checks and all six evidence SHA checks pass.
+
+Operator procedure after verifying the approved publication:
+
+1. Checkout the exact newly published clean SHA, not `dfd5e79f` or r09.
+2. Keep the existing Section 5 command and `both-exact` + `record-full` modes,
+   300 updates, no evaluation/checkpoint, APC off and unchanged JobSet settings.
+   Use fresh run IDs/output directories; publication/render/launch approvals
+   remain separate. This document does not authorize a launch.
+3. On a pre-response timeout, expect `[P57.TITO.EMPTY_RESPONSE] UNEXERCISED`
+   and continued batch preparation. Row-map and NPZ metadata must carry the
+   matching `empty_response`/`empty_responses` receipt. A nonempty valid/action
+   mask or missing receipt still fails; numerical/backward gates are unchanged.
+4. Return the full Section 6 package plus no-response counts/reasons, the
+   affected step/row/trajectory join, and the next optimizer receipt after any
+   such row. Preserve all failed artifacts. This repair does not fix the
+   cause of 1,800-second generation latency and does not create resume state.
+
 ## 1. Scope and immutable facts
 
 - Worktree: `/home/yuxuan/code_rl_repro/worktrees/p57_tito_pair_0902`
@@ -17,7 +79,8 @@
   T9e is one additive follow-up concern on that baseline. Always obtain and
   return the current full SHA with `git rev-parse HEAD`, and verify the
   published branch resolves to that same value before any target work.
-- The user approved commit/push of the T9e follow-up only. That approval
+- The user approved commit/push of the T9f repair and its evidence/handoff
+  closeout on 2026-09-07. That approval
   does not authorize TPU/Kubernetes, a durable manifest render, image
   publication, or any other remote mutation.
 - Do not edit the base JobSet topology, autoscaling, exclusive-topology
@@ -29,7 +92,8 @@ Production behavior is unchanged by default: FrozenLake uses legacy token
 transport, and an explicitly selected ordinary exact-TiTO full train remains
 fatal on its first token-continuity difference.
 
-T9c/T9d are implemented and T9e is the active evidence-completeness phase. T9c adds a
+T9c/T9d/T9e are implemented; T9f adds the scoped empty-response receipt
+described in Section 0. T9c adds a
 separate `record-full` value for explicit P45/M15 300-update exact-TiTO full
 trains. T9e makes every structurally valid token-difference event write a
 complete replay capsule, including update 0, repeated differences in one
@@ -157,12 +221,13 @@ bash tests/p57_frozenlake_tim/run_cpu.sh
 bash tests/v1_phase4/run_cpu.sh
 python3 .claude/skills/manage-canon-flags/scripts/audit_flag_registry.py \
   --repo .. \
-  --changed-base 6842edae88b5692c7d4c6ae4ecadfc9e2bf1e411
-bash tests/v1_phase4/run_exact_image.sh tunix_frozenlake_image:vllm-tpu0.25.0
+  --changed-base 2833977c1daae9971330e9be9bf16e546b9f0f4f
+bash tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 git diff --check
 ```
 
-Current verified result: P57 234/234, V1 102/102, APC 12/12, flag audit
+Current T9f result is in Section 0. Historical post-T9e result:
+P57 234/234, V1 102/102, APC 12/12, flag audit
 422/422, Python/shell syntax, and `git diff --check`. The P57 total includes
 all-event token-difference coverage plus poison coverage for all-update sidecars,
 source/image/mesh-bound actor snapshots, hidden-red rejection, complete-line
@@ -198,7 +263,7 @@ the pre-alignment-only M15 verifier or P64 replay:
 - P64's frozen training capsule is bound to P45 DP8xTP8,
   `backward-no-commit`, and its registered physical tensor shapes.
 
-After checking out the published fifth CL in a clean worktree, and only after a
+After checking out the delivered T9f release HEAD in a clean worktree, and only after a
 separate direct-TPU approval, run from the worktree root with a fresh label:
 
 ```bash
@@ -226,7 +291,7 @@ authorize a DP8xTP8 launch.
 Do not render from a dirty or unpublished tree. Rendering requires all of the
 following:
 
-1. the pushed fifth CL is read back and recorded as one full 40-character
+1. the delivered T9f release HEAD is read back and recorded as one full 40-character
    lowercase SHA;
 2. the worktree is clean and checked out exactly at that SHA;
 3. the output directory and both run IDs have never been used;
@@ -347,7 +412,7 @@ trajectory/request/step/sequence-row joins, the four separate execution/token/
 Zero-TIM/evidence verdicts, and its ordinary training curve. A completed red
 record arm is useful data but is not a Zero-TIM PASS.
 
-Claim ceiling now: T9e host and pinned-image construction PASS. It does not
+Claim ceiling now: T9f host and pinned-image construction PASS. It does not
 prove one-host observer neutrality,
 real-GCS/Orbax durability, DP8xTP8
 behavior, 300-update completion/convergence, or production exact-TiTO
