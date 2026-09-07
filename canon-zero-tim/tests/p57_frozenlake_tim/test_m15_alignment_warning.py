@@ -25,6 +25,18 @@ alignment = importlib.util.module_from_spec(ALIGNMENT_SPEC)
 sys.modules[ALIGNMENT_SPEC.name] = alignment
 ALIGNMENT_SPEC.loader.exec_module(alignment)
 
+# Keep this standalone host gate independent of Tunix's training dependencies,
+# but execute the actual shared identity validator (not a mocked verdict).
+TOKEN_SPEC = importlib.util.spec_from_file_location(
+    "p57_m15_alignment_token_identity", ROOT / "tunix/rl/agentic/token_continuity.py"
+)
+assert TOKEN_SPEC is not None and TOKEN_SPEC.loader is not None
+token_identity = importlib.util.module_from_spec(TOKEN_SPEC)
+sys.modules[TOKEN_SPEC.name] = token_identity
+TOKEN_SPEC.loader.exec_module(token_identity)
+agentic_stub = types.ModuleType("tunix.rl.agentic")
+agentic_stub.token_continuity = token_identity
+
 
 def _environment(
     report: str, *, candidate: str = "m15", data_split: str = "main"
@@ -151,7 +163,9 @@ class M15AlignmentWarningTest(unittest.TestCase):
           "later_turns": 0,
           "token_different": False,
       }]
-      with mock.patch.dict(os.environ, values, clear=True):
+      with mock.patch.dict(os.environ, values, clear=True), mock.patch.dict(
+          sys.modules, {"tunix.rl.agentic": agentic_stub}
+      ):
         record = alignment.check_pre_backward(
             _sidecar(), step=0, row_identity=identity
         )
@@ -174,7 +188,7 @@ class M15AlignmentWarningTest(unittest.TestCase):
 
       with mock.patch.dict(os.environ, values, clear=True), self.assertRaisesRegex(
           alignment.AlignmentGateError, "already exists"
-      ):
+      ), mock.patch.dict(sys.modules, {"tunix.rl.agentic": agentic_stub}):
         alignment.check_pre_backward(
             _sidecar(), step=0, row_identity=identity
         )

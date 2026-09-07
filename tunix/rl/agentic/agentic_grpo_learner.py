@@ -743,6 +743,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 item.traj.get("p57_token_continuity_different", False)
             ),
         })
+        if "p57_token_continuity_empty_response" in item.traj:
+          row_identity[-1]["empty_response"] = item.traj[
+              "p57_token_continuity_empty_response"
+          ]
 
     if record_full:
       token_continuity.append_full_record_batch_map(row_identity)

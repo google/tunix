@@ -104,6 +104,37 @@ class AlignmentTest(absltest.TestCase):
         s_prefill_source=_real_rescore,
     )
 
+  def test_record_full_sidecar_validates_empty_response(self):
+    rows = [{
+        'trajectory_id': f'{index + 1:032x}', 'request_ids': [f'request-{index}'],
+        'policy_step': 0, 'group_id': 0, 'pair_index': index,
+        'sequence_row': index, 'later_turns': 0, 'token_different': False,
+    } for index in range(2)]
+    empty = {
+        'schema': 'canon.p57-tito-empty-response.v1',
+        'status': 'MODEL_TIMEOUT', 'timeout_stage': 'model_generation',
+        'completed_model_calls': 0, 'trajectory_steps': 0,
+        'completion_tokens': 0, 'action_tokens': 0,
+    }
+    rows[1].update(request_ids=[], empty_response=empty)
+    sidecar = self._wrapped()
+    mask = np.asarray([[True, True, True], [False, False, False]])
+    clean = sidecar.replace(action_mask=mask, completion_valid_mask=mask)
+    identity = {'workload': 'm15', 'dp': 8, 'tp': 8, 'source_commit': 'a' * 40, 'image_identity': 'sha256:' + 'b' * 64}
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+        'CANON_P57_TOKEN_CONTINUITY_DEBUG': 'record-full', 'CANON_STATE': tmp,
+    }), mock.patch.object(alignment, '_p57_record_full_runtime_identity', return_value=identity):
+      with self.assertRaisesRegex(alignment.AlignmentGateError, 'empty response has completion data'):
+        alignment._persist_p57_full_update_sidecar(sidecar, {'step': 0}, rows)
+      receipt = alignment._persist_p57_full_update_sidecar(clean, {'step': 0}, rows)
+      with np.load(receipt['path'], allow_pickle=False) as archive:
+        metadata = json.loads(archive['metadata_json'].tobytes())
+        self.assertEqual(metadata['request_ids'], [['request-0'], []])
+        self.assertEqual(metadata['empty_responses'], [None, empty])
+      rows[1].pop('empty_response')
+      with self.assertRaisesRegex(alignment.AlignmentGateError, 'row identity differs'):
+        alignment._persist_p57_full_update_sidecar(clean, {'step': 0}, rows)
+
   def test_exact_gate_passes_and_writes_report(self):
     wrapped = self._wrapped()
     with tempfile.TemporaryDirectory() as tmpdir:

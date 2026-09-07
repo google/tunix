@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import functools
 import io
+import json
 import os
 import queue
 import random
@@ -1576,10 +1577,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     loss = loss_output.primary_loss.compute()
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6, atol=1e-6)
 
-  def test_process_results_extracts_assistant_text(self):
+  @parameterized.named_parameters(
+      ("ordinary", False), ("record_full_empty_response", True)
+  )
+  def test_process_results_extracts_assistant_text(self, record_timeout):
     class MockTraj:
 
       def __init__(self, index):
+        self.group_id = 0
+        self.pair_index = index
         self.traj = {
             "conversation_text": [
                 {"role": "system", "content": "system prompt"},
@@ -1596,7 +1602,22 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
             "group_id": "group1",
+            "p57_token_continuity_trajectory_id": f"{index + 1:032x}",
+            "p57_token_continuity_request_ids": (f"request-{index}",),
         }
+        if record_timeout and index == 1:
+          self.traj.update({
+              "conversation_text": [],
+              "conversation_tokens": np.array([], dtype=np.int32),
+              "conversation_masks": np.array([], dtype=np.int32),
+              "p57_token_continuity_request_ids": (),
+              "p57_token_continuity_empty_response": {
+                  "schema": "canon.p57-tito-empty-response.v1",
+                  "status": "MODEL_TIMEOUT", "timeout_stage": "model_generation",
+                  "completed_model_calls": 0, "trajectory_steps": 0,
+                  "completion_tokens": 0, "action_tokens": 0,
+              },
+          })
 
     trajectories = [MockTraj(0), MockTraj(1)]
 
@@ -1664,9 +1685,25 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           return_value=jnp.zeros((2, 10)),
           autospec=True,
       ):
-        learner._process_results(trajectories)
+        plain = learner._process_results(trajectories)
+        if record_timeout:
+          extracted_completions.clear()
+          with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+              os.environ, {"CANON_STATE": tmp}
+          ), mock.patch.object(
+              agentic_grpo_learner.token_continuity,
+              "frozenlake_token_continuity_debug_mode", return_value="record-full",
+          ):
+            recorded = learner._process_results(trajectories, expected_step=0)
+            for before, after in zip(jax.tree_util.tree_leaves(plain), jax.tree_util.tree_leaves(recorded), strict=True):
+              np.testing.assert_array_equal(before, after)
+            self.assertFalse(np.any(recorded[0].completion_mask[1]))
+            with open(os.path.join(tmp, "p57_tito_witness/full-row-map.jsonl")) as stream:
+              rows = [json.loads(line) for line in stream]
+            self.assertEqual(rows[1]["request_ids"], [])
+            self.assertEqual(rows[1]["empty_response"]["completed_model_calls"], 0)
 
-    self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
+    self.assertEqual(extracted_completions, ["msg 0", "" if record_timeout else "msg 1"])
 
   def test_process_results_zero_advantage_group(self):
     class MockTraj:

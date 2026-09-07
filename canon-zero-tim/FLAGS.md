@@ -117,6 +117,19 @@
 | CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_KIND / CANON_P59_REQUIRE_XPROF | P59 单次载具的证据目的地、冻结内层命令、臂身份与 XProf 完整性要求 | 试验；仅 P59 renderer/one-host wrapper 设置 | P59 证据载具归档后整体退役 |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
+### T9f record-full empty-response boundary
+
+`CANON_P57_TOKEN_CONTINUITY_DEBUG=record-full` records request IDs for
+completed responses, not every submitted request. A terminal row with no
+completed model call/trajectory step/completion token/action token may have an
+empty request list only with an explicit `canon.p57-tito-empty-response.v1`
+receipt. Row-map, A/B/C sidecar and final classifier validate the same receipt;
+sidecar masks must also contain no valid completion or action for that row.
+These rows count as unexercised, never as successful token comparisons. A
+returned response with missing/duplicate/foreign identity still fails. There
+is no new flag, no default change and no change to training rows or deadlines.
+T9f target validation is pending; see the owning task's phase and handoff.
+
 ## MARKERS(日志 marker 契约,非开关;~60 个)
 
 关键项:`[CANON_ALIGN_PRE]`(四边界判决行)、`[CANON_ALIGN_PRE_JSON/EVIDENCE]`、
@@ -132,6 +145,7 @@
 `[CANON_P57_TOKEN_CONTINUITY_SUMMARY]`、
 `[CANON_P57_TITO_HOST_WITNESS]`、
 `[CANON_P57_TITO_DIAGNOSTIC]`、
+`[P57.TITO.EMPTY_RESPONSE]`、
 `[CANON_P38_DURABLE_COLLECTION]`、`[CANON_P38_SEAM_CLASSIFICATION_JSON]`、
 PATHTRACE 族(固定树行数 =2×层+1)。
 Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按合同类文档对待。

@@ -1344,6 +1344,56 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertTrue(result_traj.steps[-1].done)
     self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.TIMEOUT)
 
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_record_full_first_model_timeout_preserves_empty_training_row(self, mock_convert):
+    mock_convert.return_value = ([101], [0])
+    self.mock_env.extra_kwargs = {'pair_index': 4, 'group_id': 1299}
+    self.mock_env.task = {'prompts': 'initial', 'policy_version': 40}
+    self.trajectory.task = self.mock_env.task
+    self.mock_model_call.side_effect = TimeoutError('test model deadline')
+    continuity = trajectory_collect_engine.token_continuity
+    contract = continuity.FrozenLakeTokenContinuity(
+        workload='m15', mode='exact', selector=continuity.P57_TOKEN_CONTINUITY_ENV
+    )
+    outputs = []
+    with tempfile.TemporaryDirectory() as tmp:
+      for mode in (None, continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL):
+        with mock.patch.dict(os.environ, {
+            'CANON_STATE': tmp, 'CANON_EXPECT_COMMIT': 'a' * 40,
+            'CANON_CLIENT_IMAGE': 'sha256:' + 'b' * 64,
+            'CANON_DP_SIZE': '8', 'CANON_TP_SIZE': '8',
+        }), mock.patch.object(
+            continuity, 'frozenlake_token_continuity', return_value=contract
+        ), mock.patch.object(continuity, 'frozenlake_token_continuity_debug_mode', return_value=mode):
+          if mode:
+            continuity.begin_token_continuity_collection()
+          engine = trajectory_collect_engine.TrajectoryCollectEngine(
+              agent=self.mock_agent, env=self.mock_env, model_call=self.mock_model_call,
+              tokenizer=self.mock_tokenizer, chat_parser=self.mock_chat_parser,
+              max_response_length=1024,
+          )
+          outputs.append(asyncio.run(self._run_collect(engine, mode='Token')))
+      plain, recorded = outputs
+      self.assertEqual(recorded['status'], 'MODEL_TIMEOUT')
+      self.assertEqual(recorded['p57_token_continuity_request_ids'], ())
+      self.assertNotIn('p57_token_continuity_empty_response', plain)
+      for key in ('prompt_tokens', 'conversation_tokens', 'conversation_masks'):
+        np.testing.assert_array_equal(plain[key], recorded[key])
+      self.assertEqual(plain['trajectory_reward'], recorded['trajectory_reward'])
+      self.assertEqual(recorded['policy_version'], 40)
+      row = {
+          'trajectory_id': recorded['p57_token_continuity_trajectory_id'],
+          'request_ids': [], 'policy_step': 40, 'group_id': 1299,
+          'pair_index': 4, 'sequence_row': 156, 'later_turns': 0,
+          'token_different': False,
+          'empty_response': recorded['p57_token_continuity_empty_response'],
+      }
+      continuity.append_full_record_batch_map([row], state_dir=tmp)
+      summary = continuity.token_collection_snapshot()
+      self.assertEqual(summary['engine_echo_comparisons'], 0)
+      self.assertEqual(summary['unexercised_single_turn_trajectories'], 1)
+      self.mock_env.step.assert_not_called()
+
   def test_model_timeout_aborts_turn_and_always_closes(self):
     def slow_model(*args, **kwargs):
       del args, kwargs

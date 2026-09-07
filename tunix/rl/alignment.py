@@ -1323,6 +1323,8 @@ def _persist_p57_full_update_sidecar(
         f"{len(rows)} vs {batch_rows}"
     )
   step = int(record.get("step", -1))
+  from tunix.rl.agentic import token_continuity  # pylint: disable=g-import-not-at-top
+
   sequence_rows = []
   trajectory_ids = []
   group_ids = []
@@ -1338,12 +1340,17 @@ def _persist_p57_full_update_sidecar(
         or re.fullmatch(r"[0-9a-f]{32}", trajectory_id) is None
         or type(row.get("group_id")) is not int
         or type(row.get("pair_index")) is not int
-        or not isinstance(requests, list)
-        or not requests
-        or any(not isinstance(value, str) or not value for value in requests)
+        or not token_continuity.record_full_request_identity_valid(row)
     ):
       raise AlignmentGateError(
           f"P57 record-full sidecar row identity differs at row {index}"
+      )
+    if not requests and (
+        np.any(arrays["completion_valid_mask"][index])
+        or np.any(arrays["action_mask"][index])
+    ):
+      raise AlignmentGateError(
+          f"P57 record-full empty response has completion data at row {index}"
       )
     sequence_rows.append(index)
     trajectory_ids.append(trajectory_id)
@@ -1386,6 +1393,8 @@ def _persist_p57_full_update_sidecar(
           for name, value in arrays.items()
       },
   }
+  if any(row.get("empty_response") is not None for row in rows):
+    metadata["empty_responses"] = [row.get("empty_response") for row in rows]
   metadata_json = json.dumps(
       metadata, sort_keys=True, separators=(",", ":"), allow_nan=False
   ).encode("utf-8")

@@ -127,6 +127,7 @@ class TrajectoryCollectEngine:
     self._frozenlake_token_continuity_debug_emitted = False
     self._frozenlake_token_continuity_trajectory_id = None
     self._frozenlake_token_continuity_request_ids: list[str] = []
+    self._completed_model_calls = 0
     self._frozenlake_token_continuity_completed_later_calls = 0
     self._frozenlake_token_continuity_receipt_turns: list[int] = []
     self._frozenlake_token_continuity_different = False
@@ -333,6 +334,7 @@ class TrajectoryCollectEngine:
     else:
       self._frozenlake_token_continuity_trajectory_id = None
     self._frozenlake_token_continuity_request_ids = []
+    self._completed_model_calls = 0
     self._frozenlake_token_continuity_completed_later_calls = 0
     self._frozenlake_token_continuity_receipt_turns = []
     self._frozenlake_token_continuity_different = False
@@ -549,7 +551,39 @@ class TrajectoryCollectEngine:
       )
       original_input = self._original_input()
 
+      empty_response_fields = {}
+      if (
+          self._frozenlake_token_continuity_debug_mode
+          == token_continuity.P57_TOKEN_CONTINUITY_DEBUG_RECORD_FULL
+          and not self._frozenlake_token_continuity_request_ids
+      ):
+        empty_response = {
+            "schema": "canon.p57-tito-empty-response.v1",
+            "status": self.agent.trajectory.status.name,
+            "timeout_stage": self.agent.trajectory.timeout_stage,
+            "completed_model_calls": self._completed_model_calls,
+            "trajectory_steps": len(self.agent.trajectory.steps),
+            "completion_tokens": int(conversation_tokens.size),
+            "action_tokens": int(np.count_nonzero(conversation_masks)),
+        }
+        if not token_continuity.record_full_request_identity_valid({
+            "request_ids": [], "empty_response": empty_response,
+            "later_turns": self._frozenlake_token_continuity_completed_later_calls,
+            "token_different": self._frozenlake_token_continuity_different,
+        }):
+          raise ValueError("P57 record-full empty response identity is malformed")
+        empty_response_fields["p57_token_continuity_empty_response"] = empty_response
+        print(
+            "[P57.TITO.EMPTY_RESPONSE] UNEXERCISED "
+            f"trajectory_id={self._frozenlake_token_continuity_trajectory_id} "
+            f"status={empty_response['status']} "
+            f"timeout_stage={empty_response['timeout_stage']} "
+            "completed_model_calls=0 action_tokens=0 continue_training=1",
+            flush=True,
+        )
+
       return {
+          **empty_response_fields,
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
           "prompt_length": prompt_length,
@@ -937,6 +971,9 @@ class TrajectoryCollectEngine:
           time.perf_counter() - model_started
       )
     logging.debug("%s model_call done", self._debug_prefix)
+    # Count successful returns independently of witness IDs and agent steps.
+    # A timed-out executor may have submitted work, but returned no response.
+    self._completed_model_calls += 1
 
     if self._frozenlake_token_continuity_debug_mode in (
         token_continuity.P57_TOKEN_CONTINUITY_DEBUG_COLLECT,

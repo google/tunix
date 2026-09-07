@@ -1030,6 +1030,37 @@ class M15TokenContinuityTest(unittest.TestCase):
             [invalid], state_dir=Path(tmp) / "missing-request"
         )
 
+  def test_record_full_accepts_only_witnessed_empty_response_rows(self):
+    row = {
+        "trajectory_id": "a" * 32, "request_ids": [], "policy_step": 40,
+        "group_id": 1299, "pair_index": 4, "sequence_row": 156,
+        "later_turns": 0, "token_different": False,
+        "empty_response": {
+            "schema": "canon.p57-tito-empty-response.v1",
+            "status": "MODEL_TIMEOUT", "timeout_stage": "model_generation",
+            "completed_model_calls": 0, "trajectory_steps": 0,
+            "completion_tokens": 0, "action_tokens": 0,
+        },
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+      output = token_continuity.append_full_record_batch_map([row], state_dir=tmp)
+      self.assertEqual(json.loads(output.read_text())["empty_response"], row["empty_response"])
+      for key, value in (
+          ("completed_model_calls", 1), ("completed_model_calls", False),
+          ("trajectory_steps", 1), ("completion_tokens", 1),
+          ("action_tokens", 1), ("status", "SUCCEEDED"),
+          ("timeout_stage", "environment_step"),
+      ):
+        bad = {**row, "empty_response": {**row["empty_response"], key: value}}
+        with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, "identity is malformed"):
+          token_continuity.append_full_record_batch_map([bad], state_dir=tmp)
+      for change in (
+          {"later_turns": 1}, {"token_different": True},
+          {"request_ids": ["unexpected-request"]}, {"empty_response": None},
+      ):
+        with self.subTest(change=change), self.assertRaisesRegex(ValueError, "identity is malformed"):
+          token_continuity.append_full_record_batch_map([{**row, **change}], state_dir=tmp)
+
   def test_actor_snapshot_request_is_consumed_before_update(self):
     class FakeManager:
 

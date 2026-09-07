@@ -106,7 +106,13 @@ $docker run --rm \
       TrajectoryCollectEngineTest.test_p57_collect_diff_stops_only_trajectory_and_masks_tokens \
       TrajectoryCollectEngineTest.test_p57_collect_cap_is_process_wide_and_allocated_before_io \
       TrajectoryCollectEngineTest.test_p57_record_full_diff_preserves_training_row_and_request_join \
+      TrajectoryCollectEngineTest.test_record_full_first_model_timeout_preserves_empty_training_row \
       TrajectoryCollectEngineTest.test_m15_exact_fails_if_serving_consumes_different_tokens
+    python3 tests/rl/alignment_test.py \
+      AlignmentTest.test_record_full_sidecar_validates_empty_response
+    python3 tests/rl/agentic/agentic_grpo_learner_test.py \
+      AgenticGrpoLearnerTest.test_process_results_extracts_assistant_text_record_full_empty_response \
+      AgenticGrpoLearnerTest.test_process_results_extracts_assistant_text_ordinary
     python3 tests/rl/agentic/agentic_rl_learner_test.py \
       AgenticRLLearnerTest.test_model_call_routes_signed_deepswe_pre_tokenized_prompt_exactly \
       AgenticRLLearnerTest.test_model_call_routes_signed_m15_pre_tokenized_prompt_exactly \

@@ -47,6 +47,7 @@ def _write_sidecar(
     step: int,
     rows: list[dict],
     pre_record: dict,
+    empty_masks: bool = True,
 ) -> None:
   count = len(rows)
   arrays = {
@@ -71,6 +72,10 @@ def _write_sidecar(
           [row["pair_index"] for row in rows], dtype=np.int32
       ),
   }
+  for index, row in enumerate(rows):
+    if row.get("empty_response") is not None and empty_masks:
+      arrays["completion_valid_mask"][index] = False
+      arrays["action_mask"][index] = False
   record_payload = json.dumps(
       pre_record, sort_keys=True, separators=(",", ":"), allow_nan=False
   ).encode()
@@ -96,6 +101,8 @@ def _write_sidecar(
           for name, value in arrays.items()
       },
   }
+  if any(row.get("empty_response") is not None for row in rows):
+    metadata["empty_responses"] = [row.get("empty_response") for row in rows]
   directory = state / "p57_tito_witness/update-sidecars"
   directory.mkdir(parents=True, exist_ok=True, mode=0o700)
   directory.chmod(0o700)
@@ -351,6 +358,47 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
       self.assertEqual(result["token_verdict"], "DIFFERENT")
       self.assertEqual(result["zero_tim_verdict"], "FAIL")
       self.assertEqual(result["claim"], "NON_ZERO_TIM_DATA_COLLECTION")
+
+  def test_empty_response_join_and_masks_are_required(self):
+    for mutation in (None, "missing", "completed", "masks", "sidecar_join"):
+      with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+        state, base, v1 = _fixture(Path(tmp), red=False)
+        row_path = state / "p57_tito_witness/full-row-map.jsonl"
+        rows = [json.loads(line) for line in row_path.read_text().splitlines()]
+        # This row already has no later-turn comparisons; do not count it equal.
+        rows[3]["request_ids"] = []
+        empty = {
+            "schema": "canon.p57-tito-empty-response.v1",
+            "status": "MODEL_TIMEOUT", "timeout_stage": "model_generation",
+            "completed_model_calls": 0, "trajectory_steps": 0,
+            "completion_tokens": 0, "action_tokens": 0,
+        }
+        rows[3]["empty_response"] = empty
+        if mutation == "completed":
+          empty["completed_model_calls"] = 1
+        if mutation == "missing":
+          rows[3].pop("empty_response")
+        _write_jsonl(row_path, rows)
+        summary_path = state / "p57_tito_witness/full-record-summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["collection"]["engine_echo_comparisons"] -= 1
+        _write_json(summary_path, summary)
+        pre_path = state / "pre_alignment.jsonl"
+        pre = [json.loads(line) for line in pre_path.read_text().splitlines()]
+        pre[0].pop("tito_update_sidecar")
+        if mutation == "sidecar_join":
+          rows[3]["empty_response"] = {**empty, "status": "ENV_TIMEOUT", "timeout_stage": "environment_reset"}
+        _write_sidecar(state, step=0, rows=rows[:4], pre_record=pre[0], empty_masks=mutation != "masks")
+        _write_jsonl(pre_path, pre)
+        result = self._classify(state, base, v1)
+        if mutation is None:
+          self.assertEqual(result["execution_verdict"], "PASS", result["reasons"])
+          self.assertEqual(result["no_completed_response_trajectories"], 1)
+          self.assertEqual(result["unexercised_trajectories"], 4)
+          self.assertEqual(result["compared_trajectories"], 4)
+        else:
+          self.assertEqual(result["execution_verdict"], "FAIL")
+          self.assertTrue(any(reason.startswith(("row_map_request_identity", "update_sidecar_empty_response", "update_sidecar_row_join")) for reason in result["reasons"]), result["reasons"])
 
   def test_update_zero_token_red_is_completed_data_collection(self):
     with tempfile.TemporaryDirectory() as tmp:

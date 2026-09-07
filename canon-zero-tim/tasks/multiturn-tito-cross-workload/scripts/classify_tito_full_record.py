@@ -218,9 +218,20 @@ def _validate_update_sidecars(
         == [row.get("pair_index") for row in expected_rows]
         and metadata.get("request_ids")
         == [row.get("request_ids") for row in expected_rows]
+        and metadata.get("empty_responses", [None] * rows_per_update)
+        == [row.get("empty_response") for row in expected_rows]
         and bool(np.all(arrays["policy_version"] == step))
     )
     _require(joins_equal, f"update_sidecar_row_join:{path.name}", reasons)
+    for index, row in enumerate(expected_rows):
+      if row.get("request_ids") == []:
+        empty_masks = (
+            index < arrays["action_mask"].shape[0]
+            and index < arrays["completion_valid_mask"].shape[0]
+            and not np.any(arrays["action_mask"][index])
+            and not np.any(arrays["completion_valid_mask"][index])
+        )
+        _require(empty_masks, f"update_sidecar_empty_response:{step}:{index}", reasons)
     pre_record = pre_by_step.get(step, {})
     receipt = pre_record.get("tito_update_sidecar", {})
     unhashed_record = dict(pre_record)
@@ -648,12 +659,6 @@ def classify(
         reasons,
     )
     _require(
-        collection["engine_echo_comparisons"]
-        == collection["trajectories"] + collection["later_turn_comparisons"],
-        "engine_echo_coverage",
-        reasons,
-    )
-    _require(
         collection["capsules_reserved"]
         == collection["capsules_emitted"] + collection["emission_failures"],
         "capsule_emission_accounting",
@@ -707,10 +712,7 @@ def classify(
     if (
         not isinstance(trajectory_id, str)
         or len(trajectory_id) != 32
-        or not isinstance(request_ids, list)
-        or not request_ids
-        or any(not isinstance(value, str) or not value for value in request_ids)
-        or len(set(request_ids)) != len(request_ids)
+        or not collection_classifier.token_continuity.record_full_request_identity_valid(row)
     ):
       reasons.append("row_map_request_identity")
       continue
@@ -723,6 +725,23 @@ def classify(
       reasons,
   )
   if collection:
+    no_response_rows = sum(
+        row.get("request_ids") == []
+        and collection_classifier.token_continuity.record_full_request_identity_valid(row)
+        for row in row_maps
+    )
+    _require(
+        collection.get("engine_echo_comparisons")
+        == collection.get("trajectories", 0) - no_response_rows
+        + collection.get("later_turn_comparisons", 0),
+        "engine_echo_coverage",
+        reasons,
+    )
+    _require(
+        no_response_rows <= collection.get("unexercised_single_turn_trajectories", 0),
+        "no_response_unexercised_coverage",
+        reasons,
+    )
     _require(
         sum(int(row.get("later_turns", 0)) for row in row_maps)
         == collection.get("later_turn_comparisons"),
@@ -922,6 +941,9 @@ def classify(
       "compared_trajectories": collection.get("compared_trajectories", 0),
       "unexercised_trajectories": collection.get(
           "unexercised_single_turn_trajectories", 0
+      ),
+      "no_completed_response_trajectories": sum(
+          row.get("request_ids") == [] for row in row_maps
       ),
       "different_trajectories": collection.get("different_trajectories", 0),
       "token_difference_events": collection.get("token_difference_events", 0),

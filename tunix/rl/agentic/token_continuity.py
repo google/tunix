@@ -1872,6 +1872,51 @@ def write_tito_diagnostic_summary(
   return target, hashlib.sha256(payload).hexdigest(), len(payload)
 
 
+def record_full_request_identity_valid(row: Mapping[str, Any]) -> bool:
+  """Distinguishes unreturned responses from lost identity on returned data.
+
+  Request IDs here name completed, witnessed responses, not submitted requests.
+  Pre-response termination can have none, but needs an explicit zero-data
+  receipt. This does not waive request validation for any returned response.
+  """
+  requests = row.get("request_ids")
+  if not isinstance(requests, list) or any(
+      not isinstance(value, str) or not value for value in requests
+  ):
+    return False
+  if len(set(requests)) != len(requests):
+    return False
+  empty = row.get("empty_response")
+  if requests:
+    return empty is None
+  zero_fields = (
+      "completed_model_calls", "trajectory_steps", "completion_tokens",
+      "action_tokens",
+  )
+  if not isinstance(empty, dict) or set(empty) != {
+      "schema", "status", "timeout_stage", *zero_fields
+  }:
+    return False
+  terminal_stages = {
+      "MODEL_TIMEOUT": ("model_generation",),
+      "ENV_TIMEOUT": ("environment_reset", "sandbox_start"),
+      "TIMEOUT": ("trajectory_deadline",),
+      "REWARD_TIMEOUT": ("final_reward",),
+      "MAX_CONTEXT_LIMIT_REACHED": ("",),
+      "MAX_STEPS_REACHED": ("",),
+  }
+  status = empty.get("status")
+  return (
+      empty.get("schema") == "canon.p57-tito-empty-response.v1"
+      and isinstance(status, str)
+      and empty.get("timeout_stage") in terminal_stages.get(status, ())
+      and all(type(empty.get(key)) is int and empty[key] == 0 for key in zero_fields)
+      and type(row.get("later_turns")) is int
+      and row["later_turns"] == 0
+      and row.get("token_different") is False
+  )
+
+
 def append_full_record_batch_map(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -1902,13 +1947,7 @@ def append_full_record_batch_map(
         or row < 0
         or type(step) is not int
         or step < 0
-        or not isinstance(request_ids, list)
-        or not request_ids
-        or any(
-            not isinstance(request_id, str) or not request_id
-            for request_id in request_ids
-        )
-        or len(set(request_ids)) != len(request_ids)
+        or not record_full_request_identity_valid(record)
     ):
       raise ValueError("record-full row identity is malformed")
     if (
