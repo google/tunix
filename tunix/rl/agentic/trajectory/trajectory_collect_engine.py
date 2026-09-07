@@ -27,6 +27,9 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from absl import logging
 import numpy as np
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import store as store_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -68,36 +71,63 @@ class TrajectoryCollectEngine:
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
+      on_model_step_callback: Optional[Callable[[Any], None]] = None,
+      on_env_step_callback: Optional[Callable[[Any], None]] = None,
+      on_rollout_output_callback: Optional[
+          Callable[[base_rollout.RolloutOutput], None]
+      ] = None,
+      on_final_reward_callback: Optional[Callable[[Any], None]] = None,
+      policy_version: Optional[int] = None,
+      trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
+      metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
   ):
     """Initialize the trajectory collection engine.
 
     Args:
-        agent (ConversationAgentBase): The agent that will interact with the
-          environment
-        env (BaseTaskEnv): The environment providing tasks and feedback
-        model_call (Callable): Function that takes chat completions as first
-          argument with optional kwargs and returns model response string.
-          Handles the actual LLM inference.
-        model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
-          model_call.
-        gamma (float): Discount factor for MC reward calculation (1.0 = no
-          discounting).
-        max_response_length (Optional[int]): Maximum number of context tokens to
-          use before forced termination.
-        timeout (float): Maximum episode duration in seconds before timeout
-          termination
-        tokenizer: Optional tokenizer for converting messages to token IDs. This
-          is required if we want to track down token counts.
-        chat_parser: Optional chat parser for formatting messages
-        filter_statuses (Set[TrajectoryStatus]): A set of statuses that are
-          masked out for overlong filtering.
-        overlong_filter: Whether to filter overlong trajectories.
-        perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
-          to use for performance measurements. Defaults to a no-op tracer.
+      agent (ConversationAgentBase): The agent that will interact with the
+        environment
+      env (BaseTaskEnv): The environment providing tasks and feedback
+      model_call (Callable): Function that takes chat completions as first
+        argument with optional kwargs and returns model response string. Handles
+        the actual LLM inference.
+      model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
+        model_call.
+      gamma (float): Discount factor for MC reward calculation (1.0 = no
+        discounting).
+      max_response_length (Optional[int]): Maximum number of context tokens to
+        use before forced termination.
+      timeout (float): Maximum episode duration in seconds before timeout
+        termination
+      tokenizer: Optional tokenizer for converting messages to token IDs. This
+        is required if we want to track down token counts.
+      chat_parser: Optional chat parser for formatting messages
+      filter_statuses (Set[TrajectoryStatus]): A set of statuses that are masked
+        out for overlong filtering.
+      overlong_filter: Whether to filter overlong trajectories.
+      perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer to
+        use for performance measurements. Defaults to a no-op tracer.
+      on_model_step_callback: Optional callback invoked when model step
+        completes.
+      on_env_step_callback: Optional callback invoked when env step completes.
+      on_rollout_output_callback: Optional callback invoked when model_call
+        returns rollout_output.
+      on_final_reward_callback: Optional callback invoked when final reward is
+        computed and added to last step.
+      policy_version: Optional policy version integer to pass down for
+        trajectory and performance tracing.
+      trajectory_store: Optional TrajectoryWriter to write trajectory steps to.
+      metadata: Optional TrajectoryMetadata for the current episode.
     """
     self.agent = agent
     self.env = env
     self.model_call = model_call
+    self.on_model_step_callback = on_model_step_callback
+    self.on_env_step_callback = on_env_step_callback
+    self.on_rollout_output_callback = on_rollout_output_callback
+    self.on_final_reward_callback = on_final_reward_callback
+    self.policy_version = policy_version
+    self.trajectory_store = trajectory_store
+    self.metadata = metadata
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     self.perf_v2 = (
@@ -180,6 +210,22 @@ class TrajectoryCollectEngine:
     self._logged_clip_reasons.add(reason)
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
 
+  def _sync_trajectory_metadata(
+      self, policy_version: Optional[int] = None
+  ) -> None:
+    """Syncs metadata status and agent trajectory timing/reward in place."""
+    if self.metadata is not None:
+      effective_policy_version = (
+          policy_version if policy_version is not None else self.policy_version
+      )
+      converter_lib.update_trajectory_metadata(
+          metadata=self.metadata,
+          agent=self.agent,
+          policy_version=effective_policy_version,
+          env_time=self.env_time,
+          reward_time=self.reward_time,
+      )
+
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
 
@@ -198,6 +244,12 @@ class TrajectoryCollectEngine:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
     await self._reset()
+
+    if self.trajectory_store is not None and self.metadata is not None:
+      task = self.agent.trajectory.task or getattr(self.env, "task", None)
+      task_step = converter_lib.create_task_step(task)
+      if task_step is not None:
+        self.trajectory_store.add_step(task_step, self.metadata)
 
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
     self._logged_clip_reasons.clear()
@@ -228,6 +280,18 @@ class TrajectoryCollectEngine:
       self.compute_trajectory_reward()
     finally:
       await self._close()
+      if self.trajectory_store is not None and self.metadata is not None:
+        self._sync_trajectory_metadata(policy_version=self.policy_version)
+        for i, step in enumerate(self.agent.trajectory.steps):
+          agent_step = converter_lib.create_agent_step(
+              step,
+              tunix_step_id=i,
+              policy_version=self.policy_version,
+          )
+          if agent_step is not None:
+            self.trajectory_store.add_step(agent_step, self.metadata)
+        self.trajectory_store.update_metadata(self.metadata)
+        self.trajectory_store.flush()
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -314,6 +378,14 @@ class TrajectoryCollectEngine:
           else conversation_masks
       )
 
+      policy_version = self.policy_version
+      if (
+          policy_version is None
+          and hasattr(self.env, "task")
+          and isinstance(self.env.task, dict)
+      ):
+        policy_version = self.env.task.get("policy_version")
+
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
@@ -326,7 +398,7 @@ class TrajectoryCollectEngine:
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
-          "policy_version": self.env.task.get("policy_version"),
+          "policy_version": policy_version,
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
@@ -438,13 +510,19 @@ class TrajectoryCollectEngine:
   @property
   def _debug_prefix(self) -> str:
     """Returns a consistent log prefix with step_idx, pair_index, and group_id."""
-    extra = getattr(self.env, "extra_kwargs", {}) or {}
+    extra = getattr(self.env, "extra_kwargs", {})
     step_idx = len(self.agent.trajectory.steps)
     pair_index = extra.get("pair_index")
     group_id = extra.get("group_id")
-    return (
-        f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
-    )
+    if pair_index is not None and group_id is not None:
+      return (
+          f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
+      )
+    if group_id is not None:
+      return f"[step_idx={step_idx}, group_id={group_id}]"
+    if pair_index is not None:
+      return f"[step_idx={step_idx}, pair_index={pair_index}]"
+    return f"[step_idx={step_idx}]"
 
   def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None
@@ -465,7 +543,9 @@ class TrajectoryCollectEngine:
       pair_index = self.env.extra_kwargs.get("pair_index")
       if pair_index is not None:
         tags[perf_constants.PAIR_INDEX] = pair_index
-    if hasattr(self.env, "task"):
+    if self.policy_version is not None:
+      tags[perf_constants.STEP] = self.policy_version
+    elif hasattr(self.env, "task") and isinstance(self.env.task, dict):
       policy_version = self.env.task.get("policy_version")
       if policy_version is not None:
         tags[perf_constants.STEP] = policy_version
@@ -540,6 +620,8 @@ class TrajectoryCollectEngine:
           _safe_model_call,
       )
     logging.debug("%s model_call done", self._debug_prefix)
+    if self.on_rollout_output_callback:
+      self.on_rollout_output_callback(rollout_output)
 
     # Align trajectory prompt tokens with the rollout worker's actual
     # tokenization on the first turn to prevent prompt token desync.
@@ -555,6 +637,55 @@ class TrajectoryCollectEngine:
       self._response_token_count += len(rollout_output.tokens[0])
 
     action = self.agent.update_from_model(rollout_output.text[0]).action
+    cur_step = self.agent.get_current_step()
+    if cur_step is not None:
+      if rollout_output.tokens:
+        if self.tokenizer and self.chat_parser:
+          cur_step.assistant_tokens, n_append = (
+              self.chat_parser.update_assistant_end_tokens(
+                  rollout_output.tokens[0]
+              )
+          )
+          cur_step.assistant_masks = np.concatenate(
+              [
+                  np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
+                  np.zeros(n_append, dtype=np.int32),
+              ],
+              axis=0,
+          )
+          if rollout_output.logprobs is not None:
+            cur_step.logprobs = np.concatenate(
+                [
+                    rollout_output.logprobs[0],
+                    np.zeros(n_append, dtype=np.float32),
+                ],
+                axis=0,
+            )
+        else:
+          cur_step.assistant_tokens = rollout_output.tokens[0]
+          if rollout_output.logprobs is not None:
+            cur_step.logprobs = rollout_output.logprobs[0]
+      elif rollout_output.logprobs is not None:
+        cur_step.logprobs = rollout_output.logprobs[0]
+
+    if self.on_model_step_callback:
+      self.on_model_step_callback(cur_step)
+
+    if (
+        self.trajectory_store is not None
+        and self.metadata is not None
+        and cur_step is not None
+    ):
+      tunix_step_id = max(0, len(self.agent.trajectory.steps) - 1)
+      agent_step = converter_lib.create_agent_step(
+          cur_step,
+          tunix_step_id=tunix_step_id,
+          policy_version=self.policy_version,
+      )
+      if agent_step is not None:
+        self._sync_trajectory_metadata(policy_version=self.policy_version)
+        self.trajectory_store.add_step(agent_step, self.metadata)
+
     logging.debug(
         "%s Agent Action:\n%s",
         self._debug_prefix,
@@ -622,38 +753,16 @@ class TrajectoryCollectEngine:
       self.agent.update_from_env(
           obs, rew, done, self._rollout_state_info(info)
       )
+      if self.on_env_step_callback:
+        self.on_env_step_callback(self.agent.get_current_step())
     else:
       done = True
 
-    cur_step = self.agent.get_current_step()
-
-    if cur_step is not None and rollout_output.logprobs is not None:
-      cur_step.logprobs = rollout_output.logprobs[0]
-
     step_timed_out = time.perf_counter() - self._start_ts > self.timeout
     if cur_step is not None and self.tokenizer and self.chat_parser:
-      assistant_message, env_messages = (
-          utils.get_recent_assistant_user_messages(self.agent.chat_completions)
+      _, env_messages = utils.get_recent_assistant_user_messages(
+          self.agent.chat_completions
       )
-
-      # Assistant tokens/masks
-      if assistant_message:
-        cur_step.assistant_tokens, n_append = (
-            self.chat_parser.update_assistant_end_tokens(
-                rollout_output.tokens[0]
-            )
-        )
-        cur_step.assistant_masks = np.concatenate(
-            [
-                np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
-                np.zeros(n_append, dtype=np.int32),
-            ],
-            axis=0,
-        )
-        if cur_step.logprobs is not None:
-          cur_step.logprobs = np.concatenate(
-              [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
-          )
 
       # Environment tokens/masks
       # Terminal-step environment messages are not appended to the response
@@ -669,6 +778,19 @@ class TrajectoryCollectEngine:
         cur_step.env_tokens = np.array(e_tokens)
         cur_step.env_masks = np.array(e_masks)
         self._response_token_count += len(e_tokens)
+
+    if (
+        self.trajectory_store is not None
+        and self.metadata is not None
+        and cur_step is not None
+    ):
+      tunix_step_id = max(0, len(self.agent.trajectory.steps) - 1)
+      env_step = converter_lib.create_env_step(
+          cur_step, tunix_step_id=tunix_step_id
+      )
+      if env_step is not None:
+        self._sync_trajectory_metadata()
+        self.trajectory_store.add_step(env_step, self.metadata)
 
     if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
@@ -702,6 +824,20 @@ class TrajectoryCollectEngine:
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward
+    if self.on_final_reward_callback:
+      self.on_final_reward_callback(last_step)
+    if (
+        self.trajectory_store is not None
+        and self.metadata is not None
+        and last_step is not None
+    ):
+      tunix_step_id = max(0, len(self.agent.trajectory.steps) - 1)
+      env_step = converter_lib.create_env_step(
+          last_step, tunix_step_id=tunix_step_id
+      )
+      if env_step is not None:
+        self._sync_trajectory_metadata()
+        self.trajectory_store.add_step(env_step, self.metadata)
     logging.debug(
         "%s Final reward computed: %s", self._debug_prefix, final_reward
     )
