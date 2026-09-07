@@ -924,7 +924,10 @@ class M15TokenContinuityTest(unittest.TestCase):
       self.assertEqual(snapshot["capsules_omitted"], 0)
       token_continuity._reset_token_collection_for_test()
 
-  def test_orbax_probe_is_independent_and_fail_closed(self):
+  def test_dp4_orbax_probe_metadata_and_restore_negative(self):
+    self.test_orbax_probe_is_independent_and_fail_closed(dp=4)
+
+  def test_orbax_probe_is_independent_and_fail_closed(self, dp=8):
     class Model:
 
       def __init__(self, value):
@@ -955,6 +958,9 @@ class M15TokenContinuityTest(unittest.TestCase):
 
     with tempfile.TemporaryDirectory() as tmp:
       values = _p57_environment("p45")
+      if dp == 4:
+        values.update(token_continuity.fl_geometry.geometry(token_continuity.fl_geometry.SMALL).environment())
+        values[token_continuity.fl_geometry.SELECTOR] = token_continuity.fl_geometry.SMALL
       values.update({
           token_continuity.P57_TOKEN_CONTINUITY_DEBUG_ENV: "record-full",
           "CANON_STATE": tmp,
@@ -977,6 +983,7 @@ class M15TokenContinuityTest(unittest.TestCase):
           value_reader=lambda model: model.value,
       )
       self.assertEqual(record["status"], "PASS")
+      self.assertEqual(record["dp"], dp)
       self.assertTrue(record["restored_equal"])
       self.assertTrue(managers[0].root.endswith("/orbax-admission-probe"))
       receipt = Path(tmp) / "p57_tito_gcs/orbax-probe.json"
@@ -1061,7 +1068,10 @@ class M15TokenContinuityTest(unittest.TestCase):
         with self.subTest(change=change), self.assertRaisesRegex(ValueError, "identity is malformed"):
           token_continuity.append_full_record_batch_map([{**row, **change}], state_dir=tmp)
 
-  def test_actor_snapshot_request_is_consumed_before_update(self):
+  def test_dp4_actor_snapshot_consumption_and_metadata(self):
+    self.test_actor_snapshot_request_is_consumed_before_update(dp=4)
+
+  def test_actor_snapshot_request_is_consumed_before_update(self, dp=8):
     class FakeManager:
 
       def __init__(self, root):
@@ -1080,6 +1090,9 @@ class M15TokenContinuityTest(unittest.TestCase):
 
     with tempfile.TemporaryDirectory() as tmp:
       values = _p57_environment("p45")
+      if dp == 4:
+        values.update(token_continuity.fl_geometry.geometry(token_continuity.fl_geometry.SMALL).environment())
+        values[token_continuity.fl_geometry.SELECTOR] = token_continuity.fl_geometry.SMALL
       values.update({
           "CANON_P57_TOKEN_CONTINUITY_DEBUG": "record-full",
           "CANON_STATE": tmp,
@@ -1101,7 +1114,7 @@ class M15TokenContinuityTest(unittest.TestCase):
           "source_commit": "a" * 40,
           "image_identity": values["CANON_CLIENT_IMAGE"],
           "workload": "p45",
-          "dp": 8,
+          "dp": dp,
           "tp": 8,
       }
       request_path = request_dir / "step-000005.json"
@@ -1134,7 +1147,7 @@ class M15TokenContinuityTest(unittest.TestCase):
       self.assertFalse(receipt["optimizer_included"])
       self.assertFalse(receipt["resumable"])
       self.assertEqual(receipt["image_identity"], values["CANON_CLIENT_IMAGE"])
-      self.assertEqual(receipt["dp"], 8)
+      self.assertEqual(receipt["dp"], dp)
       self.assertEqual(receipt["tp"], 8)
       self.assertEqual(
           receipt["categories"], ["first-any", "first-ge-1", "first-ge-8"]

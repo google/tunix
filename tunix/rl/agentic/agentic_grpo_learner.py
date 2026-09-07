@@ -191,14 +191,16 @@ def _canonical_alignment_sampler_is_valid(
 
 def _p57_tim_purity_enabled(env: Mapping[str, str]) -> bool:
   """Return whether the signed P57 training purity contract applies."""
+  from examples.frozenlake import training_geometry as fl_geometry
+  geom = fl_geometry.from_env(env)
   return (
       env.get("CANON_P57_RUN_KIND") == "train"
       and env.get("CANON_P57_TIM_ARM") in ("mismatch", "zero")
       and env.get("CANON_PROFILE_FILE") in (
           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
-          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+          geom.profile_file,
       )
-      and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
+      and env.get("CANON_P32_WORKLOAD") == geom.workload
   )
 
 

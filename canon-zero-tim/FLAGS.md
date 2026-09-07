@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 422 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 423 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -98,6 +98,33 @@
 | P45 rank-1 first-red | CANON_P64_P45_NUMERIC_DEBUG 与 `CANON_P64_TRAINING_CAPSULE_{MODE,GCS_URI,SHA256}`、`CANON_P64_TRAINING_CAPSULE`、`CANON_P64_MODEL_BINDING_SHA256`:仅严格原始 P45 DP8xTP8、APC-off、P59 fixed-head、`backward-no-commit` 载具可开。capture 在 strict pre-alignment 后原子保存完整 tensorized train batch，并在 backward 前绑定 live model sample；replay 逐数组/文件/模型指纹验真，跳过 environment/rollout/B-rescore，只执行完整 trainer forward 与 group-0 backward，随后丢弃 accumulator。Replay 明示 `certification=0`，不能冒充新 Zero-TIM 认证；首次 NaN/Inf 立即停，绝不 clamp/cast/commit | 默认 off；定位 Attempt-7 P45 rank1 的首个 finite→non-finite 边界并完成根因修复后整体退役，所有 capsule、失败证据与 GCS 路径永久保留 |
 
 ## D 层 · 发射/基建管道(~230,按前缀组;逐条语义允许"待考古")
+
+T9g registers `CANON_P57_TRAIN_GEOMETRY`: absent retains the historical
+DP8xTP8/B32xG8 full recipe; the only present value is `dp4-tp8-b128`.
+It selects a separate P45/M15 Zero-HP full profile (32 chips, B16xG8,
+global M1024/local M256, 32 gradient groups, 300 updates), never a diagnostic,
+Native/IS or GSM8K override. This changes global batch/data budget; it is not
+a speed-only same-trajectory claim. APC/eval/checkpoint remain off and all
+existing numerical/backward gates remain in force. Default off; construction
+and target certification tracked in T9g. Retire only after a separately approved
+recipe migration; old evidence remains attached to DP8xTP8/B256.
+
+The enum is workload/infrastructure, not a numerical-algorithm switch.
+The P67 wrapper and P57 renderer write it only for the explicit small
+option; profiles and `00_env.sh` validate raw/resolved values, the learner
+Python process validates `examples.frozenlake.training_geometry`, and
+`90_run.sh` forwards the same geometry to both postflight classifiers.
+Empty, `0`, unknown and explicitly present legacy values reject; the
+legacy renderer emits no key. P59/P63/P67/first-update, fixed-head and TiTO
+full identities may use the new geometry **only as a complete T9g tuple**;
+diagnostic identities remain DP8xTP8. Qwen3-8B/TP8 adds caller-global M1024
+to the head admission table without changing local/kernel M256 or TP
+reduction math. T9g host (P57 248/V1 104/APC 12/flags 423), eight-case real
+runtime admission, bounded DP4xTP8 CPU reducer and complete pinned-image
+gates pass; see `tasks/multiturn-tito-cross-workload/evidence/t9g-host-20260907/receipt.json`.
+These are fresh construction claims, not inherited DP4xTP8 target
+certification. Both workload arms must declare their global
+batch/data budget when compared with historical Native/IS curves.
 
 | 前缀组 | 用途 | 处置 |
 |---|---|---|
@@ -456,6 +483,7 @@ CANON_P57_TITO_ROLLOUT_ONLY
 CANON_P57_TITO_RUNNER_WITNESS_DIR
 CANON_P57_TOKEN_CONTINUITY
 CANON_P57_TOKEN_CONTINUITY_DEBUG
+CANON_P57_TRAIN_GEOMETRY
 CANON_P57_WORKLOAD_CANDIDATE
 CANON_P58_CHECKED_VMA_DIAGNOSTIC
 CANON_P58_DEBUG_DIR
@@ -587,4 +615,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 422 settable names (appendix inventory above; exclusions: none).
+Count: 423 settable names (appendix inventory above; exclusions: none).

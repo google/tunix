@@ -13,6 +13,7 @@ import sys
 
 
 _REPO = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_REPO))
 _TOKEN_PATH = _REPO / "tunix/rl/agentic/token_continuity.py"
 _TOKEN_SPEC = importlib.util.spec_from_file_location(
     "p57_token_continuity_extractor", _TOKEN_PATH

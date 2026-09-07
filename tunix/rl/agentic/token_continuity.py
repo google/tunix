@@ -72,6 +72,9 @@ _COLLECTION_STATE = {
     "alignment_updates": 0,
 }
 
+from examples.frozenlake import training_geometry as fl_geometry
+
+
 _M15_FULL_IDENTITY = {
     "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
     "CANON_PROFILE_FILE": (
@@ -401,7 +404,7 @@ def run_tito_orbax_admission_probe(
   contract = frozenlake_token_continuity(env)
   if (
       contract is None
-      or env.get("CANON_DP_SIZE") != "8"
+      or env.get("CANON_DP_SIZE") != str(fl_geometry.from_env(env).dp)
       or env.get("CANON_TP_SIZE") != "8"
   ):
     raise ValueError("Orbax admission probe requires production DP8xTP8")
@@ -495,7 +498,7 @@ def run_tito_orbax_admission_probe(
             "source_commit": source_commit,
             "image_identity": image_identity,
             "workload": contract.workload,
-            "dp": 8,
+            "dp": int(env["CANON_DP_SIZE"]),
             "tp": 8,
         },
     )
@@ -537,7 +540,7 @@ def run_tito_orbax_admission_probe(
       "workload": contract.workload,
       "source_commit": source_commit,
       "image_identity": image_identity,
-      "dp": 8,
+      "dp": int(env["CANON_DP_SIZE"]),
       "tp": 8,
       "probe_root_sha256": hashlib.sha256(probe_root.encode()).hexdigest(),
       "saved_step": 0,
@@ -549,7 +552,7 @@ def run_tito_orbax_admission_probe(
   _write_exclusive_json(receipt_path, record)
   print(
       "[P57.TITO.ORBAX_PROBE] "
-      f"{record['status']} workload={contract.workload} dp=8 tp=8 "
+      f"{record['status']} workload={contract.workload} dp={record['dp']} tp=8 "
       f"restored_equal={int(restored_equal)} "
       f"root_sha256={record['probe_root_sha256']}",
       flush=True,
@@ -698,7 +701,7 @@ def m15_token_continuity_mode(
       if onehost_identity
       else _M15_APC_DEBUG_IDENTITY
       if debug_identity
-      else _M15_FULL_IDENTITY
+      else fl_geometry.full_expected(_M15_FULL_IDENTITY, env)
   )
   drift = {
       name: (env.get(name), expected)
@@ -817,7 +820,7 @@ def frozenlake_token_continuity(
         **(
             _P57_TITO_DIAGNOSTIC_COMMON_IDENTITY
             if diagnostic
-            else _P57_FULL_COMMON_IDENTITY
+            else fl_geometry.full_expected(_P57_FULL_COMMON_IDENTITY, env)
         ),
         **_P57_FULL_WORKLOAD_IDENTITIES[workload],
     }
@@ -2020,7 +2023,7 @@ def consume_actor_snapshot_request(
       re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
       or not image_identity
       or not expected_workload
-      or os.environ.get("CANON_DP_SIZE", "") != "8"
+      or os.environ.get("CANON_DP_SIZE", "") != str(fl_geometry.from_env(os.environ).dp)
       or os.environ.get("CANON_TP_SIZE", "") != "8"
   ):
     raise ValueError(
@@ -2066,7 +2069,7 @@ def consume_actor_snapshot_request(
         or request.get("source_commit") != source_commit
         or request.get("image_identity") != image_identity
         or request.get("workload") != expected_workload
-        or request.get("dp") != 8
+        or request.get("dp") != int(os.environ["CANON_DP_SIZE"])
         or request.get("tp") != 8
     ):
       raise ValueError(f"actor snapshot request identity differs: {path.name}")

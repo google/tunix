@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -250,6 +251,86 @@ class FullClassifierTest(unittest.TestCase):
           ],
           8.0,
       )
+
+  def _small_frozenlake_evidence(self, root, recipe):
+    from examples.frozenlake.training_geometry import geometry, SMALL, SELECTOR
+    geom = geometry(SMALL)
+    state, run_log, update_path, base_path = self._evidence(root)
+    old_env = classifier._resolved_env(state / "env.sh")
+    contract = {**classifier._RECIPES[recipe], "profile": geom.profile_file}
+    env = {**classifier._required_recipe_env(recipe, contract), **geom.environment(),
+           SELECTOR: SMALL, "CANON_XPROF_DIR": old_env["CANON_XPROF_DIR"]}
+    (state / "env.sh").write_text("".join(f"export {key}={value}\n" for key, value in env.items()))
+    for phase in ("restore", "save"):
+      path = state / f"jax_cache_{phase}.receipt"
+      path.write_text(path.read_text().replace("qwen3-1p7b-dp16-tp4-gsm8k-v1-hp", geom.profile))
+    lines = []
+    for line in run_log.read_text().splitlines():
+      if line.startswith("[CANON_ALIGN"):
+        continue
+      if line.startswith("[V1.FIRST_UPDATE] "):
+        receipt = json.loads(line.removeprefix("[V1.FIRST_UPDATE] "))
+        receipt.update(workload=geom.workload, dp=4, tp=8)
+        if "microsteps" in receipt:
+          receipt.update(microsteps=32, accumulator_denominator=32.0)
+        line = "[V1.FIRST_UPDATE] " + json.dumps(receipt)
+      else:
+        for old, new in (
+            ("[P59.DP16]", "[P59.DP4]"), ("data=16", "data=4"),
+            ("target_rows=4096", "target_rows=1024"),
+            ("global_shape=(4096,", "global_shape=(1024,"),
+            ("37984", "18992"), ("38144", "19200"),
+            ("K=2048", "K=4096"), ("TP=4", "TP=8"), ("tp=4", "tp=8"),
+            ("endpoint=tied_embed", "endpoint=untied_lm_head"),
+            ("global_M=4096", "global_M=1024"), ("semantic_M=4096", "semantic_M=1024"),
+            ("dp=16", "dp=4"), ("dp_size=16", "dp_size=4"),
+            ("local_kv_heads=2 cache_heads=2", "local_kv_heads=1 cache_heads=1"),
+            ("declared_width=6144", "declared_width=12288"),
+            ("workload=gsm8k", "workload=" + geom.workload),
+            ("max_norm=1.0", "max_norm=100.0"),
+        ):
+          line = line.replace(old, new)
+      lines.append(line)
+    lines.extend(f"[CANON_ALIGN{'_PRE' if index % 33 == 0 else ''}] step={index} verdict=PASS" for index in range(132))
+    lines.extend((
+        "[CANON_P33_EVAL] DISABLED workload=frozenlake",
+        f"[P45.CHECKPOINT] DISABLED workload_candidate={recipe} reason=v1-hp-fast-concept",
+        "[P3_APC_CONFIG] enabled=0 workload=frozenlake reader=train_frozenlake_qwen3",
+    ))
+    run_log.write_text("\n".join(lines) + "\n")
+    updates = [json.loads(line) for line in update_path.read_text().splitlines()]
+    for update in updates:
+      update["dp_rank_pullbacks_per_transaction"] = 4
+      update["commit_evidence"]["overflow_safe_clip"]["max_norm"] = 100.0
+    update_path.write_text("".join(json.dumps(update) + "\n" for update in updates))
+    base = json.loads(base_path.read_text())
+    base.update(verdict="PASS_WITH_ALIGNMENT_WARNINGS", claim_level="convergence-only", observed_alignments=128)
+    base_path.write_text(json.dumps(base))
+    return state, run_log, update_path, base_path
+
+  def test_dp4_frozenlake_full_contract_and_shape_negatives(self):
+    for recipe in ("p45", "m15"):
+      for mutation in (None, "global", "local", "chunks", "profile", "geometry"):
+        with self.subTest(recipe=recipe, mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+          state, log, updates, base = self._small_frozenlake_evidence(Path(tmp), recipe)
+          if mutation in ("global", "local", "chunks"):
+            old, new = {"global": ("global_M=1024", "global_M=2048"),
+                        "local": ("local_M=256", "local_M=512"),
+                        "chunks": ("chunks=1", "chunks=2")}[mutation]
+            log.write_text(log.read_text().replace(old, new))
+          elif mutation in ("profile", "geometry"):
+            path = state / "env.sh"
+            old, new = (("qwen3-8b-dp4-tp8-frozenlake-v1-hp", "qwen3-8b-dp8-tp8-frozenlake-v1-hp")
+                        if mutation == "profile" else ("CANON_GLOBAL_TRAJECTORIES=128", "CANON_GLOBAL_TRAJECTORIES=256"))
+            path.write_text(path.read_text().replace(old, new))
+          with mock.patch.dict(classifier._RECIPES[recipe], updates=4):
+            result = classifier.classify(recipe=recipe, state=state, run_log=log,
+                                         update_report=updates, base_classification=base,
+                                         train_geometry="dp4-tp8-b128")
+          self.assertEqual(result["verdict"], "PASS" if mutation is None else "FAIL", result["reasons"])
+          if mutation is None:
+            self.assertEqual(result["topology"], {"dp": 4, "tp": 8})
+            self.assertEqual(result["zero_tim"]["expected_pass"], 132)
 
   def test_frozenlake_contract_requires_eval_off(self):
     required = classifier._required_recipe_env(

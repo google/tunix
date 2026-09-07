@@ -25,6 +25,7 @@ import jax
 from jax.experimental import mesh_utils
 
 from tunix.rl import dp_training
+from examples.frozenlake import training_geometry as fl_geometry
 
 
 _RUN_STAGE_STEPS = {
@@ -351,13 +352,20 @@ class DPWorkloadSpec:
             "P66 unit-data TP4 proxy requires four devices and global M256"
         )
       return
-    if (self.dp_size, self.tp_size) not in ((16, 4), (8, 8)):
+    small_full = self.name == "frozenlake-dp4-tp8"
+    if small_full and (
+        (self.dp_size, self.tp_size, self.global_prompts, self.local_trajectories)
+        != (4, 8, 16, 32) or self.model_id != "Qwen/Qwen3-8B"
+        or self.periodic_evaluation
+    ):
+      raise ValueError("DP4xTP8/B128 FrozenLake geometry changed")
+    if not small_full and (self.dp_size, self.tp_size) not in ((16, 4), (8, 8)):
       raise ValueError(
           "canonical workloads require DP16xTP4 or DP8xTP8"
       )
-    if self.total_devices != 64:
+    if self.total_devices != (32 if small_full else 64):
       raise ValueError("canonical workloads require exactly 64 devices")
-    if (self.global_prompts, self.num_generations) != (32, 8):
+    if (self.global_prompts, self.num_generations) != (16 if small_full else 32, 8):
       raise ValueError(
           "canonical workloads require 32 prompts and 8 generations"
       )
@@ -585,6 +593,13 @@ _WORKLOADS = {
 }
 
 
+_WORKLOADS["frozenlake-dp4-tp8"] = dataclasses.replace(
+    _WORKLOADS["frozenlake-dp8-tp8"], name="frozenlake-dp4-tp8",
+    dp_size=4, global_prompts=16, max_steps=300, periodic_evaluation=False,
+    wandb_project="zero-tim-p57-frozenlake-tim",
+)
+
+
 def get_workload(name: str) -> DPWorkloadSpec:
   """Returns one immutable workload or rejects an unknown name."""
   try:
@@ -603,6 +618,7 @@ def active_workload(
   """Returns the selected default-off workload, if any."""
   values = os.environ if environ is None else environ
   name = values.get("CANON_P32_WORKLOAD", "")
+  fl_geometry.validate_selected_full(values)
   return None if not name else get_workload(name)
 
 
@@ -757,7 +773,7 @@ def requested_max_steps(
   if stage == "full":
     if values.get("CANON_PROFILE_FILE", "") in (
         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
-        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+        fl_geometry.from_env(values).profile_file,
     ):
       try:
         steps = int(values.get("CANON_P57_EXPECTED_UPDATES", ""))
@@ -826,7 +842,9 @@ def expected_token_widths(
       values.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
       values.get("CANON_P57_DATA_SPLIT", ""),
   )
-  if workload.name == "frozenlake-dp8-tp8":
+  if workload.name in ("frozenlake-dp8-tp8", "frozenlake-dp4-tp8"):
+    if workload.name == "frozenlake-dp4-tp8" and p57_key not in (("", ""), ("m15", "main")):
+      raise ValueError("DP4xTP8/B128 supports only P45 or M15/main")
     try:
       return _P57_DP8_TP8_TOKEN_WIDTHS[p57_key]
     except KeyError as exc:
@@ -854,6 +872,12 @@ def validate_frozenlake_max_concurrency(
   exception is intentionally tied to the complete capture/no-commit envelope
   so a stray command-line override cannot silently change a training run.
   """
+  values = os.environ if environ is None else environ
+  if workload.name == "frozenlake-dp4-tp8":
+    fl_geometry.validate_selected_full(values)
+    if max_concurrency != 128:
+      raise ValueError("DP4xTP8/B128 requires max_concurrency=128")
+    return
   if max_concurrency == 256:
     return
   values = os.environ if environ is None else environ
@@ -968,6 +992,7 @@ def validate_environment(
   """Validates topology, numerical switches, and reduction promotion."""
   workload.validate()
   values = os.environ if environ is None else environ
+  fl_geometry.validate_selected_full(values)
   expected = {
       "CANON_P32_WORKLOAD": workload.name,
       "CANON_DP_SIZE": str(workload.dp_size),
@@ -1098,11 +1123,11 @@ def validate_environment(
     wandb_project = workload.wandb_project
     p57_profile = values.get("CANON_PROFILE_FILE", "") in (
         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
-        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+        fl_geometry.from_env(values).profile_file,
     )
     if (
         p57_profile
-        and workload.name == "frozenlake-dp8-tp8"
+        and workload.name == fl_geometry.from_env(values).workload
         and values.get("CANON_P57_RUN_KIND") == "train"
         and values.get("CANON_P57_TIM_ARM") == "zero"
     ):

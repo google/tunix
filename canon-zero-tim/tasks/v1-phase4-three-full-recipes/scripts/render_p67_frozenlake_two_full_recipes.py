@@ -124,7 +124,9 @@ def render_two(
     token_continuity_debug: bool = False,
     token_continuity_debug_mode: str | None = None,
     target_cluster: str = "legacy",
+    train_geometry: str = p57.fl_geometry.LEGACY,
 ) -> tuple[Path, ...]:
+  geom = p57.fl_geometry.geometry(train_geometry)
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
   if output_dir.exists():
@@ -165,6 +167,7 @@ def render_two(
       arm="zero",
       high_performance=True,
       disable_eval=True,
+      train_geometry=train_geometry,
   )
   m15_outputs = p57.render_all(
       base_path=base_path,
@@ -180,6 +183,7 @@ def render_two(
       arm="zero",
       high_performance=True,
       disable_eval=True,
+      train_geometry=train_geometry,
   )
   outputs = (*p45_outputs, *m15_outputs)
   if len(outputs) != 2:
@@ -246,7 +250,7 @@ def render_two(
       worker_meta = worker_template.setdefault("metadata", {})
       worker_annotations = worker_meta.setdefault("annotations", {})
       worker_annotations["cloud.google.com/skip-tpu-webhook-check"] = "true"
-      worker_annotations["cloud.google.com/gke-tpu-slice-topology"] = "4x4x4"
+      worker_annotations["cloud.google.com/gke-tpu-slice-topology"] = geom.topology
 
       document["metadata"].setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
       head_meta = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"].setdefault("metadata", {})
@@ -266,9 +270,9 @@ def render_two(
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     env = _env(document)
     required = {
-        "CANON_PROFILE_FILE": _PROFILE,
+        "CANON_PROFILE_FILE": geom.profile_file,
         "CANON_V1_HP_FULL": "1",
-        "CANON_P33_SHARED_MESH": "8,8",
+        "CANON_P33_SHARED_MESH": f"{geom.dp},8",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P57_TIM_ARM": "zero",
@@ -356,6 +360,7 @@ def render_two(
       json.dumps({
           "schema": "v1-p67-frozenlake-two-full-v2",
           "target_cluster": target_cluster,
+          "train_geometry": train_geometry,
           "token_continuity": token_continuity,
           "token_continuity_debug": debug_mode,
           "manifests": receipts,
@@ -376,6 +381,8 @@ def main() -> int:
   parser.add_argument("--p45-run-id", required=True)
   parser.add_argument("--m15-run-id", required=True)
   parser.add_argument("--campaign-root", required=True)
+  parser.add_argument("--train-geometry", choices=p57.fl_geometry.CHOICES,
+                      default=p57.fl_geometry.LEGACY)
   parser.add_argument(
       "--target-cluster",
       choices=_TARGET_CLUSTERS,
@@ -418,6 +425,7 @@ def main() -> int:
       token_continuity_debug=args.token_continuity_debug,
       token_continuity_debug_mode=args.token_continuity_debug_mode,
       target_cluster=args.target_cluster,
+      train_geometry=args.train_geometry,
   )
   return 0
 

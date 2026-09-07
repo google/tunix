@@ -22,6 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
 import render_p33_jobsets as p33
 from v1_full_system_optimization import full_system_optimization_additions
 from examples.frozenlake import p57_workloads
+from examples.frozenlake import training_geometry as fl_geometry
 
 
 _PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
@@ -177,13 +178,16 @@ def _spec(
     data_split: str,
     high_performance: bool = False,
     disable_eval: bool = False,
+    train_geometry: str = fl_geometry.LEGACY,
 ) -> p33.JobSpec:
+  geom = fl_geometry.geometry(train_geometry)
   enable_train_evaluation = (
       run_kind == "train" and data_split != "selection" and not disable_eval
   )
   command = list(
       p33._frozenlake_command(  # pylint: disable=protected-access
-          expected_updates, dp_size=_DP_SIZE, tp_size=_TP_SIZE
+          expected_updates, dp_size=geom.dp, tp_size=geom.tp,
+          batch_size=geom.prompts, mini_batch_size=geom.prompts,
       )
   )
   _use_module_entrypoint(command)
@@ -265,7 +269,7 @@ def _spec(
       profile=(
           _TITO_DIAGNOSTIC_PROFILE
           if run_kind == "tito-diagnostic"
-          else _V1_HP_PROFILE
+          else geom.profile_file
           if high_performance
           else _PROFILE
       ),
@@ -274,11 +278,12 @@ def _spec(
       command=tuple(command),
       enable_evaluation=enable_train_evaluation,
       eval_every_n_steps=_EVAL_EVERY_N_STEPS,
-      dp_size=_DP_SIZE,
-      tp_size=_TP_SIZE,
+      dp_size=geom.dp,
+      tp_size=geom.tp,
       optimizer_resident=True,
       rank_parallel_backward=high_performance,
       v1_hp_full=high_performance,
+      train_geometry=(train_geometry if train_geometry != fl_geometry.LEGACY else ""),
   )
 
 
@@ -342,7 +347,16 @@ def render_all(
     high_performance: bool = False,
     disable_eval: bool = False,
     cpu_nodepool: str = "cpu-np",
+    train_geometry: str = fl_geometry.LEGACY,
 ) -> tuple[Path, ...]:
+  geom = fl_geometry.geometry(train_geometry)
+  if train_geometry != fl_geometry.LEGACY and not (
+      high_performance and arm == "zero" and run_kind == "train"
+      and expected_updates == 300 and checkpoint_mode == "disabled"
+      and disable_eval and not stock_only
+      and (workload_candidate, data_split) in (("", ""), ("m15", "main"))
+  ):
+    raise ValueError("DP4xTP8/B128 is restricted to P45/M15 Zero-HP full training")
   if expected_updates not in _ALLOWED_UPDATES:
     raise ValueError(
         f"P57 expected updates must be one of {_ALLOWED_UPDATES}, "
@@ -518,6 +532,7 @@ def render_all(
         data_split=data_split,
         high_performance=high_performance,
         disable_eval=disable_eval,
+        train_geometry=train_geometry,
     )
     path = output_dir / f"jobset-{spec.key}.yaml"
     if path.exists():
@@ -626,6 +641,10 @@ def render_all(
               "CANON_P57_TITO_ROLLOUT_ONLY": "1",
           },
       )
+    if train_geometry != fl_geometry.LEGACY:
+      # Raw geometry receipts are explicit so 00_env can reject contradictions
+      # before a sourced profile has a chance to overwrite them.
+      _replace_env(document, geom.environment())
     if high_performance:
       _replace_env(
           document,
@@ -658,7 +677,7 @@ def render_all(
         "CANON_PROFILE_FILE": (
             _TITO_DIAGNOSTIC_PROFILE
             if tito_diagnostic
-            else _V1_HP_PROFILE
+            else geom.profile_file
             if high_performance
             else _PROFILE
         ),

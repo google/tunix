@@ -8,6 +8,8 @@ set -uo pipefail
 source "$CANON_STATE/env.sh"
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
+source "$CANON_PKG/cluster/steps/p57_training_geometry.sh"
+p57_training_geometry_init || exit 1
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/jax_cache_sync_lib.sh"
 # shellcheck disable=SC1091
@@ -387,7 +389,7 @@ elif [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
     echo "[run] FATAL: P64 full-log seed requires its exact profile" >&2
     exit 1
   fi
-  p64_profile_receipt="[P64.NUMERIC] profile_resolved workload=frozenlake-dp8-tp8 dp=8 tp=8 stage=backward-no-commit optimizer_commits=0 capsule_mode=${CANON_P64_TRAINING_CAPSULE_MODE:-missing}"
+  p64_profile_receipt="[P64.NUMERIC] profile_resolved workload=${_p57_full_workload} dp=8 tp=8 stage=backward-no-commit optimizer_commits=0 capsule_mode=${CANON_P64_TRAINING_CAPSULE_MODE:-missing}"
   printf '%s\n' "$p64_profile_receipt" > "$LOG"
   echo "$p64_profile_receipt"
   run_tee_args=(-a "$LOG")
@@ -1225,7 +1227,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       p38_fixed_tp=4
       ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
+    ${_p57_full_profile_file}|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
@@ -1269,21 +1271,21 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       if [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
         p38_fixed_receipt_args+=(--request-only)
       else
-        p38_fixed_receipt_args+=(--learner-m 2048)
+        p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")
         if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
-          p38_fixed_receipt_args+=(--p59-local-dp-size 8)
+          p38_fixed_receipt_args+=(--p59-local-dp-size "$_p57_full_dp")
         fi
       fi
       ;;
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
+    ${_p57_full_profile_file}|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
-      p38_fixed_receipt_args+=(--learner-m 2048)
+      p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")
       if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
-        p38_fixed_receipt_args+=(--p59-local-dp-size 8)
+        p38_fixed_receipt_args+=(--p59-local-dp-size "$_p57_full_dp")
       fi
       ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env)
-      p38_fixed_receipt_args+=(--learner-m 2048)
+      p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")
       ;;
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env|\
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env)
@@ -1412,7 +1414,7 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && [ "$n_wandb" -ne 1 ]; then
 fi
 if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ]; then
   case "${CANON_P32_WORKLOAD:-}" in
-    frozenlake|frozenlake-dp8-tp8) is_frozenlake=1 ;;
+    frozenlake|${_p57_full_workload}) is_frozenlake=1 ;;
     *) is_frozenlake=0 ;;
   esac
 fi
@@ -1877,7 +1879,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
     if { [ "${CANON_PROFILE_FILE:-}" = \
            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
          [ "${CANON_PROFILE_FILE:-}" = \
-           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; } && \
+           "${_p57_full_profile_file}" ]; } && \
        [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
       p57_eval_classification="$CANON_STATE/p57_inprocess_eval.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
@@ -1894,13 +1896,13 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       echo "[P57.EVAL] EVIDENCE classification=$p57_eval_classification classification_sha256=$p57_eval_class_sha"
     fi
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
-      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+      if [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
          [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ]; then
         p57_classifier_args+=(--alignment-warning-only 1 --p57-ab-only 1)
       else
         p57_classifier_args+=(--alignment-warning-only 0)
       fi
-      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; then
+      if [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ]; then
         p57_classifier_args+=(--expected-updates "$CANON_P57_EXPECTED_UPDATES")
       fi
     elif [ "${CANON_PROFILE_FILE:-}" = \
@@ -1928,8 +1930,8 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
       case "${CANON_P32_WORKLOAD:-}:${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
         gsm8k::) v1_recipe=gsm8k ;;
-        frozenlake-dp8-tp8::) v1_recipe=p45 ;;
-        frozenlake-dp8-tp8:m15:main) v1_recipe=m15 ;;
+        ${_p57_full_workload}::) v1_recipe=p45 ;;
+        ${_p57_full_workload}:m15:main) v1_recipe=m15 ;;
         *)
           echo "[run] FATAL: unknown V1 high-performance recipe identity" >&2
           exit 1
@@ -1939,6 +1941,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
         python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py" \
           --recipe "$v1_recipe" \
+          --train-geometry "${CANON_P57_TRAIN_GEOMETRY:-dp8-tp8-b256}" \
           --state "$CANON_STATE" \
           --run-log "$LOG" \
           --update-report "$CANON_UPDATE_REPORT" \
@@ -1952,6 +1955,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
           python3 "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py" \
             --state "$CANON_STATE" \
             --recipe "$v1_recipe" \
+          --train-geometry "${CANON_P57_TRAIN_GEOMETRY:-dp8-tp8-b256}" \
             --base-classification "$classification" \
             --v1-classification "$v1_classification" \
             --output "$p57_tito_full_classification" || exit 1
@@ -1971,7 +1975,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
     if [ "${CANON_PROFILE_FILE:-}" = \
          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
        [ "${CANON_PROFILE_FILE:-}" = \
-         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; then
+         "${_p57_full_profile_file}" ]; then
       class_sha="$(sha256sum "$classification" | awk '{print $1}')"
       echo "[P57.TRAIN] EVIDENCE classification=$classification classification_sha256=$class_sha"
       JAX_PLATFORMS=cpu python3 -c \

@@ -273,6 +273,33 @@ class FixedLmHeadReceiptTest(unittest.TestCase):
             red["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_FAIL"
         )
 
+  def test_p59_local_dp4_m1024_passes(self):
+    report = receipts.classify(
+        _log("untied_lm_head", hidden=4096, tp_size=8,
+             learner_m=1024, p59_local_dp_size=4),
+        endpoint="untied_lm_head", hidden=4096, tp_size=8,
+        require_vjp=True, learner_m=1024, p59_local_dp_size=4,
+    )
+    self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
+    self.assertEqual(report["p59_local_M"], 256)
+
+  def test_p59_local_dp4_m1024_rejects_wrong_shapes_or_missing_reduction(self):
+    text = _log("untied_lm_head", hidden=4096, tp_size=8,
+                learner_m=1024, p59_local_dp_size=4)
+    for before, after in (("global_M=1024", "global_M=2048"),
+                          ("local_M=256", "local_M=128"),
+                          ("chunks=1", "chunks=2"),
+                          ("tp_input_reduction=all_gather_rank_order_f32_barrier", "")):
+      with self.subTest(before=before):
+        report = receipts.classify(text.replace(before, after),
+            endpoint="untied_lm_head", hidden=4096, tp_size=8,
+            require_vjp=True, learner_m=1024, p59_local_dp_size=4)
+        self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_FAIL")
+    with self.assertRaises(ValueError):
+      receipts.classify(text, endpoint="untied_lm_head", hidden=4096,
+                        tp_size=4, learner_m=1024, p59_local_dp_size=4,
+                        require_vjp=True)
+
   def test_p59_local_dp16_m4096_passes(self):
     report = receipts.classify(
         _log(

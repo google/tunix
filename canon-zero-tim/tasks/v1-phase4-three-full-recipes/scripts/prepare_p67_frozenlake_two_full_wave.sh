@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 5 || "$#" -gt 11 ]]; then
-  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--token-continuity legacy|p45-exact|m15-exact|both-exact] [--token-continuity-debug|--token-continuity-debug-mode first-diff|record-full] [--target-cluster legacy|bodaborg]" >&2
+if [[ "$#" -lt 5 || "$#" -gt 13 ]]; then
+  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--token-continuity legacy|p45-exact|m15-exact|both-exact] [--token-continuity-debug|--token-continuity-debug-mode first-diff|record-full] [--target-cluster legacy|bodaborg] [--train-geometry dp8-tp8-b256|dp4-tp8-b128]" >&2
   exit 2
 fi
 
@@ -18,8 +18,23 @@ TOKEN_CONTINUITY_SEEN=0
 TOKEN_CONTINUITY_DEBUG=off
 TARGET_CLUSTER_ARGS=()
 TARGET_CLUSTER_SEEN=0
+TRAIN_GEOMETRY_ARGS=()
+TRAIN_GEOMETRY_SEEN=0
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
+    --train-geometry)
+      if [[ "$TRAIN_GEOMETRY_SEEN" = 1 || "$#" -lt 2 ]]; then
+        echo "--train-geometry requires one non-duplicate value" >&2
+        exit 2
+      fi
+      case "$2" in
+        dp8-tp8-b256|dp4-tp8-b128) ;;
+        *) echo "unregistered training geometry" >&2; exit 2 ;;
+      esac
+      TRAIN_GEOMETRY_ARGS+=(--train-geometry "$2")
+      TRAIN_GEOMETRY_SEEN=1
+      shift 2
+      ;;
     --m15-tito-exact)
       if [[ "$TOKEN_CONTINUITY_SEEN" = 1 ]]; then
         echo "token-continuity selector may be supplied only once" >&2
@@ -134,6 +149,7 @@ python3 "$RENDERER" \
   --p45-run-id "$P45_RUN_ID" \
   --m15-run-id "$M15_RUN_ID" \
   "${TOKEN_CONTINUITY_ARGS[@]}" \
+  "${TRAIN_GEOMETRY_ARGS[@]}" \
   "${TARGET_CLUSTER_ARGS[@]}"
 
 INDEX="$OUTPUT_DIR/manifest-index.json"

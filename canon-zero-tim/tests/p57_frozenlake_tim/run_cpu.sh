@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 python3 -m unittest \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_training_geometry.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_renderer.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_checkpoint_eval.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_cycle_counter.py \

@@ -48,6 +48,7 @@ def _write_sidecar(
     rows: list[dict],
     pre_record: dict,
     empty_masks: bool = True,
+    dp: int = 8,
 ) -> None:
   count = len(rows)
   arrays = {
@@ -84,7 +85,7 @@ def _write_sidecar(
       "workload": "p45",
       "step": step,
       "rows": count,
-      "dp": 8,
+      "dp": dp,
       "tp": 8,
       "source_commit": "a" * 40,
       "image_identity": "example/image@sha256:" + "b" * 64,
@@ -129,12 +130,12 @@ def _write_sidecar(
   }
 
 
-def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
+def _fixture(root: Path, *, red: bool, dp: int = 8, row_count: int = 4) -> tuple[Path, Path, Path]:
   state = root / "state"
   rows = []
   for step in range(2):
-    for sequence_row in range(4):
-      ordinal = step * 4 + sequence_row
+    for sequence_row in range(row_count):
+      ordinal = step * row_count + sequence_row
       rows.append({
           "schema": "canon.p57-tito-row-map.v1",
           "trajectory_id": f"{ordinal + 1:032x}",
@@ -152,13 +153,13 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
   collection = {
       "active": True,
       "mode": "record-full",
-      "trajectories": 8,
+      "trajectories": 2 * row_count,
       "compared_trajectories": 4,
-      "unexercised_single_turn_trajectories": 4,
+      "unexercised_single_turn_trajectories": 2 * row_count - 4,
       "equal_trajectories": 3 if red else 4,
       "different_trajectories": 1 if red else 0,
       "later_turn_comparisons": 4,
-      "engine_echo_comparisons": 12,
+      "engine_echo_comparisons": 2 * row_count + 4,
       "engine_echo_differences": 1 if red else 0,
       "token_difference_events": 1 if red else 0,
       "capsules_reserved": 1 if red else 0,
@@ -175,7 +176,7 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
       "workload": "p45",
       "source_commit": "a" * 40,
       "image_identity": "example/image@sha256:" + "b" * 64,
-      "dp": 8,
+      "dp": dp,
       "tp": 8,
       "expected_updates": 2,
       "train_steps_before": 0,
@@ -202,7 +203,7 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
           "workload": "p45",
           "source_commit": "a" * 40,
           "image_identity": "example/image@sha256:" + "b" * 64,
-          "dp": 8,
+          "dp": dp,
           "tp": 8,
           "controller_pid": 123,
           "controller_hostname": "controller",
@@ -218,7 +219,7 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
           "workload": "p45",
           "source_commit": "a" * 40,
           "image_identity": "example/image@sha256:" + "b" * 64,
-          "dp": 8,
+          "dp": dp,
           "tp": 8,
           "probe_root_sha256": "c" * 64,
           "saved_step": 0,
@@ -255,6 +256,7 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
         step=step,
         rows=[row for row in rows if row["policy_step"] == step],
         pre_record=pre_record,
+        dp=dp,
     )
   _write_jsonl(state / "pre_alignment.jsonl", pre_rows)
   _write_jsonl(
@@ -306,6 +308,36 @@ def _fixture(root: Path, *, red: bool) -> tuple[Path, Path, Path]:
 
 
 class TitoFullRecordClassifierTest(unittest.TestCase):
+
+  def test_dp4_production_row_count_and_evidence_mesh(self):
+    for mutation in (None, "summary", "writer", "orbax", "sidecar"):
+      with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+        state, base, v1 = _fixture(Path(tmp), red=False, dp=4, row_count=128)
+        paths = {
+            "summary": "p57_tito_witness/full-record-summary.json",
+            "writer": "p57_tito_witness/single-writer.json",
+            "orbax": "p57_tito_gcs/orbax-probe.json",
+        }
+        if mutation in paths:
+          path = state / paths[mutation]
+          value = json.loads(path.read_text())
+          value["dp"] = 8
+          _write_json(path, value)
+        elif mutation == "sidecar":
+          pre_path = state / "pre_alignment.jsonl"
+          pre = [json.loads(line) for line in pre_path.read_text().splitlines()]
+          rows = [json.loads(line) for line in (state / "p57_tito_witness/full-row-map.jsonl").read_text().splitlines()]
+          pre[0].pop("tito_update_sidecar")
+          _write_sidecar(state, step=0, rows=rows[:128], pre_record=pre[0], dp=8)
+          _write_jsonl(pre_path, pre)
+        result = classifier.classify(
+            state=state, recipe="p45", base_classification=base,
+            v1_classification=v1, _expected_updates=2,
+            train_geometry="dp4-tp8-b128",
+        )
+        self.assertEqual(result["execution_verdict"], "PASS" if mutation is None else "FAIL", result["reasons"])
+        if mutation is None:
+          self.assertEqual(result["claim"], "STRICT_ZERO_TIM")
 
   def test_snapshot_trigger_ladder_is_bounded_and_first_per_threshold(self):
     pre = []
@@ -533,7 +565,10 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
       )
       self.assertEqual(reasons, [])
 
-  def test_actor_snapshot_receipt_proves_pre_update_actor_only_state(self):
+  def test_dp4_actor_snapshot_classifier(self):
+    self.test_actor_snapshot_receipt_proves_pre_update_actor_only_state(dp=4)
+
+  def test_actor_snapshot_receipt_proves_pre_update_actor_only_state(self, dp=8):
     with tempfile.TemporaryDirectory() as tmp:
       state = Path(tmp) / "state"
       request_path = state / (
@@ -550,7 +585,7 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
           "source_commit": "a" * 40,
           "image_identity": "example/image@sha256:" + "b" * 64,
           "workload": "p45",
-          "dp": 8,
+          "dp": dp,
           "tp": 8,
       }
       _write_json(request_path, request)
@@ -589,7 +624,7 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
           "source_commit": "a" * 40,
           "image_identity": "example/image@sha256:" + "b" * 64,
           "workload": "p45",
-          "dp": 8,
+          "dp": dp,
           "tp": 8,
           "request_path": str(request_path),
           "request_sha256": request_sha,
@@ -621,6 +656,7 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
       _write_json(receipt_path, receipt)
       reasons = []
       counts = classifier._validate_actor_snapshots(
+          dp=dp,
           state=state,
           source_commit="a" * 40,
           image_identity="example/image@sha256:" + "b" * 64,
@@ -631,10 +667,22 @@ class TitoFullRecordClassifierTest(unittest.TestCase):
       self.assertEqual(counts, (1, 1))
       self.assertEqual(reasons, [])
 
+      receipt["dp"] = 8 if dp == 4 else 4
+      _write_json(receipt_path, receipt)
+      reasons = []
+      classifier._validate_actor_snapshots(
+          state=state, source_commit="a" * 40,
+          image_identity="example/image@sha256:" + "b" * 64,
+          recipe="p45", pre=pre, reasons=reasons, dp=dp,
+      )
+      self.assertIn("actor_snapshot_receipt:3", reasons)
+      receipt["dp"] = dp
+
       receipt["optimizer_included"] = True
       _write_json(receipt_path, receipt)
       reasons = []
       classifier._validate_actor_snapshots(
+          dp=dp,
           state=state,
           source_commit="a" * 40,
           image_identity="example/image@sha256:" + "b" * 64,

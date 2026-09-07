@@ -42,7 +42,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertEqual(fixed.REQUEST_M, (8, 16, 32, 64, 128, 256))
     self.assertEqual(fixed.LEARNER_M, (4096,))
     self.assertEqual(fixed.QWEN4B_TP8_LEARNER_M, (2048, 4096))
-    self.assertEqual(fixed.QWEN8B_TP8_LEARNER_M, (2048, 4096))
+    self.assertEqual(fixed.QWEN8B_TP8_LEARNER_M, (1024, 2048, 4096))
     self.assertEqual(
         fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256, 2048, 4096)
     )
@@ -228,31 +228,31 @@ class FixedLmHeadContractTest(unittest.TestCase):
     text = RUN_STEP.read_text()
     receipt_section = text[text.index("p38_fixed_receipt_args=("):]
     for profile in (
-        "qwen3-8b-dp8-tp8-frozenlake-tim.env",
-        "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
-        "qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+        "${_p57_full_profile_file}",
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
     ):
       with self.subTest(profile=profile):
-        start = receipt_section.index(f"cluster/profiles/{profile}")
+        start = receipt_section.index(profile)
         branch = receipt_section[start:receipt_section.index(";;", start)]
         self.assertIn(
-            "p38_fixed_receipt_args+=(--learner-m 2048)", branch
+            'p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")', branch
         )
     self.assertEqual(
-        receipt_section.count("p38_fixed_receipt_args+=(--learner-m 2048)"), 3
+        receipt_section.count('p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")'), 3
     )
 
   def test_v1_runtime_selects_exact_p59_local_dp_receipts(self):
     text = RUN_STEP.read_text()
     receipt_section = text[text.index("p38_fixed_receipt_args=("):]
     expected = {
-        "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env": 16,
-        "qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env": 16,
-        "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env": 8,
+        "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env": "16",
+        "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env": "16",
+        "${_p57_full_profile_file}": '"$_p57_full_dp"',
     }
     for profile, dp_size in expected.items():
       with self.subTest(profile=profile):
-        start = receipt_section.index(f"cluster/profiles/{profile}")
+        start = receipt_section.index(profile)
         branch = receipt_section[start:receipt_section.index(";;", start)]
         self.assertIn(
             f"p38_fixed_receipt_args+=(--p59-local-dp-size {dp_size})",

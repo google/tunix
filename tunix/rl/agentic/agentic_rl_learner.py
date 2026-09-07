@@ -1749,6 +1749,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else "legacy-segmented"
     )
     if checked_vma_full or first_update_gate_enabled:
+      from examples.frozenlake import training_geometry as fl_geometry
+      fl_geom = fl_geometry.validate_selected_full(os.environ)
       exact_checked_vma_geometry = (
           full_train
           and not p33_no_commit
@@ -1763,9 +1765,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   and workload.global_m == 4096
               )
               or (
-                  workload_identity == "frozenlake-dp8-tp8"
-                  and (workload.dp_size, workload.tp_size) == (8, 8)
-                  and workload.global_m == 2048
+                  workload_identity == fl_geom.workload
+                  and (workload.dp_size, workload.tp_size) == (fl_geom.dp, 8)
+                  and workload.global_m == fl_geom.global_m
               )
               or (
                   workload_identity == "p58-qwen4b-tim-128"

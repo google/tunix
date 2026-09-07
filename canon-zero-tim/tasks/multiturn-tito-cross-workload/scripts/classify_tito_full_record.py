@@ -113,6 +113,7 @@ def _validate_update_sidecars(
     row_maps: list[dict[str, Any]],
     pre: list[dict[str, Any]],
     reasons: list[str],
+    dp: int = 8,
 ) -> tuple[int, int, float]:
   paths = sorted(
       (state / "p57_tito_witness" / "update-sidecars").glob("step-*.npz")
@@ -166,7 +167,7 @@ def _validate_update_sidecars(
         or metadata.get("workload") != recipe
         or metadata.get("step") != step
         or metadata.get("rows") != rows_per_update
-        or metadata.get("dp") != 8
+        or metadata.get("dp") != dp
         or metadata.get("tp") != 8
         or metadata.get("source_commit") != source_commit
         or metadata.get("image_identity") != image_identity
@@ -305,6 +306,7 @@ def _validate_actor_snapshots(
     recipe: str,
     pre: list[dict[str, Any]],
     reasons: list[str],
+    dp: int = 8,
 ) -> tuple[int, int]:
   expected = _expected_actor_snapshot_triggers(pre)
   request_dir = state / "p57_tito_witness/actor-snapshot-requests"
@@ -358,7 +360,7 @@ def _validate_actor_snapshots(
         and request.get("workload") == recipe
         and request.get("source_commit") == source_commit
         and request.get("image_identity") == image_identity
-        and request.get("dp") == 8
+        and request.get("dp") == dp
         and request.get("tp") == 8
         and request.get("sidecar_sha256") == sidecar_receipt.get("sha256")
         and isinstance(request.get("max_abs"), (int, float))
@@ -400,7 +402,7 @@ def _validate_actor_snapshots(
         and receipt.get("source_commit") == source_commit
         and receipt.get("image_identity") == image_identity
         and receipt.get("workload") == recipe
-        and receipt.get("dp") == 8
+        and receipt.get("dp") == dp
         and receipt.get("tp") == 8
         and receipt.get("request_path") == str(request_path)
         and receipt.get("request_sha256") == request_sha
@@ -438,6 +440,7 @@ def _validate_startup_receipts(
     image_identity: Any,
     recipe: str,
     reasons: list[str],
+    dp: int = 8,
 ) -> dict[str, Any]:
   """Requires the singleton controller and real Orbax admission receipts."""
   writer_path = state / "p57_tito_witness/single-writer.json"
@@ -466,7 +469,7 @@ def _validate_startup_receipts(
       and writer.get("workload") == recipe
       and writer.get("source_commit") == source_commit
       and writer.get("image_identity") == image_identity
-      and writer.get("dp") == 8
+      and writer.get("dp") == dp
       and writer.get("tp") == 8
       and writer.get("writer_contract") == "one-python-controller-o-excl"
       and writer.get("neutrality_arm") is None,
@@ -480,7 +483,7 @@ def _validate_startup_receipts(
       and orbax.get("workload") == recipe
       and orbax.get("source_commit") == source_commit
       and orbax.get("image_identity") == image_identity
-      and orbax.get("dp") == 8
+      and orbax.get("dp") == dp
       and orbax.get("tp") == 8
       and orbax.get("saved_step") == 0
       and orbax.get("restored_step") == 0
@@ -588,11 +591,14 @@ def classify(
     base_classification: Path,
     v1_classification: Path,
     _expected_updates: int = 300,
-    _rows_per_update: int = 256,
+    _rows_per_update: int | None = None,
+    train_geometry: str = "dp8-tp8-b256",
 ) -> dict[str, Any]:
   reasons: list[str] = []
   expected_updates = _expected_updates
-  rows_per_update = _rows_per_update
+  from examples.frozenlake import training_geometry as fl_geometry
+  geom = fl_geometry.geometry(train_geometry)
+  rows_per_update = geom.trajectories if _rows_per_update is None else _rows_per_update
   _require(recipe in ("p45", "m15"), "recipe", reasons)
   summary_path = state / "p57_tito_witness/full-record-summary.json"
   row_map_path = state / "p57_tito_witness/full-row-map.jsonl"
@@ -617,8 +623,9 @@ def classify(
       "summary_image_identity",
       reasons,
   )
-  _require(summary.get("dp") == 8 and summary.get("tp") == 8, "summary_mesh", reasons)
+  _require(summary.get("dp") == geom.dp and summary.get("tp") == 8, "summary_mesh", reasons)
   startup_receipts = _validate_startup_receipts(
+      dp=geom.dp,
       state=state,
       source_commit=source_commit,
       image_identity=image_identity,
@@ -806,6 +813,7 @@ def classify(
 
   sidecar_count, sidecar_bytes, sidecar_write_seconds = (
       _validate_update_sidecars(
+          dp=geom.dp,
           state=state,
           recipe=recipe,
           expected_updates=expected_updates,
@@ -818,6 +826,7 @@ def classify(
       )
   )
   requested_snapshots, successful_snapshots = _validate_actor_snapshots(
+      dp=geom.dp,
       state=state,
       source_commit=source_commit,
       image_identity=image_identity,
@@ -968,6 +977,7 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--state", type=Path, required=True)
   parser.add_argument("--recipe", choices=("p45", "m15"), required=True)
+  parser.add_argument("--train-geometry", choices=("dp8-tp8-b256", "dp4-tp8-b128"), default="dp8-tp8-b256")
   parser.add_argument("--base-classification", type=Path, required=True)
   parser.add_argument("--v1-classification", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True)
@@ -977,6 +987,7 @@ def main() -> int:
   record = classify(
       state=args.state,
       recipe=args.recipe,
+      train_geometry=args.train_geometry,
       base_classification=args.base_classification,
       v1_classification=args.v1_classification,
   )

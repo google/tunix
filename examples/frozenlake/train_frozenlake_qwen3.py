@@ -64,6 +64,7 @@ def _canonical_frozenlake_admission_geometry(
     p57_run_kind: str,
     p64_numeric_debug: bool = False,
     v1_tp8_ab_arm: str = "",
+    global_prompts: int = 32,
 ) -> tuple[int, str]:
   """Returns the signed mini-batch and sampler admission values.
 
@@ -97,7 +98,7 @@ def _canonical_frozenlake_admission_geometry(
   if p64_numeric_debug:
     return 32, "none"
   return (
-      4 if p38_precheck_only else 32,
+      4 if p38_precheck_only else global_prompts,
       "token"
       if p57_tim_arm == "is"
       else "none"
@@ -701,13 +702,14 @@ if CANON_P32_WORKLOAD:
           p57_run_kind=CANON_P57_RUN_KIND,
           p64_numeric_debug=CANON_P64_P45_NUMERIC_DEBUG,
           v1_tp8_ab_arm=CANON_V1_FL_TP8_AB_ARM,
+          global_prompts=P32_WORKLOAD.global_prompts,
       )
   )
   dp_workloads.validate_frozenlake_max_concurrency(
       P32_WORKLOAD, args.max_concurrency, os.environ
   )
   expected_geometry = {
-      "batch_size": (BATCH_SIZE, 32),
+      "batch_size": (BATCH_SIZE, P32_WORKLOAD.global_prompts),
       "mini_batch_size": (MINI_BATCH_SIZE, expected_mini_batch_size),
       "num_batches": (NUM_BATCHES, 150),
       "num_generations": (

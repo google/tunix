@@ -10,7 +10,10 @@ import math
 from pathlib import Path
 import re
 import shlex
+import sys
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 
 _RECIPES = {
@@ -699,12 +702,20 @@ def classify(
     base_classification: Path,
     xprof_dir: Path | None = None,
     xprof_receipt: Path | None = None,
+    train_geometry: str = "dp8-tp8-b256",
 ) -> dict[str, Any]:
-  contract = _RECIPES[recipe]
+  from examples.frozenlake import training_geometry as fl_geometry
+  geom = fl_geometry.geometry(train_geometry)
+  contract = dict(_RECIPES[recipe])
+  if train_geometry != fl_geometry.LEGACY:
+    if recipe not in ("p45", "m15"):
+      raise ValueError("small full geometry is FrozenLake-only")
+    contract.update(workload=geom.workload, profile=geom.profile_file,
+                    dp=geom.dp, global_m=geom.global_m)
   expected_updates = int(contract["updates"])
   dp_size = int(contract["dp"])
   tp_size = int(contract["tp"])
-  local_groups = 256 // dp_size
+  local_groups = (geom.trajectories if recipe in ("p45", "m15") else 256) // dp_size
   expected_alignment_pass = expected_updates * (1 + local_groups)
   reasons: list[str] = []
   if xprof_dir is None:
@@ -726,6 +737,11 @@ def classify(
 
   env = _resolved_env(env_path)
   required_env = _required_recipe_env(recipe, contract)
+  if train_geometry != fl_geometry.LEGACY:
+    required_env.update(geom.environment())
+    required_env[fl_geometry.SELECTOR] = train_geometry
+  else:
+    _require(fl_geometry.SELECTOR not in env, "unexpected_train_geometry", reasons)
   if recipe == "gsm8k":
     _require(
         env.get("CANON_P67_P66_VMA_P59_ONLY") in (None, "", "0"),
@@ -1272,7 +1288,7 @@ def classify(
       f"[P3_APC_CONFIG] enabled={int(apc_on)} "
       "workload=frozenlake reader=train_frozenlake_qwen3"
   )
-  if contract["workload"] == "frozenlake-dp8-tp8":
+  if contract["workload"] in ("frozenlake-dp8-tp8", "frozenlake-dp4-tp8"):
     _require(text.count(apc_marker) == 1, "apc_runtime_marker", reasons)
     opposite_apc_marker = (
         f"[P3_APC_CONFIG] enabled={int(not apc_on)} "
@@ -1374,6 +1390,8 @@ def classify(
       "recipe": recipe,
       "workload": contract["workload"],
       "topology": {"dp": dp_size, "tp": tp_size},
+      "train_geometry": train_geometry if recipe != "gsm8k" else None,
+      "global_trajectories": geom.trajectories if recipe != "gsm8k" else 256,
       "updates": {"expected": expected_updates, "observed": len(updates)},
       "zero_tim": {
           "status": (
@@ -1493,6 +1511,7 @@ def classify(
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--recipe", choices=tuple(_RECIPES), required=True)
+  parser.add_argument("--train-geometry", choices=("dp8-tp8-b256", "dp4-tp8-b128"), default="dp8-tp8-b256")
   parser.add_argument("--state", type=Path, required=True)
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--update-report", type=Path, required=True)
@@ -1505,6 +1524,7 @@ def main() -> int:
     raise FileExistsError(f"refusing to overwrite V1 classification: {args.output}")
   record = classify(
       recipe=args.recipe,
+      train_geometry=args.train_geometry,
       state=args.state,
       run_log=args.run_log,
       update_report=args.update_report,

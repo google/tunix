@@ -65,19 +65,63 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
       token_continuity: str | None = None,
       token_continuity_debug: bool = False,
       token_continuity_debug_mode: str | None = None,
+      train_geometry: str = "dp8-tp8-b256",
+      target_cluster: str = "legacy",
   ):
     return renderer.render_two(
         source_commit="b" * 40,
         output_dir=output,
-        p45_run_id="p45p67a",
-        m15_run_id="m15p67a",
+        p45_run_id="r1" if target_cluster == "bodaborg" else "p45p67a",
+        m15_run_id="r2" if target_cluster == "bodaborg" else "m15p67a",
         campaign_root="v1p67-a",
         base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
         m15_tito_exact=m15_tito_exact,
         token_continuity=token_continuity,
         token_continuity_debug=token_continuity_debug,
         token_continuity_debug_mode=token_continuity_debug_mode,
+        train_geometry=train_geometry,
+        target_cluster=target_cluster,
     )
+
+  def test_dp4_pair_preserves_autoscale_and_optional_record_full(self):
+    for cluster, debug in (("legacy", None), ("legacy", "record-full"),
+                           ("bodaborg", None), ("bodaborg", "record-full")):
+      with self.subTest(cluster=cluster, debug=debug), tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        args = {"token_continuity": "both-exact" if debug else "legacy",
+                "token_continuity_debug_mode": debug, "target_cluster": cluster}
+        old_paths = self._render(root / "old", **args)
+        new_paths = self._render(root / "new", train_geometry="dp4-tp8-b128", **args)
+        for old_path, new_path in zip(old_paths, new_paths, strict=True):
+          old = yaml.safe_load(old_path.read_text())
+          new = yaml.safe_load(new_path.read_text())
+          old_worker, new_worker = _worker_template(old), _worker_template(new)
+          # The topology value is the only pod scheduling change: preserve
+          # autoscale/exclusive-topology and every other selector/annotation.
+          old_worker["spec"]["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = "2x4x4"
+          if cluster == "bodaborg":
+            old_worker["metadata"]["annotations"]["cloud.google.com/gke-tpu-slice-topology"] = "2x4x4"
+          self.assertEqual(old_worker, new_worker)
+          job = next(item for item in new["spec"]["replicatedJobs"] if item["name"] == "pathways-worker")
+          self.assertEqual(job["template"]["spec"]["parallelism"], 8)
+          self.assertEqual(job["template"]["spec"]["completions"], 8)
+          env = _env(new)
+          self.assertEqual(env["CANON_P33_SHARED_MESH"], "4,8")
+          self.assertEqual(env["CANON_GLOBAL_TRAJECTORIES"], "128")
+          self.assertEqual(env.get("CANON_P57_TOKEN_CONTINUITY_DEBUG"), debug)
+          self.assertEqual(env["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
+          self.assertEqual(env["CANON_P33_DISABLE_EVAL"], "1")
+          # Real entrypoint checks, not just a dictionary fixture.
+          state = root / ("state-" + (env.get("CANON_P57_WORKLOAD_CANDIDATE") or "p45"))
+          state.mkdir()
+          result = subprocess.run(
+              ["bash", str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh")],
+              cwd=_REPO, env={**os.environ, **env, "CANON_PKG": str(_REPO / "canon-zero-tim"),
+                             "CANON_STATE": str(state), "JOBSET_RESTART_ATTEMPT": "0",
+                             "INJECTED_WANDB_API_KEY": "test-only"},
+              text=True, capture_output=True,
+          )
+          self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
   def test_renders_exactly_two_scoped_full_recipes_without_topology_drift(self):
     with tempfile.TemporaryDirectory() as tmp:

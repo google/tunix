@@ -39,6 +39,8 @@ $docker run --rm \
   -e GIT_CONFIG_VALUE_0=/workspace \
   "$image_id" \
   bash -euo pipefail -c '
+    XLA_FLAGS=--xla_force_host_platform_device_count=32 \
+      python3 canon-zero-tim/tests/p57_frozenlake_tim/probe_training_geometry_runtime.py
     XLA_FLAGS=--xla_force_host_platform_device_count=64 \
       python3 tests/rl/canonical_qwen3_adapter_test.py \
         CanonicalQwen3AdapterTest.test_dp16_gathered_logprobs_pads_and_slices_each_data_rank

@@ -190,6 +190,9 @@ _P63_COMMON_REQUIRED = {
 }
 
 
+from examples.frozenlake import training_geometry as fl_geometry
+
+
 _P63_CONTEXTS = {
     (
         "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
@@ -246,6 +249,16 @@ _P63_CONTEXTS = {
 }
 
 
+_P63_CONTEXTS[(fl_geometry.geometry(fl_geometry.SMALL).profile_file,
+               fl_geometry.geometry(fl_geometry.SMALL).profile,
+               fl_geometry.geometry(fl_geometry.SMALL).workload)] = {
+    "max_norm": 100.0,
+    "alignment_flag": "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
+    "required": {"CANON_P33_RUN_STAGE": "full", "CANON_P33_NO_COMMIT": "0",
+                 fl_geometry.SELECTOR: fl_geometry.SMALL},
+}
+
+
 def canonical_overflow_safe_clip_max_norm(
     environ: dict[str, str],
 ) -> float | None:
@@ -275,6 +288,7 @@ def canonical_overflow_safe_clip_max_norm(
         f"profiles; found {key!r}"
     )
   context = _P63_CONTEXTS[key]
+  fl_geom = fl_geometry.validate_selected_full(environ)
   required = {**_P63_COMMON_REQUIRED, **context["required"]}
   wrong = {
       name: environ.get(name)
@@ -295,9 +309,9 @@ def canonical_overflow_safe_clip_max_norm(
   ):
     expected_warn_only = "1"
   if key == (
-      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
-      "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
-      "frozenlake-dp8-tp8",
+      fl_geom.profile_file,
+      fl_geom.profile,
+      fl_geom.workload,
   ) and all((
       environ.get("CANON_P57_RUN_KIND") == "train",
       environ.get("CANON_P57_TIM_ARM") == "zero",

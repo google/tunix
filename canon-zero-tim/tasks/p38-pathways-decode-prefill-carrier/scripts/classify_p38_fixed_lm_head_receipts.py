@@ -147,9 +147,9 @@ def classify(
         "unsupported fixed-head geometry: "
         f"endpoint={endpoint} hidden={hidden} tp={tp_size}"
     ) from error
-  if learner_m not in (2048, 4096) or learner_m % 256:
+  if learner_m not in (1024, 2048, 4096) or learner_m % 256:
     raise ValueError(f"unsupported fixed-head learner M: {learner_m}")
-  if learner_m == 2048 and (endpoint, hidden, tp_size) != (
+  if learner_m in (1024, 2048) and (endpoint, hidden, tp_size) != (
       "untied_lm_head", 4096, 8
   ):
     raise ValueError(
@@ -161,7 +161,7 @@ def classify(
       raise ValueError(
           "P59 local receipt mode requires learner primal and VJP receipts"
       )
-    if p59_local_dp_size not in (8, 16):
+    if p59_local_dp_size not in (4, 8, 16):
       raise ValueError(
           f"unsupported P59 local DP size: {p59_local_dp_size}"
       )
@@ -299,13 +299,13 @@ def main() -> int:
   )
   parser.add_argument("--tp-size", required=True, type=int, choices=(4, 8))
   parser.add_argument(
-      "--learner-m", type=int, choices=(2048, 4096), default=4096
+      "--learner-m", type=int, choices=(1024, 2048, 4096), default=4096
   )
   parser.add_argument("--require-vjp", action="store_true")
   parser.add_argument(
       "--p59-local-dp-size",
       type=int,
-      choices=(8, 16),
+      choices=(4, 8, 16),
       help=(
           "Require the P59 rank-local learner receipt, its global/local row "
           "identity, one local M256 chunk, and fixed TP input reduction."

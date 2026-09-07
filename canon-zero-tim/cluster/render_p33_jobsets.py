@@ -52,6 +52,7 @@ class JobSpec:
   strict_alignment: bool = False
   v1_hp_full: bool = False
   backward_numeric_debug: bool = False
+  train_geometry: str = ""
 
   @property
   def filename(self) -> str:
@@ -66,18 +67,19 @@ def _common_args(
     dp_size: int = 16,
     tp_size: int = 4,
     mini_batch_size: int = 32,
+    batch_size: int = 32,
 ) -> tuple[str, ...]:
   return (
       f"--mesh_dp={dp_size}",
       f"--mesh_tp={tp_size}",
-      "--batch_size=32",
+      f"--batch_size={batch_size}",
       f"--mini_batch_size={mini_batch_size}",
       f"--train_trajectory_micro_batch_size={dp_size}",
       f"--max_steps={max_steps}",
       "--num_generations=8",
       f"--max_prompt_length={prompt}",
       f"--max_response_length={response}",
-      "--max_concurrency=256",
+      f"--max_concurrency={batch_size * 8}",
   )
 
 
@@ -89,8 +91,9 @@ def _frozenlake_command(
     dp_size: int = 16,
     tp_size: int = 4,
     mini_batch_size: int = 32,
+    batch_size: int = 32,
 ) -> tuple[str, ...]:
-  local_trajectories = 256 // dp_size
+  local_trajectories = batch_size * 8 // dp_size
   command = (
     "python3",
     "-u",
@@ -98,6 +101,7 @@ def _frozenlake_command(
     *_common_args(
         max_steps=max_steps,
         prompt=4096,
+        batch_size=batch_size,
         response=512 if short_alignment else 2048,
         dp_size=dp_size,
         tp_size=tp_size,
@@ -295,12 +299,33 @@ def render_jobset(
     raise ValueError(
         "run id must be a 1-16 character lowercase DNS label component"
     )
-  if spec.dp_size * spec.tp_size != 64:
+  small_full = spec.train_geometry == "dp4-tp8-b128"
+  if spec.train_geometry and not small_full:
+    raise ValueError("unregistered FrozenLake train geometry")
+  if small_full and not (
+      spec.workload == "frozenlake" and spec.stage == "full"
+      and spec.v1_hp_full and spec.rank_parallel_backward
+      and not spec.no_commit and not spec.enable_evaluation
+      and spec.profile == "cluster/profiles/qwen3-8b-dp4-tp8-frozenlake-v1-hp.env"
+      and (spec.dp_size, spec.tp_size) == (4, 8)
+  ):
+    raise ValueError("DP4xTP8/B128 requires the exact FrozenLake Zero-HP full spec")
+  if spec.dp_size * spec.tp_size != (32 if small_full else 64):
     raise ValueError("P33/P45 JobSpecs must consume exactly 64 devices")
-  if spec.dp_size not in (8, 16) or spec.tp_size not in (4, 8):
+  if not small_full and (spec.dp_size not in (8, 16) or spec.tp_size not in (4, 8)):
     raise ValueError("P33/P45 JobSpec topology is not registered")
 
   document = copy.deepcopy(base)
+  if small_full:
+    # Preserve autoscaling/exclusive-topology and every other scheduling field.
+    worker_job = document["spec"]["replicatedJobs"][1]["template"]["spec"]
+    if (worker_job["completions"], worker_job["parallelism"]) != (16, 16):
+      raise ValueError("32-chip derivation requires the reviewed 16-worker base")
+    worker_selector = worker_job["template"]["spec"]["nodeSelector"]
+    if worker_selector["cloud.google.com/gke-tpu-topology"] != "4x4x4":
+      raise ValueError("32-chip derivation requires the reviewed 4x4x4 base")
+    worker_job["completions"] = worker_job["parallelism"] = 8
+    worker_selector["cloud.google.com/gke-tpu-topology"] = "2x4x4"
   name = _job_name(spec, source_commit, run_id)
   state = f"/tmp/canon-state/{name}"
   scratch = f"{_SCRATCH_ROOT}/{name}"
@@ -425,6 +450,8 @@ def render_jobset(
     _set_named_env(
         main["env"], {"CANON_P38_FIXED_LM_HEAD": "1"}, remove=()
     )
+  if small_full:
+    _set_named_env(main["env"], {"CANON_P57_TRAIN_GEOMETRY": spec.train_geometry}, remove=())
   if spec.workload == "frozenlake":
     _set_named_env(
         main["env"],

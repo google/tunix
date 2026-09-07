@@ -17,18 +17,21 @@ _FULL_STEPS = {
     "gsm8k-p59-dp4-tp1": 3,
     "frozenlake": 450,
     "frozenlake-dp8-tp8": 450,
+    "frozenlake-dp4-tp8": 300,
 }
 _WORKLOAD_TOPOLOGIES = {
     "gsm8k": (16, 4),
     "gsm8k-p59-dp4-tp1": (4, 1),
     "frozenlake": (16, 4),
     "frozenlake-dp8-tp8": (8, 8),
+    "frozenlake-dp4-tp8": (4, 8),
 }
 _GLOBAL_TRAJECTORIES = {
     "gsm8k": 256,
     "gsm8k-p59-dp4-tp1": 64,
     "frozenlake": 256,
     "frozenlake-dp8-tp8": 256,
+    "frozenlake-dp4-tp8": 128,
 }
 _BOUNDARIES = {
     "S_decode_vs_S_prefill",
@@ -442,7 +445,7 @@ def classify(
     )
   local_gradient_groups = _GLOBAL_TRAJECTORIES[workload] // dp_size
   if p57_ab_only and (
-      workload != "frozenlake-dp8-tp8"
+      workload not in ("frozenlake-dp8-tp8", "frozenlake-dp4-tp8")
       or stage != "full"
       or alignment_warning_only is not True
   ):
@@ -663,7 +666,7 @@ def classify(
         reasons,
     )
     expected_optimizer_kind = _OPTIMIZER_MEMORY_KIND.get(placement)
-    if (dp_size, tp_size) == (8, 8):
+    if (dp_size, tp_size) in ((8, 8), (4, 8)):
       _require(
           placement == "device-resident",
           f"{prefix}.p45_optimizer_placement",
@@ -774,7 +777,7 @@ def classify(
             f"{prefix}.parameter_delta_finite",
             reasons,
         )
-        if (dp_size, tp_size) == (8, 8):
+        if (dp_size, tp_size) in ((8, 8), (4, 8)):
           timing = evidence.get("optimizer_timing")
           _require(isinstance(timing, dict), f"{prefix}.optimizer_timing", reasons)
           if isinstance(timing, dict):

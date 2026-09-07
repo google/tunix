@@ -636,8 +636,10 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
         else p34_stage
     )
   elif frozenlake_warning_only:
+    from examples.frozenlake import training_geometry as fl_geometry
+    fl_geom = fl_geometry.from_env(os.environ)
     admitted = (
-        workload in ("frozenlake", "frozenlake-dp8-tp8")
+        workload in ("frozenlake", fl_geom.workload)
         and stage == "full"
         and no_commit == "0"
         and execution_mode() == "train"
@@ -660,11 +662,11 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           )
       )
       p57_zero_ab_warning = all((
-          workload == "frozenlake-dp8-tp8",
+          workload == fl_geom.workload,
           os.environ.get("CANON_PROFILE_FILE", "")
-          == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+          == fl_geom.profile_file,
           os.environ.get("CANON_PROFILE", "")
-          == "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
+          == fl_geom.profile,
           os.environ.get("CANON_V1_HP_FULL", "") == "1",
           os.environ.get("CANON_P57_RUN_KIND", "") == "train",
           os.environ.get("CANON_P57_EXPECTED_UPDATES", "") == "300",
