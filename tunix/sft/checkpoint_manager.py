@@ -337,6 +337,14 @@ class CheckpointManager:
             ' `restore_only_lora_params=True`.'
         ) from e
       raise e
+    except Exception as e:
+      logging.warning(
+          "Failed to restore checkpointables from step %d due to error: %s. "
+          "Skipping restore and starting from step 0.",
+          step,
+          e,
+      )
+      return 0, {}
 
     if optimizer is not None and 'optimizer_state' in restored_checkpointables:  # pyrefly: ignore[not-iterable]
       nnx.update(optimizer, restored_checkpointables['optimizer_state'])  # pyrefly: ignore[missing-attribute]
