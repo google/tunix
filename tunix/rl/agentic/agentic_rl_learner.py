@@ -722,6 +722,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       eval_dataset: Iterable[TrainingInputT] | None = None,
       skip_jit: bool = False,
   ) -> None:
+    """Main training loop for the AgenticRLLearner with guaranteed cleanup."""
+    try:
+      self._train_impl(
+          train_dataset=train_dataset,
+          eval_dataset=eval_dataset,
+          skip_jit=skip_jit,
+      )
+    finally:
+      self.close()
+
+  def _train_impl(
+      self,
+      train_dataset: Iterable[TrainingInputT],
+      eval_dataset: Iterable[TrainingInputT] | None = None,
+      skip_jit: bool = False,
+  ) -> None:
     """Main training loop for the AgenticRLLearner."""
     full_batch_iterator = iter(train_dataset)
 

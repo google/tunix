@@ -1338,9 +1338,18 @@ if (
   )
 
 print("Starting training...", flush=True)
-agentic_grpo_learner.train(
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-)
-print("Training completed successfully. Exiting.", flush=True)
-os._exit(0)
+exit_code = 0
+try:
+  agentic_grpo_learner.train(
+      train_dataset=train_dataset,
+      eval_dataset=eval_dataset,
+  )
+  print("Training completed successfully. Exiting.", flush=True)
+except Exception as e:
+  print(f"Training failed with exception: {e}", flush=True)
+  import traceback
+  traceback.print_exc()
+  exit_code = 1
+finally:
+  agentic_grpo_learner.close()
+  os._exit(exit_code)

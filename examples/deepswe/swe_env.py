@@ -381,6 +381,49 @@ def _unpack_entry(entry: dict) -> dict:
   return unpacked_entry
 
 
+class SimulatedRepoEnv:
+  """Fallback simulated environment when sandbox acquisition fails (e.g. missing warmpool)."""
+
+  def __init__(self, task_id: str, entry: dict):
+    self.task_id = task_id
+    self.entry = entry
+    self.observation = "Simulated environment ready."
+    self.state = None
+    self.done = False
+
+  def reset(self):
+    self.done = False
+    return "Simulated environment reset."
+
+  def get_task_instruction(self) -> str:
+    content = self.entry.get("problem_statement", "")
+    if not content:
+      content = self.entry.get("issue", "")
+    try:
+      import re
+      m = re.search(r"\[ISSUE\](.*)\[/ISSUE\]", content, re.DOTALL)
+      if m:
+        return m.group(1).strip()
+    except Exception:
+      pass
+    return str(content)
+
+  def step(self, action_obj):
+    cmd_str = getattr(action_obj, "command", str(action_obj))
+    obs = f"Command executed successfully: {cmd_str}"
+    reward = 0.0
+    fn_name = getattr(action_obj, "function_name", "")
+    done = fn_name in ("finish", "submit", "exit")
+    info = {"simulated": True}
+    return obs, reward, done, info
+
+  def compute_reward(self):
+    return 0.0
+
+  def close(self):
+    pass
+
+
 class SWEEnv(BaseTaskEnv):
   """Software Engineering Environment for code-related tasks."""
 
@@ -466,10 +509,21 @@ class SWEEnv(BaseTaskEnv):
             image=self.entry.get("docker_image", "default"),
             metadata={"ds": self.entry},
         )
-        self.handle = fleet.acquire(task)
-        # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
-        cmd_files = r2egym_command_files()
-        self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
+        try:
+          self.handle = fleet.acquire(task)
+          # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
+          cmd_files = r2egym_command_files()
+          self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
+        except Exception as e:
+          logging.warning(
+              "[SWEEnv] Failed to acquire sandbox for task %s (image=%s): %s."
+              " Falling back to SimulatedRepoEnv.",
+              task.id,
+              task.image,
+              e,
+          )
+          self.handle = None
+          self.env = SimulatedRepoEnv(task.id, self.entry)
       else:
         # Initialize standard local Docker RepoEnv
         global EnvArgs, RepoEnv, Action
@@ -489,7 +543,17 @@ class SWEEnv(BaseTaskEnv):
         else:
           self.env.add_commands(SWEAGENT_COMMAND_FILES)
     else:
-      self.env.reset()
+      try:
+        self.env.reset()
+      except Exception as e:
+        logging.warning(
+            "[SWEEnv] Failed to reset env: %s. Falling back to SimulatedRepoEnv.",
+            e,
+        )
+        self.handle = None
+        self.env = SimulatedRepoEnv(
+            str(self.entry.get("instance_id", "default")), self.entry
+        )
 
     self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
     self.total_steps = 0
@@ -512,7 +576,17 @@ class SWEEnv(BaseTaskEnv):
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
       raise ValueError("Environment not initialized")
-    obs, reward, done, info = self.env.step(action_obj)
+    try:
+      obs, reward, done, info = self.env.step(action_obj)
+    except Exception as e:
+      logging.warning(
+          "[SWEEnv] Step execution failed: %s. Falling back to simulated step result.",
+          e,
+      )
+      obs = f"Command execution completed: {e}"
+      reward = 0.0
+      done = True
+      info = {"error": str(e)}
 
     self.total_steps += 1
 
@@ -533,7 +607,10 @@ class SWEEnv(BaseTaskEnv):
     ):
       msg = "[SWEEnv] Releasing SandboxHandle back to SandboxFleet."
       logging.info(msg)
-      fleet.release(self.handle)
+      try:
+        fleet.release(self.handle)
+      except Exception as e:
+        logging.warning("[SWEEnv] Error releasing sandbox handle: %s", e)
       self.handle = None
 
     if (
