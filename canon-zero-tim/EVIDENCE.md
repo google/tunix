@@ -201,3 +201,43 @@ p38s12f / p38s15 / p38s16.
 | TiTO T9f source freeze preserves the exact pinned-image-tested runtime | t9f-release-20260907 | Source CL `89a58e24d02ed42b2bc39126eb592ca0a1426bd3`, source tree `dfc70cf2150328d1e1c354a4ac4855acf56bb573`; the preceding T9f entry describes the historical uncommitted verification state. User approved source+ledger publication on 2026-09-07. Pre-publication fetch equals baseline `2833977c1daae9971330e9be9bf16e546b9f0f4f`; repeated host P57 238/238, V1 102/102 and flags 422/422 PASS. `tasks/multiturn-tito-cross-workload/evidence/t9f-release-20260907.json` binds the source/tree and six unchanged runtime/gate hashes to the existing image admission receipt. No overlay/YAML/timeout/numerical/training-policy change; no patched TPU or real-storage claim. |
 
 Legacy flat pile `debug_logs/` is frozen read-only; anything new must use a run directory.
+
+## T9g FrozenLake DP4xTP8/B128 option — 2026-09-07
+
+- Local candidate on `c07ea8fa10cbfc55957503b9831ed863f8c36814`, not a
+  new published source. P57 248/248, V1 104/104, APC 12/12 and flags
+  423/423 PASS. Complete pinned CPU image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits 0 with `V1_HP_EXACT_IMAGE_PASS`.
+- Receipt: `tasks/multiturn-tito-cross-workload/evidence/t9g-host-20260907/receipt.json`,
+  SHA256 `5df76e984f354109e50cc9ff5be9b1e584ab09017c4ce39baa0716d676fbf8fb`. Full raw image log in that directory:
+  `exact-image-r2.log`, SHA256
+  `091707da9a2fd7476ff08eefe6322e04cc511310b150901eebd2841dba5277a3`.
+  All 14 retained raw logs plus the receipt verify against local SHA256SUMS;
+  package artifact inventory includes these files.
+- Coverage: actual shell/Python full admission for P45/M15 old/new
+  legacy/record-full combinations; a bounded DP4xTP8 fixed reducer on 32
+  forced CPU devices; installed head M1024 construction and neighboring
+  geometry negatives; full classifier shapes and 128-row/DP4 TiTO evidence,
+  including fake-manager actor/probe metadata. Existing installed TP4/TP8
+  backward regression gates also pass. Forty-one final code/gate SHA256
+  values match the audited candidate.
+- Ceiling: no DP4xTP8 TPU/full-model backward or optimizer/full horizon,
+  throughput, real GCS/Orbax, or observer-neutrality certification. No
+  same-data speedup claim. No commit/push or target action authorized.
+  Failed construction/invocation logs remain in the same directory.
+
+### T9g source freeze and publication audit — 2026-09-07
+
+Source CL `ae2e4884d7df20cdf7cda6dd4a910ea61280e443`, source tree
+`6d364a5e1deadba87abf8281cac33e55d7208b4e`, preserves all 41 tested
+code/gate SHA256 values from the preceding construction receipt. The only
+other core file is FLAGS registration. The user explicitly approved source
+and ledger publication to `yuxzhang/canon-zero-tim`, not a target launch.
+Repeated host P57 248/248, V1 104/104, APC 12/12 and flags 423/423 PASS.
+Release receipt and raw logs:
+`tasks/multiturn-tito-cross-workload/evidence/t9g-release-20260907/`.
+The earlier uncommitted receipt is preserved as historical evidence; the
+release audit binds its exact-image raw log to committed source. The
+accompanying ledger CL changes docs/evidence only. **TARGET NOT RUN**;
+no new-geometry full-model gradient, convergence, speed or GCS/Orbax claim.

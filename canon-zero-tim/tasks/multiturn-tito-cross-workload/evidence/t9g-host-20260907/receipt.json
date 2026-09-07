@@ -1,0 +1,194 @@
+{
+  "schema": "canon.p57-t9g-geometry-construction.v1",
+  "date_utc": "2026-09-07",
+  "branch": "local/p57-tito-pair-0902",
+  "published_baseline": "c07ea8fa10cbfc55957503b9831ed863f8c36814",
+  "source_state": "uncommitted local candidate; baseline is not the candidate commit",
+  "source_head_unchanged": true,
+  "published_tracking_ref_at_start": "c07ea8fa10cbfc55957503b9831ed863f8c36814",
+  "authorization": {
+    "implementation": true,
+    "commit": false,
+    "push": false,
+    "tpu_kubernetes": false,
+    "remote_storage": false,
+    "image_publication": false
+  },
+  "geometry": {
+    "selector": "dp4-tp8-b128",
+    "devices": 32,
+    "topology": "2x4x4",
+    "dp": 4,
+    "tp": 8,
+    "prompts": 16,
+    "generations": 8,
+    "trajectories": 128,
+    "updates": 300,
+    "trajectory_budget": 38400,
+    "local_trajectories": 32,
+    "microbatch": 4,
+    "gradient_groups": 32,
+    "global_m": 1024,
+    "local_m": 256,
+    "fixed_m": 256,
+    "head_chunks": 1
+  },
+  "legacy_default": "dp8-tp8-b256; no selector key rendered",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "gates": {
+    "p57": {
+      "tests": 248,
+      "exit_code": 0,
+      "log": "p57-host-r3.log"
+    },
+    "v1": {
+      "tests": 104,
+      "exit_code": 0,
+      "log": "v1-host-r3.log"
+    },
+    "apc": {
+      "tests": 12,
+      "exit_code": 0,
+      "log": "apc-host.log"
+    },
+    "flags": {
+      "declared": 423,
+      "actual": 423,
+      "exit_code": 0,
+      "log": "flag-audit.log"
+    },
+    "real_runtime": {
+      "cases": 8,
+      "forced_cpu_devices": 32,
+      "dp4_tp8_fixed_reducer": 1,
+      "exit_code": 0,
+      "log": "geometry-runtime.log",
+      "claim": "admission and bounded reducer, not a full-model TPU gradient oracle"
+    },
+    "full_exact_image": {
+      "exit_code": 0,
+      "log": "exact-image-r2.log",
+      "terminal": "V1_HP_EXACT_IMAGE_PASS",
+      "new_probe": "P57_TRAIN_GEOMETRY_RUNTIME_PASS cases=8 dp4tp8_cpu_reducer=1 target=not-run",
+      "installed_head_m1024": true,
+      "neighboring_m1024_negatives": true,
+      "evidence_grade": "complete raw log, SHA checked"
+    },
+    "syntax": {
+      "shell_profile_files": 10,
+      "python_compile": "PASS",
+      "code_document_diff_check": "PASS"
+    },
+    "raw_retention": {
+      "all_completed_raw_logs_copied_byte_exact": true,
+      "failed_checks_retained": true
+    }
+  },
+  "failed_checks": [
+    {
+      "log": "p57-host.log",
+      "cause": "New test omitted the required require_vjp keyword; fixed test invocation."
+    },
+    {
+      "log": "v1-host.log",
+      "cause": "New test used a trailing-hyphen synthetic state name; existing DNS identity gate correctly refused."
+    },
+    {
+      "log": "p67-renderer-r2.log",
+      "cause": "Setting attempt did not repair invalid test state name; fixed the name without changing admission."
+    },
+    {
+      "log": "exact-image.log",
+      "cause": "Old installed-probe expected 8B/TP8 learner M2048/4096 only; added preregistered M1024 and neighboring-geometry rejection."
+    },
+    {
+      "logs": [
+        "shim-manifest.log",
+        "shim-manifest-r2.log"
+      ],
+      "cause": "Installed-output manifest was manually checked against source directories, where generated files are absent; use install.sh output verification. The full image installs verified manifests."
+    }
+  ],
+  "code_and_gate_sha256": {
+    "canon-zero-tim/MANIFEST.sha256": "a2f49c21496f7af536f1a80bbb0035f82d187d916f01ff9f0cded353267deea6",
+    "canon-zero-tim/cluster/profiles/qwen3-8b-dp4-tp8-frozenlake-v1-hp.env": "13885aa5d137182c191ca25a387b7bc6514a1efc072395e8ae6dac33c21787d1",
+    "canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env": "283018fc5c512f3f032c43721629958150e345f6a096256bb3642ed0dae3bc5e",
+    "canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env": "5fcbe60695e5b0fe784bceda3c51550b54d93857e508e9825da545dd3fa8795b",
+    "canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env": "905fac51ba31c1c7a1ab78ad555093f977d56151acbce81f32f8445fe6525fb3",
+    "canon-zero-tim/cluster/render_p33_jobsets.py": "21c5c110b4238b9f4d6aafe13c1449a0bc89169bc4bfe5ff0f010cfa8d601047",
+    "canon-zero-tim/cluster/render_p57_frozenlake_tim.py": "c494085eacea083b312b845e2f15c1e23bade5dd1410f0d05ea58e44d8f127cd",
+    "canon-zero-tim/cluster/steps/00_env.sh": "a51e2d5d0ff2ef8a24ffd6d53380c155f9841baa2039bc15bfd7a357f2e0d02b",
+    "canon-zero-tim/cluster/steps/90_run.sh": "47184cd36f0b5c5e377e015ee23c82f5165319325c9bd63f572dc9e755acf7f5",
+    "canon-zero-tim/cluster/steps/p57_training_geometry.sh": "156c6bd2c5db683eb6c7f48de43eb527562aa12aa9bcb4af32daa4aeb6cf3e7c",
+    "canon-zero-tim/src/engine_shims/p38_fixed_lm_head.py": "60f7173fc44236e6ae1d9400080ffde00f769ccf86484ad77283cf07d7e0b564",
+    "canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/classify_tito_collection.py": "58e266037127ac65916f8d242f864e927024de727ba0511dacc8df3efccbd7f5",
+    "canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py": "e014d7dc49cfb713511de6bf98808e0c8508341b770e5e6f3db2a1ee29fef354",
+    "canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/extract_first_diff_capsule.py": "2246e8b694d4fbdd25fc29d75032529f71fa2f12ea8c5b8042a937fb55550b9f",
+    "canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_fixed_lm_head_receipts.py": "4412c13dfd45d44ba821668ca23f9c87668542cf06d06d5aa3cf14308dd041bc",
+    "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py": "ad2e79e073f2d223214166ab45b03675ab9bf5b781f1bf476f964ba377ff251d",
+    "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh": "548bcf06835245a4ac1c9cd834106974cce068ebf455b9b46a0506389c63c500",
+    "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_p67_frozenlake_two_full_recipes.py": "f7e8372fe63efd8d93ff26d725ab608e9745ba6f5bce8bb9a979d2605783e133",
+    "canon-zero-tim/tests/p33_workloads/classify_run.py": "dbf3e9c729af28eb211b559a34f4843f2594e6535480c87c732e791ea98bb4d3",
+    "canon-zero-tim/tests/p33_workloads/validate_workload.py": "abdca63cd8f812d2f8bded83a87c086083f9e1cd146355ba4cbf733f740dd5b2",
+    "canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py": "c0e4252154b694415ce7655f2f95a853b693b89765956dcc7457f3df6dcc994e",
+    "canon-zero-tim/tests/p38_serving/test_fixed_lm_head.py": "2ab002ddf10c32a101b029f545aaffe048f6e09f9383067f0019aaaef8e179fc",
+    "canon-zero-tim/tests/p38_serving/test_fixed_lm_head_receipts.py": "9d972037e2af00c896c1d6901b9da9fc3a8c78275db4ceb0fea651099343fbdb",
+    "canon-zero-tim/tests/p3_prefix_cache/test_contract.py": "310b04b6c11b4dad0fb2295a07049447ca1620951912989533c423519975eff4",
+    "canon-zero-tim/tests/p57_frozenlake_tim/probe_training_geometry_runtime.py": "5f9d954b6520902b9efd8a926e7b237a1ff22b49427b1387676b5f5ac2bcfd30",
+    "canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh": "eac1746648f259ef16ca005e3433b8c424f06f5bc80bccf0ed780bb6236a6685",
+    "canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py": "b4ddbb0fc019bd6710816e10c51a53b4ecc9b149bb5248a4a5c77e7fb9df796f",
+    "canon-zero-tim/tests/p57_frozenlake_tim/test_tito_full_record_classifier.py": "cd735b958651436056fe62fbc8bf6c3d835b9d1d5f14f9ee12214c301c93b4cb",
+    "canon-zero-tim/tests/p57_frozenlake_tim/test_training_geometry.py": "6efc1d369b5456bc87b30db968d24d1fee8b13deb0d2ca0b10fd11ccdbcedda1",
+    "canon-zero-tim/tests/v1_phase4/run_exact_image.sh": "077a2c6a25f325169a4395f660878539831b76b390fcc8876f5eac4872f2271e",
+    "canon-zero-tim/tests/v1_phase4/test_full_classifier.py": "d39901cd4ec7acb99274565ccb932b0d1e77b56d02171f2d73f1703744fa3bad",
+    "canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py": "545892835046546c75991a16d6d928b531412534e5a252a1d8fe72d6af648303",
+    "examples/frozenlake/train_frozenlake_qwen3.py": "df406938bf3ae1453c327700da6b93d524bd50cd9706dc8fb5bca2eb37ad6af0",
+    "examples/frozenlake/training_geometry.py": "875680f2436b958ebdd4c85178b24258b5570fa0990538b8c0a4de00d76c7e94",
+    "tunix/rl/agentic/agentic_grpo_learner.py": "3564a5c29092ad0ce5767def9319de639318a071d08655f7ead7ecc69de49526",
+    "tunix/rl/agentic/agentic_rl_learner.py": "5d7ed89d901d4e3d610f81449b79f205ce381383034d369fc33502a45ab71a0f",
+    "tunix/rl/agentic/token_continuity.py": "8036d958657f45830ac2f8ba4898e312a23abb7e96b34854dfd18f27312da4a6",
+    "tunix/rl/alignment.py": "929976f2fb3f5d75da1a8c4a08d8647c171213ca173b023863f15c6f8025b982",
+    "tunix/rl/dp_workloads.py": "8b0ee6c8efd3696aa26021db8416a1e2bffdb5300f9678f0c26dc537530b83b4",
+    "tunix/rl/frozenlake_checkpoint.py": "86343a0c5da0fb8003b461ee4dec043a917aacbfdf2980cdfc78dbed8491d1e5",
+    "tunix/sft/utils.py": "5a1b3cf8f06c225db337200ee1cd5e21be56810da31be95ef3d25072036588f1"
+  },
+  "code_and_gate_files": 41,
+  "final_candidate_matches_audited_code_and_gate_blobs": true,
+  "artifacts": {
+    "apc-host.log": "4e9583fbd8b7dfd17b1b52f963bca5e078ab351e78d6c9726b2c05ff184c10db",
+    "flag-audit.log": "130db3a890767bb4cf0da476c5dc9467f429527c2c0b9bc7fff927781cbdbac5",
+    "geometry-runtime.log": "d4a65a14059e2b417da14a740089a6152b8e3153e76b312b43adb6720965cbc4",
+    "p57-host.log": "437ec45c7ccfc592b528120d91018d8496501db39b088e1b04225c8260b22f44",
+    "p57-host-r2.log": "f5c7001f4057f6ccae9fddee4a21d21032433d56a39986f37feba644ed8c9652",
+    "v1-host.log": "8d31ef4143cf22e547ed04a35964a95462196725aad62add56ac9ffecdb07a77",
+    "v1-host-r2.log": "f8e343efc6af04e826b70e3a496bdd5d911f7c0f49a310bd5e1d34c7eedd240a",
+    "v1-host-r3.log": "4648337b6feaa6842f9dd9e35382dcdb3851998eb190f6bb33f9e1a1a9bb8584",
+    "p67-renderer-r2.log": "b868ad50e4027ee2b27e613668258973d3a7e59bc72d9cdafc76edafcf0337c3",
+    "exact-image.log": "7c61f0633a50ee91ec769c74a4f0507eb9e9df067a32538325175066a48e634d",
+    "shim-manifest.log": "77b02f0e0c3aac1b86699c5731c274b448f983298fa490238b4a61c218809a97",
+    "shim-manifest-r2.log": "95bb28587e95ec8cdd5f2bcef0c287f191bb677842719e12699f169debd9026b",
+    "p57-host-r3.log": "aa7cc1f0a024a85bdb494863b87ce264831b14e0bba7247158117832677fc610",
+    "exact-image-r2.log": "091707da9a2fd7476ff08eefe6322e04cc511310b150901eebd2841dba5277a3"
+  },
+  "unchanged": [
+    "base JobSet YAML",
+    "autoscale and exclusive-topology policy",
+    "non-topology node selectors",
+    "dataset identity and sampler/loss/optimizer hyperparameters",
+    "canonical_qwen3_adapter backward implementation",
+    "fixed DP reducer mathematics",
+    "TiTO all-diff recording and training policy",
+    "GCS worker and timeout handling"
+  ],
+  "target": "NOT RUN",
+  "not_certified": [
+    "DP4xTP8 TPU A/B/C alignment",
+    "full-model backward and optimizer commit",
+    "TPU memory and throughput",
+    "300-update convergence",
+    "real GCS/Orbax recovery",
+    "matched observer neutrality"
+  ],
+  "performance_claim": "None. Half the global trajectory budget with unchanged per-DP-rank work does not imply half the step time.",
+  "rollback": "Omit the new geometry option for the old 64-chip render. Any source revert must be scoped/reviewed; preserve all evidence."
+}

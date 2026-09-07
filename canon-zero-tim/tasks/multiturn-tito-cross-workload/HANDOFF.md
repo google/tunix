@@ -1,6 +1,103 @@
 # TiTO full-record and data-extraction handoff
 
-## 0. Current repair status — 2026-09-07 (supersedes historical status below)
+## 0. Current work — T9g 32-chip / B128 option (2026-09-07)
+
+T9g source is frozen in `ae2e4884d7df20cdf7cda6dd4a910ea61280e443`
+(source tree `6d364a5e1deadba87abf8281cac33e55d7208b4e`) on published
+baseline `c07ea8fa10cbfc55957503b9831ed863f8c36814`, followed by the
+accompanying evidence/handoff CL on `local/p57-tito-pair-0902`.
+The user explicitly approved this T9g commit/push on 2026-09-07 to
+`yuxzhang/canon-zero-tim`. Resolve the delivered full HEAD and verify remote
+readback before use; do not use the pre-T9g baseline as a launch source.
+No target render, TPU/Kubernetes launch, image publication or remote-storage
+write is authorized or performed. See `phases/t9g-dp4-tp8-b128-full.md`
+and `evidence/t9g-release-20260907/receipt.json` for the release audit.
+
+Current verification: P57 248/248, V1 104/104, APC 12/12, flags 423/423,
+complete pinned-image CPU gate PASS. This includes eight real-runtime
+admission cases, the bounded DP4xTP8 CPU reducer, installed head M1024 and
+neighboring-geometry negatives. Full raw logs, failed attempts and 41
+code/gate hashes are in `evidence/t9g-host-20260907/receipt.json`
+(SHA256 `5df76e984f354109e50cc9ff5be9b1e584ab09017c4ce39baa0716d676fbf8fb`).
+The local evidence manifest verifies 15/15 entries. No target certification
+is implied by these checks.
+Raw image logs retain terminal trailing whitespace; the phase lists exact
+lines. Do not normalize raw evidence to satisfy a future staged diff check;
+source/document checks are clean.
+
+The explicit renderer argument is `--train-geometry dp4-tp8-b128`.
+For **each** P45/M15 JobSet it selects:
+
+- 32 v5p chips, topology `2x4x4`, DP4 x TP8, eight four-chip workers.
+  DP2 x TP8 would be 16 chips and is not this option.
+- 16 prompts x 8 generations = 128 trajectories/update; microbatch four
+  trajectories, 32 gradient-accumulation groups, 300 optimizer updates.
+- Global M1024, rank-local and fixed-kernel M256, one head chunk;
+  32 serving sequences per DP rank and max concurrency 128.
+- The existing optimized serving/backward bundle, independent B rescore,
+  first-update/backward gates, datasets, sampler, loss and optimizer remain.
+  P45 five turns and M15/main fifteen turns retain their old token envelopes.
+  APC, evaluation and ordinary training checkpoints remain disabled.
+- Same W&B project `zero-tim-p57-frozenlake-tim`; group adds
+  `-dp4-b128`. Compare both optimizer updates and cumulative trajectories:
+  the 300-update budget is 38,400 rather than 76,800 trajectories.
+  This is not a same-data/same-weight-trajectory experiment or a promised
+  2x speedup. The new profile also has a separate persistent-cache namespace.
+
+Old 64-chip DP8 x TP8/B256 is still the renderer default; omitting the option
+is rollback without touching old files/evidence. The base JobSet YAML is
+unchanged. Only the explicit new output adjusts worker count and the TPU
+topology value (including Bodaborg's existing slice-topology annotation);
+autoscaling, exclusive-topology and other selectors stay as before.
+Two simultaneous new runs require 64 chips in total.
+
+### Operator procedure after separate publication/render approval
+
+1. From a clean checkout, verify the full published SHA contains source CL
+   `ae2e4884` and its evidence/handoff follow-up. This release is approved;
+   target render/launch still needs its own approval. Do not use the baseline
+   SHA above as a launch source for T9g.
+2. Reuse Section 5's render-only wrapper, keeping the operator's existing
+   target-cluster selection and fresh output/run IDs. Append the new geometry
+   argument; for the all-diff TiTO pair the complete argument shape is:
+
+   ```bash
+   bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+     APPROVED_NEW_FULL_SHA NEW_OUTPUT_DIRECTORY NEW_CAMPAIGN FRESH_P45_ID FRESH_M15_ID \
+     --train-geometry dp4-tp8-b128 \
+     --token-continuity both-exact \
+     --token-continuity-debug-mode record-full
+   ```
+
+   Placeholders must be replaced after approval. This procedure only renders;
+   launching the two full jobs remains the user's separately approved action.
+   For legacy transport, use `--token-continuity legacy` and omit debug mode.
+   Do not combine the new geometry with Native/IS, rollout-only, calibration,
+   eval, GSM8K or one-host identities.
+3. Verify the manifest index says `train_geometry=dp4-tp8-b128`, both profiles
+   say `qwen3-8b-dp4-tp8-frozenlake-v1-hp`, mesh is `4,8`, workers are
+   `8/8`, topology is `2x4x4`, batch is `16x8`, and no scheduling setting
+   besides the required count/topology fields drifted. Runtime must show
+   `[P59.DP4]`, checked-VMA global M1024, local M256/chunks1,
+   `tp_input_reduction=all_gather_rank_order_f32_barrier`, APC-off, eval-off,
+   checkpoint-disabled and a genuine first optimizer commit.
+4. Return Section 6's complete raw logs/worker logs and SHA package, resolved
+   environment, all classifications, 300 update receipts, component PERF and
+   XProf/Perfetto. In record-full, also return 300 sidecars of 128 rows,
+   38,400 step/row joins, every token-diff event capsule, live/final durability
+   receipts and any triggered actor snapshots. Snapshots remain bounded,
+   actor-only and non-resumable; they are not ordinary training checkpoints.
+   Pass `--train-geometry dp4-tp8-b128` to both full classifiers when running
+   them manually (the worker postflight already passes it).
+
+Token-red trajectories in record-full continue training unchanged, including
+update zero. Warning-only/data-collection runs are not strict Zero-TIM proof;
+missing evidence, structural identity corruption and non-whitelisted numerical
+or backward faults still fail. T9g does not fix the cause of 1,800-second
+generation timeouts, certify TPU memory/throughput, or close the earlier
+observer-neutrality/real-Orbax review items.
+
+## 0.1 Historical T9f repair status — 2026-09-07
 
 T9f source is committed as `89a58e24d02ed42b2bc39126eb592ca0a1426bd3`
 on baseline `2833977c1daae9971330e9be9bf16e546b9f0f4f`, followed by
@@ -221,12 +318,12 @@ bash tests/p57_frozenlake_tim/run_cpu.sh
 bash tests/v1_phase4/run_cpu.sh
 python3 .claude/skills/manage-canon-flags/scripts/audit_flag_registry.py \
   --repo .. \
-  --changed-base 2833977c1daae9971330e9be9bf16e546b9f0f4f
+  --changed-base c07ea8fa10cbfc55957503b9831ed863f8c36814
 bash tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 git diff --check
 ```
 
-Current T9f result is in Section 0. Historical post-T9e result:
+Current T9g result is in Section 0; T9f is in Section 0.1. Historical post-T9e result:
 P57 234/234, V1 102/102, APC 12/12, flag audit
 422/422, Python/shell syntax, and `git diff --check`. The P57 total includes
 all-event token-difference coverage plus poison coverage for all-update sidecars,

@@ -1,0 +1,275 @@
+test_commit_rejects_nonfinite_delta_or_positive_lr_without_change (test_first_update_gate.FirstUpdateGateTest.test_commit_rejects_nonfinite_delta_or_positive_lr_without_change) ... ok
+test_green_precommit_and_commit (test_first_update_gate.FirstUpdateGateTest.test_green_precommit_and_commit) ... ok
+test_p58_qwen4b_rejects_outer_prompt_chunk_denominator (test_first_update_gate.FirstUpdateGateTest.test_p58_qwen4b_rejects_outer_prompt_chunk_denominator) ... ok
+test_p58_qwen4b_uses_rank_local_sixteen_group_denominator (test_first_update_gate.FirstUpdateGateTest.test_p58_qwen4b_uses_rank_local_sixteen_group_denominator) ... ok
+test_precommit_rejects_nonfinite_zero_huge_and_wrong_denominator (test_first_update_gate.FirstUpdateGateTest.test_precommit_rejects_nonfinite_zero_huge_and_wrong_denominator) ... ok
+test_zero_learning_rate_allows_unchanged_parameters (test_first_update_gate.FirstUpdateGateTest.test_zero_learning_rate_allows_unchanged_parameters) ... ok
+test_attempt9_reds_classify_as_informative_zero_commit (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_attempt9_reds_classify_as_informative_zero_commit) ... V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=A_B_RED_REPRODUCED arm=p66-off workload=p45 a_b_bytes=1755 b_c_bytes=0 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=A_B_RED_REPRODUCED arm=p66-off workload=m15 a_b_bytes=93 b_c_bytes=0 backward=0 optimizer_commits=0
+ok
+test_classifier_accepts_recovery_and_rejects_bc_drift (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_classifier_accepts_recovery_and_rejects_bc_drift) ... V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=ZERO_TIM_RECOVERED arm=p66-off workload=p45 a_b_bytes=0 b_c_bytes=0 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_CLASSIFICATION verdict=FAIL outcome=ZERO_TIM_RECOVERED arm=p66-off workload=p45 a_b_bytes=0 b_c_bytes=1 backward=0 optimizer_commits=0
+ok
+test_engine_patch_scopes_embed_and_rpa_vma (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_engine_patch_scopes_embed_and_rpa_vma) ... ok
+test_p67_vma_scope_bypasses_serving_and_retains_p59 (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_p67_vma_scope_bypasses_serving_and_retains_p59) ... ok
+test_renderer_preserves_production_geometry_and_zero_commit (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_renderer_preserves_production_geometry_and_zero_commit) ... V1_FL_TP8_AB_RENDER_PASS workload=p45 arm=p66-off jobset=canon-v1fl-ab-p45-p45abtest1-0a30e606 sha256=681abc0d0b7b6920825873f5ef16974bbf493b88e3b8049362023766f3d0edd9 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_RENDER_PASS workload=p45 arm=serving-scope jobset=canon-v1fl-ab-p45-p45abtest1-0a30e606 sha256=f8d9be931d889456e36ff55d27cf024fca1730fba6ee8171fcc7a16065643313 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_RENDER_PASS workload=m15 arm=p66-off jobset=canon-v1fl-ab-m15-m15abtest1-0a30e606 sha256=0de6ac4274cf2df631e6dee577242bb01ce5fbb3ede2d39f45cd8661d7851748 backward=0 optimizer_commits=0
+ok
+test_serving_scope_classifier_requires_its_exact_marker (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_serving_scope_classifier_requires_its_exact_marker) ... V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=ZERO_TIM_RECOVERED arm=serving-scope workload=p45 a_b_bytes=0 b_c_bytes=0 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_CLASSIFICATION verdict=FAIL outcome=ZERO_TIM_RECOVERED arm=serving-scope workload=p45 a_b_bytes=0 b_c_bytes=0 backward=0 optimizer_commits=0
+ok
+test_v1_fl_tp8_ab_consumer_contract (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_v1_fl_tp8_ab_consumer_contract) ... ok
+test_any_real_alignment_fail_is_fatal (test_full_classifier.FullClassifierTest.test_any_real_alignment_fail_is_fatal) ... ok
+test_apc_on_is_fatal_for_an_apc_off_recipe (test_full_classifier.FullClassifierTest.test_apc_on_is_fatal_for_an_apc_off_recipe) ... ok
+test_direct_eval_cycle_timing_uses_explicit_enclosing_step (test_full_classifier.FullClassifierTest.test_direct_eval_cycle_timing_uses_explicit_enclosing_step) ... ok
+test_dp4_frozenlake_full_contract_and_shape_negatives (test_full_classifier.FullClassifierTest.test_dp4_frozenlake_full_contract_and_shape_negatives) ... ok
+test_frozenlake_apc_off_requires_exact_runtime_marker (test_full_classifier.FullClassifierTest.test_frozenlake_apc_off_requires_exact_runtime_marker) ... ok
+test_frozenlake_contract_requires_eval_off (test_full_classifier.FullClassifierTest.test_frozenlake_contract_requires_eval_off) ... ok
+test_green_full_contract_and_excludes_profiled_step (test_full_classifier.FullClassifierTest.test_green_full_contract_and_excludes_profiled_step) ... ok
+test_gsm8k_rejects_frozenlake_p67_scope (test_full_classifier.FullClassifierTest.test_gsm8k_rejects_frozenlake_p67_scope) ... ok
+test_gsm8k_requires_observed_p63_fallback (test_full_classifier.FullClassifierTest.test_gsm8k_requires_observed_p63_fallback) ... ok
+test_incoherent_jax_cache_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_incoherent_jax_cache_receipt_is_fatal) ... ok
+test_incoherent_xprof_restore_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_incoherent_xprof_restore_receipt_is_fatal) ... ok
+test_m15_tito_defaults_off_and_accepts_explicit_exact (test_full_classifier.FullClassifierTest.test_m15_tito_defaults_off_and_accepts_explicit_exact) ... ok
+test_missing_first_update_precommit_is_fatal (test_full_classifier.FullClassifierTest.test_missing_first_update_precommit_is_fatal) ... ok
+test_missing_jax_cache_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_jax_cache_receipt_is_fatal) ... ok
+test_missing_p59_head_partition_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p59_head_partition_receipt_is_fatal) ... ok
+test_missing_p59_local_fused_linear_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p59_local_fused_linear_receipt_is_fatal) ... ok
+test_missing_p59_rpa_local_kv_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p59_rpa_local_kv_receipt_is_fatal) ... ok
+test_missing_p63_update_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p63_update_receipt_is_fatal) ... ok
+test_missing_profile_artifact_is_fatal (test_full_classifier.FullClassifierTest.test_missing_profile_artifact_is_fatal) ... ok
+test_missing_xprof_restore_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_xprof_restore_receipt_is_fatal) ... ok
+test_over_threshold_first_update_precommit_is_fatal (test_full_classifier.FullClassifierTest.test_over_threshold_first_update_precommit_is_fatal) ... ok
+test_p57_first_diff_debug_is_armed_only_on_success_without_a_dump (test_full_classifier.FullClassifierTest.test_p57_first_diff_debug_is_armed_only_on_success_without_a_dump) ... ok
+test_p57_tito_accepts_exact_p45_and_m15_and_rejects_cross_labels (test_full_classifier.FullClassifierTest.test_p57_tito_accepts_exact_p45_and_m15_and_rejects_cross_labels) ... ok
+test_p57_tito_rejects_mixed_selectors_and_unselected_receipts (test_full_classifier.FullClassifierTest.test_p57_tito_rejects_mixed_selectors_and_unselected_receipts) ... ok
+test_p63_nonfinite_or_wrong_max_norm_is_fatal (test_full_classifier.FullClassifierTest.test_p63_nonfinite_or_wrong_max_norm_is_fatal) ... ok
+test_recipe_shape_contracts_cover_dp16_and_dp8 (test_full_classifier.FullClassifierTest.test_recipe_shape_contracts_cover_dp16_and_dp8) ... ok
+test_wrong_jax_cache_bucket_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_jax_cache_bucket_is_fatal) ... ok
+test_wrong_p59_head_shape_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_head_shape_is_fatal) ... ok
+test_wrong_p59_local_chunks_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_local_chunks_is_fatal) ... ok
+test_wrong_p59_local_fused_linear_shape_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_local_fused_linear_shape_is_fatal) ... ok
+test_wrong_p59_rpa_local_kv_shape_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_rpa_local_kv_shape_is_fatal) ... ok
+test_wrong_profile_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_profile_is_fatal) ... ok
+test_wrong_xprof_gcs_path_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_xprof_gcs_path_is_fatal) ... ok
+test_both_arms_share_one_capsule_and_fp64_oracle (test_gsm_fixed_replay_contract.GsmFixedReplayContractTest.test_both_arms_share_one_capsule_and_fp64_oracle) ... ok
+test_pinned_image_executes_forced_cpu_dp16_tp4 (test_gsm_fixed_replay_contract.GsmFixedReplayContractTest.test_pinned_image_executes_forced_cpu_dp16_tp4) ... ok
+test_script_is_syntactically_valid_and_freezes_exact_topology (test_gsm_fixed_replay_contract.GsmFixedReplayContractTest.test_script_is_syntactically_valid_and_freezes_exact_topology) ... ok
+test_restore_hit_emits_and_persists_exact_receipt (test_jax_cache_sync.JaxCacheSyncTest.test_restore_hit_emits_and_persists_exact_receipt) ... ok
+test_save_runs_before_fail_closed_postflight (test_jax_cache_sync.JaxCacheSyncTest.test_save_runs_before_fail_closed_postflight) ... ok
+test_transport_error_is_visible_but_not_a_numerical_gate (test_jax_cache_sync.JaxCacheSyncTest.test_transport_error_is_visible_but_not_a_numerical_gate) ... ok
+test_classifier_accepts_only_complete_finite_no_commit_carrier (test_numeric_debug.NumericDebugTest.test_classifier_accepts_only_complete_finite_no_commit_carrier) ... ok
+test_classifier_localizes_nonfinite_and_finite_naive_overflow (test_numeric_debug.NumericDebugTest.test_classifier_localizes_nonfinite_and_finite_naive_overflow) ... ok
+test_classifier_rejects_alignment_scale_and_optimizer_violations (test_numeric_debug.NumericDebugTest.test_classifier_rejects_alignment_scale_and_optimizer_violations) ... ok
+test_classifier_rejects_or_downgrades_truncated_evidence (test_numeric_debug.NumericDebugTest.test_classifier_rejects_or_downgrades_truncated_evidence) ... ok
+test_classifier_rejects_unknown_or_wrong_text_markers (test_numeric_debug.NumericDebugTest.test_classifier_rejects_unknown_or_wrong_text_markers) ... ok
+test_classifier_requires_all_completion_seams (test_numeric_debug.NumericDebugTest.test_classifier_requires_all_completion_seams) ... ok
+test_cluster_postflight_persists_and_classifies_full_p62_log (test_numeric_debug.NumericDebugTest.test_cluster_postflight_persists_and_classifies_full_p62_log) ... ok
+test_profile_resolves_only_from_exact_renderer_tuple (test_numeric_debug.NumericDebugTest.test_profile_resolves_only_from_exact_renderer_tuple) ... P62_NUMERIC_RENDER_PASS jobset=canon-p62-gsm8k-num-p62a-aaaaaaaa sha256=599c75bd61d771886f1fa5dd34ab71da6e6cf61b9c788768620c980139be957b optimizer_commits=0
+ok
+test_renderer_is_strict_zero_commit_and_default_full_identity_off (test_numeric_debug.NumericDebugTest.test_renderer_is_strict_zero_commit_and_default_full_identity_off) ... P62_NUMERIC_RENDER_PASS jobset=canon-p62-gsm8k-num-p62a-aaaaaaaa sha256=599c75bd61d771886f1fa5dd34ab71da6e6cf61b9c788768620c980139be957b optimizer_commits=0
+ok
+test_capsule_gcs_transport_round_trip_and_hash_negative (test_p64_numeric_debug.P64NumericDebugTest.test_capsule_gcs_transport_round_trip_and_hash_negative) ... ok
+test_capsule_round_trip_and_model_binding_are_fail_closed (test_p64_numeric_debug.P64NumericDebugTest.test_capsule_round_trip_and_model_binding_are_fail_closed) ... [P64.CAPSULE] capture_ready path=/tmp/tmpwm8rieey/p64_training_capsule.npz sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 rows=256 arrays=17 logical_bytes=20977664 certification=strict-prealignment-source
+[P64.CAPSULE] model_bound mode=capture capsule_sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 binding_sha256=e4fc9746d97b18f8eec2002c8c76030a880f9c6a2299e49ca813f5f8aa6e98df model_fingerprint_sha256=843dbd838ac8acd358cd2578f731f167784f5401add62460ee143e30a8efbb82 sampled_model=1
+[P64.CAPSULE] diagnostic_replay_ready path=/tmp/tmpwm8rieey/p64_training_capsule.npz sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 rows=256 capture_run=p64-unit capture_source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa replay_source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb rollout=skipped rescore_b=skipped certification=0
+[P64.CAPSULE] model_verified mode=replay capsule_sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 binding_sha256=e4fc9746d97b18f8eec2002c8c76030a880f9c6a2299e49ca813f5f8aa6e98df model_fingerprint_sha256=843dbd838ac8acd358cd2578f731f167784f5401add62460ee143e30a8efbb82 sampled_model=1
+ok
+test_classifier_accepts_complete_finite_group0_and_group31 (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_accepts_complete_finite_group0_and_group31) ... ok
+test_classifier_accepts_fail_closed_at_loss_boundary (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_accepts_fail_closed_at_loss_boundary) ... ok
+test_classifier_accepts_group0_only_diagnostic_replay (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_accepts_group0_only_diagnostic_replay) ... ok
+test_classifier_localizes_rank1_engine_vjp (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_localizes_rank1_engine_vjp) ... ok
+test_classifier_rejects_missing_input_boundary_and_optimizer_activity (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_rejects_missing_input_boundary_and_optimizer_activity) ... ok
+test_classifier_rejects_receipt_after_first_nonfinite (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_rejects_receipt_after_first_nonfinite) ... ok
+test_dp_workload_rejects_neighboring_geometry (test_p64_numeric_debug.P64NumericDebugTest.test_dp_workload_rejects_neighboring_geometry) ... ok
+test_renderer_and_profile_lock_exact_zero_commit_geometry (test_p64_numeric_debug.P64NumericDebugTest.test_renderer_and_profile_lock_exact_zero_commit_geometry) ... P64_P45_NUMERIC_RENDER_PASS jobset=canon-p64-p45-num-p64a-aaaaaaaa sha256=f1d121baade2ace1d91109e3a86806f26e103119f4b14ba6c2f09c22c21a08d2 capsule_mode=capture optimizer_commits=0
+P64_P45_NUMERIC_RENDER_PASS jobset=canon-p64-p45-num-p64-replay-a-bbbbbbbb sha256=3f8da55ab9c6ca456df96095b799710ffb88e43faa0eb4ea53b4aa02c6a0e092 capsule_mode=replay optimizer_commits=0
+ok
+test_runner_persists_and_classifies_p64_full_log (test_p64_numeric_debug.P64NumericDebugTest.test_runner_persists_and_classifies_p64_full_log) ... ok
+test_both_exact_changes_only_the_two_selector_entries (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_both_exact_changes_only_the_two_selector_entries) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpfgwnrykl/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpfgwnrykl/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpfgwnrykl/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpfgwnrykl/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpfgwnrykl/legacy
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpfgwnrykl/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpfgwnrykl/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpfgwnrykl/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpfgwnrykl/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpfgwnrykl/both-exact
+ok
+test_both_manifests_pass_real_env_resolution (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_both_manifests_pass_real_env_resolution) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpflg_e7gf/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpflg_e7gf/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpflg_e7gf/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpflg_e7gf/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpflg_e7gf/rendered
+ok
+test_closed_selector_routes_exact_tito_to_each_requested_workload (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_closed_selector_routes_exact_tito_to_each_requested_workload) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpuokrb1x9/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpuokrb1x9/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpuokrb1x9/legacy
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/p45-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/p45-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpuokrb1x9/p45-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpuokrb1x9/p45-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpuokrb1x9/p45-exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/m15-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/m15-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpuokrb1x9/m15-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpuokrb1x9/m15-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpuokrb1x9/m15-exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpuokrb1x9/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpuokrb1x9/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpuokrb1x9/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpuokrb1x9/both-exact
+ok
+test_dp4_pair_preserves_autoscale_and_optional_record_full (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmps5khbelc/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmps5khbelc/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmps5khbelc/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmps5khbelc/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmps5khbelc/old
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmps5khbelc/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmps5khbelc/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmps5khbelc/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=e82ce88d735c3ade5a52ca2ae4577bce5a910ee0cb94cf59a699faee58858d33
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmps5khbelc/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=571c3c5c9a6dc78a16d345147e81d3571ca0b93b991ab14a7f23eaba059fe934
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmps5khbelc/new
+
+  test_dp4_pair_preserves_autoscale_and_optional_record_full (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) (debug=None) ... FAIL
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpbn3f86po/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpbn3f86po/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpbn3f86po/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=39d9838e3aba85753a95e79eecc043b5cc4baf0c07fbdb85ecc3d0cd240f80a1
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpbn3f86po/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=ead52786b3f88b58bd27dba9a2fdfc1a9675f418e5db5867598443464d46afc8
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpbn3f86po/old
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpbn3f86po/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpbn3f86po/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpbn3f86po/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=6ce9c2bf10766bf02af155c8851aa943c6c8527c503b770d41d98ea8639cb058
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpbn3f86po/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=1244a9ffb0c4c189f5f76f359cc377646c6ff58b67110bcaa25e5162aa1014aa
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpbn3f86po/new
+  test_dp4_pair_preserves_autoscale_and_optional_record_full (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) (debug='record-full') ... FAIL
+test_exact_selector_rejects_malformed_mixed_and_foreign_runtime (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_exact_selector_rejects_malformed_mixed_and_foreign_runtime) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp31rbo_11/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp31rbo_11/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp31rbo_11/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp31rbo_11/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp31rbo_11/rendered
+ok
+test_explicit_exact_tito_changes_only_m15 (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_explicit_exact_tito_changes_only_m15) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp8co3sv_5/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp8co3sv_5/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp8co3sv_5/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp8co3sv_5/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp8co3sv_5/rendered
+ok
+test_first_diff_debug_changes_only_selected_exact_arms (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_first_diff_debug_changes_only_selected_exact_arms) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmptodsl3c4/exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmptodsl3c4/exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmptodsl3c4/exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmptodsl3c4/exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmptodsl3c4/exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmptodsl3c4/debug/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmptodsl3c4/debug/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmptodsl3c4/debug/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1b492b42ede91d58233ef6cbe8ba67ceddd8ba09dd50bc631fc9eca22713e6be
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmptodsl3c4/debug/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=6a3ea7641dec452a56bf707b44d03c575960a9f8332549fe3c09fdc238dd685c
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmptodsl3c4/debug
+ok
+test_record_full_is_explicit_on_both_exact_arms_and_derives_gcs (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_record_full_is_explicit_on_both_exact_arms_and_derives_gcs) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzjejlgfq/record-full/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzjejlgfq/record-full/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpzjejlgfq/record-full/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=39d9838e3aba85753a95e79eecc043b5cc4baf0c07fbdb85ecc3d0cd240f80a1
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpzjejlgfq/record-full/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=ead52786b3f88b58bd27dba9a2fdfc1a9675f418e5db5867598443464d46afc8
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpzjejlgfq/record-full
+ok
+test_refuses_reused_output_and_duplicate_ids (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_refuses_reused_output_and_duplicate_ids) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpjiz9lc_u/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpjiz9lc_u/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpjiz9lc_u/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpjiz9lc_u/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpjiz9lc_u/rendered
+ok
+test_renders_exactly_two_scoped_full_recipes_without_topology_drift (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_renders_exactly_two_scoped_full_recipes_without_topology_drift) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp5c919360/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp5c919360/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp5c919360/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp5c919360/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp5c919360/rendered
+ok
+test_selector_rejects_unknown_and_alias_conflict (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_selector_rejects_unknown_and_alias_conflict) ... ok
+test_wrapper_is_render_only_and_emits_two_unpiped_launch_commands (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_wrapper_is_render_only_and_emits_two_unpiped_launch_commands) ... ok
+test_wrong_profile_and_partial_scope_are_rejected (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_wrong_profile_and_partial_scope_are_rejected) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpscqrwou5/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpscqrwou5/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpscqrwou5/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpscqrwou5/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpscqrwou5/rendered
+ok
+test_exports_only_target_and_only_newest_committed_step (test_profile_window.ProfileWindowTest.test_exports_only_target_and_only_newest_committed_step) ... [V1.PERFETTO] captured training_step=2 timelines=1
+ok
+test_rejects_negative_target (test_profile_window.ProfileWindowTest.test_rejects_negative_target) ... ok
+test_exact_python_readers_use_hybrid_transform (test_stable_clip_contract.StableClipContractTest.test_exact_python_readers_use_hybrid_transform) ... ok
+test_only_registered_full_profile_family_enables_p63 (test_stable_clip_contract.StableClipContractTest.test_only_registered_full_profile_family_enables_p63) ... ok
+test_postflight_and_exact_image_require_p63 (test_stable_clip_contract.StableClipContractTest.test_postflight_and_exact_image_require_p63) ... ok
+test_all_three_pass_real_env_resolution_and_partial_bundle_fails (test_three_full_renderer.ThreeFullRendererTest.test_all_three_pass_real_env_resolution_and_partial_bundle_fails) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpcd3ag_1a/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpcd3ag_1a/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpcd3ag_1a/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpcd3ag_1a/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpcd3ag_1a/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpcd3ag_1a/rendered
+ok
+test_exact_image_gate_imports_the_mounted_workspace (test_three_full_renderer.ThreeFullRendererTest.test_exact_image_gate_imports_the_mounted_workspace) ... ok
+test_gsm8k_p74_wrapper_renders_one_job_and_never_launches (test_three_full_renderer.ThreeFullRendererTest.test_gsm8k_p74_wrapper_renders_one_job_and_never_launches) ... V1_HP_GSM8K_P74_MANIFEST_PASS path=/tmp/tmpxyx46mcb/gsm8k-p74/jobset-v1-hp-gsm8k-dp16tp4-p74.yaml sha256=82e8f761dcbdeff4a022f911f37de0a4988375e171c8d2182599dbb546b2f07e source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ok
+test_p57_high_performance_rejects_nonzero_or_short_job (test_three_full_renderer.ThreeFullRendererTest.test_p57_high_performance_rejects_nonzero_or_short_job) ... ok
+test_p63_rejects_neighboring_stock_profile (test_three_full_renderer.ThreeFullRendererTest.test_p63_rejects_neighboring_stock_profile) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzy3ruyn3/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzy3ruyn3/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpzy3ruyn3/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpzy3ruyn3/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpzy3ruyn3/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpzy3ruyn3/rendered
+ok
+test_profiles_resolve_complete_workload_scoped_bundle (test_three_full_renderer.ThreeFullRendererTest.test_profiles_resolve_complete_workload_scoped_bundle) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvm8oaqnf/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvm8oaqnf/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpvm8oaqnf/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpvm8oaqnf/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpvm8oaqnf/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpvm8oaqnf/rendered
+ok
+test_refuses_reused_output_and_duplicate_ids (test_three_full_renderer.ThreeFullRendererTest.test_refuses_reused_output_and_duplicate_ids) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvxbevh5_/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvxbevh5_/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpvxbevh5_/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpvxbevh5_/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpvxbevh5_/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpvxbevh5_/rendered
+ok
+test_renders_one_strict_and_two_frozenlake_warning_full_recipes (test_three_full_renderer.ThreeFullRendererTest.test_renders_one_strict_and_two_frozenlake_warning_full_recipes) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp24l0jc8r/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp24l0jc8r/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmp24l0jc8r/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmp24l0jc8r/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmp24l0jc8r/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmp24l0jc8r/rendered
+ok
+test_wave_wrapper_is_render_only_and_binds_clean_head (test_three_full_renderer.ThreeFullRendererTest.test_wave_wrapper_is_render_only_and_binds_clean_head) ... ok
+test_complete_capture_restores_both_artifact_types (test_xprof_gcs_sync.XprofGcsSyncTest.test_complete_capture_restores_both_artifact_types) ... ok
+test_missing_trace_is_fail_closed_and_preserved (test_xprof_gcs_sync.XprofGcsSyncTest.test_missing_trace_is_fail_closed_and_preserved) ... ok
+test_run_restores_before_full_classifier (test_xprof_gcs_sync.XprofGcsSyncTest.test_run_restores_before_full_classifier) ... ok
+test_transport_error_is_fail_closed (test_xprof_gcs_sync.XprofGcsSyncTest.test_transport_error_is_fail_closed) ... ok
+test_wrong_remote_identity_is_rejected_before_transport (test_xprof_gcs_sync.XprofGcsSyncTest.test_wrong_remote_identity_is_rejected_before_transport) ... ok
+
+======================================================================
+FAIL: test_dp4_pair_preserves_autoscale_and_optional_record_full (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) (debug=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/yuxuan/code_rl_repro/worktrees/p57_tito_pair_0902/canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py", line 118, in test_dp4_pair_preserves_autoscale_and_optional_record_full
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0 : [profile] FrozenLake v1-hp XProf identity is not an isolated JobSet/attempt
+
+
+======================================================================
+FAIL: test_dp4_pair_preserves_autoscale_and_optional_record_full (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) (debug='record-full')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/yuxuan/code_rl_repro/worktrees/p57_tito_pair_0902/canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py", line 118, in test_dp4_pair_preserves_autoscale_and_optional_record_full
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0 : [profile] TiTO full-record JobSet/attempt identity is invalid
+
+
+----------------------------------------------------------------------
+Ran 104 tests in 10.816s
+
+FAILED (failures=2)

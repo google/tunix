@@ -779,3 +779,63 @@
   preserve this ledger, all failed logs and the all-diff TiTO implementation.
 - Next: fast-forward push the approved source+ledger stack and compare the
   full remote readback SHA to delivered HEAD; target work stays separate.
+
+## 2026-09-07 — T9g explicit 32-chip/B128 full option, local admission PASS
+
+- User approved implementation only. Source remained
+  `c07ea8fa10cbfc55957503b9831ed863f8c36814` in `local/p57-tito-pair-0902`;
+  no commit, push, target render, TPU/Kubernetes or remote-storage mutation.
+- Added `--train-geometry dp4-tp8-b128`: each P45/M15 full run uses
+  32 chips (`2x4x4`), DP4xTP8, B16xG8=128, 300 updates, global M1024 and
+  local/kernel M256. Microbatch four and 32 groups preserve the per-rank
+  workload; the total trajectory budget halves. Old 64-chip default remains.
+- Shared profile/admission chain, real learner readers, fixed-head M table,
+  first-update/full classifiers and TiTO DP/row/snapshot metadata agree.
+  Preserved all existing optimization/math/gate and token-record policies.
+  Existing autoscale/exclusive-topology and other scheduling fields are
+  preserved for both legacy and Bodaborg; base YAML has no diff.
+- Host: P57 248/248, V1 104/104, APC 12/12, flags 423/423; real entrypoint
+  shape and neighboring-profile negatives. Full pinned CPU image exits 0,
+  including installed M1024/neighbor negatives, eight real-runtime cases,
+  bounded DP4TP8 reducer and existing installed TP4/TP8 backward regressions.
+- Raw artifacts and final 41 code/gate hashes:
+  `evidence/t9g-host-20260907/receipt.json`, SHA256
+  `5df76e984f354109e50cc9ff5be9b1e584ab09017c4ce39baa0716d676fbf8fb`; 15/15 local manifest entries verify.
+  Initial fixture mistakes, the stale image-probe M assertion and incorrect
+  source-directory manifest invocations are explained in the phase and
+  receipt, with failed logs retained. No hardware numerical red occurred.
+- No target memory, full-model backward/optimizer, convergence, performance,
+  real-storage or observer-neutrality claim. Do not present this as a pure
+  speed-only comparison against Native/IS at B256. HANDOFF Section 0 gives
+  the fresh-SHA render-only procedure, exact receipts to return and rollback.
+
+## 2026-09-07 — T9g source freeze and authorized publication
+
+- Type: release / handoff. The user explicitly approved this T9g commit/push
+  to `yuxzhang/canon-zero-tim`; no target render/launch, image publication
+  or remote-storage action was authorized. Fetch readback equals baseline
+  `c07ea8fa10cbfc55957503b9831ed863f8c36814`.
+- Source CL: `ae2e4884d7df20cdf7cda6dd4a910ea61280e443`; source tree
+  `6d364a5e1deadba87abf8281cac33e55d7208b4e`. Its 42 files are exactly
+  the 41 tested code/gate blobs plus FLAGS registration, with no other
+  runtime change. The evidence and handoff form a separate follow-up CL.
+- Repeated P57 248/248, V1 104/104, APC 12/12 and flags 423/423 PASS;
+  all commands exit zero. Python AST 30 files, individual shell syntax ten
+  files, source staged diff check and secret-pattern scan PASS. Raw repeat
+  logs are in `evidence/t9g-release-20260907/` and match the original
+  command-output files byte-for-byte.
+- The committed source matches all 41 hashes in the prior pinned-image
+  receipt. Construction evidence verifies 15/15 SHA entries, including both
+  failed and passing image logs. No image/TPU rerun is needed for a
+  docs/evidence-only follow-up; TPU certification remains NOT RUN.
+- Preserve four historical trailing-whitespace lines in immutable image
+  output (two per log); they are the only staged formatting exception.
+- HANDOFF now records publication authority and the explicit three-argument
+  geometry + both-exact + record-full combination. Geometry alone does not
+  enable TiTO. Original base scheduling YAML, exclusive-topology and old
+  renderer defaults remain unchanged.
+- Rollback: omit the new geometry for the old 64-chip render; a separately
+  approved source revert targets only `ae2e4884`. Keep all evidence.
+- Next: finish the evidence/handoff commit, re-fetch before fast-forward
+  push, then verify full remote HEAD. Any target render/launch remains a
+  separate user decision.

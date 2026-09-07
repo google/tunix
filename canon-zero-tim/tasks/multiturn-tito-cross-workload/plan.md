@@ -40,8 +40,22 @@ TiTO. No phase may infer DP8xTP8 certification from host or one-host evidence.
 | T9e | All-event token-difference stream | every structurally valid token diff, including update 0 and repeated diffs in one trajectory, persists a replay capsule and continues the unchanged full-training row; evidence accounting is bijective and collect-64 remains bounded | complete for host and pinned-image construction — P57 234/234, V1 102/102, APC 12/12, flags 422/422, full pinned image PASS; one-host/real GCS/DP8xTP8 unrun |
 | T9f | Pre-response termination identity through row map/sidecar/classifier | actual collector timeout and unchanged learner tensors; zero-response receipt and mask poison controls; host and pinned-image regression | source frozen as `89a58e24`; publication approved 2026-09-07 — P57 238/238, V1 102/102, flags 422/422 and complete pinned-image PASS; patched target unrun |
 | T10 | DP8xTP8 treatment run | explicit P45-exact and M15-exact full runs return complete token receipts and their existing alignment/training classifications | pending — separate launch approval required |
+| T9g | Explicit 32-chip DP4xTP8 / B16xG8 full option | legacy-preserving renderer, full admission/shape/classifier negatives and pinned-image construction | local implementation complete — P57 248/248, V1 104/104, APC 12/12, flags 423/423, complete pinned CPU image PASS; source CL `ae2e4884`, publication approved, target NOT RUN |
 
 ## Decisions
+
+- 2026-09-07 release authorization: commit and push the T9g geometry source
+  and evidence/handoff CLs to `yuxzhang/canon-zero-tim`. Source frozen at
+  `ae2e4884d7df20cdf7cda6dd4a910ea61280e443`; 41 tested code/gate
+  hashes remain exact. This new authorization supersedes only the earlier
+  T9g publication restriction; target render/launch remains unauthorized.
+
+- 2026-09-07 T9g: implementation approved for an explicit P45/M15 full
+  DP4xTP8/B16xG8 option (32 chips each). Keep the legacy 64-chip default,
+  300 updates, scientific hyperparameters and TiTO policy. No commit/push,
+  target render or launch authority transfers from the earlier T9f release.
+  This halves the sample budget, not the per-DP-rank work; target speed and
+  convergence require fresh evidence.
 
 - 2026-09-07 authorization: commit/push the T9f source and evidence/handoff
   CLs to `yuxzhang/canon-zero-tim`. This does not authorize a target render,
