@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # %%
 # [WIP] Reproduction of [DeepSWE](https://www.together.ai/blog/deepswe)
 # with Multi-turn Agentic framework on MaxText models.
@@ -35,11 +49,6 @@ from tunix.cli.utils import data as data_lib
 from tunix.rl.agentic.agents import agent_types
 from tunix.utils import compat
 import vllm  # pytype: disable=import-error
-from vllm.config import ModelConfig
-
-# Force uses_mrope to False to disable 3D multimodal position IDs in text-only runs.
-# See b/520142315 and maxtext/inference/vllm_decode.py.
-ModelConfig.uses_mrope = property(lambda _: False)
 
 # Register MaxText vLLM adapter
 maxtext_vllm_adapter.register()
@@ -102,9 +111,7 @@ parser.add_argument(
     type=str,
     default="decoder",
     choices=["none", "block", "decoder", "minimal", "full", "qwen_full"],
-    help=(
-        "Remat policy: 'none', 'block'/'minimal', 'decoder'/'full'."
-    ),
+    help="Remat policy: 'none', 'block'/'minimal', 'decoder'/'full'.",
 )
 parser.add_argument(
     "--prefuse_moe_weights",
@@ -187,11 +194,21 @@ parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
 parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--max_concurrency", type=int, default=200)
-parser.add_argument("--max_warmpool_size", type=int, default=None, help="Max warmpool replicas per task/image. Defaults to num_generations.")
+parser.add_argument(
+    "--max_warmpool_replicas",
+    "--max_warmpool_size",
+    dest="max_warmpool_replicas",
+    type=int,
+    default=None,
+    help="Max warmpool replicas per task/image. Defaults to num_generations.",
+)
 parser.add_argument(
     "--use_agent_sandbox",
     action="store_true",
-    help="Whether to use Kubernetes Agent Sandbox runtime instead of local Docker socket.",
+    help=(
+        "Whether to use Kubernetes Agent Sandbox runtime instead of local"
+        " Docker socket."
+    ),
 )
 
 parser.add_argument(
@@ -287,15 +304,20 @@ parser.add_argument(
     "--docker_image_prefix",
     type=str,
     default=None,
-    help="Optional prefix/registry to replace source image repo with (e.g. us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix).",
+    help=(
+        "Optional prefix/registry to replace source image repo with (e.g."
+        " us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix)."
+    ),
 )
 parser.add_argument(
     "--filter_available_images_only",
     type=str2bool,
     default=False,
-    help="Filter dataset items to only those whose docker images already exist in Artifact Registry.",
+    help=(
+        "Filter dataset items to only those whose docker images already exist"
+        " in Artifact Registry."
+    ),
 )
-
 
 
 # Other
@@ -327,7 +349,6 @@ parser.add_argument(
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="Logging level for the script and relevant libraries.",
 )
-
 parser.add_argument(
     "--enable_jax_profiler",
     type=str2bool,
@@ -346,147 +367,21 @@ args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
+
+from examples.deepswe import r2e_gym_helper
+
+r2e_gym_helper.patch_kubernetes_runtime()
+r2e_gym_helper.patch_k8s_agent_sandbox()
+
 if args.enable_jax_profiler and jax.process_index() == 0:
   try:
     import jax.profiler
 
     jax.profiler.start_server(args.jax_profiler_port)
-    print(
-        f"Started JAX XProf live server on port {args.jax_profiler_port}",
-        flush=True,
-    )
+    logging.info("Started JAX XProf live server on port %d", args.jax_profiler_port)
   except Exception as e:
-    print(
-        f"Warning: Failed to start JAX profiler server on port {args.jax_profiler_port}: {e}",
-        flush=True,
-    )
+    logging.warning("Failed to start JAX profiler server on port %d: %s", args.jax_profiler_port, e)
 
-
-# Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
-# This is required because r2egym hardcodes the CPU nodepool name (using
-# Karpenter bigcpu-standby), which does not exist in our GKE cluster. We
-# override it here to match the nodepool configured via the
-# --node_selector_val flag.
-def patch_kubernetes_runtime():
-  try:
-    from r2egym.agenthub.runtime.docker import DockerRuntime
-    import os
-
-    original_start_kubernetes_pod = DockerRuntime._start_kubernetes_pod
-
-    def patched_start_kubernetes_pod(
-        self, docker_image, command, pod_name, **docker_kwargs
-    ):
-      original_create_namespaced_pod = self.client.create_namespaced_pod
-
-      def patched_create_namespaced_pod(*args, **kwargs):
-        body = kwargs.get("body")
-        if body and "spec" in body:
-          key = os.environ.get(
-              "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
-          )
-          val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
-          body["spec"]["nodeSelector"] = {key: val}
-          print(f"[Monkeypatch] Overrode nodeSelector to {key}={val}")
-        return original_create_namespaced_pod(*args, **kwargs)
-
-      self.client.create_namespaced_pod = patched_create_namespaced_pod
-      try:
-        return original_start_kubernetes_pod(
-            self, docker_image, command, pod_name, **docker_kwargs
-        )
-      finally:
-        self.client.create_namespaced_pod = original_create_namespaced_pod
-
-    DockerRuntime._start_kubernetes_pod = patched_start_kubernetes_pod
-    print(
-        "[Monkeypatch] Successfully patched DockerRuntime._start_kubernetes_pod"
-    )
-
-
-  except Exception as e:
-    print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
-
-
-def patch_k8s_agent_sandbox():
-  try:
-    import time
-    from k8s_agent_sandbox.k8s_helper import (
-        K8sHelper,
-        SandboxClaimFailedError,
-        SandboxMetadataError,
-        SandboxTemplateNotFoundError,
-        SandboxWarmPoolNotFoundError,
-    )
-    import urllib3
-
-    original_watch_claim = K8sHelper._watch_claim
-
-    def robust_watch_claim(
-        self,
-        claim_name,
-        namespace,
-        timeout=300,
-        require_ready=False,
-        resource_version=None,
-    ):
-      start_time = time.time()
-      last_rv = resource_version or "0"
-      while time.time() - start_time < timeout:
-        remaining_timeout = max(1, int(timeout - (time.time() - start_time)))
-        try:
-          return original_watch_claim(
-              self,
-              claim_name,
-              namespace,
-              timeout=remaining_timeout,
-              require_ready=require_ready,
-              resource_version=last_rv,
-          )
-        except (
-            SandboxClaimFailedError,
-            SandboxTemplateNotFoundError,
-            SandboxWarmPoolNotFoundError,
-            SandboxMetadataError,
-        ):
-          raise
-        except Exception as e:
-          print(
-              f"[Monkeypatch] K8sHelper._watch_claim caught {type(e).__name__}: {e} for claim {claim_name}. Retrying..."
-          )
-          # Quick poll check before restarting stream
-          try:
-            claim = self.get_sandbox_claim(claim_name, namespace)
-            status = claim.get("status", {})
-            last_rv = claim.get("metadata", {}).get("resourceVersion", "0")
-            ready = any(
-                c.get("type") == "Ready" and c.get("status") == "True"
-                for c in status.get("conditions", [])
-            )
-            sandbox_status = status.get("sandbox", {})
-            name = sandbox_status.get("name", "") or sandbox_status.get("Name", "")
-            if name and (ready or not require_ready):
-              print(
-                  f"[Monkeypatch] Resolved sandbox name '{name}' for claim {claim_name} via poll fallback"
-              )
-              return name
-          except Exception as poll_err:
-            print(f"[Monkeypatch] Poll fallback error for {claim_name}: {poll_err}")
-          time.sleep(1.0)
-      raise TimeoutError(
-          f"Timed out waiting for claim {claim_name} readiness after {timeout}s"
-      )
-
-    K8sHelper._watch_claim = robust_watch_claim
-    print(
-        "[Monkeypatch] Successfully patched K8sHelper._watch_claim with resilient retry/polling fallback"
-    )
-  except Exception as e:
-    print(f"[Monkeypatch] Failed to patch k8s_agent_sandbox: {e}")
-
-
-patch_kubernetes_runtime()
-patch_k8s_agent_sandbox()
 
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
@@ -661,7 +556,9 @@ REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
 USE_AGENT_SANDBOX = args.use_agent_sandbox
-KV_CACHE_SIZE = max(4096, 1 << ((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH - 1).bit_length()))
+KV_CACHE_SIZE = max(
+    4096, 1 << ((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH - 1).bit_length())
+)
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -739,24 +636,23 @@ else:
 
 
 if args.filter_repo:
-  target_repo = args.filter_repo.replace("_final", "")
-  print(f"Filtering dataset to repo: {args.filter_repo} (matching '{target_repo}')")
-  dataset = dataset.filter(
-      lambda x: x.get("repo_name") == target_repo
-      or x.get("repo_name") == args.filter_repo
-      or args.filter_repo in x.get("docker_image", "")
-  )
+  print(f"Filtering dataset to repo: {args.filter_repo}")
+  dataset = dataset.filter(lambda x: x["repo_name"] == args.filter_repo)
   print(f"Filtered dataset size: {len(dataset)}")
 
 if args.filter_available_images_only:
   import urllib.request, json
+
   ar_tags = set()
   # Query GCP Artifact Registry REST API or fallback to metadata token
   try:
     # 1. Get access token from metadata server or default credentials
     token = None
     try:
-      req = urllib.request.Request("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", headers={"Metadata-Flavor": "Google"})
+      req = urllib.request.Request(
+          "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+          headers={"Metadata-Flavor": "Google"},
+      )
       with urllib.request.urlopen(req, timeout=3) as resp:
         token = json.loads(resp.read().decode())["access_token"]
     except Exception:
@@ -767,7 +663,9 @@ if args.filter_available_images_only:
       # List tags via Artifact Registry REST API
       url = "https://artifactregistry.googleapis.com/v1/projects/cloud-tpu-multipod-dev/locations/us-central1/repositories/tunix/packages/pandas_final/tags?pageSize=1000"
       while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
           data = json.loads(resp.read().decode())
           for tag_obj in data.get("tags", []):
@@ -785,9 +683,14 @@ if args.filter_available_images_only:
     with open("/app/ar_available_tags.json") as f:
       ar_tags = set(json.load(f))
 
-  print(f"Found {len(ar_tags)} available image tags in Artifact Registry. Filtering dataset...")
+  print(
+      f"Found {len(ar_tags)} available image tags in Artifact Registry."
+      " Filtering dataset..."
+  )
   if ar_tags:
-    dataset = dataset.filter(lambda x: x["docker_image"].split(":")[-1] in ar_tags)
+    dataset = dataset.filter(
+        lambda x: x["docker_image"].split(":")[-1] in ar_tags
+    )
     print(f"Dataset filtered to {len(dataset)} available instances.")
   else:
     print("Warning: No AR tags found, proceeding without filtering.")
@@ -798,11 +701,16 @@ if args.max_examples:
   print(f"Limiting dataset to {num_to_take} examples")
   dataset = dataset.select(range(num_to_take))
 
+
 def transform(entry):
   for k, v in entry.items():
     if isinstance(v, list):
       entry[k] = json.dumps(v)
-  if args.docker_image_prefix and "docker_image" in entry and entry["docker_image"]:
+  if (
+      args.docker_image_prefix
+      and "docker_image" in entry
+      and entry["docker_image"]
+  ):
     # e.g., 'namanjain12/pandas_final:tag' -> '<prefix>/pandas_final:tag'
     img_name = entry["docker_image"].split("/")[-1]
     entry["docker_image"] = f"{args.docker_image_prefix.rstrip('/')}/{img_name}"
@@ -875,14 +783,14 @@ if USE_AGENT_SANDBOX:
       max_concurrency=MAX_CONCURRENCY,
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
-      max_warmpool_size=args.max_warmpool_size,
+      max_warmpool_replicas=args.max_warmpool_replicas,
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,
       fleet=fleet,
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
-      max_warmpool_size=args.max_warmpool_size,
+      max_warmpool_replicas=args.max_warmpool_replicas,
   )
 
 
@@ -1045,7 +953,11 @@ if TRAIN_WITH_LORA:
         alpha=ALPHA,
     )
     raw_model = getattr(base_model, "base", base_model)
-    model_input = raw_model.get_model_input() if hasattr(raw_model, "get_model_input") else {}
+    model_input = (
+        raw_model.get_model_input()
+        if hasattr(raw_model, "get_model_input")
+        else {}
+    )
     lora_model = qwix.apply_lora_to_model(
         base_model, lora_provider, **model_input
     )
@@ -1143,8 +1055,6 @@ vllm_rollout_dict = {
             "remat_policy": "none",
             "enable_dp_attention": False,
             "vllm_hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
-            "enable_jax_profiler": args.enable_jax_profiler,
-            "jax_profiler_port": args.jax_profiler_port,
         }
     },
     "rollout_vllm_sampling_kwargs": {
