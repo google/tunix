@@ -100,6 +100,9 @@ RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
       rm -rf /var/lib/apt/lists/*; \
     fi
 
+RUN uv pip install --no-cache-dir -U "jax[tpu]==0.11.0" "jaxlib==0.11.0" "libtpu==0.0.44" \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+
 # Copy the rest of the project files
 COPY . .
 

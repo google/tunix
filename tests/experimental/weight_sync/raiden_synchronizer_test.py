@@ -388,18 +388,29 @@ class RaidenSynchronizerTest(absltest.TestCase):
     ffi_h2d.assert_called_once_with()
 
   def test_ffi_compute_on_compat_accepts_out_memory_spaces(self):
-    from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
-    compute_on_mod = getattr(raiden_synchronizer.jax, "_src").compute_on
-    original = compute_on_mod.compute_on
-    self.addCleanup(setattr, compute_on_mod, "compute_on", original)
+    experimental_compute_on_mod = jax.experimental.compute_on
+    internal_compute_on_mod = getattr(raiden_synchronizer.jax, "_src").compute_on
+    original_experimental = experimental_compute_on_mod.compute_on
+    original_internal = internal_compute_on_mod.compute_on
+    self.addCleanup(
+      setattr, experimental_compute_on_mod, "compute_on", original_experimental
+    )
+    self.addCleanup(
+      setattr, internal_compute_on_mod, "compute_on", original_internal
+    )
 
     raiden_synchronizer._ensure_ffi_compute_on_compat()
 
-    decorator = compute_on_mod.compute_on(
+    experimental_decorator = experimental_compute_on_mod.compute_on(
+      compute_type="device_host",
+      out_memory_spaces=jax.memory.Space.Device,
+    )
+    internal_decorator = internal_compute_on_mod.compute_on(
         compute_type="device_host",
         out_memory_spaces=jax.memory.Space.Device,
     )
-    self.assertTrue(callable(decorator))
+    self.assertTrue(callable(experimental_decorator))
+    self.assertTrue(callable(internal_decorator))
 
 
 if __name__ == "__main__":

@@ -63,34 +63,51 @@ except ImportError:
 
 def _ensure_ffi_compute_on_compat() -> None:
   """Bridges TPU-sync wheels that call the newer compute_on decorator API."""
+  experimental_compute_on_mod = None
   try:
-    from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
+    from jax.experimental import compute_on as experimental_compute_on_mod  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
   except ImportError:
-    pass
-  compute_on_mod = getattr(jax, "_src", None)
-  if compute_on_mod is None:
-    return
-  compute_on_mod = getattr(compute_on_mod, "compute_on", None)
-  if compute_on_mod is None:
+    experimental_compute_on_mod = None
+
+  internal_compute_on_mod = getattr(jax, "_src", None)
+  if internal_compute_on_mod is not None:
+    internal_compute_on_mod = getattr(internal_compute_on_mod, "compute_on", None)
+
+  compute_on_modules = [
+      module
+      for module in (experimental_compute_on_mod, internal_compute_on_mod)
+      if module is not None
+  ]
+  if not compute_on_modules:
     return
 
-  try:
-    params = inspect.signature(compute_on_mod.compute_on).parameters
-  except (TypeError, ValueError):
-    params = {}
-  if "out_memory_spaces" in params:
+  needs_patch = False
+  for compute_on_mod in compute_on_modules:
+    try:
+      params = inspect.signature(compute_on_mod.compute_on).parameters
+    except (TypeError, ValueError):
+      params = {}
+    if "out_memory_spaces" not in params:
+      needs_patch = True
+      break
+  if not needs_patch:
     return
 
-  compute_on2 = getattr(compute_on_mod, "compute_on2", None)
+  compute_on2 = None
+  for compute_on_mod in compute_on_modules:
+    compute_on2 = getattr(compute_on_mod, "compute_on2", None)
+    if compute_on2 is not None:
+      break
   if compute_on2 is None:
     raise RuntimeError(
         "Installed JAX lacks compute_on compatibility required by the TPU-sync"
         " FFI wheel."
     )
 
-  compute_on_mod.compute_on = compute_on2
+  for compute_on_mod in compute_on_modules:
+    compute_on_mod.compute_on = compute_on2
   logging.warning(
-      "Patched jax._src.compute_on.compute_on to compute_on2 for TPU-sync FFI"
+      "Patched JAX compute_on entrypoints to compute_on2 for TPU-sync FFI"
       " compatibility."
   )
 
