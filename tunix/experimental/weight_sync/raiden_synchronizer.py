@@ -25,7 +25,7 @@ from typing import Any, List, Optional, Tuple
 
 from absl import logging
 import jax
-from jax.experimental import compute_on
+# from jax.experimental import compute_on
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 
@@ -303,10 +303,18 @@ class RaidenSynchronizer:
     )
 
     src_devices = mesh.devices.flatten()
-    num_processes = len(
-        set(getattr(d, "process_index", 0) for d in src_devices)
-    )
-    devices_per_host = len(src_devices) // max(1, num_processes)
+    devices_per_host_env = os.environ.get("RAIDEN_DEVICES_PER_HOST")
+    if devices_per_host_env:
+      devices_per_host = int(devices_per_host_env)
+    elif self._is_proxy:
+      # In Pathways, process_index is always 0 for proxy devices. Default to
+      # 4 devices/host for standard Cloud TPU VM topologies.
+      devices_per_host = min(4, len(src_devices))
+    else:
+      num_processes = len(
+          set(getattr(d, "process_index", 0) for d in src_devices)
+      )
+      devices_per_host = len(src_devices) // max(1, num_processes)
 
     if is_d2h:
       logging.info(
@@ -335,49 +343,49 @@ class RaidenSynchronizer:
 
       # TODO(b/557061810): Re-enable this once the bug is fixed and the FFI
       # call is verified to work.
-      # ws_info = _raiden_ffi.init_weight_synchronizer(
-      #     device_array=self.arrays[0],
-      #     shard_idx=shard_idx,
-      #     mesh=mesh,
-      #     slice_byte_sizes=slice_byte_sizes_sharded,
-      #     parallelism=self._parallelism,
-      #     num_layers=len(self.arrays),
-      #     listener_port=0,
-      #     num_shards=devices_per_host,
-      # )
-
-      @compute_on.compute_on(
-          compute_type="device_host",
-          out_memory_spaces=jax.memory.Space.Device,
-      )
-      def _local_init(anchor, s_idx, sizes):
-        axis_names = mesh.axis_names
-        out_shape = tuple([1] * len(axis_names)) + (6,)
-        return jax.ffi.ffi_call(
-            "init_weight_synchronizer",
-            jax.ShapeDtypeStruct(out_shape, jnp.int32),
-            has_side_effect=True,
-        )(
-            anchor,
-            s_idx,
-            sizes,
-            local_port=np.int32(0),
-            parallelism=np.int32(self._parallelism),
-            num_layers=np.int32(len(self.arrays)),
-            listener_port=np.int32(0),
-            num_shards=np.int32(devices_per_host),
-        )
-
-      ws_info = jax.shard_map(
-          _local_init,
+      ws_info = _raiden_ffi.init_weight_synchronizer(
+          device_array=self.arrays[0],
+          shard_idx=shard_idx,
           mesh=mesh,
-          in_specs=(
-              self.arrays[0].sharding.spec,
-              jax.sharding.PartitionSpec(*mesh.axis_names),
-              jax.sharding.PartitionSpec(None),
-          ),
-          out_specs=jax.sharding.PartitionSpec(*mesh.axis_names, None),
-      )(self.arrays[0], shard_idx, slice_byte_sizes_sharded)
+          slice_byte_sizes=slice_byte_sizes_sharded,
+          parallelism=self._parallelism,
+          num_layers=len(self.arrays),
+          listener_port=0,
+          num_shards=devices_per_host,
+      )
+
+      # @compute_on.compute_on(
+      #     compute_type="device_host",
+      #     out_memory_spaces=jax.memory.Space.Device,
+      # )
+      # def _local_init(anchor, s_idx, sizes):
+      #   axis_names = mesh.axis_names
+      #   out_shape = tuple([1] * len(axis_names)) + (6,)
+      #   return jax.ffi.ffi_call(
+      #       "init_weight_synchronizer",
+      #       jax.ShapeDtypeStruct(out_shape, jnp.int32),
+      #       has_side_effect=True,
+      #   )(
+      #       anchor,
+      #       s_idx,
+      #       sizes,
+      #       local_port=np.int32(0),
+      #       parallelism=np.int32(self._parallelism),
+      #       num_layers=np.int32(len(self.arrays)),
+      #       listener_port=np.int32(0),
+      #       num_shards=np.int32(devices_per_host),
+      #   )
+
+      # ws_info = jax.shard_map(
+      #     _local_init,
+      #     mesh=mesh,
+      #     in_specs=(
+      #         self.arrays[0].sharding.spec,
+      #         jax.sharding.PartitionSpec(*mesh.axis_names),
+      #         jax.sharding.PartitionSpec(None),
+      #     ),
+      #     out_specs=jax.sharding.PartitionSpec(*mesh.axis_names, None),
+      # )(self.arrays[0], shard_idx, slice_byte_sizes_sharded)
 
     local_ws_info = multihost_utils.global_array_to_host_local_array(
         ws_info,
@@ -549,7 +557,9 @@ class RaidenSynchronizer:
       mesh_shape = (1,)
     if self._is_proxy:
       shards = tuple(self._ips)
-      control_addr = self._unique_listeners[0] if self._unique_listeners else ""
+      control_addr = (
+          ",".join(self._unique_listeners) if self._unique_listeners else ""
+      )
     else:
       data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
       control_addr = (

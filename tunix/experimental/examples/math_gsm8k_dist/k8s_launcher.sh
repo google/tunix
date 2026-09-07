@@ -72,6 +72,7 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export LOG_DIR=${LOG_DIR:-}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 
@@ -114,6 +115,7 @@ start_orchestrator() {
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
+      ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       python -m tunix.experimental.distributed.runtime.main \
