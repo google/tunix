@@ -13,45 +13,57 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -Ee
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
+cd "${REPO_ROOT}"
+
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
-# Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
-# which can cause stale config/shape mismatches if shared across models.
+export MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-32B}
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
-# Defaults to MODEL_ID so AutoTokenizer downloads directly from HuggingFace
-# instead of failing on an initially empty local MODEL_DIR.
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
-export BATCH_SIZE=${BATCH_SIZE:-1}
-export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export MAX_TURNS=${MAX_TURNS:-3}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+export BATCH_SIZE=${BATCH_SIZE:-8}
+export NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+export MAX_STEPS=${MAX_STEPS:-50}
+export MAX_TURNS=${MAX_TURNS:-50}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
-
-# Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
-export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
-export LEARNING_RATE=${LEARNING_RATE:-1e-6}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
-export LORA_RANK=${LORA_RANK:-64}
-export LORA_ALPHA=${LORA_ALPHA:-64.0}
-export USE_LORA=${USE_LORA:-0}
-export DEBUG=${DEBUG:-0}
+export EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+export LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
+export OFF_POLICY_STEPS=${OFF_POLICY_STEPS:-0}
+export TOP_P=${TOP_P:-none}
+export TOP_K=${TOP_K:-none}
+export LEARNING_RATE=${LEARNING_RATE:-1e-6}
+export ADAM_B1=${ADAM_B1:-0.9}
+export ADAM_B2=${ADAM_B2:-0.99}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export USE_LORA=${USE_LORA:-0}
+export LORA_RANK=${LORA_RANK:-64}
+export LORA_ALPHA=${LORA_ALPHA:-64.0}
+export DEBUG=${DEBUG:-0}
 
-# DeepSWE dataset and environment configuration
-export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-500}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-4}
+export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints/deepswe}
+
+export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-V1}
 export DATASET_PATH=${DATASET_PATH:-}
 export DATASET_SPLIT=${DATASET_SPLIT:-train}
 export DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-artifacts/qwen3_dist_deepswe/dataset_cache}
@@ -61,161 +73,179 @@ export ENV_BACKEND=${ENV_BACKEND:-kubernetes}
 export SCAFFOLD=${SCAFFOLD:-r2egym}
 export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}
 export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
-export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
-export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
+export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}
+export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-deepswe-cpu-pool}
+export SANDBOX_MAX_CONCURRENCY=${SANDBOX_MAX_CONCURRENCY:-200}
+export MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-}
 export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
-export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
-export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
-
-# MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
-export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
-# If TRAINER_BACKEND=maxtext, MAXTEXT_CKPT must be set to the path of an Orbax params-only checkpoint.
-if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
-  echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
-  exit 1
-fi
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/deepswe_dist/maxtext}
-export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
-export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
-# Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
-export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
-export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
-export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
-# Optional: enable experimental batched-RPA attention kernel for rollout.
-export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
-export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
-
-# Logs source/destination Raiden tensor checksums on both the trainer and
-# rollout sides during weight sync, for cross-verification of a real run.
-export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-10800}
+export OVERLONG_FILTER=${OVERLONG_FILTER:-true}
+export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}
 
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 
-export ORCHESTRATOR_ID=$USER-orch
-export ORCHESTRATOR_PORT=20000
-
-export ROLLOUT_ID=$USER-roll
-export ROLLOUT_PORT=20001
-
-export TRAINER_ID=$USER-train
-export TRAINER_PORT=20002
+export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$USER-deepswe-orch}
+export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
+export TRAINER_ID=${TRAINER_ID:-$USER-deepswe-train}
+export TRAINER_PORT=${TRAINER_PORT:-20002}
+export ROLLOUT_ID=${ROLLOUT_ID:-$USER-deepswe-roll}
+export ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
-
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
+export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
+export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-4}
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
+
+DEBUG_FLAG=""
+if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+  DEBUG_FLAG="--debug"
+fi
+
+USE_LORA_FLAG=""
+if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+  USE_LORA_FLAG="--use_lora"
+fi
+
+USE_AGENT_SANDBOX_FLAG=""
+if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
+  USE_AGENT_SANDBOX_FLAG="--use_agent_sandbox"
+fi
+
+SHUFFLE_FLAG="--shuffle"
+if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
+  SHUFFLE_FLAG="--no-shuffle"
+fi
+
+OVERLONG_FILTER_FLAG="--overlong_filter"
+if [[ "$OVERLONG_FILTER" == "0" || "$OVERLONG_FILTER" == "false" || "$OVERLONG_FILTER" == "False" ]]; then
+  OVERLONG_FILTER_FLAG="--no-overlong_filter"
+fi
 
 if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
-  echo "Error: this first DeepSWE distributed launcher only wires trainer+rollout."
-  echo "Use BETA=0.0 until the reference inference worker is added."
+  echo "Error: this launcher starts actor and rollout workers only."
+  echo "Use BETA=0.0 until a reference worker is added."
+  exit 1
+fi
+
+if (( BATCH_SIZE <= 0 ||
+      MINI_BATCH_SIZE <= 0 ||
+      NUM_GENERATIONS <= 0 ||
+      TRAIN_MICRO_BATCH_SIZE <= 0 )); then
+  echo "Error: batch sizes and NUM_GENERATIONS must all be positive."
+  echo "  BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  echo "  NUM_GENERATIONS=$NUM_GENERATIONS TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
+  exit 1
+fi
+if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
+  echo "Error: BATCH_SIZE must be divisible by MINI_BATCH_SIZE."
+  echo "  BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  exit 1
+fi
+if (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
+  echo "Error: MINI_BATCH_SIZE * NUM_GENERATIONS must be divisible by TRAIN_MICRO_BATCH_SIZE."
+  echo "  MINI_BATCH_SIZE=$MINI_BATCH_SIZE NUM_GENERATIONS=$NUM_GENERATIONS TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
   exit 1
 fi
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
 }
 
 start_orchestrator() {
-  local dataset_args=""
-  if [[ -n "${DATASET_PATH}" ]]; then
-    dataset_args="--dataset_path=${DATASET_PATH}"
-  fi
-  local shuffle_arg="--shuffle"
-  if [[ "${SHUFFLE}" == "0" || "${SHUFFLE}" == "false" || "${SHUFFLE}" == "False" ]]; then
-    shuffle_arg="--no-shuffle"
-  fi
-  local sandbox_arg=""
-  if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    sandbox_arg="--use_agent_sandbox"
-  fi
-
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
-    --cpu_machine=${CPU_MACHINE} \
+    --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
-      python -m tunix.experimental.distributed.runtime.main \
+      python3 -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist.main \
         --model_id=${MODEL_ID} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --batch_size=${BATCH_SIZE} \
+        --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --max_steps=${MAX_STEPS} \
         --max_turns=${MAX_TURNS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --episode_timeout_secs=${EPISODE_TIMEOUT_SECS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --beta=${BETA} \
         --epsilon=${EPSILON} \
+        --epsilon_high=${EPSILON_HIGH} \
+        --advantage_estimator=${ADVANTAGE_ESTIMATOR} \
+        --loss_agg_mode=${LOSS_AGG_MODE} \
+        --max_staleness=${OFF_POLICY_STEPS} \
+        --top_p=${TOP_P} \
+        --top_k=${TOP_K} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
-        ${DATASET_CACHE_DIR:+--dataset_cache_dir=${DATASET_CACHE_DIR}} \
+        --dataset_cache_dir=${DATASET_CACHE_DIR} \
         --seed=${SEED} \
         --env_backend=${ENV_BACKEND} \
         --scaffold=${SCAFFOLD} \
         --step_timeout_secs=${STEP_TIMEOUT_SECS} \
         --reward_timeout_secs=${REWARD_TIMEOUT_SECS} \
-        --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
-        --wandb_project=\"${WANDB_PROJECT}\" \
-        --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
-        ${dataset_args} \
-        ${shuffle_arg} \
-        ${sandbox_arg} \
+        ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
+        ${DATASET_PATH:+--dataset_path=${DATASET_PATH}} \
+        ${USE_AGENT_SANDBOX_FLAG} \
+        ${SHUFFLE_FLAG} \
+        ${OVERLONG_FILTER_FLAG} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
-        ${DEBUG:+--debug} \
+        ${DEBUG_FLAG} \
     " \
     | kubectl apply -f -
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" 2>/dev/null || true
 }
 
 start_trainer() {
-  local maxtext_args=""
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    maxtext_args=" \
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
-      --maxtext_ckpt_path=${MAXTEXT_CKPT} \
-      --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
-      --mesh_tp=${TRAINER_MESH_TP} \
-      --mesh_expert=${TRAINER_MESH_EXPERT} \
-    "
+  if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
-  local lora_args=""
-  if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
-    lora_args="--use_lora"
-  fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
-    --tpu_slice=${TRAINER_TPU_SLICE} \
-    --cpu_machine=${CPU_MACHINE} \
-    --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
+    --tpu_slice="${TRAINER_TPU_SLICE}" \
+    --cpu_machine="${CPU_MACHINE}" \
+    --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
+    --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
+    --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      HF_TOKEN=${HF_TOKEN} \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} \
+      python3 -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -223,7 +253,7 @@ start_trainer() {
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
         --mesh_tp=${TRAINER_MESH_TP} \
-        --trainer_backend=${TRAINER_BACKEND} \
+        --mesh_expert=${TRAINER_MESH_EXPERT} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
@@ -231,87 +261,93 @@ start_trainer() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
+        --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --learning_rate=${LEARNING_RATE} \
+        --adam_b1=${ADAM_B1} \
+        --adam_b2=${ADAM_B2} \
+        --weight_decay=${WEIGHT_DECAY} \
+        --max_grad_norm=${MAX_GRAD_NORM} \
+        --sampler_type=${SAMPLER} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --sampler=${SAMPLER} \
-        ${lora_args} \
-        ${maxtext_args} \
-        ${DEBUG:+--debug} \
+        --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
+        --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
+        --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
+        ${USE_LORA_FLAG} \
+        ${DEBUG_FLAG} \
     " \
     | kubectl apply -f -
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  for i in $(seq 0 $((ROLLOUT_REPLICAS - 1))); do
+    kubectl delete jobset "${ROLLOUT_ID}-${i}" 2>/dev/null || true
+  done
 }
 
 start_rollout() {
-  local maxtext_args=""
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    maxtext_args=" \
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-    "
+  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
-  local vllm_args=""
-  if [[ "$SAMPLER" == "vllm" ]]; then
-    vllm_args="\
-    --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
-    "
-  fi
-  local lora_args=""
-  if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
-    lora_args="--use_lora"
-  fi
-  local sandbox_env=""
-  if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"}"
-  fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
-    --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=${ROLLOUT_TPU_SLICE} \
-    --worker_container_image="${TUNIX_IMAGE}" \
-    --worker_container_port="${ROLLOUT_PORT}" \
-    --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
-        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
-        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-        --worker_id=${ROLLOUT_ID} \
-        --port=${ROLLOUT_PORT} \
-        --model_id=${MODEL_ID} \
-        --model_dir=${MODEL_DIR} \
-        --model_name=${MODEL_NAME} \
-        --tokenizer_path=${TOKENIZER_PATH} \
-        --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
-        --mesh_tp=${ROLLOUT_MESH_TP} \
-        --max_prompt_length=${MAX_PROMPT_LENGTH} \
-        --max_response_length=${MAX_RESPONSE_LENGTH} \
-        --sampler=${SAMPLER} \
-        --lora_rank=${LORA_RANK} \
-        --lora_alpha=${LORA_ALPHA} \
-        --weight_sync_mode=${WEIGHT_SYNC_MODE} \
-        --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
-        --env_name=deepswe_env \
-        --agent_name=deepswe_agent \
-        --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
-        ${lora_args} \
-        ${maxtext_args} \
-        ${vllm_args} \
-        ${DEBUG:+--debug} \
-    " \
-    | kubectl apply -f -
+
+  for i in $(seq 0 $((ROLLOUT_REPLICAS - 1))); do
+    local replica_id="${ROLLOUT_ID}-${i}"
+    python3 tunix/experimental/distributed/deployment/yaml_generator.py \
+      tunix/experimental/distributed/deployment/yamls/${ROLLOUT_JOBSET_YAML} \
+      --jobset_name="${replica_id}" \
+      --tpu_slice="${ROLLOUT_TPU_SLICE}" \
+      --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
+      --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
+      --worker_container_image="${TUNIX_IMAGE}" \
+      --worker_container_port="${ROLLOUT_PORT}" \
+      --worker_startup_command=" \
+        HF_TOKEN=${HF_TOKEN} \
+        SKIP_JAX_PRECOMPILE=1 \
+        VERIFY_WEIGHTS=${VERIFY_WEIGHTS} \
+        NAMESPACE=${SANDBOX_NAMESPACE} \
+        NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY} \
+        NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL} \
+        DATASET_NAME=${DATASET_NAME} \
+        DATASET_PATH=${DATASET_PATH} \
+        DATASET_SPLIT=${DATASET_SPLIT} \
+        DATASET_CACHE_DIR=${DATASET_CACHE_DIR} \
+        SHUFFLE=${SHUFFLE} \
+        SEED=${SEED} \
+        ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY} \
+        SANDBOX_MAX_CONCURRENCY=${SANDBOX_MAX_CONCURRENCY} \
+        python3 -m tunix.experimental.distributed.runtime.main \
+          --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+          --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+          --process_main=tunix.experimental.examples.common.run_rollout_node.main \
+          --worker_id=${replica_id} \
+          --port=${ROLLOUT_PORT} \
+          --model_id=${MODEL_ID} \
+          --model_dir=${MODEL_DIR} \
+          --model_name=${MODEL_NAME} \
+          --sampler=${SAMPLER} \
+          --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
+          --mesh_tp=${ROLLOUT_MESH_TP} \
+          --tokenizer_path=${TOKENIZER_PATH} \
+          --max_prompt_length=${MAX_PROMPT_LENGTH} \
+          --max_response_length=${MAX_RESPONSE_LENGTH} \
+          --lora_rank=${LORA_RANK} \
+          --lora_alpha=${LORA_ALPHA} \
+          --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+          --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
+          --env_name=deepswe_env \
+          --agent_name=deepswe_agent \
+          --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+          --enable_thinking \
+          ${USE_LORA_FLAG} \
+          ${DEBUG_FLAG} \
+      " \
+      | kubectl apply -f -
+  done
 }
 
-if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
-  source tunix/experimental/examples/common/enter_kube_context.sh
-elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
-  source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh"
-fi
+source tunix/experimental/examples/common/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -338,30 +374,39 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TUNIX_IMAGE" ]]; then
-  echo "Error: no image set. Build one with tunix, maxtext, and" \
-       "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
-       "--image=..."
+  echo "Error: no image set. Pass TUNIX_IMAGE=... or --image=..."
   exit 1
 fi
 
-if [[ "$COMMAND" == "start" ]]; then
-  stop_orchestrator
-  stop_trainer
-  stop_rollout
-  start_orchestrator
-  start_trainer
-  start_rollout
-elif [[ "$COMMAND" == "stop" ]]; then
-  stop_orchestrator
-  stop_trainer
-  stop_rollout
-elif [[ "$COMMAND" == "orchestrator" ]]; then
-  stop_orchestrator; start_orchestrator
-elif [[ "$COMMAND" == "trainer" ]]; then
-  stop_trainer; start_trainer
-elif [[ "$COMMAND" == "rollout" ]]; then
-  stop_rollout; start_rollout
-else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
-  exit 1
-fi
+case "$COMMAND" in
+  start)
+    stop_orchestrator
+    stop_trainer
+    stop_rollout
+    start_orchestrator
+    start_trainer
+    start_rollout
+    ;;
+  stop)
+    stop_orchestrator
+    stop_trainer
+    stop_rollout
+    ;;
+  orchestrator)
+    stop_orchestrator
+    start_orchestrator
+    ;;
+  trainer)
+    stop_trainer
+    start_trainer
+    ;;
+  rollout)
+    stop_rollout
+    start_rollout
+    ;;
+  *)
+    echo "Error: Invalid command '$COMMAND'."
+    echo "Available commands: start, stop, orchestrator, trainer, rollout."
+    exit 1
+    ;;
+esac

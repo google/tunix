@@ -67,6 +67,55 @@ class DeepSWEDistTest(absltest.TestCase):
         deepswe.DeepSWEAgent,
     )
 
+  def test_launcher_env_defaults_match_reference_recipe(self):
+    package_dir = Path(deepswe.__file__).parent
+    local_launcher = (package_dir / "launcher.sh").read_text(
+        encoding="utf-8"
+    )
+    k8s_launcher = (package_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
+
+    self.assertIn("ENV_BACKEND=${ENV_BACKEND:-kubernetes}", local_launcher)
+    self.assertIn("USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}", local_launcher)
+    self.assertIn(
+        "WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}", local_launcher
+    )
+    self.assertIn(
+        "ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}",
+        local_launcher,
+    )
+    self.assertIn(
+        "MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}", local_launcher
+    )
+    self.assertEqual(
+        local_launcher.count('--mini_batch_size="$MINI_BATCH_SIZE"'), 2
+    )
+    self.assertEqual(
+        local_launcher.count('--num_generations="$NUM_GENERATIONS"'), 2
+    )
+    self.assertIn('--sampler_type="$SAMPLER"', local_launcher)
+    self.assertEqual(local_launcher.count('--sampler="$SAMPLER"'), 1)
+    self.assertIn(
+        "export ENV_BACKEND=${ENV_BACKEND:-kubernetes}", k8s_launcher
+    )
+    self.assertIn(
+        "export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}", k8s_launcher
+    )
+    self.assertIn(
+        "export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}", k8s_launcher
+    )
+    self.assertIn("--sampler_type=${SAMPLER}", k8s_launcher)
+    self.assertNotIn("--sampler_mesh_tp", k8s_launcher)
+    self.assertIn(
+        "export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}",
+        k8s_launcher,
+    )
+    self.assertEqual(
+        k8s_launcher.count("--mini_batch_size=${MINI_BATCH_SIZE}"), 2
+    )
+    self.assertEqual(
+        k8s_launcher.count("--num_generations=${NUM_GENERATIONS}"), 2
+    )
+
   def test_build_prompt_item_carries_env_and_agent_config(self):
     item = deepswe.build_prompt_item(
         entry={

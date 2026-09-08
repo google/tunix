@@ -26,26 +26,36 @@ ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
-MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-32B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_deepswe"}
 MODEL_DIR=${MODEL_DIR:-"${ARTIFACT_ROOT}/models/${MODEL_NAME}"}
 TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
-BATCH_SIZE=${BATCH_SIZE:-1}
-NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-MAX_STEPS=${MAX_STEPS:-1}
-MAX_TURNS=${MAX_TURNS:-3}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+BATCH_SIZE=${BATCH_SIZE:-8}
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+MAX_STEPS=${MAX_STEPS:-50}
+MAX_TURNS=${MAX_TURNS:-50}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
-MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
-LEARNING_RATE=${LEARNING_RATE:-1e-6}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
+EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
+OFF_POLICY_STEPS=${OFF_POLICY_STEPS:-0}
+TOP_P=${TOP_P:-none}
+TOP_K=${TOP_K:-none}
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
+ADAM_B1=${ADAM_B1:-0.9}
+ADAM_B2=${ADAM_B2:-0.99}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_LORA=${USE_LORA:-0}
@@ -54,11 +64,11 @@ LORA_ALPHA=${LORA_ALPHA:-64.0}
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 
-CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
-CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-500}
+CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-4}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 
-DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
+DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-V1}
 DATASET_PATH=${DATASET_PATH:-}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-"${ARTIFACT_ROOT}/dataset_cache"}
@@ -68,11 +78,15 @@ ENV_BACKEND=${ENV_BACKEND:-kubernetes}
 SCAFFOLD=${SCAFFOLD:-r2egym}
 USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}
 SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
-SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
-SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
+SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}
+SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-deepswe-cpu-pool}
+SANDBOX_MAX_CONCURRENCY=${SANDBOX_MAX_CONCURRENCY:-200}
+MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-}
 STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
-ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
+EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-10800}
+OVERLONG_FILTER=${OVERLONG_FILTER:-true}
+ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}
 
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -200,6 +214,7 @@ echo "  tokenizer path: ${TOKENIZER_PATH}"
 echo "  dataset:        ${DATASET_PATH:-${DATASET_NAME}:${DATASET_SPLIT}}"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
 echo "  batch size:     ${BATCH_SIZE}"
+echo "  mini batch:     ${MINI_BATCH_SIZE} prompt groups/update"
 echo "  generations:    ${NUM_GENERATIONS}"
 echo "  max steps:      ${MAX_STEPS}"
 echo "  max turns:      ${MAX_TURNS}"
@@ -226,6 +241,26 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   exit 1
 fi
 
+if (( BATCH_SIZE <= 0 ||
+      MINI_BATCH_SIZE <= 0 ||
+      NUM_GENERATIONS <= 0 ||
+      TRAIN_MICRO_BATCH_SIZE <= 0 )); then
+  echo "Error: batch sizes and NUM_GENERATIONS must all be positive."
+  echo "  BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  echo "  NUM_GENERATIONS=$NUM_GENERATIONS TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
+  exit 1
+fi
+if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
+  echo "Error: BATCH_SIZE must be divisible by MINI_BATCH_SIZE."
+  echo "  BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  exit 1
+fi
+if (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
+  echo "Error: MINI_BATCH_SIZE * NUM_GENERATIONS must be divisible by TRAIN_MICRO_BATCH_SIZE."
+  echo "  MINI_BATCH_SIZE=$MINI_BATCH_SIZE NUM_GENERATIONS=$NUM_GENERATIONS TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
+  exit 1
+fi
+
 ensure_model_dir
 mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
 : > "$TRAINER_LOG"
@@ -248,12 +283,17 @@ echo "Launching trainer node..."
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --mini_batch_size="$MINI_BATCH_SIZE"
+    --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --learning_rate="$LEARNING_RATE"
+    --adam_b1="$ADAM_B1"
+    --adam_b2="$ADAM_B2"
+    --weight_decay="$WEIGHT_DECAY"
+    --max_grad_norm="$MAX_GRAD_NORM"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
-    --sampler="$SAMPLER"
+    --sampler_type="$SAMPLER"
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
@@ -299,6 +339,7 @@ echo "Launching DeepSWE rollout node..."
     --env_name=deepswe_env
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --enable_thinking
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
@@ -315,6 +356,14 @@ echo "Launching DeepSWE rollout node..."
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     export NAMESPACE="$SANDBOX_NAMESPACE"
+    export DATASET_NAME="$DATASET_NAME"
+    export DATASET_PATH="$DATASET_PATH"
+    export DATASET_SPLIT="$DATASET_SPLIT"
+    export DATASET_CACHE_DIR="$DATASET_CACHE_DIR"
+    export SHUFFLE="$SHUFFLE"
+    export SEED="$SEED"
+    export ROLLOUT_MAX_CONCURRENCY="$ROLLOUT_MAX_CONCURRENCY"
+    export SANDBOX_MAX_CONCURRENCY="$SANDBOX_MAX_CONCURRENCY"
     if [[ -n "$SANDBOX_NODE_SELECTOR_KEY" && -n "$SANDBOX_NODE_SELECTOR_VAL" ]]; then
       export NODE_SELECTOR_KEY="$SANDBOX_NODE_SELECTOR_KEY"
       export NODE_SELECTOR_VAL="$SANDBOX_NODE_SELECTOR_VAL"
@@ -339,14 +388,22 @@ echo "Launching CPU orchestrator..."
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
     --batch_size="$BATCH_SIZE"
+    --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --max_steps="$MAX_STEPS"
     --max_turns="$MAX_TURNS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
+    --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
+    --epsilon_high="$EPSILON_HIGH"
+    --advantage_estimator="$ADVANTAGE_ESTIMATOR"
+    --loss_agg_mode="$LOSS_AGG_MODE"
+    --max_staleness="$OFF_POLICY_STEPS"
+    --top_p="$TOP_P"
+    --top_k="$TOP_K"
     --dataset_name="$DATASET_NAME"
     --dataset_split="$DATASET_SPLIT"
     --dataset_cache_dir="$DATASET_CACHE_DIR"
@@ -362,10 +419,18 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$DATASET_PATH" ]]; then
     ORCHESTRATOR_CMD+=(--dataset_path="$DATASET_PATH")
   fi
+  if [[ -n "$MAX_WARMPOOL_REPLICAS" ]]; then
+    ORCHESTRATOR_CMD+=(--max_warmpool_replicas="$MAX_WARMPOOL_REPLICAS")
+  fi
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)
   else
     ORCHESTRATOR_CMD+=(--shuffle)
+  fi
+  if [[ "$OVERLONG_FILTER" == "0" || "$OVERLONG_FILTER" == "false" || "$OVERLONG_FILTER" == "False" ]]; then
+    ORCHESTRATOR_CMD+=(--no-overlong_filter)
+  else
+    ORCHESTRATOR_CMD+=(--overlong_filter)
   fi
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--use_agent_sandbox)
