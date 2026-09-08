@@ -150,7 +150,7 @@ if (args.hidden_size, tp_size) == (2560, 8):
   )
   learner_m = fixed.QWEN4B_TP8_LEARNER_M
 elif (args.hidden_size, tp_size) == (4096, 8):
-  if fixed.QWEN8B_TP8_LEARNER_M != (2048, 4096):
+  if fixed.QWEN8B_TP8_LEARNER_M != (1024, 2048, 4096):
     raise AssertionError(
         "Qwen3-8B TP8 learner rows drifted: "
         f"{fixed.QWEN8B_TP8_LEARNER_M}"
@@ -180,6 +180,17 @@ else:
         f"TP={tp_size}"
     )
 geometry = fixed.resolve_geometry(args.hidden_size, tp_size, endpoint=endpoint)
+try:
+  fixed.validate_global_contract(
+      (1024, args.hidden_size), (args.hidden_size, fixed.VOCAB),
+      "bfloat16", "bfloat16", tp_size=tp_size,
+  )
+except ValueError:
+  if (args.hidden_size, tp_size) == (4096, 8):
+    raise AssertionError("registered Qwen3-8B TP8 M1024 was rejected")
+else:
+  if (args.hidden_size, tp_size) != (4096, 8):
+    raise AssertionError("M1024 leaked into a neighboring head geometry")
 if (
     geometry.local_vocab != local_vocab
     or geometry.padded_local_vocab != padded_local_vocab

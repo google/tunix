@@ -1,0 +1,55 @@
+{
+  "schema": "canon.p57-tito-t9f-local-repair.v1",
+  "date_utc": "2026-09-06",
+  "branch": "local/p57-tito-pair-0902",
+  "source_base": "2833977c1daae9971330e9be9bf16e546b9f0f4f",
+  "uncommitted": true,
+  "incident": "debug_logs/canon_p57_fl_zero_m15_r09_crash_20260906",
+  "incident_sha_checks": 3,
+  "host": {
+    "p57_tests": 238,
+    "v1_tests": 102,
+    "flags_declared": 422,
+    "flags_actual": 422,
+    "diff_check": "PASS"
+  },
+  "focused_image": {
+    "collector_timeout": "PASS",
+    "learner_training_arrays_off_on": "EXACT",
+    "sidecar_poison": "PASS",
+    "scope": "CPU only; mock sampler/cluster; actual collector/learner/sidecar methods"
+  },
+  "exact_image": {
+    "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+    "command": "bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+    "exit_code": 0,
+    "terminal": "V1_HP_EXACT_IMAGE_PASS",
+    "console_capture": "exact-image-console-partial.log",
+    "console_capture_complete": false,
+    "evidence_grade": "admission receipt; tool output truncation prevents a complete raw-log claim"
+  },
+  "changed_runtime_and_gate_sha256": {
+    "tunix/rl/agentic/token_continuity.py": "80d3f6910e03da3b123d3f0cbac4a69383adddf937a1d4d5642bb8dfb153608b",
+    "tunix/rl/agentic/trajectory/trajectory_collect_engine.py": "5ccd24064d90ded8cb889f02e9e5f1e11a2fd25c13919c05b80d2d80d51ed2ce",
+    "tunix/rl/agentic/agentic_grpo_learner.py": "9bfba8fbf4cc5d0a29166866b36b550c09df390395387a37496d53ff4dac4bd1",
+    "tunix/rl/alignment.py": "848ef814757f3f9df6594f47657aee022f3c116e3498682b5519654524091046",
+    "canon-zero-tim/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py": "6d1a5c74ef8f3ed48abacd92bb327ec78043d435735fb06b415a49955e472e21",
+    "canon-zero-tim/tests/v1_phase4/run_exact_image.sh": "704ae34b98b3b0064742e3460854e4ed17e54bb7288d770e2f4f9c05327e2e70"
+  },
+  "target": "NOT RUN",
+  "remote_writes": false,
+  "commit": false,
+  "push": false,
+  "prior_failures": [
+    "Old row-map assertion reproduced before repair",
+    "P57 host r1: standalone test imported optional metrax dependency; actual helper loaded with lightweight test harness in r2",
+    "Focused image fixture missed source/image identity; fixture corrected",
+    "Focused learner invocation used wrong test-class name; corrected invocation PASS"
+  ],
+  "limitations": [
+    "Does not fix generation latency/timeouts",
+    "Does not change prior sorting/observer-neutrality or Orbax exception behavior",
+    "No full 300-update or patched TPU claim",
+    "No remote storage recovery or resume-state claim"
+  ]
+}

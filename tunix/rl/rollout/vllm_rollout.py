@@ -247,6 +247,7 @@ class VllmRollout(base_rollout.BaseRollout):
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,
         prompt_lengths=self.output.prompt_lengths,
+        prompt_token_witnesses=self.output.prompt_token_witnesses,
     )
 
   def set_recorded_sampling_transforms(

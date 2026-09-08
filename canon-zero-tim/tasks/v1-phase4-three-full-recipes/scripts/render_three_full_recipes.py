@@ -204,10 +204,12 @@ def render_three(
     raise ValueError(f"Phase4 must render exactly three manifests, got {len(outputs)}")
   for label, path in zip(("gsm8k", "p45", "m15"), outputs, strict=True):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    # P57 owns the full-system bundle for its high-performance FrozenLake
+    # manifests; the outer three-recipe renderer remains the writer for
+    # GSM8K.  The GSM8K document comes from the P33 JobSet path, which does
+    # not inject the bundle; the FrozenLake documents come from render_p57,
+    # which does, so they are verified rather than re-injected.
     if label == "gsm8k":
-      # The GSM8K document comes from the P33 JobSet path, which does not
-      # inject the bundle; the FrozenLake documents come from render_p57,
-      # which does, so they are verified rather than re-injected.
       _set_env(document, _optimization_additions(label))
     else:
       _require_env(document, _optimization_additions(label))
@@ -261,6 +263,10 @@ def render_three(
       if "CANON_M15_TOKEN_CONTINUITY" in env:
         raise ValueError(
             f"{label} must not render the experimental M15 TITO selector"
+        )
+      if "CANON_P57_TOKEN_CONTINUITY" in env:
+        raise ValueError(
+            f"{label} must keep the P57 TITO treatment selector absent"
         )
     wrong = {
         name: env.get(name)

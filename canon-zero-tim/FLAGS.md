@@ -11,6 +11,7 @@
 
 | Flag | 语义 | 默认 | 生命周期 | 日落条件 |
 |---|---|---|---|---|
+| CANON_P57_TITO_ONEHOST_NEUTRALITY | T9d-3 observer-neutrality selector。`off|on` 两臂都复用既有 Qwen3-8B FrozenLake Perf-v2 DP1×TP4、三次真实 backward/AdamW、strict A=B=C 载具并开启 generic exact TiTO；`on` 唯一增量是 `record-full` host 证据，`off` 禁止该 debug selector。配对判决要求两臂逐 update gradient norm、alignment hashes、抽样模型/optimizer/accumulator fingerprints 与 12 条 strict alignment 数值完全相同，并同时命中 r7 三个 gradient-norm 与 forward implementation 锚点 | 默认 absent；只准 P45、DP1×TP4、3 updates、APC-off、no-eval/no-checkpoint、strict alignment 的本地 one-host gate；production profile、M15、DP8×TP8、其他 horizon、空值均 fatal。它不开放 actor snapshot 或 GCS 写入 | host/CPU construction in progress；one-host target 未跑，不得据此声明 observer neutrality | matched off/on target 绿且证据登记后退役该 selector；若旧锚点不符先判 RED/INCONCLUSIVE，不得静默重钉 |
 | CANON_FIXED_AR | R1:TP 归约换固定序 ppermute 树 | off(canonical lane 开) | 已认证(1host+DP16/DP8/256) | 转正焊死:全负载默认开满一周期后无条件化 |
 | CANON_FIXED_AR_EMBED | R3 补漏:vocab 分片 embedding gather 固定序 | off | 已认证 | 同上,与 FIXED_AR 同批 |
 | CANON_RPA_VJP2(+VJP2_MAX_SEQS) | R4:cache-aware 认证反向 | off | 已认证(fp64 oracle+20/20+21/21) | 转正焊死;MAX_SEQS>1 需归约序审计先行 |
@@ -22,7 +23,10 @@
 | CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY | FrozenLake有限差异的可观测训练策略。历史 Native/IS full 继续保留 broad warning；优化 Zero 仅精确 P45（candidate/split 均 absent）或 M15/main v1-hp、DP8×TP8、300-update、no-eval/no-checkpoint concept run 可开，且只将有限 `S_decode_vs_S_prefill` 与由其直接派生的 `w`/`wr`/clip/TIS 差异降为 warning。`S_prefill_vs_T_old`、`T_old_vs_T_current`、`r`、任意 nonfinite、梯度、副本与 optimizer transaction 始终 fatal | off；renderer 对精确 P45/M15 Zero concept arms 写 1 | 临时收敛曲线逃生阀；host/exact-image admission 已覆盖两条 identity，DP8×TP8 target 未跑。开启后只能声明 `convergence-only / alignment-degraded`，不得声明 Zero-TIM | 分别修复 P45/M15 carrier 并完成 strict 300-update target 后恢复 0；失败与 warning 剂量证据永久保留 |
 | CANON_DEEPSWE_ALIGNMENT_WARN_ONLY | DeepSWE有限差异的可观测训练策略。历史 P58 Native full 保留 broad serving/trainer warning；优化 Zero 只允许精确 Qwen3-4B-Instruct-2507、P58 Zero-HP/full/1,000-update、DP8×TP8 双角色、128 trajectories 的 production profile 开启，且只将有限 `S_decode_vs_S_prefill` 与由它直接派生的 `w`/`wr`/clip/TIS 差异降为 warning。`S_prefill_vs_T_old`、`T_old_vs_T_current`、`r`、任意 nonfinite、shape、gradient、replica 与 optimizer transaction 始终 fatal；precheck、checked-VMA、seam、one-host、ordinary Zero 都必须为 0/strict | off；renderer 仅对 Native 或精确 P58 Zero-HP production full 写 1 | P58.32 host policy/profile/classifier、P34 static、409/409 registry 与完整 digest-pinned image gates 通过；DP8×TP8 target 尚未跑。Zero-HP warning lane 只能声明 `convergence-only / alignment-degraded`，不得声明 Zero-TIM | 修复 DeepSWE decode/prefill carrier并完成同配置 strict target 后恢复 0；保留 warning 剂量和失败证据 |
 | CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM | v2 Phase 2 DeepSWE 严格 control/treatment 数值准入 selector。只准精确 P44 Qwen3-4B、three-update、DP4×TP8 或 DP8×TP8 strict profile；两臂共同启用 fixed head、rank-parallel checked-VMA、P59-only VMA scope、first-update gate 与 host-receipt bundle。`control` 保持 KEEP_TAPE/REDUCE_ONCE 真缺省，`treatment` 只增加 `KEEP_TAPE=stream` 与 `DP_REDUCE_ONCE=1`，因此明确暴露唯一会改变梯度归约顺序的刀 | absent/off；空值不构成 arm，renderer 仅在显式 `control|treatment` 时写入，既有六份 P44 render 逐字节语义不变 | 试验；renderer/profile/Python contract、负控、adjacent 与 pinned exact-image host 门已绿；DP4×TP8 与 DP8×TP8 strict target 两臂均未跑，不能从其他 workload/几何继承锚或性能结论 | P44 两几何完成 A=B=C、G4/D4/G5/G6、G1、逐臂 commit-norm/HBM/update 秒后，按 target 判决将 treatment 纳入 DeepSWE 默认包或否决并删除 selector；失败证据永久保留 |
-| CANON_M15_TOKEN_CONTINUITY | M15 later-turn token continuity selector。`verify` 仅观察 serving 实际 prompt IDs；`exact` 为 later turns 直接提交 initial tail + sampled assistant IDs + nonterminal environment IDs，关闭 chat-template 重应用并逐 token 回验。exact 任一不等立即 fatal。签名身份有三类：M15 APC debug DP8×TP8 off/on 的 layer/backward-no-commit 载具只准 exact；one-host DP1×TP4 允许 APC-off legacy verify、APC-off/on exact；P67 full 只准精确 M15/main Zero v1-hp DP8×TP8、300-update、no-eval/no-checkpoint exact。malformed/missing/negative arrays hard-fail | 全局 absent/off。P67 默认不写；只有显式 `--m15-tito-exact` 才写 exact。P45 永远 absent。APC debug 与 one-host 必须满足各自完整身份，禁止与 target 混用。空值、`0`、full verify、P45/GSM8K/Native/IS/eval、其他拓扑均 fatal | 历史 exact-default `3fc7ef8b` 已撤出 production default。Legacy r7 APC-off 17/17 equal；matched exact r8 17/17 equal，三轮 strict 且与 r7 prompt/trajectory hashes 全同。远端 E0v/E0w one-host APC-off/on exact pair 同样全零并记录 APC-on hits；这些均不继承到 DP8×TP8。P67 full exact 与 APC debug target 均未跑 | 默认 full 必须证明 selector absent且零 receipt；显式 exact M15 full 必须逐 prompt equal、env receipt 恰一。APC debug/one-host 按各自 classifier 判决；DP8×TP8 首次启用仍是独立 target gate |
+| CANON_M15_TOKEN_CONTINUITY | 历史 M15 later-turn token continuity selector。`verify` 仅观察 serving 实际 prompt IDs；`exact` 为 later turns 直接提交 initial tail + sampled assistant IDs + nonterminal environment IDs，关闭 chat-template 重应用并逐 token 回验。签名身份保留三类：M15 APC debug DP8×TP8 layer/backward-no-commit、one-host DP1×TP4 verify/exact、以及旧 P67 M15/main full exact；malformed/missing/negative arrays hard-fail | 全局 absent/off。新 P67 renderer 不再写此 key；兼容 CLI `--m15-tito-exact` 映射到新的 P57 selector。P45 永远禁止此历史 key；与 `CANON_P57_TOKEN_CONTINUITY` 同时存在 fatal | 历史 exact-default `3fc7ef8b` 已撤出 production default。Legacy r7 APC-off 17/17 equal；matched exact r8 17/17 equal，三轮 strict 且与 r7 prompt/trajectory hashes 全同；E0v/E0w one-host APC-off/on exact pair 同样全零。这些均不继承到 DP8×TP8 | 历史 APC debug/one-host 证据与 classifier 退役后移除旧 selector 的可达写入；证据文本永久保留 |
+| CANON_P57_TOKEN_CONTINUITY | FrozenLake P45/M15 later-turn exact token-in/token-out selector。合法值仅 `exact`：首轮保持 chat 输入；后续轮次直接提交 initial prompt tail + sampled assistant IDs + nonterminal environment IDs，并把 serving 实际消费的 prompt IDs 与整数 ledger 逐 token 回验。receipt 必须带 `workload=p45|m15`、fresh trajectory ID、request ID、policy step、group 与 sequence row；full classifier 对全部预期 row 做 identity join，并把未进入 later-turn 比较的单轮 trajectory 诚实记为 `UNEXERCISED`。selector 单独使用时任一 token 不等保持 fatal；仅与注册的 `record-full` 调试策略组合时，same-request-ID token red 可留证后让同一未改 row 继续训练，missing/duplicate/swapped/foreign identity 与 malformed token array 仍 fatal。只准精确 P57 Zero v1-hp、DP8×TP8、300-update、no-eval/no-checkpoint full 身份；不改变采样、reward、loss、backward 或 optimizer | 数值旗标，默认 absent/off；renderer 闭集 `legacy|p45-exact|m15-exact|both-exact` 按 workload 派生。空值、`0`、`verify`、Native/IS/eval/GSM8K/DeepSWE、错误 profile/topology/horizon 均 fatal。与历史 `CANON_M15_TOKEN_CONTINUITY` 同时存在 fatal | M15 shared implementation 有 DP1×TP4 r8 17/17 exact-equal、三轮 strict 证据；P45 与 P45/M15 DP8×TP8 target 均未跑，不能继承 M15 one-host 认证。T9c host 216/216、V1 102/102、flags 421/421 与完整 pinned-image construction 绿 | 两个显式 DP8×TP8 exact treatment分别完成 full horizon、完整 row/join/classifier/GCS 证据后，决定是否按 workload 默认化；token red 的 record-full arm 永远只算 `NON_ZERO_TIM_DATA_COLLECTION`；在此之前始终 explicit-only |
+| CANON_P57_TOKEN_CONTINUITY_DEBUG | P45/M15 exact TiTO 调试策略。`first-diff` 只准 production full：每个 trajectory engine 至多写一份分段 capsule，随后保持 fatal。`collect-64` 只准独立 DP8×TP8 rollout-only 载具：差异结束并 mask 当前 trajectory，永不进入训练。`record-full` 只准显式 P45/M15 v1-hp 300-update full：每一个 same-ID token-diff event（submit-vs-engine echo 或 later-turn actual-vs-ledger，含 update 0、同轨迹重复事件和第 65 件以后）都写一份带全量 actual/expected token、segment、request/trajectory/policy/event join 的 mode-0600 capsule；不设 record-full 事件上限，同一普通 row 不 mask、不 drop、不 retry、不 reweight，继续原 GRPO。missing/duplicate/swapped/foreign request ID、漏件/重号/篡改 capsule 或写盘失败仍 fatal。single-turn 记 `UNEXERCISED`，不冒充 equal | 诊断旗标，默认 absent/off；三值都要求 generic exact selector。`collect-64` 要求专用 no-commit/no-eval/no-checkpoint/APC-off/P59-off profile；`record-full` 要求生产 DP8×TP8、300 updates、no-eval/no-checkpoint 和既有有限 A-B warning carrier。Native/IS/legacy/eval/GSM8K/DeepSWE、空值和 partial tuple 均 fatal。record-full 证据量随 diff 数和上下文长度增长，不能作为性能证据；任一 token red 或有限 A-B red 只能声明 `NON_ZERO_TIM_DATA_COLLECTION` | `first-diff`、`collect-64` 与 T9d `record-full` 已有 host/pinned-image construction；T9e all-event host 234/234、V1 102/102、flags 422/422 与完整 pinned-image construction 通过，one-host observer-neutrality、real GCS 与 DP8×TP8 target 均未跑 | P45/M15 drift 根因关闭且 capsule 归档后退役可达写入；历史 marker/证据永久保留 |
+| CANON_P57_TITO_ROLLOUT_ONLY / CANON_P57_TITO_RUNNER_WITNESS_DIR / CANON_P57_TITO_GCS_{PREFIX,INTERVAL_SECONDS,READY,STOP_FILE,FINALIZE_FILE,FINAL_ACK,HEARTBEAT,WORKER_LOG} | T9b/T9c 数据载具合同：提交 token hash 与 `RequestOutput.prompt_token_ids` echo 按 request ID 绑定；rollout-only 另用 TPU runner 的 host-owned `input_batch.token_ids_cpu` 作第三方 witness，full-record 不声称逐请求 runner witness。可逆 token 只写 `$CANON_STATE` 下 mode-0600 capsule。后台 worker 先以非敏感 probe 完成 GCS no-clobber 上传、下载验 SHA 并写 READY；随后低 CPU/I/O 优先级运行，只对新完成的 immutable files 建 delta tar，瞬时传输失败有界退避并发布 heartbeat；正常完成再用所有 delta receipts 与完整本地 inventory 生成 final manifest | 默认 absent；只由 P45/M15 exact `collect-64` 专用 profile或 `record-full` v1-hp profile派生。prefix 按 JobSet/attempt 隔离；raw caller values、证据改写/消失/重复上传、坏 delta、final 缺项、readback SHA 差异均 fatal。live 瞬时失败不改变训练 row，但 final 无法证明完整时 `evidence_verdict=FAIL`。异常退出只保证最近成功 delta，最后同步窗口内新文件可能丢失 | fake-remote incremental/retry/tamper/heartbeat 与 T9b/T9c immutable-image construction 已绿；real GCS、one-host neutrality、DP8×TP8 full record 均未跑 | target 数据集归档并完成离线复刻后退役整组诊断路径；raw evidence 不进 Git |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向；默认 production clipping 继续使用 stock `optax.clip_by_global_norm`。Attempt-7 P62 no-commit 载具额外打印 element-finiteness、naive/max-scaled L2、DP/TP reduction 与 accumulator receipt；G5b 已证明 16/16 groups 与最终 accumulator 全 finite，旧 `norm=inf` 是 FP32 sum-of-squares overflow | off | 历史 segmented 路径已认证；P62 DP16×TP4 G5b target 仅认证 finite backward 与零 commit，未认证 optimizer transaction | 默认路径不变；仅精确 P63 full profiles 可启用 hybrid clip，首次真实 commit 与完整 horizon 仍是 target gate |
 | CANON_P59_RANK_PARALLEL_BACKWARD | 每个 trajectory group 的 DP rank-local VJP 从 host 逐-rank 串行改为一次手动 `shard_map`;TP1 保留 DP-manual/unit-TP carrier，TP>1 在同一物理设备上改用 engine `data/model` 二轴词汇并令 DP+TP 均 manual，使 inner engine shard_map 复用已绑定 TP collective；processed-logprob VJP 产出的 full logical-vocab cotangent 在 head VJP 入口显式约束为 `P(data,model)`，随后 fixed-head 只消费 TP-local vocab；projection 与 attention 的 P59-local 边界均只由精确的双 manual-axis context 选择，RPA 不再二次扩展已经 TP-local 的 GQA K/V；replicated-input TP hidden cotangent以 FP32、升序 rank、逐项 operand barrier 累加后只在边界 cast 一次；leading-DP 暂存后仍走原 fixed reduction，group 顺序不变 | off；仅显式 V1/P58.7 high-performance full profile 开 | **gradient-correctness KEEP / DP4 PERF KEEP / Attempt-3 repair one-host mechanism PASS / exact-image+target pending**:ordinary-JAX FP64 oracle relL2 `3.91e-16`，真实 Qwen 梯度 relL2 `1.582%` 过冻结梯度门，DP4 reverse 3.605x；串行与并行 AdamW 首步 delta relL2 `9.976%` 是已披露 trajectory difference。Attempt 3 的 GSM8K `g64m` 与 P45 `f45m` 均在 step-0 strict pre-alignment 逐字节全同且 0 FAIL，随后分别在 TP4/TP8 证明 attention 入口重复扩展已 local 的 KV；追加 patch 25 只在精确 P59 manual DP×TP context 跳过该扩展并强校验 local Q/K/V/cache。M15 `m15m` 在更早的独立 token-contract 门停止，不构成 P59 数值判决。host V1 21/21、P57 144/144、P59 34/34、APC 31/31、flags 366/366 通过；真实 v5p `DP2xTP2` RPA forward+VJP2、wrong-cache negative 与普通 `DP1xTP4` GQA control 通过且零 optimizer commit。installed-attention DP2×TP4/TP8 pinned-image 正负控与真实 DP16×TP4/DP8×TP8 optimizer commit 仍未验证 | Phase4 三个 full target 与 P58.7 full 归档后按 workload 转正；任一 real ALIGN FAIL 立即退役；全局默认仍 off |
@@ -168,6 +172,33 @@
 
 ## D 层 · 发射/基建管道(~230,按前缀组;逐条语义允许"待考古")
 
+T9g registers `CANON_P57_TRAIN_GEOMETRY`: absent retains the historical
+DP8xTP8/B32xG8 full recipe; the only present value is `dp4-tp8-b128`.
+It selects a separate P45/M15 Zero-HP full profile (32 chips, B16xG8,
+global M1024/local M256, 32 gradient groups, 300 updates), never a diagnostic,
+Native/IS or GSM8K override. This changes global batch/data budget; it is not
+a speed-only same-trajectory claim. APC/eval/checkpoint remain off and all
+existing numerical/backward gates remain in force. Default off; construction
+and target certification tracked in T9g. Retire only after a separately approved
+recipe migration; old evidence remains attached to DP8xTP8/B256.
+
+The enum is workload/infrastructure, not a numerical-algorithm switch.
+The P67 wrapper and P57 renderer write it only for the explicit small
+option; profiles and `00_env.sh` validate raw/resolved values, the learner
+Python process validates `examples.frozenlake.training_geometry`, and
+`90_run.sh` forwards the same geometry to both postflight classifiers.
+Empty, `0`, unknown and explicitly present legacy values reject; the
+legacy renderer emits no key. P59/P63/P67/first-update, fixed-head and TiTO
+full identities may use the new geometry **only as a complete T9g tuple**;
+diagnostic identities remain DP8xTP8. Qwen3-8B/TP8 adds caller-global M1024
+to the head admission table without changing local/kernel M256 or TP
+reduction math. T9g host (P57 248/V1 104/APC 12/flags 423), eight-case real
+runtime admission, bounded DP4xTP8 CPU reducer and complete pinned-image
+gates pass; see `tasks/multiturn-tito-cross-workload/evidence/t9g-host-20260907/receipt.json`.
+These are fresh construction claims, not inherited DP4xTP8 target
+certification. Both workload arms must declare their global
+batch/data budget when compared with historical Native/IS curves.
+
 | 前缀组 | 用途 | 处置 |
 |---|---|---|
 | CANON_RUN_* / STATE / PKG / PROFILE* / SHIM_ROOT / MODE | 发射管道(渲染/安装/运行合同) | phase2 三层 profile 落地时逐条核对归位 |
@@ -186,6 +217,19 @@
 | CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_KIND / CANON_P59_REQUIRE_XPROF | P59 单次载具的证据目的地、冻结内层命令、臂身份与 XProf 完整性要求 | 试验；仅 P59 renderer/one-host wrapper 设置 | P59 证据载具归档后整体退役 |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
+### T9f record-full empty-response boundary
+
+`CANON_P57_TOKEN_CONTINUITY_DEBUG=record-full` records request IDs for
+completed responses, not every submitted request. A terminal row with no
+completed model call/trajectory step/completion token/action token may have an
+empty request list only with an explicit `canon.p57-tito-empty-response.v1`
+receipt. Row-map, A/B/C sidecar and final classifier validate the same receipt;
+sidecar masks must also contain no valid completion or action for that row.
+These rows count as unexercised, never as successful token comparisons. A
+returned response with missing/duplicate/foreign identity still fails. There
+is no new flag, no default change and no change to training rows or deadlines.
+T9f target validation is pending; see the owning task's phase and handoff.
+
 ## MARKERS(日志 marker 契约,非开关;~60 个)
 
 关键项:`[CANON_ALIGN_PRE]`(四边界判决行)、`[CANON_ALIGN_PRE_JSON/EVIDENCE]`、
@@ -195,6 +239,13 @@
 `[CANON_P58_CONTINUE_KV_CANDIDATE]`、`[CANON_P58_CONTINUE_KV_CLEAN_EMPTY]`、
 `[CANON_P58_CONTINUE_KV_CLEAN_PREFIX]`、`[CANON_P58_CONTINUE_KV_CLEAN_READY]`、
 `[CANON_APC_M15_B_CONTRACT]`、
+`[CANON_P57_TOKEN_CONTINUITY_DEBUG]`、
+`[CANON_P57_TOKEN_CONTINUITY_DEBUG_JSON]`、
+`[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE]`、
+`[CANON_P57_TOKEN_CONTINUITY_SUMMARY]`、
+`[CANON_P57_TITO_HOST_WITNESS]`、
+`[CANON_P57_TITO_DIAGNOSTIC]`、
+`[P57.TITO.EMPTY_RESPONSE]`、
 `[CANON_P38_DURABLE_COLLECTION]`、`[CANON_P38_SEAM_CLASSIFICATION_JSON]`、
 PATHTRACE 族(固定树行数 =2×层+1)。
 Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按合同类文档对待。
@@ -499,6 +550,20 @@ CANON_P57_EXPECTED_UPDATES
 CANON_P57_RUN_KIND
 CANON_P57_STOP_AFTER_STEP
 CANON_P57_TIM_ARM
+CANON_P57_TITO_GCS_FINAL_ACK
+CANON_P57_TITO_GCS_FINALIZE_FILE
+CANON_P57_TITO_GCS_HEARTBEAT
+CANON_P57_TITO_GCS_INTERVAL_SECONDS
+CANON_P57_TITO_GCS_PREFIX
+CANON_P57_TITO_GCS_READY
+CANON_P57_TITO_GCS_STOP_FILE
+CANON_P57_TITO_GCS_WORKER_LOG
+CANON_P57_TITO_ONEHOST_NEUTRALITY
+CANON_P57_TITO_ROLLOUT_ONLY
+CANON_P57_TITO_RUNNER_WITNESS_DIR
+CANON_P57_TOKEN_CONTINUITY
+CANON_P57_TOKEN_CONTINUITY_DEBUG
+CANON_P57_TRAIN_GEOMETRY
 CANON_P57_WORKLOAD_CANDIDATE
 CANON_P58_CHECKED_VMA_DIAGNOSTIC
 CANON_P58_DEBUG_DIR
@@ -639,7 +704,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 425 settable names (appendix inventory above; exclusions: none).
+Count: 439 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

@@ -13,6 +13,9 @@ set -euo pipefail
 PROFILE="${CANON_PROFILE_FILE:-cluster/profiles/qwen3-1p7b.env}"
 case "$PROFILE" in /*) PROFILE_ABS="$PROFILE";; *) PROFILE_ABS="$CANON_PKG/$PROFILE";; esac
 [ -f "$PROFILE_ABS" ] || { echo "profile not found: $PROFILE_ABS" >&2; exit 1; }
+source "$CANON_PKG/cluster/steps/p57_training_geometry.sh"
+p57_training_geometry_init
+p57_training_geometry_check_raw
 
 # Preserve contradictory values supplied by the caller before the profile
 # derives reward-only invariants. Without this snapshot, sourcing the profile
@@ -69,6 +72,151 @@ if [ "${CANON_PROFILE_FILE:-}" = \
   unset _canon_gsm_native_key
 fi
 
+# Preserve the raw P57 exact-token identity before the workload profile can
+# derive or overwrite any field. A hand-edited manifest must not become valid
+# merely because the profile restores the registered DP/TP or stage value.
+_CANON_P57_TITO_INPUT_DRIFT=()
+if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env" ]; then
+  for _canon_p57_tito_pair in \
+      "CANON_P57_TOKEN_CONTINUITY=exact" \
+      "CANON_P57_TOKEN_CONTINUITY_DEBUG=collect-64" \
+      "CANON_P32_WORKLOAD=${_p57_full_workload}" \
+      "CANON_DP_SIZE=${_p57_full_dp}" \
+      "CANON_TP_SIZE=8" \
+      "CANON_V1_HP_FULL=0" \
+      "CANON_P57_TIM_ARM=zero" \
+      "CANON_P57_RUN_KIND=tito-diagnostic" \
+      "CANON_P57_EXPECTED_UPDATES=1" \
+      "CANON_P57_STOP_AFTER_STEP=1" \
+      "CANON_P33_RUN_STAGE=rollout-only" \
+      "CANON_P33_NO_COMMIT=1" \
+      "CANON_P33_ENABLE_EVAL=0" \
+      "CANON_P33_DISABLE_EVAL=1" \
+      "CANON_P31_ENABLE_EVAL=0" \
+      "CANON_FROZENLAKE_CKPT_MODE=disabled" \
+      "CANON_P57_TITO_ROLLOUT_ONLY=1" \
+      "CANON_P33_SHARED_MESH=8,8"; do
+    _canon_p57_tito_key="${_canon_p57_tito_pair%%=*}"
+    _canon_p57_tito_value="${_canon_p57_tito_pair#*=}"
+    if [[ ! -v "$_canon_p57_tito_key" ]] || \
+       [ "${!_canon_p57_tito_key}" != "$_canon_p57_tito_value" ]; then
+      _CANON_P57_TITO_INPUT_DRIFT+=("$_canon_p57_tito_key")
+    fi
+  done
+  for _canon_p57_tito_key in CANON_P57_TITO_GCS_PREFIX \
+      CANON_P57_TITO_GCS_INTERVAL_SECONDS CANON_P57_TITO_GCS_READY \
+      CANON_P57_TITO_GCS_STOP_FILE \
+      CANON_P57_TITO_GCS_FINALIZE_FILE CANON_P57_TITO_GCS_FINAL_ACK \
+      CANON_P57_TITO_GCS_HEARTBEAT \
+      CANON_P57_TITO_GCS_WORKER_LOG; do
+    if [[ -v "$_canon_p57_tito_key" ]]; then
+      _CANON_P57_TITO_INPUT_DRIFT+=("raw-$_canon_p57_tito_key")
+    fi
+  done
+  unset _canon_p57_tito_key
+  unset _canon_p57_tito_value
+  unset _canon_p57_tito_pair
+fi
+if [[ -v CANON_P57_TOKEN_CONTINUITY ]]; then
+  _canon_p57_tito_workload=
+  case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+    :) _canon_p57_tito_workload=p45 ;;
+    m15:main) _canon_p57_tito_workload=m15 ;;
+  esac
+  if [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "collect-64" ]; then
+    _canon_p57_tito_expected=(
+      "CANON_P57_TOKEN_CONTINUITY=exact"
+      "CANON_P57_TOKEN_CONTINUITY_DEBUG=collect-64"
+      "CANON_P32_WORKLOAD=${_p57_full_workload}"
+      "CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env"
+      "CANON_V1_HP_FULL=0"
+      "CANON_P57_TIM_ARM=zero"
+      "CANON_P57_RUN_KIND=tito-diagnostic"
+      "CANON_P57_EXPECTED_UPDATES=1"
+      "CANON_P57_STOP_AFTER_STEP=1"
+      "CANON_P33_RUN_STAGE=rollout-only"
+      "CANON_P33_NO_COMMIT=1"
+      "CANON_P33_ENABLE_EVAL=0"
+      "CANON_P33_DISABLE_EVAL=1"
+      "CANON_P31_ENABLE_EVAL=0"
+      "CANON_FROZENLAKE_CKPT_MODE=disabled"
+      "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0"
+      "CANON_P57_TITO_ROLLOUT_ONLY=1"
+      "CANON_VLLM_ENABLE_PREFIX_CACHING=0"
+      "CANON_DP_SIZE=${_p57_full_dp}"
+      "CANON_TP_SIZE=8"
+    )
+    _canon_p57_tito_expected_runner_dir="${CANON_STATE%/}/p57_tito_witness/runner"
+    if [[ -v CANON_P57_TITO_RUNNER_WITNESS_DIR ]] && \
+       [ "$CANON_P57_TITO_RUNNER_WITNESS_DIR" != \
+         "$_canon_p57_tito_expected_runner_dir" ]; then
+      _CANON_P57_TITO_INPUT_DRIFT+=("CANON_P57_TITO_RUNNER_WITNESS_DIR")
+    fi
+    unset _canon_p57_tito_expected_runner_dir
+  else
+    _canon_p57_tito_expected=(
+      "CANON_P57_TOKEN_CONTINUITY=exact"
+      "CANON_P32_WORKLOAD=${_p57_full_workload}"
+      "CANON_PROFILE_FILE=${_p57_full_profile_file}"
+      "CANON_V1_HP_FULL=1"
+      "CANON_P57_TIM_ARM=zero"
+      "CANON_P57_RUN_KIND=train"
+      "CANON_P57_EXPECTED_UPDATES=300"
+      "CANON_P57_STOP_AFTER_STEP=300"
+      "CANON_P33_RUN_STAGE=full"
+      "CANON_P33_NO_COMMIT=0"
+      "CANON_P33_ENABLE_EVAL=0"
+      "CANON_P33_DISABLE_EVAL=1"
+      "CANON_P31_ENABLE_EVAL=0"
+      "CANON_FROZENLAKE_CKPT_MODE=disabled"
+      "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1"
+      "CANON_DP_SIZE=${_p57_full_dp}"
+      "CANON_TP_SIZE=8"
+    )
+  fi
+  if [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "record-full" ]; then
+    for _canon_p57_tito_key in CANON_P57_TITO_RUNNER_WITNESS_DIR \
+        CANON_P57_TITO_GCS_PREFIX CANON_P57_TITO_GCS_INTERVAL_SECONDS \
+        CANON_P57_TITO_GCS_READY CANON_P57_TITO_GCS_STOP_FILE \
+        CANON_P57_TITO_GCS_FINALIZE_FILE CANON_P57_TITO_GCS_FINAL_ACK \
+        CANON_P57_TITO_GCS_HEARTBEAT \
+        CANON_P57_TITO_GCS_WORKER_LOG; do
+      if [[ -v "$_canon_p57_tito_key" ]]; then
+        _CANON_P57_TITO_INPUT_DRIFT+=("raw-$_canon_p57_tito_key")
+      fi
+    done
+  fi
+  if [ -z "$_canon_p57_tito_workload" ]; then
+    _CANON_P57_TITO_INPUT_DRIFT+=("workload=unregistered")
+  fi
+  for _canon_p57_tito_pair in "${_canon_p57_tito_expected[@]}"; do
+    _canon_p57_tito_key="${_canon_p57_tito_pair%%=*}"
+    _canon_p57_tito_value="${_canon_p57_tito_pair#*=}"
+    # An omitted field is derived by the locked profile below.  Reject only a
+    # caller-supplied contradiction; otherwise ordinary rendered manifests
+    # would be mistaken for drift merely because they avoid duplicating the
+    # profile's DP/TP and stage constants.
+    if [[ -v "$_canon_p57_tito_key" ]] && \
+       [ "${!_canon_p57_tito_key}" != "$_canon_p57_tito_value" ]; then
+      _CANON_P57_TITO_INPUT_DRIFT+=("$_canon_p57_tito_key")
+    fi
+  done
+  for _canon_p57_tito_key in CANON_FROZENLAKE_CKPT_ROOT \
+      CANON_FROZENLAKE_CKPT_TAG CANON_FROZENLAKE_CKPT_INTERVAL \
+      CANON_FROZENLAKE_CKPT_MAX_TO_KEEP \
+      CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL; do
+    if [ -n "${!_canon_p57_tito_key:-}" ]; then
+      _CANON_P57_TITO_INPUT_DRIFT+=("$_canon_p57_tito_key")
+    fi
+  done
+  unset _canon_p57_tito_expected
+  unset _canon_p57_tito_key
+  unset _canon_p57_tito_pair
+  unset _canon_p57_tito_value
+  unset _canon_p57_tito_workload
+fi
+
 # shellcheck disable=SC1090
 set -a
 export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
@@ -85,10 +233,10 @@ esac
 P57_ZERO_ALIGNMENT_WARNING_EXPECTED=0
 M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED=0
 if [ "${CANON_PROFILE_FILE:-}" = \
-       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
+       "${_p57_full_profile_file}" ] && \
    [ "${CANON_PROFILE:-}" = \
-       "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
-   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+       "${_p57_full_profile}" ] && \
+   [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
    [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
    [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
@@ -105,7 +253,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ] && \
    [ "${CANON_PROFILE:-}" = \
        "qwen3-8b-dp8-tp8-frozenlake-apc-debug" ] && \
-   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+   [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
    { [ "${CANON_APC_M15_TARGET_DEBUG:-}" = "off" ] || \
      [ "${CANON_APC_M15_TARGET_DEBUG:-}" = "on" ]; } && \
    [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
@@ -123,7 +271,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
    [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
    [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
-   [ "${CANON_DP_SIZE:-}" = "8" ] && \
+   [ "${CANON_DP_SIZE:-}" = "$_p57_full_dp" ] && \
    [ "${CANON_TP_SIZE:-}" = "8" ]; then
   M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED=1
 fi
@@ -205,7 +353,100 @@ echo "[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to S
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0
 req() { [ -n "${!1:-}" ] || { echo "[env] MISSING: $1" >&2; fail=1; }; }
-if [ "$M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED" = "1" ]; then
+if [ "${#_CANON_P57_TITO_INPUT_DRIFT[@]}" -ne 0 ]; then
+  echo "[env] raw P57 exact TITO identity drifted at ${_CANON_P57_TITO_INPUT_DRIFT[*]}" >&2
+  fail=1
+fi
+unset _CANON_P57_TITO_INPUT_DRIFT
+if [[ -v CANON_M15_TOKEN_CONTINUITY && \
+      -v CANON_P57_TOKEN_CONTINUITY ]]; then
+  echo "[env] CANON_M15_TOKEN_CONTINUITY and CANON_P57_TOKEN_CONTINUITY are mutually exclusive" >&2
+  fail=1
+elif [[ -v CANON_P57_TOKEN_CONTINUITY ]]; then
+  P57_TOKEN_CONTINUITY_WORKLOAD=
+  case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+    :) P57_TOKEN_CONTINUITY_WORKLOAD=p45 ;;
+    m15:main) P57_TOKEN_CONTINUITY_WORKLOAD=m15 ;;
+  esac
+  P57_TOKEN_CONTINUITY_ADMITTED=0
+  if [ "${CANON_P57_TOKEN_CONTINUITY}" = "exact" ] && \
+     [ -n "$P57_TOKEN_CONTINUITY_WORKLOAD" ] && \
+     [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
+     [ "${CANON_DP_SIZE:-}" = "$_p57_full_dp" ] && \
+     [ "${CANON_TP_SIZE:-}" = "8" ] && \
+     [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
+     [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
+     [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
+     [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "disabled" ] && \
+     [ -z "${CANON_FROZENLAKE_CKPT_ROOT:-}${CANON_FROZENLAKE_CKPT_TAG:-}${CANON_FROZENLAKE_CKPT_INTERVAL:-}${CANON_FROZENLAKE_CKPT_MAX_TO_KEEP:-}${CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL:-}" ]; then
+    if [ "${CANON_PROFILE_FILE:-}" = \
+         "${_p57_full_profile_file}" ] && \
+       [ "${CANON_PROFILE:-}" = \
+         "${_p57_full_profile}" ] && \
+       [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+       [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
+       [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
+       [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
+       [ "${CANON_P57_STOP_AFTER_STEP:-}" = "300" ] && \
+       [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+       [ "${CANON_P33_NO_COMMIT:-}" = "0" ]; then
+      P57_TOKEN_CONTINUITY_ADMITTED=1
+      echo "[env] P57 exact TITO enabled workload=$P57_TOKEN_CONTINUITY_WORKLOAD mode=exact default=off"
+      if [[ -v CANON_P57_TOKEN_CONTINUITY_DEBUG ]]; then
+        case "${CANON_P57_TOKEN_CONTINUITY_DEBUG}" in
+          first-diff)
+            echo "[env] P57 exact TITO first-diff diagnostics armed workload=$P57_TOKEN_CONTINUITY_WORKLOAD default=off"
+            ;;
+          record-full)
+            [ -z "${CANON_P57_TITO_RUNNER_WITNESS_DIR:-}" ] && \
+            [[ "${CANON_P57_TITO_GCS_PREFIX:-}" =~ ^gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p57-tito/[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?/attempt-(direct|[0-9]+)$ ]] && \
+            [ "${CANON_P57_TITO_GCS_INTERVAL_SECONDS:-}" = "30" ] && \
+            [ "${CANON_P57_TITO_GCS_READY:-}" = "${CANON_STATE%/}/p57_tito_gcs/ready" ] && \
+            [ "${CANON_P57_TITO_GCS_STOP_FILE:-}" = "${CANON_STATE%/}/p57_tito_gcs/stop" ] && \
+            [ "${CANON_P57_TITO_GCS_FINALIZE_FILE:-}" = "${CANON_STATE%/}/p57_tito_gcs/finalize" ] && \
+            [ "${CANON_P57_TITO_GCS_FINAL_ACK:-}" = "${CANON_STATE%/}/p57_tito_gcs/finalize.ack" ] && \
+            [ "${CANON_P57_TITO_GCS_HEARTBEAT:-}" = "${CANON_STATE%/}/p57_tito_gcs/heartbeat" ] && \
+            [ "${CANON_P57_TITO_GCS_WORKER_LOG:-}" = "${CANON_STATE%/}/p57_tito_gcs/worker.log" ] || {
+              echo "[env] P57 record-full evidence contract drifted" >&2
+              fail=1
+            }
+            echo "[env] P57 exact TITO record-full enabled workload=$P57_TOKEN_CONTINUITY_WORKLOAD training=unchanged zero_tim_claim=disabled"
+            ;;
+          *)
+            echo "[env] full-training TITO debug must be first-diff or record-full" >&2
+            fail=1
+            ;;
+        esac
+      fi
+    elif [ "${CANON_PROFILE_FILE:-}" = \
+           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env" ] && \
+         [ "${CANON_PROFILE:-}" = \
+           "qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic" ] && \
+         [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+         [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
+         [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ] && \
+         [ "${CANON_P57_EXPECTED_UPDATES:-}" = "1" ] && \
+         [ "${CANON_P57_STOP_AFTER_STEP:-}" = "1" ] && \
+         [ "${CANON_P33_RUN_STAGE:-}" = "rollout-only" ] && \
+         [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+         [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "collect-64" ] && \
+         [ "${CANON_P57_TITO_ROLLOUT_ONLY:-}" = "1" ] && \
+         [ "${CANON_P57_TITO_RUNNER_WITNESS_DIR:-}" = \
+           "${CANON_STATE%/}/p57_tito_witness/runner" ]; then
+      P57_TOKEN_CONTINUITY_ADMITTED=1
+      echo "[env] P57 exact TITO collect-64 diagnostic enabled workload=$P57_TOKEN_CONTINUITY_WORKLOAD backward=0 optimizer_commits=0"
+    fi
+  fi
+  if [ "$P57_TOKEN_CONTINUITY_ADMITTED" != "1" ]; then
+    echo "[env] CANON_P57_TOKEN_CONTINUITY is outside the admitted P45/M15 exact identity" >&2
+    fail=1
+  fi
+  unset P57_TOKEN_CONTINUITY_ADMITTED
+  unset P57_TOKEN_CONTINUITY_WORKLOAD
+elif [[ -v CANON_P57_TOKEN_CONTINUITY_DEBUG ]]; then
+  echo "[env] P57 token-continuity debug requires the generic exact selector" >&2
+  fail=1
+elif [ "$M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED" = "1" ]; then
   [ "${CANON_M15_TOKEN_CONTINUITY:-}" = "exact" ] || {
     echo "[env] M15 APC layer re-baseline requires CANON_M15_TOKEN_CONTINUITY=exact" >&2
     fail=1
@@ -214,10 +455,10 @@ if [ "$M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED" = "1" ]; then
 elif [[ -v CANON_M15_TOKEN_CONTINUITY ]]; then
   if [ "${CANON_M15_TOKEN_CONTINUITY}" = "exact" ] && \
      [ "${CANON_PROFILE_FILE:-}" = \
-       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
+       "${_p57_full_profile_file}" ] && \
      [ "${CANON_PROFILE:-}" = \
-       "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
-     [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+       "${_p57_full_profile}" ] && \
+     [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
      [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
      [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
      [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
@@ -314,7 +555,7 @@ case "${CANON_V1_FL_TP8_AB_ARM:-}" in
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env" ] && \
     [ "${CANON_PROFILE:-}" = \
       "qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug" ] && \
-    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+    [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
     [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
     [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
     [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] && \
@@ -341,7 +582,7 @@ case "${CANON_V1_FL_TP8_AB_ARM:-}" in
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env" ] && \
     [ "${CANON_PROFILE:-}" = \
       "qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug" ] && \
-    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+    [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
     [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
     [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
     [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] && \
@@ -430,11 +671,11 @@ case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
         ;;
       "")
         if [ "${CANON_PROFILE_FILE:-}" = \
-               "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
+               "${_p57_full_profile_file}" ] && \
            [ "${CANON_PROFILE:-}" = \
-               "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
-           [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
-           [ "${CANON_P33_SHARED_MESH:-}" = "8,8" ] && \
+               "${_p57_full_profile}" ] && \
+           [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
+           [ "${CANON_P33_SHARED_MESH:-}" = "$_p57_full_mesh" ] && \
            [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
            [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
            [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
@@ -513,7 +754,7 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
     _canon_p59_checked_context=""
     case "${CANON_PROFILE_FILE:-}:${CANON_PROFILE:-}:${CANON_P32_WORKLOAD:-}" in
       cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env:qwen3-1p7b-dp16-tp4-gsm8k-v1-hp:gsm8k|\
-      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8)
+      ${_p57_full_profile_file}:${_p57_full_profile}:${_p57_full_workload})
         _canon_p59_checked_context=phase4
         ;;
       cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env:qwen3-4b-dp8-tp8-deepswe-v1-hp:)
@@ -523,7 +764,7 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
       cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env:qwen3-4b-dp8-tp8-deepswe-v2-admission:)
         _canon_p59_checked_context=p44-v2
         ;;
-      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env:qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug:frozenlake-dp8-tp8)
+      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env:qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug:${_p57_full_workload})
         _canon_p59_checked_context=v1-fl-serving-scope
         ;;
       *)
@@ -661,7 +902,7 @@ case "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" in
           fail=1
         }
         ;;
-      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8)
+      ${_p57_full_profile_file}:${_p57_full_profile}:${_p57_full_workload})
         [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-1}" = \
           "$P57_ZERO_ALIGNMENT_WARNING_EXPECTED" ] || {
           echo "[env] P63 FrozenLake alignment policy drifted" >&2
@@ -963,7 +1204,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     [ "$P58_SEAM_LOCALIZATION" = "0" ] && \
     [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; } || \
   { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
-    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || \
+    [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ]; } || \
   { [ "$P58_SEAM_LOCALIZATION" = "1" ] && \
     [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; } || {
     echo "[env] P38 serving capture workload identity drifted" >&2
@@ -1428,9 +1669,59 @@ case "${CANON_P38_FIXED_LM_HEAD:-0}" in
     ;;
 esac
 if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env" ]; then
+  case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+    :|m15:main) ;;
+    *)
+      echo "[env] P57 TiTO diagnostic workload identity drifted" >&2
+      fail=1
+      ;;
+  esac
+  [ "${CANON_PROFILE:-}" = \
+    "qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic" ] && \
+  [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
+  [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ] && \
+  [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
+  [ "${CANON_P57_EXPECTED_UPDATES:-}" = "1" ] && \
+  [ "${CANON_P57_STOP_AFTER_STEP:-}" = "1" ] && \
+  [ "${CANON_P33_RUN_STAGE:-}" = "rollout-only" ] && \
+  [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+  [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
+  [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
+  [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
+  [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "disabled" ] && \
+  [ -z "${CANON_FROZENLAKE_CKPT_ROOT:-}${CANON_FROZENLAKE_CKPT_TAG:-}${CANON_FROZENLAKE_CKPT_INTERVAL:-}${CANON_FROZENLAKE_CKPT_MAX_TO_KEEP:-}${CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL:-}" ] && \
+  [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-}" = "0" ] && \
+  [ "${CANON_P57_TOKEN_CONTINUITY:-}" = "exact" ] && \
+  [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "collect-64" ] && \
+  [ "${CANON_P57_TITO_ROLLOUT_ONLY:-}" = "1" ] && \
+  [ "${CANON_P57_TITO_RUNNER_WITNESS_DIR:-}" = \
+    "${CANON_STATE%/}/p57_tito_witness/runner" ] && \
+  [[ "${CANON_P57_TITO_GCS_PREFIX:-}" =~ ^gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p57-tito/[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?/attempt-(direct|[0-9]+)$ ]] && \
+  [ "${CANON_P57_TITO_GCS_INTERVAL_SECONDS:-}" = "30" ] && \
+  [ "${CANON_P57_TITO_GCS_READY:-}" = \
+    "${CANON_STATE%/}/p57_tito_gcs/ready" ] && \
+  [ "${CANON_P57_TITO_GCS_STOP_FILE:-}" = \
+    "${CANON_STATE%/}/p57_tito_gcs/stop" ] && \
+  [ "${CANON_P57_TITO_GCS_FINALIZE_FILE:-}" = \
+    "${CANON_STATE%/}/p57_tito_gcs/finalize" ] && \
+  [ "${CANON_P57_TITO_GCS_FINAL_ACK:-}" = \
+    "${CANON_STATE%/}/p57_tito_gcs/finalize.ack" ] && \
+  [ "${CANON_P57_TITO_GCS_HEARTBEAT:-}" = \
+    "${CANON_STATE%/}/p57_tito_gcs/heartbeat" ] && \
+  [ "${CANON_P57_TITO_GCS_WORKER_LOG:-}" = \
+    "${CANON_STATE%/}/p57_tito_gcs/worker.log" ] && \
+  [ "${CANON_VLLM_ENABLE_PREFIX_CACHING:-}" = "0" ] && \
+  [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+  [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+  [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "0" ] || {
+    echo "[env] P57 TiTO rollout-only diagnostic contract drifted" >&2
+    fail=1
+  }
+elif [ "${CANON_PROFILE_FILE:-}" = \
      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
    [ "${CANON_PROFILE_FILE:-}" = \
-     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; then
+     "${_p57_full_profile_file}" ]; then
   [[ "${CANON_P57_EXPECTED_UPDATES:-}" =~ ^[1-9][0-9]*$ ]] || {
     echo "[env] P57 requires a positive expected-update horizon" >&2
     fail=1
@@ -1667,8 +1958,18 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P38.2h fixed lm-head backward-no-commit enabled"
       ;;
-    frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
-    frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
+    ${_p57_full_workload}:rollout-only:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env)
+      [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ] && \
+      [ "${CANON_P57_TITO_ROLLOUT_ONLY:-0}" = "1" ] && \
+      [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "collect-64" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] || {
+        echo "[env] P57 TiTO diagnostic fixed-head contract drifted" >&2
+        fail=1
+      }
+      echo "[env] P57 TiTO rollout-only fixed lm-head enabled"
+      ;;
+    ${_p57_full_workload}:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
+    ${_p57_full_workload}:full:0:${_p57_full_profile_file})
       case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
         train:zero)
           [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = \
@@ -1720,7 +2021,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P62 numeric debug fixed lm-head enabled"
       ;;
-    frozenlake-dp8-tp8:backward-no-commit:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
+    ${_p57_full_workload}:backward-no-commit:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
       [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
       [ "${CANON_P33_NO_COMMIT:-0}" = "1" ] || {
@@ -1729,7 +2030,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P64 numeric debug fixed lm-head enabled"
       ;;
-    frozenlake-dp8-tp8:backward-no-commit:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env)
+    ${_p57_full_workload}:backward-no-commit:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env)
       [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] || {
         echo "[env] V1 FrozenLake TP8 A/B fixed-head contract drifted" >&2
@@ -2715,11 +3016,11 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       }
     fi
     case "${CANON_P32_WORKLOAD:-}" in
-      gsm8k|gsm8k-p59-dp4-tp1|frozenlake|frozenlake-dp8-tp8) ;;
+      gsm8k|gsm8k-p59-dp4-tp1|frozenlake|${_p57_full_workload}) ;;
       *) echo "[env] admitted P33 training has invalid workload" >&2; fail=1 ;;
     esac
     case "${CANON_P32_WORKLOAD:-}" in
-    frozenlake|frozenlake-dp8-tp8)
+    frozenlake|${_p57_full_workload})
       req CANON_P33_ENABLE_EVAL
       req CANON_P33_DISABLE_EVAL
       req CANON_P31_ENABLE_EVAL
@@ -2800,8 +3101,8 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       }
     fi
     if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
-      [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
-      [ "${CANON_DP_SIZE:-}" = "8" ] && \
+      [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
+      [ "${CANON_DP_SIZE:-}" = "$_p57_full_dp" ] && \
       [ "${CANON_TP_SIZE:-}" = "8" ] && \
       [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
       [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
@@ -2852,6 +3153,15 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       fail=1
     fi
   case "${CANON_P33_RUN_STAGE:-}" in
+    rollout-only)
+      [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+      [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env" ] && \
+      [ "${CANON_P57_TITO_ROLLOUT_ONLY:-0}" = "1" ] || {
+        echo "[env] P33 rollout-only requires the P57 TiTO diagnostic" >&2
+        fail=1
+      }
+      ;;
     envelope-short)
       [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
         echo "[env] P33 envelope-short requires no-commit=1" >&2; fail=1;
@@ -2922,9 +3232,9 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       fi
       if { [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || \
            { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
-             [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || \
+             [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ]; } || \
            { [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ] && \
-             [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; }; } && \
+             [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ]; }; } && \
          [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
         req CANON_P38_MISMATCH_CAPSULE
         expected_p38_capsule_rows=2
@@ -2937,7 +3247,7 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
           fail=1
         }
       elif [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
-           [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+           [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
            [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
         req CANON_P64_TRAINING_CAPSULE
         req CANON_P64_TRAINING_CAPSULE_GCS_URI

@@ -1,0 +1,39 @@
+{
+  "schema": "canon.p57-tito-release-closeout.v1",
+  "timestamp_utc": "2026-09-04T08:21:00Z",
+  "base_sha": "6842edae88b5692c7d4c6ae4ecadfc9e2bf1e411",
+  "branch": "local/p57-tito-pair-0902",
+  "runtime_commits": [
+    "c5d5ddd9c25c8ef00fb8bdfeac1a5e404601f510",
+    "067cf3bf7f67bd976a361b514f245d71df829d71",
+    "dcde8a9105e2e7cd82748b7c2ffac6c0d81eb05a",
+    "ba533dd7d8888c83d4c2ee50472a9346ccd3741c"
+  ],
+  "documentation_commit": "self",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "gates": {
+    "p57_host": "232/232 PASS",
+    "v1_host": "102/102 PASS",
+    "apc_host": "31/31 PASS",
+    "flags": "422/422 PASS",
+    "python_compile": "PASS",
+    "shell_syntax": "PASS",
+    "diff_check": "PASS",
+    "exact_image": "V1_HP_EXACT_IMAGE_PASS",
+    "postfix_overlay": "P33_EXACT_IMAGE_PASS"
+  },
+  "logs": {
+    "apc_host.log": "72b1e2e067a198ab75fdf4067b5fbac28129f4f846b7c9025cd3ce1cb9b7040c",
+    "diff_check.log": "fe0ef4bf61eaa1a686adb6e63de7c3703d3ab8a4db59cc50bd8bedaded043b96",
+    "exact_image.log": "61c85207e9a54ce8b7347afc0a348bb73a5d789c99241311364edbb448699bf2",
+    "flags.log": "1a0349335be82f81ca34e899680b3c916b87fb0afa416c9d2c6a14b9bafaf85a",
+    "p33_postfix.log": "4a1297e286d9cb21c310c41790f1142d280513e02830583379e23de097aca7b9",
+    "p57_host.log": "a32ba557d4a10e76f9490542e2f043eacfde01aedc57aeada12efaa72d8199a9",
+    "v1_host.log": "fb54e189b7f9e8f6cd38fb592339e82c55930ede4f05887158959c251bef3b6b"
+  },
+  "claim_ceiling": "host-and-pinned-image-construction-only",
+  "onehost_status": "matched DP1xTP4 observer-neutrality pair not run",
+  "target_status": "P45/M15 DP8xTP8 not run",
+  "deepswe_adjacency_status": "DP1xTP4 controlled carrier not rerun",
+  "tpu_or_kubernetes_launched": false
+}

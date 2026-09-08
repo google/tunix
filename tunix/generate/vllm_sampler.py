@@ -18,6 +18,7 @@ import atexit
 from concurrent.futures import TimeoutError as FutureTimeoutError
 import dataclasses
 import gc
+import hashlib
 from itertools import count
 import os
 import time
@@ -66,6 +67,70 @@ def _configure_logprob_request(
   else:
     sampling_params.logprobs = None
     sampling_params.prompt_logprobs = None
+
+
+def _prompt_token_ids(value: Any, *, field: str) -> np.ndarray:
+  """Returns one canonical int32 prompt vector for witness hashing."""
+  tokens = np.asarray(value)
+  if (
+      tokens.ndim != 1
+      or tokens.dtype.kind not in "iu"
+      or np.any(tokens < 0)
+      or np.any(tokens > np.iinfo(np.int32).max)
+  ):
+    raise ValueError(f"{field} must be a 1-D nonnegative int32 token vector")
+  return np.asarray(tokens, dtype="<i4")
+
+
+def _prompt_token_sha256(tokens: np.ndarray) -> str:
+  portable = np.ascontiguousarray(np.asarray(tokens, dtype="<i8"))
+  return hashlib.sha256(portable.tobytes()).hexdigest()
+
+
+def build_prompt_token_witnesses(
+    submitted_prompts: Sequence[Sequence[int] | np.ndarray],
+    request_outputs: Sequence[RequestOutput],
+) -> list[base_sampler.PromptTokenWitness]:
+  """Joins submit-side prompts to vLLM RequestOutput echoes by list position."""
+  if len(submitted_prompts) != len(request_outputs):
+    raise ValueError(
+        "vLLM prompt witness count differs: "
+        f"submitted={len(submitted_prompts)} outputs={len(request_outputs)}"
+    )
+  witnesses = []
+  request_ids = set()
+  for index, (submitted, output) in enumerate(
+      zip(submitted_prompts, request_outputs, strict=True)
+  ):
+    request_id = getattr(output, "request_id", None)
+    if not isinstance(request_id, str) or not request_id:
+      raise ValueError(f"vLLM prompt witness {index} has no request ID")
+    if request_id in request_ids:
+      raise ValueError(f"duplicate vLLM prompt witness request ID: {request_id}")
+    request_ids.add(request_id)
+    engine_echo = getattr(output, "prompt_token_ids", None)
+    if engine_echo is None:
+      raise ValueError(
+          f"vLLM prompt witness {request_id} has no RequestOutput prompt IDs"
+      )
+    submitted_tokens = _prompt_token_ids(
+        submitted, field=f"vLLM submitted prompt {index}"
+    )
+    echoed_tokens = _prompt_token_ids(
+        engine_echo, field=f"vLLM engine echo {request_id}"
+    )
+    witnesses.append(
+        base_sampler.PromptTokenWitness(
+            request_id=request_id,
+            submitted_tokens=int(submitted_tokens.size),
+            submitted_sha256=_prompt_token_sha256(submitted_tokens),
+            engine_echo_tokens=int(echoed_tokens.size),
+            engine_echo_sha256=_prompt_token_sha256(echoed_tokens),
+            submitted_token_ids=tuple(int(token) for token in submitted_tokens),
+            engine_echo_token_ids=tuple(int(token) for token in echoed_tokens),
+        )
+    )
+  return witnesses
 
 
 @dataclasses.dataclass
@@ -442,6 +507,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       reset_prefix_cache: bool = False,
       reset_timeout_s: float = 300.0,
       request_timeout_s: float | None = None,
+      verify_request_identity: bool = False,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -477,7 +543,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else time.monotonic() + request_timeout_s
     )
     try:
-      for future in request_futures:
+      for request, future in zip(requests, request_futures, strict=True):
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
           raise FutureTimeoutError()
@@ -485,6 +551,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         if not isinstance(result, RequestOutput):
           raise TypeError(
               f"Expected RequestOutput from driver, received {type(result)}."
+          )
+        if verify_request_identity and result.request_id != request["request_id"]:
+          raise ValueError(
+              "vLLM server-mode result order/request identity differs: "
+              f"expected={request['request_id']} actual={result.request_id}"
           )
         outputs.append(result)
     except FutureTimeoutError as exc:
@@ -560,11 +631,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       echo: bool = False,
       pad_output: bool = False,
       request_timeout_s: float | None = None,
+      return_prompt_token_witnesses: bool = False,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
     if isinstance(input_strings, str):
       input_strings = [input_strings]
+    if return_prompt_token_witnesses and self._driver is None:
+      raise ValueError(
+          "prompt-token witnesses require server mode so submitted request "
+          "IDs can be bound to RequestOutput IDs"
+      )
 
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
@@ -682,6 +759,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           prompt_objects,
           sampling_params,
           request_timeout_s=request_timeout_s,
+          verify_request_identity=return_prompt_token_witnesses,
       )
     else:
       outputs = self.llm.generate(
@@ -692,6 +770,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(
         input_strings, outputs
     )
+    prompt_token_witnesses = None
+    if return_prompt_token_witnesses:
+      prompt_token_witnesses = build_prompt_token_witnesses(prompt_ids, outputs)
     if self.config.return_logprobs and (
         out_logprobs is None or out_logprobs[0] is None
     ):
@@ -722,4 +803,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         prompt_lengths=np.asarray(
             [len(prompt_id) for prompt_id in prompt_ids], dtype=np.int32
         ),
+        prompt_token_witnesses=prompt_token_witnesses,
     )

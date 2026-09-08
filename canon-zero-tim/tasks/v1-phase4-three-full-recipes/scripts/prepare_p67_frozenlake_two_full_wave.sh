@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 5 || "$#" -gt 7 ]]; then
-  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--m15-tito-exact] [--p45-length-sort]" >&2
+if [[ "$#" -lt 5 || "$#" -gt 14 ]]; then
+  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--token-continuity legacy|p45-exact|m15-exact|both-exact] [--token-continuity-debug|--token-continuity-debug-mode first-diff|record-full] [--target-cluster legacy|bodaborg] [--train-geometry dp8-tp8-b256|dp4-tp8-b128] [--p45-length-sort]" >&2
   exit 2
 fi
 
@@ -11,34 +11,114 @@ OUTPUT_DIR="$2"
 CAMPAIGN_ROOT="$3"
 P45_RUN_ID="$4"
 M15_RUN_ID="$5"
-M15_TITO_ARGS=()
-M15_TITO_MODE=off
+shift 5
+TOKEN_CONTINUITY_ARGS=()
+TOKEN_CONTINUITY_MODE=legacy
+TOKEN_CONTINUITY_SEEN=0
+TOKEN_CONTINUITY_DEBUG=off
+TARGET_CLUSTER_ARGS=()
+TARGET_CLUSTER_SEEN=0
+TRAIN_GEOMETRY_ARGS=()
+TRAIN_GEOMETRY_SEEN=0
 P45_LENGTH_SORT_ARGS=()
 P45_LENGTH_SORT_MODE=off
-for OPTION in "${@:6}"; do
-  case "$OPTION" in
-    --m15-tito-exact)
-      if [[ "$M15_TITO_MODE" == exact ]]; then
-        echo "--m15-tito-exact may appear only once" >&2
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --train-geometry)
+      if [[ "$TRAIN_GEOMETRY_SEEN" = 1 || "$#" -lt 2 ]]; then
+        echo "--train-geometry requires one non-duplicate value" >&2
         exit 2
       fi
-      M15_TITO_ARGS=(--m15-tito-exact)
-      M15_TITO_MODE=exact
+      case "$2" in
+        dp8-tp8-b256|dp4-tp8-b128) ;;
+        *) echo "unregistered training geometry" >&2; exit 2 ;;
+      esac
+      TRAIN_GEOMETRY_ARGS+=(--train-geometry "$2")
+      TRAIN_GEOMETRY_SEEN=1
+      shift 2
+      ;;
+    --m15-tito-exact)
+      if [[ "$TOKEN_CONTINUITY_SEEN" = 1 ]]; then
+        echo "token-continuity selector may be supplied only once" >&2
+        exit 2
+      fi
+      TOKEN_CONTINUITY_ARGS+=(--m15-tito-exact)
+      TOKEN_CONTINUITY_MODE=m15-exact
+      TOKEN_CONTINUITY_SEEN=1
+      shift
+      ;;
+    --token-continuity)
+      if [[ "$TOKEN_CONTINUITY_SEEN" = 1 || "$#" -lt 2 ]]; then
+        echo "--token-continuity requires one non-duplicate mode" >&2
+        exit 2
+      fi
+      case "$2" in
+      legacy|p45-exact|m15-exact|both-exact) ;;
+      *)
+        echo "token continuity must be legacy, p45-exact, m15-exact, or both-exact" >&2
+        exit 2
+        ;;
+      esac
+      TOKEN_CONTINUITY_ARGS+=(--token-continuity "$2")
+      TOKEN_CONTINUITY_MODE="$2"
+      TOKEN_CONTINUITY_SEEN=1
+      shift 2
+      ;;
+    --token-continuity-debug)
+      if [[ "$TOKEN_CONTINUITY_DEBUG" = on ]]; then
+        echo "--token-continuity-debug may be supplied only once" >&2
+        exit 2
+      fi
+      TOKEN_CONTINUITY_ARGS+=(--token-continuity-debug)
+      TOKEN_CONTINUITY_DEBUG=on
+      shift
+      ;;
+    --token-continuity-debug-mode)
+      if [[ "$TOKEN_CONTINUITY_DEBUG" != off || "$#" -lt 2 ]]; then
+        echo "--token-continuity-debug-mode requires one non-duplicate value" >&2
+        exit 2
+      fi
+      case "$2" in
+        first-diff|record-full) ;;
+        *) echo "debug mode must be first-diff or record-full" >&2; exit 2 ;;
+      esac
+      TOKEN_CONTINUITY_ARGS+=(--token-continuity-debug-mode "$2")
+      TOKEN_CONTINUITY_DEBUG="$2"
+      shift 2
+      ;;
+    --target-cluster|--cluster)
+      if [[ "$TARGET_CLUSTER_SEEN" = 1 || "$#" -lt 2 ]]; then
+        echo "--target-cluster requires one non-duplicate value" >&2
+        exit 2
+      fi
+      case "$2" in
+        legacy|bodaborg) ;;
+        *) echo "target cluster must be legacy or bodaborg" >&2; exit 2 ;;
+      esac
+      TARGET_CLUSTER_ARGS+=(--target-cluster "$2")
+      TARGET_CLUSTER_SEEN=1
+      shift 2
       ;;
     --p45-length-sort)
-      if [[ "$P45_LENGTH_SORT_MODE" == on ]]; then
+      if [[ "$P45_LENGTH_SORT_MODE" = on ]]; then
         echo "--p45-length-sort may appear only once" >&2
         exit 2
       fi
-      P45_LENGTH_SORT_ARGS=(--p45-length-sort)
+      P45_LENGTH_SORT_ARGS+=(--p45-length-sort)
       P45_LENGTH_SORT_MODE=on
+      shift
       ;;
     *)
-      echo "unknown optional argument: $OPTION" >&2
+      echo "unknown optional argument: $1" >&2
       exit 2
       ;;
   esac
 done
+if [[ "$TOKEN_CONTINUITY_DEBUG" != off && \
+      "$TOKEN_CONTINUITY_MODE" = legacy ]]; then
+  echo "token-continuity diagnostics require an exact treatment" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -79,7 +159,9 @@ python3 "$RENDERER" \
   --campaign-root "$CAMPAIGN_ROOT" \
   --p45-run-id "$P45_RUN_ID" \
   --m15-run-id "$M15_RUN_ID" \
-  "${M15_TITO_ARGS[@]}" \
+  "${TOKEN_CONTINUITY_ARGS[@]}" \
+  "${TRAIN_GEOMETRY_ARGS[@]}" \
+  "${TARGET_CLUSTER_ARGS[@]}" \
   "${P45_LENGTH_SORT_ARGS[@]}"
 
 INDEX="$OUTPUT_DIR/manifest-index.json"
@@ -90,7 +172,7 @@ fi
 
 sha256sum "$INDEX"
 printf '%s\n' \
-  "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR m15_tito=$M15_TITO_MODE p45_length_sort=$P45_LENGTH_SORT_MODE launch=not-executed" \
+  "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR token_continuity=$TOKEN_CONTINUITY_MODE token_continuity_debug=$TOKEN_CONTINUITY_DEBUG p45_length_sort=$P45_LENGTH_SORT_MODE launch=not-executed" \
   "Review manifest-index.json and verify the pushed SHA by remote read-back before launch." \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml" \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml"

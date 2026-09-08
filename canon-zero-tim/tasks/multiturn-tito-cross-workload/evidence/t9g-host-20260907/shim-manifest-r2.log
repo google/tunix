@@ -1,0 +1,43 @@
+sha256sum: attn_iface_patched.py: No such file or directory
+attn_iface_patched.py: FAILED open or read
+canon_shim_root.py: OK
+sha256sum: embed_patched.py: No such file or directory
+embed_patched.py: FAILED open or read
+linear_p22xf.py: OK
+linear_p22xi.py: OK
+linear_p22xk.py: OK
+sha256sum: linear_patched.py: No such file or directory
+linear_patched.py: FAILED open or read
+p22_pallas_matmul.py: OK
+p22_pallas_rmsnorm.py: OK
+p22_pallas_swiglu.py: OK
+p22xg_contract.py: OK
+p22xh_contract.py: OK
+p22xi_contract.py: OK
+p22xi_padded_matmul.py: OK
+p22xj_contract.py: OK
+p22xj_padded_swiglu.py: OK
+p22xk_contract.py: OK
+p22xk_vjp_ops.py: OK
+p38_fixed_lm_head.py: OK
+p38_kv_fingerprint.py: OK
+p38_seam_capture.py: OK
+p38_tail_capture.py: OK
+p38_terminal_capture.py: OK
+qwen2_p22xg.py: OK
+qwen2_p22xj.py: OK
+qwen2_p22xk.py: OK
+sha256sum: qwen2_patched.py: No such file or directory
+qwen2_patched.py: FAILED open or read
+sha256sum: qwen3.py: No such file or directory
+qwen3.py: FAILED open or read
+qwen3_p22xk.py: OK
+rpa_diff.py: OK
+rpa_diff_chunked.py: OK
+sha256sum: rpa_kernel_p66.py: No such file or directory
+rpa_kernel_p66.py: FAILED open or read
+sha256sum: tpu_runner_p21_l30.py: No such file or directory
+tpu_runner_p21_l30.py: FAILED open or read
+p56_pallas_norm_matmul.py: OK
+xprof_labels.py: OK
+sha256sum: WARNING: 7 listed files could not be read

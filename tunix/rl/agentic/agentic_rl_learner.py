@@ -2058,6 +2058,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else "legacy-segmented"
     )
     if checked_vma_full or first_update_gate_enabled:
+      from examples.frozenlake import training_geometry as fl_geometry
+      fl_geom = fl_geometry.validate_selected_full(os.environ)
       exact_registered_full_geometry = (
           full_train
           and not p33_no_commit
@@ -2072,9 +2074,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   and workload.global_m == 4096
               )
               or (
-                  workload_identity == "frozenlake-dp8-tp8"
-                  and (workload.dp_size, workload.tp_size) == (8, 8)
-                  and workload.global_m == 2048
+                  workload_identity == fl_geom.workload
+                  and (workload.dp_size, workload.tp_size) == (fl_geom.dp, 8)
+                  and workload.global_m == fl_geom.global_m
               )
               or (
                   workload_identity == "p58-qwen4b-tim-128"
@@ -2918,6 +2920,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       raise alignment.AlignmentGateError(
           f"P28 G6 update transaction red: {update_record}"
       )
+    token_continuity.record_full_update(update_record)
     if first_update_admission:
       first_commit_record = {
           "schema": "canon-v1-first-update-commit-v1",
@@ -3280,6 +3283,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       max_generation_steps: int | None = None,
       request_timeout_s: float | None = None,
       prompt_token_ids: Sequence[int] | np.ndarray | None = None,
+      return_prompt_token_witnesses: bool = False,
   ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
     if env:
@@ -3287,16 +3291,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     if prompt_token_ids is not None:
       deepswe_exact = deepswe_debug.deepswe_exact_token_continuity()
-      m15_exact = token_continuity.m15_token_continuity_mode() == "exact"
-      if deepswe_exact and m15_exact:
+      frozenlake_continuity = token_continuity.frozenlake_token_continuity()
+      frozenlake_exact = (
+          frozenlake_continuity is not None
+          and frozenlake_continuity.mode == "exact"
+      )
+      if deepswe_exact and frozenlake_exact:
         raise ValueError(
-            "DeepSWE and M15 pre-tokenized prompt admissions are mutually "
+            "DeepSWE and FrozenLake pre-tokenized prompt admissions are mutually "
             "exclusive"
         )
-      if not (deepswe_exact or m15_exact):
+      if not (deepswe_exact or frozenlake_exact):
         raise ValueError(
-            "pre-tokenized agentic prompts require a signed DeepSWE or M15 "
-            "exact-token admission"
+            "pre-tokenized agentic prompts require a signed DeepSWE or "
+            "M15/P57 exact-token admission"
         )
       exact_prompt = np.asarray(prompt_token_ids)
       if (
@@ -3336,6 +3344,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
         request_timeout_s=request_timeout_s,
+        return_prompt_token_witnesses=return_prompt_token_witnesses,
     )
 
     return result
@@ -4408,6 +4417,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           receipt_train_example,
           train_step=int(pre_update_train_step),
           global_step=int(pre_update_global_step),
+      )
+      token_continuity.consume_actor_snapshot_request(
+          self.rl_cluster.actor_trainer,
+          step=int(pre_update_train_step),
       )
 
       if os.environ.get("CANON_P28_G5C_ONLY", "") == "1":

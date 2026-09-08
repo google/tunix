@@ -1,0 +1,25 @@
+{
+  "schema": "canon-p57-tito-pair-local-pinned-admission-v1",
+  "timestamp_utc": "2026-09-02T10:42:52Z",
+  "source_base_sha": "6842edae88b5692c7d4c6ae4ecadfc9e2bf1e411",
+  "worktree_branch": "local/p57-tito-pair-0902",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "raw_log_local_path": "/tmp/p57_tito_pair_pinned_20260902_r2.log",
+  "raw_log_sha256": "9bc28afb41ac0a7049eb66a2c65aa47abb912bdcf42ed4620603c961700446a3",
+  "raw_log_durable_gcs": false,
+  "exit_code": 0,
+  "terminal": "V1_HP_EXACT_IMAGE_PASS",
+  "terminal_contract": {
+    "frozenlake_tito_impl": 2,
+    "frozenlake_tito_selector": "closed",
+    "frozenlake_tito_summary": 1,
+    "frozenlake_tito_debug": 1,
+    "frozenlake_tito_capsule_integrity": 1,
+    "frozenlake_tito_default": "legacy",
+    "manifests": 3
+  },
+  "claim_ceiling": "host-and-pinned-construction-only",
+  "target_status": "P45/M15 DP8xTP8 not run",
+  "deepswe_adjacency_status": "DP1xTP4 controlled carrier not rerun",
+  "commit_push_launch": false
+}

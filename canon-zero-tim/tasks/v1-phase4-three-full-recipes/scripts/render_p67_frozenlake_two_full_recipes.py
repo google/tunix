@@ -27,6 +27,13 @@ from v1_full_system_optimization import full_system_optimization_additions
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _PROFILE = p57._V1_HP_PROFILE  # pylint: disable=protected-access
+_TOKEN_CONTINUITY_MODES = (
+    "legacy",
+    "p45-exact",
+    "m15-exact",
+    "both-exact",
+)
+_TARGET_CLUSTERS = ("legacy", "bodaborg")
 _JAX_CACHE_ENV = {
     "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
     "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
@@ -104,6 +111,30 @@ def _write_yaml(path: Path, document: dict) -> None:
   )
 
 
+def _resolve_token_continuity(
+    token_continuity: str | None,
+    *,
+    m15_tito_exact: bool,
+) -> str:
+  if token_continuity is not None and m15_tito_exact:
+    raise ValueError(
+        "--m15-tito-exact cannot be combined with --token-continuity"
+    )
+  resolved = (
+      "m15-exact"
+      if m15_tito_exact
+      else "legacy"
+      if token_continuity is None
+      else token_continuity
+  )
+  if resolved not in _TOKEN_CONTINUITY_MODES:
+    raise ValueError(
+        "token continuity must be one of "
+        f"{_TOKEN_CONTINUITY_MODES}, got {resolved!r}"
+    )
+  return resolved
+
+
 def render_two(
     *,
     source_commit: str,
@@ -113,14 +144,40 @@ def render_two(
     campaign_root: str,
     base_path: Path,
     m15_tito_exact: bool = False,
+    token_continuity: str | None = None,
+    token_continuity_debug: bool = False,
+    token_continuity_debug_mode: str | None = None,
+    target_cluster: str = "legacy",
+    train_geometry: str = p57.fl_geometry.LEGACY,
     p45_length_sort: bool = False,
 ) -> tuple[Path, ...]:
+  geom = p57.fl_geometry.geometry(train_geometry)
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
   if output_dir.exists():
     raise FileExistsError(f"refusing to overwrite output root: {output_dir}")
+  if target_cluster not in _TARGET_CLUSTERS:
+    raise ValueError(
+        f"target cluster must be one of {_TARGET_CLUSTERS}, got {target_cluster!r}"
+    )
   if p45_run_id == m15_run_id:
     raise ValueError("P45 and M15 run ids must be distinct")
+  token_continuity = _resolve_token_continuity(
+      token_continuity, m15_tito_exact=m15_tito_exact
+  )
+  if token_continuity_debug and token_continuity_debug_mode is not None:
+    raise ValueError(
+        "--token-continuity-debug and --token-continuity-debug-mode conflict"
+    )
+  debug_mode = (
+      "first-diff" if token_continuity_debug else token_continuity_debug_mode
+  )
+  if debug_mode not in (None, "first-diff", "record-full"):
+    raise ValueError("token-continuity debug mode is not closed")
+  if debug_mode is not None and token_continuity == "legacy":
+    raise ValueError(
+        "token-continuity diagnostics require at least one exact treatment"
+    )
 
   output_dir.mkdir(parents=True)
   p45_outputs = p57.render_all(
@@ -135,6 +192,7 @@ def render_two(
       arm="zero",
       high_performance=True,
       disable_eval=True,
+      train_geometry=train_geometry,
   )
   m15_outputs = p57.render_all(
       base_path=base_path,
@@ -150,6 +208,7 @@ def render_two(
       arm="zero",
       high_performance=True,
       disable_eval=True,
+      train_geometry=train_geometry,
   )
   outputs = (*p45_outputs, *m15_outputs)
   if len(outputs) != 2:
@@ -183,8 +242,58 @@ def render_two(
     }
     if anti_affinity_term not in required_anti_affinity:
       required_anti_affinity.append(anti_affinity_term)
-    if label == "m15" and m15_tito_exact:
-      _set_env(document, {"CANON_M15_TOKEN_CONTINUITY": "exact"})
+    exact_workloads = {
+        "legacy": frozenset(),
+        "p45-exact": frozenset({"p45"}),
+        "m15-exact": frozenset({"m15"}),
+        "both-exact": frozenset({"p45", "m15"}),
+    }[token_continuity]
+    if label in exact_workloads:
+      _set_env(document, {"CANON_P57_TOKEN_CONTINUITY": "exact"})
+      if debug_mode is not None:
+        _set_env(
+            document,
+            {"CANON_P57_TOKEN_CONTINUITY_DEBUG": debug_mode},
+        )
+    if target_cluster == "bodaborg":
+      if len(document["metadata"]["name"]) > 36:
+        raise ValueError(
+            f"JobSet name {document['metadata']['name']!r} exceeds 36 characters "
+            f"({len(document['metadata']['name'])} > 36); GKE vjobset webhook will reject pod names > 63 characters. "
+            "Use a shorter run ID (e.g. r01)."
+        )
+      head["priorityClassName"] = "medium"
+      tolerations = head.setdefault("tolerations", [])
+      cpu_np_toleration = {
+          "key": "cloud.google.com/gke-nodepool",
+          "operator": "Equal",
+          "value": "cpu-np",
+          "effect": "NoSchedule",
+      }
+      if cpu_np_toleration not in tolerations:
+        tolerations.append(cpu_np_toleration)
+
+      worker_template = document["spec"]["replicatedJobs"][1]["template"]["spec"]["template"]
+      worker_spec = worker_template["spec"]
+      worker_spec["priorityClassName"] = "medium"
+      worker_meta = worker_template.setdefault("metadata", {})
+      worker_annotations = worker_meta.setdefault("annotations", {})
+      worker_annotations["cloud.google.com/skip-tpu-webhook-check"] = "true"
+      worker_annotations["cloud.google.com/gke-tpu-slice-topology"] = geom.topology
+
+      document["metadata"].setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
+      head_meta = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"].setdefault("metadata", {})
+      head_meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
+      worker_meta.setdefault("labels", {})["kueue.x-k8s.io/queue-name"] = "default"
+
+      # Align head resource requests to fit within n2d-standard-64 (240Gi allocatable)
+      # Limits remain generous and unchanged (burstable up to full node capacity).
+      proxy = next(c for c in head["initContainers"] if c["name"] == "pathways-proxy")
+      rm = next(c for c in head["initContainers"] if c["name"] == "pathways-rm")
+      main = next(c for c in head["containers"] if c["name"] == "jax-tpu")
+      proxy["resources"]["requests"] = {"cpu": "8", "memory": "16Gi"}
+      rm["resources"]["requests"] = {"cpu": "4", "memory": "16Gi"}
+      main["resources"]["requests"] = {"cpu": "16", "memory": "64Gi"}
     if label == "p45" and p45_length_sort:
       _set_env(document, {"CANON_P32_LENGTH_SORT": "1"})
     _write_yaml(path, document)
@@ -192,9 +301,9 @@ def render_two(
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     env = _env(document)
     required = {
-        "CANON_PROFILE_FILE": _PROFILE,
+        "CANON_PROFILE_FILE": geom.profile_file,
         "CANON_V1_HP_FULL": "1",
-        "CANON_P33_SHARED_MESH": "8,8",
+        "CANON_P33_SHARED_MESH": f"{geom.dp},8",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P57_TIM_ARM": "zero",
@@ -242,16 +351,30 @@ def render_two(
       raise ValueError(
           f"{label} rendered an uncertified DP collective reducer"
       )
-    expected_tito = "exact" if label == "m15" and m15_tito_exact else None
-    if expected_tito is None and "CANON_M15_TOKEN_CONTINUITY" in env:
+    if "CANON_M15_TOKEN_CONTINUITY" in env:
       raise ValueError(
-          f"{label} must keep the optional M15 TITO selector absent"
+          f"{label} must not render the historical M15 TITO selector"
       )
-    if (
-        expected_tito is not None
-        and env.get("CANON_M15_TOKEN_CONTINUITY") != expected_tito
-    ):
-      raise ValueError("M15 exact TITO option was not rendered exactly once")
+    expected_tito = "exact" if label in exact_workloads else None
+    if expected_tito is None and "CANON_P57_TOKEN_CONTINUITY" in env:
+      raise ValueError(f"{label} must keep the P57 TITO selector absent")
+    if expected_tito is not None and env.get(
+        "CANON_P57_TOKEN_CONTINUITY"
+    ) != expected_tito:
+      raise ValueError(f"{label} exact TITO option was not rendered exactly once")
+    expected_debug = (
+        debug_mode
+        if label in exact_workloads and debug_mode is not None
+        else None
+    )
+    if expected_debug is None and "CANON_P57_TOKEN_CONTINUITY_DEBUG" in env:
+      raise ValueError(f"{label} must keep token diagnostics absent")
+    if expected_debug is not None and env.get(
+        "CANON_P57_TOKEN_CONTINUITY_DEBUG"
+    ) != expected_debug:
+      raise ValueError(
+          f"{label} token diagnostics were not rendered exactly once"
+      )
     if label == "p45" and p45_length_sort:
       if env.get("CANON_P32_LENGTH_SORT") != "1":
         raise ValueError("P45 length-sort treatment was not rendered exactly once")
@@ -272,14 +395,18 @@ def render_two(
 
   index = output_dir / "manifest-index.json"
   index_receipt = {
-      "schema": "v1-p67-frozenlake-two-full-v1",
-      "m15_tito_exact": m15_tito_exact,
+      "schema": "v1-p67-frozenlake-two-full-v2",
+      "target_cluster": target_cluster,
+      "train_geometry": train_geometry,
+      "token_continuity": token_continuity,
+      "token_continuity_debug": debug_mode,
       "manifests": receipts,
   }
   if p45_length_sort:
     index_receipt["p45_length_sort"] = True
   index.write_text(
-      json.dumps(index_receipt, indent=2) + "\n", encoding="utf-8"
+      json.dumps(index_receipt, indent=2) + "\n",
+      encoding="utf-8",
   )
   print(
       f"V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output={output_dir}",
@@ -295,10 +422,33 @@ def main() -> int:
   parser.add_argument("--p45-run-id", required=True)
   parser.add_argument("--m15-run-id", required=True)
   parser.add_argument("--campaign-root", required=True)
+  parser.add_argument("--train-geometry", choices=p57.fl_geometry.CHOICES,
+                      default=p57.fl_geometry.LEGACY)
+  parser.add_argument(
+      "--target-cluster",
+      choices=_TARGET_CLUSTERS,
+      default="legacy",
+      help="select cluster targeting policy; default is legacy",
+  )
   parser.add_argument(
       "--m15-tito-exact",
       action="store_true",
-      help="render exact M15 token input; default keeps the selector absent",
+      help="deprecated alias for --token-continuity=m15-exact",
+  )
+  parser.add_argument(
+      "--token-continuity",
+      choices=_TOKEN_CONTINUITY_MODES,
+      help="select exact token transport per workload; default is legacy",
+  )
+  parser.add_argument(
+      "--token-continuity-debug",
+      action="store_true",
+      help="persist and log the first exact token mismatch; default is off",
+  )
+  parser.add_argument(
+      "--token-continuity-debug-mode",
+      choices=("first-diff", "record-full"),
+      help="select the closed diagnostic policy; default is absent",
   )
   parser.add_argument(
       "--p45-length-sort",
@@ -317,6 +467,11 @@ def main() -> int:
       campaign_root=args.campaign_root,
       base_path=args.base,
       m15_tito_exact=args.m15_tito_exact,
+      token_continuity=args.token_continuity,
+      token_continuity_debug=args.token_continuity_debug,
+      token_continuity_debug_mode=args.token_continuity_debug_mode,
+      target_cluster=args.target_cluster,
+      train_geometry=args.train_geometry,
       p45_length_sort=args.p45_length_sort,
   )
   return 0

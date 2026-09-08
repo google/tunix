@@ -1,0 +1,1342 @@
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen1p7b)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen1p7b)
+
+Installed to: /tmp/p33-qwen1p7b.yZjkAm   (model=qwen1p7b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p33-qwen1p7b.yZjkAm:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p33-qwen1p7b.yZjkAm          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 09-06 22:49:35 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:49:41 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:49:41 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:49:41 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:49:41 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:49:41 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS chain=linear_p22xk model=qwen1p7b tp=4 K=2048 request_M=8,16,32,64,128,256 learner_M=4096 fixed_M=256 local_N=37984 fixed_N=38144 endpoint=tied_embed
+ERROR 09-06 22:49:45 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:49:45 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+WARNING 09-06 22:49:45 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/site-packages/tpu_info/device.py:33: DeprecationWarning: In 3.13 classes created inside an enum will not become a member.  Use the `member` decorator to keep the current behavior.
+  class Info(typing.NamedTuple):
+INFO 09-06 22:49:50 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:49:50 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:49:50 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 09-06 22:49:50 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+/usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py:324: DeprecationWarning: jax.core.Effect is deprecated. Use jax.extend.core.Effect.
+  class VariableEffect(jax.core.Effect): ...
+WARNING 09-06 22:49:53 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:49:53 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:49:53 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-06 22:49:53 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-06 22:49:53 [attention_interface.py:56] Using default RPA kernel
+/usr/local/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+INFO 09-06 22:49:53 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-06 22:49:53 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-06 22:49:53 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-06 22:49:53 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1664, 1792, 1920, 2048) expected_path=standard module=/tmp/p33-qwen1p7b.yZjkAm/tpu_runner_p21_l30.py
+..[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=11023
+.....[CANON_P38_KV_OBSERVER_CANDIDATE] round=2 request=candidate-a call=4223 prefix=2209
+...........[CANON_P38_REQUEST_JOURNAL] record=1 request=request-a prefix=1600 stratum=0 dp=0
+.................
+----------------------------------------------------------------------
+Ran 35 tests in 13.978s
+
+OK
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen8b)
+
+Installed to: /tmp/p33-qwen8b.QcpNk8   (model=qwen8b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p33-qwen8b.QcpNk8:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p33-qwen8b.QcpNk8          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 09-06 22:50:02 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:50:07 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:50:07 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:50:07 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:50:08 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:50:08 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS chain=linear_p22xk model=qwen8b tp=4 K=4096 request_M=8,16,32,64,128,256 learner_M=4096 fixed_M=256 local_N=37984 fixed_N=38144 endpoint=untied_lm_head
+ERROR 09-06 22:50:11 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:50:11 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+WARNING 09-06 22:50:11 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/site-packages/tpu_info/device.py:33: DeprecationWarning: In 3.13 classes created inside an enum will not become a member.  Use the `member` decorator to keep the current behavior.
+  class Info(typing.NamedTuple):
+INFO 09-06 22:50:17 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:50:17 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:50:17 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 09-06 22:50:17 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+/usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py:324: DeprecationWarning: jax.core.Effect is deprecated. Use jax.extend.core.Effect.
+  class VariableEffect(jax.core.Effect): ...
+WARNING 09-06 22:50:19 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:50:19 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:50:19 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-06 22:50:19 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-06 22:50:20 [attention_interface.py:56] Using default RPA kernel
+/usr/local/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+INFO 09-06 22:50:20 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-06 22:50:20 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-06 22:50:20 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-06 22:50:20 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+[CANON_P38_SERVING_CAPTURE_INIT] enabled=1 max_calls=4 min_prefix=1536 prefix_bounds=(1536, 1664, 1792, 1920, 2048) expected_path=standard module=/tmp/p33-qwen8b.QcpNk8/tpu_runner_p21_l30.py
+..[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=11023
+.....[CANON_P38_KV_OBSERVER_CANDIDATE] round=2 request=candidate-a call=4223 prefix=2209
+.......Warning: truncated output (original token count: 35488)
+Total output lines: 291
+
+....[CANON_P38_REQUEST_JOURNAL] record=1 request=request-a prefix=1600 stratum=0 dp=0
+.................
+----------------------------------------------------------------------
+Ran 35 tests in 14.417s
+
+OK
+[CANON_P57_TITO_RUNNER_WITNESS] record=1 request=a0 prompt_tokens=3 prompt_sha256=e6c755be63ad52f42474accd9c42d099f8272574bb4babba65bf7e8d090d04b7
+[CANON_P57_TITO_RUNNER_WITNESS] record=2 request=a1 prompt_tokens=2 prompt_sha256=6bc454331fc753a1f9646096d94d86f12876c6d9aa1898d2bec00ac693487ff0
+[CANON_P57_TITO_RUNNER_WITNESS] record=3 request=a0 prompt_tokens=3 prompt_sha256=e6c755be63ad52f42474accd9c42d099f8272574bb4babba65bf7e8d090d04b7
+P57_TITO_RUNNER_WITNESS_OVERLAY_PASS a_requests=2 b_excluded=1 negatives=3 mode0600=1
+M15_REPLAY_ROUND_PROVENANCE_PASS schema=m15-apc-serving-envelope-v1 binding=int(_p38_seam_round())
+P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=37 p57_tito_runner_witness=2 p57_tito_runner_execution=1 m15_round_provenance=1 overlays=2
+P45_EXACT_IMAGE image_ref=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b_tp8)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen8b_tp8)
+
+Installed to: /tmp/p45-qwen8b-tp8.n5cI7T   (model=qwen8b_tp8)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p45-qwen8b-tp8.n5cI7T:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p45-qwen8b-tp8.n5cI7T          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+....................................................................................[P33.JOBSET] RENDERED key=gsm8k-alignment-short path=/tmp/tmp5sqwvnch/jobset-p33-gsm8k-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-alignment-short path=/tmp/tmp5sqwvnch/jobset-p33-frozenlake-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-backward-no-commit path=/tmp/tmp5sqwvnch/jobset-p33-frozenlake-backward-no-commit.yaml
+[P33.JOBSET] RENDERED key=gsm8k-full path=/tmp/tmp5sqwvnch/jobset-p33-gsm8k-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full path=/tmp/tmp5sqwvnch/jobset-p33-frozenlake-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full-eval path=/tmp/tmp5sqwvnch/jobset-p33-frozenlake-full-eval.yaml
+..[P33.JOBSET] RENDERED key=gsm8k-alignment-short path=/tmp/tmplj501d2c/jobset-p33-gsm8k-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-alignment-short path=/tmp/tmplj501d2c/jobset-p33-frozenlake-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-backward-no-commit path=/tmp/tmplj501d2c/jobset-p33-frozenlake-backward-no-commit.yaml
+[P33.JOBSET] RENDERED key=gsm8k-full path=/tmp/tmplj501d2c/jobset-p33-gsm8k-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full path=/tmp/tmplj501d2c/jobset-p33-frozenlake-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full-eval path=/tmp/tmplj501d2c/jobset-p33-frozenlake-full-eval.yaml
+..[P33.JOBSET] RENDERED key=gsm8k-alignment-short path=/tmp/tmpdhokyzcs/jobset-p33-gsm8k-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-alignment-short path=/tmp/tmpdhokyzcs/jobset-p33-frozenlake-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-backward-no-commit path=/tmp/tmpdhokyzcs/jobset-p33-frozenlake-backward-no-commit.yaml
+[P33.JOBSET] RENDERED key=gsm8k-full path=/tmp/tmpdhokyzcs/jobset-p33-gsm8k-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full path=/tmp/tmpdhokyzcs/jobset-p33-frozenlake-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full-eval path=/tmp/tmpdhokyzcs/jobset-p33-frozenlake-full-eval.yaml
+........[P33.JOBSET] RENDERED key=gsm8k-alignment-short path=/tmp/tmpetzxos0o/jobset-p33-gsm8k-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-alignment-short path=/tmp/tmpetzxos0o/jobset-p33-frozenlake-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-backward-no-commit path=/tmp/tmpetzxos0o/jobset-p33-frozenlake-backward-no-commit.yaml
+[P33.JOBSET] RENDERED key=gsm8k-full path=/tmp/tmpetzxos0o/jobset-p33-gsm8k-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full path=/tmp/tmpetzxos0o/jobset-p33-frozenlake-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full-eval path=/tmp/tmpetzxos0o/jobset-p33-frozenlake-full-eval.yaml
+.[P33.JOBSET] RENDERED key=gsm8k-alignment-short path=/tmp/tmp_pg_v7rv/jobset-p33-gsm8k-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-alignment-short path=/tmp/tmp_pg_v7rv/jobset-p33-frozenlake-alignment-short.yaml
+[P33.JOBSET] RENDERED key=frozenlake-backward-no-commit path=/tmp/tmp_pg_v7rv/jobset-p33-frozenlake-backward-no-commit.yaml
+[P33.JOBSET] RENDERED key=gsm8k-full path=/tmp/tmp_pg_v7rv/jobset-p33-gsm8k-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full path=/tmp/tmp_pg_v7rv/jobset-p33-frozenlake-full.yaml
+[P33.JOBSET] RENDERED key=frozenlake-full-eval path=/tmp/tmp_pg_v7rv/jobset-p33-frozenlake-full-eval.yaml
+......................[P45.JOBSET] RENDERED key=frozenlake-full-dp8-tp8-resident path=/tmp/tmpp0ztb9de/jobset-p45-frozenlake-full-dp8-tp8-resident.yaml
+[P45.JOBSET] RENDERED key=frozenlake-full-dp8-tp8-resident-eval path=/tmp/tmpp0ztb9de/jobset-p45-frozenlake-full-dp8-tp8-resident-eval.yaml
+...[P45.JOBSET] RENDERED key=frozenlake-full-dp8-tp8-resident path=/tmp/tmp4i4k60i1/jobset-p45-frozenlake-full-dp8-tp8-resident.yaml
+[P45.JOBSET] RENDERED key=frozenlake-full-dp8-tp8-resident-eval path=/tmp/tmp4i4k60i1/jobset-p45-frozenlake-full-dp8-tp8-resident-eval.yaml
+.[P45.JOBSET] RENDERED key=frozenlake-full-dp8-tp8-resident path=/tmp/tmpjl4vv0ea/jobset-p45-frozenlake-full-dp8-tp8-resident.yaml
+[P45.JOBSET] RENDERED key=frozenlake-full-dp8-tp8-resident-eval path=/tmp/tmpjl4vv0ea/jobset-p45-frozenlake-full-dp8-tp8-resident-eval.yaml
+.......
+----------------------------------------------------------------------
+Ran 130 tests in 4.590s
+
+OK
+[CANON_ALIGN_PRE_JSON] {"N_action":6,"action_geometry":{"max_logical_kv_prefix_length":4,"min_logical_kv_prefix_length":2,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":null,"claim_level":"convergence-only","enabled":true,"id":"deepswe-pilot-alignment-warning-v1","max_abs_limit":null,"stage":"full","warning_boundaries":null,"warning_items":null,"warning_only":true,"workload":"deepswe"},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.375,"differing_bytes":9,"differing_elements":6,"element_fraction":1.0,"finite":true,"first_mismatch":{"a":-0.5,"a_bits":"0xbf000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.0,"b_bits":"0x00000000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1056964609,"xor_bits":"0xbf000000"},"max_abs":0.5,"max_abs_mismatch":{"a":-0.5,"a_bits":"0xbf000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.0,"b_bits":"0x00000000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1056964609,"xor_bits":"0xbf000000"},"mismatches":[{"a":-0.5,"a_bits":"0xbf000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.0,"b_bits":"0x00000000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1056964609,"xor_bits":"0xbf000000"},{"a":-0.375,"a_bits":"0xbec00000","abs_delta":0.5,"action_run_end":false,"action_run_start":false,"b":0.125,"b_bits":"0x3e000000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":3,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":3,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":1,"turn_index":0,"ulp_distance":2092957697,"xor_bits":"0x80c00000"},{"a":-0.25,"a_bits":"0xbe800000","abs_delta":0.5,"action_run_end":true,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[0,2],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":2,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":2,"turn_index":0,"ulp_distance":2097152001,"xor_bits":"0x80000000"},{"a":-0.125,"a_bits":"0xbe000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.375,"b_bits":"0x3ec00000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[1,0],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":3,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":3,"turn_index":0,"ulp_distance":2092957697,"xor_bits":"0x80c00000"},{"a":0.0,"a_bits":"0x00000000","abs_delta":0.5,"action_run_end":false,"action_run_start":false,"b":0.5,"b_bits":"0x3f000000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[1,1],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":3,"masked_index":4,"offset_in_action_run":1,"offset_in_sequence_chunk":3,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":4,"turn_index":0,"ulp_distance":1056964608,"xor_bits":"0x3f000000"},{"a":0.125,"a_bits":"0x3e000000","abs_delta":0.5,"action_run_end":true,"action_run_start":false,"b":0.625,"b_bits":"0x3f200000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":18874368,"xor_bits":"0x01200000"}],"mismatches_truncated":false,"reported_mismatches":6,"total_bytes":24,"total_elements":6,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.375,"differing_bytes":9,"differing_elements":6,"element_fraction":1.0,"finite":true,"first_mismatch":{"a":0.0,"a_bits":"0x00000000","abs_delta":0.25,"action_run_end":false,"action_run_start":true,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1048576000,"xor_bits":"0x3e800000"},"max_abs":0.25,"max_abs_mismatch":{"a":0.0,"a_bits":"0x00000000","abs_delta":0.25,"action_run_end":false,"action_run_start":true,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1048576000,"xor_bits":"0x3e800000"},"mismatches":[{"a":0.0,"a_bits":"0x00000000","abs_delta":0.25,"action_run_end":false,"action_run_start":true,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1048576000,"xor_bits":"0x3e800000"},{"a":0.125,"a_bits":"0x3e000000","abs_delta":0.25,"action_run_end":false,"action_run_start":false,"b":0.375,"b_bits":"0x3ec00000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":3,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":3,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":1,"turn_index":0,"ulp_distance":12582912,"xor_bits":"0x00c00000"},{"a":0.25,"a_bits":"0x3e800000","abs_delta":0.25,"action_run_end":true,"action_run_start":false,"b":0.5,"b_bits":"0x3f000000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[0,2],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":2,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":2,"turn_index":0,"ulp_distance":8388608,"xor_bits":"0x01800000"},{"a":0.375,"a_bits":"0x3ec00000","abs_delta":0.25,"action_run_end":false,"action_run_start":true,"b":0.625,"b_bits":"0x3f200000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[1,0],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":3,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":3,"turn_index":0,"ulp_distance":6291456,"xor_bits":"0x01e00000"},{"a":0.5,"a_bits":"0x3f000000","abs_delta":0.25,"action_run_end":false,"action_run_start":false,"b":0.75,"b_bits":"0x3f400000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[1,1],"differing_byte_offsets":[2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":3,"masked_index":4,"offset_in_action_run":1,"offset_in_sequence_chunk":3,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":4,"turn_index":0,"ulp_distance":4194304,"xor_bits":"0x00400000"},{"a":0.625,"a_bits":"0x3f200000","abs_delta":0.25,"action_run_end":true,"action_run_start":false,"b":0.875,"b_bits":"0x3f600000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":4194304,"xor_bits":"0x00400000"}],"mismatches_truncated":false,"reported_mismatches":6,"total_bytes":24,"total_elements":6,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"fd73817e1ac0cb56310d4f8c9cc58e566e97513da9df864be827dca81c466bf3","S_prefill":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","T_old":"ca053e853f4601e2cdd31bbfeb14f3c1512bf9806733452e12730c83e15c4559","action_mask":"dfea2964b5deedea7b1ef077de529c3959e6788bdbb3441e70c77a1ae875bb48","policy_version":"af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc","tokens":"cd9a54ed1f18bf97db08914e280ea7349e11ca2c4885a4d8052552ceba84208d"},"masked_hashes":{"S_decode":"fd73817e1ac0cb56310d4f8c9cc58e566e97513da9df864be827dca81c466bf3","S_prefill":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","T_old":"ca053e853f4601e2cdd31bbfeb14f3c1512bf9806733452e12730c83e15c4559"},"no_signal_admitted":false,"reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"],"reported_reds":[],"step":0,"timestamp":1788735043.3764787,"verdict":"PASS_WITH_ALIGNMENT_WARNINGS","warning_reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmpqdplr8ef/pre.jsonl sha256=16f7823b8c5215d14aac464a68397c30b7f919f64804ecceb5943e069abaeaa7
+[CANON_ALIGN_PRE] step=0 verdict=PASS_WITH_ALIGNMENT_WARNINGS N_action=6 bounds=[('S_decode_vs_S_prefill', 9), ('S_prefill_vs_T_old', 9)]
+[CANON_ALIGN_WARNING] boundary=pre_backward step=0 warnings=['S_decode_vs_S_prefill', 'S_prefill_vs_T_old']
+[CANON_ALIGN] step=0 verdict=PASS_WITH_ALIGNMENT_WARNINGS N_action=6 bounds=[('S_decode_vs_S_prefill', 9), ('S_prefill_vs_T_old', 9), ('T_old_vs_T_current', 7)] w/r/wr={'w_all_exactly_1': False, 'r_all_exactly_1': False, 'wr_all_exactly_1': False} clip=6 tis=6 grad_norm=0
+[CANON_ALIGN_WARNING] boundary=post_backward step=0 warnings=['S_decode_vs_S_prefill', 'S_prefill_vs_T_old', 'T_old_vs_T_current', 'w_all_exactly_1', 'r_all_exactly_1', 'wr_all_exactly_1', 'clip_hits=6', 'tis_hits=6']
+[CANON_ALIGN_PRE_JSON] {"N_action":6,"action_geometry":{"max_logical_kv_prefix_length":4,"min_logical_kv_prefix_length":2,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":null,"claim_level":"convergence-only","enabled":true,"id":"deepswe-pilot-alignment-warning-v1","max_abs_limit":null,"stage":"full","warning_boundaries":null,"warning_items":null,"warning_only":true,"workload":"deepswe"},"all_compact_filtered":false,"blocking_reds":["S_prefill_vs_T_old"],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.375,"differing_bytes":9,"differing_elements":6,"element_fraction":1.0,"finite":true,"first_mismatch":{"a":-0.5,"a_bits":"0xbf000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.0,"b_bits":"0x00000000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1056964609,"xor_bits":"0xbf000000"},"max_abs":0.5,"max_abs_mismatch":{"a":-0.5,"a_bits":"0xbf000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.0,"b_bits":"0x00000000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1056964609,"xor_bits":"0xbf000000"},"mismatches":[{"a":-0.5,"a_bits":"0xbf000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.0,"b_bits":"0x00000000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[0,0],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":0,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":0,"turn_index":0,"ulp_distance":1056964609,"xor_bits":"0xbf000000"},{"a":-0.375,"a_bits":"0xbec00000","abs_delta":0.5,"action_run_end":false,"action_run_start":false,"b":0.125,"b_bits":"0x3e000000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":3,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":3,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":1,"turn_index":0,"ulp_distance":2092957697,"xor_bits":"0x80c00000"},{"a":-0.25,"a_bits":"0xbe800000","abs_delta":0.5,"action_run_end":true,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[0,2],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":2,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":0,"token_id":2,"turn_index":0,"ulp_distance":2097152001,"xor_bits":"0x80000000"},{"a":-0.125,"a_bits":"0xbe000000","abs_delta":0.5,"action_run_end":false,"action_run_start":true,"b":0.375,"b_bits":"0x3ec00000","completion_chunk_index":0,"completion_position":0,"completion_valid_length":3,"coordinate":[1,0],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":254,"logical_kv_prefix_length":2,"masked_index":3,"offset_in_action_run":0,"offset_in_sequence_chunk":2,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":3,"turn_index":0,"ulp_distance":2092957697,"xor_bits":"0x80c00000"},{"a":0.0,"a_bits":"0x00000000","abs_delta":0.5,"action_run_end":false,"action_run_start":false,"b":0.5,"b_bits":"0x3f000000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[1,1],"differing_byte_offsets":[3],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":3,"masked_index":4,"offset_in_action_run":1,"offset_in_sequence_chunk":3,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":4,"turn_index":0,"ulp_distance":1056964608,"xor_bits":"0x3f000000"},{"a":0.125,"a_bits":"0x3e000000","abs_delta":0.5,"action_run_end":true,"action_run_start":false,"b":0.625,"b_bits":"0x3f200000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":252,…23488 tokens truncated…6a30aa79b78fd621b"},"no_signal_admitted":false,"reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"],"reported_reds":[],"step":0,"timestamp":1788735044.3964188,"verdict":"FAIL","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmp9pd1t56h/pre.jsonl sha256=f17e51672fe997dffb75a3fd9192a132ad84bbaa624103f70b281e7a814a3ebf
+[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=6 bounds=[('S_decode_vs_S_prefill', -1), ('S_prefill_vs_T_old', -1)]
+.[CANON_ALIGN_PRE_JSON] {"N_action":4,"action_geometry":{"max_logical_kv_prefix_length":260,"min_logical_kv_prefix_length":255,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"","warning_boundaries":null,"warning_items":null,"warning_only":false,"workload":""},"all_compact_filtered":false,"blocking_reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.1875,"differing_bytes":3,"differing_elements":1,"element_fraction":0.25,"finite":true,"first_mismatch":{"a":0.5,"a_bits":"0x3f000000","abs_delta":0.1039000153541565,"action_run_end":false,"action_run_start":true,"b":0.6039000153541565,"b_bits":"0x3f1a9931","completion_chunk_index":0,"completion_position":4,"completion_valid_length":6,"coordinate":[0,4],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":259,"masked_index":2,"offset_in_action_run":0,"offset_in_sequence_chunk":3,"previous_token_is_environment":true,"prompt_length":255,"sequence_chunk_index":1,"sequence_row":0,"token_id":4,"turn_index":1,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"max_abs":0.1039000153541565,"max_abs_mismatch":{"a":0.5,"a_bits":"0x3f000000","abs_delta":0.1039000153541565,"action_run_end":false,"action_run_start":true,"b":0.6039000153541565,"b_bits":"0x3f1a9931","completion_chunk_index":0,"completion_position":4,"completion_valid_length":6,"coordinate":[0,4],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":259,"masked_index":2,"offset_in_action_run":0,"offset_in_sequence_chunk":3,"previous_token_is_environment":true,"prompt_length":255,"sequence_chunk_index":1,"sequence_row":0,"token_id":4,"turn_index":1,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"mismatches":[{"a":0.5,"a_bits":"0x3f000000","abs_delta":0.1039000153541565,"action_run_end":false,"action_run_start":true,"b":0.6039000153541565,"b_bits":"0x3f1a9931","completion_chunk_index":0,"completion_position":4,"completion_valid_length":6,"coordinate":[0,4],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":259,"masked_index":2,"offset_in_action_run":0,"offset_in_sequence_chunk":3,"previous_token_is_environment":true,"prompt_length":255,"sequence_chunk_index":1,"sequence_row":0,"token_id":4,"turn_index":1,"ulp_distance":1743153,"xor_bits":"0x001a9931"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":16,"total_elements":4,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.1875,"differing_bytes":3,"differing_elements":1,"element_fraction":0.25,"finite":true,"first_mismatch":{"a":0.6039000153541565,"a_bits":"0x3f1a9931","abs_delta":0.1039000153541565,"action_run_end":false,"action_run_start":true,"b":0.5,"b_bits":"0x3f000000","completion_chunk_index":0,"completion_position":4,"completion_valid_length":6,"coordinate":[0,4],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":259,"masked_index":2,"offset_in_action_run":0,"offset_in_sequence_chunk":3,"previous_token_is_environment":true,"prompt_length":255,"sequence_chunk_index":1,"sequence_row":0,"token_id":4,"turn_index":1,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"max_abs":0.1039000153541565,"max_abs_mismatch":{"a":0.6039000153541565,"a_bits":"0x3f1a9931","abs_delta":0.1039000153541565,"action_run_end":false,"action_run_start":true,"b":0.5,"b_bits":"0x3f000000","completion_chunk_index":0,"completion_position":4,"completion_valid_length":6,"coordinate":[0,4],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":259,"masked_index":2,"offset_in_action_run":0,"offset_in_sequence_chunk":3,"previous_token_is_environment":true,"prompt_length":255,"sequence_chunk_index":1,"sequence_row":0,"token_id":4,"turn_index":1,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"mismatches":[{"a":0.6039000153541565,"a_bits":"0x3f1a9931","abs_delta":0.1039000153541565,"action_run_end":false,"action_run_start":true,"b":0.5,"b_bits":"0x3f000000","completion_chunk_index":0,"completion_position":4,"completion_valid_length":6,"coordinate":[0,4],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":253,"logical_kv_prefix_length":259,"masked_index":2,"offset_in_action_run":0,"offset_in_sequence_chunk":3,"previous_token_is_environment":true,"prompt_length":255,"sequence_chunk_index":1,"sequence_row":0,"token_id":4,"turn_index":1,"ulp_distance":1743153,"xor_bits":"0x001a9931"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":16,"total_elements":4,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","S_prefill":"97d7bd6afbc800c792ea053d2f68b46a475385108356c92b3a64ab83d9b55b48","T_old":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","action_mask":"0666b155967b1e6452b4adbaa386f6b0348ae8db9814e75c2717416754336ecf","policy_version":"df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119","tokens":"cd9a54ed1f18bf97db08914e280ea7349e11ca2c4885a4d8052552ceba84208d"},"masked_hashes":{"S_decode":"834f82555d45c4bfdae16737af0f1e0d9c61232e70d464726a5eeabc1276670c","S_prefill":"5f380ed03b6b2cab76d283ee94a0a319a253878042b205439dfe4bba0fa8679c","T_old":"834f82555d45c4bfdae16737af0f1e0d9c61232e70d464726a5eeabc1276670c"},"no_signal_admitted":false,"reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"],"reported_reds":[],"step":0,"timestamp":1788735044.4678607,"verdict":"FAIL","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmpssj7ogjj/pre.jsonl sha256=6f499814b092cee9fa70334dd03949801255c51db84babed4f8cf6f6dda808c9
+[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=4 bounds=[('S_decode_vs_S_prefill', 3), ('S_prefill_vs_T_old', 3)]
+.[CANON_ALIGN_PRE_JSON] {"N_action":6,"action_geometry":{"max_logical_kv_prefix_length":4,"min_logical_kv_prefix_length":2,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"","warning_boundaries":null,"warning_items":null,"warning_only":false,"workload":""},"all_compact_filtered":false,"blocking_reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.125,"differing_bytes":3,"differing_elements":1,"element_fraction":0.16666666666666666,"finite":true,"first_mismatch":{"a":0.625,"a_bits":"0x3f200000","abs_delta":0.1039000153541565,"action_run_end":true,"action_run_start":false,"b":0.7289000153541565,"b_bits":"0x3f3a9931","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"max_abs":0.1039000153541565,"max_abs_mismatch":{"a":0.625,"a_bits":"0x3f200000","abs_delta":0.1039000153541565,"action_run_end":true,"action_run_start":false,"b":0.7289000153541565,"b_bits":"0x3f3a9931","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"mismatches":[{"a":0.625,"a_bits":"0x3f200000","abs_delta":0.1039000153541565,"action_run_end":true,"action_run_start":false,"b":0.7289000153541565,"b_bits":"0x3f3a9931","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":1743153,"xor_bits":"0x001a9931"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":24,"total_elements":6,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.125,"differing_bytes":3,"differing_elements":1,"element_fraction":0.16666666666666666,"finite":true,"first_mismatch":{"a":0.7289000153541565,"a_bits":"0x3f3a9931","abs_delta":0.1039000153541565,"action_run_end":true,"action_run_start":false,"b":0.625,"b_bits":"0x3f200000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"max_abs":0.1039000153541565,"max_abs_mismatch":{"a":0.7289000153541565,"a_bits":"0x3f3a9931","abs_delta":0.1039000153541565,"action_run_end":true,"action_run_start":false,"b":0.625,"b_bits":"0x3f200000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":1743153,"xor_bits":"0x001a9931"},"mismatches":[{"a":0.7289000153541565,"a_bits":"0x3f3a9931","abs_delta":0.1039000153541565,"action_run_end":true,"action_run_start":false,"b":0.625,"b_bits":"0x3f200000","completion_chunk_index":0,"completion_position":2,"completion_valid_length":3,"coordinate":[1,2],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":252,"logical_kv_prefix_length":4,"masked_index":5,"offset_in_action_run":2,"offset_in_sequence_chunk":4,"previous_token_is_environment":false,"prompt_length":2,"sequence_chunk_index":0,"sequence_row":1,"token_id":5,"turn_index":0,"ulp_distance":1743153,"xor_bits":"0x001a9931"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":24,"total_elements":6,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","S_prefill":"ebc5404c5c427ce67c13601a45d05c0a0c4f9a76f531f6e7a0ddce6adb20ef2b","T_old":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","action_mask":"dfea2964b5deedea7b1ef077de529c3959e6788bdbb3441e70c77a1ae875bb48","policy_version":"af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc","tokens":"cd9a54ed1f18bf97db08914e280ea7349e11ca2c4885a4d8052552ceba84208d"},"masked_hashes":{"S_decode":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b","S_prefill":"ebc5404c5c427ce67c13601a45d05c0a0c4f9a76f531f6e7a0ddce6adb20ef2b","T_old":"259a2e23297810b6704586ca682a0f0497faa0a2260e08a6a30aa79b78fd621b"},"no_signal_admitted":false,"reds":["S_decode_vs_S_prefill","S_prefill_vs_T_old"],"reported_reds":[],"step":0,"timestamp":1788735044.4717515,"verdict":"FAIL","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmpc9fam96t/pre.jsonl sha256=0badce6a534e2bb35809290025d687670cd8ce1e6e1fb023ca9fbea9a70e9c18
+[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=6 bounds=[('S_decode_vs_S_prefill', 3), ('S_prefill_vs_T_old', 3)]
+..[P57.TITO.UPDATE_SIDECAR] PASS step=0 rows=2 bytes=6414 logical_bytes=256 write_seconds=0.001952 sha256=a5e5a5992b8ca718d4f9cdcdb4f653c02d947c1118e0b457e7a48ad6d788351d path=/tmp/tmpep9u6eo5/p57_tito_witness/update-sidecars/step-000000.npz
+...[CANON_ALIGN] step=0 verdict=PASS N_action=6 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0), ('T_old_vs_T_current', 0)] w/r/wr={'w_all_exactly_1': True, 'r_all_exactly_1': True, 'wr_all_exactly_1': True} clip=0 tis=0 grad_norm=0
+[CANON_ALIGN] step=1 verdict=FAIL N_action=6 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0), ('T_old_vs_T_current', 1)] w/r/wr={'w_all_exactly_1': True, 'r_all_exactly_1': True, 'wr_all_exactly_1': True} clip=0 tis=0 grad_norm=0
+.[CANON_ALIGN] step=0 verdict=PASS N_action=6 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0), ('T_old_vs_T_current', 0)] w/r/wr={'w_all_exactly_1': True, 'r_all_exactly_1': True, 'wr_all_exactly_1': True} clip=0 tis=0 grad_norm=2
+[CANON_ALIGN] step=0 verdict=PASS N_action=6 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0), ('T_old_vs_T_current', 0)] w/r/wr={'w_all_exactly_1': True, 'r_all_exactly_1': True, 'wr_all_exactly_1': True} clip=0 tis=0 grad_norm=2
+.[CANON_ALIGN] step=0 verdict=PASS N_action=6 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0), ('T_old_vs_T_current', 0)] w/r/wr={'w_all_exactly_1': True, 'r_all_exactly_1': True, 'wr_all_exactly_1': True} clip=0 tis=0 grad_norm=2
+..
+----------------------------------------------------------------------
+Ran 44 tests in 1.302s
+
+OK
+[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 model_dir=qwen8b_tp8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=off warning_only=on checkpoint=new/10/latest1 host_memory=telemetry+gc1 batched_report=on
+[P45.FROZENLAKE] CPU_GATE PASS topology=DP8xTP8 optimizer=device-resident checkpoint=every10/latest1
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.028s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] PeftTrainerTest.test_p28_g6_checkpointing_is_isolated_to_signed_p45
+[       OK ] PeftTrainerTest.test_p28_g6_checkpointing_is_isolated_to_signed_p45
+[ RUN      ] PeftTrainerTest.test_p28_g6_precomputed_four_microstep_update
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+/workspace/tests/sft/peft_trainer_test.py:1207: DeprecationWarning: 'VariableState' was removed, this is just an alias to 'Variable'. Plase use 'Variable' directly instead.
+  is_leaf=lambda value: isinstance(value, nnx.VariableState),
+[PERF] stage=grad_accumulate seconds=0.171 microbatch=0 variant=plain call=0.170 block=0.002
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=1 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=2 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=3 variant=plain call=0.002 block=0.000
+/workspace/tunix/sft/peft_trainer.py:1129: DeprecationWarning: jax.interpreters.pxla.thread_resources is deprecated as of JAX v0.8.2. Please switch to using `with jax.set_mesh(mesh)` instead of `with mesh:` and then use `jax.sharding.get_abstract_mesh()` to get the current mesh.
+  self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+[PERF] stage=adam_commit_detail seconds=0.532 jit_setup=0.013 call=0.516 block=0.000 evidence_get=0.003
+/workspace/tests/sft/peft_trainer_test.py:1228: DeprecationWarning: 'VariableState' was removed, this is just an alias to 'Variable'. Plase use 'Variable' directly instead.
+  is_leaf=lambda value: isinstance(value, nnx.VariableState),
+[PERF] stage=grad_accumulate seconds=0.156 microbatch=0 variant=plain call=0.156 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=1 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=2 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=3 variant=plain call=0.002 block=0.000
+[PERF] stage=adam_commit_detail seconds=0.491 jit_setup=0.012 call=0.476 block=0.000 evidence_get=0.003
+[       OK ] PeftTrainerTest.test_p28_g6_precomputed_four_microstep_update
+----------------------------------------------------------------------
+Ran 2 tests in 3.292s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] AgenticRLLearnerTest.test_nonpositive_eval_cadence_disables_evaluation
+[       OK ] AgenticRLLearnerTest.test_nonpositive_eval_cadence_disables_evaluation
+[ RUN      ] AgenticRLLearnerTest.test_p31_segmented_eval_uses_preupdate_step_exactly_once
+[       OK ] AgenticRLLearnerTest.test_p31_segmented_eval_uses_preupdate_step_exactly_once
+[ RUN      ] AgenticRLLearnerTest.test_p57_evaluate_only_covers_dataset_without_train_update
+I0906 22:50:57.108148 140353686426432 algorithm_config.py:72] Initializing AgenticRLConfig:
+I0906 22:50:57.108272 140353686426432 algorithm_config.py:75]   algo_variant: grpo
+I0906 22:50:57.108327 140353686426432 algorithm_config.py:75]   advantage_estimator: grpo
+I0906 22:50:57.108362 140353686426432 algorithm_config.py:75]   policy_loss_fn: grpo
+I0906 22:50:57.108391 140353686426432 algorithm_config.py:75]   reward_manager: agentic-sequence-level
+I0906 22:50:57.108420 140353686426432 algorithm_config.py:75]   kl_clamp_value: None
+I0906 22:50:57.108446 140353686426432 algorithm_config.py:75]   system_prompt: 
+I0906 22:50:57.108471 140353686426432 algorithm_config.py:75]   max_response_length: 1024
+I0906 22:50:57.108494 140353686426432 algorithm_config.py:75]   max_concurrency: 32
+I0906 22:50:57.108516 140353686426432 algorithm_config.py:75]   off_policy_steps: 0
+I0906 22:50:57.108538 140353686426432 algorithm_config.py:75]   num_generations: 8
+I0906 22:50:57.108561 140353686426432 algorithm_config.py:75]   num_iterations: 1
+I0906 22:50:57.108589 140353686426432 algorithm_config.py:75]   episode_timeout: 1800.0
+I0906 22:50:57.108612 140353686426432 algorithm_config.py:75]   per_turn_timeout: None
+I0906 22:50:57.108634 140353686426432 algorithm_config.py:75]   cleanup_timeout: 150.0
+I0906 22:50:57.108656 140353686426432 algorithm_config.py:75]   rollout_batch_timeout: None
+I0906 22:50:57.108678 140353686426432 algorithm_config.py:75]   filter_statuses: None
+I0906 22:50:57.108702 140353686426432 algorithm_config.py:75]   overlong_filter: False
+I0906 22:50:57.108724 140353686426432 algorithm_config.py:75]   use_rollout_logps: True
+[       OK ] AgenticRLLearnerTest.test_p57_evaluate_only_covers_dataset_without_train_update
+[ RUN      ] AgenticRLLearnerTest.test_p57_rollout_only_evaluate_skips_trainer_recompute
+I0906 22:50:57.110179 140353686426432 algorithm_config.py:72] Initializing AgenticRLConfig:
+I0906 22:50:57.110238 140353686426432 algorithm_config.py:75]   algo_variant: grpo
+I0906 22:50:57.110268 140353686426432 algorithm_config.py:75]   advantage_estimator: grpo
+I0906 22:50:57.110294 140353686426432 algorithm_config.py:75]   policy_loss_fn: grpo
+I0906 22:50:57.110317 140353686426432 algorithm_config.py:75]   reward_manager: agentic-sequence-level
+I0906 22:50:57.110341 140353686426432 algorithm_config.py:75]   kl_clamp_value: None
+I0906 22:50:57.110363 140353686426432 algorithm_config.py:75]   system_prompt: 
+I0906 22:50:57.110387 140353686426432 algorithm_config.py:75]   max_response_length: 1024
+I0906 22:50:57.110414 140353686426432 algorithm_config.py:75]   max_concurrency: 32
+I0906 22:50:57.110438 140353686426432 algorithm_config.py:75]   off_policy_steps: 0
+I0906 22:50:57.110461 140353686426432 algorithm_config.py:75]   num_generations: 2
+I0906 22:50:57.110483 140353686426432 algorithm_config.py:75]   num_iterations: 1
+I0906 22:50:57.110506 140353686426432 algorithm_config.py:75]   episode_timeout: 1800.0
+I0906 22:50:57.110528 140353686426432 algorithm_config.py:75]   per_turn_timeout: None
+I0906 22:50:57.110549 140353686426432 algorithm_config.py:75]   cleanup_timeout: 150.0
+I0906 22:50:57.110571 140353686426432 algorithm_config.py:75]   rollout_batch_timeout: None
+I0906 22:50:57.110593 140353686426432 algorithm_config.py:75]   filter_statuses: None
+I0906 22:50:57.110615 140353686426432 algorithm_config.py:75]   overlong_filter: False
+I0906 22:50:57.110636 140353686426432 algorithm_config.py:75]   use_rollout_logps: True
+[       OK ] AgenticRLLearnerTest.test_p57_rollout_only_evaluate_skips_trainer_recompute
+----------------------------------------------------------------------
+Ran 4 tests in 0.004s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] TimelineTest.test_commit_step
+[       OK ] TimelineTest.test_commit_step
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] PerfTracerTest.test_commit_rejects_active_host_span_without_mutating_it
+[       OK ] PerfTracerTest.test_commit_rejects_active_host_span_without_mutating_it
+[ RUN      ] NoopTracerTest.test_commit_uncompleted_span
+[       OK ] NoopTracerTest.test_commit_uncompleted_span
+----------------------------------------------------------------------
+Ran 2 tests in 0.003s
+
+OK
+P57_PERF_V2_STEP_BOUNDARY_PASS active_commit=non_destructive order=export_then_queue
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task
+W0906 22:51:10.388228 140568426783552 trajectory_collect_engine.py:262] [step_idx=0, pair_index=None, group_id=None] trajectory clipped: ENV_RESET_TIMEOUT
+E0906 22:51:10.388391 140568426783552 trajectory_collect_engine.py:360] [step_idx=0, pair_index=None, group_id=None] env.reset exceeded the 0.0s trajectory deadline
+I0906 22:51:10.388980 140568426783552 trajectory_collect_engine.py:803] [step_idx=0, pair_index=None, group_id=None] preserving original input from the environment after pre-observation termination
+[       OK ] TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task
+[ RUN      ] TrajectoryCollectEngineTest.test_token_prefers_policy_seeded_environment_task
+[       OK ] TrajectoryCollectEngineTest.test_token_prefers_policy_seeded_environment_task
+[ RUN      ] TrajectoryCollectEngineTest.test_token_merges_policy_version_into_frozenlake_prompt
+[       OK ] TrajectoryCollectEngineTest.test_token_merges_policy_version_into_frozenlake_prompt
+[ RUN      ] TrajectoryCollectEngineTest.test_policy_seeded_original_input_missing_prompt_fails_closed
+W0906 22:51:10.443388 140568426783552 trajectory_collect_engine.py:262] [step_idx=0, pair_index=None, group_id=None] trajectory clipped: ENV_RESET_TIMEOUT
+E0906 22:51:10.443502 140568426783552 trajectory_collect_engine.py:360] [step_idx=0, pair_index=None, group_id=None] env.reset exceeded the 1.0s trajectory deadline
+I0906 22:51:10.443832 140568426783552 trajectory_collect_engine.py:803] [step_idx=0, pair_index=None, group_id=None] preserving original input from the environment after pre-observation termination
+[       OK ] TrajectoryCollectEngineTest.test_policy_seeded_original_input_missing_prompt_fails_closed
+----------------------------------------------------------------------
+Ran 4 tests in 0.308s
+
+OK
+P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed
+P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.002s
+
+OK
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 26.1.2 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6
+WARNING 09-06 22:51:19 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:51:25 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:51:25 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:51:25 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:51:26 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:51:26 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 09-06 22:51:26 [attention_interface.py:56] Using default RPA kernel
+WARNING 09-06 22:51:26 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:51:27 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:51:27 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:51:27 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-06 22:51:27 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-06 22:51:28 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-06 22:51:28 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-06 22:51:28 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-06 22:51:28 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+P57_STOCK_ENGINE_IMPORT_PASS modules=6 root=/usr/local/lib/python3.12/site-packages
+[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module
+[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+P57_STOCK_RUNTIME_MODE_PASS run_kind=calibration
+[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6
+WARNING 09-06 22:51:38 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:51:44 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:51:44 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:51:44 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:51:44 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:51:44 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 09-06 22:51:45 [attention_interface.py:56] Using default RPA kernel
+WARNING 09-06 22:51:45 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:51:46 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:51:46 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:51:46 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-06 22:51:46 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-06 22:51:46 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-06 22:51:46 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-06 22:51:46 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-06 22:51:46 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+P57_STOCK_ENGINE_IMPORT_PASS modules=6 root=/usr/local/lib/python3.12/site-packages
+[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module
+[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+P57_STOCK_RUNTIME_MODE_PASS run_kind=train
+[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6
+WARNING 09-06 22:51:57 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:52:03 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:52:03 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:52:03 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:52:03 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:52:03 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 09-06 22:52:03 [attention_interface.py:56] Using default RPA kernel
+WARNING 09-06 22:52:04 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:52:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:52:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:52:05 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-06 22:52:05 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-06 22:52:05 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-06 22:52:05 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-06 22:52:05 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-06 22:52:05 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+P57_STOCK_ENGINE_IMPORT_PASS modules=6 root=/usr/local/lib/python3.12/site-packages
+[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module
+[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+P57_STOCK_RUNTIME_MODE_PASS run_kind=eval
+[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6
+WARNING 09-06 22:52:16 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:52:22 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:52:22 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:52:22 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:52:22 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:52:22 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 09-06 22:52:22 [attention_interface.py:56] Using default RPA kernel
+WARNING 09-06 22:52:23 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:52:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:52:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 09-06 22:52:24 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 09-06 22:52:24 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 09-06 22:52:24 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 09-06 22:52:24 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 09-06 22:52:24 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 09-06 22:52:24 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+P57_STOCK_ENGINE_IMPORT_PASS modules=6 root=/usr/local/lib/python3.12/site-packages
+[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module
+[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+P57_STOCK_RUNTIME_MODE_PASS run_kind=train arm=is
+[P57.STOCK_FAST] FATAL: stock runtime install used outside exact stock-fast runtime
+P57_STOCK_RUNTIME_NEGATIVE_PASS arm=zero rejected=1
+[P57.STOCK_FAST] FATAL: stock target changed: layers/jax/linear.py
+P57_STOCK_ENGINE_NEGATIVE_PASS drift=rejected
+P57_FILE_ENTRYPOINT_NEGATIVE_PASS script_mode=rejected
+P57_MODULE_ENTRYPOINT_PASS workload_import=complete
+P45_QWEN8B_TP8_CONTRACT_SELFTEST_PASS cases=7/7 tp4_negative=1
+WARNING 09-06 22:52:44 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:52:49 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:52:49 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:52:49 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:52:50 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:52:50 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+P45_QWEN8B_TP8_IMPORT_PASS chain=linear_p22xk model=qwen8b_tp8 tp=8 sites=7
+WARNING 09-06 22:52:53 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:52:59 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:52:59 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:52:59 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:52:59 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:52:59 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS chain=linear_p22xk model=qwen8b_tp8 tp=8 K=4096 request_M=8,16,32,64,128,256 learner_M=2048,4096 fixed_M=256 local_N=18992 fixed_N=19200 endpoint=untied_lm_head
+P45_QWEN8B_TP8_SITE_PASS site=q_proj local_shape=1x4096x512 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_SITE_PASS site=k_proj local_shape=1x4096x128 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_SITE_PASS site=v_proj local_shape=1x4096x128 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_SITE_PASS site=o_proj local_shape=1x512x4096 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_SITE_PASS site=gate_proj local_shape=1x4096x1536 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_SITE_PASS site=up_proj local_shape=1x4096x1536 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_SITE_PASS site=down_proj local_shape=1x1536x4096 padding=none forward_shape=1 vjp_shapes=1
+P45_QWEN8B_TP8_FORWARD_VJP_PASS pallas_interpret=1 shape=128x128x128 forward_exact=1 vjp_exact=1
+P45_QWEN8B_TP8_PROBE_PASS sites=7/7 padding=none tp=8
+[P57.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 treatment=observer-only
+WARNING 09-06 22:53:05 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:53:11 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:53:11 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:53:11 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:53:11 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:53:11 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+.[P57.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS rows=4 populated=4 targets=absolute-request-history treatment=observer-only
+..
+----------------------------------------------------------------------
+Ran 3 tests in 0.940s
+
+OK
+P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed
+P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8
+P59_TP_SHIM_EXACT_IMAGE image_ref=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 16) local_shape=(8,4) placement=dp,tp
+[P66.VMA] outer_check_enabled module=zt_tr_dp_parallel_bwd_head manual_axes=['data', 'model']
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=vma_autodiff_psum K=4 TP=4 local_N=4 fixed_N=8 endpoint=direct_probe
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":49.98999786376953,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":66.61224365234375,"schema":"canon-p62-tree-numeric-v1","stable_norm":49.98999786376953,"stage":"engine_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"}],"total_elements":128}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":50.00729751586914,"naive_norm_finite":true,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":66.65836334228516,"schema":"canon-p62-tree-numeric-v1","stable_norm":50.007301330566406,"stage":"trainer_rank_local","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":136}
+[P62.NUMERIC] {"all_finite":false,"any_nonzero":true,"first_nonfinite":{"leaf":0,"path":"[0]"},"first_nonfinite_rank":{"leaf":0,"path":"[0]","rank":0},"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":"nan","naive_norm_finite":false,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":["nan",6.125],"scaled_sumsq":"nan","schema":"canon-p62-tree-numeric-v1","stable_norm":6.125,"stage":"trainer_rank_local_negative","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":136}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"group":0,"groups":2,"leaf_count":2,"max_abs":8.25,"naive_norm":63.06084442138672,"naive_norm_finite":true,"nonzero_leaf_count":2,"scaled_sumsq":58.4267463684082,"schema":"canon-p62-tree-numeric-v1","stable_norm":63.060848236083984,"stage":"fixed_dp_reduced","top_leaves":[{"leaf":0,"max_abs":8.25,"path":"[0]"},{"leaf":1,"max_abs":1.111328125,"path":"[1]"}],"total_elements":68}
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=2 endpoint=direct_probe
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+[       OK ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+----------------------------------------------------------------------
+Ran 2 tests in 2.945s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 32) local_shape=(8,4) placement=dp,tp
+[P66.VMA] outer_check_enabled module=zt_tr_dp_parallel_bwd_head manual_axes=['data', 'model']
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=vma_autodiff_psum K=4 TP=8 local_N=4 fixed_N=8 endpoint=direct_probe
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":70.696533203125,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":133.2244873046875,"schema":"canon-p62-tree-numeric-v1","stable_norm":70.696533203125,"stage":"engine_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"}],"total_elements":256}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":70.70877075195312,"naive_norm_finite":true,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":133.27061462402344,"schema":"canon-p62-tree-numeric-v1","stable_norm":70.70877075195312,"stage":"trainer_rank_local","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":264}
+[P62.NUMERIC] {"all_finite":false,"any_nonzero":true,"first_nonfinite":{"leaf":0,"path":"[0]"},"first_nonfinite_rank":{"leaf":0,"path":"[0]","rank":0},"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":"nan","naive_norm_finite":false,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":["nan",6.125],"scaled_sumsq":"nan","schema":"canon-p62-tree-numeric-v1","stable_norm":6.125,"stage":"trainer_rank_local_negative","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":264}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"group":0,"groups":2,"leaf_count":2,"max_abs":8.25,"naive_norm":89.1665267944336,"naive_norm_finite":true,"nonzero_leaf_count":2,"scaled_sumsq":116.81426239013672,"schema":"canon-p62-tree-numeric-v1","stable_norm":89.16653442382812,"stage":"fixed_dp_reduced","top_leaves":[{"leaf":0,"max_abs":8.25,"path":"[0]"},{"leaf":1,"max_abs":1.111328125,"path":"[1]"}],"total_elements":132}
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=2 endpoint=direct_probe
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+[       OK ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+----------------------------------------------------------------------
+Ran 2 tests in 3.174s
+
+OK
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen1p7b)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen1p7b)
+
+Installed to: /tmp/p59-qwen1p7b-tp4.xZxMad   (model=qwen1p7b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p59-qwen1p7b-tp4.xZxMad:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p59-qwen1p7b-tp4.xZxMad          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b_tp8)
+[4/4] verifying against MANIFEST.sha256
+      all 37 files match (qwen8b_tp8)
+
+Installed to: /tmp/p59-qwen8b-tp8.qS6PIb   (model=qwen8b_tp8)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+  $OUT/rpa_kernel_p66.py       -> $SP/kernels/ragged_paged_attention/v3/kernel.py
+
+  PYTHONPATH=/tmp/p59-qwen8b-tp8.qS6PIb:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p59-qwen8b-tp8.qS6PIb          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 09-06 22:53:33 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:53:39 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:53:39 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:53:39 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:53:40 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:53:40 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[P66.VMA] outer_check_enabled module=zt_tr_dp_parallel_installed_projection manual_axes=['data', 'model']
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=gate_proj local_width=1536 declared_width=6144 layout_shards=1 pieces=1
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=up_proj local_width=1536 declared_width=6144 layout_shards=1 pieces=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":565.572265625,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":8526.36328125,"schema":"canon-p62-tree-numeric-v1","stable_norm":565.5721435546875,"stage":"engine_projection_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"['weight']"}],"total_elements":16384}
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=ordinary.serving.q_proj M=16 Klocal=4 Nlocal=512
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at ordinary.serving.o_proj.gather_0 (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_0 M=16 Klocal=1 Nlocal=4
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at ordinary.serving.o_proj.gather_0 (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_0 M=16 Klocal=1 Nlocal=4
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at ordinary.serving.o_proj.gather_1 (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_1 M=16 Klocal=1 Nlocal=4
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at ordinary.serving.o_proj.gather_1 (TNH,NHD->TD, tp=4)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_1 M=16 Klocal=1 Nlocal=4
+P59_TP4_INSTALLED_PROJECTION_PASS topology=DP2xTP4 q_proj_layout_shards=1 gate_up_layout_shards_one=2 wrong_width_negative=2 ordinary_global=1 ordinary_contract_p66_global_negative=2 serial_parallel=exact optimizer_commits=0
+WARNING 09-06 22:53:52 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 09-06 22:53:58 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:53:58 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:53:58 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:53:59 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:53:59 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 09-06 22:53:59 [attn_iface_patched.py:58] Using default RPA kernel
+[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=4 local_q_heads=4 local_kv_heads=2 cache_heads=2 packing=2
+[PATHTRACE] RPA_VJP2 on (chunked-cache differentiable)
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_installed_attention tp=4
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_installed_attention tp=4
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_installed_attention tp=4
+P59_TP4_INSTALLED_ATTENTION_PASS topology=DP2xTP4 local_kv_heads=2 rpa_vjp2=1 wrong_cache_negative=1 ordinary_global_gqa=1 p66_unit_data=2 optimizer_commits=0
+WARNING 09-06 22:54:06 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:54:11 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:54:11 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:54:11 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:54:12 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:54:12 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[P66.VMA] outer_check_enabled module=zt_tr_dp_parallel_installed_projection manual_axes=['data', 'model']
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=8 site=gate_proj local_width=1536 declared_width=12288 layout_shards=1 pieces=1
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=8 site=up_proj local_width=1536 declared_width=12288 layout_shards=1 pieces=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":799.8399658203125,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":17052.7265625,"schema":"canon-p62-tree-numeric-v1","stable_norm":799.8397827148438,"stage":"engine_projection_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"['weight']"}],"total_elements":32768}
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=ordinary.serving.q_proj M=16 Klocal=4 Nlocal=512
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at ordinary.serving.o_proj.gather_0 (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_0 M=16 Klocal=1 Nlocal=4
+[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at ordinary.serving.o_proj.gather_0 (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_0 M=16 Klocal=1 Nlocal=4
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at ordinary.serving.o_proj.gather_1 (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_1 M=16 Klocal=1 Nlocal=4
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at ordinary.serving.o_proj.gather_1 (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=ordinary.serving.o_proj.gather_1 M=16 Klocal=1 Nlocal=4
+P59_TP8_INSTALLED_PROJECTION_PASS topology=DP2xTP8 q_proj_layout_shards=1 gate_up_layout_shards_one=2 wrong_width_negative=2 ordinary_global=1 ordinary_contract_p66_global_negative=2 serial_parallel=exact optimizer_commits=0
+WARNING 09-06 22:54:26 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 09-06 22:54:32 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:54:32 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:54:32 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:54:33 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:54:33 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 09-06 22:54:33 [attn_iface_patched.py:58] Using default RPA kernel
+[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=8 local_q_heads=4 local_kv_heads=1 cache_heads=1 packing=2
+[PATHTRACE] RPA_VJP2 on (chunked-cache differentiable)
+[P66.VMA] nested_engine_body_reuses_outer_map label=zt_tr_dp_parallel_installed_attention tp=8
+P59_TP8_INSTALLED_ATTENTION_PASS topology=DP2xTP8 local_kv_heads=1 rpa_vjp2=1 wrong_cache_negative=1 ordinary_global_gqa=1 p66_unit_data=0 optimizer_commits=0
+P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 p66_unit_data_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x37/37
+V1_HP_EXACT_IMAGE image_ref=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_dp16_gathered_logprobs_pads_and_slices_each_data_rank
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+WARNING 09-06 22:54:41 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/site-packages/tpu_info/device.py:33: DeprecationWarning: In 3.13 classes created inside an enum will not become a member.  Use the `member` decorator to keep the current behavior.
+  class Info(typing.NamedTuple):
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=7) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  self.pid = os.fork()
+INFO 09-06 22:54:47 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:54:47 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:54:47 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 09-06 22:54:47 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:54:47 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[P56.GATHERED_LOGPROBS] installed data=16 local_m=256 continue_decode=8
+[       OK ] CanonicalQwen3AdapterTest.test_dp16_gathered_logprobs_pads_and_slices_each_data_rank
+----------------------------------------------------------------------
+Ran 1 test in 6.910s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P30.G2] SPARSE_GRAD_ASSEMBLY on scalar_zero_canonicalization=1
+[       OK ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2
+----------------------------------------------------------------------
+Ran 1 test in 0.994s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives
+[ RUN      ] CanonicalQwen3AdapterTest.test_p32_m15_step61_group_spec_preserves_prompt_only_dp8_row
+[       OK ] CanonicalQwen3AdapterTest.test_p32_m15_step61_group_spec_preserves_prompt_only_dp8_row
+[ RUN      ] CanonicalQwen3AdapterTest.test_p32_nonempty_group_is_identical_when_empty_rows_are_admitted
+[       OK ] CanonicalQwen3AdapterTest.test_p32_nonempty_group_is_identical_when_empty_rows_are_admitted
+----------------------------------------------------------------------
+Ran 3 tests in 3.736s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] DPTrainingTest.test_dp2_tp2_rank_parallel_vjp_matches_serial_rank_isolation
+[       OK ] DPTrainingTest.test_dp2_tp2_rank_parallel_vjp_matches_serial_rank_isolation
+----------------------------------------------------------------------
+Ran 1 test in 1.073s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] DPTrainingTest.test_dp8_tp8_rank_gradient_reducer_consumes_finite_staged_table
+[       OK ] DPTrainingTest.test_dp8_tp8_rank_gradient_reducer_consumes_finite_staged_table
+[ RUN      ] DPTrainingTest.test_parallel_staged_common_nan_is_nonfinite_not_replica_mismatch
+[       OK ] DPTrainingTest.test_parallel_staged_common_nan_is_nonfinite_not_replica_mismatch
+[ RUN      ] DPTrainingTest.test_finite_replica_mismatch_remains_fatal
+[       OK ] DPTrainingTest.test_finite_replica_mismatch_remains_fatal
+----------------------------------------------------------------------
+Ran 3 tests in 0.775s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] StableGlobalNormTest.test_finite_large_gradient_does_not_overflow
+[       OK ] StableGlobalNormTest.test_finite_large_gradient_does_not_overflow
+[ RUN      ] StableGlobalNormTest.test_hybrid_clip_does_not_sanitize_nonfinite_tree
+[       OK ] StableGlobalNormTest.test_hybrid_clip_does_not_sanitize_nonfinite_tree
+[ RUN      ] StableGlobalNormTest.test_hybrid_clip_overflow_matches_fp64_oracle
+[       OK ] StableGlobalNormTest.test_hybrid_clip_overflow_matches_fp64_oracle
+[ RUN      ] StableGlobalNormTest.test_hybrid_clip_stock_finite_path_is_byte_exact
+[       OK ] StableGlobalNormTest.test_hybrid_clip_stock_finite_path_is_byte_exact
+[ RUN      ] StableGlobalNormTest.test_nonfinite_gradient_remains_nonfinite
+[       OK ] StableGlobalNormTest.test_nonfinite_gradient_remains_nonfinite
+[ RUN      ] StableGlobalNormTest.test_numeric_stats_distinguish_finite_huge_from_nonfinite
+[       OK ] StableGlobalNormTest.test_numeric_stats_distinguish_finite_huge_from_nonfinite
+[ RUN      ] StableGlobalNormTest.test_p63_context_is_exact_and_default_off
+[       OK ] StableGlobalNormTest.test_p63_context_is_exact_and_default_off
+[ RUN      ] StableGlobalNormTest.test_ranked_numeric_stats_identify_rank_and_leaf
+[       OK ] StableGlobalNormTest.test_ranked_numeric_stats_identify_rank_and_leaf
+[ RUN      ] StableGlobalNormTest.test_scaled_numeric_stats_expose_multiplier
+[       OK ] StableGlobalNormTest.test_scaled_numeric_stats_expose_multiplier
+----------------------------------------------------------------------
+Ran 9 tests in 2.542s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] PeftTrainerTest.test_p62_precomputed_diagnostic_discard_resets_without_commit
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+/workspace/tests/sft/peft_trainer_test.py:1318: DeprecationWarning: 'VariableState' was removed, this is just an alias to 'Variable'. Plase use 'Variable' directly instead.
+  is_leaf=lambda value: isinstance(value, nnx.VariableState),
+[PERF] stage=grad_accumulate seconds=0.170 microbatch=0 variant=plain call=0.168 block=0.002
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=1 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=2 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=3 variant=plain call=0.002 block=0.000
+[       OK ] PeftTrainerTest.test_p62_precomputed_diagnostic_discard_resets_without_commit
+[ RUN      ] PeftTrainerTest.test_p64_precomputed_diagnostic_discard_resets_without_commit
+/workspace/tests/sft/peft_trainer_test.py:1366: DeprecationWarning: 'VariableState' was removed, this is just an alias to 'Variable'. Plase use 'Variable' directly instead.
+  is_leaf=lambda value: isinstance(value, nnx.VariableState),
+[PERF] stage=grad_accumulate seconds=0.155 microbatch=0 variant=plain call=0.155 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=1 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=2 variant=plain call=0.002 block=0.000
+[PERF] stage=grad_accumulate seconds=0.002 microbatch=3 variant=plain call=0.002 block=0.000
+[       OK ] PeftTrainerTest.test_p64_precomputed_diagnostic_discard_resets_without_commit
+[ RUN      ] PeftTrainerTest.test_p63_finite_overflow_commits_nonzero_clipped_update
+/workspace/tests/sft/peft_trainer_test.py:1653: DeprecationWarning: 'VariableState' was removed, this is just an alias to 'Variable'. Plase use 'Variable' directly instead.
+  is_leaf=lambda value: isinstance(value, nnx.VariableState),
+/workspace/tunix/sft/peft_trainer.py:1129: DeprecationWarning: jax.interpreters.pxla.thread_resources is deprecated as of JAX v0.8.2. Please switch to using `with jax.set_mesh(mesh)` instead of `with mesh:` and then use `jax.sharding.get_abstract_mesh()` to get the current mesh.
+  self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+[P63.STABLE_CLIP] update=0 all_finite=1 naive_norm=inf naive_norm_finite=0 stable_norm=1.2973823439541035e+22 selected_norm=1.2973823439541035e+22 fallback_used=1 clip_factor=7.707828007371153e-23 max_norm=1.0
+[       OK ] PeftTrainerTest.test_p63_finite_overflow_commits_nonzero_clipped_update
+----------------------------------------------------------------------
+Ran 3 tests in 3.898s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p62_tree_receipt_catches_first_nonfinite_boundary
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[       OK ] CanonicalQwen3AdapterTest.test_p62_tree_receipt_catches_first_nonfinite_boundary
+[ RUN      ] CanonicalQwen3AdapterTest.test_p62_loss_receipt_locks_denominator_and_scale
+[P62.NUMERIC] {"advantage_abs_mean":0.5,"advantage_max":1.0,"advantage_min":-1.0,"dp":16,"effective_rows":256.0,"expected_accumulator_denominator":16,"expected_streamed_multiplier":0.0625,"global_M":4096,"global_trajectories":256,"gradient_groups":16,"is_ratio_max":1.100000023841858,"is_ratio_min":0.8999999761581421,"local_M":256,"local_trajectories":16,"loss":0.25,"loss_denominator":256.0,"loss_scale":0.00390625,"schema":"canon-p62-loss-scale-v1","stage":"loss_scale","tp":4,"valid_tokens":1024.0}
+[P62.NUMERIC] {"advantage_abs_mean":0.5,"advantage_max":1.0,"advantage_min":-1.0,"dp":16,"effective_rows":256.0,"expected_accumulator_denominator":16,"expected_streamed_multiplier":0.0625,"global_M":4096,"global_trajectories":256,"gradient_groups":16,"is_ratio_max":1.100000023841858,"is_ratio_min":0.8999999761581421,"local_M":256,"local_trajectories":16,"loss":0.5,"loss_denominator":128.0,"loss_scale":0.0078125,"schema":"canon-p62-loss-scale-v1","stage":"loss_scale","tp":4,"valid_tokens":1024.0}
+[       OK ] CanonicalQwen3AdapterTest.test_p62_loss_receipt_locks_denominator_and_scale
+[ RUN      ] CanonicalQwen3AdapterTest.test_p62_flag_parser_is_exact_boolean
+[       OK ] CanonicalQwen3AdapterTest.test_p62_flag_parser_is_exact_boolean
+[ RUN      ] CanonicalQwen3AdapterTest.test_p64_receipts_and_flag_parser_are_isolated_from_p62
+[       OK ] CanonicalQwen3AdapterTest.test_p64_receipts_and_flag_parser_are_isolated_from_p62
+----------------------------------------------------------------------
+Ran 4 tests in 0.643s
+
+OK
+..[P64.CAPSULE] capture_ready path=/tmp/tmpde8glt8t/p64_training_capsule.npz sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 rows=256 arrays=17 logical_bytes=20977664 certification=strict-prealignment-source
+[P64.CAPSULE] model_bound mode=capture capsule_sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 binding_sha256=e4fc9746d97b18f8eec2002c8c76030a880f9c6a2299e49ca813f5f8aa6e98df model_fingerprint_sha256=843dbd838ac8acd358cd2578f731f167784f5401add62460ee143e30a8efbb82 sampled_model=1
+[P64.CAPSULE] diagnostic_replay_ready path=/tmp/tmpde8glt8t/p64_training_capsule.npz sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 rows=256 capture_run=p64-unit capture_source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa replay_source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb rollout=skipped rescore_b=skipped certification=0
+[P64.CAPSULE] model_verified mode=replay capsule_sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 binding_sha256=e4fc9746d97b18f8eec2002c8c76030a880f9c6a2299e49ca813f5f8aa6e98df model_fingerprint_sha256=843dbd838ac8acd358cd2578f731f167784f5401add62460ee143e30a8efbb82 sampled_model=1
+.
+----------------------------------------------------------------------
+Ran 3 tests in 0.226s
+
+OK
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.001s
+
+OK
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.005s
+
+OK
+[V1.GSM.FIXED_REPLAY] {"accumulator_denominator": 16.0, "action_mask_sha256": "748e6f395741b1414cfdebe28a8fce1ecafe0558cac557e4e4d99f5cbd6f1f26", "advantages_sha256": "aa524f49f2c55a126d2431355cb75404e513b810039930f5fa659bd657ab4e3f", "capsule_sha256": "1e4da73644749f41854a9cb943f6da162a99a7689dfb41e045ff356ae6420eb6", "checkpoint_sha256": "dbc9952608046fead82b51647e199d241ff285831db4eff7fb1d4cd3bffff831", "claim_ceiling": "bounded_projection_topology_and_scale_only", "cotangent_sha256": "2b95eeb3a986723ef19fc488ffdf0da5b2a5d229bccf59e2d3768b330e981b22", "duplicate_dp_sum_rel_l2": 15.00000006742168, "first_trajectory": {"action_mask": [0, 1, 1, 1], "advantage": -1.25, "tokens": [365, 3170, 2681, 1797]}, "global_trajectories": 256, "groups": 16, "local_trajectories": 16, "loss_denominator": 256.0, "loss_scale": 0.00390625, "optimizer_commits": 0, "ordinary_cosine_fp64": 0.9999999999999983, "ordinary_gradient_sha256": "172b776e076dbb7cceee78559c75d2c01c22faafa542322204e22927d5e64abc", "ordinary_p59_byte_exact": false, "ordinary_p59_rel_l2": 9.147027157901805e-08, "ordinary_rel_l2_fp64": 5.847893661673246e-08, "p59_cosine_fp64": 0.9999999999999976, "p59_gradient_sha256": "b7baed92b38c330f4306e84f8913f92972a5160d4c4d3d51a237d6d843b0dd97", "p59_rel_l2_fp64": 7.202291487580081e-08, "rank_partial_unique_per_group": [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16], "schema": "canon-v1-gsm-fixed-replay-scale-v1", "seed": 42, "streamed_multiplier": 0.0625, "tokens_sha256": "b1cab54302addb0cf6ef0d07b393203bb6fe4a94986abe30c8f17ae97c5dde83", "topology": "DP16xTP4", "verdict": "PASS", "wrong_denominator_rel_l2": 15.00000006742168}
+V1_GSM_FIXED_REPLAY_PASS topology=DP16xTP4 groups=16 rank_ownership=16/16 fp64=ordinary,p59 negatives=denominator,dp_sum optimizer_commits=0
+[V1.PERFETTO] captured training_step=2 timelines=1
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+OK
+[CANON_ALIGN_PRE_JSON] {"N_action":3,"action_geometry":{"max_logical_kv_prefix_length":2,"min_logical_kv_prefix_length":0,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":null,"claim_level":"convergence-only","enabled":true,"id":"frozenlake-full-alignment-warning-v1","max_abs_limit":null,"stage":"full","warning_boundaries":["S_decode_vs_S_prefill"],"warning_items":["S_decode_vs_S_prefill","w_all_exactly_1","wr_all_exactly_1","clip_hits","tis_hits"],"warning_only":true,"workload":"frozenlake"},"all_compact_filtered":false,"blocking_reds":["S_prefill_vs_T_old"],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":12,"total_elements":3,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.25,"differing_bytes":3,"differing_elements":1,"element_fraction":0.3333333333333333,"finite":true,"first_mismatch":{"a":0.25,"a_bits":"0x3e800000","abs_delta":0.19999998807907104,"action_run_end":false,"action_run_start":false,"b":0.44999998807907104,"b_bits":"0x3ee66666","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":6710886,"xor_bits":"0x00666666"},"max_abs":0.19999998807907104,"max_abs_mismatch":{"a":0.25,"a_bits":"0x3e800000","abs_delta":0.19999998807907104,"action_run_end":false,"action_run_start":false,"b":0.44999998807907104,"b_bits":"0x3ee66666","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":6710886,"xor_bits":"0x00666666"},"mismatches":[{"a":0.25,"a_bits":"0x3e800000","abs_delta":0.19999998807907104,"action_run_end":false,"action_run_start":false,"b":0.44999998807907104,"b_bits":"0x3ee66666","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":6710886,"xor_bits":"0x00666666"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":12,"total_elements":3,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"full","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"af43808a133cce38bb959475eaec59bac18f68f11ce1c1756cb4c49d80cfa408","action_mask":"75c8fd04ad916aec3e3d5cb76a452b116b3d4d0912a0a485e9fb8e3d240e210c","policy_version":"df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119","tokens":"a56d6bbbe254a23749343fb727e7f348b719bc6314763d6a792843e2f7c466ee"},"masked_hashes":{"S_decode":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"af43808a133cce38bb959475eaec59bac18f68f11ce1c1756cb4c49d80cfa408"},"no_signal_admitted":false,"reds":["S_prefill_vs_T_old"],"reported_reds":[],"step":0,"timestamp":1788735352.620236,"verdict":"FAIL","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmpxslptr4d/pre.jsonl sha256=1ab304e02eb72f6dca2f4f57d24332503b4952a346452ed7be193cbd7ec471e2
+[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=3 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 3)]
+[CANON_ALIGN_PRE_JSON] {"N_action":3,"action_geometry":{"max_logical_kv_prefix_length":2,"min_logical_kv_prefix_length":0,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":null,"claim_level":"convergence-only","enabled":true,"id":"frozenlake-full-alignment-warning-v1","max_abs_limit":null,"stage":"full","warning_boundaries":["S_decode_vs_S_prefill"],"warning_items":["S_decode_vs_S_prefill","w_all_exactly_1","wr_all_exactly_1","clip_hits","tis_hits"],"warning_only":true,"workload":"frozenlake"},"all_compact_filtered":false,"blocking_reds":["S_decode_vs_S_prefill"],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.16666666666666666,"differing_bytes":2,"differing_elements":1,"element_fraction":0.3333333333333333,"finite":false,"first_mismatch":{"a":"nan","a_bits":"0x7fc00000","abs_delta":"nan","action_run_end":false,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":null,"xor_bits":"0x41400000"},"max_abs":"nan","max_abs_mismatch":{"a":"nan","a_bits":"0x7fc00000","abs_delta":"nan","action_run_end":false,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":null,"xor_bits":"0x41400000"},"mismatches":[{"a":"nan","a_bits":"0x7fc00000","abs_delta":"nan","action_run_end":false,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":null,"xor_bits":"0x41400000"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":12,"total_elements":3,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":12,"total_elements":3,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"full","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"86bb4dbfd9d34a28f7559d8c2773bf54ccfe5c7500a5b5c59fd3b4ef8a754a1a","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","action_mask":"75c8fd04ad916aec3e3d5cb76a452b116b3d4d0912a0a485e9fb8e3d240e210c","policy_version":"df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119","tokens":"a56d6bbbe254a23749343fb727e7f348b719bc6314763d6a792843e2f7c466ee"},"masked_hashes":{"S_decode":"86bb4dbfd9d34a28f7559d8c2773bf54ccfe5c7500a5b5c59fd3b4ef8a754a1a","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415"},"no_signal_admitted":false,"reds":["S_decode_vs_S_prefill"],"reported_reds":[],"step":0,"timestamp":1788735352.6239586,"verdict":"FAIL","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmp3vv1pvy0/pre.jsonl sha256=e1e3be3a0682f9a80075cde5dcb957cb7027d02851ddcc4862ec325f5b750c87
+[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=3 bounds=[('S_decode_vs_S_prefill', 2), ('S_prefill_vs_T_old', 0)]
+...[CANON_ALIGN_PRE_JSON] {"N_action":3,"action_geometry":{"max_logical_kv_prefix_length":2,"min_logical_kv_prefix_length":0,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":null,"claim_level":"convergence-only","enabled":true,"id":"frozenlake-full-alignment-warning-v1","max_abs_limit":null,"stage":"full","warning_boundaries":["S_decode_vs_S_prefill"],"warning_items":["S_decode_vs_S_prefill","w_all_exactly_1","wr_all_exactly_1","clip_hits","tis_hits"],"warning_only":true,"workload":"frozenlake"},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.25,"differing_bytes":3,"differing_elements":1,"element_fraction":0.3333333333333333,"finite":true,"first_mismatch":{"a":0.3499999940395355,"a_bits":"0x3eb33333","abs_delta":0.09999999403953552,"action_run_end":false,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":3355443,"xor_bits":"0x00333333"},"max_abs":0.09999999403953552,"max_abs_mismatch":{"a":0.3499999940395355,"a_bits":"0x3eb33333","abs_delta":0.09999999403953552,"action_run_end":false,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":3355443,"xor_bits":"0x00333333"},"mismatches":[{"a":0.3499999940395355,"a_bits":"0x3eb33333","abs_delta":0.09999999403953552,"action_run_end":false,"action_run_start":false,"b":0.25,"b_bits":"0x3e800000","completion_chunk_index":0,"completion_position":1,"completion_valid_length":3,"coordinate":[0,1],"differing_byte_offsets":[0,1,2],"distance_to_next_sequence_chunk":255,"logical_kv_prefix_length":1,"masked_index":1,"offset_in_action_run":1,"offset_in_sequence_chunk":1,"previous_token_is_environment":false,"prompt_length":0,"sequence_chunk_index":0,"sequence_row":0,"token_id":11,"turn_index":0,"ulp_distance":3355443,"xor_bits":"0x00333333"}],"mismatches_truncated":false,"reported_mismatches":1,"total_bytes":12,"total_elements":3,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":12,"total_elements":3,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"full","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"a0263baf472490746da250e51d9850fd3d68d16cd43822919760438ee97da945","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","action_mask":"75c8fd04ad916aec3e3d5cb76a452b116b3d4d0912a0a485e9fb8e3d240e210c","policy_version":"df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119","tokens":"a56d6bbbe254a23749343fb727e7f348b719bc6314763d6a792843e2f7c466ee"},"masked_hashes":{"S_decode":"a0263baf472490746da250e51d9850fd3d68d16cd43822919760438ee97da945","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415"},"no_signal_admitted":false,"reds":["S_decode_vs_S_prefill"],"reported_reds":[],"step":0,"timestamp":1788735352.6278908,"verdict":"PASS_WITH_ALIGNMENT_WARNINGS","warning_reds":["S_decode_vs_S_prefill"]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmp5ld43ok2/pre.jsonl sha256=114b45c6bbd125786532c1c8dab95a5900c78719c7213b53724429b3fa2c034b
+[CANON_ALIGN_PRE] step=0 verdict=PASS_WITH_ALIGNMENT_WARNINGS N_action=3 bounds=[('S_decode_vs_S_prefill', 3), ('S_prefill_vs_T_old', 0)]
+[CANON_ALIGN_WARNING] boundary=pre_backward step=0 warnings=['S_decode_vs_S_prefill']
+..[P57.TITO.UPDATE_SIDECAR] PASS step=0 rows=1 bytes=6084 logical_bytes=133 write_seconds=0.002160 sha256=58e4d5fbec0b8a84f7640217e942b85b32cf02365fbd5001681f93ab94f1c34b path=/tmp/tmp9ck0gnmb/p57_tito_witness/update-sidecars/step-000000.npz
+[CANON_ALIGN_PRE_JSON] {"N_action":3,"action_geometry":{"max_logical_kv_prefix_length":2,"min_logical_kv_prefix_length":0,"rows_reaching_1686":0,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":null,"claim_level":"convergence-only","enabled":true,"id":"frozenlake-full-alignment-warning-v1","max_abs_limit":null,"stage":"full","warning_boundaries":["S_decode_vs_S_prefill"],"warning_items":["S_decode_vs_S_prefill","w_all_exactly_1","wr_all_exactly_1","clip_hits","tis_hits"],"warning_only":true,"workload":"frozenlake"},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":12,"total_elements":3,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":12,"total_elements":3,"valid":true}},"context":{"bucket":"","mesh":"","run_stage":"full","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","action_mask":"75c8fd04ad916aec3e3d5cb76a452b116b3d4d0912a0a485e9fb8e3d240e210c","policy_version":"df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119","tokens":"a56d6bbbe254a23749343fb727e7f348b719bc6314763d6a792843e2f7c466ee"},"masked_hashes":{"S_decode":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","S_prefill":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415","T_old":"0e46b0f0450941b9cf7ce388df558a92c5d042dae3f9a46a64c946ea56f25415"},"no_signal_admitted":false,"reds":[],"reported_reds":[],"step":0,"timestamp":1788735352.6314523,"tito_update_sidecar":{"bytes":6084,"logical_bytes":133,"path":"/tmp/tmp9ck0gnmb/p57_tito_witness/update-sidecars/step-000000.npz","rows":1,"schema":"canon.p57-tito-update-sidecar-receipt.v1","sha256":"58e4d5fbec0b8a84f7640217e942b85b32cf02365fbd5001681f93ab94f1c34b","step":0,"write_seconds":0.002160205040127039},"verdict":"PASS","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/tmp9ck0gnmb/pre.jsonl sha256=f20780e2c095fe2996140e46c8af45fc90e550c3ef51c549cab212bc64cc3ada
+[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=3 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]
+.[P57.TITO.ACTOR_SNAPSHOT_REQUEST] PASS step=0 categories=first-any max_abs=0.2 sha256=9aae2a467a62a6b273d7baf0b55ee2f70ca6b7b24fdb3d90c1cb1dd5f857b088 path=/tmp/tmpd71_y8ss/p57_tito_witness/actor-snapshot-requests/step-000000.json
+[P57.TITO.ACTOR_SNAPSHOT_REQUEST] PASS step=1 categories=first-ge-1 max_abs=2.0 sha256=539d3dfe20869b5aaa7493ae636500e18134ef433c227f8f325771f2378b8429 path=/tmp/tmpd71_y8ss/p57_tito_witness/actor-snapshot-requests/step-000001.json
+[P57.TITO.ACTOR_SNAPSHOT_REQUEST] PASS step=2 categories=first-ge-8 max_abs=9.0 sha256=d0bdce0bafb957a1d0d48927413bdb6a77bbf6eae425add5d5d4c3f1e147aaa7 path=/tmp/tmpd71_y8ss/p57_tito_witness/actor-snapshot-requests/step-000002.json
+[P57.TITO.ACTOR_SNAPSHOT_REQUEST] PASS step=3 categories=first-ge-32 max_abs=33.0 sha256=c96fe8f37ddf59db8d73d4619e06ad174419099701fa00e26b22576a2454969c path=/tmp/tmpd71_y8ss/p57_tito_witness/actor-snapshot-requests/step-000003.json
+.
+----------------------------------------------------------------------
+Ran 7 tests in 0.027s
+
+OK
+[P57.TITO.ACTOR_SNAPSHOT] status=PASS step=5 categories=first-any,first-ge-1,first-ge-8 optimizer_included=0 resumable=0 latest_step=5 save_seconds=0.000057 receipt_sha256=2e087f8a9006d7035655925a5af03232c73e24559d0bfaa9d296a5995c30737a
+..............[P57.TITO.ORBAX_PROBE] PASS workload=p45 dp=8 tp=8 restored_equal=1 root_sha256=476845a21c2155330471259fca46b517a57ad8a327925ef9efc8b608ad9afb72
+Traceback (most recent call last):
+  File "/workspace/tunix/rl/agentic/token_continuity.py", line 519, in run_tito_orbax_admission_probe
+    raise RuntimeError("Orbax admission probe restore differs")
+RuntimeError: Orbax admission probe restore differs
+[P57.TITO.ORBAX_PROBE] FAIL workload=p45 dp=8 tp=8 restored_equal=0 root_sha256=476845a21c2155330471259fca46b517a57ad8a327925ef9efc8b608ad9afb72
+.....[P57.TITO.SINGLE_WRITER] PASS workload=p45 dp=8 tp=8 pid=5487 path=/tmp/tmpd8rjt59r/p57_tito_witness/single-writer.json
+.[P57.TITO.SINGLE_WRITER] PASS workload=p45 dp=1 tp=4 pid=5487 path=/tmp/tmp_xpni9af/p57_tito_witness/single-writer.json
+..[P57.TITO.SINGLE_WRITER] PASS workload=p45 dp=1 tp=4 pid=5487 path=/tmp/tmpfz_wqid2/p57_tito_witness/single-writer.json
+[P57.TITO.FIRST_UPDATE_TOKEN_GATE] PASS step=0 rows=2 different_rows=0 continue_training=1
+[P57.TITO.FIRST_UPDATE_TOKEN_GATE] OBSERVED_DIFFERENT step=0 rows=1 different_rows=1 continue_training=1
+....
+----------------------------------------------------------------------
+Ran 26 tests in 0.342s
+
+OK
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.019s
+
+OK
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.143s
+
+OK
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 1.567s
+
+OK
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpoc185cv_/rendered/p45/jobset-p57-frozenlake-zero-tito-diagnostic.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpoc185cv_/rendered/m15/jobset-p57-frozenlake-zero-m15-main-tito-diagnostic.yaml
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmppmq6wibs/rendered/p45/jobset-p57-frozenlake-zero-tito-diagnostic.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmppmq6wibs/rendered/m15/jobset-p57-frozenlake-zero-m15-main-tito-diagnostic.yaml
+.
+----------------------------------------------------------------------
+Ran 3 tests in 0.788s
+
+OK
+ERROR 09-06 22:56:00 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 09-06 22:56:00 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+WARNING 09-06 22:56:00 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 09-06 22:56:06 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 09-06 22:56:06 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 09-06 22:56:06 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] VllmRolloutCanonicalTest.test_prompt_witness_distinguishes_submit_from_engine_echo
+[       OK ] VllmRolloutCanonicalTest.test_prompt_witness_distinguishes_submit_from_engine_echo
+[ RUN      ] VllmRolloutCanonicalTest.test_prompt_witness_rejects_missing_duplicate_or_malformed_echo
+[       OK ] VllmRolloutCanonicalTest.test_prompt_witness_rejects_missing_duplicate_or_malformed_echo
+[ RUN      ] VllmRolloutCanonicalTest.test_server_mode_rejects_swapped_request_outputs
+[       OK ] VllmRolloutCanonicalTest.test_server_mode_rejects_swapped_request_outputs
+[ RUN      ] VllmRolloutCanonicalTest.test_server_mode_does_not_add_identity_assertion_without_witness
+[       OK ] VllmRolloutCanonicalTest.test_server_mode_does_not_add_identity_assertion_without_witness
+----------------------------------------------------------------------
+Ran 4 tests in 0.003s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] TrajectoryCollectEngineTest.test_m15_verify_observes_drift_without_replacing_text_prompt
+[       OK ] TrajectoryCollectEngineTest.test_m15_verify_observes_drift_without_replacing_text_prompt
+[ RUN      ] TrajectoryCollectEngineTest.test_m15_verify_reports_exact_later_turn_prompt
+[       OK ] TrajectoryCollectEngineTest.test_m15_verify_reports_exact_later_turn_prompt
+[ RUN      ] TrajectoryCollectEngineTest.test_m15_verify_rejects_caller_prompt_token_override
+[       OK ] TrajectoryCollectEngineTest.test_m15_verify_rejects_caller_prompt_token_override
+[ RUN      ] TrajectoryCollectEngineTest.test_deepswe_and_m15_exact_admissions_are_mutually_exclusive
+[       OK ] TrajectoryCollectEngineTest.test_deepswe_and_m15_exact_admissions_are_mutually_exclusive
+[ RUN      ] TrajectoryCollectEngineTest.test_m15_exact_reuses_and_verifies_exact_turn_tokens
+[       OK ] TrajectoryCollectEngineTest.test_m15_exact_reuses_and_verifies_exact_turn_tokens
+[ RUN      ] TrajectoryCollectEngineTest.test_p45_exact_reuses_and_verifies_exact_turn_tokens
+[       OK ] TrajectoryCollectEngineTest.test_p45_exact_reuses_and_verifies_exact_turn_tokens
+[ RUN      ] TrajectoryCollectEngineTest.test_p57_m15_exact_reuses_and_verifies_exact_turn_tokens
+[       OK ] TrajectoryCollectEngineTest.test_p57_m15_exact_reuses_and_verifies_exact_turn_tokens
+[ RUN      ] TrajectoryCollectEngineTest.test_p57_first_diff_debug_persists_reconstructable_capsule
+[       OK ] TrajectoryCollectEngineTest.test_p57_first_diff_debug_persists_reconstructable_capsule
+[ RUN      ] TrajectoryCollectEngineTest.test_p57_collect_diff_stops_only_trajectory_and_masks_tokens
+[       OK ] TrajectoryCollectEngineTest.test_p57_collect_diff_stops_only_trajectory_and_masks_tokens
+[ RUN      ] TrajectoryCollectEngineTest.test_p57_collect_cap_is_process_wide_and_allocated_before_io
+[       OK ] TrajectoryCollectEngineTest.test_p57_collect_cap_is_process_wide_and_allocated_before_io
+[ RUN      ] TrajectoryCollectEngineTest.test_p57_record_full_diff_preserves_training_row_and_request_join
+[P57.TITO.SINGLE_WRITER] PASS workload=p45 dp=8 tp=8 pid=6186 path=/tmp/tmpezqp_pc7/p57_tito_witness/single-writer.json
+[CANON_P57_TITO_HOST_WITNESS] request=request-0 trajectory_id=fbfdbd14bdf9458a8c5b7f5a8613cc70 turn=0 submitted_tokens=1 submitted_sha256=8d67520993de119090ca5ef1d7a6feb35c8b348503426049f21af5875c7a5d4b engine_echo_tokens=1 engine_echo_sha256=98fdfcbc3fdc1804f196207e9b88616544580a6213fec7474b2a2ded56e6ca9e equal=0 artifact=/tmp/tmpezqp_pc7/p57_tito_witness/host/host-request-c1185fd39a300b0e.json bytes=433 artifact_sha256=be5b967588fe8100e5e43fab88df59852c2f6703156650eef627d9456f9b934a
+[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] verdict=PASS slot=1 path=/tmp/tmpezqp_pc7/token-continuity-first-diff/p57-p45-echo-c1185fd39a300b0e-6186-1788735374582087900.json bytes=558 sha256=81b36fb3f0685377801a237503611e1e88850b7d637666b1bc614291be5ffa37 kind=engine-echo durability=mode0600-run-state+periodic-gcs
+[CANON_P57_TITO_HOST_WITNESS] request=request-1 trajectory_id=fbfdbd14bdf9458a8c5b7f5a8613cc70 turn=1 submitted_tokens=5 submitted_sha256=2711f7e8b985cd6fc8023daa8be7bcddaf15582ea0bee93c9eea91fdf5db5595 engine_echo_tokens=5 engine_echo_sha256=2711f7e8b985cd6fc8023daa8be7bcddaf15582ea0bee93c9eea91fdf5db5595 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=p45 mode=exact trajectory_id=fbfdbd14bdf9458a8c5b7f5a8613cc70 turn=1 verdict=TOKEN_STREAM_DIFFERENT actual_tokens=1 expected_tokens=5 actual_sha256=8fc6cb4a9816d75621652de783118eee13112cda196e61d1bde0460f29b26e3e expected_sha256=18932ef9e73f1b2c3377364802b7f93318a6c0685f7335a0738869a86f6bd9fe first_mismatch=1 actual_token=NA expected_token=201
+[CANON_P57_TOKEN_CONTINUITY_DEBUG] {"actual_sha256":"8fc6cb4a9816d75621652de783118eee13112cda196e61d1bde0460f29b26e3e","actual_tokens":1,"capsule_id":"3512c1ff69de49ba8349408db627fc54","event_index":2,"expected_sha256":"18932ef9e73f1b2c3377364802b7f93318a6c0685f7335a0738869a86f6bd9fe","expected_tokens":5,"first_mismatch":1,"group_id":"9","pair_index":"7","policy_step":3,"record":"header","records_metadata_sha256":"30ddf6aea0413f914084180f8120d2b7255c084bc1be4cef33c5b7bff29ba574","request_id":"request-1","schema":"p57-token-first-diff-v1","segments":3,"token_chunk_records":4,"trajectory_id":"fbfdbd14bdf9458a8c5b7f5a8613cc70","trajectory_steps":1,"turn":1,"workload":"p45"}
+[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] verdict=PASS slot=2 path=/tmp/tmpezqp_pc7/token-continuity-first-diff/p57-p45-turn1-3512c1ff69de49ba8349408db627fc54-6186-1788735374584689936.json bytes=1479 sha256=3a7a5fb05d034cbccc707b4f4804bc82bcc50c0e512c1140a4484e9d476c3e32 kind=later-turn durability=mode0600-run-state+periodic-gcs
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=p45 trajectory_id=fbfdbd14bdf9458a8c5b7f5a8613cc70 steps=2 expected_later_turns=1 receipts=1 verdict=DIFFERENT
+[       OK ] TrajectoryCollectEngineTest.test_p57_record_full_diff_preserves_training_row_and_request_join
+[ RUN      ] TrajectoryCollectEngineTest.test_record_full_first_model_timeout_preserves_empty_training_row
+W0906 22:56:14.599730 139688974033728 trajectory_collect_engine.py:262] [step_idx=0, pair_index=4, group_id=1299] trajectory clipped: MODEL_TIMEOUT
+E0906 22:56:14.599879 139688974033728 trajectory_collect_engine.py:962] [step_idx=0, pair_index=4, group_id=1299] model generation exceeded the 600.0s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=1e5e515ad1764ba99a2d2c60f46db55e steps=0 expected_later_turns=0 receipts=0 verdict=UNEXERCISED
+[P57.TITO.SINGLE_WRITER] PASS workload=m15 dp=8 tp=8 pid=6186 path=/tmp/tmpwpdc5hhc/p57_tito_witness/single-writer.json
+W0906 22:56:14.603333 139688974033728 trajectory_collect_engine.py:262] [step_idx=0, pair_index=4, group_id=1299] trajectory clipped: MODEL_TIMEOUT
+E0906 22:56:14.603429 139688974033728 trajectory_collect_engine.py:962] [step_idx=0, pair_index=4, group_id=1299] model generation exceeded the 600.0s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=e8c64fdb9c6540d1b9b41b8ede8fc47f steps=0 expected_later_turns=0 receipts=0 verdict=UNEXERCISED
+[P57.TITO.EMPTY_RESPONSE] UNEXERCISED trajectory_id=e8c64fdb9c6540d1b9b41b8ede8fc47f status=MODEL_TIMEOUT timeout_stage=model_generation completed_model_calls=0 action_tokens=0 continue_training=1
+[       OK ] TrajectoryCollectEngineTest.test_record_full_first_model_timeout_preserves_empty_training_row
+[ RUN      ] TrajectoryCollectEngineTest.test_m15_exact_fails_if_serving_consumes_different_tokens
+[CANON_M15_TOKEN_CONTINUITY] mode=exact turn=1 verdict=TOKEN_STREAM_DIFFERENT actual_tokens=1 expected_tokens=5 actual_sha256=8fc6cb4a9816d75621652de783118eee13112cda196e61d1bde0460f29b26e3e expected_sha256=18932ef9e73f1b2c3377364802b7f93318a6c0685f7335a0738869a86f6bd9fe first_mismatch=1 actual_token=NA expected_token=201
+[       OK ] TrajectoryCollectEngineTest.test_m15_exact_fails_if_serving_consumes_different_tokens
+----------------------------------------------------------------------
+Ran 13 tests in 0.463s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] AlignmentTest.test_record_full_sidecar_validates_empty_response
+[P57.TITO.UPDATE_SIDECAR] PASS step=0 rows=2 bytes=6414 logical_bytes=256 write_seconds=0.002699 sha256=a5e5a5992b8ca718d4f9cdcdb4f653c02d947c1118e0b457e7a48ad6d788351d path=/tmp/tmppgm1h0md/p57_tito_witness/update-sidecars/step-000000.npz
+[       OK ] AlignmentTest.test_record_full_sidecar_validates_empty_response
+----------------------------------------------------------------------
+Ran 1 test in 0.180s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] AgenticGrpoLearnerTest.test_process_results_extracts_assistant_text_record_full_empty_response
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+/workspace/tests/rl/agentic/agentic_grpo_learner_test.py:1640: DeprecationWarning: jax.interpreters.pxla.thread_resources is deprecated as of JAX v0.8.2. Please switch to using `with jax.set_mesh(mesh)` instead of `with mesh:` and then use `jax.sharding.get_abstract_mesh()` to get the current mesh.
+  mesh = pxla.thread_resources.env.physical_mesh
+/usr/local/lib/python3.12/contextlib.py:526: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  result = _enter(cm)
+I0906 22:56:25.491654 139910878036800 utils.py:636] AgenticRLLearner init - Pathways not available. Using default HBM stats collector
+W0906 22:56:25.491863 139910878036800 utils.py:606] Skipping non-TPU device: cpu. You might be missing jax[tpu] dependency.
+W0906 22:56:25.492646 139910878036800 agentic_grpo_learner.py:574] Metrics log dir is None, skipping trajectory logging.
+[P57.TITO.FIRST_UPDATE_TOKEN_GATE] PASS step=0 rows=2 different_rows=0 continue_training=1
+[       OK ] AgenticGrpoLearnerTest.test_process_results_extracts_assistant_text_record_full_empty_response
+[ RUN      ] AgenticGrpoLearnerTest.test_process_results_extracts_assistant_text_ordinary
+I0906 22:56:26.558493 139910878036800 utils.py:636] AgenticRLLearner init - Pathways not available. Using default HBM stats collector
+W0906 22:56:26.558659 139910878036800 utils.py:606] Skipping non-TPU device: cpu. You might be missing jax[tpu] dependency.
+W0906 22:56:26.559360 139910878036800 agentic_grpo_learner.py:574] Metrics log dir is None, skipping trajectory logging.
+[       OK ] AgenticGrpoLearnerTest.test_process_results_extracts_assistant_text_ordinary
+----------------------------------------------------------------------
+Ran 2 tests in 2.832s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] AgenticRLLearnerTest.test_model_call_routes_signed_deepswe_pre_tokenized_prompt_exactly
+[       OK ] AgenticRLLearnerTest.test_model_call_routes_signed_deepswe_pre_tokenized_prompt_exactly
+[ RUN      ] AgenticRLLearnerTest.test_model_call_routes_signed_m15_pre_tokenized_prompt_exactly
+[       OK ] AgenticRLLearnerTest.test_model_call_routes_signed_m15_pre_tokenized_prompt_exactly
+[ RUN      ] AgenticRLLearnerTest.test_model_call_routes_signed_p45_pre_tokenized_prompt_exactly
+[       OK ] AgenticRLLearnerTest.test_model_call_routes_signed_p45_pre_tokenized_prompt_exactly
+[ RUN      ] AgenticRLLearnerTest.test_model_call_routes_signed_p57_m15_pre_tokenized_prompt_exactly
+[       OK ] AgenticRLLearnerTest.test_model_call_routes_signed_p57_m15_pre_tokenized_prompt_exactly
+[ RUN      ] AgenticRLLearnerTest.test_model_call_rejects_simultaneous_deepswe_and_m15_admission
+[       OK ] AgenticRLLearnerTest.test_model_call_rejects_simultaneous_deepswe_and_m15_admission
+[ RUN      ] AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt
+[       OK ] AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt
+----------------------------------------------------------------------
+Ran 6 tests in 0.003s
+
+OK
+test_commit_rejects_nonfinite_delta_or_positive_lr_without_change (test_first_update_gate.FirstUpdateGateTest.test_commit_rejects_nonfinite_delta_or_positive_lr_without_change) ... ok
+test_green_precommit_and_commit (test_first_update_gate.FirstUpdateGateTest.test_green_precommit_and_commit) ... ok
+test_p58_qwen4b_rejects_outer_prompt_chunk_denominator (test_first_update_gate.FirstUpdateGateTest.test_p58_qwen4b_rejects_outer_prompt_chunk_denominator) ... ok
+test_p58_qwen4b_uses_rank_local_sixteen_group_denominator (test_first_update_gate.FirstUpdateGateTest.test_p58_qwen4b_uses_rank_local_sixteen_group_denominator) ... ok
+test_precommit_rejects_nonfinite_zero_huge_and_wrong_denominator (test_first_update_gate.FirstUpdateGateTest.test_precommit_rejects_nonfinite_zero_huge_and_wrong_denominator) ... ok
+test_zero_learning_rate_allows_unchanged_parameters (test_first_update_gate.FirstUpdateGateTest.test_zero_learning_rate_allows_unchanged_parameters) ... ok
+test_attempt9_reds_classify_as_informative_zero_commit (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_attempt9_reds_classify_as_informative_zero_commit) ... V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=A_B_RED_REPRODUCED arm=p66-off workload=p45 a_b_bytes=1755 b_c_bytes=0 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=A_B_RED_REPRODUCED arm=p66-off workload=m15 a_b_bytes=93 b_c_bytes=0 backward=0 optimizer_commits=0
+ok
+test_classifier_accepts_recovery_and_rejects_bc_drift (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_classifier_accepts_recovery_and_rejects_bc_drift) ... V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=ZERO_TIM_RECOVERED arm=p66-off workload=p45 a_b_bytes=0 b_c_bytes=0 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_CLASSIFICATION verdict=FAIL outcome=ZERO_TIM_RECOVERED arm=p66-off workload=p45 a_b_bytes=0 b_c_bytes=1 backward=0 optimizer_commits=0
+ok
+test_engine_patch_scopes_embed_and_rpa_vma (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_engine_patch_scopes_embed_and_rpa_vma) ... ok
+test_p67_vma_scope_bypasses_serving_and_retains_p59 (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_p67_vma_scope_bypasses_serving_and_retains_p59) ... ok
+test_renderer_preserves_production_geometry_and_zero_commit (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_renderer_preserves_production_geometry_and_zero_commit) ... V1_FL_TP8_AB_RENDER_PASS workload=p45 arm=p66-off jobset=canon-v1fl-ab-p45-p45abtest1-0a30e606 sha256=681abc0d0b7b6920825873f5ef16974bbf493b88e3b8049362023766f3d0edd9 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_RENDER_PASS workload=p45 arm=serving-scope jobset=canon-v1fl-ab-p45-p45abtest1-0a30e606 sha256=f8d9be931d889456e36ff55d27cf024fca1730fba6ee8171fcc7a16065643313 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_RENDER_PASS workload=m15 arm=p66-off jobset=canon-v1fl-ab-m15-m15abtest1-0a30e606 sha256=0de6ac4274cf2df631e6dee577242bb01ce5fbb3ede2d39f45cd8661d7851748 backward=0 optimizer_commits=0
+ok
+test_serving_scope_classifier_requires_its_exact_marker (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_serving_scope_classifier_requires_its_exact_marker) ... V1_FL_TP8_AB_CLASSIFICATION verdict=PASS outcome=ZERO_TIM_RECOVERED arm=serving-scope workload=p45 a_b_bytes=0 b_c_bytes=0 backward=0 optimizer_commits=0
+V1_FL_TP8_AB_CLASSIFICATION verdict=FAIL outcome=ZERO_TIM_RECOVERED arm=serving-scope workload=p45 a_b_bytes=0 b_c_bytes=0 backward=0 optimizer_commits=0
+ok
+test_v1_fl_tp8_ab_consumer_contract (test_fl_tp8_ab_diagnostic.FrozenLakeTp8AbDiagnosticTest.test_v1_fl_tp8_ab_consumer_contract) ... ok
+test_any_real_alignment_fail_is_fatal (test_full_classifier.FullClassifierTest.test_any_real_alignment_fail_is_fatal) ... ok
+test_apc_on_is_fatal_for_an_apc_off_recipe (test_full_classifier.FullClassifierTest.test_apc_on_is_fatal_for_an_apc_off_recipe) ... ok
+test_direct_eval_cycle_timing_uses_explicit_enclosing_step (test_full_classifier.FullClassifierTest.test_direct_eval_cycle_timing_uses_explicit_enclosing_step) ... ok
+test_frozenlake_apc_off_requires_exact_runtime_marker (test_full_classifier.FullClassifierTest.test_frozenlake_apc_off_requires_exact_runtime_marker) ... ok
+test_frozenlake_contract_requires_eval_off (test_full_classifier.FullClassifierTest.test_frozenlake_contract_requires_eval_off) ... ok
+test_green_full_contract_and_excludes_profiled_step (test_full_classifier.FullClassifierTest.test_green_full_contract_and_excludes_profiled_step) ... ok
+test_gsm8k_rejects_frozenlake_p67_scope (test_full_classifier.FullClassifierTest.test_gsm8k_rejects_frozenlake_p67_scope) ... ok
+test_gsm8k_requires_observed_p63_fallback (test_full_classifier.FullClassifierTest.test_gsm8k_requires_observed_p63_fallback) ... ok
+test_incoherent_jax_cache_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_incoherent_jax_cache_receipt_is_fatal) ... ok
+test_incoherent_xprof_restore_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_incoherent_xprof_restore_receipt_is_fatal) ... ok
+test_m15_tito_defaults_off_and_accepts_explicit_exact (test_full_classifier.FullClassifierTest.test_m15_tito_defaults_off_and_accepts_explicit_exact) ... ok
+test_missing_first_update_precommit_is_fatal (test_full_classifier.FullClassifierTest.test_missing_first_update_precommit_is_fatal) ... ok
+test_missing_jax_cache_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_jax_cache_receipt_is_fatal) ... ok
+test_missing_p59_head_partition_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p59_head_partition_receipt_is_fatal) ... ok
+test_missing_p59_local_fused_linear_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p59_local_fused_linear_receipt_is_fatal) ... ok
+test_missing_p59_rpa_local_kv_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p59_rpa_local_kv_receipt_is_fatal) ... ok
+test_missing_p63_update_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_p63_update_receipt_is_fatal) ... ok
+test_missing_profile_artifact_is_fatal (test_full_classifier.FullClassifierTest.test_missing_profile_artifact_is_fatal) ... ok
+test_missing_xprof_restore_receipt_is_fatal (test_full_classifier.FullClassifierTest.test_missing_xprof_restore_receipt_is_fatal) ... ok
+test_over_threshold_first_update_precommit_is_fatal (test_full_classifier.FullClassifierTest.test_over_threshold_first_update_precommit_is_fatal) ... ok
+test_p57_first_diff_debug_is_armed_only_on_success_without_a_dump (test_full_classifier.FullClassifierTest.test_p57_first_diff_debug_is_armed_only_on_success_without_a_dump) ... ok
+test_p57_tito_accepts_exact_p45_and_m15_and_rejects_cross_labels (test_full_classifier.FullClassifierTest.test_p57_tito_accepts_exact_p45_and_m15_and_rejects_cross_labels) ... ok
+test_p57_tito_rejects_mixed_selectors_and_unselected_receipts (test_full_classifier.FullClassifierTest.test_p57_tito_rejects_mixed_selectors_and_unselected_receipts) ... ok
+test_p63_nonfinite_or_wrong_max_norm_is_fatal (test_full_classifier.FullClassifierTest.test_p63_nonfinite_or_wrong_max_norm_is_fatal) ... ok
+test_recipe_shape_contracts_cover_dp16_and_dp8 (test_full_classifier.FullClassifierTest.test_recipe_shape_contracts_cover_dp16_and_dp8) ... ok
+test_wrong_jax_cache_bucket_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_jax_cache_bucket_is_fatal) ... ok
+test_wrong_p59_head_shape_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_head_shape_is_fatal) ... ok
+test_wrong_p59_local_chunks_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_local_chunks_is_fatal) ... ok
+test_wrong_p59_local_fused_linear_shape_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_local_fused_linear_shape_is_fatal) ... ok
+test_wrong_p59_rpa_local_kv_shape_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_p59_rpa_local_kv_shape_is_fatal) ... ok
+test_wrong_profile_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_profile_is_fatal) ... ok
+test_wrong_xprof_gcs_path_is_fatal (test_full_classifier.FullClassifierTest.test_wrong_xprof_gcs_path_is_fatal) ... ok
+test_both_arms_share_one_capsule_and_fp64_oracle (test_gsm_fixed_replay_contract.GsmFixedReplayContractTest.test_both_arms_share_one_capsule_and_fp64_oracle) ... ok
+test_pinned_image_executes_forced_cpu_dp16_tp4 (test_gsm_fixed_replay_contract.GsmFixedReplayContractTest.test_pinned_image_executes_forced_cpu_dp16_tp4) ... ok
+test_script_is_syntactically_valid_and_freezes_exact_topology (test_gsm_fixed_replay_contract.GsmFixedReplayContractTest.test_script_is_syntactically_valid_and_freezes_exact_topology) ... ok
+test_restore_hit_emits_and_persists_exact_receipt (test_jax_cache_sync.JaxCacheSyncTest.test_restore_hit_emits_and_persists_exact_receipt) ... ok
+test_save_runs_before_fail_closed_postflight (test_jax_cache_sync.JaxCacheSyncTest.test_save_runs_before_fail_closed_postflight) ... ok
+test_transport_error_is_visible_but_not_a_numerical_gate (test_jax_cache_sync.JaxCacheSyncTest.test_transport_error_is_visible_but_not_a_numerical_gate) ... ok
+test_classifier_accepts_only_complete_finite_no_commit_carrier (test_numeric_debug.NumericDebugTest.test_classifier_accepts_only_complete_finite_no_commit_carrier) ... ok
+test_classifier_localizes_nonfinite_and_finite_naive_overflow (test_numeric_debug.NumericDebugTest.test_classifier_localizes_nonfinite_and_finite_naive_overflow) ... ok
+test_classifier_rejects_alignment_scale_and_optimizer_violations (test_numeric_debug.NumericDebugTest.test_classifier_rejects_alignment_scale_and_optimizer_violations) ... ok
+test_classifier_rejects_or_downgrades_truncated_evidence (test_numeric_debug.NumericDebugTest.test_classifier_rejects_or_downgrades_truncated_evidence) ... ok
+test_classifier_rejects_unknown_or_wrong_text_markers (test_numeric_debug.NumericDebugTest.test_classifier_rejects_unknown_or_wrong_text_markers) ... ok
+test_classifier_requires_all_completion_seams (test_numeric_debug.NumericDebugTest.test_classifier_requires_all_completion_seams) ... ok
+test_cluster_postflight_persists_and_classifies_full_p62_log (test_numeric_debug.NumericDebugTest.test_cluster_postflight_persists_and_classifies_full_p62_log) ... ok
+test_profile_resolves_only_from_exact_renderer_tuple (test_numeric_debug.NumericDebugTest.test_profile_resolves_only_from_exact_renderer_tuple) ... P62_NUMERIC_RENDER_PASS jobset=canon-p62-gsm8k-num-p62a-aaaaaaaa sha256=599c75bd61d771886f1fa5dd34ab71da6e6cf61b9c788768620c980139be957b optimizer_commits=0
+ok
+test_renderer_is_strict_zero_commit_and_default_full_identity_off (test_numeric_debug.NumericDebugTest.test_renderer_is_strict_zero_commit_and_default_full_identity_off) ... P62_NUMERIC_RENDER_PASS jobset=canon-p62-gsm8k-num-p62a-aaaaaaaa sha256=599c75bd61d771886f1fa5dd34ab71da6e6cf61b9c788768620c980139be957b optimizer_commits=0
+ok
+test_capsule_gcs_transport_round_trip_and_hash_negative (test_p64_numeric_debug.P64NumericDebugTest.test_capsule_gcs_transport_round_trip_and_hash_negative) ... ok
+test_capsule_round_trip_and_model_binding_are_fail_closed (test_p64_numeric_debug.P64NumericDebugTest.test_capsule_round_trip_and_model_binding_are_fail_closed) ... [P64.CAPSULE] capture_ready path=/tmp/tmpak_c1of4/p64_training_capsule.npz sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 rows=256 arrays=17 logical_bytes=20977664 certification=strict-prealignment-source
+[P64.CAPSULE] model_bound mode=capture capsule_sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 binding_sha256=e4fc9746d97b18f8eec2002c8c76030a880f9c6a2299e49ca813f5f8aa6e98df model_fingerprint_sha256=843dbd838ac8acd358cd2578f731f167784f5401add62460ee143e30a8efbb82 sampled_model=1
+[P64.CAPSULE] diagnostic_replay_ready path=/tmp/tmpak_c1of4/p64_training_capsule.npz sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 rows=256 capture_run=p64-unit capture_source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa replay_source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb rollout=skipped rescore_b=skipped certification=0
+[P64.CAPSULE] model_verified mode=replay capsule_sha256=db6fd3fd8f1c62543d4922fb4ebdef1e5b765f1289e1e8bbf96864ab395cf8b5 binding_sha256=e4fc9746d97b18f8eec2002c8c76030a880f9c6a2299e49ca813f5f8aa6e98df model_fingerprint_sha256=843dbd838ac8acd358cd2578f731f167784f5401add62460ee143e30a8efbb82 sampled_model=1
+ok
+test_classifier_accepts_complete_finite_group0_and_group31 (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_accepts_complete_finite_group0_and_group31) ... ok
+test_classifier_accepts_fail_closed_at_loss_boundary (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_accepts_fail_closed_at_loss_boundary) ... ok
+test_classifier_accepts_group0_only_diagnostic_replay (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_accepts_group0_only_diagnostic_replay) ... ok
+test_classifier_localizes_rank1_engine_vjp (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_localizes_rank1_engine_vjp) ... ok
+test_classifier_rejects_missing_input_boundary_and_optimizer_activity (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_rejects_missing_input_boundary_and_optimizer_activity) ... ok
+test_classifier_rejects_receipt_after_first_nonfinite (test_p64_numeric_debug.P64NumericDebugTest.test_classifier_rejects_receipt_after_first_nonfinite) ... ok
+test_dp_workload_rejects_neighboring_geometry (test_p64_numeric_debug.P64NumericDebugTest.test_dp_workload_rejects_neighboring_geometry) ... ok
+test_renderer_and_profile_lock_exact_zero_commit_geometry (test_p64_numeric_debug.P64NumericDebugTest.test_renderer_and_profile_lock_exact_zero_commit_geometry) ... P64_P45_NUMERIC_RENDER_PASS jobset=canon-p64-p45-num-p64a-aaaaaaaa sha256=f1d121baade2ace1d91109e3a86806f26e103119f4b14ba6c2f09c22c21a08d2 capsule_mode=capture optimizer_commits=0
+P64_P45_NUMERIC_RENDER_PASS jobset=canon-p64-p45-num-p64-replay-a-bbbbbbbb sha256=3f8da55ab9c6ca456df96095b799710ffb88e43faa0eb4ea53b4aa02c6a0e092 capsule_mode=replay optimizer_commits=0
+ok
+test_runner_persists_and_classifies_p64_full_log (test_p64_numeric_debug.P64NumericDebugTest.test_runner_persists_and_classifies_p64_full_log) ... ok
+test_both_exact_changes_only_the_two_selector_entries (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_both_exact_changes_only_the_two_selector_entries) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpe0vsw9jx/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpe0vsw9jx/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpe0vsw9jx/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpe0vsw9jx/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpe0vsw9jx/legacy
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpe0vsw9jx/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpe0vsw9jx/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpe0vsw9jx/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpe0vsw9jx/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpe0vsw9jx/both-exact
+ok
+test_both_manifests_pass_real_env_resolution (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_both_manifests_pass_real_env_resolution) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp4ecwptna/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp4ecwptna/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp4ecwptna/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp4ecwptna/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp4ecwptna/rendered
+ok
+test_closed_selector_routes_exact_tito_to_each_requested_workload (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_closed_selector_routes_exact_tito_to_each_requested_workload) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp7lia_6ln/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp7lia_6ln/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp7lia_6ln/legacy
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/p45-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/p45-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp7lia_6ln/p45-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp7lia_6ln/p45-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp7lia_6ln/p45-exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/m15-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/m15-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp7lia_6ln/m15-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp7lia_6ln/m15-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp7lia_6ln/m15-exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp7lia_6ln/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp7lia_6ln/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp7lia_6ln/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp7lia_6ln/both-exact
+ok
+test_exact_selector_rejects_malformed_mixed_and_foreign_runtime (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_exact_selector_rejects_malformed_mixed_and_foreign_runtime) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpok0qqrk4/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpok0qqrk4/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpok0qqrk4/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpok0qqrk4/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpok0qqrk4/rendered
+ok
+test_explicit_exact_tito_changes_only_m15 (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_explicit_exact_tito_changes_only_m15) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvyp9iym_/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvyp9iym_/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpvyp9iym_/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpvyp9iym_/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpvyp9iym_/rendered
+ok
+test_first_diff_debug_changes_only_selected_exact_arms (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_first_diff_debug_changes_only_selected_exact_arms) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpl97obiif/exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpl97obiif/exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpl97obiif/exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpl97obiif/exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpl97obiif/exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpl97obiif/debug/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpl97obiif/debug/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpl97obiif/debug/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1b492b42ede91d58233ef6cbe8ba67ceddd8ba09dd50bc631fc9eca22713e6be
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpl97obiif/debug/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=6a3ea7641dec452a56bf707b44d03c575960a9f8332549fe3c09fdc238dd685c
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpl97obiif/debug
+ok
+test_record_full_is_explicit_on_both_exact_arms_and_derives_gcs (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_record_full_is_explicit_on_both_exact_arms_and_derives_gcs) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpsxwczuah/record-full/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpsxwczuah/record-full/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpsxwczuah/record-full/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=39d9838e3aba85753a95e79eecc043b5cc4baf0c07fbdb85ecc3d0cd240f80a1
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpsxwczuah/record-full/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=ead52786b3f88b58bd27dba9a2fdfc1a9675f418e5db5867598443464d46afc8
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpsxwczuah/record-full
+ok
+test_refuses_reused_output_and_duplicate_ids (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_refuses_reused_output_and_duplicate_ids) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpcqwsuox8/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpcqwsuox8/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpcqwsuox8/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpcqwsuox8/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpcqwsuox8/rendered
+ok
+test_renders_exactly_two_scoped_full_recipes_without_topology_drift (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_renders_exactly_two_scoped_full_recipes_without_topology_drift) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp9wyh439v/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp9wyh439v/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp9wyh439v/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp9wyh439v/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp9wyh439v/rendered
+ok
+test_selector_rejects_unknown_and_alias_conflict (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_selector_rejects_unknown_and_alias_conflict) ... ok
+test_wrapper_is_render_only_and_emits_two_unpiped_launch_commands (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_wrapper_is_render_only_and_emits_two_unpiped_launch_commands) ... ok
+test_wrong_profile_and_partial_scope_are_rejected (test_p67_frozenlake_two_full_renderer.P67FrozenLakeTwoFullRendererTest.test_wrong_profile_and_partial_scope_are_rejected) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpmuozh43o/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpmuozh43o/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpmuozh43o/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpmuozh43o/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpmuozh43o/rendered
+ok
+test_exports_only_target_and_only_newest_committed_step (test_profile_window.ProfileWindowTest.test_exports_only_target_and_only_newest_committed_step) ... [V1.PERFETTO] captured training_step=2 timelines=1
+ok
+test_rejects_negative_target (test_profile_window.ProfileWindowTest.test_rejects_negative_target) ... ok
+test_exact_python_readers_use_hybrid_transform (test_stable_clip_contract.StableClipContractTest.test_exact_python_readers_use_hybrid_transform) ... ok
+test_only_registered_full_profile_family_enables_p63 (test_stable_clip_contract.StableClipContractTest.test_only_registered_full_profile_family_enables_p63) ... ok
+test_postflight_and_exact_image_require_p63 (test_stable_clip_contract.StableClipContractTest.test_postflight_and_exact_image_require_p63) ... ok
+test_all_three_pass_real_env_resolution_and_partial_bundle_fails (test_three_full_renderer.ThreeFullRendererTest.test_all_three_pass_real_env_resolution_and_partial_bundle_fails) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdwser7ww/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdwser7ww/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpdwser7ww/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpdwser7ww/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpdwser7ww/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpdwser7ww/rendered
+ok
+test_exact_image_gate_imports_the_mounted_workspace (test_three_full_renderer.ThreeFullRendererTest.test_exact_image_gate_imports_the_mounted_workspace) ... ok
+test_gsm8k_p74_wrapper_renders_one_job_and_never_launches (test_three_full_renderer.ThreeFullRendererTest.test_gsm8k_p74_wrapper_renders_one_job_and_never_launches) ... V1_HP_GSM8K_P74_MANIFEST_PASS path=/tmp/tmp0hjl5zzx/gsm8k-p74/jobset-v1-hp-gsm8k-dp16tp4-p74.yaml sha256=82e8f761dcbdeff4a022f911f37de0a4988375e171c8d2182599dbb546b2f07e source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ok
+test_p57_high_performance_rejects_nonzero_or_short_job (test_three_full_renderer.ThreeFullRendererTest.test_p57_high_performance_rejects_nonzero_or_short_job) ... ok
+test_p63_rejects_neighboring_stock_profile (test_three_full_renderer.ThreeFullRendererTest.test_p63_rejects_neighboring_stock_profile) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpgicrio04/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpgicrio04/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpgicrio04/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpgicrio04/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpgicrio04/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpgicrio04/rendered
+ok
+test_profiles_resolve_complete_workload_scoped_bundle (test_three_full_renderer.ThreeFullRendererTest.test_profiles_resolve_complete_workload_scoped_bundle) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmpducs1_p5/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpducs1_p5/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmpducs1_p5/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmpducs1_p5/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmpducs1_p5/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmpducs1_p5/rendered
+ok
+test_refuses_reused_output_and_duplicate_ids (test_three_full_renderer.ThreeFullRendererTest.test_refuses_reused_output_and_duplicate_ids) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp_hzbxa35/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp_hzbxa35/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmp_hzbxa35/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmp_hzbxa35/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmp_hzbxa35/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmp_hzbxa35/rendered
+ok
+test_renders_one_strict_and_two_frozenlake_warning_full_recipes (test_three_full_renderer.ThreeFullRendererTest.test_renders_one_strict_and_two_frozenlake_warning_full_recipes) ... [P57.JOBSET] RENDERED arm=zero path=/tmp/tmp79o854zb/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp79o854zb/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_HP_MANIFEST_PASS recipe=gsm8k path=/tmp/tmp79o854zb/rendered/gsm8k/jobset-v1-hp-gsm8k-full.yaml sha256=c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d
+V1_HP_MANIFEST_PASS recipe=p45 path=/tmp/tmp79o854zb/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0
+V1_HP_MANIFEST_PASS recipe=m15 path=/tmp/tmp79o854zb/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796
+V1_HP_THREE_FULL_RENDER_PASS manifests=3 output=/tmp/tmp79o854zb/rendered
+ok
+test_wave_wrapper_is_render_only_and_binds_clean_head (test_three_full_renderer.ThreeFullRendererTest.test_wave_wrapper_is_render_only_and_binds_clean_head) ... ok
+test_complete_capture_restores_both_artifact_types (test_xprof_gcs_sync.XprofGcsSyncTest.test_complete_capture_restores_both_artifact_types) ... ok
+test_missing_trace_is_fail_closed_and_preserved (test_xprof_gcs_sync.XprofGcsSyncTest.test_missing_trace_is_fail_closed_and_preserved) ... ok
+test_run_restores_before_full_classifier (test_xprof_gcs_sync.XprofGcsSyncTest.test_run_restores_before_full_classifier) ... ok
+test_transport_error_is_fail_closed (test_xprof_gcs_sync.XprofGcsSyncTest.test_transport_error_is_fail_closed) ... ok
+test_wrong_remote_identity_is_rejected_before_transport (test_xprof_gcs_sync.XprofGcsSyncTest.test_wrong_remote_identity_is_rejected_before_transport) ... ok
+
+----------------------------------------------------------------------
+Ran 102 tests in 9.738s
+
+OK
+V1_HP_THREE_FULL_CPU_PASS manifests=3 strict=1 frozenlake_ab_warning=2 xprof=3
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.064s
+
+OK
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.013s
+
+OK
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.014s
+
+OK
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.591s
+
+OK
+.............[P38_OBSERVER_ROUND_BUDGET] label=seam round=0 records=17 bytes=1234
+[P38_OBSERVER_ROUND_BUDGET] label=seam round=1 records=17 bytes=0
+..........
+----------------------------------------------------------------------
+Ran 23 tests in 1.410s
+
+OK
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 2.529s
+
+OK
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.037s
+
+OK
+[M15.E0.KV3.RETURN] SALVAGE_FIRST_TEST_PASS missing_root=preserved partial_exit=3 terminal_pair=PASS gcs_write=0
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.864s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.003s
+
+OK
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.005s
+
+OK
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.014s
+
+OK
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+OK
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.060s
+
+OK
+.......................
+----------------------------------------------------------------------
+Ran 23 tests in 0.170s
+
+OK
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.058s
+
+OK
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.396s
+
+OK
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.294s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.054s
+
+OK
+..........[CANON_P38] ROUND_SEAL_REQUESTED round=0 request=/tmp/tmpvop4toji/requests/round-000000.request
+.
+----------------------------------------------------------------------
+Ran 11 tests in 0.059s
+
+OK
+[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit m15_round_stage_failure=durable m15_stage_upload_failure=fail_closed m15_worker_rounds=3 m15_worker_failure=fail_fast m15_e0_three_round=sealed-classified-readback m15_e0_round2_failure=rounds0_1_preserved p58_three_round_collection=verified p58_missing_selector=rejected source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected
+V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 frozenlake_system_optimization=1 frozenlake_ab_warning=2 m15_token=1 frozenlake_tito_impl=2 frozenlake_tito_selector=closed frozenlake_tito_summary=1 frozenlake_tito_debug=1 frozenlake_tito_capsule_integrity=1 frozenlake_tito_engine_witness=1 frozenlake_tito_collect64=1 frozenlake_tito_record_full=1 frozenlake_tito_gcs=1 frozenlake_tito_default=legacy p32_empty_completion=2 apc_m15_carrier=74 m15_d3e=1 m15_e0=30 m15_e0_kv3=3 m15_e0_kv3_return=1 m15_e0u_round0_recovery=8 m15_e0v_tito=7 m15_e0v_onehost_arm=5 m15_e0v_onehost_pair=5 m15_e0v_onehost_runner=3 m15_e0w5_recovery=5 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3

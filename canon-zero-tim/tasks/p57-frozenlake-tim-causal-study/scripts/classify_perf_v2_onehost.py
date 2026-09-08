@@ -46,6 +46,8 @@ def classify(
     update_path: Path,
     semantic_path: Path,
     docker_exit: int,
+    neutrality_arm: str = "standard",
+    tito_state: Path | None = None,
 ) -> dict[str, Any]:
   reasons: list[str] = []
 
@@ -70,6 +72,15 @@ def classify(
   require(alignment_path.is_file(), "missing_alignment")
   require(update_path.is_file(), "missing_updates")
   require(semantic_path.is_file(), "missing_semantic")
+  require(
+      neutrality_arm in ("standard", "tito-off", "tito-on"),
+      f"neutrality_arm={neutrality_arm}",
+  )
+  if neutrality_arm != "standard":
+    require(
+        raw.count(f"neutrality_arm={neutrality_arm}") == 1,
+        "neutrality_arm_marker",
+    )
 
   require(docker_exit == 0, f"docker_exit={docker_exit}")
   require(
@@ -167,6 +178,74 @@ def classify(
       "semantic.reference_inference_unexpected",
   )
 
+  tito_evidence: dict[str, Any] = {}
+  if neutrality_arm != "standard":
+    require(tito_state is not None, "tito_state_argument")
+    state = tito_state if tito_state is not None else Path("/")
+    witness_root = state / "p57_tito_witness"
+    if neutrality_arm == "tito-off":
+      require(not witness_root.exists(), "tito_off_witness_leak")
+      require(
+          "[P57.TITO.FIRST_UPDATE_TOKEN_GATE]" not in raw,
+          "tito_off_first_update_gate_leak",
+      )
+    else:
+      writer_path = witness_root / "single-writer.json"
+      summary_path = witness_root / "full-record-summary.json"
+      sidecars = sorted((witness_root / "update-sidecars").glob("step-*.npz"))
+      try:
+        writer = json.loads(writer_path.read_text(encoding="utf-8"))
+      except (OSError, json.JSONDecodeError):
+        writer = {}
+      try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+      except (OSError, json.JSONDecodeError):
+        summary = {}
+      require(
+          writer.get("schema") == "canon.p57-tito-single-writer.v1"
+          and writer.get("status") == "PASS"
+          and writer.get("workload") == "p45"
+          and writer.get("dp") == 1
+          and writer.get("tp") == 4
+          and writer.get("neutrality_arm") == "on"
+          and writer_path.is_file()
+          and not writer_path.is_symlink()
+          and writer_path.stat().st_mode & 0o077 == 0,
+          "tito_on_single_writer",
+      )
+      require(
+          [path.name for path in sidecars]
+          == [f"step-{step:06d}.npz" for step in range(3)],
+          "tito_on_sidecar_inventory",
+      )
+      require(
+          summary.get("schema") == "canon.p57-tito-full-record.v1"
+          and summary.get("workload") == "p45"
+          and summary.get("dp") == 1
+          and summary.get("tp") == 4
+          and summary.get("expected_updates") == 3
+          and summary.get("optimizer_commits") == 3
+          and summary.get("global_updates") == 3
+          and summary.get("checkpoint_writes") == 0,
+          "tito_on_summary",
+      )
+      require(
+          raw.count(
+              "[P57.TITO.FIRST_UPDATE_TOKEN_GATE] PASS step=0"
+          ) == 1,
+          "tito_on_first_update_gate",
+      )
+      require(
+          not (witness_root / "actor-snapshot-requests").exists()
+          and not (witness_root / "actor-snapshot-receipts").exists(),
+          "tito_on_snapshot_leak",
+      )
+      tito_evidence = {
+          "writer_sha256": _sha256(writer_path) if writer_path.is_file() else None,
+          "sidecars": len(sidecars),
+          "summary_sha256": _sha256(summary_path) if summary_path.is_file() else None,
+      }
+
   return {
       "schema": "p57-perf-v2-onehost-g4-v1",
       "verdict": "PASS" if not reasons else "FAIL",
@@ -180,6 +259,8 @@ def classify(
           row.get("verdict") != "PASS" for row in alignments
       ),
       "semantic_event_counts": counts,
+      "neutrality_arm": neutrality_arm,
+      "tito_evidence": tito_evidence,
       "sha256": {
           name: _sha256(path)
           for name, path in (
@@ -202,6 +283,12 @@ def main() -> int:
   parser.add_argument("--semantic", required=True, type=Path)
   parser.add_argument("--docker-exit", required=True, type=int)
   parser.add_argument("--output", required=True, type=Path)
+  parser.add_argument(
+      "--neutrality-arm",
+      choices=("standard", "tito-off", "tito-on"),
+      default="standard",
+  )
+  parser.add_argument("--tito-state", type=Path)
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite {args.output}")
@@ -211,6 +298,8 @@ def main() -> int:
       update_path=args.updates,
       semantic_path=args.semantic,
       docker_exit=args.docker_exit,
+      neutrality_arm=args.neutrality_arm,
+      tito_state=args.tito_state,
   )
   args.output.write_text(
       json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"

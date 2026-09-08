@@ -8,6 +8,8 @@ set -uo pipefail
 source "$CANON_STATE/env.sh"
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
+source "$CANON_PKG/cluster/steps/p57_training_geometry.sh"
+p57_training_geometry_init || exit 1
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/jax_cache_sync_lib.sh"
 # shellcheck disable=SC1091
@@ -101,6 +103,58 @@ p38_request_live_action() {
   echo "[run] FATAL: timed out waiting for P38 live-worker action: $action" >&2
   return 2
 }
+
+p57_stop_tito_gcs_worker() {
+  if [ -z "${p57_tito_gcs_pid:-}" ]; then
+    return 0
+  fi
+  mkdir -p "$(dirname -- "$CANON_P57_TITO_GCS_STOP_FILE")"
+  touch "$CANON_P57_TITO_GCS_STOP_FILE"
+  p57_tito_gcs_rc=0
+  wait "$p57_tito_gcs_pid" || p57_tito_gcs_rc=$?
+  cat "$CANON_P57_TITO_GCS_WORKER_LOG" || true
+  echo "[P57.TITO.GCS] WORKER_JOINED rc=$p57_tito_gcs_rc"
+  p57_tito_gcs_pid=""
+  return 0
+}
+
+p57_finalize_tito_gcs_worker() {
+  local unused
+  if [ -z "${p57_tito_gcs_pid:-}" ]; then
+    echo "[run] FATAL: P57 TiTO GCS worker is not running" >&2
+    return 2
+  fi
+  if [ -e "$CANON_P57_TITO_GCS_FINALIZE_FILE" ] || \
+     [ -e "$CANON_P57_TITO_GCS_FINAL_ACK" ]; then
+    echo "[run] FATAL: repeated P57 TiTO GCS finalization" >&2
+    return 2
+  fi
+  (umask 077; printf 'action=finalize\n' > "$CANON_P57_TITO_GCS_FINALIZE_FILE")
+  for unused in $(seq 1 900); do
+    if [ -s "$CANON_P57_TITO_GCS_FINAL_ACK" ]; then
+      if [ "$(cat "$CANON_P57_TITO_GCS_FINAL_ACK")" != \
+           "action=finalize status=PASS" ]; then
+        echo "[run] FATAL: malformed P57 TiTO GCS final acknowledgement" >&2
+        return 2
+      fi
+      echo "[P57.TITO.GCS] FINAL_ACKNOWLEDGED"
+      return 0
+    fi
+    if ! kill -0 "$p57_tito_gcs_pid" 2>/dev/null; then
+      echo "[run] FATAL: P57 TiTO GCS worker exited before final acknowledgement" >&2
+      cat "$CANON_P57_TITO_GCS_WORKER_LOG" >&2 || true
+      return 2
+    fi
+    sleep 1
+  done
+  echo "[run] FATAL: P57 TiTO GCS finalization timed out" >&2
+  return 2
+}
+
+canon_stop_background_workers() {
+  p57_stop_tito_gcs_worker
+  p38_stop_live_worker
+}
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
    [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ]; then
   if ! p57_is_nontraining_runtime; then
@@ -113,7 +167,11 @@ fi
 : "${CANON_RUN_CMD:?CANON_RUN_CMD unset -- nothing to run}"
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
 if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
-  report_keys=(CANON_RUN_LOG CANON_PRE_ALIGN_REPORT CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
+  if [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ]; then
+    report_keys=(CANON_RUN_LOG)
+  else
+    report_keys=(CANON_RUN_LOG CANON_PRE_ALIGN_REPORT CANON_ALIGN_REPORT CANON_UPDATE_REPORT)
+  fi
   if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     report_keys+=(CANON_P34_WEIGHT_REPORT)
     if [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
@@ -218,6 +276,51 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
     fi
   fi
 fi
+if [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ] || \
+   [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "record-full" ]; then
+  for p57_tito_control in \
+      "$CANON_P57_TITO_GCS_READY" \
+      "$CANON_P57_TITO_GCS_STOP_FILE" \
+      "$CANON_P57_TITO_GCS_FINALIZE_FILE" \
+      "$CANON_P57_TITO_GCS_FINAL_ACK" \
+      "$CANON_P57_TITO_GCS_HEARTBEAT" \
+      "$CANON_P57_TITO_GCS_WORKER_LOG"; do
+    if [ -e "$p57_tito_control" ]; then
+      echo "[run] FATAL: stale P57 TiTO GCS worker state" >&2
+      exit 1
+    fi
+  done
+  mkdir -p "$(dirname -- "$CANON_P57_TITO_GCS_WORKER_LOG")"
+  nice -n 10 bash "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/p57_tito_gcs_worker.sh" \
+    > "$CANON_P57_TITO_GCS_WORKER_LOG" 2>&1 &
+  p57_tito_gcs_pid=$!
+  trap 'canon_stop_background_workers' EXIT
+  echo "[P57.TITO.GCS] WORKER_LAUNCHED pid=$p57_tito_gcs_pid"
+  p57_tito_gcs_ready=0
+  for p57_tito_wait in $(seq 1 60); do
+    if [ -s "$CANON_P57_TITO_GCS_READY" ]; then
+      if [ "$(cat "$CANON_P57_TITO_GCS_READY")" != \
+           "action=ready status=PASS" ]; then
+        echo "[run] FATAL: malformed P57 TiTO GCS ready acknowledgement" >&2
+        exit 1
+      fi
+      p57_tito_gcs_ready=1
+      break
+    fi
+    if ! kill -0 "$p57_tito_gcs_pid" 2>/dev/null; then
+      echo "[run] FATAL: P57 TiTO GCS worker exited before readiness" >&2
+      cat "$CANON_P57_TITO_GCS_WORKER_LOG" >&2 || true
+      exit 1
+    fi
+    sleep 1
+  done
+  if [ "$p57_tito_gcs_ready" != "1" ]; then
+    echo "[run] FATAL: P57 TiTO GCS worker readiness timed out" >&2
+    exit 1
+  fi
+  unset p57_tito_gcs_ready p57_tito_wait
+  echo "[P57.TITO.GCS] READY_ACKNOWLEDGED"
+fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
     probe || {
@@ -251,7 +354,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
     > "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" 2>&1 &
   p38_live_pid=$!
-  trap 'p38_stop_live_worker' EXIT
+  trap 'canon_stop_background_workers' EXIT
   echo "[P38.GCS] LIVE_WORKER_LAUNCHED pid=$p38_live_pid"
 fi
 LOG_BASE="$LOG"
@@ -286,7 +389,7 @@ elif [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
     echo "[run] FATAL: P64 full-log seed requires its exact profile" >&2
     exit 1
   fi
-  p64_profile_receipt="[P64.NUMERIC] profile_resolved workload=frozenlake-dp8-tp8 dp=8 tp=8 stage=backward-no-commit optimizer_commits=0 capsule_mode=${CANON_P64_TRAINING_CAPSULE_MODE:-missing}"
+  p64_profile_receipt="[P64.NUMERIC] profile_resolved workload=${_p57_full_workload} dp=8 tp=8 stage=backward-no-commit optimizer_commits=0 capsule_mode=${CANON_P64_TRAINING_CAPSULE_MODE:-missing}"
   printf '%s\n' "$p64_profile_receipt" > "$LOG"
   echo "$p64_profile_receipt"
   run_tee_args=(-a "$LOG")
@@ -1124,7 +1227,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       p38_fixed_tp=4
       ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
+    ${_p57_full_profile_file}|\
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
       p38_fixed_endpoint=untied_lm_head
@@ -1160,25 +1264,28 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
     --output "$CANON_STATE/p38_fixed_lm_head_receipts.json"
   )
   case "${CANON_PROFILE_FILE:-}" in
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env)
+      p38_fixed_receipt_args+=(--request-only)
+      ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env)
       if [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
         p38_fixed_receipt_args+=(--request-only)
       else
-        p38_fixed_receipt_args+=(--learner-m 2048)
+        p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")
         if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
-          p38_fixed_receipt_args+=(--p59-local-dp-size 8)
+          p38_fixed_receipt_args+=(--p59-local-dp-size "$_p57_full_dp")
         fi
       fi
       ;;
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
+    ${_p57_full_profile_file}|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
-      p38_fixed_receipt_args+=(--learner-m 2048)
+      p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")
       if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
-        p38_fixed_receipt_args+=(--p59-local-dp-size 8)
+        p38_fixed_receipt_args+=(--p59-local-dp-size "$_p57_full_dp")
       fi
       ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env)
-      p38_fixed_receipt_args+=(--learner-m 2048)
+      p38_fixed_receipt_args+=(--learner-m "$_p57_full_global_m")
       ;;
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env|\
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env)
@@ -1190,7 +1297,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
   if [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
      ! { [ "${CANON_PROFILE_FILE:-}" = \
              "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
-         [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; }; then
+         [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; } && \
+     [ "${CANON_P57_RUN_KIND:-}" != "tito-diagnostic" ]; then
     p38_fixed_receipt_args+=(--require-vjp)
   fi
   if ! JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
@@ -1306,7 +1414,7 @@ if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && [ "$n_wandb" -ne 1 ]; then
 fi
 if [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ]; then
   case "${CANON_P32_WORKLOAD:-}" in
-    frozenlake|frozenlake-dp8-tp8) is_frozenlake=1 ;;
+    frozenlake|${_p57_full_workload}) is_frozenlake=1 ;;
     *) is_frozenlake=0 ;;
   esac
 fi
@@ -1732,7 +1840,26 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --output "$classification" || exit 1
   fi
 elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
-  if [ "${CANON_PROFILE_FILE:-}" = \
+  if [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ]; then
+    classification="$CANON_STATE/p57_tito_collection.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/classify_tito_collection.py" \
+        --state "$CANON_STATE" \
+        --output "$classification" || exit 1
+    class_sha="$(sha256sum "$classification" | awk '{print $1}')"
+    echo "[P57.TITO] EVIDENCE classification=$classification classification_sha256=$class_sha"
+    JAX_PLATFORMS=cpu python3 -c \
+      'import json,sys; print("[P57.TITO.CLASSIFICATION_JSON] "+json.dumps(json.load(open(sys.argv[1], encoding="utf-8")), sort_keys=True, separators=(",", ":")))' \
+      "$classification"
+    p57_finalize_tito_gcs_worker || exit 1
+    p57_stop_tito_gcs_worker
+    trap - EXIT
+    if [ "${p57_tito_gcs_rc:-1}" -ne 0 ]; then
+      echo "[run] FATAL: P57 TiTO GCS worker failed: rc=${p57_tito_gcs_rc:-unset}" >&2
+      exit 1
+    fi
+    echo "[P57.TITO] DIAGNOSTIC_COMPLETE backward=0 optimizer_commits=0 checkpoint_writes=0"
+  elif [ "${CANON_PROFILE_FILE:-}" = \
        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
      [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
     classification="$CANON_STATE/p57_${CANON_P57_TIM_ARM}_eval_${CANON_P57_EVAL_CHECKPOINT_STEP}.classification.json"
@@ -1761,7 +1888,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
     if { [ "${CANON_PROFILE_FILE:-}" = \
            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
          [ "${CANON_PROFILE_FILE:-}" = \
-           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; } && \
+           "${_p57_full_profile_file}" ]; } && \
        [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
       p57_eval_classification="$CANON_STATE/p57_inprocess_eval.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
@@ -1778,13 +1905,13 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       echo "[P57.EVAL] EVIDENCE classification=$p57_eval_classification classification_sha256=$p57_eval_class_sha"
     fi
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
-      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+      if [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ] && \
          [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ]; then
         p57_classifier_args+=(--alignment-warning-only 1 --p57-ab-only 1)
       else
         p57_classifier_args+=(--alignment-warning-only 0)
       fi
-      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; then
+      if [ "${CANON_P32_WORKLOAD:-}" = "${_p57_full_workload}" ]; then
         p57_classifier_args+=(--expected-updates "$CANON_P57_EXPECTED_UPDATES")
       fi
     elif [ "${CANON_PROFILE_FILE:-}" = \
@@ -1812,8 +1939,8 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
       case "${CANON_P32_WORKLOAD:-}:${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
         gsm8k::) v1_recipe=gsm8k ;;
-        frozenlake-dp8-tp8::) v1_recipe=p45 ;;
-        frozenlake-dp8-tp8:m15:main) v1_recipe=m15 ;;
+        ${_p57_full_workload}::) v1_recipe=p45 ;;
+        ${_p57_full_workload}:m15:main) v1_recipe=m15 ;;
         *)
           echo "[run] FATAL: unknown V1 high-performance recipe identity" >&2
           exit 1
@@ -1823,6 +1950,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
         python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py" \
           --recipe "$v1_recipe" \
+          --train-geometry "${CANON_P57_TRAIN_GEOMETRY:-dp8-tp8-b256}" \
           --state "$CANON_STATE" \
           --run-log "$LOG" \
           --update-report "$CANON_UPDATE_REPORT" \
@@ -1830,13 +1958,33 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
           --xprof-dir "$xprof_local_dir" \
           --xprof-receipt "$xprof_restore_receipt" \
           --output "$v1_classification" || exit 1
+      if [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "record-full" ]; then
+        p57_tito_full_classification="$CANON_STATE/p57_tito_full_record.classification.json"
+        JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+          python3 "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py" \
+            --state "$CANON_STATE" \
+            --recipe "$v1_recipe" \
+          --train-geometry "${CANON_P57_TRAIN_GEOMETRY:-dp8-tp8-b256}" \
+            --base-classification "$classification" \
+            --v1-classification "$v1_classification" \
+            --output "$p57_tito_full_classification" || exit 1
+        p57_tito_full_sha="$(sha256sum "$p57_tito_full_classification" | awk '{print $1}')"
+        echo "[P57.TITO.FULL_RECORD] EVIDENCE classification=$p57_tito_full_classification classification_sha256=$p57_tito_full_sha"
+        p57_finalize_tito_gcs_worker || exit 1
+        p57_stop_tito_gcs_worker
+        trap - EXIT
+        if [ "${p57_tito_gcs_rc:-1}" -ne 0 ]; then
+          echo "[run] FATAL: P57 TiTO GCS worker failed: rc=${p57_tito_gcs_rc:-unset}" >&2
+          exit 1
+        fi
+      fi
       unset v1_recipe
       unset v1_classification
     fi
     if [ "${CANON_PROFILE_FILE:-}" = \
          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
        [ "${CANON_PROFILE_FILE:-}" = \
-         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; then
+         "${_p57_full_profile_file}" ]; then
       class_sha="$(sha256sum "$classification" | awk '{print $1}')"
       echo "[P57.TRAIN] EVIDENCE classification=$classification classification_sha256=$class_sha"
       JAX_PLATFORMS=cpu python3 -c \

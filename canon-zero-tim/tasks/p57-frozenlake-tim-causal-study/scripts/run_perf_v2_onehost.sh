@@ -2,10 +2,18 @@
 # Run the P57.1c Perf v2 step-boundary gate on one direct-attached v5p host.
 set -euo pipefail
 
-label="${1:?usage: run_perf_v2_onehost.sh <unique-label>}"
+label="${1:?usage: run_perf_v2_onehost.sh <unique-label> [standard|tito-off|tito-on]}"
+neutrality_arm="${2:-standard}"
 case "$label" in
   *[!a-zA-Z0-9_-]*|'')
     echo "[P57.PERF_V2.ONEHOST] invalid label: $label" >&2
+    exit 2
+    ;;
+esac
+case "$neutrality_arm" in
+  standard|tito-off|tito-on) ;;
+  *)
+    echo "[P57.PERF_V2.ONEHOST] invalid neutrality arm: $neutrality_arm" >&2
     exit 2
     ;;
 esac
@@ -34,6 +42,7 @@ perf_dir="$root/perf"
 semantic="$root/semantic.json"
 result="$root/classification.json"
 driver="$root/driver.log"
+tito_state="$root/tito-state"
 container="p57_perf_v2_${label}"
 timeout_seconds="${P57_PERF_V2_ONEHOST_TIMEOUT_SECONDS:-3600}"
 
@@ -72,8 +81,43 @@ if [ -e "$root" ]; then
 fi
 mkdir -p "$root/wandb" "$root/logs" "$perf_dir"
 
+tito_env=()
+tito_cli=()
+if [ "$neutrality_arm" != standard ]; then
+  mkdir -p "$tito_state"
+  tito_env=(
+    -e CANON_P57_TOKEN_CONTINUITY=exact
+    -e CANON_P57_TITO_ONEHOST_NEUTRALITY="${neutrality_arm#tito-}"
+    -e CANON_V1_HP_FULL=0
+    -e CANON_P57_TIM_ARM=zero
+    -e CANON_P57_RUN_KIND=train
+    -e CANON_P57_EXPECTED_UPDATES=3
+    -e CANON_P57_STOP_AFTER_STEP=3
+    -e CANON_P57_WORKLOAD_CANDIDATE=
+    -e CANON_P57_DATA_SPLIT=
+    -e CANON_P33_RUN_STAGE=full
+    -e CANON_P33_NO_COMMIT=0
+    -e CANON_P33_ENABLE_EVAL=0
+    -e CANON_P33_DISABLE_EVAL=1
+    -e CANON_P31_ENABLE_EVAL=0
+    -e CANON_FROZENLAKE_CKPT_MODE=disabled
+    -e CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0
+    -e CANON_VLLM_ENABLE_PREFIX_CACHING=0
+    -e CANON_EXPECT_COMMIT="$source_sha"
+    -e CANON_CLIENT_IMAGE="$image_id"
+    -e CANON_STATE="$tito_state"
+    -e CANON_PRE_ALIGN_REPORT="$tito_state/pre_alignment.jsonl"
+  )
+  tito_cli+=(--max_steps=3)
+  if [ "$neutrality_arm" = tito-on ]; then
+    tito_env+=(
+      -e CANON_P57_TOKEN_CONTINUITY_DEBUG=record-full
+    )
+  fi
+fi
+
 {
-  echo "[P57.PERF_V2.ONEHOST] source=$source_sha diff_sha256=$diff_sha"
+  echo "[P57.PERF_V2.ONEHOST] source=$source_sha diff_sha256=$diff_sha neutrality_arm=$neutrality_arm"
   echo "[P57.PERF_V2.ONEHOST] image_id=$image_id"
   echo "[P57.PERF_V2.ONEHOST] topology=DP1xTP4 model=Qwen3-8B trajectories=8 microbatches=4 updates=3 concurrency=2"
   echo "[P57.PERF_V2.ONEHOST] perf_target_step=2 strict_alignment=1 placement=device-resident timeout_seconds=$timeout_seconds"
@@ -137,6 +181,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P30_POST_COMMIT_GC=0 -e CANON_P30_DONATE_MODEL=0 \
   -e CANON_P30_SHARDING_PROFILE=1 -e CANON_P30_RESHARD_ACCUMULATOR=1 \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e FL_SHARED_MESH=1,4 \
+  "${tito_env[@]}" \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e CANON_RPA_D=128,512,128,512 -e CANON_RPA_P=128,512,128,512 \
   -e CANON_RPA_M=128,512,128,512 -e MIN_TOKEN_BUCKET=256 \
@@ -172,7 +217,8 @@ PY
       --num_generations=2 --max_prompt_length=2048 \\
       --max_response_length=64 --max_concurrency=2 \\
       --vllm_max_num_seqs=2 --vllm_max_num_batched_tokens=256 \\
-      --env_max_steps=2 --beta=0 --temperature=0.7 --top_k=0 --top_p=1.0
+      --env_max_steps=2 --beta=0 --temperature=0.7 --top_k=0 --top_p=1.0 \\
+      "${tito_cli[@]}"
   " >>"$raw" 2>&1 &
 docker_wait_pid=$!
 wait "$docker_wait_pid"
@@ -201,6 +247,7 @@ set +e
 python3 "$script_dir/classify_perf_v2_onehost.py" \
   --raw "$raw" --alignment "$align" --updates "$updates" \
   --semantic "$semantic" --docker-exit "$docker_rc" --output "$result" \
+  --neutrality-arm "$neutrality_arm" --tito-state "$tito_state" \
   >>"$driver" 2>&1
 classifier_rc=$?
 set -e

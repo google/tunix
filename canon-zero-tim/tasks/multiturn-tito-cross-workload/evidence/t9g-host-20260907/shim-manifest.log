@@ -1,0 +1,71 @@
+sha256sum: attn_iface_patched.py: No such file or directory
+attn_iface_patched.py: FAILED open or read
+sha256sum: canon_shim_root.py: No such file or directory
+canon_shim_root.py: FAILED open or read
+sha256sum: embed_patched.py: No such file or directory
+embed_patched.py: FAILED open or read
+sha256sum: linear_p22xf.py: No such file or directory
+linear_p22xf.py: FAILED open or read
+sha256sum: linear_p22xi.py: No such file or directory
+linear_p22xi.py: FAILED open or read
+sha256sum: linear_p22xk.py: No such file or directory
+linear_p22xk.py: FAILED open or read
+sha256sum: linear_patched.py: No such file or directory
+linear_patched.py: FAILED open or read
+sha256sum: p22_pallas_matmul.py: No such file or directory
+p22_pallas_matmul.py: FAILED open or read
+sha256sum: p22_pallas_rmsnorm.py: No such file or directory
+p22_pallas_rmsnorm.py: FAILED open or read
+sha256sum: p22_pallas_swiglu.py: No such file or directory
+p22_pallas_swiglu.py: FAILED open or read
+sha256sum: p22xg_contract.py: No such file or directory
+p22xg_contract.py: FAILED open or read
+sha256sum: p22xh_contract.py: No such file or directory
+p22xh_contract.py: FAILED open or read
+sha256sum: p22xi_contract.py: No such file or directory
+p22xi_contract.py: FAILED open or read
+sha256sum: p22xi_padded_matmul.py: No such file or directory
+p22xi_padded_matmul.py: FAILED open or read
+sha256sum: p22xj_contract.py: No such file or directory
+p22xj_contract.py: FAILED open or read
+sha256sum: p22xj_padded_swiglu.py: No such file or directory
+p22xj_padded_swiglu.py: FAILED open or read
+sha256sum: p22xk_contract.py: No such file or directory
+p22xk_contract.py: FAILED open or read
+sha256sum: p22xk_vjp_ops.py: No such file or directory
+p22xk_vjp_ops.py: FAILED open or read
+sha256sum: p38_fixed_lm_head.py: No such file or directory
+p38_fixed_lm_head.py: FAILED open or read
+sha256sum: p38_kv_fingerprint.py: No such file or directory
+p38_kv_fingerprint.py: FAILED open or read
+sha256sum: p38_seam_capture.py: No such file or directory
+p38_seam_capture.py: FAILED open or read
+sha256sum: p38_tail_capture.py: No such file or directory
+p38_tail_capture.py: FAILED open or read
+sha256sum: p38_terminal_capture.py: No such file or directory
+p38_terminal_capture.py: FAILED open or read
+sha256sum: qwen2_p22xg.py: No such file or directory
+qwen2_p22xg.py: FAILED open or read
+sha256sum: qwen2_p22xj.py: No such file or directory
+qwen2_p22xj.py: FAILED open or read
+sha256sum: qwen2_p22xk.py: No such file or directory
+qwen2_p22xk.py: FAILED open or read
+sha256sum: qwen2_patched.py: No such file or directory
+qwen2_patched.py: FAILED open or read
+sha256sum: qwen3.py: No such file or directory
+qwen3.py: FAILED open or read
+sha256sum: qwen3_p22xk.py: No such file or directory
+qwen3_p22xk.py: FAILED open or read
+sha256sum: rpa_diff.py: No such file or directory
+rpa_diff.py: FAILED open or read
+sha256sum: rpa_diff_chunked.py: No such file or directory
+rpa_diff_chunked.py: FAILED open or read
+sha256sum: rpa_kernel_p66.py: No such file or directory
+rpa_kernel_p66.py: FAILED open or read
+sha256sum: tpu_runner_p21_l30.py: No such file or directory
+tpu_runner_p21_l30.py: FAILED open or read
+sha256sum: p56_pallas_norm_matmul.py: No such file or directory
+p56_pallas_norm_matmul.py: FAILED open or read
+sha256sum: xprof_labels.py: No such file or directory
+xprof_labels.py: FAILED open or read
+sha256sum: WARNING: 35 listed files could not be read

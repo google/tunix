@@ -78,7 +78,7 @@ def main() -> int:
   parser.add_argument(
       "--name",
       required=True,
-      choices=("gsm8k", "frozenlake", "frozenlake-dp8-tp8"),
+      choices=("gsm8k", "frozenlake", "frozenlake-dp8-tp8", "frozenlake-dp4-tp8"),
   )
   parser.add_argument("--output", required=True)
   parser.add_argument("--launch", action="store_true")

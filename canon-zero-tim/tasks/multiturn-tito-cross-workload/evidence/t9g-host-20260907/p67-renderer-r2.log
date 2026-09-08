@@ -1,0 +1,120 @@
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp9uzsnfyw/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp9uzsnfyw/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp9uzsnfyw/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp9uzsnfyw/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp9uzsnfyw/legacy
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp9uzsnfyw/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp9uzsnfyw/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp9uzsnfyw/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp9uzsnfyw/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp9uzsnfyw/both-exact
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpjnajiz4f/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpjnajiz4f/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpjnajiz4f/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpjnajiz4f/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpjnajiz4f/rendered
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpdqtbw041/legacy/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpdqtbw041/legacy/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpdqtbw041/legacy
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/p45-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/p45-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpdqtbw041/p45-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpdqtbw041/p45-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpdqtbw041/p45-exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/m15-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/m15-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpdqtbw041/m15-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpdqtbw041/m15-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpdqtbw041/m15-exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpdqtbw041/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpdqtbw041/both-exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpdqtbw041/both-exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpdqtbw041/both-exact
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp5js793py/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp5js793py/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp5js793py/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp5js793py/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp5js793py/old
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp5js793py/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp5js793py/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp5js793py/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=e82ce88d735c3ade5a52ca2ae4577bce5a910ee0cb94cf59a699faee58858d33
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp5js793py/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=571c3c5c9a6dc78a16d345147e81d3571ca0b93b991ab14a7f23eaba059fe934
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp5js793py/new
+F[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvmso7_i5/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvmso7_i5/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpvmso7_i5/old/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=39d9838e3aba85753a95e79eecc043b5cc4baf0c07fbdb85ecc3d0cd240f80a1
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpvmso7_i5/old/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=ead52786b3f88b58bd27dba9a2fdfc1a9675f418e5db5867598443464d46afc8
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpvmso7_i5/old
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvmso7_i5/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpvmso7_i5/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpvmso7_i5/new/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=6ce9c2bf10766bf02af155c8851aa943c6c8527c503b770d41d98ea8639cb058
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpvmso7_i5/new/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=1244a9ffb0c4c189f5f76f359cc377646c6ff58b67110bcaa25e5162aa1014aa
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpvmso7_i5/new
+F[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzovcf6nk/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzovcf6nk/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpzovcf6nk/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpzovcf6nk/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpzovcf6nk/rendered
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp58jbtbq7/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmp58jbtbq7/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmp58jbtbq7/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmp58jbtbq7/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmp58jbtbq7/rendered
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpanmtu06o/exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpanmtu06o/exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpanmtu06o/exact/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=67a50ce983027c3776f495cd6879f360901869b5127e948c71b95fe9473b02d3
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpanmtu06o/exact/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=e2c333e1e9869646dcc78d1fec7730376f0b6468742053960d26bc9f2e09bedf
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpanmtu06o/exact
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpanmtu06o/debug/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpanmtu06o/debug/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpanmtu06o/debug/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1b492b42ede91d58233ef6cbe8ba67ceddd8ba09dd50bc631fc9eca22713e6be
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpanmtu06o/debug/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=6a3ea7641dec452a56bf707b44d03c575960a9f8332549fe3c09fdc238dd685c
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpanmtu06o/debug
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzfjdfax9/record-full/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzfjdfax9/record-full/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpzfjdfax9/record-full/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=39d9838e3aba85753a95e79eecc043b5cc4baf0c07fbdb85ecc3d0cd240f80a1
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpzfjdfax9/record-full/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=ead52786b3f88b58bd27dba9a2fdfc1a9675f418e5db5867598443464d46afc8
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpzfjdfax9/record-full
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpyjs10kwk/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpyjs10kwk/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpyjs10kwk/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpyjs10kwk/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpyjs10kwk/rendered
+.[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzpdwbvhp/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpzpdwbvhp/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpzpdwbvhp/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpzpdwbvhp/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpzpdwbvhp/rendered
+...[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpw9zhh1h1/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+[P57.JOBSET] RENDERED arm=zero path=/tmp/tmpw9zhh1h1/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml
+V1_P67_MANIFEST_PASS recipe=p45 path=/tmp/tmpw9zhh1h1/rendered/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml sha256=1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680
+V1_P67_MANIFEST_PASS recipe=m15 path=/tmp/tmpw9zhh1h1/rendered/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml sha256=727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49
+V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output=/tmp/tmpw9zhh1h1/rendered
+.
+======================================================================
+FAIL: test_dp4_pair_preserves_autoscale_and_optional_record_full (__main__.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) (debug=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/yuxuan/code_rl_repro/worktrees/p57_tito_pair_0902/canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py", line 119, in test_dp4_pair_preserves_autoscale_and_optional_record_full
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0 : [profile] FrozenLake v1-hp XProf identity is not an isolated JobSet/attempt
+
+
+======================================================================
+FAIL: test_dp4_pair_preserves_autoscale_and_optional_record_full (__main__.P67FrozenLakeTwoFullRendererTest.test_dp4_pair_preserves_autoscale_and_optional_record_full) (debug='record-full')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/yuxuan/code_rl_repro/worktrees/p57_tito_pair_0902/canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py", line 119, in test_dp4_pair_preserves_autoscale_and_optional_record_full
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0 : [profile] TiTO full-record JobSet/attempt identity is invalid
+
+
+----------------------------------------------------------------------
+Ran 13 tests in 6.460s
+
+FAILED (failures=2)

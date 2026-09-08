@@ -1,0 +1,120 @@
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=6bab0fa6a29147839dc04181d796182f turn=10 verdict=TOKEN_STREAM_EQUAL actual_tokens=9291 expected_tokens=9291 actual_sha256=fed6677aa62d9d39c6f726da135e7e720834ba6097f055ffc321daf68cba9f39 expected_sha256=fed6677aa62d9d39c6f726da135e7e720834ba6097f055ffc321daf68cba9f39 first_mismatch=-1 actual_token=NA expected_token=NA
+2026-09-06 10:57:47 - WARNING - [absl] [step_idx=11, pair_index=2, group_id=1281] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=6bab0fa6a29147839dc04181d796182f steps=11 expected_later_turns=10 receipts=10 verdict=PASS
+[PERF] stage=rollout_generate seconds=103.258 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78642 trajectory_id=a68c10b01d834d73ab84a03345c95a25 turn=9 submitted_tokens=6746 submitted_sha256=badd83a6254fd597b48273c3906b89d670bf40426e2363172c1d863a14e3c0d2 engine_echo_tokens=6746 engine_echo_sha256=badd83a6254fd597b48273c3906b89d670bf40426e2363172c1d863a14e3c0d2 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=a68c10b01d834d73ab84a03345c95a25 turn=9 verdict=TOKEN_STREAM_EQUAL actual_tokens=6746 expected_tokens=6746 actual_sha256=b7f67cb463a05b8eeee726dde1f776624ff4869683c0b7a9ecc96cb7bc242baa expected_sha256=b7f67cb463a05b8eeee726dde1f776624ff4869683c0b7a9ecc96cb7bc242baa first_mismatch=-1 actual_token=NA expected_token=NA
+INFO 09-06 10:57:47 [loggers.py:273] Engine 000: Avg prompt throughput: 3015.2 tokens/s, Avg generation throughput: 239.7 tokens/s, Running: 13 reqs, Waiting: 0 reqs, GPU KV cache usage: 2.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=45.452 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78652 trajectory_id=841addc741724be7b7aa2b02db68580b turn=10 submitted_tokens=9259 submitted_sha256=22fcb839ba19061f42de088329768002ca15a52e5aab18c8f2c3185594ab707f engine_echo_tokens=9259 engine_echo_sha256=22fcb839ba19061f42de088329768002ca15a52e5aab18c8f2c3185594ab707f equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=841addc741724be7b7aa2b02db68580b turn=10 verdict=TOKEN_STREAM_EQUAL actual_tokens=9259 expected_tokens=9259 actual_sha256=6efa4313427b568854ac9575a52f2bf9a0070c4489a69fbb72d8bf09efe02a18 expected_sha256=6efa4313427b568854ac9575a52f2bf9a0070c4489a69fbb72d8bf09efe02a18 first_mismatch=-1 actual_token=NA expected_token=NA
+2026-09-06 10:57:54 - WARNING - [absl] [step_idx=11, pair_index=6, group_id=1293] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=841addc741724be7b7aa2b02db68580b steps=11 expected_later_turns=10 receipts=10 verdict=PASS
+INFO 09-06 10:57:55 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 33.8 tokens/s, Running: 12 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=81.961 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78646 trajectory_id=5f5988b7165741f0939506cbc21ca211 turn=10 submitted_tokens=9076 submitted_sha256=750d30fd0236ffcbb61985a0f76cdae7274ca676a511329e0827887725a8a999 engine_echo_tokens=9076 engine_echo_sha256=750d30fd0236ffcbb61985a0f76cdae7274ca676a511329e0827887725a8a999 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=5f5988b7165741f0939506cbc21ca211 turn=10 verdict=TOKEN_STREAM_EQUAL actual_tokens=9076 expected_tokens=9076 actual_sha256=6693095dbcc0a28291ca4857f32de3527886415c7d21374a06511911dffb8c63 expected_sha256=6693095dbcc0a28291ca4857f32de3527886415c7d21374a06511911dffb8c63 first_mismatch=-1 actual_token=NA expected_token=NA
+2026-09-06 10:57:56 - WARNING - [absl] [step_idx=11, pair_index=5, group_id=1289] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=5f5988b7165741f0939506cbc21ca211 steps=11 expected_later_turns=10 receipts=10 verdict=PASS
+INFO 09-06 10:57:57 [loggers.py:273] Engine 000: Avg prompt throughput: 3073.5 tokens/s, Avg generation throughput: 174.8 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=147.497 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78637 trajectory_id=08bfcfa231c044dba77872bdfa0aea74 turn=7 submitted_tokens=6930 submitted_sha256=7f187f953ae395f630ba2912d6bd4ce6436daa686b224937b943764891cd933b engine_echo_tokens=6930 engine_echo_sha256=7f187f953ae395f630ba2912d6bd4ce6436daa686b224937b943764891cd933b equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=08bfcfa231c044dba77872bdfa0aea74 turn=7 verdict=TOKEN_STREAM_EQUAL actual_tokens=6930 expected_tokens=6930 actual_sha256=94bdf7c162cc5deb2315aed9b87cf8d8a5ec39368597182a6572b3591573cdb7 expected_sha256=94bdf7c162cc5deb2315aed9b87cf8d8a5ec39368597182a6572b3591573cdb7 first_mismatch=-1 actual_token=NA expected_token=NA
+[PERF] stage=rollout_generate seconds=102.119 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78644 trajectory_id=8a6d7cb831b64fadb07bf222a46ebeea turn=8 submitted_tokens=8502 submitted_sha256=5d8396e79e7fbd286758d0d0a4b00cbe7344219a2bf1bc5aca8248393cd2b733 engine_echo_tokens=8502 engine_echo_sha256=5d8396e79e7fbd286758d0d0a4b00cbe7344219a2bf1bc5aca8248393cd2b733 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=8a6d7cb831b64fadb07bf222a46ebeea turn=8 verdict=TOKEN_STREAM_EQUAL actual_tokens=8502 expected_tokens=8502 actual_sha256=4fc36662d43d725c286cd15b9706d877b056105d9336e14effe88efc6832aa7e expected_sha256=4fc36662d43d725c286cd15b9706d877b056105d9336e14effe88efc6832aa7e first_mismatch=-1 actual_token=NA expected_token=NA
+[PERF] stage=rollout_generate seconds=138.061 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78639 trajectory_id=4b170c3dedee42c5b39c9410deac66e9 turn=9 submitted_tokens=8169 submitted_sha256=f578561515f6c9b6ff5ea4dcae01bc828868d722ed1fcbbb9f048ade8047ccc7 engine_echo_tokens=8169 engine_echo_sha256=f578561515f6c9b6ff5ea4dcae01bc828868d722ed1fcbbb9f048ade8047ccc7 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=4b170c3dedee42c5b39c9410deac66e9 turn=9 verdict=TOKEN_STREAM_EQUAL actual_tokens=8169 expected_tokens=8169 actual_sha256=392b631076e47f8ed251a93c7e773bc1aac6c7a78bcf969ab916c94420c8cabc expected_sha256=392b631076e47f8ed251a93c7e773bc1aac6c7a78bcf969ab916c94420c8cabc first_mismatch=-1 actual_token=NA expected_token=NA
+INFO 09-06 10:58:05 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 62.3 tokens/s, Running: 10 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.4%, Prefix cache hit rate: 0.0%
+INFO 09-06 10:58:07 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 24.7 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.5%, Prefix cache hit rate: 0.0%
+INFO 09-06 10:58:15 [loggers.py:273] Engine 000: Avg prompt throughput: 1047.8 tokens/s, Avg generation throughput: 26.4 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.7%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=100.581 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78647 trajectory_id=45557df2b2e649f68a3c8f41a80fef9b turn=10 submitted_tokens=6464 submitted_sha256=dd329c88aa1454f6461add7529daae2b6d1fef6a58522fbed1330a3529d2fb43 engine_echo_tokens=6464 engine_echo_sha256=dd329c88aa1454f6461add7529daae2b6d1fef6a58522fbed1330a3529d2fb43 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=45557df2b2e649f68a3c8f41a80fef9b turn=10 verdict=TOKEN_STREAM_EQUAL actual_tokens=6464 expected_tokens=6464 actual_sha256=5a9e04de633df89a7e052ebb9e9e9bef8375222d78805028e376a637d8f22d5c expected_sha256=5a9e04de633df89a7e052ebb9e9e9bef8375222d78805028e376a637d8f22d5c first_mismatch=-1 actual_token=NA expected_token=NA
+INFO 09-06 10:58:18 [loggers.py:273] Engine 000: Avg prompt throughput: 6180.8 tokens/s, Avg generation throughput: 67.7 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.7%, Prefix cache hit rate: 0.0%
+INFO 09-06 10:58:25 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 28.4 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=92.139 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78649 trajectory_id=2557cfd7e7b547b7b879bdb4bac1d96c turn=9 submitted_tokens=8896 submitted_sha256=7ef57c96f03e4eb97388ac3468ea316292a1b20709bd356f7edbf6ceb92a18db engine_echo_tokens=8896 engine_echo_sha256=7ef57c96f03e4eb97388ac3468ea316292a1b20709bd356f7edbf6ceb92a18db equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=2557cfd7e7b547b7b879bdb4bac1d96c turn=9 verdict=TOKEN_STREAM_EQUAL actual_tokens=8896 expected_tokens=8896 actual_sha256=f36b1986eded2f37fb01fcd5d9788bf466fbe901d5a30c97171bf7a79c01e93b expected_sha256=f36b1986eded2f37fb01fcd5d9788bf466fbe901d5a30c97171bf7a79c01e93b first_mismatch=-1 actual_token=NA expected_token=NA
+2026-09-06 10:58:28 - WARNING - [absl] [step_idx=10, pair_index=5, group_id=1293] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=2557cfd7e7b547b7b879bdb4bac1d96c steps=10 expected_later_turns=9 receipts=9 verdict=PASS
+INFO 09-06 10:58:28 [loggers.py:273] Engine 000: Avg prompt throughput: 2295.3 tokens/s, Avg generation throughput: 189.7 tokens/s, Running: 10 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=62.710 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78654 trajectory_id=3465bbd75be74dd68abd45958089382c turn=13 submitted_tokens=7843 submitted_sha256=483e9b0b4e005abc1b166296044ccd6faec76ebcc717638c2ebd4fa00b33f852 engine_echo_tokens=7843 engine_echo_sha256=483e9b0b4e005abc1b166296044ccd6faec76ebcc717638c2ebd4fa00b33f852 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=3465bbd75be74dd68abd45958089382c turn=13 verdict=TOKEN_STREAM_EQUAL actual_tokens=7843 expected_tokens=7843 actual_sha256=8ef3a6330c3fb9ad6abf4d3408bca9557e607206e5d7864e4d4da448dcd6835c expected_sha256=8ef3a6330c3fb9ad6abf4d3408bca9557e607206e5d7864e4d4da448dcd6835c first_mismatch=-1 actual_token=NA expected_token=NA
+[PERF] stage=rollout_generate seconds=92.089 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78650 trajectory_id=b9ad6df39f1946759f095cc31488d339 turn=11 submitted_tokens=7664 submitted_sha256=f251dd7781201dc6bd27caa5ce7dc7c2304af1128609bb75117d85e189026bcd engine_echo_tokens=7664 engine_echo_sha256=f251dd7781201dc6bd27caa5ce7dc7c2304af1128609bb75117d85e189026bcd equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=b9ad6df39f1946759f095cc31488d339 turn=11 verdict=TOKEN_STREAM_EQUAL actual_tokens=7664 expected_tokens=7664 actual_sha256=297ac357557e32230c0e5afbaf491b2c55828956bc9e4af384b258c6a3383037 expected_sha256=297ac357557e32230c0e5afbaf491b2c55828956bc9e4af384b258c6a3383037 first_mismatch=-1 actual_token=NA expected_token=NA
+INFO 09-06 10:58:35 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 38.9 tokens/s, Running: 10 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.5%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=76.844 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78653 trajectory_id=0152673900bd4c18a80cd9be499e97b2 turn=12 submitted_tokens=7113 submitted_sha256=25ad1b8593c2979aeb20ca69e9b66f31ab7e9f237e44148cb3d2f32b0b27a8cb engine_echo_tokens=7113 engine_echo_sha256=25ad1b8593c2979aeb20ca69e9b66f31ab7e9f237e44148cb3d2f32b0b27a8cb equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=0152673900bd4c18a80cd9be499e97b2 turn=12 verdict=TOKEN_STREAM_EQUAL actual_tokens=7113 expected_tokens=7113 actual_sha256=2916f266b72215200efdf66281ece78108de7da6d41e1d3d01e518ffab1b6499 expected_sha256=2916f266b72215200efdf66281ece78108de7da6d41e1d3d01e518ffab1b6499 first_mismatch=-1 actual_token=NA expected_token=NA
+INFO 09-06 10:58:38 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 22.9 tokens/s, Running: 10 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.4%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=35.215 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78658 trajectory_id=8a6d7cb831b64fadb07bf222a46ebeea turn=9 submitted_tokens=9285 submitted_sha256=5cc8e2098bedb5d86459c8592ce3af1b6055353ab01726691b2f56d2872eb9f2 engine_echo_tokens=9285 engine_echo_sha256=5cc8e2098bedb5d86459c8592ce3af1b6055353ab01726691b2f56d2872eb9f2 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=8a6d7cb831b64fadb07bf222a46ebeea turn=9 verdict=TOKEN_STREAM_EQUAL actual_tokens=9285 expected_tokens=9285 actual_sha256=2a413cdf31a60b653c735befacd9e1de5160d14daef4634638e71b2e6e48e723 expected_sha256=2a413cdf31a60b653c735befacd9e1de5160d14daef4634638e71b2e6e48e723 first_mismatch=-1 actual_token=NA expected_token=NA
+2026-09-06 10:58:39 - WARNING - [absl] [step_idx=10, pair_index=3, group_id=1281] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=8a6d7cb831b64fadb07bf222a46ebeea steps=10 expected_later_turns=9 receipts=9 verdict=PASS
+INFO 09-06 10:58:45 [loggers.py:273] Engine 000: Avg prompt throughput: 2470.8 tokens/s, Avg generation throughput: 22.1 tokens/s, Running: 9 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.4%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=71.245 rows=1
+[CANON_P57_TITO_HOST_WITNESS] request=78655 trajectory_id=ade276a4caf14de7bb6b9ab1b6142ca6 turn=12 submitted_tokens=6855 submitted_sha256=f8dc06c022d1aeecba7bafd5a552f999a9ee9f07acfe988195fa546a6bdd7a86 engine_echo_tokens=6855 engine_echo_sha256=f8dc06c022d1aeecba7bafd5a552f999a9ee9f07acfe988195fa546a6bdd7a86 equal=1 artifact=not-persisted-equal bytes=0 artifact_sha256=not-persisted-equal
+[CANON_P57_TOKEN_CONTINUITY] workload=m15 mode=exact trajectory_id=ade276a4caf14de7bb6b9ab1b6142ca6 turn=12 verdict=TOKEN_STREAM_EQUAL actual_tokens=6855 expected_tokens=6855 actual_sha256=6ab31346ba27dc0b4136a08a52cb25aa830e87fd52c8ad6313dc1fcd71c5ed60 expected_sha256=6ab31346ba27dc0b4136a08a52cb25aa830e87fd52c8ad6313dc1fcd71c5ed60 first_mismatch=-1 actual_token=NA expected_token=NA
+INFO 09-06 10:58:48 [loggers.py:273] Engine 000: Avg prompt throughput: 2119.8 tokens/s, Avg generation throughput: 154.2 tokens/s, Running: 9 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.3%, Prefix cache hit rate: 0.0%
+INFO 09-06 10:58:55 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 23.7 tokens/s, Running: 9 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.4%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1796.889 rows=1
+2026-09-06 10:58:56 - WARNING - [absl] [step_idx=0, pair_index=4, group_id=1299] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:56 - ERROR - [absl] [step_idx=0, pair_index=4, group_id=1299] model generation exceeded the 1799.9s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=3deae7b6caf340208b46624b35a777b6 steps=0 expected_later_turns=0 receipts=0 verdict=UNEXERCISED
+2026-09-06 10:58:58 - WARNING - [absl] [step_idx=12, pair_index=2, group_id=1285] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:58 - ERROR - [absl] [step_idx=12, pair_index=2, group_id=1285] model generation exceeded the 27.3s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=b9ad6df39f1946759f095cc31488d339 steps=12 expected_later_turns=11 receipts=11 verdict=PASS
+[PERF] stage=rollout_generate seconds=27.544 rows=1
+[PERF] stage=rollout_generate seconds=53.148 rows=1
+2026-09-06 10:58:58 - WARNING - [absl] [step_idx=10, pair_index=0, group_id=1290] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:58 - ERROR - [absl] [step_idx=10, pair_index=0, group_id=1290] model generation exceeded the 53.2s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=4b170c3dedee42c5b39c9410deac66e9 steps=10 expected_later_turns=9 receipts=9 verdict=PASS
+[PERF] stage=rollout_generate seconds=60.171 rows=1
+2026-09-06 10:58:58 - WARNING - [absl] [step_idx=8, pair_index=7, group_id=1294] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:58 - ERROR - [absl] [step_idx=8, pair_index=7, group_id=1294] model generation exceeded the 60.6s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=08bfcfa231c044dba77872bdfa0aea74 steps=8 expected_later_turns=7 receipts=7 verdict=PASS
+[PERF] stage=rollout_generate seconds=71.613 rows=1
+2026-09-06 10:58:58 - WARNING - [absl] [step_idx=10, pair_index=6, group_id=1300] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:58 - ERROR - [absl] [step_idx=10, pair_index=6, group_id=1300] model generation exceeded the 72.0s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=a68c10b01d834d73ab84a03345c95a25 steps=10 expected_later_turns=9 receipts=9 verdict=PASS
+2026-09-06 10:58:58 - WARNING - [absl] [step_idx=13, pair_index=4, group_id=1298] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:58 - ERROR - [absl] [step_idx=13, pair_index=4, group_id=1298] model generation exceeded the 22.0s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=0152673900bd4c18a80cd9be499e97b2 steps=13 expected_later_turns=12 receipts=12 verdict=PASS
+INFO 09-06 10:58:59 [loggers.py:273] Engine 000: Avg prompt throughput: 1997.9 tokens/s, Avg generation throughput: 57.3 tokens/s, Running: 4 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=22.287 rows=1
+[PERF] stage=rollout_generate seconds=41.587 rows=1
+2026-09-06 10:58:59 - WARNING - [absl] [step_idx=11, pair_index=3, group_id=1308] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:59 - ERROR - [absl] [step_idx=11, pair_index=3, group_id=1308] model generation exceeded the 41.7s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=45557df2b2e649f68a3c8f41a80fef9b steps=11 expected_later_turns=10 receipts=10 verdict=PASS
+2026-09-06 10:58:59 - WARNING - [absl] [step_idx=13, pair_index=4, group_id=1308] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:59 - ERROR - [absl] [step_idx=13, pair_index=4, group_id=1308] model generation exceeded the 11.1s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=ade276a4caf14de7bb6b9ab1b6142ca6 steps=13 expected_later_turns=12 receipts=12 verdict=PASS
+[PERF] stage=rollout_generate seconds=31.005 rows=1
+2026-09-06 10:58:59 - WARNING - [absl] [step_idx=14, pair_index=1, group_id=1311] trajectory clipped: MODEL_TIMEOUT
+2026-09-06 10:58:59 - ERROR - [absl] [step_idx=14, pair_index=1, group_id=1311] model generation exceeded the 31.1s turn deadline and was aborted
+[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=m15 trajectory_id=3465bbd75be74dd68abd45958089382c steps=14 expected_later_turns=13 receipts=13 verdict=PASS
+[PERF] stage=rollout_generate seconds=11.152 rows=1
+2026-09-06 10:58:59 - INFO - [absl] [DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=32 elapsed_secs=3767.1 deadline_secs=None
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 2282, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3949, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3211, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 748, in _process_results
+[rank0]:     token_continuity.append_full_record_batch_map(row_identity)
+[rank0]:   File "/app/tunix/rl/agentic/token_continuity.py", line 1913, in append_full_record_batch_map
+[rank0]:     raise ValueError("record-full row identity is malformed")
+[rank0]: ValueError: record-full row identity is malformed
+INFO 09-06 10:59:05 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 11.4 tokens/s, Running: 2 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
+INFO 09-06 10:59:15 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 2 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%

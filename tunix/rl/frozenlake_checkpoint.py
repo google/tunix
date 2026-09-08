@@ -250,6 +250,8 @@ def require_p57_fast_no_checkpoint(
       "CANON_P33_DISABLE_EVAL": "1",
       "CANON_P31_ENABLE_EVAL": "0",
   }
+  from examples.frozenlake import training_geometry as fl_geometry
+  required = fl_geometry.full_expected(required, env)
   wrong = {
       key: env.get(key, "")
       for key, expected in required.items()
