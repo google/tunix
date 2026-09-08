@@ -121,6 +121,15 @@ explicit invalid value. Reclassification writes a new artifact and retains
 the original verdict. Tests: `tests/v2_frozenlake_onehost/test_classifier.py`
 (package root); registered-anchor contracts live beside it.
 
+For an explicitly scoped recovery-control contract, retain the complete standard
+verdict and identify the deferred optimization separately. Account only for the
+pre-registered exact goal mismatch and full observed receipt tuple, never a
+failure prefix or a numerical exception. Test each tuple field, wrong/dirty
+source, signed-zero norm bits, duplicate/failed terminal markers and surviving
+standard failures. The control verdict must not imply optimization admission.
+See `tasks/v2-frozenlake-onehost/RECOVERY_CONTROL.md` and
+`tests/v2_frozenlake_onehost/test_recovery_control.py` (package root).
+
 ## 7. Flag lifecycle
 
 For changes that span renderers, profiles, process delivery, or paired treatment

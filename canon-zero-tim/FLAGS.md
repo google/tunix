@@ -869,6 +869,24 @@ runtime certification. Reclassifying the immutable E.1 controls still rejects
 the 36-program reuse receipt, and the rejected key candidate still fails its
 gradient anchor. Original classifications and checksum packages are preserved.
 
+## P45 recovered-baseline control contract (v2_integrate E.1, 2026-09-08)
+
+Flagless, offline-only addition: `classify_frozenlake_recovery_control.py`
+evaluates the explicit `p45-dp2tp2-r2-recovery-control-v1` contract. No runtime,
+profile, launcher, registered anchor or standard-classifier change. Its exact
+conservative-key tuple is `(0,36,36,36,1,1,0)`; the one-program optimization
+remains NOT_ADMITTED/DEFERRED and the standard FAIL is embedded unchanged.
+All other failures survive. Full expected source SHA, clean source/terminal
+and serialized norm-bit checks are additional constraints. The verdict is
+`RECOVERY_CONTROL_PASS`, not ordinary PASS; output cannot overwrite input runs.
+
+Admission ledger: zero-TIM arithmetic = exempt (offline classifier); gradient
+arithmetic = exempt (no training changes, all checks retained); performance =
+no claim, the one-program gate remains unmet. CPU control/negative tests and
+historical evidence replay do not certify the final source on TPU. They also
+do not prove full-gradient parity, fresh-rollout Zero-TIM, optimizer health or
+other geometries. Contract and CLI: `tasks/v2-frozenlake-onehost/RECOVERY_CONTROL.md`.
+
 ## 无 flag 的行为变更(tasks/v2_dispatch Phase 15,2026-09-07;dp2-tp2 三发 + long 一发,锚按 fp64 规则重钉)
 反向 chunk 程序(Phase 7 的类在认证 lane 上重做,CL c61a7497):kept tape 上的 rank-parallel 反向每个 chunk 的整段反向体——chunk inputs、entry-cache 重建、norm/head 重算、rows pullback、头余切分区、head/norm/28 层/embed 的映射 pullback——trace 成**一个**程序 `zt_tr_bwd_chunk`,在图内按原样调用已建好的映射程序(shard_map 原样嵌套、不重做块体),叶/tape/cache/余切全作操作数,输出 sharding 钉到 bootstrap chunk 记录的拼写,每个原程序边界一个 `optimization_barrier`;组内首个反向 chunk 是第二个编译变体(dcache 零在图内造);进程第一组的第一个 chunk 走逐程序路径建映射程序并记录 sharding(bootstrap),之后每 chunk 一个程序。无 flag:准入 = rank-parallel ∧ kept tape ∧ 非 P71 block ∧ 非 P66 arm ∧ 无 HBM sink ∧ 无 P76 ticket(Phase 14 的两次 chunk 边界等待照常,两条路径共用 `finish_chunk`);`chunk_program=False` 为测试 oracle。普查等效门:模块普查 `--p32-reverse-chunk`(launcher 从源码 grep)按 `bwd_chunk` 家族计数、折入的程序不得单独出现;P74 gap 普查改计 chunk 程序;classifier 读 receipt 的 `reverse_chunk` 变体(CL 2df3b398)。CPU 门:`tests/rl/test_p32_reverse_chunk.py` 独立进程 `--xla_cpu_max_isa=AVX`(XLA:CPU 的 FMA 收缩在独立程序与 chunk 程序里不同)逐字节 = 逐程序 oracle,每 chunk 1 次 `bwd_chunk`;邻居门 54 + 17。
 收据(dp2-tp2,配方 `stream` + `CANON_DP_REDUCE_ONCE=1 CANON_P32_CHUNK_BATCH=2 CANON_P71_SCAN=fwd_block`,control = K14c 认证发 3,040 / 38.27 GiB / warm reverse 5.327 s):
