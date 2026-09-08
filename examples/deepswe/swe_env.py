@@ -111,7 +111,6 @@ def _init_global_fleet(
     num_generations: int = 8,
     batch_size: int = 8,
     max_warmpool_replicas: int | None = None,
-    scaffold: str = "openhands",
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
