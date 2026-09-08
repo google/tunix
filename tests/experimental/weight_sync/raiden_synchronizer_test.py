@@ -401,6 +401,51 @@ class RaidenSynchronizerTest(absltest.TestCase):
     )
     self.assertTrue(callable(decorator))
 
+  def test_proxy_multi_listener_control_addr(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    sync._is_proxy = True
+    sync._ips = ["10.0.0.1:8000", "10.0.0.2:8000"]
+    sync._unique_listeners = ["10.0.0.1:9001", "10.0.0.2:9002"]
+    metadata = sync.work_unit_metadata()
+    self.assertEqual(
+        metadata.control_plane_rpc_address, "10.0.0.1:9001,10.0.0.2:9002"
+    )
+
+  def test_devices_per_host_proxy_defaults_and_env_override(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+      sync.arrays = [arr]
+
+      fake_info = np.zeros((1, 6), dtype=np.int32)
+      with mock.patch.object(
+          raiden_synchronizer, "_raiden_ffi", autospec=True
+      ) as ffi, mock.patch(
+          "jax.experimental.multihost_utils.global_array_to_host_local_array",
+          return_value=fake_info,
+      ), mock.patch(
+          "jax.experimental.multihost_utils.process_allgather",
+          return_value=fake_info,
+      ):
+        # Default under proxy mode: min(4, len(src_devices)) = min(4, 1) = 1
+        sync._init_ffi_transport(is_d2h=True)
+        self.assertEqual(
+            ffi.init_weight_synchronizer_and_d2h.call_args.kwargs["num_shards"],
+            1,
+        )
+
+        # Environment variable override:
+        with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "8"}):
+          sync._init_ffi_transport(is_d2h=True)
+          self.assertEqual(
+              ffi.init_weight_synchronizer_and_d2h.call_args.kwargs[
+                  "num_shards"
+              ],
+              8,
+          )
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -303,10 +303,18 @@ class RaidenSynchronizer:
     )
 
     src_devices = mesh.devices.flatten()
-    num_processes = len(
-        set(getattr(d, "process_index", 0) for d in src_devices)
-    )
-    devices_per_host = len(src_devices) // max(1, num_processes)
+    devices_per_host_env = os.environ.get("RAIDEN_DEVICES_PER_HOST")
+    if devices_per_host_env:
+      devices_per_host = int(devices_per_host_env)
+    elif self._is_proxy:
+      # In Pathways, process_index is always 0 for proxy devices. Default to
+      # 4 devices/host for standard Cloud TPU VM topologies.
+      devices_per_host = min(4, len(src_devices))
+    else:
+      num_processes = len(
+          set(getattr(d, "process_index", 0) for d in src_devices)
+      )
+      devices_per_host = len(src_devices) // max(1, num_processes)
 
     if is_d2h:
       logging.info(
@@ -549,7 +557,9 @@ class RaidenSynchronizer:
       mesh_shape = (1,)
     if self._is_proxy:
       shards = tuple(self._ips)
-      control_addr = self._unique_listeners[0] if self._unique_listeners else ""
+      control_addr = (
+          ",".join(self._unique_listeners) if self._unique_listeners else ""
+      )
     else:
       data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
       control_addr = (
