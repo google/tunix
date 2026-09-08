@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Trainer worker process runner for the experimental distributed GRPO demo."""
+"""Trainer worker process runner shared by distributed RL examples."""
 
 from __future__ import annotations
 
@@ -33,10 +33,10 @@ import jax
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
-from orbax import checkpoint as ocp
 import optax
+from orbax import checkpoint as ocp
 from tunix.cli.utils import model as model_utils
-from tunix.experimental.examples.math_gsm8k_dist import models
+from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
@@ -46,7 +46,7 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 DEFAULT_MODEL_DOWNLOAD_DIR = os.path.join(
-    REPO_ROOT, "artifacts", "qwen3_dist_gsm8k", "models"
+    REPO_ROOT, "artifacts", "distributed_examples", "models"
 )
 
 
@@ -90,12 +90,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sampler_type",
+      type=str,
+      choices=("inprocess_vllm", "vllm", "vanilla"),
+      default="inprocess_vllm",
+      help="Sampler type for the trainer to use.",
+  )
+  parser.add_argument(
       "--trainer_backend",
       choices=("tunix", "maxtext"),
       default="tunix",
-      help=(
-          "tunix runs Tunix's PeftTrainer; maxtext runs MaxTextTrainingEngine"
-      ),
+      help="tunix runs Tunix's PeftTrainer; maxtext runs MaxTextTrainingEngine",
   )
   parser.add_argument("--maxtext_model_name", type=str, default="qwen3-0.6b")
   parser.add_argument(
@@ -111,14 +116,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--maxtext_ckpt_path",
       type=str,
       default=os.getenv("MAXTEXT_CKPT", ""),
-      help="Orbax params-only checkpoint for the MaxText trainer, e.g. gs://...",
+      help=(
+          "Orbax params-only checkpoint for the MaxText trainer, e.g. gs://..."
+      ),
   )
   parser.add_argument(
-        "--maxtext_output_directory",
-        type=str,
-        default=os.getenv("MAXTEXT_OUTPUT_DIR", os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext")),
-        help="Base directory for MaxText trainer outputs.",
-    )
+      "--maxtext_output_directory",
+      type=str,
+      default=os.getenv(
+          "MAXTEXT_OUTPUT_DIR",
+          os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext"),
+      ),
+      help="Base directory for MaxText trainer outputs.",
+  )
   parser.add_argument(
       "--maxtext_warmup_steps_fraction",
       type=float,
@@ -127,6 +137,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Warmup fraction for MaxText LR schedule (0.0 enables updates from"
           " step 0)."
       ),
+  )
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging for the trainer worker.",
   )
   return parser.parse_args(argv)
 
@@ -159,8 +174,8 @@ def _has_direct_safetensors(model_path: Path) -> bool:
 def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
   if not model_dir:
     raise ValueError(
-        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
-        "--model_dir=/path/to/local/qwen3/safetensors."
+        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
+        " --model_dir=/path/to/local/qwen3/safetensors."
     )
 
   model_path = Path(model_dir).expanduser()
@@ -197,6 +212,7 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
       f"in --model_dir: {model_path}"
   )
 
+
 def _create_mesh(args) -> Mesh:
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
@@ -211,8 +227,8 @@ def _create_mesh(args) -> Mesh:
 def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   if not args.model_dir:
     raise ValueError(
-        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
-        "--model_dir=/path/to/local/safetensors."
+        "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
+        " --model_dir=/path/to/local/safetensors."
     )
   model = models.create_model(args.model_name, args.model_dir, mesh)
   if not lora:
@@ -270,6 +286,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 
+  def restore_checkpoint(self, **kwargs) -> Any:
+    with self._mesh:
+      return self._trainer.restore_checkpoint(**kwargs)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -316,9 +336,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
 def _create_tunix_trainer_factory(args) -> Any:
   """Creates the trainer factory function for Tunix's PeftTrainer."""
   logging.info("Trainer backend: Tunix's PeftTrainer.")
-  args.model_dir = _ensure_model_dir_for_trainer(
-      args.model_dir, args.model_id
-  )
+  args.model_dir = _ensure_model_dir_for_trainer(args.model_dir, args.model_id)
   logging.info("Prepared trainer safetensors directory: %s", args.model_dir)
 
   logging.info("Creating trainer mesh...")
@@ -344,6 +362,10 @@ def _create_tunix_trainer_factory(args) -> Any:
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
       checkpoint_root_directory=args.checkpoint_root_directory,
+      # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
+      # Orchestrator needs to realign its step/policy_version from the returned
+      # metadata.
+      resume_from_checkpoint_on_init=False,
   )
   logging.info(
       "PeftTrainer v2 gradient_accumulation_steps=%d.",
@@ -356,6 +378,7 @@ def _create_tunix_trainer_factory(args) -> Any:
           actor_model,
           optax.adamw(learning_rate=args.learning_rate),
           training_config,
+          sampler_type=args.sampler_type,
       )
     return _MeshBoundTrainer(trainer, mesh)
 
@@ -382,7 +405,6 @@ def main(argv: list[str], context: Any = None) -> None:
       format="%(asctime)s - [TrainerNode] %(message)s",
       force=True,
   )
-
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 

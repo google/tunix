@@ -15,12 +15,35 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 from typing import Any, List
+import zlib
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
+
+
+def generate_vanilla_rollout_seed(
+    prompt_id: str | int,
+    group_index: int = 0,
+) -> int:
+  """Generates a deterministic rollout seed for vanilla samplers.
+
+  Computes `seed = (crc32(prompt_id) & 0x7FFFFFFF + group_index) & 0x7FFFFFFF`.
+
+  Args:
+    prompt_id: Prompt identifier string or integer (e.g. 'prompt_0', 42,
+      'gsm8k_q1').
+    group_index: The index of the rollout within its group (group_index >= 0).
+
+  Returns:
+    A deterministic 31-bit non-negative integer seed for the rollout request.
+  """
+  prompt_hash = zlib.crc32(str(prompt_id).encode("utf-8")) & 0x7FFFFFFF
+  return (prompt_hash + group_index) & 0x7FFFFFFF
+
 
 def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
   """Vanilla samplers take a string; parse chat messages when needed."""
@@ -64,6 +87,9 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    self.max_response_length = request.generation_kwargs.get(
+        "max_response_length"
+    )
 
   async def run_episode(self) -> trajectory_lib.Trajectory:
     """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
@@ -75,15 +101,44 @@ class TrajectoryCollectorEngine:
     ):
       del env, kwargs
       generation_kwargs = dict(self.request.generation_kwargs)
+      request_max_generation_steps = generation_kwargs.pop(
+          "max_generation_steps", None
+      )
+
       if max_generation_steps is not None:
-        generation_kwargs["max_tokens"] = max_generation_steps
+        effective_max_tokens = max_generation_steps
+      elif request_max_generation_steps is not None:
+        effective_max_tokens = request_max_generation_steps
+      else:
+        raise ValueError(
+            "TrajectoryCollectorEngine requires either"
+            " request.generation_kwargs or the model_call callback to specify"
+            " max_generation_steps."
+        )
+
+      generation_kwargs["max_tokens"] = effective_max_tokens
+
+      seed = generation_kwargs.get("seed", None)
+      if isinstance(
+          self.sampler, vanilla_sampler_adapter.VanillaSamplerAdapter
+      ):
+        # TODO(tunix-dev): make vanilla sampler stateful with internal RNG key
+        if seed is None and self.request.prompt_id is not None:
+          seed = generate_vanilla_rollout_seed(
+              self.request.prompt_id, self.request.group_index
+          )
+        if seed is None:
+          raise ValueError(
+              "Vanilla sampler requires a seed or valid prompt_id to generate"
+              " diverse rollouts, but got seed=None."
+          )
 
       sampling_params = sampler_lib.SamplingParams(
-          max_tokens=generation_kwargs.get("max_tokens", 64),
+          max_tokens=effective_max_tokens,
           temperature=generation_kwargs.get("temperature", 0.0),
           top_p=generation_kwargs.get("top_p", None),
           top_k=generation_kwargs.get("top_k", None),
-          seed=generation_kwargs.get("seed", None),
+          seed=seed,
           return_logprobs=generation_kwargs.get("return_logprobs", False),
       )
       sampling_req = sampler_lib.SamplingRequest(
@@ -123,6 +178,7 @@ class TrajectoryCollectorEngine:
         model_call=model_call,  # pyrefly: ignore[bad-argument-type]
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        max_response_length=self.max_response_length,
     )
     rl_traj = await inner_engine.collect(mode="Trajectory")
     self.is_done = True

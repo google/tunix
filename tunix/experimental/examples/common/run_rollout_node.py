@@ -12,21 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM rollout worker process runner for the distributed GRPO demo."""
+"""Rollout worker process runner shared by distributed RL examples."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import importlib
+import json
 import logging
 import os
 import pickle
 import sys
 from typing import Any
 
-from tunix.experimental.examples.math_gsm8k_dist import gsm8k
-from tunix.experimental.examples.math_gsm8k_dist import models
+from tunix.experimental.examples.common import models
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
@@ -44,6 +44,9 @@ CHAT_PARSERS = {
     "llama": chat_parser_lib.LlamaChatTemplateParser,
     "gemma": chat_parser_lib.GemmaChatTemplateParser,
 }
+DEFAULT_REGISTRY_MODULE = "tunix.experimental.examples.math_gsm8k_dist.gsm8k"
+DEFAULT_ENV_NAME = "gsm8kenv"
+DEFAULT_AGENT_NAME = "gsm8kagent"
 
 
 def _import_vllm_sampler():
@@ -68,7 +71,7 @@ def _chat_parser_for(model_id: str, tokenizer):
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
-  parser = argparse.ArgumentParser(description="vLLM rollout worker process")
+  parser = argparse.ArgumentParser(description="Distributed rollout worker")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
@@ -93,7 +96,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=["vllm", "inprocess_vllm", "vanilla"],
       help="Rollout sampler backend: vllm, inprocess_vllm, or vanilla.",
   )
-  parser.add_argument("--sampler_mesh_tp", type=int, default=4)
   parser.add_argument(
       "--maxtext_model_name",
       type=str,
@@ -117,6 +119,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action="store_true",
       help="Enable debug logging for rollout worker.",
   )
+  parser.add_argument(
+      "--registry_module",
+      type=str,
+      default=os.getenv("ROLLOUT_REGISTRY_MODULE", DEFAULT_REGISTRY_MODULE),
+      help=(
+          "Module imported at startup to register rollout env/agent classes."
+      ),
+  )
+  parser.add_argument(
+      "--env_name",
+      type=str,
+      default=os.getenv("ROLLOUT_ENV_NAME", DEFAULT_ENV_NAME),
+      help="Registered rollout environment name.",
+  )
+  parser.add_argument(
+      "--agent_name",
+      type=str,
+      default=os.getenv("ROLLOUT_AGENT_NAME", DEFAULT_AGENT_NAME),
+      help="Registered rollout agent name.",
+  )
+  parser.add_argument(
+      "--agent_config_json",
+      type=str,
+      default=os.getenv("ROLLOUT_AGENT_CONFIG_JSON", "{}"),
+      help="JSON object passed to the registered agent constructor.",
+  )
+  parser.add_argument(
+      "--max_concurrency",
+      type=int,
+      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "64")),
+      help="Maximum concurrent trajectory collections inside this worker.",
+  )
 
   parser.add_argument(
       "--weight_sync_mode",
@@ -128,6 +162,30 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Weight sync mode (none, fallback, or raiden).",
   )
   return parser.parse_args(argv)
+
+
+def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
+  try:
+    config = json.loads(args.agent_config_json or "{}")
+  except json.JSONDecodeError as exc:
+    raise ValueError("--agent_config_json must be a valid JSON object.") from exc
+  if not isinstance(config, dict):
+    raise ValueError("--agent_config_json must decode to a JSON object.")
+  return config
+
+
+def _rollout_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+  return {
+      "weight_sync_mode": args.weight_sync_mode,
+      "max_prompt_length": args.max_prompt_length,
+      "max_tokens_to_generate": args.max_response_length,
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "return_logprobs": True,
+      "env_name": args.env_name,
+      "agent_name": args.agent_name,
+      "agent_config": _agent_config(args),
+  }
 
 
 def _create_rollout_mesh(args) -> Any:
@@ -169,14 +227,7 @@ def _create_vanilla_worker(args, tokenizer):
     )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
-      weight_sync_mode=args.weight_sync_mode,
-      max_prompt_length=args.max_prompt_length,
-      max_tokens_to_generate=args.max_response_length,
-      temperature=1.0,
-      top_p=1.0,
-      return_logprobs=True,
-      env_name=gsm8k.GSM8K_ENV_NAME,
-      agent_name=gsm8k.GSM8K_AGENT_NAME,
+      **_rollout_config_kwargs(args),
   )
   sampler_adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
       server_id=args.worker_id,
@@ -194,7 +245,7 @@ def _create_vanilla_worker(args, tokenizer):
       sampler=sampler_adapter,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
-      max_concurrency=64,
+      max_concurrency=args.max_concurrency,
   )
 
 
@@ -223,7 +274,7 @@ def _create_vllm_worker(args, tokenizer):
       sampler=sampler_adapter,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
-      max_concurrency=64,
+      max_concurrency=args.max_concurrency,
   )
 
 
@@ -251,9 +302,32 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   mapping_config = mappings_lib.MappingConfig(
       lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
   )
-  vllm_model = args.model_dir or args.model_id
-  rollout_mesh = _create_rollout_mesh(args)
+  vllm_model = (
+      args.model_dir
+      if (
+          args.model_dir
+          and os.path.isdir(args.model_dir)
+          and bool(os.listdir(args.model_dir))
+      )
+      else args.model_id
+  )
   max_model_len = args.max_prompt_length + args.max_response_length
+
+  multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+  if multihost_backend:
+    assert (
+        multihost_backend != "ray" or args.mesh_tp is not None
+    ), "Must set --mesh_tp when using Ray backend."
+
+  engine_kwargs = {
+      "model": vllm_model,
+      "max_model_len": max_model_len,
+  }
+  if multihost_backend:
+    engine_kwargs["distributed_executor_backend"] = multihost_backend
+  server_mode = True if multihost_backend else None
+  rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
+
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
@@ -270,6 +344,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_loras": 1,
     }
   vllm_config = vllm_sampler.VllmConfig(
+      server_mode=server_mode,
       mesh=rollout_mesh,
       tensor_parallel_size=args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
@@ -289,24 +364,23 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
-      weight_sync_mode=args.weight_sync_mode,
-      max_prompt_length=args.max_prompt_length,
-      max_tokens_to_generate=args.max_response_length,
-      temperature=1.0,
-      top_p=1.0,
-      return_logprobs=True,
       rollout_vllm_model_version=vllm_model,
-      env_name=gsm8k.GSM8K_ENV_NAME,
-      agent_name=gsm8k.GSM8K_AGENT_NAME,
+      **_rollout_config_kwargs(args),
   )
   return sampler_adapter, config
 
 
 def _create_vllm_sampler(args):
   """Creates a vLLM sampler rollout worker instance."""
-  from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
-  from tunix.experimental.worker import rollout_worker  # pylint: disable=g-import-not-at-top
-  from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
+      vllm_sampler_adapter,
+  )
+  from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
+      rollout_worker,
+  )
+  from vllm.engine.arg_utils import (  # pylint: disable=g-import-not-at-top
+      AsyncEngineArgs,
+  )
 
   vllm_model = (
       args.model_dir
@@ -322,13 +396,13 @@ def _create_vllm_sampler(args):
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "max_model_len=%d...",
       vllm_model,
-      args.sampler_mesh_tp,
+      args.mesh_tp,
       max_model_len,
   )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
-      tensor_parallel_size=args.sampler_mesh_tp,
+      tensor_parallel_size=args.mesh_tp,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
@@ -358,23 +432,17 @@ def _create_vllm_sampler(args):
     engine_kwargs["additional_config"] = {
         "maxtext_config": maxtext_config_overrides
     }
-  engine_args = AsyncEngineArgs(**engine_kwargs)
-  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+  engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
+  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
       server_id=args.worker_id,
       engine_args=engine_args,
       model_name=vllm_model,
+      weight_sync_mode=args.weight_sync_mode,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
-      weight_sync_mode=args.weight_sync_mode,
-      max_prompt_length=args.max_prompt_length,
-      max_tokens_to_generate=args.max_response_length,
-      temperature=1.0,
-      top_p=1.0,
-      return_logprobs=True,
       rollout_vllm_model_version=vllm_model,
-      env_name=gsm8k.GSM8K_ENV_NAME,
-      agent_name=gsm8k.GSM8K_AGENT_NAME,
+      **_rollout_config_kwargs(args),
   )
   return sampler_adapter, config
 
@@ -396,7 +464,14 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
-  if context and args.sampler != "vllm":
+  if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+  logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
+
+  logging.info("Importing rollout registry module: %s", args.registry_module)
+  importlib.import_module(args.registry_module)
+
+  if context and args.sampler == "vanilla":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
@@ -404,9 +479,6 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
   if args.maxtext_model_name:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
-  if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-  logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
 
   from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 

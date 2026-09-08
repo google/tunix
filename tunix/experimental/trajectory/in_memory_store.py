@@ -39,7 +39,10 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       self,
   ) -> list[trajectory_lib.TrajectoryMetadata]:
     """Retrieves metadata for each trajectory in the run."""
-    return list(self._metadata_by_trajectory_id.values())
+    return [
+        meta.model_copy(deep=True)
+        for meta in self._metadata_by_trajectory_id.values()
+    ]
 
   def get_trajectories(
       self, trajectory_ids: list[str]
@@ -61,10 +64,16 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       if traj_id not in self._metadata_by_trajectory_id:
         raise store.TrajectoryNotFoundError(traj_id)
       meta = self._metadata_by_trajectory_id[traj_id]
-      steps = list(self._steps_by_trajectory_id.get(traj_id, []))
+      steps = [
+          s.model_copy(deep=True)
+          for s in self._steps_by_trajectory_id.get(traj_id, [])
+      ]
       traj_data = meta.model_dump()
       traj_data["steps"] = steps
-      result.append(trajectory_lib.Trajectory(**traj_data))
+      if isinstance(meta, trajectory_lib.TunixTrajectoryMetadata):
+        result.append(trajectory_lib.TunixTrajectory(**traj_data))  # pyrefly: ignore[bad-argument-type]
+      else:
+        result.append(trajectory_lib.Trajectory(**traj_data))
     return result
 
   def add_step(
@@ -88,7 +97,14 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     """
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
     self.update_metadata(metadata)
-    self._steps_by_trajectory_id[traj_id].append(step.model_copy(deep=True))
+    step_copy = step.model_copy(deep=True)
+    steps = self._steps_by_trajectory_id[traj_id]
+    for idx, s in enumerate(steps):
+      if s.step_id == step_copy.step_id:
+        steps[idx] = step_copy
+        break
+    else:
+      steps.append(step_copy)
 
   def update_metadata(
       self,

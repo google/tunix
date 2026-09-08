@@ -199,7 +199,7 @@ class HyperParameters:
 
     # Handle relative paths used in example scripts as a special case.
     # TODO(noghabi): Remove this once the example scripts are updated.
-    if argv[1] == "base_config.yaml":
+    if argv[1] in ("base_config.yaml", "base_agentic_config.yaml"):
       base_config_file = pathlib.Path(__file__).parent / argv[1]
     else:
       base_config_file = argv[1]

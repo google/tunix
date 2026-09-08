@@ -55,6 +55,9 @@ class VllmConfig:
       default_factory=MappingConfig
   )
   return_logprobs: bool = False
+  # Capture the MoE expert ids the rollout actually routed through, so training
+  # can replay them. Sets vLLM's `enable_return_routed_experts` engine arg.
+  return_routed_experts: bool = False
 
   # vLLM Env vars
   init_with_random_weights: bool = True
@@ -328,34 +331,53 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     args["gpu_memory_utilization"] = config.hbm_utilization
 
+    if config.return_routed_experts:
+      args["enable_return_routed_experts"] = True
+
     args["additional_config"] = config.additional_config or {}
 
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
 
-    tp, dp, ep = utils.resolve_parallelism_sizes(
-        mesh=config.mesh,  # pyrefly: ignore[bad-argument-type]
-        tensor_parallel_size=config.tensor_parallel_size,
-        data_parallel_size=config.data_parallel_size,
-        expert_parallel_size=config.expert_parallel_size,
-    )
-    args["tensor_parallel_size"] = tp
-    args["data_parallel_size"] = dp
+    if config.mesh:
+      tp, dp, ep = utils.resolve_parallelism_sizes(
+          mesh=config.mesh,  # pyrefly: ignore[bad-argument-type]
+          tensor_parallel_size=config.tensor_parallel_size,
+          data_parallel_size=config.data_parallel_size,
+          expert_parallel_size=config.expert_parallel_size,
+      )
+      args["tensor_parallel_size"] = tp
+      args["data_parallel_size"] = dp
 
-    assert config.mesh is not None
-    device_indexes = config.mesh.device_ids.flatten().tolist()
-    # Merge with any sharding settings the caller put in `additional_config`
-    # (e.g. tpu-inference's `attn_dp_size`) instead of dropping them.
-    sharding = dict(args["additional_config"].get("sharding") or {})
-    strategy = dict(sharding.get("sharding_strategy") or {})
-    strategy.setdefault("expert_parallelism", ep)
-    strategy.setdefault("enable_dp_attention", config.enable_dp_attention)
-    if config.enable_dp_attention:
-      strategy["enable_dp_attention"] = True
-    strategy["device_indexes"] = device_indexes
-    sharding["sharding_strategy"] = strategy
-    args["additional_config"] = dict(args["additional_config"])
-    args["additional_config"]["sharding"] = sharding
+      assert config.mesh is not None
+      device_indexes = config.mesh.device_ids.flatten().tolist()
+      # Merge with any sharding settings the caller put in `additional_config`
+      # (e.g. tpu-inference's `attn_dp_size`) instead of dropping them.
+      sharding = dict(args["additional_config"].get("sharding") or {})
+      strategy = dict(sharding.get("sharding_strategy") or {})
+      strategy.setdefault("expert_parallelism", ep)
+      strategy.setdefault("enable_dp_attention", config.enable_dp_attention)
+      if config.enable_dp_attention:
+        strategy["enable_dp_attention"] = True
+      strategy["device_indexes"] = device_indexes
+      sharding["sharding_strategy"] = strategy
+      args["additional_config"] = dict(args["additional_config"])
+      args["additional_config"]["sharding"] = sharding
+    else:
+      # In distributed setting, JAX backend is not initialized at this point, so
+      # we can't use mesh to resolve parallelism sizes and device indexes.
+      args["tensor_parallel_size"] = config.tensor_parallel_size
+      args["data_parallel_size"] = config.data_parallel_size
+
+      sharding = dict(args["additional_config"].get("sharding") or {})
+      strategy = dict(sharding.get("sharding_strategy") or {})
+      strategy.setdefault("expert_parallelism", config.expert_parallel_size)
+      strategy.setdefault("enable_dp_attention", config.enable_dp_attention)
+      if config.enable_dp_attention:
+        strategy["enable_dp_attention"] = True
+      sharding["sharding_strategy"] = strategy
+      args["additional_config"] = dict(args["additional_config"])
+      args["additional_config"]["sharding"] = sharding
 
     return args
 
@@ -407,13 +429,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
   ) -> Tuple[
-      List[List[str]], List[List[List[float] | None]], List[List[np.ndarray]]
+      List[List[str]],
+      List[List[List[float] | None]],
+      List[List[np.ndarray]],
+      List[List[np.ndarray | None]],
   ]:
     """Detokenize the vllm outputs."""
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
     out_logprobs = [[] for _ in range(generations)]
     out_tokens = [[] for _ in range(generations)]
+    out_routed_experts = [[] for _ in range(generations)]
     for input_string, multi_sampling_output in zip(
         input_strings, request_outputs
     ):
@@ -436,12 +462,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
         )
         out_logprobs[idx].append(logprobs)
+        # `[length, num_layers, top_k]`, or None when capture is disabled.
+        out_routed_experts[idx].append(
+            getattr(single_output, "routed_experts", None)
+        )
         logging.debug(
             "Prompt: %r\n\nGenerated text: %r\n\n ",
             input_string,
             decoded_outputs[idx][-1],
         )
-    return decoded_outputs, out_logprobs, out_tokens
+    return decoded_outputs, out_logprobs, out_tokens, out_routed_experts
 
   def _generate_server_mode(
       self,
@@ -590,8 +620,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           sampling_params=sampling_params,
           use_tqdm=True,
       )
-    decoded_outputs, out_logprobs, out_tokens = self.detokenize(
-        input_strings, outputs
+    decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
+        self.detokenize(input_strings, outputs)
     )
     if self.config.return_logprobs and (
         out_logprobs is None or out_logprobs[0] is None
@@ -620,4 +650,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        routed_experts=(
+            out_routed_experts[0] if self.config.return_routed_experts else None
+        ),
     )

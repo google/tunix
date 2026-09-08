@@ -28,11 +28,11 @@ from typing import Any
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
-from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
@@ -51,6 +51,8 @@ class RLStepResult:
   num_microbatches: int
   reward_mean: float
   reward_std: float
+  advantage_mean: float = 0.0
+  advantage_std: float = 0.0
   train_result: Any = None
 
 
@@ -99,6 +101,7 @@ class StandardRLProgram(RLProgram):
       max_steps: int | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
+      generation_args: datatypes.GenerationArgs | None = None,
       group_size: int = 8,
       mini_batch_size: int = 4,
       max_staleness: int = 0,
@@ -116,12 +119,32 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
+    algo_max_response_length = getattr(self.algo, "max_response_length", 1024)
+    if generation_args is None:
+      self.generation_args = datatypes.GenerationArgs(
+          max_response_length=algo_max_response_length,
+      )
+    elif generation_args.max_response_length is None:
+      self.generation_args = dataclasses.replace(
+          generation_args,
+          max_response_length=algo_max_response_length,
+      )
+    else:
+      self.generation_args = generation_args
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
+    if self.mini_batch_size <= 0 or self.group_size <= 0:
+      raise ValueError("mini_batch_size and group_size must be positive.")
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
-        max_packed_len=getattr(algo, "max_packed_len", 8192)
+        batch_size=getattr(algo, "train_micro_batch_size", 1),
+        group_size=self.group_size,
+        mini_batch_size=self.mini_batch_size,
+        max_packed_len=getattr(algo, "max_packed_len", 8192),
     )
+    self.assembler.group_size = self.group_size
+
+    self.assembler.mini_batch_size = self.mini_batch_size
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
@@ -154,6 +177,34 @@ class StandardRLProgram(RLProgram):
     ), "run_async must initialize capacity."
     await self._dispatch_capacity.acquire()
 
+  async def _resume_from_checkpoint(self) -> None:
+    """Realigns program orchestration state with the engine's restored checkpoint.
+
+    Delegates the mesh-level work (restoring the trainer checkpoint and, when
+    `sync_weights` is enabled, resyncing rollout worker weights to the restored
+    policy) to the engine, then translates the restored step into program
+    orchestration state: the train-loop bound (`_step`) and the dataset prefix
+    to skip (resumed `_step` if any).
+    """
+    assert self.engine is not None
+    restored_step = (
+        await self.engine.resume_from_checkpoint(
+            role=datatypes.Role.ACTOR,
+            resync_rollout_weights=self.sync_weights,
+        )
+    )
+    if restored_step <= 0:
+      return
+    self._step = restored_step
+    self.policy_version = restored_step
+    logging.info(
+        "Resuming from checkpoint: step=%d policy_version=%d (skipping %d"
+        " already-trained dataset items).",
+        restored_step,
+        self.policy_version,
+        self._step * self.mini_batch_size,
+    )
+
   async def rollout_dispatch_stage(self) -> None:
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
 
@@ -162,15 +213,19 @@ class StandardRLProgram(RLProgram):
     satisfying the engine's strict `prompt_id` contract.
     """
     assert self.engine is not None
-    # TODO(tunix-dev): Skip already trained datasets when resuming from
-    # checkpoints.
     if self.dataset is None:
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
+    # TODO(tunix-dev): current skip logic assumes mini_batch_size is the same as
+    # global batch size. We should support the case that one global batch
+    # contains multiple mini-batches.
+    already_consumed = self._step * self.mini_batch_size
 
     try:
       for prompt_idx, prompt_item in enumerate(self.dataset):
+        if prompt_idx < already_consumed:
+          continue
         await self._wait_for_dispatch_window()
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
@@ -182,10 +237,15 @@ class StandardRLProgram(RLProgram):
           }
 
         self._in_flight_rollouts += self.group_size
+        dispatch_kwargs: dict[str, Any] = {
+            "group_size": self.group_size,
+            "policy_version": self.policy_version,
+        }
+        if self.generation_args is not None:
+          dispatch_kwargs["generation_args"] = self.generation_args
         await self.engine.dispatch_rollouts(
             [prompt_item],
-            group_size=self.group_size,
-            policy_version=self.policy_version,
+            **dispatch_kwargs,
         )
     finally:
       self._dispatch_done.set()
@@ -285,6 +345,7 @@ class StandardRLProgram(RLProgram):
       *,
       all_step_items: Sequence[datatypes.TrajectoryItem],
       step_rewards: Sequence[float],
+      step_advantages: Sequence[float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
       num_rollouts: int,
@@ -322,16 +383,19 @@ class StandardRLProgram(RLProgram):
       prompt_tokens = getattr(item, "prompt_tokens", None)
       if prompt_tokens is not None:
         p_len = len(prompt_tokens)
-      elif (
-          hasattr(item, "payload")
-          and getattr(item.payload, "token_ids", None) is not None
-      ):
-        token_mask = getattr(item.payload, "token_mask", None)
-        loss_mask = getattr(item.payload, "loss_mask", None)
-        if token_mask is not None and loss_mask is not None:
-          p_len = int(np.sum((token_mask > 0) & (loss_mask == 0)))
-        elif token_mask is not None:
-          p_len = int(np.sum(token_mask > 0))
+      elif hasattr(item, "payload"):
+        segment_ids = getattr(item.payload, "segment_ids", None)
+        prompt_mask = getattr(item.payload, "prompt_mask", None)
+        completion_mask = getattr(item.payload, "completion_mask", None)
+        if segment_ids is not None and completion_mask is not None:
+          p_len = int(
+              np.sum(
+                  (np.asarray(segment_ids) > 0)
+                  & (np.asarray(completion_mask) == 0)
+              )
+          )
+        elif prompt_mask is not None and np.size(prompt_mask):
+          p_len = int(np.sum(np.asarray(prompt_mask) > 0))
 
       c_len = None
       completion_tokens = getattr(item, "completion_tokens", None)
@@ -339,9 +403,9 @@ class StandardRLProgram(RLProgram):
         c_len = len(completion_tokens)
       elif (
           hasattr(item, "payload")
-          and getattr(item.payload, "loss_mask", None) is not None
+          and getattr(item.payload, "completion_mask", None) is not None
       ):
-        c_len = int(np.sum(item.payload.loss_mask > 0))
+        c_len = int(np.sum(np.asarray(item.payload.completion_mask) > 0))
 
       if p_len is not None:
         prompt_lengths.append(p_len)
@@ -448,6 +512,27 @@ class StandardRLProgram(RLProgram):
       for tag, val in reward_stats.items():
         self.metrics_logger.log(
             self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
+        )
+
+    # --- Advantage Metrics ---
+    advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
+    advantage_std = float(np.std(step_advantages)) if step_advantages else 0.0
+    advantage_min = float(np.min(step_advantages)) if step_advantages else 0.0
+    advantage_max = float(np.max(step_advantages)) if step_advantages else 0.0
+    if step_advantages:
+      advantage_stats = {
+          "mean": advantage_mean,
+          "max": advantage_max,
+          "min": advantage_min,
+          "std": advantage_std,
+      }
+      for tag, val in advantage_stats.items():
+        self.metrics_logger.log(
+            self.metrics_prefix,
+            f"rewards/advantage/{tag}",
+            val,
+            self.mode,
+            log_step,
         )
 
     # --- 3. Orchestrator Metrics ---
@@ -567,6 +652,8 @@ class StandardRLProgram(RLProgram):
     return {
         "reward_mean": reward_mean,
         "reward_std": reward_std,
+        "advantage_mean": advantage_mean,
+        "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
     }
@@ -584,59 +671,72 @@ class StandardRLProgram(RLProgram):
       step_result = None
       trainer_metrics = None
       step_rewards = []
+      step_advantages = []
       num_microbatches = 0
       num_rollouts = 0
       all_step_items = []
       scored_items = []
       groups_consumed = 0
 
-      for group_idx in range(self.mini_batch_size):
+      while groups_consumed < self.mini_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
-          break
+          assembled_batches = self.assembler.flush()
+        else:
+          if groups_consumed == 0 and self.on_step_begin:
+            self.on_step_begin(current_step)
 
-        if group_idx == 0 and self.on_step_begin:
-          self.on_step_begin(current_step)
+          groups_consumed += 1
+          uncommitted_groups.append(scored_items)
+          all_step_items.extend(scored_items)
+          num_rollouts += len(scored_items)
+          for item in scored_items:
+            step_rewards.append(float(item.traj.reward if item.traj else 0.0))
+            payload = getattr(item, "payload", None)
+            if payload is not None and payload.advantages is not None:
+              step_advantages.append(float(np.mean(payload.advantages)))
 
-        groups_consumed += 1
-        uncommitted_groups.append(scored_items)
-        all_step_items.extend(scored_items)
-        num_rollouts += len(scored_items)
-        for item in scored_items:
-          step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
+          payloads = []
+          for item in scored_items:
+            payload = getattr(item, "payload", None)
+            if isinstance(payload, datatypes.RLTrainerPayload):
+              payload = dataclasses.replace(
+                  payload,
+                  metadata={
+                      **payload.metadata,
+                      "traj_id": item.traj_id,
+                  },
+              )
+            payloads.append(payload)
+          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
 
-        payloads = [getattr(item, "payload", None) for item in scored_items]
-        # TODO: Implement streaming microbatch assembly to overlap packing
-        # with trainer execution.
-        microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
-        if getattr(self.algo, "requires_reference_kl", False):
-          scored_microbatches = []
-          for batch in microbatches:
-            if not isinstance(batch, rl_common.TrainExample):
+        for mb in assembled_batches:
+          batch = mb.payload
+          if getattr(self.algo, "requires_reference_kl", False):
+            if not isinstance(batch, datatypes.RLTrainerPayload):
               raise TypeError(
                   "Reference KL requires an assembler that returns "
-                  "rl_common.TrainExample microbatches; got "
+                  "datatypes.RLTrainerPayload microbatches; got "
                   f"{type(batch).__name__}."
               )
             ref_logps = await self.engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )
-            scored_microbatches.append(
-                batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-            )
-          microbatches = scored_microbatches
+            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
 
-        num_microbatches += len(microbatches)
-        is_final_group = group_idx == self.mini_batch_size - 1
-        for batch_idx, batch in enumerate(microbatches):
-          is_final_batch = is_final_group and batch_idx == len(microbatches) - 1
+          num_microbatches += 1
+          logging.info(
+              "Packed %d trajectories into microbatch: %s",
+              len(mb.trajectory_ids),
+              logging_utils.summarize_list(list(mb.trajectory_ids)),
+          )
           step_result = await self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
-              apply_optimizer=is_final_batch,
+              apply_optimizer=mb.is_final_batch,
           )
-          if is_final_batch:
+          if mb.is_final_batch:
             # TODO(tunix-dev): Current checkpoint and metrics logic only works
             # for fully on-policy. We need to come up with a solution for
             # semi-off-policy where a single full batch has multiple mini
@@ -653,15 +753,20 @@ class StandardRLProgram(RLProgram):
                 role=datatypes.Role.ACTOR,
                 metadata={
                     "step": self.step + 1,
-                    "policy_version": self.policy_version,
+                    # TODO(tunix-dev): Current implementation assumes that
+                    # policy_version is the same as the step. We need to
+                    # decouple them once the global batch and mini batch
+                    # alignment is fixed.
+                    "policy_version": self.policy_version + 1,
                     "num_rollouts": num_rollouts,
                     "num_microbatches": num_microbatches,
                 },
             )
 
-      if not scored_items:
-        # TODO: We currently silently drop in-progress partial microbatch accumulators if
-        # the dataset ends early. We may need to force-apply gradients here instead.
+        if not scored_items:
+          break
+
+      if not all_step_items:
         logging.info(
             "Dataset exhausted at step %d before max_steps.", current_step
         )
@@ -686,6 +791,7 @@ class StandardRLProgram(RLProgram):
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
+          step_advantages=step_advantages,
           step_result=step_result,
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
@@ -702,6 +808,8 @@ class StandardRLProgram(RLProgram):
           num_microbatches=num_microbatches,
           reward_mean=metrics_summary["reward_mean"],
           reward_std=metrics_summary["reward_std"],
+          advantage_mean=metrics_summary["advantage_mean"],
+          advantage_std=metrics_summary["advantage_std"],
           train_result=step_result,
       )
 
@@ -709,11 +817,12 @@ class StandardRLProgram(RLProgram):
       perplexity_val = metrics_summary["perplexity_val"]
       if self.mode == Mode.TRAIN:
         logging.info(
-            "Train step %d - loss: %s - reward_mean: %.4f - perplexity: %s -"
-            " step_time: %.2fs",
+            "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
+            " %.4f - perplexity: %s - step_time: %.2fs",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
+            metrics_summary["advantage_mean"],
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
         )
@@ -730,7 +839,24 @@ class StandardRLProgram(RLProgram):
     """Launches all stages concurrently on event loop."""
     del kwargs
     self.engine = engine
+    # Must happen before any stage starts: train_stage reads `_step` for its
+    # loop bound and rollout_dipatch_stage reads resumed `_step` to skip
+    # the dataset prefix the previous run already consumed.
+    await self._resume_from_checkpoint()
     logging.info("Starting StandardRLProgram concurrent stages...")
+
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=self.algo,
+        assembler=self.assembler,
+    )
+
+    if self.sync_weights:
+      await engine.prepare_rollout_policy(
+          role=datatypes.Role.ACTOR,
+          sync_weights=True,
+          policy_version=self.policy_version,
+      )
 
     max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
     self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
@@ -758,6 +884,7 @@ class StandardRLProgram(RLProgram):
       logging.error("Exception in StandardRLProgram execution: %s", exc)
       await self.raw_q.abort(exc)
       await self.scored_q.abort(exc)
+      self.assembler.reset()
       raise
     finally:
       for task in tasks:

@@ -493,9 +493,17 @@ class AutoModel:
           val_str = str(v).lower() if isinstance(v, bool) else str(v)
           argv.append(f'{k}={val_str}')
 
+      tokenizer_pad_id = kwargs.pop('tokenizer_pad_id', None)
       maxtext_config = pyconfig.initialize(argv)
+      model_creation_kwargs = {
+          'mesh': mesh,
+          'wrap_with_tunix_adapter': True,
+      }
+      if tokenizer_pad_id is not None:
+        model_creation_kwargs['tokenizer_pad_id'] = tokenizer_pad_id
       model = maxtext_model_creation_utils.from_pretrained(
-          maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True
+          maxtext_config,
+          **model_creation_kwargs,
       )
       return model, resolved_model_path
     # For other native Tunix models with special handling cases for Gemma3 models

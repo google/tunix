@@ -991,8 +991,16 @@ class WeightSyncCoordinator:
             " quiesced; no rollback needed"
         ) from e
 
-      src_metadata = [m for per_source in src_meta_lists for m in per_source]
-      dst_metadata = [m for per_dest in dst_meta_lists for m in per_dest]
+      src_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_source in src_meta_lists
+          for m in per_source
+      ]
+      dst_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_dest in dst_meta_lists
+          for m in per_dest
+      ]
       if not src_metadata or not dst_metadata:
         failures.append(
             f"metadata: {len(src_metadata)} source, {len(dst_metadata)}"
@@ -1009,6 +1017,28 @@ class WeightSyncCoordinator:
       preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
       if preflight_problems:
         failures.extend(preflight_problems)
+        src_names = []
+        for m in src_metadata:
+          src_names.extend(v.name for v in m.variables)
+        src_names.sort()
+
+        dst_names = []
+        for m in dst_metadata:
+          dst_names.extend(v.name for v in m.variables)
+        dst_names.sort()
+        logging.error(
+            "manifest preflight failed: %d source var(s), %d destination"
+            " var(s), %d problem(s)\n"
+            "  source sample:\n    %s\n"
+            "  destination sample:\n    %s\n"
+            "  problems (first 20):\n    %s",
+            len(src_names),
+            len(dst_names),
+            len(preflight_problems),
+            "\n    ".join(src_names[:8]),
+            "\n    ".join(dst_names[:8]),
+            "\n    ".join(preflight_problems[:20]),
+        )
         raise fail(
             "manifest preflight failed before any destination was quiesced;"
             " no rollback needed"

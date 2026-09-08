@@ -28,14 +28,18 @@ class _FakeWorker:
     self.worker_index = worker_index
     self.kwargs = kwargs
     self.bound = False
+    self.active = False
     self.bound_state = None
+    self.arrays = []
     self.h2d_calls = 0
     self.bind_calls = 0
 
   def bind(self, state):
     self.bound = True
+    self.active = True
     self.bind_calls += 1
     self.bound_state = state
+    self.arrays = list(state.values()) if isinstance(state, dict) else [state]
 
   def work_unit_metadata(self):
     return {"unit": self.job_name}
@@ -81,6 +85,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
   async def test_worker_uses_the_validated_config(self):
     delegate = self._delegate()
     self.assertIs(delegate._synchronizers[0].kwargs["auto_h2d"], True)
+    self.assertEqual(delegate._synchronizers[0].kwargs, {"auto_h2d": True})
 
   async def test_repeat_phases_bind_exactly_once(self):
     delegate = self._delegate()

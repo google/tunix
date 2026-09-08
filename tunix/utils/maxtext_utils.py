@@ -23,9 +23,9 @@ from typing import Any
 
 def maxtext_modules():
   """Imports MaxText lazily; some installs nest it under maxtext.src.maxtext."""
-  from maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-  from maxtext.src.maxtext.training_engine import maxtext_engine  # pylint: disable=g-import-not-at-top
-  from maxtext.src.maxtext.utils import maxtext_utils  # pylint: disable=g-import-not-at-top
+  from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
+  from maxtext.training_engine import maxtext_engine  # pylint: disable=g-import-not-at-top
+  from maxtext.utils import maxtext_utils  # pylint: disable=g-import-not-at-top
   return pyconfig, maxtext_engine, maxtext_utils
 
 

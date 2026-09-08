@@ -15,7 +15,7 @@
 
 import functools
 import inspect
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import flax
 from flax import nnx
@@ -123,6 +123,11 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
+  # laid out over the same `[prompt | completion]` padding as the token ids.
+  # When set, a model that accepts `forced_routed_experts` replays these
+  # instead of re-running its router. `-1` marks a slot to leave to the router.
+  routed_experts: ArrayType | None = None
 
   def to_jax_array(self) -> "TrainExample":
     """Returns a copy of the batch with all array fields moved to JAX array."""
@@ -291,6 +296,74 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
 
+# Marks a router-replay slot the trainer must leave to the model's own router.
+# `-1` and not `0`, because expert 0 is a real expert.
+UNSET_ROUTED_EXPERT = -1
+
+
+def align_routed_experts(
+    routed_experts: Sequence[np.ndarray | None] | None,
+    completion_lengths: Sequence[int],
+    prompt_width: int,
+    completion_width: int,
+) -> np.ndarray | None:
+  """Lays rollout routing out over the padded `[prompt | completion]` stream.
+
+  The rollout reports `[prompt_len + completion_len, num_layers, top_k]` per
+  generation, while the trainer sees prompts left-padded to `prompt_width` and
+  completions right-padded to `completion_width`. Routing has to be padded the
+  same way, or every replayed expert detaches from the token it was captured
+  for -- a silent wrong-answer bug rather than a crash.
+
+  Args:
+    routed_experts: One array per generation, or None. Replay is all-or-nothing:
+      if any row is missing, the whole batch falls back to the model's own
+      router rather than mixing replayed and fresh rows.
+    completion_lengths: Unpadded completion length per generation. The prompt /
+      completion split cannot be inferred from the widths alone, since both
+      sides are padded.
+    prompt_width: Padded prompt length.
+    completion_width: Padded completion length.
+
+  Returns:
+    `[B, prompt_width + completion_width, num_layers, top_k]`, or None.
+  """
+  if not routed_experts or any(r is None for r in routed_experts):
+    return None
+  if len(routed_experts) != len(completion_lengths):
+    raise ValueError(
+        f"got {len(routed_experts)} routing rows but"
+        f" {len(completion_lengths)} completion lengths"
+    )
+
+  rows = []
+  for routed, completion_len in zip(routed_experts, completion_lengths):
+    routed = np.asarray(routed, dtype=np.int32)
+    if routed.ndim != 3:
+      raise ValueError(
+          "routed_experts must be [length, num_layers, top_k]; got shape"
+          f" {routed.shape}"
+      )
+    # Prompts are left-padded, so an over-long one keeps its tail; completions
+    # are right-padded, so an over-long one keeps its head.
+    split = max(routed.shape[0] - completion_len, 0)
+    kept_prompt_start = max(split - prompt_width, 0)
+    kept_completion_end = split + min(routed.shape[0] - split, completion_width)
+    prompt_part = routed[kept_prompt_start:split]
+    completion_part = routed[split:kept_completion_end]
+    row = np.full(
+        (prompt_width + completion_width,) + routed.shape[1:],
+        UNSET_ROUTED_EXPERT,
+        dtype=np.int32,
+    )
+    row[prompt_width - prompt_part.shape[0] : prompt_width] = prompt_part
+    row[prompt_width : prompt_width + completion_part.shape[0]] = (
+        completion_part
+    )
+    rows.append(row)
+  return np.stack(rows)
+
+
 @functools.cache
 def _call_contains_by_type(target_cls: type[Any], target_arg: str) -> bool:
   """Determines if a class' call function contains a target argument and caches the result."""
@@ -337,6 +410,7 @@ def compute_per_token_logps(
     segment_positions: jax.Array | None = None,
     temperature: float = 1.0,
     chunk_size: int = 0,
+    routed_experts: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -360,6 +434,10 @@ def compute_per_token_logps(
     temperature: temperature used for rollout.
     chunk_size: If not 0, computes the log probabilities in sequence chunks of
       this size.
+    routed_experts: Optional `[B, T, num_layers, top_k]` MoE experts captured
+      during rollout. Forwarded to the model as `forced_routed_experts` -- the
+      name MaxText's adapter uses -- so it replays this routing instead of
+      re-running its router. Ignored by models that do not accept the kwarg.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -412,6 +490,13 @@ def compute_per_token_logps(
       model_kwargs["segment_ids"] = input_seg_ids
   if images is not None:
     model_kwargs["images"] = images
+  # Router replay. `forced_routed_experts` is the model-side name (MaxText's
+  # adapter); only models that advertise it can consume it, so everything else
+  # is unaffected.
+  if routed_experts is not None and model_call_contains(
+      model, "forced_routed_experts"
+  ):
+    model_kwargs["forced_routed_experts"] = routed_experts
 
   outputs, _ = model(input_tokens, **model_kwargs)
 

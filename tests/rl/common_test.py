@@ -1014,5 +1014,105 @@ class CommonTest(parameterized.TestCase):
     )
 
 
+_ROUTING_LAYERS = 2
+_ROUTING_TOP_K = 2
+_UNSET = common.UNSET_ROUTED_EXPERT
+
+
+def _routing(length, fill):
+  """`[length, num_layers, top_k]` routing where every slot holds `fill`."""
+  return np.full(
+      (length, _ROUTING_LAYERS, _ROUTING_TOP_K), fill, dtype=np.int32
+  )
+
+
+class AlignRoutedExpertsTest(parameterized.TestCase):
+  """Rollout routing must be padded exactly like the token ids it describes."""
+
+  def test_prompt_right_aligned_and_completion_left_aligned(self):
+    """Prompts are left-padded and completions right-padded, so routing must
+
+    follow, or every replayed expert lands on the wrong token.
+    """
+    prompt_len, completion_len = 2, 3
+    prompt_width, completion_width = 5, 6
+    routed = np.concatenate(
+        [_routing(prompt_len, 7), _routing(completion_len, 9)], axis=0
+    )
+
+    out = common.align_routed_experts(
+        [routed],
+        completion_lengths=[completion_len],
+        prompt_width=prompt_width,
+        completion_width=completion_width,
+    )
+
+    self.assertEqual(
+        out.shape,
+        (1, prompt_width + completion_width, _ROUTING_LAYERS, _ROUTING_TOP_K),
+    )
+    row = out[0]
+    np.testing.assert_array_equal(row[: prompt_width - prompt_len], _UNSET)
+    np.testing.assert_array_equal(
+        row[prompt_width - prompt_len : prompt_width], 7
+    )
+    np.testing.assert_array_equal(
+        row[prompt_width : prompt_width + completion_len], 9
+    )
+    np.testing.assert_array_equal(row[prompt_width + completion_len :], _UNSET)
+
+  def test_batches_rows_in_order(self):
+    """Row i's routing must stay on row i, or rows train on each other's."""
+    rows = [
+        np.concatenate([_routing(1, i), _routing(2, i)], axis=0)
+        for i in range(3)
+    ]
+    out = common.align_routed_experts(
+        rows, completion_lengths=[2] * 3, prompt_width=1, completion_width=2
+    )
+    self.assertEqual(out.shape[0], 3)
+    for i in range(3):
+      np.testing.assert_array_equal(out[i], i)
+
+  @parameterized.named_parameters(
+      ("nothing_captured", None),
+      ("empty", []),
+      ("partially_captured", "partial"),
+  )
+  def test_replay_is_all_or_nothing(self, rows):
+    """A half-replayed batch would mix replayed and freshly routed rows."""
+    if rows == "partial":
+      rows = [np.concatenate([_routing(1, 1), _routing(2, 1)], axis=0), None]
+    lengths = [2] * (len(rows) if rows else 0)
+    self.assertIsNone(
+        common.align_routed_experts(
+            rows,
+            completion_lengths=lengths,
+            prompt_width=1,
+            completion_width=2,
+        )
+    )
+
+  def test_overlong_prompt_keeps_the_tail(self):
+    """Left padding keeps the last prompt tokens, so routing must too."""
+    prompt = np.concatenate([_routing(1, 5), _routing(1, 6)], axis=0)
+    routed = np.concatenate([prompt, _routing(1, 9)], axis=0)
+    out = common.align_routed_experts(
+        [routed], completion_lengths=[1], prompt_width=1, completion_width=1
+    )
+    # Prompt row 5 is dropped; 6 survives.
+    np.testing.assert_array_equal(out[0, 0], 6)
+    np.testing.assert_array_equal(out[0, 1], 9)
+
+  def test_wrong_rank_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "length, num_layers, top_k"):
+      common.align_routed_experts(
+          [np.zeros((3, _ROUTING_TOP_K), dtype=np.int32)],
+          completion_lengths=[2],
+          prompt_width=1,
+          completion_width=2,
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

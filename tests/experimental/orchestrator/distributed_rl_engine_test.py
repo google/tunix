@@ -22,6 +22,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import distributed_rl_engine
+from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
@@ -51,6 +52,14 @@ class MockActorHandle(mock.MagicMock):
     self.save_checkpoint = mock.AsyncMock()
     self.restore_checkpoint = mock.AsyncMock()
     self.get_metrics = mock.AsyncMock(return_value={})
+    self.get_target_state = mock.AsyncMock(return_value={"params": 1})
+    self.set_target_state = mock.AsyncMock()
+    self.with_loss_fn = mock.MagicMock()
+    self.with_gen_model_input_fn = mock.MagicMock()
+
+  def submit(self, method_name: str, *args, **kwargs):
+    method = getattr(self, method_name)
+    return method(*args, **kwargs)
 
   async def asubmit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -59,6 +68,31 @@ class MockActorHandle(mock.MagicMock):
   async def dispatch_task(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
     return await method(*args, **kwargs)
+
+
+class _FakeSyncResult:
+  """Minimal result object exposing a `policy_version` attribute."""
+
+  def __init__(self, policy_version: int):
+    self.policy_version = policy_version
+
+
+class _FakeWeightSyncCoordinator:
+  """Records sync calls and echoes (or forces) the resulting policy version."""
+
+  def __init__(self, forced_version: int | None = None):
+    self.calls: list[int] = []
+    self._forced_version = forced_version
+
+  async def sync(self, policy_version: int = 0, **kwargs):
+    del kwargs
+    self.calls.append(policy_version)
+    version = (
+        policy_version
+        if self._forced_version is None
+        else self._forced_version
+    )
+    return _FakeSyncResult(version)
 
 
 class DistributedRLEngineTest(absltest.TestCase):
@@ -312,6 +346,142 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_sync_weights_accepts_explicit_policy_version(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+      version = await engine.sync_weights(policy_version=5)
+      self.assertEqual(version, 5)
+      self.assertEqual(coordinator.calls, [5])
+
+    asyncio.run(_run())
+
+  def test_sync_weights_accepts_role_and_target_roles(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      version = await engine.sync_weights(
+          role=datatypes.Role.CRITIC,
+          target_roles=[datatypes.Role.ACTOR],
+      )
+      self.assertEqual(version, 1)
+      self.assertEqual(coordinator.calls, [1])
+
+    asyncio.run(_run())
+
+  def _engine_with_coordinator(self, coordinator):
+    return distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        weight_sync_coordinator=coordinator,
+    )
+
+  def test_resume_from_checkpoint_returns_step_and_resyncs_weights(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint(role=datatypes.Role.ACTOR)
+
+      self.assertEqual(result, 3)
+      # Engine aligns its own policy version and resyncs rollout weights.
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+      self.mock_actor.restore_checkpoint.assert_called_once_with()
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_uses_step_boundary_policy_version(self):
+    async def _run():
+      # Recorded mid-step policy_version is ignored in favor of the step.
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 2,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_no_checkpoint_does_not_resync(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {"step": 0}
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 0)
+      self.assertEqual(coordinator.calls, [])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_tolerates_bad_metadata(self):
+    for bad_value in (None, "not-a-dict", {"step": "bogus"}):
+      with self.subTest(bad_value=bad_value):
+        async def _run(bad_value=bad_value):
+          self.mock_actor.restore_checkpoint.return_value = bad_value
+          coordinator = _FakeWeightSyncCoordinator()
+          engine = self._engine_with_coordinator(coordinator)
+
+          result = await engine.resume_from_checkpoint()
+
+          self.assertEqual(result, 0)
+          self.assertEqual(coordinator.calls, [])
+
+        asyncio.run(_run())
+
+  def test_resume_from_checkpoint_skips_resync_when_disabled(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 2,
+          "policy_version": 2,
+      }
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      with self.assertLogs(level="WARNING") as logs:
+        result = await engine.resume_from_checkpoint(
+            resync_rollout_weights=False
+        )
+
+      self.assertEqual(result, 2)
+      self.assertEqual(engine._policy_version, 2)
+      self.assertEqual(coordinator.calls, [])
+      self.assertTrue(
+          any("base weights" in line for line in logs.output), logs.output
+      )
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_raises_on_version_mismatch(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=1)
+      engine = self._engine_with_coordinator(coordinator)
+
+      with self.assertRaisesRegex(
+          RuntimeError, "does not match synced version"
+      ):
+        await engine.resume_from_checkpoint()
+
+    asyncio.run(_run())
+
   def test_train_step_propagates_optional_kwargs(self):
     async def _run():
       self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
@@ -411,6 +581,41 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(await engine.sync_weights(), 1)
       self.assertEqual(await engine.sync_weights(), 2)
       self.assertEqual(coordinator.calls, [1, 2])
+
+    asyncio.run(_run())
+
+  def test_prepare_rollout_policy_sets_target_state_and_bootstraps_sync(self):
+    async def _run():
+      class _FakeResult:
+        policy_version = 0
+
+      class _FakeCoordinator:
+
+        def __init__(self):
+          self.calls = []
+
+        async def sync(self, policy_version=0, **kwargs):
+          del kwargs
+          self.calls.append(policy_version)
+          _FakeResult.policy_version = policy_version
+          return _FakeResult
+
+      coordinator = _FakeCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+          weight_sync_coordinator=coordinator,
+      )
+
+      version = await engine.prepare_rollout_policy()
+
+      self.assertEqual(version, 0)
+      self.mock_rollout_1.get_target_state.assert_called_once_with()
+      self.mock_actor.set_target_state.assert_called_once_with(
+          target_state={"params": 1}
+      )
+      self.assertEqual(coordinator.calls, [0])
 
     asyncio.run(_run())
 
@@ -617,7 +822,6 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.assertLen(requests_none, 1)
     self.assertIsNone(requests_none[0].metadata["env_config"])
 
-
     # 3. env_config is omitted
     requests_omitted = self.engine._build_rollout_requests(
         [{"prompt": "p3", "prompt_id": "p3"}],
@@ -626,7 +830,6 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
     self.assertLen(requests_omitted, 1)
     self.assertNotIn("env_config", requests_omitted[0].metadata)
-
 
   def test_dispatch_rollouts_passes_generation_args_and_route_metadata(self):
     async def _run():
@@ -1074,6 +1277,205 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
 
     asyncio.run(_run())
+
+  def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 10
+    mock_assembler.eos_id = 20
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        mock_loss, has_aux=True
+    )
+    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=10, eos_id=20
+    )
+
+  def test_configure_worker_actor_raises_when_algo_none(self):
+    with self.assertRaisesRegex(ValueError, "algo is required"):
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=None,
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_actor_raises_when_assembler_none(self):
+    with self.assertRaisesRegex(ValueError, "assembler is required"):
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock.MagicMock(),
+          assembler=None,
+      )
+
+  def test_configure_worker_critic_configures_loss_and_gen_model_input_fn(self):
+    mock_critic = MockActorHandle()
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 5
+    mock_assembler.eos_id = 6
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1],
+        trainer_workers={datatypes.Role.CRITIC: mock_critic},
+    )
+    engine.configure_worker(
+        role=datatypes.Role.CRITIC,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    mock_critic.with_loss_fn.assert_called_once_with(mock_loss, has_aux=True)
+    mock_critic.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=5, eos_id=6
+    )
+
+  def test_configure_worker_fallback_pad_and_eos_kwargs(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock.MagicMock(spec=[]),
+        pad_id=42,
+        eos_id=43,
+    )
+
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=42, eos_id=43
+    )
+
+  def test_configure_worker_raises_on_missing_worker(self):
+    mock_algo = mock.MagicMock()
+    with self.assertRaises(ValueError):
+      self.engine.configure_worker(
+          role=datatypes.Role.CRITIC,
+          algo=mock_algo,
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_rollout_and_reference(self):
+    mock_algo = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    self.engine.configure_worker(
+        role=datatypes.Role.ROLLOUT,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+    self.engine.configure_worker(
+        role=datatypes.Role.REFERENCE,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    engine_no_workers = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+    )
+    with self.assertRaises(ValueError):
+      engine_no_workers.configure_worker(
+          role=datatypes.Role.ROLLOUT,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+    with self.assertRaises(ValueError):
+      engine_no_workers.configure_worker(
+          role=datatypes.Role.REFERENCE,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+  def test_configure_worker_unsupported_role(self):
+    mock_algo = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    with self.assertRaises(ValueError):
+      self.engine.configure_worker(
+          role="unsupported_role",
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+  def test_distributed_rl_engine_implements_protocol(self):
+    self.assertIsInstance(self.engine, rl_engine_interface.AbstractRLEngine)
+
+  def test_configure_worker_default_role_is_actor(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock(pad_id=1, eos_id=2)
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        mock_loss, has_aux=True
+    )
+    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=1, eos_id=2
+    )
+
+  def test_configure_worker_actor_raises_when_no_actor_worker(self):
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1],
+        trainer_workers={},
+    )
+    with self.assertRaisesRegex(
+        ValueError, "No trainer worker registered for role actor"
+    ):
+      engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock.MagicMock(),
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_pad_and_eos_defaults(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    # 1. Zero defaults when neither assembler nor kwargs define pad/eos
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock.MagicMock(spec=[]),
+    )
+    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=0, eos_id=0)
+
+    # 2. eos_id defaults to pad_id when only pad_id is set on assembler
+    mock_assembler_pad_only = mock.MagicMock(spec=["pad_id"])
+    mock_assembler_pad_only.pad_id = 7
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler_pad_only,
+    )
+    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=7, eos_id=7)
 
 
 if __name__ == "__main__":

@@ -21,33 +21,22 @@ The TPU worker processes host the expensive pieces:
 
 This process only owns Orchestrator V2 control flow. It registers remote worker
 handles with ClusterOrchestrator, configures the GRPO loss on the trainer worker,
-and executes StandardRLProgram through ClusterOrchestrator.run_program().
+and executes StandardRLProgram through ClusterOrchestrator.run().
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
-from concurrent import futures
 import functools
 import logging
 import os
-import pickle
 import sys
-from types import SimpleNamespace
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import grain  # pylint: disable=g-import-not-at-top
 import jax  # pylint: disable=g-import-not-at-top
-import numpy as np  # pylint: disable=g-import-not-at-top
-import tensorflow_datasets as tfds  # pylint: disable=g-import-not-at-top
-
-try:
-  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
-except (ImportError, ModuleNotFoundError):
-  pass
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -57,25 +46,17 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
+from tunix.experimental.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
+from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
-
-def _parse_weight_sync_mode(value: str) -> str:
-  mode = value.lower()
-  if mode in ("noop", "no-op"):
-    return "fallback"
-  if mode not in ("none", "fallback", "raiden"):
-    raise argparse.ArgumentTypeError(
-        "weight_sync_mode must be one of: none, fallback, raiden"
-    )
-  return mode
-
+ProcessContext = runtime_context.ProcessContext
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
@@ -120,8 +101,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--weight_sync_mode",
-      type=_parse_weight_sync_mode,
-      default=_parse_weight_sync_mode(os.getenv("WEIGHT_SYNC_MODE", "none")),
+      type=weight_sync.WeightSyncMode,
+      default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
+      choices=list(weight_sync.WeightSyncMode),
       help=(
           "Weight synchronization mode. 'none' disables post-update sync, "
           "'raiden' uses Raiden, and 'fallback' runs protocol-only sync."
@@ -153,6 +135,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Directory for local event logging (TensorBoard/CLU).",
   )
   parser.add_argument(
+      "--flush_metrics_every_n_steps",
+      type=int,
+      default=1,
+      help="Frequency in steps to flush metrics logger.",
+  )
+  parser.add_argument(
       "--wandb_project",
       type=str,
       default=os.getenv("WANDB_PROJECT", "trellis-gsm8k"),
@@ -165,6 +153,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
@@ -175,221 +164,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
-  return remote_execution.ActorHandle.from_address(
-      f"grpc://{addr}", rpc_timeout_s=timeout_s
-  )
-
-
-def _normalize_example_value(value: Any) -> Any:
-  if isinstance(value, np.ndarray):
-    flat = value.reshape(-1).tolist()
-    if len(flat) == 1:
-      return _normalize_example_value(flat[0])
-    return [_normalize_example_value(v) for v in flat]
-  if isinstance(value, np.bytes_):
-    return value.tobytes().decode("utf-8")
-  if isinstance(value, bytes):
-    return value.decode("utf-8")
-  return value
-
-
-def _as_text(value: Any) -> str:
-  normalized = _normalize_example_value(value)
-  return normalized if isinstance(normalized, str) else str(normalized)
-
-
-def _build_gsm8k_dataset(args: argparse.Namespace) -> grain.MapDataset:
-  """Loads the real GSM8K split and maps examples to prompt/answer records."""
-  logging.info(
-      "Loading GSM8K TFDS split=%s data_dir=%s shuffle=%s seed=%d.",
-      args.tfds_split,
-      args.tfds_data_dir,
-      args.shuffle,
-      args.seed,
-  )
-  data = tfds.data_source(
-      "gsm8k",
-      split=args.tfds_split,
-      data_dir=args.tfds_data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
-  dataset = grain.MapDataset.source(data)
-  if args.shuffle:
-    dataset = dataset.shuffle(seed=args.seed)
-  logging.info("GSM8K dataset loaded successfully: %d examples.", len(dataset))
-  return dataset.map(
-      lambda x: {
-          "prompts": gsm8k.build_prompt(_as_text(x["question"])),
-          "question": _as_text(x["question"]),
-          "answer": gsm8k.extract_hash_answer(_as_text(x["answer"])),
-      }
-  )
-
-
-def _make_reward_fn(mode: str, debug: bool = False):
-  """Creates the optional orchestrator-side reward function."""
-  if mode == "env":
-    return None
-
-  def reward_fn(item: datatypes.TrajectoryItem) -> float:
-    metadata = dict(item.metadata or {})
-    text = str(metadata.get("text", ""))
-    reward, _ = gsm8k.score_gsm8k_completion(
-        text, metadata.get("answer", metadata.get("gold_answer"))
-    )
-    if debug:
-      prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
-      gold_answer = metadata.get("gold_answer")
-      logging.debug(
-          "[Orchestrator] Sampler response for %s:\n"
-          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-          "Gold Answer: %s, Extracted Answer: %s",
-          prompt_id,
-          text,
-          gold_answer,
-          gsm8k.extract_boxed_answer(text),
-      )
-    return reward
-
-  return reward_fn
-
-
-def _grpo_model_input(
-    train_example: Any,
-    *,
-    algo_config: Any,
-    pad_id: int,
-    eos_id: int,
-) -> dict[str, Any]:
-  """Maps a TrainExample microbatch to algo_core.grpo_loss_fn kwargs."""
-  return {
-      "train_example": train_example,
-      "algo_config": algo_config,
-      "pad_id": pad_id,
-      "eos_id": eos_id,
-  }
-
-
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  algo = algorithm_adapter.GRPOAdapter(
+  return algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
       # StandardRLProgram consumes this many prompt groups per trainer update.
       mini_batch_size=args.batch_size,
       max_packed_len=args.max_prompt_length + args.max_response_length,
+      max_response_length=args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
-  )
-  return algo
-
-
-def _get_config_attr(config: Any, key: str, default: Any = None) -> Any:
-  if config is None:
-    return default
-  if isinstance(config, dict):
-    return config.get(key, default)
-  return getattr(config, key, default)
-
-
-def _build_grpo_config(args: argparse.Namespace) -> Any:
-  return SimpleNamespace(
-      beta=args.beta,
-      epsilon=args.epsilon,
-      loss_algo="grpo",
-      loss_agg_mode="sequence-mean-token-mean",
       temperature=args.temperature,
-      kl_loss_mode="mse_kl",
-      kl_clamp_value=None,
   )
-
-
-def _configure_trainer_loss(
-    trainer_handle: remote_execution.ActorHandle,
-    *,
-    algo: algorithm_adapter.GRPOAdapter,
-    grpo_config: Any,
-    pad_id: int,
-    eos_id: int,
-) -> None:
-  beta = _get_config_attr(grpo_config, "beta", "N/A")
-  epsilon = _get_config_attr(grpo_config, "epsilon", "N/A")
-  loss_algo = _get_config_attr(grpo_config, "loss_algo", "N/A")
-  logging.info(
-      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
-      "epsilon=%s, loss_algo=%s).",
-      beta,
-      epsilon,
-      loss_algo,
-  )
-  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
-  trainer_handle.submit(
-      "with_gen_model_input_fn",
-      functools.partial(
-          _grpo_model_input,
-          algo_config=grpo_config,
-          pad_id=pad_id,
-          eos_id=eos_id,
-      ),
-  )
-
-
-def _register_workers(
-    args: argparse.Namespace,
-    *,
-    cluster: orchestrator.ClusterOrchestrator,
-    trainer_handle: remote_execution.ActorHandle,
-    trainer_addr: str,
-    rollout_handle: remote_execution.ActorHandle,
-    rollout_addr: str,
-    inference_handle: remote_execution.ActorHandle | None,
-    inference_addr: str | None,
-) -> None:
-  """Registers gRPC-backed workers in the Orchestrator V2 registry."""
-  cluster.register_worker_handle(
-      worker_id="trainer-0",
-      roles=[datatypes.Role.ACTOR],
-      handle=trainer_handle,
-      resources={"address": trainer_addr},
-  )
-  cluster.register_worker_handle(
-      worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
-      handle=rollout_handle,
-      resources={"address": rollout_addr},
-  )
-  if inference_handle is not None:
-    cluster.register_worker_handle(
-        worker_id="reference-0",
-        roles=[datatypes.Role.REFERENCE],
-        handle=inference_handle,
-        resources={"address": inference_addr},
-    )
 
 
 def _build_prompt_item(
     *,
     example: dict[str, Any],
     prompt_idx: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
 ) -> dict[str, Any]:
-  prompt = _as_text(example["prompts"])
-  question = _as_text(example["question"])
-  answer = _normalize_example_value(example["answer"])
+  prompt = gsm8k.as_text(example["prompts"])
+  question = gsm8k.as_text(example["question"])
+  answer = gsm8k.normalize_example_value(example["answer"])
   prompt_id = f"prompt_{prompt_idx}"
   return {
       "prompt": prompt,
       "prompt_id": prompt_id,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
       "metadata": {
           "answer": answer,
           "gold_answer": answer,
@@ -398,6 +197,7 @@ def _build_prompt_item(
           "env_config": {
               "prompt": prompt,
               "prompts": prompt,
+              "prompt_id": prompt_id,
               "question": question,
               "answer": answer,
               "gold_answer": answer,
@@ -410,30 +210,28 @@ def _build_prompt_item(
 def _iter_prompt_items(
     args: argparse.Namespace,
 ) -> Iterator[dict[str, Any]]:
-  top_k = None if args.top_k < 0 else args.top_k
-  dataset = _build_gsm8k_dataset(args)
+  dataset = gsm8k.load_gsm8k_dataset(
+      split=args.tfds_split,
+      data_dir=args.tfds_data_dir,
+      shuffle=args.shuffle,
+      seed=args.seed,
+  )
   dataset_size = len(dataset)
   if dataset_size == 0:
     raise ValueError("GSM8K dataset is empty.")
   for prompt_idx in range(args.max_steps * args.batch_size):
     example = dataset[prompt_idx % dataset_size]
+    assert example is not None
     yield _build_prompt_item(
         example=example,
         prompt_idx=prompt_idx,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
     )
 
 
-def main(argv: list[str], context: Any = None) -> None:
-  if context and context.ipc and context.ipc.discovery:
-    pass
-  else:
-    raise RuntimeError(
-        "Require discovery API, but process context doesn't support."
-    )
+def main(argv: list[str], context: ProcessContext | None = None) -> None:
+  assert (
+      context and context.ipc and context.ipc.discovery
+  ), "Require discovery API, but process context doesn't support."
 
   logging.basicConfig(
       level=logging.INFO,
@@ -491,93 +289,35 @@ def main(argv: list[str], context: Any = None) -> None:
       eos_id,
   )
 
-  trainer_addr_future = futures.Future()
-  rollout_addr_future = futures.Future()
-  inference_addr_future = futures.Future()
-
-  def accept_worker(hostname: str, _: int, metadata: bytes) -> None:
-    md = pickle.loads(metadata)
-
-    service_type = md["service_type"]
-    service_address = f"{hostname}:{md['service_port']}"
-    worker_id = md["worker_id"]
-
-    logging.info(
-        "Discovered %s service (%s) at %s.",
-        service_type,
-        worker_id,
-        service_address,
-    )
-
-    match service_type:
-      case "trainer":
-        if not trainer_addr_future.done():
-          trainer_addr_future.set_result(service_address)
-      case "rollout":
-        if not rollout_addr_future.done():
-          rollout_addr_future.set_result(service_address)
-      case "inference":
-        if not inference_addr_future.done():
-          inference_addr_future.set_result(service_address)
-      case _:
-        raise RuntimeError(f"unknown service type {service_type}")
-
-  assert context and context.ipc and context.ipc.discovery
-  context.ipc.discovery.on_register(accept_worker)
+  cluster = orchestrator.ClusterOrchestrator(
+      weight_sync_mode=args.weight_sync_mode,
+  )
+  context.ipc.discovery.on_register(
+      functools.partial(
+          cluster.register_worker_from_hostname,
+          rpc_timeout_s=args.rpc_timeout_s,
+      )
+  )
 
   logging.info("Waiting for workers to register via discovery service...")
-  trainer_addr = trainer_addr_future.result()
-  trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
-  rollout_addr = rollout_addr_future.result()
-  rollout_handle = _connect(rollout_addr, args.rpc_timeout_s)
-  inference_addr = None
-  inference_handle = None
-  if args.beta != 0.0:
-    inference_addr = (
-        args.inference_addr
-        if args.inference_addr
-        else inference_addr_future.result(timeout=args.rpc_timeout_s)
-    )
-    inference_handle = _connect(inference_addr, args.rpc_timeout_s)
-
-  logging.info(
-      "Connected to all required workers: Trainer=%s, Rollout=%s%s.",
-      trainer_addr,
-      rollout_addr,
-      f", Inference={inference_addr}" if inference_addr else "",
-  )
-
-  algo = _build_algo(args)
-  grpo_config = _build_grpo_config(args)
-  _configure_trainer_loss(
-      trainer_handle,
-      algo=algo,
-      grpo_config=grpo_config,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-
-  cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode
-  )
-
-  _register_workers(
-      args,
-      cluster=cluster,
-      trainer_handle=trainer_handle,
-      trainer_addr=trainer_addr,
-      rollout_handle=rollout_handle,
-      rollout_addr=rollout_addr,
-      inference_handle=inference_handle,
-      inference_addr=inference_addr,
+  cluster.wait_for_workers(
+      min_workers={
+          datatypes.Role.ACTOR: 1,
+          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+      },
+      timeout=args.init_timeout_s,
+      poll_interval_s=1.0,
   )
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
+
+  algo = _build_algo(args)
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
-      flush_every_n_steps=1,
+      flush_every_n_steps=args.flush_metrics_every_n_steps,
       backend_kwargs={
           "wandb": {
               "config": vars(args),
@@ -585,18 +325,31 @@ def main(argv: list[str], context: Any = None) -> None:
       },
   )
 
-  reward_fn = _make_reward_fn(args.reward_mode, debug=args.debug)
-  reward_fns = [reward_fn] if reward_fn is not None else []
+  reward_fns = (
+      [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
+      if args.reward_mode == "exact"
+      else []
+  )
+  generation_args = datatypes.GenerationArgs(
+      max_response_length=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=None if args.top_k < 0 else args.top_k,
+      return_logprobs=True,
+  )
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
-      assembler=batch_assembly.GRPOTrainExampleAssembler(
+      generation_args=generation_args,
+      assembler=batch_assembly.PaddedBatchAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
           pad_id=pad_id,
+          group_size=algo.group_size,
+          mini_batch_size=algo.mini_batch_size,
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,
@@ -620,7 +373,7 @@ def main(argv: list[str], context: Any = None) -> None:
         "Cluster workers ready: %s. Starting StandardRLProgram execution...",
         [w.worker_id for w in cluster.worker_infos()],
     )
-    cluster.run_program(
+    cluster.run(
         program=program,
         num_steps=args.max_steps,
         bring_up=False,

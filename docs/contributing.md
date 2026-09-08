@@ -32,6 +32,22 @@ that clearly reproduces the error.
 
 To begin coding, fork the repository and create a new branch from main.
 
+#### Setting up a development environment
+
+We recommend creating an isolated virtual environment before installing Tunix's
+development dependencies. From the repository root you can run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .[dev]
+```
+
+The `dev` extra pulls in the bleeding-edge dependencies we rely on during local
+development. If you prefer to stick with released packages, skip the extra and
+run `pip install -e .` instead.
+
 ### 3. Create a pull request
 
 Once your changes are ready, open a pull request from your branch to the main
@@ -50,25 +66,37 @@ A project maintainer will review your pull request. Be prepared for one or more
 rounds of comments and requested changes as we work with you to refine the
 contribution.
 
-### Setting up a development environment
+During review and development, standard CPU unit tests, package builds, and
+documentation checks run automatically on every pull request push.
 
-We recommend creating an isolated virtual environment before installing Tunix's
-development dependencies. From the repository root you can run:
+### 6. TPU CI Validation (`ready-to-submit` label)
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e .[dev]
-```
+To conserve shared hardware resources and prevent long queue times on live TPU
+runners, multi-device TPU integration tests do not run automatically on every
+pull request update.
 
-The `dev` extra pulls in the bleeding-edge dependencies we rely on during local
-development. If you prefer to stick with released packages, skip the extra and
-run `pip install -e .` instead.
+Once your pull request has completed code review, addressed all reviewer comments,
+and is ready for final verification:
+1. A project maintainer will apply the `ready-to-submit` label to the pull
+   request.
+2. The `ready-to-submit` label automatically triggers the comprehensive TPU test
+   suite (`tunix_tpu_unit_tests`) running against live TPU accelerators.
+3. If further commits are pushed to the pull request while the `ready-to-submit`
+   label is present, TPU tests will automatically re-run.
 
-### 6. Merging
+### 7. Internal Import and Merging
 
-Once the pull request is approved, a team member will take care of merging.
+Once the pull request has been approved and all CI checks (including the TPU test
+suite triggered by `ready-to-submit`) have passed:
+1. The PR will be converted/imported into Google's internal repository.
+2. The change is verified and approved from the internal review workflow.
+3. The change is submitted internally, which automatically syncs to GitHub and
+   resolves the pull request.
+
+**Important Note for Maintainers & Reviewers**: Do **not** click the "Merge" button
+directly on the GitHub pull request UI. All PR merges must go through the internal
+import and sync pipeline to keep internal and open-source repositories consistent.
+
 Thank you for your contribution!
 
 ## Formatting and linting

@@ -15,11 +15,7 @@ from tunix.tests.test_common import ModelConfig, ToyTransformer
 
 class RaidenIntegrationTest(absltest.TestCase):
 
-  @absltest.skipIf(
-      raiden_synchronizer._ws_lib is None,
-      "Requires TPU Raiden C++ extension (_ws_lib)",
-  )
-  def test_toy_transformer_raiden_sync(self):
+  def _build_sharded_states(self):
     config = ModelConfig(vocab_size=128, num_layers=2)
 
     rng_s = nnx.Rngs(0)
@@ -33,12 +29,10 @@ class RaidenIntegrationTest(absltest.TestCase):
 
     import numpy as np
     devices = np.array(jax.devices())
-    print("devices: ", devices)
     mesh1 = jax.sharding.Mesh(devices, ('x',))
     mesh2 = jax.sharding.Mesh(devices.reshape((2, 2)), ('x', 'y'))
 
     def shard1(x):
-      # Shard along the first dimension if available
       if x.ndim >= 1 and x.shape[0] % 4 == 0:
         spec = jax.sharding.PartitionSpec('x')
       else:
@@ -46,7 +40,6 @@ class RaidenIntegrationTest(absltest.TestCase):
       return jax.device_put(x, jax.sharding.NamedSharding(mesh1, spec))
 
     def shard2(x):
-      # Shard along a different dimension if available
       if x.ndim >= 2 and x.shape[1] % 2 == 0 and x.shape[0] % 2 == 0:
         spec = jax.sharding.PartitionSpec('x', 'y')
       elif x.ndim >= 1 and x.shape[0] % 2 == 0:
@@ -57,22 +50,24 @@ class RaidenIntegrationTest(absltest.TestCase):
 
     sender_state = jax.tree_util.tree_map(shard1, sender_state)
     receiver_state = jax.tree_util.tree_map(shard2, receiver_state)
-
     sender_state = jax.tree_util.tree_map(lambda x: x + 1.0, sender_state)
+    return sender_state, receiver_state
 
+  def _run_sync(self):
+    sender_state, receiver_state = self._build_sharded_states()
     handler = RaidenHandler(port=0, transfer_parallelism=2)
 
     async def run_sync():
       trainer_sync = RaidenSynchronizer("trainer")
       trainer_sync.bind(sender_state)
 
-      sampler_sync = RaidenSynchronizer("sampler")
+      sampler_sync = RaidenSynchronizer("sampler", auto_h2d=True)
       sampler_sync.bind(receiver_state)
+
+      trainer_sync.d2h()
 
       handler.register_work_unit(trainer_sync.work_unit_metadata())
       handler.register_work_unit(sampler_sync.work_unit_metadata())
-
-      trainer_sync.d2h()
 
       await asyncio.to_thread(
           handler.transfer,
@@ -83,7 +78,40 @@ class RaidenIntegrationTest(absltest.TestCase):
 
       sampler_sync.h2d()
 
-    asyncio.run(run_sync())
+    try:
+      asyncio.run(run_sync())
+    finally:
+      handler.close()
+
+    return sender_state, receiver_state
+
+  @absltest.skipIf(
+      raiden_synchronizer._ws_lib is None,
+      "Requires TPU Raiden C++ extension (_ws_lib)",
+  )
+  @absltest.skipIf(
+      "proxy" in os.environ.get("JAX_PLATFORMS", ""),
+      "Native trainer-side sync is only the default outside Pathways proxy"
+      " runtimes.",
+  )
+  def test_toy_transformer_raiden_sync(self):
+    sender_state, receiver_state = self._run_sync()
+
+    leaves_s, _ = jax.tree_util.tree_flatten(sender_state)
+    leaves_r, _ = jax.tree_util.tree_flatten(receiver_state)
+    for i, (s, r) in enumerate(zip(leaves_s, leaves_r)):
+      self.assertTrue(jnp.allclose(s, r), f"Mismatch at leaf {i}")
+
+  @absltest.skipIf(
+      raiden_synchronizer._raiden_ffi is None,
+      "Requires Pathways FFI extension (_raiden_ffi)",
+  )
+  @absltest.skipIf(
+      "proxy" not in os.environ.get("JAX_PLATFORMS", ""),
+      "Trainer-side FFI weight sync only runs on Pathways proxy runtimes.",
+  )
+  def test_toy_transformer_raiden_sync_trainer_ffi(self):
+    sender_state, receiver_state = self._run_sync()
 
     leaves_s, _ = jax.tree_util.tree_flatten(sender_state)
     leaves_r, _ = jax.tree_util.tree_flatten(receiver_state)

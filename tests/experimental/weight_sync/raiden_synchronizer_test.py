@@ -82,6 +82,28 @@ class _ProxyArray:
   def devices(self):
     return {_ProxyDevice()}
 
+  def block_until_ready(self):
+    return self
+
+
+class _TpuDevice:
+  platform = "tpu"
+
+
+class _FakeBindableArray:
+  """Array-like leaf that looks bindable without needing a TPU runtime."""
+
+  def __init__(self, shape=(2,), dtype=np.float32):
+    self.shape = shape
+    self.dtype = np.dtype(dtype)
+    self.ndim = len(shape)
+
+  def devices(self):
+    return {_TpuDevice()}
+
+  def block_until_ready(self):
+    return self
+
 
 class _FakeSocket:
 
@@ -171,13 +193,21 @@ class RaidenSynchronizerTest(absltest.TestCase):
 
   def test_census_drops_non_cpu_tpu_platforms(self):
     names, _ = raiden_synchronizer._filter_bindable(
-        ["good", "proxy"], [jnp.ones((2,)), _ProxyArray()]
+        ["good", "proxy"], [_FakeBindableArray(), _ProxyArray()]
     )
     self.assertEqual(names, ["good"])
 
+  def test_census_keeps_proxy_platforms_for_ffi(self):
+    names, _ = raiden_synchronizer._filter_bindable(
+        ["good", "proxy"],
+        [_FakeBindableArray(), _ProxyArray()],
+        allow_proxy=True,
+    )
+    self.assertEqual(names, ["good", "proxy"])
+
   def test_census_keeps_bfloat16_weights(self):
     names, _ = raiden_synchronizer._filter_bindable(
-        ["w"], [jnp.ones((2,), jnp.bfloat16)]
+        ["w"], [_FakeBindableArray(dtype=jnp.bfloat16)]
     )
     self.assertEqual(names, ["w"])
 
@@ -192,7 +222,18 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     sums = sync.checksums()
     self.assertEqual(sums["__grand_total__"], 8.0 + 3.0)
-    self.assertLen(sums, 3)  # two sampled tensors + grand total
+    self.assertLen(sums, 5)  # two sampled tensors + three totals
+
+  def test_checksums_count_every_tensor_not_just_the_sample(self):
+    """Verifies counts cover every tensor even when sampled.
+
+    `sample` caps the per-tensor entries, so the counts are what tells the
+    two sides they compared the same set of weights.
+    """
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
+    sums = sync.checksums(sample=1)
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 2 * 4 + 3)
 
   def test_work_unit_metadata_shards_and_addresses(self):
     sync = raiden_synchronizer.RaidenSynchronizer(
@@ -284,15 +325,81 @@ class RaidenSynchronizerTest(absltest.TestCase):
     base = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     self.assertEqual(base.work_unit_metadata().unit.job_replica_id, "")
 
-  def test_host_stage_pulls_state_to_host(self):
-    sentinel = {"w": jnp.ones((2, 2))}
+  def test_defaults_to_ffi_under_proxy(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    self.assertTrue(sync._is_proxy)
+
+  def test_defaults_to_non_ffi_without_proxy(self):
+    with mock.patch.dict("os.environ", {}, clear=True):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    self.assertFalse(sync._is_proxy)
+
+  def test_ffi_h2d_blocks_until_ready(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+
+    class _ReadyArray:
+
+      def __init__(self):
+        self.ready_calls = 0
+
+      def block_until_ready(self):
+        self.ready_calls += 1
+        return self
+
+    ready = _ReadyArray()
+    sync._ffi_mesh = object()
+    sync._ffi_shard_idx = object()
     with mock.patch.object(
-        raiden_synchronizer, "to_host_cpu_state", return_value=sentinel
-    ) as pull:
-      raiden_synchronizer.RaidenSynchronizer(
-          "trainer", self._state(), host_stage=True
+        raiden_synchronizer, "_raiden_ffi", autospec=True
+    ) as ffi:
+      ffi.multi_h2d.return_value = [ready]
+      sync._ffi_h2d()
+    self.assertEqual(ready.ready_calls, 1)
+
+  def test_ffi_source_routes_through_d2h_init(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      with mock.patch.object(
+          sync, "_init_ffi_transport", autospec=True
+      ) as init_ffi:
+        sync.bind(self._state())
+        init_ffi.assert_not_called()
+        sync.d2h()
+    init_ffi.assert_called_once_with(is_d2h=True)
+
+  def test_ffi_destination_init_runs_at_bind(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("rollout", auto_h2d=True)
+      with mock.patch.object(
+          sync, "_init_ffi_transport", autospec=True
+      ) as init_ffi:
+        sync.bind(self._state())
+    init_ffi.assert_called_once_with(is_d2h=False)
+
+  def test_ffi_destination_h2d_routes_through_multi_h2d(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("rollout", auto_h2d=True)
+      sync.names, sync.arrays = raiden_synchronizer.flatten_weights(
+          self._state()
       )
-    pull.assert_called_once()
+      with mock.patch.object(sync, "_ffi_h2d", autospec=True) as ffi_h2d:
+        sync.h2d()
+    ffi_h2d.assert_called_once_with()
+
+  def test_ffi_compute_on_compat_accepts_out_memory_spaces(self):
+    from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
+    compute_on_mod = getattr(raiden_synchronizer.jax, "_src").compute_on
+    original = compute_on_mod.compute_on
+    self.addCleanup(setattr, compute_on_mod, "compute_on", original)
+
+    raiden_synchronizer._ensure_ffi_compute_on_compat()
+
+    decorator = compute_on_mod.compute_on(
+        compute_type="device_host",
+        out_memory_spaces=jax.memory.Space.Device,
+    )
+    self.assertTrue(callable(decorator))
 
 
 if __name__ == "__main__":

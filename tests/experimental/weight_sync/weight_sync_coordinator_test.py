@@ -651,6 +651,32 @@ class ManifestPreflightTest(CoordinatorTestBase):
     self.assertNotIn("abort", self.phases("sampler"))
     self.assertIsNone(self.coordinator.poisoned)
 
+  def test_failure_log_shows_both_manifests(self):
+    """Verifies failure logs sample both manifests on mismatch.
+
+    WeightSyncError renders only its outer message, and the problem list is
+    name-sorted, so a naming-convention mismatch shows one side unless the log
+    samples both.
+    """
+
+    def var(name):
+      return weight_sync.TensorMetadata(
+          name=name, shape=(4,), mesh_shape=(1,), layout=(0,), item_size=4
+      )
+
+    dest = FakeDestination("sampler", [], variables=(var("rollout_w"),))
+    source = FakeSource("trainer", Wire(), [], variables=(var("trainer_w"),))
+    self.make(dest, sources=[source])
+
+    with self.assertLogs(level="ERROR") as logs:
+      with self.assertRaises(WeightSyncError):
+        self.sync()
+
+    blob = "\n".join(logs.output)
+    self.assertIn("manifest preflight failed", blob)
+    self.assertIn("trainer_w", blob)
+    self.assertIn("rollout_w", blob)
+
   def test_shape_mismatch_fails_before_any_downtime(self):
     dest = FakeDestination("sampler", [], global_shape=(8,))
     self.make(dest)  # source's global shape is (4,)

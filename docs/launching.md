@@ -387,7 +387,7 @@ Specific parameters for Proximal Policy Optimization (PPO).
 
 * **`num_iterations`**: (PPO specific) The number of iterations per batch (corresponds to $\varmu$ in the paper)
 
-* **`lambda`**: The lambda parameter for Generalized Advantage Estimation (GAE). 
+* **`lambda`**: The lambda parameter for Generalized Advantage Estimation (GAE).
 
 * **`gamma`**: The discount factor for future rewards in GAE.
 

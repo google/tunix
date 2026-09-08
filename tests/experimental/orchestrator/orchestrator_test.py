@@ -14,17 +14,18 @@
 
 """Unit tests for ClusterOrchestrator."""
 
+import pickle
+import threading
 import time
 from unittest import mock
 
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
-from tunix.experimental.orchestrator import algorithm_adapter
-from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.worker import remote_execution
 
 
 class ClusterOrchestratorTest(absltest.TestCase):
@@ -238,36 +239,160 @@ class ClusterOrchestratorTest(absltest.TestCase):
         engine._rollout_workers[0], remote_execution.InProcessActorHandle
     )
 
-  def test_run_managed_program_submission(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.requires_reference_kl = False
+  def test_worker_handles_returns_remote_and_local_workers(self):
+    from tunix.experimental.worker import remote_execution
 
-    assembler = batch_assembly.SequencePackedBatchAssembler(max_packed_len=16)
+    mock_rollout_remote = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(registry=registry)
+    orch.register_worker_handle(
+        "rollout-remote-0", [datatypes.Role.ROLLOUT], mock_rollout_remote
+    )
 
-    with mock.patch("asyncio.run") as mock_asyncio_run:
-      self.orch.run(
-          algo=mock_algo,
-          dataset=["prompt1"],
-          reward_fns=[lambda x: 1.0],
-          assembler=assembler,
-          max_steps=5,
+    class LocalRolloutWorker(abstract_worker.Worker):
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id="rollout-local-0",
+            roles=frozenset({"rollout"}),
+        )
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return datatypes.Response()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        return datatypes.Response()
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+    orch.register_worker(LocalRolloutWorker())
+
+    handles_enum = orch.worker_handles(datatypes.Role.ROLLOUT)
+    handles_str = orch.worker_handles("rollout")
+
+    self.assertEqual(len(handles_enum), 2)
+    self.assertEqual(len(handles_str), 2)
+    self.assertIs(handles_enum[0], mock_rollout_remote)
+    self.assertIsInstance(
+        handles_enum[1], remote_execution.InProcessActorHandle
+    )
+
+  def test_wait_for_workers_already_available(self):
+    from tunix.experimental.worker import remote_execution
+
+    mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch = orchestrator.ClusterOrchestrator()
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+
+    orch.wait_for_workers(
+        {
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: 1,
+            datatypes.Role.REFERENCE: 0,
+        },
+        timeout=1.0,
+        poll_interval_s=0.01,
+    )
+
+  @mock.patch.object(remote_execution.ActorHandle, "from_address")
+  def test_register_worker_from_hostname(self, mock_from_address):
+    mock_from_address.return_value = mock.MagicMock(
+        spec=remote_execution.ActorHandle
+    )
+    orch = orchestrator.ClusterOrchestrator()
+    for port, (service_type, role) in enumerate(
+        [
+            ("trainer", datatypes.Role.ACTOR),
+            ("rollout", datatypes.Role.ROLLOUT),
+            ("inference", datatypes.Role.REFERENCE),
+        ],
+        start=5000,
+    ):
+      meta = pickle.dumps({
+          "service_type": service_type,
+          "service_port": port,
+          "worker_id": f"{service_type}-0",
+      })
+      orch.register_worker_from_hostname("host", 0, meta, rpc_timeout_s=120.0)
+      mock_from_address.assert_called_with(
+          f"grpc://host:{port}", rpc_timeout_s=120.0
       )
-      self.mock_lifecycle.bring_up.assert_called_once()
-      self.mock_monitor.poll.assert_called_once()
-      mock_asyncio_run.assert_called_once()
+      self.assertEqual(
+          orch.worker_handles(role), [mock_from_address.return_value]
+      )
 
-  def test_run_program_with_bring_up_and_train_dataset(self):
+    info_by_id = {i.worker_id: i for i in orch.worker_infos()}
+    self.assertEqual(
+        info_by_id["trainer-0"],
+        datatypes.WorkerInfo(
+            worker_id="trainer-0",
+            roles=frozenset({"actor"}),
+            resources={"remote": True, "address": "host:5000"},
+        ),
+    )
+
+  def test_register_worker_from_hostname_unknown_service_type(self):
+    orch = orchestrator.ClusterOrchestrator()
+    meta = pickle.dumps({
+        "service_type": "unknown",
+        "service_port": 5000,
+        "worker_id": "bad-0",
+    })
+    with self.assertRaisesRegex(RuntimeError, "unknown service type unknown"):
+      orch.register_worker_from_hostname("host", 0, meta)
+
+  def test_wait_for_workers_delayed_registration(self):
+    from tunix.experimental.worker import remote_execution
+
+    mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch = orchestrator.ClusterOrchestrator()
+
+    def register_later():
+      time.sleep(0.05)
+      orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+
+    t = threading.Thread(target=register_later)
+    t.start()
+    try:
+      orch.wait_for_workers(
+          {datatypes.Role.ACTOR: 1},
+          timeout=2.0,
+          poll_interval_s=0.01,
+      )
+    finally:
+      t.join()
+
+    self.assertEqual(len(orch.worker_handles(datatypes.Role.ACTOR)), 1)
+
+  def test_wait_for_workers_timeout(self):
+    orch = orchestrator.ClusterOrchestrator()
+    with self.assertRaises(TimeoutError):
+      orch.wait_for_workers(
+          {datatypes.Role.ACTOR: 1},
+          timeout=0.05,
+          poll_interval_s=0.01,
+      )
+
+  def test_run_with_bring_up(self):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)
     mock_engine = mock.MagicMock()
 
     with mock.patch.object(
         self.orch, "_create_engine", return_value=mock_engine
     ):
-      self.orch.run_program(
+      self.orch.run(
           program=mock_program,
           train_dataset=["batch1", "batch2"],
           max_steps=10,
@@ -283,12 +408,12 @@ class ClusterOrchestratorTest(absltest.TestCase):
         max_steps=10,
     )
 
-  def test_run_program_without_bring_up(self):
+  def test_run_without_bring_up(self):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)
     mock_engine = mock.MagicMock()
     self.orch.engine = mock_engine
 
-    self.orch.run_program(
+    self.orch.run(
         program=mock_program,
         bring_up=False,
     )
@@ -298,87 +423,6 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
     )
-
-  def test_run_auto_instantiated_program_closes_on_success(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    self.orch.run_program = mock.MagicMock()
-
-    with mock.patch.object(
-        rl_program.StandardRLProgram, "close", autospec=True
-    ) as mock_close:
-      self.orch.run(
-          algo=mock_algo,
-          dataset=["prompt_1"],
-          program=None,
-          max_steps=1,
-      )
-      self.orch.run_program.assert_called_once()
-      created_program = self.orch.run_program.call_args.kwargs["program"]
-      self.assertIsInstance(created_program, rl_program.StandardRLProgram)
-      mock_close.assert_called_once_with(created_program)
-
-  def test_run_auto_instantiated_program_closes_on_exception(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    self.orch.run_program = mock.MagicMock(
-        side_effect=RuntimeError("Engine failure")
-    )
-
-    with mock.patch.object(
-        rl_program.StandardRLProgram, "close", autospec=True
-    ) as mock_close:
-      with self.assertRaises(RuntimeError):
-        self.orch.run(
-            algo=mock_algo,
-            dataset=["prompt_1"],
-            program=None,
-            max_steps=1,
-        )
-      self.orch.run_program.assert_called_once()
-      created_program = self.orch.run_program.call_args.kwargs["program"]
-      mock_close.assert_called_once_with(created_program)
-
-  def test_run_caller_supplied_program_preserves_external_ownership(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    caller_program = mock.MagicMock(spec=rl_program.RLProgram)
-    self.orch.run_program = mock.MagicMock()
-
-    self.orch.run(
-        algo=mock_algo,
-        dataset=["prompt_1"],
-        program=caller_program,
-        max_steps=1,
-    )
-    self.orch.run_program.assert_called_once_with(
-        program=caller_program,
-        bring_up=False,
-    )
-    caller_program.close.assert_not_called()
-
-  def test_run_auto_instantiated_program_defers_close_for_running_bg_task(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_task = mock.MagicMock()
-    mock_task.done.return_value = False
-
-    def mock_run_program(program, **kwargs):
-      del kwargs
-      program._bg_task = mock_task
-
-    self.orch.run_program = mock.MagicMock(side_effect=mock_run_program)
-
-    with mock.patch.object(
-        rl_program.StandardRLProgram, "close", autospec=True
-    ) as mock_close:
-      self.orch.run(
-          algo=mock_algo,
-          dataset=["prompt_1"],
-          program=None,
-          max_steps=1,
-      )
-      self.orch.run_program.assert_called_once()
-      # Ensure close() was NOT called prematurely
-      mock_close.assert_not_called()
-      # Ensure done callback was registered
-      mock_task.add_done_callback.assert_called_once()
 
 
 if __name__ == "__main__":

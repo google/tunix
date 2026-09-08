@@ -21,6 +21,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import PartitionSpec as P
 import jaxtyping
+from tunix.models import cache_utils
 from tunix.models.gemma4 import audio
 from tunix.models.gemma4 import vision
 from tunix.utils import env_utils
@@ -69,6 +70,17 @@ class RematConfig(enum.Enum):
   NONE = enum.auto()
   BLOCK = enum.auto()
   DECODER = enum.auto()
+
+
+class SplashAttentionImpl(enum.Enum):
+  """Backend implementation to use for splash (flash) attention.
+
+  JAX: `jax.experimental.pallas.ops.tpu.splash_attention`.
+  TOKAMAX: `tokamax._src.ops.experimental.tpu.splash_attention`.
+  """
+
+  JAX = 'jax'
+  TOKAMAX = 'tokamax'
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -167,6 +179,9 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
+  # Backend implementation for splash (flash) attention when
+  # `use_flash_attention` is True.
+  splash_attention_impl: SplashAttentionImpl = SplashAttentionImpl.JAX
   flash_attention_compute_block_size: int = 256
   # Backward needs more VMEM/tile than forward; prod uses 256 (SPLASH_BLOCK_SIZES in
   # //depot/GOOGLE_INTERNAL_PACKAGE_PATH/learning/gemini/prod/serving/jet_engine/gemma4/config_utils.py).
@@ -177,6 +192,15 @@ class ModelConfig:
   # activations are saved in fwd vs recomputed in bwd. Default recomputes
   # everything (minimum HBM).
   remat_policy: str = 'nothing_saveable'
+
+  # Prefix-length bucket ladder for chunked prefill. Each distinct bucketed
+  # prefix_length is baked as a static partial arg, so it is a separate XLA
+  # compilation; this ladder bounds the number of compiles. An empty tuple
+  # disables bucketing (passthrough, accepts recompiles). Use pow2_buckets() /
+  # linear_buckets() to build common ladders. Must be sorted and non-negative.
+  prefix_bucket_boundaries: tuple[int, ...] = cache_utils.linear_buckets(
+      step=512
+  )
 
   # When True, the splash attention backward pass uses a single fused kernel
   # for dQ+dKV instead of two separate passes, reducing VMEM round-trips.
@@ -198,10 +222,13 @@ class ModelConfig:
   audio_encoder: audio.ConformerConfig | None = None
 
   def __post_init__(self):
-    # TODO(tunix-dev): support flash attention with sliding window KV cache
-    if self.use_sliding_window_kv_cache and self.use_flash_attention:
+    boundaries = self.prefix_bucket_boundaries
+    if any(b < 0 for b in boundaries) or boundaries != tuple(
+        sorted(set(boundaries))
+    ):
       raise ValueError(
-          'Flash attention and sliding window KV cache are mutually exclusive.'
+          'prefix_bucket_boundaries must be non-negative and sorted strictly '
+          f'ascending with no duplicates; got {boundaries}'
       )
 
   @classmethod

@@ -70,9 +70,12 @@ class RolloutManager:
       )
 
       if sampler_type == "vllm":
-        raise NotImplementedError(
-            "vLLM sampler is not implemented yet. Use 'inprocess_vllm' or"
-            " 'vanilla'."
+        from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+
+        sampler = vllm_sampler_adapter.VllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+            server_id="vllm_sampler",
+            model_name=getattr(config, "rollout_vllm_model_version", ""),
+            weight_sync_mode=weight_sync_mode,
         )
       elif "inprocess_vllm" in sampler_type:
         from tunix.experimental.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
@@ -165,9 +168,13 @@ class RolloutManager:
     env_name = getattr(self.config, "env_name", "")
     if env_name and registry.ENV_REGISTRY.contains(env_name):
       env_cls = registry.ENV_REGISTRY.get(env_name)
-      env_config = request.metadata.get(
-          "env_config", getattr(self.config, "env_config", {})
-      )
+      request_metadata = dict(request.metadata or {})
+      env_config = dict(getattr(self.config, "env_config", {}))
+      if isinstance(request_metadata.get("env_config"), dict):
+        env_config.update(request_metadata["env_config"])
+      env_config.setdefault("group_index", request.group_index)
+      env_config.setdefault("policy_version", request.target_policy_version)
+
       env_client = env_cls(**env_config)
     elif self.env_pool and hasattr(self.env_pool, "acquire_env"):
       env_client = self.env_pool.acquire_env(request.metadata.get("env_config"))
@@ -177,7 +184,9 @@ class RolloutManager:
     agent_name = getattr(self.config, "agent_name", "")
     if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
       agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = getattr(self.config, "agent_config", {})
+      agent_config = request.metadata.get(
+          "agent_config", getattr(self.config, "agent_config", {})
+      )
       agent = agent_cls(**agent_config)
     elif self.agent_factory and callable(self.agent_factory):
       agent = self.agent_factory()
@@ -347,3 +356,9 @@ class RolloutManager:
     if self.sampler:
       return await self.sampler.get_weight_sync_metadata(**kwargs)
     return []
+
+  def get_target_state(self) -> Any:
+    """Returns the sampler target-state skeleton used for trainer conversion."""
+    if self.sampler is None:
+      raise RuntimeError("RolloutManager has no sampler configured.")
+    return self.sampler.get_target_state()

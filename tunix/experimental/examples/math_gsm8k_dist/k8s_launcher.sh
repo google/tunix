@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Available options: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'.
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
@@ -39,9 +40,15 @@ export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
+export REWARD_MODE=${REWARD_MODE:-env}
+export BETA=${BETA:-0}
+export EPSILON=${EPSILON:-0.2}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -52,11 +59,8 @@ if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   exit 1
 fi
 export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
-export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
-export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
-export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-4}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
@@ -68,6 +72,9 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
+export TFDS_SPLIT=${TFDS_SPLIT:-train}
+export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -82,9 +89,18 @@ export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
-export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
-export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
-export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5e:4x4}
+export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
+export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+
+export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
+export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
+export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
+export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 
 stop_orchestrator() {
   kubectl delete jobset "${ORCHESTRATOR_ID}"
@@ -115,6 +131,7 @@ start_orchestrator() {
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
+        --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
         ${DEBUG:+--debug} \
@@ -127,30 +144,38 @@ stop_trainer() {
 }
 
 start_trainer() {
-  local maxtext_args=""                                                                                                                                                                                     
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then                                                                                                                               
-    maxtext_args=" \
+  local extra_flags=""
+
+  if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
+  fi
+
+  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
+    extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
       --maxtext_ckpt_path=${MAXTEXT_CKPT} \
       --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
-    "                                                                                                                                                                                                       
+    "
   fi
+
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
+    --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
+    --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
+        --process_main=tunix.experimental.examples.common.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
@@ -158,6 +183,7 @@ start_trainer() {
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
+        --sampler_type=${SAMPLER} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -166,59 +192,70 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        ${maxtext_args} \
+        --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
+        --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
+        --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
+        ${extra_flags} \
         ${DEBUG:+--debug} \
     " \
     | kubectl apply -f -
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
+    kubectl delete leaderworkerset "${ROLLOUT_ID}"
+  else
+    kubectl delete jobset "${ROLLOUT_ID}"
+  fi
 }
 
 start_rollout() {
-  local maxtext_args=""                                                                                                                                                                             
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then                                                                                                                               
-    maxtext_args=" \
+  local extra_flags=""
+
+  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
+  fi
+
+  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
+    extra_flags+="\
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-    "                                                                                                                                                                                                       
-  fi
-  local vllm_args=""
-  if [[ "$SAMPLER" == "vllm" ]]; then
-    vllm_args="\
-    --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
     "
   fi
+
   python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
+    tunix/experimental/distributed/deployment/yamls/${ROLLOUT_JOBSET_YAML} \
     --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=${ROLLOUT_TPU_SLICE} \
+    --tpu_slice="${ROLLOUT_TPU_SLICE}" \
+    --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
+    --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      HF_TOKEN=${HF_TOKEN} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
+        --process_main=tunix.experimental.examples.common.run_rollout_node.main \
         --worker_id=${ROLLOUT_ID} \
         --port=${ROLLOUT_PORT} \
+        --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
+        --mesh_tp=${ROLLOUT_MESH_TP} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --sampler=${SAMPLER} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
-        ${maxtext_args} \
-        ${vllm_args} \
+        ${extra_flags} \
         ${DEBUG:+--debug} \
     " \
     | kubectl apply -f -
 }
 
-source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
+source tunix/experimental/examples/common/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

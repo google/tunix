@@ -30,7 +30,6 @@ import numpy as np
 from tunix.experimental.common import batch_utils
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
-from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
 
@@ -183,15 +182,15 @@ class InferenceWorker(abstract_worker.Worker):
 
   def per_token_logps(
       self,
-      items: rl_common.TrainExample,
+      items: datatypes.RLTrainerPayload,
       request_id: str = "reference_logps",
       temperature: float | None = None,
       model_role: str = "reference",
   ) -> np.ndarray:
     """Scores reference log-probs for an already padded batch."""
-    if not isinstance(items, rl_common.TrainExample):
+    if not isinstance(items, datatypes.RLTrainerPayload):
       raise TypeError(
-          "InferenceWorker.per_token_logps expects a padded TrainExample. "
+          "InferenceWorker.per_token_logps expects a padded RLTrainerPayload. "
           "Pad trajectory items in BatchAssembler before scoring."
       )
 

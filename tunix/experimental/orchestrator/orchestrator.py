@@ -15,19 +15,18 @@
 """Cluster Infrastructure Coordinator (orchestrator.py) following Orchestrator V2.
 
 Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
-Provides Tier 1 Zero-Boilerplate Managed Program Submission (`run`) and Tier 3
-Custom Program Execution (`run_program`).
+Provides supervised RL program execution (`run`).
 """
 
 import collections
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Sequence
 from concurrent import futures
+import pickle
+import time
 from typing import Any
 
 from absl import logging
 from tunix.experimental.common import datatypes
-from tunix.experimental.orchestrator import algorithm_adapter
-from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import health_monitor
 from tunix.experimental.orchestrator import lifecycle
@@ -76,6 +75,48 @@ class ClusterOrchestrator:
 
   def __exit__(self, exc_type, exc_val, exc_tb) -> None:
     self.shutdown()
+
+  def register_worker_from_hostname(
+      self,
+      hostname: str,
+      _: int,
+      metadata: bytes,
+      rpc_timeout_s: float = 1800.0,
+  ) -> None:
+    """Registers a remote worker handle from a hostname and metadata."""
+    md = pickle.loads(metadata)
+
+    # NB: this should align with workers
+    service_type = md["service_type"]
+    service_address = f"{hostname}:{md['service_port']}"
+    worker_id = md["worker_id"]
+
+    logging.info(
+        "Discovered %s service (%s) at %s.",
+        service_type,
+        worker_id,
+        service_address,
+    )
+
+    match service_type:
+      case "trainer":
+        role = datatypes.Role.ACTOR
+      case "rollout":
+        role = datatypes.Role.ROLLOUT
+      case "inference":
+        role = datatypes.Role.REFERENCE
+      case _:
+        raise RuntimeError(f"unknown service type {service_type}")
+
+    self.register_worker_handle(
+        worker_id=worker_id,
+        roles=[role],
+        handle=remote_execution.ActorHandle.from_address(
+            f"grpc://{service_address}",
+            rpc_timeout_s=rpc_timeout_s,
+        ),
+        resources={"address": service_address},
+    )
 
   def register_worker(
       self, worker: abstract_worker.Worker
@@ -139,6 +180,52 @@ class ClusterOrchestrator:
       return
     self.registry.unregister(worker_id)
 
+  def wait_for_workers(
+      self,
+      min_workers: dict[datatypes.Role | str, int],
+      timeout: float | None = None,
+      poll_interval_s: float = 0.5,
+  ) -> None:
+    """Waits for registered workers to meet the minimum required counts.
+
+    Args:
+      min_workers: A dictionary mapping Role or role name to the minimum number
+        of workers required.
+      timeout: Maximum duration to wait in seconds before raising TimeoutError.
+        If None, waits indefinitely until requirements are met.
+      poll_interval_s: Time in seconds between polling attempts.
+
+    Raises:
+      TimeoutError: If the required worker counts are not met within timeout.
+    """
+    start_time = time.monotonic()
+    while True:
+      current_counts = {
+          role: len(self.worker_handles(role)) for role in min_workers
+      }
+      if all(
+          current_counts[role] >= target_count
+          for role, target_count in min_workers.items()
+      ):
+        logging.info(
+            "All required workers are ready. Current counts: %s",
+            current_counts,
+        )
+        return
+
+      if timeout is not None and (time.monotonic() - start_time) >= timeout:
+        raise TimeoutError(
+            f"Timed out after {timeout}s waiting for workers. "
+            f"Required: {min_workers}, Current: {current_counts}"
+        )
+
+      sleep_duration = poll_interval_s
+      if timeout is not None:
+        remaining = timeout - (time.monotonic() - start_time)
+        sleep_duration = min(poll_interval_s, max(0.0, remaining))
+
+      time.sleep(sleep_duration)
+
   def worker_infos(self) -> list[datatypes.WorkerInfo]:
     """Returns local and remote worker metadata registered with the orchestrator."""
     registry_ids = self.registry.worker_ids()
@@ -147,6 +234,12 @@ class ClusterOrchestrator:
         for worker_id in sorted(self._remote_worker_infos)
         if worker_id not in registry_ids
     ]
+
+  def worker_handles(
+      self, role: datatypes.Role | str
+  ) -> list[remote_execution.ActorHandle]:
+    """Returns handles for all workers (remote and local) registered under the given role."""
+    return self._get_actor_handles(role)
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
@@ -276,14 +369,21 @@ class ClusterOrchestrator:
         weight_sync_coordinator=coordinator,
     )
 
-  def run_program(
+  def run(
       self,
       program: rl_program.RLProgram,
       bring_up: bool = True,
       dummy_data: Any = None,
       **kwargs: Any,
   ) -> None:
-    """Runs an RL program to completion under supervision."""
+    """Runs an RL program to completion under supervision.
+
+    Args:
+      program: The RL program instance to execute.
+      bring_up: Whether to bring up registered workers before execution.
+      dummy_data: Optional initialization data passed to worker compilation.
+      **kwargs: Additional keyword arguments forwarded to program.run.
+    """
     if bring_up:
       self.bring_up_workers(dummy_data=dummy_data)
 
@@ -296,46 +396,3 @@ class ClusterOrchestrator:
         **kwargs,
     )
     logging.info("Program %s finished.", type(program).__name__)
-
-  def run(
-      self,
-      algo: algorithm_adapter.AlgorithmAdapter,
-      dataset: Any,
-      reward_fns: Sequence[Callable[..., Any]] | None = None,
-      assembler: batch_assembly.BatchAssembler | None = None,
-      program: rl_program.RLProgram | None = None,
-      max_steps: int = 1000,
-  ) -> None:
-    """Managed Program Submission: auto-wires Engine, Assembler, Queues & StandardRLProgram."""
-    logging.info("Starting managed RL program run (max_steps=%d)...", max_steps)
-    if self.engine is None:
-      self.bring_up_workers()
-
-    active_assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
-        max_packed_len=getattr(algo, "max_packed_len", 8192)
-    )
-    metrics_logging_options = getattr(
-        self.config, "metrics_logging_options", None
-    )
-    metrics_prefix = getattr(self.config, "metrics_prefix", "")
-    active_program = program or rl_program.StandardRLProgram(
-        dataset=dataset,
-        max_steps=max_steps,
-        algo=algo,
-        reward_fns=reward_fns,
-        assembler=active_assembler,
-        metrics_logging_options=metrics_logging_options,
-        metrics_prefix=metrics_prefix,
-    )
-    try:
-      self.run_program(
-          program=active_program,
-          bring_up=False,
-      )
-    finally:
-      if program is None:
-        bg_task = getattr(active_program, "_bg_task", None)
-        if bg_task is not None and not bg_task.done():
-          bg_task.add_done_callback(lambda _: active_program.close())
-        else:
-          active_program.close()

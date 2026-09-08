@@ -45,13 +45,14 @@ class VllmRollout(base_rollout.BaseRollout):
         config=vllm_sampler.VllmConfig(
             server_mode=rollout_config.rollout_vllm_server_mode,
             server_mode_submission_threshold=(
-              rollout_config.rollout_vllm_server_mode_submission_threshold
+                rollout_config.rollout_vllm_server_mode_submission_threshold
             ),
             server_mode_submission_timeout_s=(
-              rollout_config.rollout_vllm_server_mode_submission_timeout_s
+                rollout_config.rollout_vllm_server_mode_submission_timeout_s
             ),
             mapping_config=mapping_config,
             return_logprobs=rollout_config.return_logprobs,
+            return_routed_experts=rollout_config.return_routed_experts,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
             tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,  # pyrefly: ignore[bad-argument-type]
             additional_config=rollout_config.rollout_vllm_additional_config,
@@ -117,6 +118,7 @@ class VllmRollout(base_rollout.BaseRollout):
         tokens=self.output.tokens,  # pyrefly: ignore[bad-argument-type]
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        routed_experts=self.output.routed_experts,
     )
 
   def get_per_token_logps(

@@ -605,15 +605,15 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Total cumulative reward.",
   )
-  hyperparams: dict[str, Any] | None = pydantic.Field(
+  hyperparams: MetadataDict = pydantic.Field(
       default=None,
       description="Hyperparameters / generation kwargs.",
   )
-  env_time: dict[str, float] | None = pydantic.Field(
+  env_time: MetadataDict = pydantic.Field(
       default=None,
       description="Timing information for environment operations.",
   )
-  reward_time: dict[str, float] | None = pydantic.Field(
+  reward_time: MetadataDict = pydantic.Field(
       default=None,
       description="Timing information for reward operations.",
   )

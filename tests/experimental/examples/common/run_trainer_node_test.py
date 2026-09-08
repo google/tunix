@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for run_trainer_node.py."""
+"""Unit tests for the shared distributed trainer worker node."""
 
 import asyncio
 import contextlib
@@ -26,7 +26,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 from jax.sharding import Mesh
-from tunix.experimental.examples.math_gsm8k_dist import run_trainer_node
+from tunix.experimental.examples.common import run_trainer_node
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
@@ -77,6 +77,29 @@ class MeshBoundTrainerTest(absltest.TestCase):
 
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
+
+  def test_restore_checkpoint_runs_within_mesh_context_and_propagates_kwargs(
+      self,
+  ):
+    call_order = []
+    self.mock_mesh.__enter__.side_effect = (
+        lambda: call_order.append("enter_mesh")
+    )
+    self.mock_mesh.__exit__.side_effect = (
+        lambda *args: call_order.append("exit_mesh")
+    )
+    self.mock_trainer.restore_checkpoint.side_effect = (
+        lambda *args, **kwargs: call_order.append("restore_checkpoint")
+        or {"step": 5}
+    )
+
+    result = self.mesh_trainer.restore_checkpoint(step=5)
+
+    self.assertEqual(result, {"step": 5})
+    self.mock_trainer.restore_checkpoint.assert_called_once_with(step=5)
+    self.assertEqual(
+        call_order, ["enter_mesh", "restore_checkpoint", "exit_mesh"]
+    )
 
   def test_fwd_bwd_runs_within_mesh(self):
     self.mesh_trainer.fwd_bwd("payload", skip_jit=False)

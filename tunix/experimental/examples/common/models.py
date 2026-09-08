@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model construction shared by the demo's trainer and rollout nodes.
+"""Model construction shared by distributed example worker nodes.
 
 Both nodes build the model here so the weight sync source and
 destination expose identically named tensors.

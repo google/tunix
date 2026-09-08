@@ -21,7 +21,6 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import rpc_utils
 from tunix.experimental.worker import inference_worker as inference_lib
-from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
 
@@ -107,7 +106,7 @@ class InferenceWorkerTest(absltest.TestCase):
 
   def test_per_token_logps_uses_padded_batch_without_repadding(self):
     core = _StubCore()
-    batch = rl_common.TrainExample(
+    batch = datatypes.RLTrainerPayload(
         prompt_ids=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
         prompt_mask=np.array([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=np.float32),
         completion_ids=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),

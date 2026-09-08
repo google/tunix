@@ -18,6 +18,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.worker import remote_execution
 
 
@@ -135,10 +137,32 @@ class AbstractRLEngine(Protocol):
     """Retrieves step metrics from the worker for the specified role."""
     ...
 
+  def configure_worker(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      *,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      assembler: batch_assembly.BatchAssembler[Any],
+      **kwargs: Any,
+  ) -> None:
+    """Configures worker(s) under the specified role with algorithm or runtime settings."""
+    ...
+
+  async def prepare_rollout_policy(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      sync_weights: bool = True,
+      policy_version: int | None = None,
+      **kwargs: Any,
+  ) -> int | None:
+    """Bootstraps rollout-facing policy state before step 0 dispatch begins."""
+    ...
+
   async def sync_weights(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
       **kwargs: Any,
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""
@@ -151,4 +175,26 @@ class AbstractRLEngine(Protocol):
       **kwargs: Any,
   ) -> Any:
     """Requests the trainer worker for `role` to save a checkpoint."""
+    ...
+
+  async def resume_from_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      resync_rollout_weights: bool = True,
+  ) -> int:
+    """Restores a checkpoint and realigns the mesh to the restored state.
+
+    Restores the trainer checkpoint for `role`, aligns the engine's internal
+    policy version with the restored step boundary, and (optionally) resyncs
+    rollout worker weights so subsequent rollouts use the restored policy.
+
+    Args:
+      role: Trainer role whose checkpoint should be restored.
+      resync_rollout_weights: If True, resync rollout worker weights to the
+        restored policy version. If False, the resync is skipped and rollout
+        workers keep their current/base weights.
+
+    Returns:
+      The restored step.
+    """
     ...

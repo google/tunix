@@ -38,9 +38,17 @@ class K8sContextTest(absltest.TestCase):
         "JOB_INDEX": "0",
         "POD_INDEX": "2",
     }
-    with mock.patch.dict(os.environ, envs):
+    with mock.patch.dict(os.environ, envs, clear=True):
       fqdn = k8s_context.resolve_self_hostname()
       self.assertEqual(fqdn, "myjobset-worker-0-2.myjobset")
+
+  def test_resolve_self_hostname_lws_leader_address(self):
+    envs = {
+        "LWS_LEADER_ADDRESS": "10.0.0.1",
+    }
+    with mock.patch.dict(os.environ, envs, clear=True):
+      fqdn = k8s_context.resolve_self_hostname()
+      self.assertEqual(fqdn, "10.0.0.1")
 
   def test_resolve_self_hostname_missing_env(self):
     envs = {
@@ -56,10 +64,24 @@ class K8sContextTest(absltest.TestCase):
         "JAX_BACKEND_TARGET": "0.0.0.0:8000",
     }
     mock_pw = mock.MagicMock()
-    with mock.patch.dict(os.environ, envs):
+    with mock.patch.dict(os.environ, envs, clear=True):
       with mock.patch.dict(sys.modules, {"pathwaysutils": mock_pw}):
         k8s_context.K8sJaxContext().initialize()
         mock_pw.initialize.assert_called_once()
+
+  def test_k8s_jax_context_ray(self):
+    envs = {
+        "TPU_MULTIHOST_BACKEND": "ray",
+    }
+    mock_jax = mock.MagicMock()
+    mock_pw = mock.MagicMock()
+    with mock.patch.dict(os.environ, envs, clear=True):
+      with mock.patch.dict(
+          sys.modules, {"jax": mock_jax, "pathwaysutils": mock_pw}
+      ):
+        k8s_context.K8sJaxContext().initialize()
+        mock_jax.distributed.initialize.assert_not_called()
+        mock_pw.initialize.assert_not_called()
 
   def test_k8s_jax_context_mcjax(self):
     envs = {}
@@ -82,7 +104,7 @@ class K8sContextTest(absltest.TestCase):
         discovery_addrs="door:8888",
     )
 
-    with mock.patch.dict(os.environ, envs):
+    with mock.patch.dict(os.environ, envs, clear=True):
       with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
         with mock.patch(
             "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.register"
@@ -91,6 +113,29 @@ class K8sContextTest(absltest.TestCase):
           mock_reg.assert_called_once_with(
               "door-proc-0-0.door:8888",
               "myjobset-worker-0-1.myjobset",
+              port,
+              b"pod-meta",
+          )
+
+  def test_k8s_discovery_context_register_lws(self):
+    envs = {
+        "LWS_LEADER_ADDRESS": "lws-leader-host",
+    }
+    port = portpicker.pick_unused_port()
+    args = argparse.Namespace(
+        discovery_port=port,
+        discovery_addrs="door:8888",
+    )
+
+    with mock.patch.dict(os.environ, envs, clear=True):
+      with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
+        with mock.patch(
+            "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.register"
+        ) as mock_reg:
+          disc_ctx.register(b"pod-meta")
+          mock_reg.assert_called_once_with(
+              "door-proc-0-0.door:8888",
+              "lws-leader-host",
               port,
               b"pod-meta",
           )

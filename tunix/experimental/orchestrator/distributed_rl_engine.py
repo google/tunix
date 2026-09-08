@@ -22,6 +22,7 @@ Contains:
 import asyncio
 import collections
 from collections.abc import Mapping, Sequence
+import concurrent.futures
 import inspect
 from typing import Any
 import uuid
@@ -30,17 +31,15 @@ from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
+from tunix.experimental.common import logging_utils
 from tunix.experimental.metrics import metrics as exp_metrics
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
-def _summarize_ids(ids: Sequence[Any], head: int = 2, tail: int = 2) -> str:
-  """Returns a compressed string representation of a sequence of IDs."""
-  str_ids = [str(x) for x in ids]
-  if len(str_ids) <= head + tail:
-    return f"[{', '.join(str_ids)}]"
-  return f"[{', '.join(str_ids[:head])}, ..., {', '.join(str_ids[-tail:])}]"
+_summarize_list = logging_utils.summarize_list
 
 
 # TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
@@ -278,7 +277,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         group_size,
         len(rollout_reqs),
         version,
-        _summarize_ids(prompt_ids),
+        _summarize_list(prompt_ids),
     )
     for req in rollout_reqs:
       if req.metadata is None:  # pyrefly: ignore[comparison-with-never]
@@ -551,10 +550,110 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
 
+  def configure_worker(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      *,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      assembler: batch_assembly.BatchAssembler[Any],
+      **kwargs: Any,
+  ) -> None:
+    """Configures worker(s) under the specified role with algorithm or runtime settings."""
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    if algo is None:
+      raise ValueError(
+          f"algo is required to configure worker for role {role_name}"
+      )
+    if assembler is None:
+      raise ValueError(
+          f"assembler is required to configure worker for role {role_name}"
+      )
+    match role:
+      case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
+        worker = self._trainer_workers.get(role)
+        if worker is None:
+          raise ValueError(f"No trainer worker registered for role {role_name}")
+        logging.info(
+            "Auto-configuring trainer loss and model input fn on %s worker...",
+            role_name,
+        )
+        pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
+        eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        gen_fn = algo.build_gen_model_input_fn(
+            pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
+            eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
+        )
+
+        def _configure():
+          assert worker is not None
+          worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+          worker.submit("with_gen_model_input_fn", gen_fn)
+
+        try:
+          loop = asyncio.get_running_loop()
+        except RuntimeError:
+          loop = None
+
+        if loop is not None and loop.is_running():
+          with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_configure).result()
+        else:
+          _configure()
+
+      case datatypes.Role.ROLLOUT:
+        if not self._rollout_workers:
+          raise ValueError("No rollout workers registered on engine.")
+        logging.info("Configuring rollout workers...")
+
+      case datatypes.Role.REFERENCE:
+        worker = self._inference_workers.get(role)
+        if worker is None:
+          raise ValueError(
+              f"No inference worker registered for role {role_name}"
+          )
+        logging.info("Configuring reference inference worker...")
+
+      case _:
+        raise ValueError(f"Unsupported role for configure_worker: {role_name}")
+
+  async def prepare_rollout_policy(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      sync_weights: bool = True,
+      policy_version: int | None = None,
+      **kwargs: Any,
+  ) -> int | None:
+    """Bootstraps the rollout-visible policy state before step 0."""
+    del kwargs
+    trainer = self._trainer_workers.get(role)
+    if trainer is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+
+    if self._rollout_workers:
+      rollout = self._rollout_workers[0]
+      try:
+        target_state = await self._invoke_worker(rollout, "get_target_state")
+        await self._invoke_worker(
+            trainer, "set_target_state", target_state=target_state
+        )
+      except (AttributeError, RuntimeError) as exc:
+        if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
+          raise
+
+    if not sync_weights:
+      return None
+    target_policy_version = (
+        self._policy_version if policy_version is None else policy_version
+    )
+    return await self.sync_weights(
+        role=role, policy_version=target_policy_version
+    )
+
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
   ) -> int:
     """Runs one weight sync round through the coordinator."""
     del role, target_roles
@@ -563,12 +662,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
+    next_policy_version = (
+        self._policy_version + 1 if policy_version is None else policy_version
+    )
     logging.info(
-        "Synchronizing weights (advancing to policy_version=%d)...",
-        self._policy_version + 1,
+        "Synchronizing weights (target policy_version=%d)...",
+        next_policy_version,
     )
     result = await self._weight_sync_coordinator.sync(
-        policy_version=self._policy_version + 1
+        policy_version=next_policy_version
     )
     self._policy_version = result.policy_version
     logging.info(
@@ -595,3 +697,83 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return await self._invoke_worker(
         worker, "save_checkpoint", metadata=metadata, **kwargs
     )
+
+  async def _restore_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> Any:
+    role_name = role.name
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role_name}")
+    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)
+
+  async def resume_from_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      resync_rollout_weights: bool = True,
+  ) -> int:
+    """Restores a checkpoint and realigns the mesh to the restored state.
+
+    See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
+    """
+    metadata = await self._restore_checkpoint(role=role)
+    if not isinstance(metadata, Mapping):
+      if metadata is not None:
+        logging.warning(
+            "restore_checkpoint returned %s, not a mapping; starting from"
+            " fresh run.",
+            type(metadata).__name__,
+        )
+      return 0
+    metadata = dict(metadata)
+    try:
+      restored_step = int(metadata.get("step", 0) or 0)
+    except (TypeError, ValueError):
+      logging.warning(
+          "restore_checkpoint returned a non-integer step %r; starting from"
+          " fresh run.",
+          metadata.get("step"),
+      )
+      return 0
+    if restored_step <= 0:
+      logging.info("No checkpoint to resume from; starting from step 0.")
+      return 0
+
+    # Resume at the step boundary; the policy version tracks the restored step.
+    restored_policy_version = restored_step
+    recorded_version = metadata.get("policy_version")
+    # TODO(tunix-dev): this is a force-fit for fully on-policy RL. Remove when
+    # async off-policy is supported.
+    if recorded_version is not None and recorded_version != restored_step:
+      logging.warning(
+          "Checkpoint recorded mid-step policy_version=%s; resuming at the"
+          " step-boundary value %d",
+          recorded_version,
+          restored_step,
+      )
+    self._policy_version = restored_policy_version
+    logging.info(
+        "Resuming from checkpoint: step=%d policy_version=%d. Metadata: %s",
+        restored_step,
+        restored_policy_version,
+        metadata,
+    )
+    if resync_rollout_weights:
+      synced_version = await self.sync_weights(
+          role=role,
+          policy_version=restored_policy_version,
+      )
+      if synced_version != restored_policy_version:
+        raise RuntimeError(
+            "Resumed policy_version=%d does not match synced version=%d"
+            % (restored_policy_version, synced_version)
+        )
+    else:
+      logging.warning(
+          "resync_rollout_weights is False. Resumed rollout workers will use"
+          " base weights instead of restored checkpoint version %d.",
+          restored_policy_version,
+      )
+    return restored_step

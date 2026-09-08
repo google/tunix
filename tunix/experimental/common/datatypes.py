@@ -23,6 +23,7 @@ import dataclasses
 import enum
 import time
 from typing import Any, Dict
+import flax
 import uuid
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
@@ -37,6 +38,15 @@ Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
 Role = common_datatypes.Role
 
+# Marks a router-replay slot the trainer must not replay, so the model falls
+# back to its own gate there. Matches what MaxText's replay path expects.
+UNSET_ROUTED_EXPERT = -1
+
+
+def format_traj_id(prompt_id: str | int = "", group_index: int = 0) -> str:
+  """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+  return f"traj_{prompt_id}_g{group_index}"
+
 
 # TODO(tunix-dev): Unify this extended TrajectoryItem back into
 # agent_types.TrajectoryItem so that all agentic workflows share the same strict
@@ -44,6 +54,7 @@ Role = common_datatypes.Role
 @dataclasses.dataclass(kw_only=True)
 class TrajectoryItem:
   """Extended TrajectoryItem for Orchestrator with token arrays."""
+
   prompt_id: str = ""
   group_index: int = 0
   start_step: int = 0
@@ -51,8 +62,16 @@ class TrajectoryItem:
   prompt_tokens: np.ndarray | None = None
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
+  # `[len(prompt_tokens) + len(completion_tokens), num_layers, top_k]` expert
+  # ids from the rollout, for replaying its routing during training.
+  routed_experts: np.ndarray | None = None
   policy_version: int = 0
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  @property
+  def traj_id(self) -> str:
+    """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+    return format_traj_id(self.prompt_id, self.group_index)
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -215,6 +234,7 @@ class WorkerInfo:
 class GenerationArgs:
   """Typed generation arguments used by the orchestrator generate API."""
   max_generation_steps: int | None = None
+  max_response_length: int | None = None
   temperature: float | None = None
   top_p: float | None = None
   top_k: int | None = None
@@ -256,7 +276,7 @@ class RolloutRequest(Request):
   @property
   def traj_id(self) -> str:
     """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
-    return f"traj_{self.prompt_id}_g{self.group_index}"
+    return format_traj_id(self.prompt_id, self.group_index)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -272,12 +292,17 @@ class TokenSegment:
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
     logps: Array of per-token log-probabilities under the sampling distribution,
       or None for spans the model did not emit (e.g. env tokens).
+    routed_experts: `[len(tokens), num_layers, top_k]` MoE expert ids this span
+      was routed through, so training can replay the routing the rollout
+      actually used. None for dense models, spans the model did not emit, or
+      when the sampler was not asked to capture routing.
   """
 
   source: str
   tokens: np.ndarray
   loss_mask: np.ndarray
   logps: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
     if self.loss_mask.shape != self.tokens.shape:
@@ -289,6 +314,19 @@ class TokenSegment:
       raise ValueError(
           f"logps shape {self.logps.shape} != tokens shape {self.tokens.shape}"
       )
+    if self.routed_experts is not None:
+      # The trailing axes are [num_layers, top_k] and are model-dependent, so
+      # only the rank and the leading (per-token) axis are checked.
+      if self.routed_experts.ndim != 3:
+        raise ValueError(
+            "routed_experts must be [length, num_layers, top_k]; got shape"
+            f" {self.routed_experts.shape}"
+        )
+      if self.routed_experts.shape[0] != self.tokens.shape[0]:
+        raise ValueError(
+            f"routed_experts shape {self.routed_experts.shape} does not cover"
+            f" tokens shape {self.tokens.shape} along axis 0"
+        )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -326,6 +364,11 @@ class RolloutResponse(Response):
   env_reward: float = 0.0
   policy_version: int = 0
   # TODO(b/532722981): capture rollout metrics, e.g., env time.
+
+  @property
+  def traj_id(self) -> str:
+    """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+    return format_traj_id(self.prompt_id, self.group_index)
 
   @classmethod
   def from_trajectory(
@@ -519,34 +562,18 @@ class WeightSyncMetadata:
 ##### Training DTOs #####
 
 
-@dataclasses.dataclass(kw_only=True)
+@flax.struct.dataclass(frozen=True, kw_only=True)
 class TrainerPayload:
-  """Base class for generic trainer payloads.
-
-  Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
-      right-padded completion tokens.
-    token_mask: [B, T] token mask to differentiate padding tokens from valid
-      tokens.
-    segment_ids: Optional [B, T] packing segment ids.
-    segment_positions: Optional [B, T] position indices within each segment.
-  """
-  # TODO(tunix-dev): We need to remove the dependency on token_ids and
-  # token_mask as they are not used in RL training.
-  token_ids: ArrayLike | None = None
-  token_mask: ArrayLike | None = None
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
+  """Base abstract class for generic trainer payloads. """
 
 
-@dataclasses.dataclass(kw_only=True)
+@flax.struct.dataclass(frozen=True, kw_only=True)
 class SFTTrainerPayload(TrainerPayload):
   """Supervised Fine-Tuning (SFT) trainer payload.
 
   Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
+    token_ids: [B, T] token IDs for a batched trainer payload. By default, each
+      row is structured as left-padded prompt tokens concatenated with
       right-padded completion tokens.
     token_mask: [B, T] token mask to differentiate padding tokens from valid
       tokens.
@@ -556,47 +583,59 @@ class SFTTrainerPayload(TrainerPayload):
 
   token_ids: ArrayLike
   token_mask: ArrayLike
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
 
 
 # TODO(tunix-dev): Introduce PPOTrainerPayload to replace generic
 # RLTrainerPayload when PPO specific fields are needed.
-@dataclasses.dataclass(kw_only=True)
+@flax.struct.dataclass(frozen=True, kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
 
   Attributes:
     advantages: [B] or [B, C] advantages.
-    loss_mask: [B, T], 1 where the position contributes to the loss.
-    action_mask: Optional [B, T] or [B, C] mask of policy actions.
     prompt_ids: Optional prompt token ids for GRPO-style losses. Unbatched
       payloads may carry 1D unpadded rows; batch assembly pads them to [B, P].
     prompt_mask: Optional [B, P] prompt mask.
     completion_ids: Optional completion token ids. Unbatched payloads may carry
       1D unpadded rows; batch assembly pads them to [B, C].
     completion_mask: Optional [B, C] completion/action mask.
+    segment_ids: Optional [B, T] or [B, C] packing segment ids.
+    segment_positions: Optional [B, T] or [B, C] position indices within each
+      segment.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
+    routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert ids captured
+      during rollout. When set, a training engine that supports router replay
+      forces these experts instead of re-running its own gate, so the training
+      forward pass matches the routing the rollout actually used. `-1` marks a
+      padded or unused slot.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
+    num_segments: Optional static upper bound on number of segments in packed
+      rows.
     metadata: Extra payload metadata dictionary.
   """
 
+  prompt_ids: ArrayLike
+  prompt_mask: ArrayLike
+  completion_ids: ArrayLike
+  completion_mask: ArrayLike
   advantages: ArrayLike
-  loss_mask: ArrayLike
-  action_mask: ArrayLike | None = None
-  # TODO(tunix-dev): make prompt_ids/mask and completion_ids/mask required after
-  # SequencePackedBatchAssembler refactor is done.
-  prompt_ids: ArrayLike | None = None
-  prompt_mask: ArrayLike | None = None
-  completion_ids: ArrayLike | None = None
-  completion_mask: ArrayLike | None = None
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+  routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
-  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+  num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
+  metadata: dict[str, Any] = flax.struct.field(
+      default_factory=dict, pytree_node=False
+  )
   # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
 
 

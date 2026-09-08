@@ -19,3 +19,5 @@ Resolves #\<issue_number_goes_here\>
 - [ ] My PR is based on the latest changes of the main branch (if unsure, rebase the code).
 - [ ] I have signed the [Contributor License Agreement](https://cla.developers.google.com/about).
 - [ ] I have followed [Contribution Guidelines](https://github.com/google/tunix/blob/main/docs/contributing.md).
+
+> **Note**: Standard CPU unit tests, package builds, and documentation checks will run automatically on pull requests. Once the PR is approved and ready for submission, maintainers will add the `ready-to-submit` label to trigger full TPU testing.
