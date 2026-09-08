@@ -203,8 +203,8 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
 
     Args:
       config: Configuration mapping, or None. The "backend" key selects the
-        implementation; "enabled" turns the store off without removing the
-        rest of the config.
+        implementation; "enabled" turns the store off without removing the rest
+        of the config.
 
     Returns:
       A store instance, or None if `config` is None or not enabled.
@@ -218,9 +218,10 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
 
     # Ensure built-in backends are imported so their __init_subclass__ hooks
     # have registered them in _REGISTRY before lookup. Imported here rather
-    # than at module level because both implementations import this module.
+    # than at module level because all implementations import this module.
     from tunix.experimental.trajectory import file_store  # pylint: disable=g-import-not-at-top,unused-import
     from tunix.experimental.trajectory import in_memory_store  # pylint: disable=g-import-not-at-top,unused-import
+    from tunix.experimental.trajectory import sql_store  # pylint: disable=g-import-not-at-top,unused-import
 
     backend = config.get("backend")
     if backend not in cls._REGISTRY:
