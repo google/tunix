@@ -514,6 +514,29 @@ def test_reduce_once_g5_capture_rejects_duplicate_rank_signatures():
       _run("stream", reduce_once="1")
 
 
+def test_reduce_once_g5_capture_admits_all_zero_rank_pairs():
+  # RLOO rows with zero advantage give both ranks an exactly zero
+  # contribution: identical by necessity, not a lost contribution.  The armed
+  # G5 carrier keeps admitting such groups (the FrozenLake r32 capsule pairs
+  # two zero-advantage rows in five of its eight groups) while the duplicate
+  # nonzero fixture above stays rejected.
+  base = _train_example()
+  zero = base.replace(advantages=jnp.zeros_like(base.advantages))
+  with mock.patch.dict(
+      os.environ,
+      {"CANON_P61_BACKWARD_NUMERICAL_DIR": "/tmp/g5-zero-pairs"},
+      clear=False,
+  ), mock.patch.object(
+      canonical_qwen3_adapter.dp_workloads, "validate_environment"
+  ), mock.patch.dict(globals(), {"_train_example": lambda: zero}):
+    once, *_ = _run("stream", reduce_once="1")
+  assert all(report["gradient_nonzero"] == 0 for report in once["reports"])
+  assert all(
+      report["dp_reduction"]["rank_local_fingerprint_unique_count"] == 1
+      for report in once["reports"]
+  )
+
+
 def test_reduce_once_streams_one_contribution_standing_for_every_group():
   calls = []
 

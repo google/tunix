@@ -13370,14 +13370,24 @@ class Qwen3EngineForwardAdapter:
       # numerical-admission batch, but not a universal training invariant:
       # RLOO may legitimately give two ranks identical zero gradients.  The
       # production cadence/count/placement gates remain unconditional; make
-      # distinctness fail closed only when the full-tree G5 carrier is armed.
+      # distinctness fail closed only when the full-tree G5 carrier is armed,
+      # and only for groups where some rank contributed a nonzero gradient:
+      # a group whose ranks all report zero nonzero counts (the FrozenLake
+      # capsule pairs two zero-advantage RLOO rows in five of eight groups)
+      # is identical by necessity, not by a lost contribution.
+      staged_all_zero = tuple(
+          bool(np.all(group_nonzero == 0)) for group_nonzero in nonzero
+      )
       if os.environ.get("CANON_P61_BACKWARD_NUMERICAL_DIR", "") and any(
-          unique_count != contract.dp_size
-          for unique_count in staged_unique_counts
+          unique_count != contract.dp_size and not all_zero
+          for unique_count, all_zero in zip(
+              staged_unique_counts, staged_all_zero, strict=True
+          )
       ):
         raise FunctionalMappingError(
             "reduce-once G5 carrier lost a distinct DP rank contribution: "
-            f"unique_counts={staged_unique_counts} dp_size={contract.dp_size}"
+            f"unique_counts={staged_unique_counts} "
+            f"all_zero={staged_all_zero} dp_size={contract.dp_size}"
         )
       norms = []
       for group_index, report in enumerate(reports):
