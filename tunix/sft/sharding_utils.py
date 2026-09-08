@@ -74,7 +74,7 @@ def shard_input(
 
 
 def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
-  """Get a sharding for an tensor given a mesh and partition spec."""
+  """Get a sharding for a tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
   if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
@@ -83,15 +83,35 @@ def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
   if x.ndim < len(pspec):
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
 
-  # Check for divisibility for all sharded axes.
+  seen_axes = set()
+  cleaned_spec = []
+  # Check for divisibility for all sharded axes and ensure no duplicate axes across dimensions.
   for i, axis_name in enumerate(pspec):
-    if axis_name is not None:
-      axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
-      for name in axis_names:
-        if name is not None and name not in mesh.shape:
-          return shd.NamedSharding(mesh, shd.PartitionSpec())
-        axis_size = mesh.shape[name]
-        if x.shape[i] % axis_size != 0:
-          # Replicate if not evenly divisible.
-          return shd.NamedSharding(mesh, shd.PartitionSpec())
-  return shd.NamedSharding(mesh, pspec)
+    if axis_name is None:
+      cleaned_spec.append(None)
+      continue
+    axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
+    valid_axes = []
+    for name in axis_names:
+      if name is None:
+        continue
+      if name not in mesh.shape:
+        # Unknown mesh axis -> replicate
+        return shd.NamedSharding(mesh, shd.PartitionSpec())
+      if name in seen_axes:
+        # Avoid duplicate mesh axes across dimensions in NamedSharding
+        continue
+      axis_size = mesh.shape[name]
+      if x.shape[i] % axis_size != 0:
+        # Replicate if not evenly divisible.
+        return shd.NamedSharding(mesh, shd.PartitionSpec())
+      valid_axes.append(name)
+      seen_axes.add(name)
+    if not valid_axes:
+      cleaned_spec.append(None)
+    elif len(valid_axes) == 1:
+      cleaned_spec.append(valid_axes[0])
+    else:
+      cleaned_spec.append(tuple(valid_axes))
+
+  return shd.NamedSharding(mesh, shd.PartitionSpec(*cleaned_spec))
