@@ -28,3 +28,24 @@ USE_AGENT_SANDBOX=1 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_
 For sandbox placement, set `SANDBOX_NAMESPACE`, `SANDBOX_NODE_SELECTOR_KEY`, and
 `SANDBOX_NODE_SELECTOR_VAL` before launching. The launcher forwards them to the
 rollout worker as the `agent_sandbox_rl` variables consumed by `SWEEnv`.
+
+To deploy on Kubernetes / GKE:
+
+```bash
+cd tunix/experimental/examples/deepswe_dist
+./k8s_launcher.sh --command start
+```
+
+Or run with sandbox enabled on GKE:
+
+```bash
+cd tunix/experimental/examples/deepswe_dist
+USE_AGENT_SANDBOX=1 ./k8s_launcher.sh --command start
+```
+
+To stop all jobsets:
+
+```bash
+./k8s_launcher.sh --command stop
+```
+
