@@ -349,18 +349,6 @@ parser.add_argument(
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="Logging level for the script and relevant libraries.",
 )
-parser.add_argument(
-    "--enable_jax_profiler",
-    type=str2bool,
-    default=False,
-    help="Enable JAX live profiler server for on-demand XProf profiling.",
-)
-parser.add_argument(
-    "--jax_profiler_port",
-    type=int,
-    default=9999,
-    help="Port for JAX live profiler server.",
-)
 
 args, _ = parser.parse_known_args()
 
@@ -371,17 +359,6 @@ NODE_SELECTOR_VAL = args.node_selector_val
 from examples.deepswe import r2e_gym_helper
 
 r2e_gym_helper.patch_kubernetes_runtime()
-r2e_gym_helper.patch_k8s_agent_sandbox()
-r2e_gym_helper.patch_pathwaysutils_profiler()
-
-if args.enable_jax_profiler and jax.process_index() == 0:
-  try:
-    import jax.profiler
-
-    jax.profiler.start_server(args.jax_profiler_port)
-    logging.info("Started JAX XProf live server on port %d", args.jax_profiler_port)
-  except Exception as e:
-    logging.warning("Failed to start JAX profiler server on port %d: %s", args.jax_profiler_port, e)
 
 
 # ====== Logging Configuration ======
@@ -1246,6 +1223,4 @@ if (
 
 print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)
-print("Training finished successfully! Exiting process cleanly...", flush=True)
-import os
-os._exit(0)
+

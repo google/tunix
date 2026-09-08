@@ -143,6 +143,21 @@ class ShardingUtilsTest(parameterized.TestCase):
     self.assertEqual(sharding.mesh, mesh)
     self.assertEqual(sharding.spec, shd.PartitionSpec())
 
+  def test_get_sharding_deduplicates_axes_across_dimensions(self):
+    device_cnt = jax.device_count()
+    mesh = shd.Mesh(
+        np.array(jax.devices()).reshape(device_cnt, 1),
+        axis_names=('fsdp', 'tp'),
+    )
+    x = jnp.ones((device_cnt, 4, 8))
+    # 'fsdp' appears on both dim 0 and dim 2
+    pspec = shd.PartitionSpec(('fsdp',), None, ('fsdp',))
+    sharding = sharding_utils.get_sharding(x, mesh, pspec)
+    self.assertEqual(sharding.mesh, mesh)
+    # The duplicate axis 'fsdp' on dim 2 should be dropped to prevent DuplicateSpecError
+    self.assertEqual(sharding.spec, shd.PartitionSpec('fsdp', None, None))
+
+
   @mock.patch('tunix.sft.sharding_utils.jax.make_array_from_process_local_data')
   def test_global_array_noop(self, mock_make_array):
     mock_make_array.side_effect = ValueError(

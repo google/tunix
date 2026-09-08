@@ -211,13 +211,14 @@ class PrewarmDatasetIterator:
     self.next_batch = None
     self.prev_batch_images: list[str] = []
 
-    # 1. Prime Slot 1 (Current Batch - pre-warming in background)
+    # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
     try:
       self.current_batch = next(self.dataset_iter)
       logging.info(
-          "[PrewarmDatasetIterator] Warming initial batch on K8s in background..."
+          "[PrewarmDatasetIterator] Warming initial batch on K8s and waiting"
+          " for pods to be ready..."
       )
-      self._warm_batch(self.current_batch, wait=False)
+      self._warm_batch(self.current_batch, wait=True)
     except StopIteration:
       pass
 
@@ -465,22 +466,10 @@ class SWEEnv(BaseTaskEnv):
             image=self.entry.get("docker_image", "default"),
             metadata={"ds": self.entry},
         )
-        try:
-          self.handle = fleet.acquire(task)
-          # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
-          cmd_files = r2egym_command_files()
-          self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
-        except Exception as e:
-          logging.warning(
-              "[SWEEnv] Sandbox acquisition/init failed for task %s: %s. Returning fallback observation.",
-              task.id,
-              e,
-          )
-          self.env = None
-          self._failed = True
-          self.final_reward_fn = lambda: 0.0
-          self.total_steps = 0
-          return "Environment initialization failed due to sandbox timeout or unavailability."
+        self.handle = fleet.acquire(task)
+        # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
+        cmd_files = r2egym_command_files()
+        self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
       else:
         # Initialize standard local Docker RepoEnv
         global EnvArgs, RepoEnv, Action
@@ -520,13 +509,9 @@ class SWEEnv(BaseTaskEnv):
     if not action_obj.function_name:
       return EnvStepResult(observation="", reward=0, done=False, info={})
 
-    if getattr(self, "_failed", False) or not self.env:
-      return EnvStepResult(
-          observation="Sandbox unavailable",
-          reward=0.0,
-          done=True,
-          info={"error": "sandbox_unavailable"},
-      )
+    # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
+    if not self.env:
+      raise ValueError("Environment not initialized")
     obs, reward, done, info = self.env.step(action_obj)
 
     self.total_steps += 1
@@ -548,10 +533,7 @@ class SWEEnv(BaseTaskEnv):
     ):
       msg = "[SWEEnv] Releasing SandboxHandle back to SandboxFleet."
       logging.info(msg)
-      try:
-        fleet.release(self.handle)
-      except Exception as e:
-        logging.warning("[SWEEnv] Note on releasing handle: %s", e)
+      fleet.release(self.handle)
       self.handle = None
 
     if (
