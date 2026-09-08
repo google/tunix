@@ -12,6 +12,11 @@ import stat
 
 SOFT_WARNING_BYTES = 1_200_000_000
 HARD_MAX_BYTES = 1_500_000_000
+# The long-context geometry captures ~10x the chunk passes per update.
+GEOMETRY_CAPS = {
+    "dp2-tp2-long": (3_000_000_000, 4_000_000_000),
+    "dp2-tp2-long8k": (6_000_000_000, 8_000_000_000),
+}
 SCHEMA = "canon.v1.gsm8k-onehost-xprof.size.v1"
 
 
@@ -103,7 +108,11 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--run-root", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True)
+  parser.add_argument("--geometry", default="")
   args = parser.parse_args()
+  global SOFT_WARNING_BYTES, HARD_MAX_BYTES
+  if args.geometry in GEOMETRY_CAPS:
+    SOFT_WARNING_BYTES, HARD_MAX_BYTES = GEOMETRY_CAPS[args.geometry]
   if args.output.exists():
     raise FileExistsError(args.output)
   receipt = build_receipt(args.run_root)

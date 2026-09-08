@@ -33,6 +33,7 @@ import argparse
 import gc
 import logging
 import math
+import hashlib
 import os
 import re
 import sys
@@ -222,6 +223,8 @@ if (
         "gsm8k-p59-dp2-tp2",
         "gsm8k-p60-dp2-tp2",
         "gsm8k-p66-dp1-tp4",
+        "gsm8k-long-dp2-tp2",
+        "gsm8k-long8k-dp2-tp2",
     )
     and not _V1_GSM8K_XPROF_NATIVE_AB
 ):
@@ -325,14 +328,20 @@ MAX_CONCURRENCY = args.max_concurrency or (
 )
 if CANON_P41_OPTIMIZER_BENCH and MAX_CONCURRENCY != 1:
   raise ValueError("P41 optimizer benchmark requires max_concurrency=1")
+# The P60 deterministic A/B contract fixes the prompt/response widths.  The
+# registered long-context carrier keeps that contract at its own widths.
+_P60_WIDTHS = (
+    (P32_WORKLOAD.max_prompt_length, P32_WORKLOAD.max_response_length)
+    if CANON_P32_WORKLOAD and P32_WORKLOAD.four_chip_2x2_long_proxy
+    else (1024, 256)
+)
 if CANON_P60_DETERMINISTIC_AB and (
-    MAX_PROMPT_LENGTH != 1024
-    or MAX_RESPONSE_LENGTH != 256
+    (MAX_PROMPT_LENGTH, MAX_RESPONSE_LENGTH) != _P60_WIDTHS
     or MAX_CONCURRENCY != 1
 ):
   raise ValueError(
-      "P60 deterministic hash A/B requires prompt/response=1024/256 and "
-      "max_concurrency=1, got "
+      "P60 deterministic hash A/B requires prompt/response="
+      f"{_P60_WIDTHS[0]}/{_P60_WIDTHS[1]} and max_concurrency=1, got "
       f"{MAX_PROMPT_LENGTH}/{MAX_RESPONSE_LENGTH} and {MAX_CONCURRENCY}"
   )
 
@@ -472,6 +481,52 @@ def build_prompt(question: str) -> str:
   return VTC_PROMPT_TEMPLATE.format(question)
 
 
+# ====== Long-context carrier: few-shot prefix ======
+# CANON_P32_LONG_PROMPT_EXAMPLES="lo-hi" prepends between lo and hi worked
+# GSM8K examples (from a fixed pool of the first _LONG_PROMPT_POOL_SIZE
+# rows of the split) to every prompt, the count chosen per question from a
+# hash of its text so it is deterministic across runs and varies across
+# rows.  This is how the one-host carrier gets 2k-4k token rows with a
+# spread of lengths (the group's chunk count is set by its longest row)
+# while the model can still answer, so rewards keep their variance.
+_LONG_PROMPT_POOL_SIZE = 64
+_LONG_PROMPT_EXAMPLES = os.getenv("CANON_P32_LONG_PROMPT_EXAMPLES", "")
+
+
+def _long_prompt_example_range() -> tuple[int, int] | None:
+  if not _LONG_PROMPT_EXAMPLES:
+    return None
+  try:
+    low, high = (int(part) for part in _LONG_PROMPT_EXAMPLES.split("-"))
+  except ValueError as exc:
+    raise ValueError(
+        "CANON_P32_LONG_PROMPT_EXAMPLES must be 'lo-hi', got "
+        f"{_LONG_PROMPT_EXAMPLES!r}"
+    ) from exc
+  if low < 0 or high < low:
+    raise ValueError(
+        "CANON_P32_LONG_PROMPT_EXAMPLES must satisfy 0 <= lo <= hi, got "
+        f"{_LONG_PROMPT_EXAMPLES!r}"
+    )
+  return low, high
+
+
+def _long_prompt_example_count(question: str, low: int, high: int) -> int:
+  digest = hashlib.sha256(question.encode("utf-8")).digest()
+  return low + int.from_bytes(digest[:4], "big") % (high - low + 1)
+
+
+def build_long_prompt(
+    question: str, pool: list[tuple[str, str]], low: int, high: int
+) -> str:
+  count = _long_prompt_example_count(question, low, high)
+  shown = [
+      f"Example problem: {example_question}\nExample solution: {example_answer}\n"
+      for example_question, example_answer in pool[:count]
+  ]
+  return "".join(shown) + "\n" + build_prompt(question)
+
+
 def build_gsm8k_dataset(
     *,
     split: str,
@@ -492,9 +547,20 @@ def build_gsm8k_dataset(
   if shuffle:
     dataset = dataset.shuffle(seed=seed)
 
+  example_range = _long_prompt_example_range()
+  if example_range is None:
+    prompt_fn = build_prompt
+  else:
+    pool = [
+        (_as_text(data[index]["question"]), _as_text(data[index]["answer"]))
+        for index in range(min(_LONG_PROMPT_POOL_SIZE, len(data)))
+    ]
+    low, high = example_range
+    prompt_fn = lambda question: build_long_prompt(question, pool, low, high)
+
   dataset = dataset.map(
       lambda x: {
-          "prompts": build_prompt(_as_text(x["question"])),
+          "prompts": prompt_fn(_as_text(x["question"])),
           "question": _as_text(x["question"]),
           "answer": extract_hash_answer(_as_text(x["answer"])),
       }
@@ -1044,14 +1110,19 @@ def main() -> None:
     else:
       if os.getenv("CANON_GSM8K_GRAD_PROBE", "") == "1":
         raise ValueError("real GSM8K training forbids diagnostic advantages")
-      expected_response_length = 256 if CANON_P60_DETERMINISTIC_AB else 1024
-      if (
-          MAX_PROMPT_LENGTH != 1024
-          or MAX_RESPONSE_LENGTH != expected_response_length
-      ):
+      if CANON_P32_WORKLOAD and P32_WORKLOAD.four_chip_2x2_long_proxy:
+        expected_widths = (
+            P32_WORKLOAD.max_prompt_length,
+            P32_WORKLOAD.max_response_length,
+        )
+      else:
+        expected_widths = (
+            1024, 256 if CANON_P60_DETERMINISTIC_AB else 1024
+        )
+      if (MAX_PROMPT_LENGTH, MAX_RESPONSE_LENGTH) != expected_widths:
         raise ValueError(
             "real GSM8K training requires prompt/response "
-            f"1024/{expected_response_length}"
+            f"{expected_widths[0]}/{expected_widths[1]}"
         )
       expected_mesh = (
           (P32_WORKLOAD.dp_size, P32_WORKLOAD.tp_size)

@@ -38,6 +38,14 @@ _P74_VICTIM_KINDS = {
 _GEOMETRIES = {
     "dp4-tp1": {"dp": 4, "tp": 1, "topology": "DP4xTP1", "groups": 16},
     "dp2-tp2": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 32},
+    "dp2-tp2-long": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 8},
+    "dp2-tp2-long8k": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 8},
+}
+# The one-update capture of the long geometry carries ~10x the chunk
+# passes of the short ones, so its size caps are its own.
+_SIZE_CAPS = {
+    "dp2-tp2-long": (3_000_000_000, 4_000_000_000),
+    "dp2-tp2-long8k": (6_000_000_000, 8_000_000_000),
 }
 _DEFAULT_GEOMETRY = "dp4-tp1"
 # Every committed update emits one pre-alignment verdict plus one per
@@ -76,7 +84,20 @@ def _work_receipts(text: str, reasons: list[str]) -> list[dict]:
 
 
 def _size_receipt(
-    path: Path, xprof_root: Path, reasons: list[str]
+    *args, geometry: str = _DEFAULT_GEOMETRY, **kwargs
+) -> dict | None:
+  """Validates the size receipt with the geometry's own caps."""
+  soft, hard = _SIZE_CAPS.get(
+      geometry, (_SIZE_SOFT_WARNING_BYTES, _SIZE_HARD_MAX_BYTES)
+  )
+  return _size_receipt_with_caps(*args, soft=soft, hard=hard, **kwargs)
+
+
+def _size_receipt_with_caps(
+    path: Path, xprof_root: Path, reasons: list[str],
+    *,
+    soft: int = _SIZE_SOFT_WARNING_BYTES,
+    hard: int = _SIZE_HARD_MAX_BYTES,
 ) -> dict | None:
   """Validates that the immutable budget receipt matches current files."""
   try:
@@ -91,8 +112,8 @@ def _size_receipt(
       "schema": _SIZE_SCHEMA,
       "xprof_root": "train/xprof",
       "byte_basis": "sum_of_logical_bytes_for_regular_files",
-      "soft_warning_bytes": _SIZE_SOFT_WARNING_BYTES,
-      "hard_max_bytes": _SIZE_HARD_MAX_BYTES,
+      "soft_warning_bytes": soft,
+      "hard_max_bytes": hard,
   }
   for key, value in expected.items():
     if receipt.get(key) != value:
@@ -164,13 +185,13 @@ def _size_receipt(
         "xprof_size_receipt.file_count="
         f"{receipt.get('file_count')!r} actual={len(actual_files)}"
     )
-  if total_bytes > _SIZE_HARD_MAX_BYTES:
+  if total_bytes > hard:
     reasons.append(
-        f"xprof_bytes={total_bytes} exceeds_hard_max={_SIZE_HARD_MAX_BYTES}"
+        f"xprof_bytes={total_bytes} exceeds_hard_max={hard}"
     )
   expected_status = (
-      "FAIL" if total_bytes > _SIZE_HARD_MAX_BYTES
-      else "WARN" if total_bytes > _SIZE_SOFT_WARNING_BYTES
+      "FAIL" if total_bytes > hard
+      else "WARN" if total_bytes > soft
       else "PASS"
   )
   if receipt.get("status") != expected_status:
@@ -183,8 +204,16 @@ def _size_receipt(
   return receipt
 
 
-def _p74_receipt(path: Path, reasons: list[str]) -> dict | None:
-  """Validates the checked-VMA gap and exact transfer-family receipt."""
+def _p74_receipt(
+    path: Path, reasons: list[str], *, geometry: str = "dp2-tp2"
+) -> dict | None:
+  """Validates the checked-VMA gap and exact transfer-family receipt.
+
+  The short dp2-tp2 carrier pins 64 windows; the long geometry's window
+  count is data dependent, so it is read from the receipt's own acceptance
+  block (the census derives it from the run's forward_group_issued lines)
+  and every count in the receipt must agree with it.
+  """
   try:
     receipt = json.loads(path.read_text(encoding="utf-8"))
   except (OSError, json.JSONDecodeError) as exc:
@@ -193,11 +222,29 @@ def _p74_receipt(path: Path, reasons: list[str]) -> dict | None:
   if not isinstance(receipt, dict):
     reasons.append("p74_gap_receipt:not_object")
     return None
+  if geometry == "dp2-tp2":
+    expected_windows = _P74_EXPECTED_WINDOWS
+  else:
+    acceptance_block = receipt.get("acceptance")
+    expected_windows = (
+        acceptance_block.get("expected_windows")
+        if isinstance(acceptance_block, dict)
+        else None
+    )
+    if (
+        not isinstance(expected_windows, int)
+        or isinstance(expected_windows, bool)
+        or expected_windows <= 0
+    ):
+      reasons.append(
+          f"p74_gap_receipt.acceptance.expected_windows={expected_windows!r}"
+      )
+      return None
   expected = {
       "schema": _P74_SCHEMA,
       "status": "PASS",
-      "geometry": "dp2-tp2",
-      "identity_windows": _P74_EXPECTED_WINDOWS,
+      "geometry": geometry,
+      "identity_windows": expected_windows,
       "windows_with_any_victim": 0,
       "reasons": [],
   }
@@ -208,7 +255,7 @@ def _p74_receipt(path: Path, reasons: list[str]) -> dict | None:
   if not isinstance(acceptance, dict):
     reasons.append("p74_gap_receipt.acceptance:not_object")
   else:
-    if acceptance.get("expected_windows") != _P74_EXPECTED_WINDOWS:
+    if acceptance.get("expected_windows") != expected_windows:
       reasons.append(
           "p74_gap_receipt.acceptance.expected_windows="
           f"{acceptance.get('expected_windows')!r}"
@@ -232,7 +279,7 @@ def _p74_receipt(path: Path, reasons: list[str]) -> dict | None:
   if not isinstance(gap, dict):
     reasons.append("p74_gap_receipt.gap:not_object")
   else:
-    if gap.get("windows") != _P74_EXPECTED_WINDOWS:
+    if gap.get("windows") != expected_windows:
       reasons.append(f"p74_gap_receipt.gap.windows={gap.get('windows')!r}")
     mean_ms = gap.get("mean_ms")
     if (
@@ -252,7 +299,7 @@ def _p74_receipt(path: Path, reasons: list[str]) -> dict | None:
   ):
     reasons.append(f"p74_gap_receipt.victim_overlap={victim!r}")
   intervening = receipt.get("intervening_modules")
-  expected_intervening = {_P74_PARTITION_MODULE: _P74_EXPECTED_WINDOWS}
+  expected_intervening = {_P74_PARTITION_MODULE: expected_windows}
   if intervening != expected_intervening:
     reasons.append(f"p74_gap_receipt.intervening_modules={intervening!r}")
   return receipt
@@ -341,7 +388,9 @@ def classify(
       else ""
   )
   size_receipt = (
-      _size_receipt(size_receipt_path, state / "xprof", reasons)
+      _size_receipt(
+          size_receipt_path, state / "xprof", reasons, geometry=geometry
+      )
       if size_receipt_path.is_file()
       else None
   )
@@ -351,7 +400,7 @@ def classify(
       else ""
   )
   p74_gap_receipt = (
-      _p74_receipt(p74_gap_receipt_path, reasons)
+      _p74_receipt(p74_gap_receipt_path, reasons, geometry=geometry)
       if require_p74_gap and p74_gap_receipt_path.is_file()
       else None
   )
@@ -423,7 +472,7 @@ def classify(
     ):
       reasons.append(f"trace_census_rc={trace_census_rc}")
   if require_p74_gap:
-    if arm != "zero-hp" or geometry != "dp2-tp2":
+    if arm != "zero-hp" or geometry not in ("dp2-tp2", "dp2-tp2-long", "dp2-tp2-long8k"):
       reasons.append("p74_gap_requirement_is_zero_hp_dp2_tp2_only")
     if p74_gap_census_rc != 0 or _P74_MARKER not in p74_gap_text:
       reasons.append(f"p74_gap_census_rc={p74_gap_census_rc}")

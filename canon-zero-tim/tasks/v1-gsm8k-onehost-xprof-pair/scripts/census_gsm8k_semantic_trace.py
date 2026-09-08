@@ -19,8 +19,10 @@ COMMON_EXACT_COUNTS = {
 # registered geometry; the rollout span count (2 per trajectory) follows
 # the shared 64-trajectory global work and does not move.
 GEOMETRIES = {
-    "dp4-tp1": {"groups": 16},
-    "dp2-tp2": {"groups": 32},
+    "dp4-tp1": {"groups": 16, "trajectories": 64},
+    "dp2-tp2": {"groups": 32, "trajectories": 64},
+    "dp2-tp2-long": {"groups": 8, "trajectories": 16},
+    "dp2-tp2-long8k": {"groups": 8, "trajectories": 16},
 }
 DEFAULT_GEOMETRY = "dp4-tp1"
 
@@ -79,8 +81,11 @@ def main() -> None:
   expected_peft = expected_peft_train(args.arm, args.geometry)
   if counts["peft_train"] != expected_peft:
     errors.append(f"peft_train={counts['peft_train']}!={expected_peft}")
-  if counts["rollout"] != 128:
-    errors.append(f"rollout={counts['rollout']}!=128")
+  # Two rollout spans per trajectory: 128 on the 64-trajectory carriers,
+  # 32 on the 16-trajectory long-context one.
+  expected_rollout = 2 * GEOMETRIES[args.geometry]["trajectories"]
+  if counts["rollout"] != expected_rollout:
+    errors.append(f"rollout={counts['rollout']}!={expected_rollout}")
   custom = counts["segmented_value_and_grad"] + counts["gradient_commit"]
   if custom:
     errors.append(f"custom_span_leftovers={custom}")

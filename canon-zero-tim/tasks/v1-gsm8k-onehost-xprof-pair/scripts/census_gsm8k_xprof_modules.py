@@ -30,6 +30,10 @@ ZERO_TAIL_EXACT = {
 GEOMETRIES = {
     "dp4-tp1": {"groups": 16},
     "dp2-tp2": {"groups": 32},
+    # Long context on the 2x2 cut: 16 trajectories of 1k-5k tokens, so a
+    # group runs 4..48 chunks instead of 1..5.
+    "dp2-tp2-long": {"groups": 8},
+    "dp2-tp2-long8k": {"groups": 8},
 }
 DEFAULT_GEOMETRY = "dp4-tp1"
 # The two mutually exclusive layer-depth backward families.  `_base` has
@@ -58,6 +62,10 @@ ZERO_BACKWARD_EXECS = 32
 # a matching forward-tape count) inside the derived floor and ceiling
 # instead of guessing one number.
 PER_GROUP_CHUNK_BOUNDS = (1, 5)
+# Per-geometry override of the chunk band: the long-context geometry admits
+# up to (4096 + 1024) / 256 = 20 chunks of real tokens plus the padding
+# chunk, and at least 4 (a 1k-token row).
+GEOMETRY_CHUNK_BOUNDS = {"dp2-tp2-long": (4, 48), "dp2-tp2-long8k": (8, 48)}
 
 
 def expected_backward_execs(geometry: str) -> int | None:
@@ -72,7 +80,7 @@ def expected_backward_execs(geometry: str) -> int | None:
 def backward_exec_bounds(geometry: str) -> tuple[int, int]:
   """Returns the admissible per-update execution range for one geometry."""
   groups = GEOMETRIES[geometry]["groups"]
-  low, high = PER_GROUP_CHUNK_BOUNDS
+  low, high = GEOMETRY_CHUNK_BOUNDS.get(geometry, PER_GROUP_CHUNK_BOUNDS)
   return (groups * low, groups * high)
 # Mirrors _P71_BWD_BLOCK_LAYERS in tunix/rl/canonical_qwen3_adapter.py.
 # That constant has a documented fallback ladder 7 -> 4 -> 2, so the

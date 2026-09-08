@@ -17,6 +17,8 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
 import numpy as np
 
+from tunix.rl import canonical_qwen3_adapter as adapter_module
+
 _HARNESS_PATH = Path(__file__).with_name("test_p71_fwd_scan.py")
 _spec = importlib.util.spec_from_file_location("p71_harness_glue", _HARNESS_PATH)
 harness = importlib.util.module_from_spec(_spec)
@@ -61,3 +63,27 @@ def test_glue_width_is_fixed_across_chunk_counts():
   assert np.array_equal(
       np.asarray(targets), np.asarray(two["next_ids"])[:, bucket : 2 * bucket].reshape(-1)
   )
+
+
+def test_long_context_two_by_two_proxy_is_admitted():
+  """gsm8k-long-dp2-tp2 at data 2 x tp 2 passes the grouped-spec admission."""
+  adapter, _ = harness._group_adapter(rank_parallel=False)  # pylint: disable=protected-access
+  adapter._data_size = 2  # pylint: disable=protected-access
+  adapter._tp_size = 2  # pylint: disable=protected-access
+  row = jnp.arange(2, dtype=jnp.int32)[:, None]
+  prompt = jnp.concatenate([1 + row % 2, 2 + row % 3], axis=1)
+  completion = jnp.concatenate([2 + row % 2], axis=1)
+  from unittest import mock  # pylint: disable=g-import-not-at-top
+
+  with mock.patch.dict(os.environ, {"CANON_P32_WORKLOAD": "gsm8k-long-dp2-tp2"}, clear=False):
+    spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+        prompt, completion, jnp.ones_like(prompt, dtype=bool), jnp.ones_like(completion, dtype=bool), 1.0
+    )
+  assert spec["num_chunks"] == 1 and spec["packed_ids"].shape[0] == 2
+  with mock.patch.dict(os.environ, {"CANON_P32_WORKLOAD": "gsm8k-somethingelse-dp2-tp2"}, clear=False):
+    import pytest  # pylint: disable=g-import-not-at-top
+
+    with pytest.raises(adapter_module.FunctionalMappingError, match="grouped reverse requires"):
+      adapter._p32_group_spec(  # pylint: disable=protected-access
+          prompt, completion, jnp.ones_like(prompt, dtype=bool), jnp.ones_like(completion, dtype=bool), 1.0
+      )

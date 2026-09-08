@@ -16,6 +16,8 @@ from typing import Mapping, Sequence
 GEOMETRIES = {
     "dp4-tp1": {"groups": 16},
     "dp2-tp2": {"groups": 32},
+    "dp2-tp2-long": {"groups": 8},
+    "dp2-tp2-long8k": {"groups": 8},
 }
 DEFAULT_GEOMETRY = "dp4-tp1"
 EXPECTED_COUNTS = {

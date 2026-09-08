@@ -229,6 +229,7 @@ class DPWorkloadSpec:
   local_m: int = 256
   four_chip_proxy: bool = False
   four_chip_2x2_proxy: bool = False
+  four_chip_2x2_long_proxy: bool = False
   unit_data_proxy: bool = False
 
   @property
@@ -323,6 +324,46 @@ class DPWorkloadSpec:
       if self.total_devices != 4 or self.global_m != 512:
         raise ValueError(
             "P59 2x2 one-host proxy requires four devices and global M512"
+        )
+      return
+    if self.four_chip_2x2_long_proxy:
+      # The dp2-tp2 carrier re-cut for long context: fewer, longer rows
+      # (prompts 4 x generations 4 = 16 trajectories, 8 gradient groups) so
+      # the rollout KV cache and the one-update xprof capture stay within
+      # the one-host budget at prompt 4096 / response 1024.  Same four
+      # chips, same all-M contract (global M512).
+      long_widths = {
+          "gsm8k-long-dp2-tp2": (4096, 1024),
+          "gsm8k-long8k-dp2-tp2": (8192, 1024),
+      }
+      if self.name not in long_widths:
+        raise ValueError(
+            f"long-context 2x2 proxy geometry changed: name={self.name!r}"
+        )
+      expected = {
+          "name": self.name,
+          "model_id": "Qwen/Qwen3-1.7B",
+          "dp_size": 2,
+          "tp_size": 2,
+          "global_prompts": 4,
+          "num_generations": 4,
+          "local_trajectories": 8,
+          "local_m": 256,
+          "max_prompt_length": long_widths[self.name][0],
+          "max_response_length": long_widths[self.name][1],
+          "periodic_evaluation": False,
+      }
+      actual = {name: getattr(self, name) for name in expected}
+      wrong = {
+          name: actual[name]
+          for name, expected_value in expected.items()
+          if actual[name] != expected_value
+      }
+      if wrong:
+        raise ValueError(f"long-context 2x2 proxy geometry changed: {wrong}")
+      if self.total_devices != 4 or self.global_m != 512:
+        raise ValueError(
+            "long-context 2x2 proxy requires four devices and global M512"
         )
       return
     if self.unit_data_proxy:
@@ -519,6 +560,50 @@ _WORKLOADS = {
         tp_size=2,
         four_chip_2x2_proxy=True,
     ),
+    "gsm8k-long-dp2-tp2": DPWorkloadSpec(
+        name="gsm8k-long-dp2-tp2",
+        model_id="Qwen/Qwen3-1.7B",
+        model_dir_name="qwen1p7b",
+        global_prompts=4,
+        num_generations=4,
+        local_trajectories=8,
+        max_prompt_length=4096,
+        max_response_length=1024,
+        max_steps=3,
+        learning_rate=2.0e-7,
+        beta=0.04,
+        optimizer_b1=0.9,
+        optimizer_b2=0.999,
+        weight_decay=0.01,
+        temperature=1.0,
+        wandb_project="zero-tim-gsm8k-long-dp2-tp2",
+        periodic_evaluation=False,
+        dp_size=2,
+        tp_size=2,
+        four_chip_2x2_long_proxy=True,
+    ),
+    "gsm8k-long8k-dp2-tp2": DPWorkloadSpec(
+        name="gsm8k-long8k-dp2-tp2",
+        model_id="Qwen/Qwen3-1.7B",
+        model_dir_name="qwen1p7b",
+        global_prompts=4,
+        num_generations=4,
+        local_trajectories=8,
+        max_prompt_length=8192,
+        max_response_length=1024,
+        max_steps=3,
+        learning_rate=2.0e-7,
+        beta=0.04,
+        optimizer_b1=0.9,
+        optimizer_b2=0.999,
+        weight_decay=0.01,
+        temperature=1.0,
+        wandb_project="zero-tim-gsm8k-long8k-dp2-tp2",
+        periodic_evaluation=False,
+        dp_size=2,
+        tp_size=2,
+        four_chip_2x2_long_proxy=True,
+    ),
     "gsm8k-p66-dp1-tp4": DPWorkloadSpec(
         name="gsm8k-p66-dp1-tp4",
         model_id="Qwen/Qwen3-1.7B",
@@ -692,6 +777,8 @@ def requested_max_steps(
       "gsm8k-p59-dp2-tp2",
       "gsm8k-p60-dp2-tp2",
       "gsm8k-p66-dp1-tp4",
+      "gsm8k-long-dp2-tp2",
+      "gsm8k-long8k-dp2-tp2",
   ):
     raise ValueError(
         "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
@@ -809,11 +896,17 @@ def expected_token_widths(
         "gsm8k-p59-dp2-tp2",
         "gsm8k-p60-dp2-tp2",
         "gsm8k-p66-dp1-tp4",
+        "gsm8k-long-dp2-tp2",
+        "gsm8k-long8k-dp2-tp2",
     ):
       raise ValueError(
           "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
           "zero-TIM workload"
       )
+    if workload.four_chip_2x2_long_proxy:
+      # The long-context carrier keeps the deterministic A/B contract but
+      # at its own registered widths.
+      return (workload.max_prompt_length, workload.max_response_length)
     return (1024, 256)
   p57_key = (
       values.get("CANON_P57_WORKLOAD_CANDIDATE", ""),

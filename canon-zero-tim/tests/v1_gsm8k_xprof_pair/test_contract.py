@@ -763,13 +763,13 @@ fi
       GSM8K_XPROF.arm(dp4_geometry_dp2_workload)
 
   def test_microstep_schedule_counts_are_geometry_registered(self):
-    """16 and 32 are the two registered counts; the factory binds them."""
-    for count in (16, 32):
+    """8, 16 and 32 are the registered counts; the factory binds them."""
+    for count in (8, 16, 32):
       schedule = GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(
           update_step=2, microsteps=count
       )
       self.assertEqual(schedule.microsteps, count)
-    for count in (8, 24, 48, 0):
+    for count in (12, 24, 48, 0):
       with self.assertRaisesRegex(ValueError, "registered per-geometry"):
         GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(
             update_step=2, microsteps=count
@@ -1445,10 +1445,6 @@ fi
     self.assertNotIn("CANON_P66_P59_CHECK_VMA", p74)
 
 
-if __name__ == "__main__":
-  unittest.main()
-
-
 class WandbGroupContractTest(unittest.TestCase):
   """The GSM8K demo must hand CANON_WANDB_GROUP to W&B on both arms.
 
@@ -1471,3 +1467,110 @@ class WandbGroupContractTest(unittest.TestCase):
         'os.environ.get("CANON_WANDB_GROUP", "") if vanilla_wandb else ""',
         demo,
     )
+
+
+class LongContextGeometryTest(unittest.TestCase):
+  """`dp2-tp2-long`: the long-context 2x2 carrier registered beside the short ones."""
+
+  def test_registry_agrees_across_every_script(self):
+    from tunix.rl import dp_workloads  # pylint: disable=g-import-not-at-top
+
+    shape = GSM8K_XPROF._GEOMETRIES["dp2-tp2-long"]  # pylint: disable=protected-access
+    self.assertEqual(shape, {"workload": "gsm8k-long-dp2-tp2", "topology": "DP2xTP2", "groups": 8})
+    self.assertEqual(ARM_CLASSIFIER._GEOMETRIES["dp2-tp2-long"]["groups"], 8)  # pylint: disable=protected-access
+    self.assertEqual(MODULE_CENSUS.GEOMETRIES["dp2-tp2-long"]["groups"], 8)
+    hierarchy = _load("v1_gsm8k_hierarchy_for_long", SCRIPTS / "census_gsm8k_xprof_hierarchy.py")
+    semantic = _load("v1_gsm8k_semantic_for_long", SCRIPTS / "census_gsm8k_semantic_trace.py")
+    self.assertEqual(hierarchy.GEOMETRIES["dp2-tp2-long"]["groups"], 8)
+    self.assertEqual(semantic.GEOMETRIES["dp2-tp2-long"]["groups"], 8)
+    # Rollout spans: two per trajectory (the short carriers keep 128).
+    self.assertEqual(
+        {name: 2 * shape["trajectories"] for name, shape in semantic.GEOMETRIES.items()},
+        {"dp4-tp1": 128, "dp2-tp2": 128, "dp2-tp2-long": 32, "dp2-tp2-long8k": 32},
+    )
+    # The short geometries are untouched.
+    self.assertEqual(GSM8K_XPROF._GEOMETRIES["dp2-tp2"]["groups"], 32)  # pylint: disable=protected-access
+    self.assertEqual(GSM8K_XPROF._GEOMETRIES["dp4-tp1"]["groups"], 16)  # pylint: disable=protected-access
+    workload = dp_workloads.get_workload("gsm8k-long-dp2-tp2")
+    workload.validate()
+    self.assertEqual((workload.global_trajectories, workload.local_trajectories, workload.global_m), (16, 8, 512))
+    env = {"CANON_P60_DETERMINISTIC_AB": "1"}
+    self.assertEqual(dp_workloads.expected_token_widths(workload, env), (4096, 1024))
+    self.assertEqual(
+        dp_workloads.expected_token_widths(dp_workloads.get_workload("gsm8k-p59-dp2-tp2"), env),
+        (1024, 256),
+    )
+
+  def test_chunk_band_and_size_caps_are_the_long_geometrys_own(self):
+    self.assertEqual(MODULE_CENSUS.backward_exec_bounds("dp2-tp2-long"), (32, 384))
+    self.assertEqual(MODULE_CENSUS.backward_exec_bounds("dp2-tp2"), (32, 160))
+    self.assertEqual(SIZE_CENSUS.GEOMETRY_CAPS["dp2-tp2-long"], (3_000_000_000, 4_000_000_000))
+    self.assertEqual(ARM_CLASSIFIER._SIZE_CAPS["dp2-tp2-long"], SIZE_CENSUS.GEOMETRY_CAPS["dp2-tp2-long"])  # pylint: disable=protected-access
+    self.assertEqual((SIZE_CENSUS.SOFT_WARNING_BYTES, SIZE_CENSUS.HARD_MAX_BYTES), (1_200_000_000, 1_500_000_000))
+
+  def test_p74_windows_come_from_the_captured_updates_chunk_counts(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      raw = Path(tmp) / "raw.log"
+      lines = []
+      # Two updates of 8 groups; only the last 8 lines count.
+      for _ in range(2):
+        for group in range(8):
+          longest = 300 + 400 * group  # 300..3100 -> chunks 2..13
+          lines.append(
+              f"[P32] forward_group_issued group={group} n_real=({longest - 50}, {longest})\n"
+          )
+      raw.write_text("".join(lines))
+      expected = sum((300 + 400 * g + 255) // 256 for g in range(8))
+      self.assertEqual(
+          P74_GAP_CENSUS.expected_windows_from_raw_log(raw, groups=8, sequence_bucket=256),
+          expected,
+      )
+      raw.write_text("".join(lines[:5]))
+      with self.assertRaisesRegex(ValueError, "forward_group_issued"):
+        P74_GAP_CENSUS.expected_windows_from_raw_log(raw, groups=8, sequence_bucket=256)
+
+  def test_classifier_reads_the_long_geometrys_window_count_from_the_receipt(self):
+    victim = {kind: 0 for kind in P74_GAP_CENSUS.VICTIM_KINDS}
+
+    def receipt(windows):
+      return {
+          "schema": P74_GAP_CENSUS.SCHEMA,
+          "status": "PASS",
+          "geometry": "dp2-tp2-long",
+          "acceptance": {
+              "expected_windows": windows,
+              "max_mean_gap_ms": 70.0,
+              "exact_victim_overlap_events": 0,
+              "partition_module_per_window": P74_GAP_CENSUS.PARTITION_MODULE,
+          },
+          "gap": {"windows": windows, "total_ms": 4.0, "mean_ms": 0.063, "max_ms": 0.064, "min_ms": 0.062},
+          "identity_windows": windows,
+          "intervening_modules": {P74_GAP_CENSUS.PARTITION_MODULE: windows},
+          "victim_overlap": victim,
+          "victim_global": victim,
+          "windows_with_any_victim": 0,
+          "reverse_wall": {"rows": [], "captured_update": {"seconds": 1.0, "groups": 8, "mean_seconds": 0.1, "max_seconds": 0.2}},
+          "reasons": [],
+      }
+
+    with tempfile.TemporaryDirectory() as tmp:
+      path = Path(tmp) / "p74_gap_receipt.json"
+      path.write_text(json.dumps(receipt(88)))
+      reasons = []
+      ARM_CLASSIFIER._p74_receipt(path, reasons, geometry="dp2-tp2-long")  # pylint: disable=protected-access
+      self.assertEqual(reasons, [])
+      # The short geometry still pins 64.
+      reasons = []
+      ARM_CLASSIFIER._p74_receipt(path, reasons, geometry="dp2-tp2")  # pylint: disable=protected-access
+      self.assertTrue(any("64" in reason or "identity_windows" in reason for reason in reasons), reasons)
+      # Internal disagreement in a long receipt is a reason.
+      bad = receipt(88)
+      bad["gap"]["windows"] = 80
+      path.write_text(json.dumps(bad))
+      reasons = []
+      ARM_CLASSIFIER._p74_receipt(path, reasons, geometry="dp2-tp2-long")  # pylint: disable=protected-access
+      self.assertTrue(any("gap.windows" in reason for reason in reasons), reasons)
+
+
+if __name__ == "__main__":
+  unittest.main()

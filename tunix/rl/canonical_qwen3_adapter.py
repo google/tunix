@@ -2199,6 +2199,85 @@ def _fused_p28_chunk_inputs(
 
 _P32_ZERO_TREE_PROGRAMS = {}
 _P32_ENTRY_CACHE_PROGRAMS = {}
+_P32_ROW_GATHER_PROGRAMS = {}
+
+
+def _p32_length_sort():
+  """CANON_P32_LENGTH_SORT=1 groups rows by length; unset/0 keeps arrival order."""
+  value = os.environ.get("CANON_P32_LENGTH_SORT", "")
+  if value in ("", "0"):
+    return False
+  if value == "1":
+    return True
+  raise FunctionalMappingError(
+      f"CANON_P32_LENGTH_SORT must be unset, 0 or 1, got {value!r}"
+  )
+
+
+def _p32_length_sorted_permutation(row_lengths, data_size):
+  """Row permutation that puts rows of similar length into the same group.
+
+  ``_group_batch_rows`` reads row ``d * L + g`` as rank ``d``'s row of group
+  ``g`` (``L`` rows per rank).  A group's chunk count is set by its longest
+  row, so rows are sorted by length (descending, stable) and dealt across
+  the ranks group by group: group ``g`` gets the ``data_size`` rows ranked
+  ``g * data_size ..`` and rank ``d`` the ``d``-th of them.  Returns the
+  permutation ``perm`` with ``permuted[i] = original[perm[i]]``.
+  """
+  lengths = np.asarray(row_lengths).reshape(-1)
+  batch = int(lengths.shape[0])
+  if batch % int(data_size):
+    raise FunctionalMappingError(
+        f"length sort needs a batch divisible by the data size: {batch} vs {data_size}"
+    )
+  local = batch // int(data_size)
+  order = np.argsort(-lengths, kind="stable")
+  perm = np.empty(batch, dtype=np.int64)
+  for group in range(local):
+    for rank in range(int(data_size)):
+      perm[rank * local + group] = order[group * int(data_size) + rank]
+  return perm
+
+
+def _p32_gather_rows(tree, perm):
+  """``tree`` with every batch-major leaf reordered by ``perm``.
+
+  The leaves of a TrainExample do not all live on the same devices: the
+  token and loss arrays that arrive from the host are uncommitted
+  single-device arrays that every downstream program places for itself,
+  while the arrays already laid out over the trainer mesh carry a
+  NamedSharding.  A mesh leaf is gathered by a program cached on its own
+  shape, dtype and sharding with ``out_shardings`` pinned to that
+  sharding; every other leaf is gathered eagerly with an uncommitted index
+  so it stays uncommitted (a committed single-device result would be
+  refused by the mesh programs that consume it, as the first carrier run
+  of the sort showed).
+  """
+  leaves, treedef = jax.tree_util.tree_flatten(tree)
+  batch = int(perm.shape[0])
+  host_index = np.asarray(perm, dtype=np.int32)
+  index = jnp.asarray(host_index)
+  out = []
+  for leaf in leaves:
+    if isinstance(leaf, np.ndarray) and leaf.ndim >= 1 and leaf.shape[0] == batch:
+      # Host-side batch arrays (the learner's policy_version, for one) are
+      # rows too: permute them in place of their kind.
+      out.append(leaf[host_index])
+      continue
+    if not (isinstance(leaf, jax.Array) and leaf.ndim >= 1 and leaf.shape[0] == batch):
+      out.append(leaf)
+      continue
+    sharding = leaf.sharding
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      out.append(leaf[index])
+      continue
+    key = (tuple(leaf.shape), str(leaf.dtype), str(sharding))
+    program = _P32_ROW_GATHER_PROGRAMS.get(key)
+    if program is None:
+      program = jax.jit(lambda x, i: x[i], out_shardings=sharding)
+      _P32_ROW_GATHER_PROGRAMS[key] = program
+    out.append(program(leaf, index))
+  return jax.tree_util.tree_unflatten(treedef, out)
 
 
 def _p32_entry_caches(final_caches, chunk_start, *, data_size):
@@ -6649,6 +6728,13 @@ class Qwen3EngineForwardAdapter:
       self._p32_chunk_metadata_program = fn
     return fn
 
+  def _p32_receipt_rows(self, rows):
+    """Original batch row numbers of grouped row positions ``rows``."""
+    perm = getattr(self, "_p32_row_permutation", None)
+    if perm is None:
+      return rows
+    return tuple(int(perm[int(row)]) for row in rows)
+
   def _p32_glue_width(self):
     """Fixed width of the grouped update's packed rows and flat cotangents."""
     bucket = int(self._sequence_bucket)
@@ -7730,16 +7816,26 @@ class Qwen3EngineForwardAdapter:
         == "gsm8k-p66-dp1-tp4"
         and bool(_p66_tp4_arm())
     )
+    # The long-context 2x2 carrier: the same cut as the P59 DP2xTP2 proxy
+    # with fewer, longer rows (gsm8k-long-dp2-tp2).
+    long_two_by_two_proxy = (
+        self._data_size == 2
+        and self._tp_size == 2
+        and os.environ.get("CANON_P32_WORKLOAD", "")
+        in ("gsm8k-long-dp2-tp2", "gsm8k-long8k-dp2-tp2")
+    )
     if (
         self._data_size not in (8, 16)
         and not p59_four_chip_proxy
         and not p59_two_by_two_proxy
+        and not long_two_by_two_proxy
         and not p66_tp4_proxy
     ):
       raise FunctionalMappingError(
           "P32 grouped reverse requires data size 8 or 16, the exact "
-          "P59 four-chip proxy, the exact P59 DP2xTP2 proxy, or the "
-          f"exact P66 DP1xTP4 proxy; got {self._data_size}"
+          "P59 four-chip proxy, the exact P59 DP2xTP2 proxy, the "
+          "long-context DP2xTP2 proxy, or the exact P66 DP1xTP4 proxy; "
+          f"got {self._data_size}"
       )
     prompt = jnp.asarray(prompt)
     completion = jnp.asarray(completion)
@@ -8840,6 +8936,29 @@ class Qwen3EngineForwardAdapter:
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
 
+    self._p32_row_permutation = None
+    if _p32_length_sort():
+      # Sort rows by length and deal them across the ranks so every group's
+      # rows are of similar length: the group pays its longest row's chunk
+      # count.  The whole example is permuted (loss inputs included), so the
+      # streamed cotangent, the end-of-update check and the receipts all see
+      # one consistent row order; per-row values do not depend on the
+      # neighbours (one paged-attention request per rank), only the order
+      # of the gradient sum over groups changes.
+      valid_value = getattr(train_example, "completion_valid_mask", None)
+      valid = (
+          jnp.asarray(train_example.completion_mask, dtype=jnp.bool_)
+          if valid_value is None
+          else jnp.asarray(valid_value, dtype=jnp.bool_)
+      )
+      row_lengths = jnp.sum(
+          jnp.asarray(train_example.prompt_mask, dtype=jnp.int32), axis=1
+      ) + jnp.sum(valid.astype(jnp.int32), axis=1)
+      perm = _p32_length_sorted_permutation(
+          np.asarray(jax.device_get(row_lengths)), self._data_size
+      )
+      train_example = _p32_gather_rows(train_example, perm)
+      self._p32_row_permutation = perm
     prompts = jnp.asarray(train_example.prompt_ids)
     completions = jnp.asarray(train_example.completion_ids)
     prompt_masks = jnp.asarray(train_example.prompt_mask, dtype=jnp.bool_)
@@ -9578,7 +9697,7 @@ class Qwen3EngineForwardAdapter:
             )
           report = {
               "group": index,
-              "trajectory_rows": reverse_groups[index],
+              "trajectory_rows": self._p32_receipt_rows(reverse_groups[index]),
               "n_real": spec["host_n_real"],
               "rank_counts": (reverse["counts"],),
               "pullback_invocations": 1,
@@ -9626,7 +9745,7 @@ class Qwen3EngineForwardAdapter:
           )
         report = {
             "group": index,
-            "trajectory_rows": reverse_groups[index],
+            "trajectory_rows": self._p32_receipt_rows(reverse_groups[index]),
             "n_real": spec["host_n_real"],
             "rank_counts": (reverse["counts"],),
             "pullback_invocations": 1,
@@ -9778,7 +9897,7 @@ class Qwen3EngineForwardAdapter:
       leaves = jax.tree.leaves(one_gradient)
       report = {
           "group": index,
-          "trajectory_rows": reverse_groups[index],
+          "trajectory_rows": self._p32_receipt_rows(reverse_groups[index]),
           "n_real": spec["host_n_real"],
           "rank_counts": tuple(rank_counts),
           "pullback_invocations": contract.dp_size,
@@ -10099,6 +10218,14 @@ class Qwen3EngineForwardAdapter:
         raise FunctionalMappingError("P32 D3b0 emitted no grouped gradient")
       trainer_gradients = jax.tree.map(
           lambda value: value * scale, trainer_gradients
+      )
+    if self._p32_row_permutation is not None:
+      # The per-row outputs go back to the learner in the batch's own row
+      # order: the alignment gate compares them row by row against the
+      # sampler's records (T_old vs T_current, ratio exactly 1).
+      inverse = np.argsort(self._p32_row_permutation)
+      per_token_logps, token_entropy = _p32_gather_rows(
+          (per_token_logps, token_entropy), inverse
       )
     return {
         "loss_output": loss_output,

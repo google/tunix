@@ -17,6 +17,31 @@ from typing import Mapping, Sequence
 SCHEMA = "canon.v1.gsm8k-onehost-xprof.p74-gap.v1"
 GEOMETRY = "dp2-tp2"
 EXPECTED_WINDOWS = 64
+# The long geometry's windows are data dependent (one per chunk pass): the
+# expectation is read from the captured update's own forward_group_issued
+# lines instead of a constant.
+LONG_GEOMETRIES = {
+    "dp2-tp2-long": {"groups": 8, "sequence_bucket": 256},
+    "dp2-tp2-long8k": {"groups": 8, "sequence_bucket": 256},
+}
+_ISSUED_RE = re.compile(r"forward_group_issued .*?n_real=\(([0-9, ]+)\)")
+
+
+def expected_windows_from_raw_log(raw_log, *, groups, sequence_bucket):
+  """Sum of the last ``groups`` groups' chunk counts (the captured update)."""
+  text = raw_log.read_text(encoding="utf-8", errors="replace")
+  issued = [
+      max(int(value) for value in match.group(1).split(","))
+      for match in _ISSUED_RE.finditer(text)
+  ]
+  if len(issued) < groups:
+    raise ValueError(
+        f"forward_group_issued lines={len(issued)} < groups={groups}"
+    )
+  return sum(
+      (longest + sequence_bucket - 1) // sequence_bucket
+      for longest in issued[-groups:]
+  )
 MAX_MEAN_GAP_MS = 70.0
 SEED_MODULE = "jit_convert_element_type"
 HEAD_MODULE = "jit_zt_tr_dp_parallel_bwd_head"
@@ -261,17 +286,28 @@ def _read_xplane(path: Path) -> tuple[list[Event], list[Event]]:
 
 
 def main() -> int:
+  global GEOMETRY
   parser = argparse.ArgumentParser()
   parser.add_argument("--run-root", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True)
+  parser.add_argument(
+      "--geometry", default=GEOMETRY,
+      choices=(GEOMETRY,) + tuple(sorted(LONG_GEOMETRIES)),
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(args.output)
+  GEOMETRY = args.geometry
 
   try:
+    expected_windows = EXPECTED_WINDOWS
+    if args.geometry in LONG_GEOMETRIES:
+      expected_windows = expected_windows_from_raw_log(
+          args.run_root / "train/raw.log", **LONG_GEOMETRIES[args.geometry]
+      )
     xplane = _resolve_xplane(args.run_root)
     modules, host_events = _read_xplane(xplane)
-    receipt = analyze(modules, host_events)
+    receipt = analyze(modules, host_events, expected_windows=expected_windows)
     receipt["xplane"] = str(xplane.relative_to(args.run_root))
     receipt["reverse_wall"] = parse_reverse_wall(
         args.run_root / "train/raw.log"

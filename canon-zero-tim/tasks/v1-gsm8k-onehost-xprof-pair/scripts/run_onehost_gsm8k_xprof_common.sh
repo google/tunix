@@ -61,6 +61,24 @@ case "$geometry" in
     # name, and W&B run name all carry it.
     label="dp2tp2-${label}"
     ;;
+  dp2-tp2-long)
+    # Long context on the same 2x2 cut: 16 trajectories of up to 4096+1024
+    # tokens (8 gradient groups), registered as its own geometry.
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-long-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    label="dp2tp2long-${label}"
+    ;;
+  dp2-tp2-long8k)
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-long8k-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    label="dp2tp2long8k-${label}"
+    ;;
   *)
     echo "[V1.GSM8K.XPROF] unsupported V1_GSM8K_XPROF_GEOMETRY: $geometry" >&2
     exit 2
@@ -239,6 +257,7 @@ docker_args=(
   -e CANON_P32_KEEP_TAPE="${CANON_P32_KEEP_TAPE:-}"
   -e CANON_DP_REDUCE_ONCE="${CANON_DP_REDUCE_ONCE:-}"
   -e CANON_FUSED_TREE_OPS="${CANON_FUSED_TREE_OPS:-}"
+  -e CANON_P32_LENGTH_SORT="${CANON_P32_LENGTH_SORT:-}"
   -e CANON_EXPECT_TRAIN_MESH_IDS="$expected_train_mesh_ids"
   -e CANON_XPROF_DIR="$xprof_dir"
   -e CANON_XPROF_SKIP_STEPS=2 -e CANON_XPROF_STEPS=1
@@ -248,6 +267,16 @@ docker_args=(
   -e CANON_PERF_TRACE_DIR="$perf_dir" -e CANON_PERF_TRACE_EXPORT_STEP=2
   -w "$repo"
 )
+# JAX parses these variables when they are present, so an empty value is
+# not the same as unset (an empty min-compile-time is an invalid float and
+# aborts the import): add them only when a cache directory is given.
+if [ -n "${CANON_ONEHOST_JAX_CACHE_DIR:-}" ]; then
+  docker_args+=(
+    -e JAX_COMPILATION_CACHE_DIR="$CANON_ONEHOST_JAX_CACHE_DIR"
+    -e JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
+    -e JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=all
+  )
+fi
 if [ "$geometry" != dp4-tp1 ]; then
   docker_args+=(
     -e V1_GSM8K_XPROF_GEOMETRY="$geometry"
@@ -341,7 +370,7 @@ trace_census_rc=1
 p74_gap_census_rc=1
 set +e
 python3 "$script_dir/census_gsm8k_xprof_size.py" \
-  --run-root "$root" --output "$size_receipt" \
+  --run-root "$root" --output "$size_receipt" --geometry "$geometry" \
   >"$size_census" 2>&1
 size_census_rc=$?
 set -e
@@ -374,9 +403,9 @@ if [ "$docker_rc" -eq 0 ]; then
       --geometry "$geometry" \
       >"$trace_census" 2>&1
     trace_census_rc=$?
-    if [ "$geometry" = dp2-tp2 ]; then
+    if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ]; then
       python3 "$script_dir/census_gsm8k_p74_gap.py" \
-        --run-root "$root" --output "$p74_gap_receipt" \
+        --run-root "$root" --output "$p74_gap_receipt" --geometry "$geometry" \
         >"$p74_gap_census" 2>&1
       p74_gap_census_rc=$?
     fi
@@ -403,7 +432,7 @@ if [ "$arm" = zero-hp ]; then
     --require-hierarchy --hierarchy-census-rc "$hierarchy_census_rc"
     --trace-census-rc "$trace_census_rc"
   )
-  if [ "$geometry" = dp2-tp2 ]; then
+  if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ]; then
     classifier_args+=(
       --require-p74-gap --p74-gap-census-rc "$p74_gap_census_rc"
     )

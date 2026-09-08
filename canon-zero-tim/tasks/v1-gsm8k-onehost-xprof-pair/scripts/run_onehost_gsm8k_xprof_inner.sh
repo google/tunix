@@ -22,11 +22,32 @@ case "$geometry" in
     mesh_dp=2; mesh_tp=2; trajectory_micro=2; vllm_max_seqs=32
     zero_profile=qwen3-1p7b-dp2-tp2-gsm8k-v1-hp.env
     ;;
+  dp2-tp2-long)
+    # 4 prompts x 4 generations = 16 trajectories, 8 per rank, prompt 4096 /
+    # response 1024; the few-shot prefix range gives rows of 1k-4k tokens.
+    mesh_dp=2; mesh_tp=2; trajectory_micro=2; vllm_max_seqs=8
+    zero_profile=qwen3-1p7b-dp2-tp2-long-gsm8k-v1-hp.env
+    prompts=4; generations=4; max_prompt=4096; max_response=1024
+    long_prompt_examples="${CANON_P32_LONG_PROMPT_EXAMPLES:-3-10}"
+    ;;
+  dp2-tp2-long8k)
+    mesh_dp=2; mesh_tp=2; trajectory_micro=2; vllm_max_seqs=8
+    zero_profile=qwen3-1p7b-dp2-tp2-long8k-gsm8k-v1-hp.env
+    prompts=4; generations=4; max_prompt=8192; max_response=1024
+    long_prompt_examples="${CANON_P32_LONG_PROMPT_EXAMPLES:-12-36}"
+    ;;
   *)
     echo "[V1.GSM8K.XPROF] unsupported V1_GSM8K_XPROF_GEOMETRY: $geometry" >&2
     exit 2
     ;;
 esac
+# The registered short geometries keep their literal arguments below;
+# the long geometry overrides them from its case arm.
+prompts="${prompts:-8}"; generations="${generations:-8}"
+max_prompt="${max_prompt:-1024}"; max_response="${max_response:-256}"
+long_prompt_examples="${long_prompt_examples:-}"
+export CANON_P32_LONG_PROMPT_EXAMPLES="$long_prompt_examples"
+export V1_GSM8K_XPROF_PROMPTS="$prompts" V1_GSM8K_XPROF_GENERATIONS="$generations"
 # The Python contract reads the CANON_-prefixed twin; a disagreement between
 # the two means a hand-rolled container environment, not a launcher run.
 if [ "${CANON_V1_GSM8K_XPROF_GEOMETRY:-dp4-tp1}" != "$geometry" ]; then
@@ -90,8 +111,13 @@ from jax.experimental import mesh_utils
 from tunix.rl import gsm8k_xprof
 
 geometry = gsm8k_xprof.geometry()
-mesh_shape = {"dp4-tp1": (4, 1), "dp2-tp2": (2, 2)}[geometry]
+mesh_shape = {
+    "dp4-tp1": (4, 1), "dp2-tp2": (2, 2), "dp2-tp2-long": (2, 2),
+    "dp2-tp2-long8k": (2, 2),
+}[geometry]
 groups = gsm8k_xprof.geometry_groups()
+prompts = int(os.environ["V1_GSM8K_XPROF_PROMPTS"])
+generations = int(os.environ["V1_GSM8K_XPROF_GENERATIONS"])
 topology = f"DP{mesh_shape[0]}xTP{mesh_shape[1]}"
 devices = tuple(jax.devices())
 if len(devices) != 4 or jax.default_backend() != "tpu":
@@ -115,7 +141,8 @@ selected = gsm8k_xprof.arm()
 print(
     "[V1.GSM8K.XPROF] PREFLIGHT_PASS "
     f"arm={selected} topology={topology} mesh_ids={actual_ids} "
-    f"prompts=8 generations=8 trajectories=64 groups={groups} "
+    f"prompts={prompts} generations={generations} "
+    f"trajectories={prompts * generations} groups={groups} "
     "capture=update:2->3",
     flush=True,
 )
@@ -123,11 +150,11 @@ PY
 
 set +e
 python3 -u examples/math_gsm8k/qwen3_grpo_demo.py \
-  --mesh_dp="$mesh_dp" --mesh_tp="$mesh_tp" --batch_size=8 --mini_batch_size=8 \
-  --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 \
+  --mesh_dp="$mesh_dp" --mesh_tp="$mesh_tp" --batch_size="$prompts" --mini_batch_size="$prompts" \
+  --train_micro_batch_size="$prompts" --compute_logps_micro_batch_size="$prompts" \
   --train_trajectory_micro_batch_size="$trajectory_micro" \
-  --max_steps="$max_steps" --num_generations=8 --max_prompt_length=1024 \
-  --max_response_length=256 --max_concurrency=1 \
+  --max_steps="$max_steps" --num_generations="$generations" --max_prompt_length="$max_prompt" \
+  --max_response_length="$max_response" --max_concurrency=1 \
   --rollout_vllm_hbm_utilization=0.20 \
   --rollout_vllm_max_num_seqs="$vllm_max_seqs" \
   --rollout_vllm_max_num_batched_tokens=256 \

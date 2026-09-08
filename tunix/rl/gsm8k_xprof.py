@@ -45,6 +45,22 @@ _GEOMETRIES = {
         "topology": "DP2xTP2",
         "groups": 32,
     },
+    # Long context on the same 2x2 cut: 16 trajectories of up to 4096+1024
+    # tokens (8 groups) so the rollout KV cache and the one-update capture
+    # fit the host.  Registered as its own geometry so the two short ones
+    # stay byte-identical.
+    "dp2-tp2-long": {
+        "workload": "gsm8k-long-dp2-tp2",
+        "topology": "DP2xTP2",
+        "groups": 8,
+    },
+    # 8k rows on the same cut (prompt 8192 / response 1024): the M15-class
+    # chunk counts (up to 37 per group).
+    "dp2-tp2-long8k": {
+        "workload": "gsm8k-long8k-dp2-tp2",
+        "topology": "DP2xTP2",
+        "groups": 8,
+    },
 }
 _WORK_FIELDS = (
     "prompt_ids",
