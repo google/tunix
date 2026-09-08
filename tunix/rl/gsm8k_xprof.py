@@ -61,6 +61,14 @@ _GEOMETRIES = {
         "topology": "DP2xTP2",
         "groups": 8,
     },
+    # P45 static shape on the same four-chip proxy: prompt 4096 / response
+    # 2048.  This name is intentionally shape-qualified; it does not claim
+    # FrozenLake data, model, topology, or Pathways equivalence.
+    "dp2-tp2-p45": {
+        "workload": "gsm8k-p45-shape-dp2-tp2",
+        "topology": "DP2xTP2",
+        "groups": 8,
+    },
 }
 _WORK_FIELDS = (
     "prompt_ids",
@@ -372,6 +380,10 @@ def arm(values: Mapping[str, str] | None = None) -> str:
         or rank_parallel != "1"
         or g6_update != "1"
         or values.get("CANON_GSM8K_ALIGNMENT_WARN_ONLY") != "0"
+        or (
+            selected_geometry != "dp4-tp1"
+            and values.get("CANON_P66_P59_CHECK_VMA") != "1"
+        )
     ):
       raise ValueError(
           f"zero-hp GSM8K XProf requires strict V1 {topology} P59 training"

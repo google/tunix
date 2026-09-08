@@ -41,14 +41,14 @@ def _devices(cross_host=False):
 
 class P39ContractTest(unittest.TestCase):
 
-  def test_pilot_geometry_and_rank_groups(self):
+  def test_pilot_geometry(self):
     workload = contract.P39_PILOT_WORKLOAD
     workload.validate()
     self.assertEqual(workload.global_trajectories, 64)
     self.assertEqual(workload.local_trajectories, 16)
     self.assertEqual(workload.global_m, 1024)
-    self.assertEqual(len(workload.rank_major_rows()), 16)
-    self.assertTrue(all(len(group) == 4 for group in workload.rank_major_rows()))
+    self.assertEqual(workload.gradient_groups, 16)
+    self.assertEqual(workload.train_trajectory_micro_batch_size, 4)
 
   def test_host_complete_role_split(self):
     rollout, trainer, report = contract.split_4x4x4_role_devices(_devices())

@@ -58,7 +58,12 @@ def _spec(topology: str) -> dict[str, int | str]:
   return classifier._TOPOLOGY[topology]
 
 
-def _log(topology: str, stage: str, batches: int) -> str:
+def _log(
+    topology: str,
+    stage: str,
+    batches: int,
+    system_optimization_arm: str | None = None,
+) -> str:
   spec = _spec(topology)
   lines = [
       "[entrypoint] JOBSET_ATTEMPT 0 (first attempt)",
@@ -92,6 +97,15 @@ def _log(topology: str, stage: str, batches: int) -> str:
   )
   if stage == "rollout-only":
     lines.append("[P44.ROLLOUT_ONLY] PASS")
+  if system_optimization_arm is not None:
+    lines.append(
+        "[P44.V2] system optimization "
+        f"arm={system_optimization_arm} topology={topology} strict=1"
+    )
+    lines.extend(
+        "[P59.CHECKED_VMA] enabled=1" for _ in range(3)
+    )
+    lines.extend("[V1.FIRST_UPDATE] {}" for _ in range(2))
   return "\n".join(lines)
 
 
@@ -112,7 +126,34 @@ def _weight(topology: str) -> dict:
   }
 
 
-def _pre() -> dict:
+def _exact_boundary() -> dict:
+  return {
+      "valid": True,
+      "finite": True,
+      "differing_bytes": 0,
+      "differing_elements": 0,
+  }
+
+
+def _pre(system_optimization_arm: str | None = None) -> dict:
+  if system_optimization_arm is not None:
+    return {
+        "verdict": "PASS",
+        "reds": [],
+        "blocking_reds": [],
+        "warning_reds": [],
+        "reported_reds": [],
+        "N_action": 10,
+        "admission_policy": {
+            "enabled": False,
+            "warning_only": False,
+            "claim_level": "strict-zero-tim",
+        },
+        "boundaries": {
+            "S_decode_vs_S_prefill": _exact_boundary(),
+            "S_prefill_vs_T_old": _exact_boundary(),
+        },
+    }
   return {
       "verdict": "PASS_WITH_ALIGNMENT_WARNINGS",
       "blocking_reds": [],
@@ -121,7 +162,37 @@ def _pre() -> dict:
   }
 
 
-def _alignment() -> dict:
+def _alignment(system_optimization_arm: str | None = None) -> dict:
+  if system_optimization_arm is not None:
+    return {
+        "verdict": "PASS",
+        "reds": [],
+        "blocking_reds": [],
+        "warning_reds": [],
+        "reported_reds": [],
+        "admission_policy": {
+            "enabled": False,
+            "warning_only": False,
+            "claim_level": "strict-zero-tim",
+        },
+        "boundaries": {
+            name: _exact_boundary()
+            for name in (
+                "S_decode_vs_S_prefill",
+                "S_prefill_vs_T_old",
+                "T_old_vs_T_current",
+            )
+        },
+        "exact": {
+            "w_all_exactly_1": True,
+            "r_all_exactly_1": True,
+            "wr_all_exactly_1": True,
+        },
+        "ratio_finite": True,
+        "clip_hits": 0,
+        "tis_hits": 0,
+        "gradient": {"finite": True},
+    }
   return {
       "verdict": "PASS_WITH_ALIGNMENT_WARNINGS",
       "blocking_reds": [],
@@ -131,7 +202,11 @@ def _alignment() -> dict:
   }
 
 
-def _update(topology: str, step: int) -> dict:
+def _update(
+    topology: str,
+    step: int,
+    system_optimization_arm: str | None = None,
+) -> dict:
   spec = _spec(topology)
   limit = 100 * 1024**3
   free = 10 * 1024**3
@@ -143,7 +218,7 @@ def _update(topology: str, step: int) -> dict:
       }
       for index in range(spec["devices"])
   ]
-  return {
+  record = {
       "contract_name": spec["contract"],
       "dp_size": spec["dp"],
       "tp_size": 8,
@@ -166,12 +241,36 @@ def _update(topology: str, step: int) -> dict:
       "hbm_after_accumulation": snapshot,
       "hbm_after_commit": snapshot,
   }
+  if system_optimization_arm is not None:
+    treatment = system_optimization_arm == "treatment"
+    record.update({
+        "system_optimization_arm": system_optimization_arm,
+        "dp_reduction_transactions": (
+            1 if treatment else spec["local_trajectories"]
+        ),
+        "dp_reduction_visibility": (
+            "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+            if treatment
+            else "EXPLICIT_FIXED_TREE"
+        ),
+        "dp_staged_accumulations": (
+            spec["local_trajectories"] if treatment else 0
+        ),
+        "commit_gradient_norm": 2.0 + step,
+    })
+  return record
 
 
 class P44ClassifierTest(unittest.TestCase):
 
   def _artifacts(
-      self, root: Path, *, topology: str, stage: str, batches: int
+      self,
+      root: Path,
+      *,
+      topology: str,
+      stage: str,
+      batches: int,
+      system_optimization_arm: str | None = None,
   ) -> None:
     for step in range(batches):
       artifacts.persist_batch(
@@ -187,27 +286,45 @@ class P44ClassifierTest(unittest.TestCase):
               "CANON_SOURCE_BRANCH": "yuxzhang/canon-zero-tim",
               "CANON_RUN_ID": "classify",
               "CANON_P34_RUN_STAGE": stage,
+              **(
+                  {"CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm}
+                  if system_optimization_arm is not None
+                  else {}
+              ),
           },
       )
 
-  def _classify(self, root: Path, *, topology: str, stage: str):
+  def _classify(
+      self,
+      root: Path,
+      *,
+      topology: str,
+      stage: str,
+      system_optimization_arm: str | None = None,
+  ):
     updates_count = classifier._STAGE_UPDATES[stage]
     batches = max(1, updates_count)
     spec = _spec(topology)
     return classifier.classify(
-        log_text=_log(topology, stage, batches),
+        log_text=_log(topology, stage, batches, system_optimization_arm),
         debug_dir=root,
         weight_attestations=[
             _weight(topology) for _ in range(updates_count)
         ],
-        pre_alignment=[_pre() for _ in range(updates_count)],
+        pre_alignment=[
+            _pre(system_optimization_arm) for _ in range(updates_count)
+        ],
         alignment=[
-            _alignment()
+            _alignment(system_optimization_arm)
             for _ in range(updates_count * spec["local_trajectories"])
         ],
-        updates=[_update(topology, step) for step in range(updates_count)],
+        updates=[
+            _update(topology, step, system_optimization_arm)
+            for step in range(updates_count)
+        ],
         stage=stage,
         topology=topology,
+        system_optimization_arm=system_optimization_arm,
     )
 
   def test_rollout_and_three_update_pass_on_both_topologies(self):
@@ -229,6 +346,110 @@ class P44ClassifierTest(unittest.TestCase):
       self._artifacts(root, topology="64", stage="one-update", batches=1)
       report = self._classify(root, topology="128", stage="one-update")
       self.assertIn("manifest_exact", report["failed"])
+
+  def test_strict_system_optimization_arms_pass_both_topologies(self):
+    for topology in ("64", "128"):
+      for arm in ("control", "treatment"):
+        with self.subTest(topology=topology, arm=arm):
+          with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text).resolve()
+            self._artifacts(
+                root,
+                topology=topology,
+                stage="three-update",
+                batches=3,
+                system_optimization_arm=arm,
+            )
+            report = self._classify(
+                root,
+                topology=topology,
+                stage="three-update",
+                system_optimization_arm=arm,
+            )
+            self.assertEqual(report["verdict"], "PASS", report)
+            self.assertEqual(
+                report["claim_level"],
+                "strict-zero-tim-system-optimization-arm",
+            )
+
+  def test_strict_system_optimization_negatives_are_audible(self):
+    topology = "64"
+    arm = "treatment"
+    spec = _spec(topology)
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text).resolve()
+      self._artifacts(
+          root,
+          topology=topology,
+          stage="three-update",
+          batches=3,
+          system_optimization_arm=arm,
+      )
+      pre = [_pre(arm) for _ in range(3)]
+      post = [_alignment(arm) for _ in range(3 * spec["local_trajectories"])]
+      updates = [_update(topology, step, arm) for step in range(3)]
+      cases = (
+          (
+              "warning_verdict",
+              "pre_alignment_nonblocking",
+          ),
+          (
+              "one_differing_byte",
+              "alignment_nonblocking",
+          ),
+          (
+              "wrong_reduce_count",
+              "fixed_dp_transaction",
+          ),
+      )
+      for name, failed_check in cases:
+        with self.subTest(name=name):
+          local_pre = [dict(record) for record in pre]
+          local_post = [dict(record) for record in post]
+          local_updates = [dict(record) for record in updates]
+          if name == "warning_verdict":
+            local_pre[0]["verdict"] = "PASS_WITH_ALIGNMENT_WARNINGS"
+          elif name == "one_differing_byte":
+            local_post[0] = {
+                **local_post[0],
+                "boundaries": {
+                    **local_post[0]["boundaries"],
+                    "T_old_vs_T_current": {
+                        **local_post[0]["boundaries"]["T_old_vs_T_current"],
+                        "differing_bytes": 1,
+                        "differing_elements": 1,
+                    },
+                },
+            }
+          else:
+            local_updates[0]["dp_reduction_transactions"] = 2
+          report = classifier.classify(
+              log_text=_log(topology, "three-update", 3, arm),
+              debug_dir=root,
+              weight_attestations=[_weight(topology) for _ in range(3)],
+              pre_alignment=local_pre,
+              alignment=local_post,
+              updates=local_updates,
+              stage="three-update",
+              topology=topology,
+              system_optimization_arm=arm,
+          )
+          self.assertIn(failed_check, report["failed"])
+
+      missing_checked = classifier.classify(
+          log_text=_log(topology, "three-update", 3, arm).replace(
+              "[P59.CHECKED_VMA] enabled=1", "", 1
+          ),
+          debug_dir=root,
+          weight_attestations=[_weight(topology) for _ in range(3)],
+          pre_alignment=pre,
+          alignment=post,
+          updates=updates,
+          stage="three-update",
+          topology=topology,
+          system_optimization_arm=arm,
+      )
+      self.assertIn("system_optimization_receipts", missing_checked["failed"])
 
   def test_missing_runtime_batch_evidence_is_rejected(self):
     topology = "64"

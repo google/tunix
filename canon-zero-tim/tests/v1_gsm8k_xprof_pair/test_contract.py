@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib.util
 import json
 import os
@@ -78,6 +79,9 @@ def _common_env(arm: str, geometry: str = "dp4-tp1") -> dict[str, str]:
   workload = {
       "dp4-tp1": "gsm8k-p59-dp4-tp1",
       "dp2-tp2": "gsm8k-p59-dp2-tp2",
+      "dp2-tp2-long": "gsm8k-long-dp2-tp2",
+      "dp2-tp2-long8k": "gsm8k-long8k-dp2-tp2",
+      "dp2-tp2-p45": "gsm8k-p45-shape-dp2-tp2",
   }.get(geometry, geometry)
   if arm == "native":
     values["CANON_GSM8K_VANILLA"] = "1"
@@ -90,6 +94,8 @@ def _common_env(arm: str, geometry: str = "dp4-tp1") -> dict[str, str]:
         "CANON_P28_G6_UPDATE": "1",
         "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
     })
+    if geometry != "dp4-tp1":
+      values["CANON_P66_P59_CHECK_VMA"] = "1"
   return values
 
 
@@ -1294,6 +1300,7 @@ fi
     self.assertIn('if [ "$geometry" != dp4-tp1 ]; then', common)
     # A dp2 run is never confusable with a dp4 run.
     self.assertIn('label="dp2tp2-${label}"', common)
+    self.assertIn('label="dp2tp2p45-${label}"', common)
     # Per-geometry tables: profile, engine overlay, mesh-id expectation,
     # serial-bridge selection.
     self.assertIn("zero_profile=qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env", common)
@@ -1343,6 +1350,7 @@ fi
         (None, False),
         ("dp4-tp1", False),
         ("dp2-tp2", False),
+        ("dp2-tp2-p45", False),
         ("dp8-tp8", True),
         ("junk", True),
     ):
@@ -1486,11 +1494,25 @@ class LongContextGeometryTest(unittest.TestCase):
     # Rollout spans: two per trajectory (the short carriers keep 128).
     self.assertEqual(
         {name: 2 * shape["trajectories"] for name, shape in semantic.GEOMETRIES.items()},
-        {"dp4-tp1": 128, "dp2-tp2": 128, "dp2-tp2-long": 32, "dp2-tp2-long8k": 32},
+        {
+            "dp4-tp1": 128,
+            "dp2-tp2": 128,
+            "dp2-tp2-long": 32,
+            "dp2-tp2-long8k": 32,
+            "dp2-tp2-p45": 32,
+        },
     )
     # The short geometries are untouched.
     self.assertEqual(GSM8K_XPROF._GEOMETRIES["dp2-tp2"]["groups"], 32)  # pylint: disable=protected-access
     self.assertEqual(GSM8K_XPROF._GEOMETRIES["dp4-tp1"]["groups"], 16)  # pylint: disable=protected-access
+    self.assertEqual(
+        GSM8K_XPROF._GEOMETRIES["dp2-tp2-long8k"],  # pylint: disable=protected-access
+        {
+            "workload": "gsm8k-long8k-dp2-tp2",
+            "topology": "DP2xTP2",
+            "groups": 8,
+        },
+    )
     workload = dp_workloads.get_workload("gsm8k-long-dp2-tp2")
     workload.validate()
     self.assertEqual((workload.global_trajectories, workload.local_trajectories, workload.global_m), (16, 8, 512))
@@ -1570,6 +1592,126 @@ class LongContextGeometryTest(unittest.TestCase):
       reasons = []
       ARM_CLASSIFIER._p74_receipt(path, reasons, geometry="dp2-tp2-long")  # pylint: disable=protected-access
       self.assertTrue(any("gap.windows" in reason for reason in reasons), reasons)
+
+
+class P45ShapeGeometryTest(unittest.TestCase):
+  """The P45 static envelope without claiming FrozenLake task equivalence."""
+
+  def test_registry_agrees_across_workload_runner_and_censuses(self):
+    from tunix.rl import dp_workloads  # pylint: disable=g-import-not-at-top
+
+    geometry = "dp2-tp2-p45"
+    expected = {
+        "workload": "gsm8k-p45-shape-dp2-tp2",
+        "topology": "DP2xTP2",
+        "groups": 8,
+    }
+    self.assertEqual(
+        GSM8K_XPROF._GEOMETRIES[geometry], expected  # pylint: disable=protected-access
+    )
+    self.assertEqual(
+        ARM_CLASSIFIER._GEOMETRIES[geometry]["groups"],  # pylint: disable=protected-access
+        8,
+    )
+    self.assertEqual(MODULE_CENSUS.GEOMETRIES[geometry]["groups"], 8)
+    hierarchy = _load(
+        "v1_gsm8k_hierarchy_for_p45_shape",
+        SCRIPTS / "census_gsm8k_xprof_hierarchy.py",
+    )
+    semantic = _load(
+        "v1_gsm8k_semantic_for_p45_shape",
+        SCRIPTS / "census_gsm8k_semantic_trace.py",
+    )
+    self.assertEqual(hierarchy.GEOMETRIES[geometry]["groups"], 8)
+    self.assertEqual(
+        semantic.GEOMETRIES[geometry], {"groups": 8, "trajectories": 16}
+    )
+    self.assertEqual(
+        P74_GAP_CENSUS.LONG_GEOMETRIES[geometry],
+        {"groups": 8, "sequence_bucket": 256},
+    )
+    self.assertEqual(
+        MODULE_CENSUS.backward_exec_bounds(geometry), (32, 256)
+    )
+    self.assertEqual(
+        SIZE_CENSUS.GEOMETRY_CAPS[geometry],
+        ARM_CLASSIFIER._SIZE_CAPS[geometry],  # pylint: disable=protected-access
+    )
+
+    workload = dp_workloads.get_workload(expected["workload"])
+    self.assertEqual(
+        (
+            workload.model_id,
+            workload.dp_size,
+            workload.tp_size,
+            workload.global_prompts,
+            workload.num_generations,
+            workload.local_trajectories,
+            workload.local_m,
+            workload.max_prompt_length,
+            workload.max_response_length,
+        ),
+        ("Qwen/Qwen3-1.7B", 2, 2, 4, 4, 8, 256, 4096, 2048),
+    )
+    self.assertEqual(
+        dp_workloads.expected_token_widths(
+            workload, {"CANON_P60_DETERMINISTIC_AB": "1"}
+        ),
+        (4096, 2048),
+    )
+
+  def test_workload_rejects_geometry_width_and_group_drift(self):
+    from tunix.rl import dp_workloads  # pylint: disable=g-import-not-at-top
+
+    workload = dp_workloads.get_workload("gsm8k-p45-shape-dp2-tp2")
+    for changed, pattern in (
+        ({"tp_size": 1}, "long-context 2x2 proxy geometry changed"),
+        ({"max_response_length": 1024}, "long-context 2x2 proxy geometry changed"),
+        ({"local_trajectories": 7}, "local trajectory count"),
+    ):
+      with self.subTest(changed=changed), self.assertRaisesRegex(
+          ValueError, pattern
+      ):
+        replace(workload, **changed).validate()
+
+  def test_tp2_arm_requires_checked_vma_and_exact_workload(self):
+    good = _common_env("zero-hp", geometry="dp2-tp2-p45")
+    self.assertEqual(GSM8K_XPROF.arm(good), "zero-hp")
+    missing_vma = dict(good)
+    missing_vma.pop("CANON_P66_P59_CHECK_VMA")
+    with self.assertRaisesRegex(ValueError, "strict V1 DP2xTP2"):
+      GSM8K_XPROF.arm(missing_vma)
+    wrong_workload = dict(good)
+    wrong_workload["CANON_P32_WORKLOAD"] = "gsm8k-long-dp2-tp2"
+    with self.assertRaisesRegex(ValueError, "strict V1 DP2xTP2"):
+      GSM8K_XPROF.arm(wrong_workload)
+
+  def test_launcher_and_profile_pin_the_exact_shape_contract(self):
+    common = (SCRIPTS / "run_onehost_gsm8k_xprof_common.sh").read_text()
+    inner = (SCRIPTS / "run_onehost_gsm8k_xprof_inner.sh").read_text()
+    profile = (
+        ROOT
+        / "canon-zero-tim/cluster/profiles/"
+        "qwen3-1p7b-dp2-tp2-p45-shape-gsm8k-v1-hp.env"
+    ).read_text()
+    for needle in (
+        "dp2-tp2-p45)",
+        "zero_profile=qwen3-1p7b-dp2-tp2-p45-shape-gsm8k-v1-hp.env",
+        'label="dp2tp2p45-${label}"',
+    ):
+      self.assertIn(needle, common)
+    for needle in (
+        "dp2-tp2-p45)",
+        "prompts=4; generations=4; max_prompt=4096; max_response=2048",
+        'long_prompt_examples="${CANON_P32_LONG_PROMPT_EXAMPLES:-3-10}"',
+    ):
+      self.assertIn(needle, inner)
+    self.assertIn(
+        "export CANON_P32_WORKLOAD=gsm8k-p45-shape-dp2-tp2", profile
+    )
+    self.assertIn("export CANON_P66_P59_CHECK_VMA=1", profile)
+    self.assertIn('FL_SHARED_MESH=2,2', profile)
+    self.assertIn("not a P45 task", profile)
 
 
 if __name__ == "__main__":

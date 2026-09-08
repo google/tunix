@@ -24,7 +24,8 @@ The exact manifests carry checked-VMA/P67/first-update protection,
 `CANON_DP_COMPARE_MODE=fingerprint-hybrid`,
 `CANON_DP_DISTINCT_SCHEDULE=first-group-warmup`,
 `CANON_DP_FINITE_FETCH=batched-commit`, `CANON_P71_SCAN=fwd`, and
-`CANON_P32_KEEP_TAPE=stream` (streamed kept tape, certified 2026-09-02).
+`CANON_P32_KEEP_TAPE=stream` (streamed kept tape, certified 2026-09-02) and
+`CANON_DP_REDUCE_ONCE=1` (one checked fixed-order DP reduction per update).
 `CANON_DP_COLLECTIVE_REDUCE` must remain absent. This route is render-only and
 still requires a separate target launch approval.
 

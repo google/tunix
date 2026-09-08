@@ -44,6 +44,7 @@ class FullClassifierTest(unittest.TestCase):
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_DP_REDUCE_ONCE": "1",
         "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_CONTINUE_DECODE": "8",
         "CANON_FIXED_AR_GATHER": "1",
@@ -345,6 +346,89 @@ class FullClassifierTest(unittest.TestCase):
         "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected", reasons
     )
     self.assertIn("unexpected_m15_token_receipt", reasons)
+
+  def test_p45_length_sort_requires_exact_runtime_receipts(self):
+    digest = "a" * 64
+    receipt = (
+        "[P32.LENGTH_SORT] enabled=1 rows=256 dp=8 groups=32 "
+        f"permutation_sha256={digest}\n"
+    )
+    reasons = []
+    enabled, receipts = classifier._validate_p45_length_sort(
+        "p45",
+        {},
+        "",
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertFalse(enabled)
+    self.assertEqual(receipts, [])
+    self.assertEqual(reasons, [])
+
+    reasons = []
+    enabled, receipts = classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt * 4,
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertTrue(enabled)
+    self.assertEqual(len(receipts), 4)
+    self.assertEqual(reasons, [])
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt * 3,
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("p45_length_sort_receipts=3 expected=4", reasons)
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt.replace("groups=32", "groups=31") * 4,
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("p45_length_sort_receipt_invalid", reasons)
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "gsm8k",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt,
+        expected_updates=4,
+        dp_size=16,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("resolved_env.CANON_P32_LENGTH_SORT_non_p45", reasons)
+    self.assertIn("unexpected_p32_length_sort_receipt", reasons)
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "0"},
+        "",
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("resolved_env.CANON_P32_LENGTH_SORT_invalid", reasons)
 
   def test_any_real_alignment_fail_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -660,6 +744,28 @@ class FullClassifierTest(unittest.TestCase):
               reason.startswith("resolved_env=")
               for reason in record["reasons"]
           )
+      )
+
+  def test_missing_reduce_once_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "export CANON_DP_REDUCE_ONCE=1\n", ""
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "resolved_env={'CANON_DP_REDUCE_ONCE': None}", record["reasons"]
       )
 
   def test_missing_p63_update_receipt_is_fatal(self):

@@ -78,6 +78,65 @@ class P44RendererTest(unittest.TestCase):
           )
           self.assertEqual(env["R2E_ACTIVE_DEADLINE_SECONDS"], "3300")
           self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "0")
+          self.assertNotIn("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", env)
+          self.assertNotIn("CANON_P32_KEEP_TAPE", env)
+          self.assertNotIn("CANON_DP_REDUCE_ONCE", env)
+          self.assertEqual(
+              env["CANON_PROFILE_FILE"],
+              "cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env",
+          )
+          self.assertNotIn(
+              "system_optimization_arm",
+              renderer.recipe_signature(document),
+          )
+
+  def test_system_optimization_arms_are_strict_and_isolated(self):
+    signatures = {}
+    common = renderer.v1opt.full_system_optimization_base_additions(
+        "deepswe-qwen4b"
+    )
+    for arm in renderer._SYSTEM_OPTIMIZATION_ARMS:
+      for topology in ("64", "128"):
+        with self.subTest(arm=arm, topology=topology):
+          document = self._render(
+              topology, system_optimization_arm=arm
+          )
+          env = renderer.p34._env(document)
+          self.assertEqual(
+              env["CANON_PROFILE_FILE"], renderer._STRICT_PROFILE
+          )
+          self.assertEqual(
+              env["CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"], arm
+          )
+          self.assertEqual(env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"], "0")
+          self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+          self.assertEqual(env["CANON_P59_RANK_PARALLEL_BACKWARD"], "1")
+          for key, value in common.items():
+            self.assertEqual(env[key], value)
+          self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", env)
+          self.assertNotIn("CANON_P32_LENGTH_SORT", env)
+          if arm == "control":
+            self.assertNotIn("CANON_P32_KEEP_TAPE", env)
+            self.assertNotIn("CANON_DP_REDUCE_ONCE", env)
+          else:
+            self.assertEqual(env["CANON_P32_KEEP_TAPE"], "stream")
+            self.assertEqual(env["CANON_DP_REDUCE_ONCE"], "1")
+          signature = renderer.recipe_signature(document)
+          if topology == "64":
+            signatures[arm] = signature
+          else:
+            self.assertEqual(signature, signatures[arm])
+    self.assertNotEqual(signatures["control"], signatures["treatment"])
+
+  def test_system_optimization_arm_is_three_update_only(self):
+    for stage in ("rollout-only", "one-update"):
+      with self.subTest(stage=stage):
+        with self.assertRaisesRegex(ValueError, "requires three-update"):
+          self._render(
+              "64", stage, system_optimization_arm="control"
+          )
+    with self.assertRaisesRegex(ValueError, "must be control or treatment"):
+      self._render("64", system_optimization_arm="mixed")
 
   def test_fixed_lm_head_is_explicit_and_part_of_recipe_signature(self):
     for topology in ("64", "128"):

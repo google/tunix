@@ -23,6 +23,7 @@ EXPECTED_WINDOWS = 64
 LONG_GEOMETRIES = {
     "dp2-tp2-long": {"groups": 8, "sequence_bucket": 256},
     "dp2-tp2-long8k": {"groups": 8, "sequence_bucket": 256},
+    "dp2-tp2-p45": {"groups": 8, "sequence_bucket": 256},
 }
 _ISSUED_RE = re.compile(r"forward_group_issued .*?n_real=\(([0-9, ]+)\)")
 

@@ -16,6 +16,7 @@ HARD_MAX_BYTES = 1_500_000_000
 GEOMETRY_CAPS = {
     "dp2-tp2-long": (3_000_000_000, 4_000_000_000),
     "dp2-tp2-long8k": (6_000_000_000, 8_000_000_000),
+    "dp2-tp2-p45": (4_000_000_000, 5_000_000_000),
 }
 SCHEMA = "canon.v1.gsm8k-onehost-xprof.size.v1"
 

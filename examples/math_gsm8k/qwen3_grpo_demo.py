@@ -234,15 +234,15 @@ if (
       f"workload={_P32_WORKLOAD_NAME!r} "
       f"xprof_arm={os.getenv('CANON_V1_GSM8K_XPROF_ARM', '')!r}"
   )
-if CANON_P61_BACKWARD_NUMERICAL_DIR and (
-    not os.path.isabs(CANON_P61_BACKWARD_NUMERICAL_DIR)
-    or _P32_WORKLOAD_NAME != "gsm8k-p59-dp4-tp1"
-    or os.getenv("CANON_P33_RUN_STAGE", "") != "one-update"
-    or not CANON_P60_DETERMINISTIC_AB
-):
+if CANON_P61_BACKWARD_NUMERICAL_DIR and not CANON_P32_WORKLOAD:
+  # The canonical workload validator above owns the exact P61 geometry,
+  # stage, flag and absolute-path contract.  Keep the recipe's only local
+  # responsibility: a numerical capture can never run outside a registered
+  # P32 workload.  Duplicating the DP4-only allowlist here blocked the strict
+  # DP2 Phase-0 carrier after the canonical validator had admitted it.
   raise ValueError(
-      "CANON_P61_BACKWARD_NUMERICAL_DIR requires an absolute path and "
-      "exact gsm8k-p59-dp4-tp1 one-update deterministic geometry"
+      "CANON_P61_BACKWARD_NUMERICAL_DIR requires an exact registered "
+      "P32 numerical-capture workload"
   )
 CANON_OPTIMIZER_PLACEMENT = dp_workloads.canonical_optimizer_placement(
     os.environ, require_explicit=CANON_P32_WORKLOAD

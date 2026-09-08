@@ -452,6 +452,23 @@ case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
               ;;
           esac
         elif [ "${CANON_PROFILE_FILE:-}" = \
+                 "cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env" ] && \
+             { [ "${CANON_PROFILE:-}" = \
+                   "qwen3-4b-dp4-tp8-deepswe-v2-admission" ] || \
+               [ "${CANON_PROFILE:-}" = \
+                   "qwen3-4b-dp8-tp8-deepswe-v2-admission" ]; } && \
+             { [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "control" ] || \
+               [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "treatment" ]; } && \
+             [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ] && \
+             [ "${CANON_P44_PARITY_ADMITTED:-0}" = "1" ] && \
+             [ "${CANON_P34_RUN_STAGE:-}" = "three-update" ] && \
+             [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+             [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+             [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+             [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] && \
+             [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ]; then
+          _canon_p67_context=p44-v2
+        elif [ "${CANON_PROFILE_FILE:-}" = \
                  "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ] && \
              [ "${CANON_PROFILE:-}" = \
                  "qwen3-4b-dp8-tp8-deepswe-v1-hp" ] && \
@@ -502,6 +519,10 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
       cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env:qwen3-4b-dp8-tp8-deepswe-v1-hp:)
         _canon_p59_checked_context=p58
         ;;
+      cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env:qwen3-4b-dp4-tp8-deepswe-v2-admission:|\
+      cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env:qwen3-4b-dp8-tp8-deepswe-v2-admission:)
+        _canon_p59_checked_context=p44-v2
+        ;;
       cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env:qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug:frozenlake-dp8-tp8)
         _canon_p59_checked_context=v1-fl-serving-scope
         ;;
@@ -538,6 +559,22 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
           fail=1
         }
         ;;
+      p44-v2)
+        { [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "control" ] || \
+          [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "treatment" ]; } && \
+        [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ] && \
+        [ "${CANON_P44_PARITY_ADMITTED:-0}" = "1" ] && \
+        [ "${CANON_P34_RUN_STAGE:-}" = "three-update" ] && \
+        [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+        [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+        [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+        [ "${CANON_P67_P66_VMA_P59_ONLY:-0}" = "1" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+        [ "${CANON_V1_HP_FULL:-0}" = "0" ] || {
+          echo "[env] P59 checked VMA P44 v2 admission changed" >&2
+          fail=1
+        }
+        ;;
       v1-fl-serving-scope)
         [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "serving-scope" ] && \
         [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
@@ -550,7 +587,8 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
         }
         ;;
     esac
-    if [ "$_canon_p59_checked_context" != "v1-fl-serving-scope" ]; then
+    if [ "$_canon_p59_checked_context" != "v1-fl-serving-scope" ] && \
+       [ "$_canon_p59_checked_context" != "p44-v2" ]; then
       [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
       [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] || {
         echo "[env] P59 checked VMA requires exact committed P59 full training" >&2
@@ -575,12 +613,23 @@ esac
 case "${CANON_V1_HP_FIRST_UPDATE_GATE:-0}" in
   0) ;;
   1)
-    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
     [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] || {
-      echo "[env] V1 first-update gate requires exact checked-VMA committed full training" >&2
+      echo "[env] V1 first-update gate requires checked VMA" >&2
       fail=1
     }
-    if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+    if [ -n "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" ]; then
+      { [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "control" ] || \
+        [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "treatment" ]; } && \
+      [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ] && \
+      [ "${CANON_P34_RUN_STAGE:-}" = "three-update" ] && \
+      [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+      [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+      [ "${CANON_V1_HP_FULL:-0}" = "0" ] || {
+        echo "[env] P44 v2 first-update gate contract changed" >&2
+        fail=1
+      }
+    elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+      [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
       [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
       [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
       [ "${CANON_P58_TIM_ARM:-}" = "zero" ] || {
@@ -588,6 +637,7 @@ case "${CANON_V1_HP_FIRST_UPDATE_GATE:-0}" in
         fail=1
       }
     else
+      [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
       [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
       [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] || {
         echo "[env] Phase4 first-update gate requires committed full training" >&2
@@ -1576,6 +1626,18 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
         }
         echo "[env] P38.2y2 fixed lm-head DeepSWE training enabled"
         ;;
+      three-update:cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env)
+        { [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "control" ] || \
+          [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "treatment" ]; } && \
+        [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ] && \
+        [ "${CANON_P44_PARITY_ADMITTED:-0}" = "1" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+        [ "${CANON_P46_EVALUATION:-0}" = "0" ] || {
+          echo "[env] P44 v2 fixed lm-head strict contract drifted" >&2
+          fail=1
+        }
+        echo "[env] P44 v2 Qwen3-4B TP8 fixed lm-head enabled"
+        ;;
       full:cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env)
         [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
         [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
@@ -2001,10 +2063,72 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       echo "[env] P44 parity requires device-resident optimizer state" >&2
       fail=1
     }
-    [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
-      echo "[env] P44 parity requires the preregistered alignment warning policy" >&2
-      fail=1
-    }
+    case "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" in
+      "")
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" = "1" ] || {
+          echo "[env] P44 parity requires the preregistered alignment warning policy" >&2
+          fail=1
+        }
+        ;;
+      control|treatment)
+        [ "${CANON_PROFILE_FILE:-}" = \
+          "cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env" ] && \
+        [ "${CANON_P34_RUN_STAGE:-}" = "three-update" ] && \
+        [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+        [ "${CANON_P44_ROLLOUT_ONLY:-1}" = "0" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+        [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+        [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+        [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] && \
+        [ "${CANON_P67_P66_VMA_P59_ONLY:-0}" = "1" ] && \
+        [ "${CANON_V1_HP_FIRST_UPDATE_GATE:-0}" = "1" ] && \
+        [ "${CANON_DP_COMPARE_MODE:-}" = "fingerprint-hybrid" ] && \
+        [ "${CANON_DP_DISTINCT_SCHEDULE:-}" = "first-group-warmup" ] && \
+        [ "${CANON_DP_FINITE_FETCH:-}" = "batched-commit" ] && \
+        [ "${CANON_P71_SCAN:-}" = "fwd" ] && \
+        [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+        [ "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" = "0" ] && \
+        ! [[ -v CANON_DP_COLLECTIVE_REDUCE ]] && \
+        ! [[ -v CANON_P32_LENGTH_SORT ]] || {
+          echo "[env] P44 v2 common system-optimization tuple drifted" >&2
+          fail=1
+        }
+        case "${CANON_P44_TOPOLOGY:-}" in
+          64)
+            [ "${CANON_PROFILE:-}" = \
+              "qwen3-4b-dp4-tp8-deepswe-v2-admission" ] || {
+              echo "[env] P44 v2 topology-64 profile drifted" >&2
+              fail=1
+            }
+            ;;
+          128)
+            [ "${CANON_PROFILE:-}" = \
+              "qwen3-4b-dp8-tp8-deepswe-v2-admission" ] || {
+              echo "[env] P44 v2 topology-128 profile drifted" >&2
+              fail=1
+            }
+            ;;
+        esac
+        if [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM}" = "control" ]; then
+          ! [[ -v CANON_P32_KEEP_TAPE ]] && \
+          ! [[ -v CANON_DP_REDUCE_ONCE ]] || {
+            echo "[env] P44 v2 control arm leaked treatment selectors" >&2
+            fail=1
+          }
+        else
+          [ "${CANON_P32_KEEP_TAPE:-}" = "stream" ] && \
+          [ "${CANON_DP_REDUCE_ONCE:-}" = "1" ] || {
+            echo "[env] P44 v2 treatment arm lost stream or reduce-once" >&2
+            fail=1
+          }
+        fi
+        echo "[P44.V2] system optimization arm=${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM} topology=${CANON_P44_TOPOLOGY} strict=1"
+        ;;
+      *)
+        echo "[env] CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM must be absent, control, or treatment" >&2
+        fail=1
+        ;;
+    esac
     case "${CANON_P44_DEBUG_DIR:-}" in
       /*) ;;
       *) echo "[env] P44 parity artifact directory must be absolute" >&2; fail=1 ;;

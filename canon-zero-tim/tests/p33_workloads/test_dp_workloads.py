@@ -275,6 +275,7 @@ class DPWorkloadsTest(unittest.TestCase):
         ),
         3,
     )
+
     self.assertEqual(
         dp_workloads.expected_token_widths(
             workload, {"CANON_P60_DETERMINISTIC_AB": "1"}
@@ -305,6 +306,51 @@ class DPWorkloadsTest(unittest.TestCase):
     bent = dataclasses.replace(workload, four_chip_proxy=True)
     with self.assertRaises(ValueError):
       bent.validate()
+
+  def test_p61_dp2_three_update_capture_is_exactly_admitted(self):
+    workload = dp_workloads.get_workload("gsm8k-p59-dp2-tp2")
+    environ = _environment(workload.name)
+    environ.update({
+        "CANON_P33_RUN_STAGE": "three-update",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_DP4_TAIL8": "0",
+        "CANON_P60_DETERMINISTIC_AB": "1",
+        "CANON_P61_BACKWARD_NUMERICAL_DIR": "/tmp/p61-dp2-capture",
+        "CANON_P29_FULL_TRAIN": "1",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P66_P59_CHECK_VMA": "1",
+    })
+    self.assertEqual(dp_workloads.requested_max_steps(workload, environ), 3)
+    for key, value in (
+        ("CANON_P33_RUN_STAGE", "one-update"),
+        ("CANON_P33_NO_COMMIT", "1"),
+        ("CANON_P60_DETERMINISTIC_AB", "0"),
+        ("CANON_P29_FULL_TRAIN", "0"),
+        ("CANON_P59_RANK_PARALLEL_BACKWARD", "0"),
+        ("CANON_P66_P59_CHECK_VMA", "0"),
+    ):
+      with self.subTest(key=key), self.assertRaisesRegex(ValueError, "P61"):
+        dp_workloads.requested_max_steps(
+            workload, {**environ, key: value}
+        )
+    with self.assertRaisesRegex(ValueError, "P61"):
+      dp_workloads.requested_max_steps(
+          workload,
+          {**environ, "CANON_P61_BACKWARD_NUMERICAL_DIR": "relative"},
+      )
+    demo = (
+        Path(__file__).parents[3]
+        / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    canonical_validation = demo.index("dp_workloads.validate_environment(")
+    p61_recipe_guard = demo.index(
+        "if CANON_P61_BACKWARD_NUMERICAL_DIR and not CANON_P32_WORKLOAD:"
+    )
+    self.assertLess(canonical_validation, p61_recipe_guard)
+    self.assertNotIn(
+        '_P32_WORKLOAD_NAME != "gsm8k-p59-dp4-tp1"',
+        demo[p61_recipe_guard:p61_recipe_guard + 800],
+    )
 
   def test_p66_unit_data_tp4_proxy_preserves_real_local_m(self):
     workload = dp_workloads.get_workload("gsm8k-p66-dp1-tp4")
@@ -955,6 +1001,42 @@ class DPWorkloadsTest(unittest.TestCase):
     ):
       with self.assertRaisesRegex(RuntimeError, "did not initialize"):
         dp_workloads.require_online_wandb_run(workload, environ)
+
+  def test_onehost_frozenlake_attests_disabled_local_wandb(self):
+    workload = dp_workloads.get_workload(
+        "frozenlake-p45-onehost-dp2-tp2"
+    )
+    environ = _environment(workload.name)
+    environ["CANON_WANDB_ONLINE_REQUIRED"] = "0"
+    environ["WANDB_MODE"] = "disabled"
+    del environ["WANDB_API_KEY"]
+    run = types.SimpleNamespace(
+        settings=types.SimpleNamespace(mode="disabled")
+    )
+    with mock.patch.object(
+        dp_workloads,
+        "_wandb_module",
+        return_value=types.SimpleNamespace(run=run),
+    ):
+      self.assertEqual(
+          dp_workloads.require_workload_wandb_run(workload, environ),
+          {
+              "status": "disabled-local",
+              "project": environ["CANON_WANDB_PROJECT"],
+              "group": environ["CANON_WANDB_GROUP"],
+              "name": environ["CANON_WANDB_RUN_NAME"],
+          },
+      )
+
+  def test_onehost_frozenlake_rejects_wandb_api_key(self):
+    workload = dp_workloads.get_workload(
+        "frozenlake-p45-onehost-dp2-tp2"
+    )
+    environ = _environment(workload.name)
+    environ["CANON_WANDB_ONLINE_REQUIRED"] = "0"
+    environ["WANDB_MODE"] = "disabled"
+    with self.assertRaisesRegex(RuntimeError, "forbids a W&B API key"):
+      dp_workloads.require_workload_wandb_run(workload, environ)
 
   def test_launch_accepts_backward_no_commit(self):
     workload = dp_workloads.get_workload("gsm8k")

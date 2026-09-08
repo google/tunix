@@ -297,19 +297,6 @@ class DeepSWEWorkload:
     if self.max_num_batched_tokens_per_dp * self.dp_size != self.global_m:
       raise ValueError("P34 global scheduler token capacity changed")
 
-  def rank_major_rows(self) -> tuple[tuple[int, ...], ...]:
-    """Returns rank-major groups with one trajectory from every DP rank."""
-    self.validate()
-    groups = tuple(
-        tuple(group * self.dp_size + rank for rank in range(self.dp_size))
-        for group in range(self.local_trajectories)
-    )
-    flat = tuple(row for group in groups for row in group)
-    if flat != tuple(range(self.global_trajectories)):
-      raise AssertionError("P34 rank-major grouping lost or duplicated rows")
-    return groups
-
-
 P34_WORKLOAD = DeepSWEWorkload()
 P39_PILOT_WORKLOAD = DeepSWEWorkload(
     contract_name="p39-64chip-pilot",
@@ -809,6 +796,20 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "p44-qwen4b-parity-64",
       "p44-qwen4b-parity-128",
   )
+  system_optimization_arm = values.get(
+      "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", ""
+  )
+  if system_optimization_arm not in ("", "control", "treatment"):
+    raise ValueError(
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM must be absent, control, or "
+        "treatment"
+    )
+  if system_optimization_arm and (
+      not parity or values.get("CANON_P34_RUN_STAGE", "") != "three-update"
+  ):
+    raise ValueError(
+        "DeepSWE system optimization is admitted only for P44 three-update"
+    )
   p46_train = workload.contract_name in (
       "p46-qwen32b-train-64",
       "p46-qwen32b-train-256",
@@ -1093,6 +1094,39 @@ def validate_environment(values: Mapping[str, str]) -> None:
             "CANON_P38_DIAGNOSTIC_ROUNDS": None,
             "CANON_P38_DIAGNOSTIC_ROUND_FILE": None,
         })
+  if system_optimization_arm:
+    expected.update({
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/"
+            "qwen3-4b-dp-parity-deepswe-v2-admission.env"
+        ),
+        "CANON_PROFILE": (
+            f"qwen3-4b-dp{workload.dp_size}-tp8-deepswe-v2-admission"
+        ),
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": (
+            system_optimization_arm
+        ),
+        "CANON_P38_FIXED_LM_HEAD": "1",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+        "CANON_DP_FINITE_FETCH": "batched-commit",
+        "CANON_P71_SCAN": "fwd",
+        "CANON_P32_KEEP_TAPE": (
+            "stream" if system_optimization_arm == "treatment" else None
+        ),
+        "CANON_DP_REDUCE_ONCE": (
+            "1" if system_optimization_arm == "treatment" else None
+        ),
+        "CANON_DP_COLLECTIVE_REDUCE": None,
+        "CANON_P32_LENGTH_SORT": None,
+        "CANON_V1_HP_FULL": None,
+        "CANON_P63_OVERFLOW_SAFE_CLIP": None,
+    })
   if pilot or debug or parity or p58_tim:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
@@ -1103,7 +1137,11 @@ def validate_environment(values: Mapping[str, str]) -> None:
                 if p58_arm == "native" or p58_zero_ab_warning
                 else "0"
             ) if p58_tim else (
-                "1" if parity or production_capture else "0"
+                "0"
+                if parity and system_optimization_arm
+                else "1"
+                if parity or production_capture
+                else "0"
             )
         ),
     })

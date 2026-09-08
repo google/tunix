@@ -14,14 +14,39 @@ class P57WorkloadsTest(unittest.TestCase):
 
   def test_generation_contract_is_shared_with_real_workload_entrypoint(self):
     self.assertEqual(p57_workloads.GENERATIONS_PER_PROMPT, 8)
-    entrypoint = (
+    entrypoint_path = (
         Path(__file__).resolve().parents[3]
         / "examples/frozenlake/train_frozenlake_qwen3.py"
-    ).read_text()
-    self.assertIn(
-        "p57_workloads.GENERATIONS_PER_PROMPT if CANON_P57_RUN_KIND else 8",
-        entrypoint,
     )
+    entrypoint = entrypoint_path.read_text()
+    tree = ast.parse(entrypoint, filename=str(entrypoint_path))
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "expected_generations"
+            for target in node.targets
+        )
+    ]
+    self.assertEqual(len(assignments), 1)
+    proxy_choice = assignments[0].value
+    self.assertIsInstance(proxy_choice, ast.IfExp)
+    self.assertIsInstance(proxy_choice.test, ast.Name)
+    self.assertEqual(proxy_choice.test.id, "frozenlake_onehost_proxy")
+    self.assertIsInstance(proxy_choice.body, ast.Attribute)
+    self.assertEqual(proxy_choice.body.attr, "num_generations")
+    p57_choice = proxy_choice.orelse
+    self.assertIsInstance(p57_choice, ast.IfExp)
+    self.assertIsInstance(p57_choice.test, ast.Name)
+    self.assertEqual(p57_choice.test.id, "CANON_P57_RUN_KIND")
+    self.assertIsInstance(p57_choice.body, ast.Attribute)
+    self.assertIsInstance(p57_choice.body.value, ast.Name)
+    self.assertEqual(p57_choice.body.value.id, "p57_workloads")
+    self.assertEqual(p57_choice.body.attr, "GENERATIONS_PER_PROMPT")
+    self.assertIsInstance(p57_choice.orelse, ast.Constant)
+    self.assertEqual(p57_choice.orelse.value, 8)
     self.assertNotIn(
         "expected_generations = 2 if CANON_P57_EVALUATION else 8",
         entrypoint,

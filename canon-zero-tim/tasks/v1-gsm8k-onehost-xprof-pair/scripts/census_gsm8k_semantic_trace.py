@@ -23,6 +23,7 @@ GEOMETRIES = {
     "dp2-tp2": {"groups": 32, "trajectories": 64},
     "dp2-tp2-long": {"groups": 8, "trajectories": 16},
     "dp2-tp2-long8k": {"groups": 8, "trajectories": 16},
+    "dp2-tp2-p45": {"groups": 8, "trajectories": 16},
 }
 DEFAULT_GEOMETRY = "dp4-tp1"
 

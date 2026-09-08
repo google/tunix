@@ -22,7 +22,8 @@ checked-VMA/P67/first-update protection,
 `CANON_DP_COMPARE_MODE=fingerprint-hybrid`,
 `CANON_DP_DISTINCT_SCHEDULE=first-group-warmup`,
 `CANON_DP_FINITE_FETCH=batched-commit`, `CANON_P71_SCAN=fwd`, and
-`CANON_P32_KEEP_TAPE=stream`; `CANON_DP_COLLECTIVE_REDUCE` must remain absent. It is
+`CANON_P32_KEEP_TAPE=stream` and `CANON_DP_REDUCE_ONCE=1`;
+`CANON_DP_COLLECTIVE_REDUCE` must remain absent. It is
 render-only and may be used only after the implementation source is committed,
 published with explicit approval, read back, and checked out clean. See
 `../v1-phase4-three-full-recipes/HANDOFF.md` for the active contract.

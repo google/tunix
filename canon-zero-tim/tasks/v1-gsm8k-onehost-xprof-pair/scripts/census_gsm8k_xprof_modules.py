@@ -34,6 +34,7 @@ GEOMETRIES = {
     # group runs 4..48 chunks instead of 1..5.
     "dp2-tp2-long": {"groups": 8},
     "dp2-tp2-long8k": {"groups": 8},
+    "dp2-tp2-p45": {"groups": 8},
 }
 DEFAULT_GEOMETRY = "dp4-tp1"
 # The two mutually exclusive layer-depth backward families.  `_base` has
@@ -65,7 +66,11 @@ PER_GROUP_CHUNK_BOUNDS = (1, 5)
 # Per-geometry override of the chunk band: the long-context geometry admits
 # up to (4096 + 1024) / 256 = 20 chunks of real tokens plus the padding
 # chunk, and at least 4 (a 1k-token row).
-GEOMETRY_CHUNK_BOUNDS = {"dp2-tp2-long": (4, 48), "dp2-tp2-long8k": (8, 48)}
+GEOMETRY_CHUNK_BOUNDS = {
+    "dp2-tp2-long": (4, 48),
+    "dp2-tp2-long8k": (8, 48),
+    "dp2-tp2-p45": (4, 32),
+}
 
 
 def expected_backward_execs(geometry: str) -> int | None:

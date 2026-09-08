@@ -21,7 +21,7 @@ SPEC.loader.exec_module(contract)
 
 class P43ContractTest(unittest.TestCase):
 
-  def test_debug_geometry_and_rank_groups(self):
+  def test_debug_geometry(self):
     workload = contract.P43_DEBUG_WORKLOAD
     workload.validate()
     self.assertEqual(workload.model_id, "Qwen/Qwen3-8B")
@@ -29,10 +29,8 @@ class P43ContractTest(unittest.TestCase):
     self.assertEqual(workload.local_trajectories, 4)
     self.assertEqual((workload.dp_size, workload.tp_size), (4, 8))
     self.assertEqual(workload.global_m, 1024)
-    self.assertEqual(len(workload.rank_major_rows()), 4)
-    self.assertTrue(
-        all(len(group) == 4 for group in workload.rank_major_rows())
-    )
+    self.assertEqual(workload.gradient_groups, 4)
+    self.assertEqual(workload.train_trajectory_micro_batch_size, 4)
 
   def test_debug_and_pilot_are_mutually_exclusive(self):
     with self.assertRaisesRegex(ValueError, "mutually exclusive"):

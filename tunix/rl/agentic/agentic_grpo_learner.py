@@ -157,6 +157,31 @@ def _v1_fl_tp8_ab_alignment_enabled(env: Mapping[str, str]) -> bool:
   )
 
 
+def _v2_frozenlake_onehost_alignment_enabled(
+    env: Mapping[str, str],
+) -> bool:
+  """Return whether the signed V2 FrozenLake one-host contract applies."""
+  return (
+      env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+      and env.get("CANON_P32_WORKLOAD")
+      in (
+          "frozenlake-p45-onehost-dp2-tp2",
+          "frozenlake-m15-onehost-dp2-tp2",
+      )
+      and env.get("CANON_P33_RUN_STAGE") == "backward-no-commit"
+      and env.get("CANON_P33_NO_COMMIT") == "1"
+      and env.get("CANON_P32_TRAIN_ADMITTED") == "1"
+      and env.get("CANON_P32_DP_REDUCTION_ADMITTED") == "1"
+      and env.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED") == "1"
+      and env.get("CANON_DP_SIZE") == "2"
+      and env.get("CANON_TP_SIZE") == "2"
+      and env.get("CANON_P66_P59_CHECK_VMA") == "1"
+      and env.get("CANON_WANDB_ONLINE_REQUIRED") == "0"
+      and env.get("WANDB_MODE") == "disabled"
+  )
+
+
 def _canonical_alignment_sampler_is_valid(
     sampler_is: str | None,
     workload_name: str,
@@ -169,6 +194,7 @@ def _canonical_alignment_sampler_is_valid(
     m15_apc_target: bool = False,
     p64_numeric_debug: bool = False,
     v1_fl_tp8_ab: bool = False,
+    v2_frozenlake_onehost: bool = False,
 ) -> bool:
   """Return whether sampler IS preserves the workload contract."""
   if sampler_is == "token":
@@ -181,6 +207,7 @@ def _canonical_alignment_sampler_is_valid(
       or m15_apc_target
       or p64_numeric_debug
       or v1_fl_tp8_ab
+      or v2_frozenlake_onehost
   ):
     return True
   return (
@@ -1544,6 +1571,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if alignment.enabled():
       m15_apc_target_alignment = _m15_apc_target_alignment_enabled(os.environ)
       v1_fl_tp8_ab_alignment = _v1_fl_tp8_ab_alignment_enabled(os.environ)
+      v2_fl_onehost_alignment = _v2_frozenlake_onehost_alignment_enabled(
+          os.environ
+      )
       if not self.algo_config.use_rollout_logps:
         raise alignment.AlignmentGateError(
             "FrozenLake alignment requires use_rollout_logps=True"
@@ -1570,11 +1600,27 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "") == "1"
           ),
           v1_fl_tp8_ab=v1_fl_tp8_ab_alignment,
+          v2_frozenlake_onehost=v2_fl_onehost_alignment,
       ):
         raise alignment.AlignmentGateError(
             "canonical alignment requires sampler_is='token'; sampler_is=None "
             "is admitted only by the signed GSM8K, P34 DeepSWE, P57 "
-            "causal-study, M15 APC target-debug, or P64 numeric-debug contract"
+            "causal-study, M15 APC target-debug, P64 numeric-debug, or V2 "
+            "FrozenLake one-host contract"
+        )
+      if v2_fl_onehost_alignment:
+        if (
+            self.algo_config.sampler_is is not None
+            or sampler_is_weights is not None
+        ):
+          raise alignment.AlignmentGateError(
+              "V2 FrozenLake one-host requires sampler_is=None and no TIS "
+              "weights"
+          )
+        print(
+            "[V2.FL.SAMPLER] CONTRACT_PASS sampler_is=none "
+            "use_rollout_logps=1 tis_weights=absent",
+            flush=True,
         )
       if v1_fl_tp8_ab_alignment:
         if self.algo_config.sampler_is is not None or sampler_is_weights is not None:

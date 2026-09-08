@@ -11,6 +11,7 @@ from typing import Any, Mapping
 import yaml
 
 import render_p34_jobset as p34
+import v1_full_system_optimization as v1opt
 
 
 _STAGE_STEPS = {
@@ -18,6 +19,10 @@ _STAGE_STEPS = {
     "one-update": 1,
     "three-update": 3,
 }
+_SYSTEM_OPTIMIZATION_ARMS = ("control", "treatment")
+_STRICT_PROFILE = (
+    "cluster/profiles/qwen3-4b-dp-parity-deepswe-v2-admission.env"
+)
 _TOPOLOGIES = {
     "64": {
         "dp": 4,
@@ -112,6 +117,7 @@ def render(
     whitelist: str,
     whitelist_sha256: str,
     fixed_lm_head: bool = False,
+    system_optimization_arm: str | None = None,
 ) -> dict[str, Any]:
   """Returns one immutable, attempt-zero P44 parity JobSet."""
   if stage not in _STAGE_STEPS:
@@ -122,6 +128,15 @@ def render(
     raise ValueError(
         "fixed lm-head requires a P44 update stage with VJP receipts"
     )
+  if system_optimization_arm is not None:
+    if system_optimization_arm not in _SYSTEM_OPTIMIZATION_ARMS:
+      raise ValueError(
+          "P44 system-optimization arm must be control or treatment"
+      )
+    if stage != "three-update":
+      raise ValueError(
+          "P44 system-optimization admission requires three-update"
+      )
   try:
     topology_spec = _TOPOLOGIES[topology]
   except KeyError as exc:
@@ -135,6 +150,7 @@ def render(
         "and SHA-256"
     )
   base_stage = "one-update" if stage == "rollout-only" else stage
+  effective_fixed_lm_head = fixed_lm_head or system_optimization_arm is not None
   document = p34.render(
       base,
       source_commit=source_commit,
@@ -147,7 +163,7 @@ def render(
       model_pvc=model_pvc,
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
-      fixed_lm_head=fixed_lm_head,
+      fixed_lm_head=effective_fixed_lm_head,
   )
 
   short_stage = {
@@ -188,9 +204,11 @@ def render(
       f"--instance_type=tpuv5:{topology_spec['slice']}",
   )
 
-  p34._set_env(main, {
+  environment = {
       "CANON_PROFILE_FILE": (
-          "cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env"
+          _STRICT_PROFILE
+          if system_optimization_arm is not None
+          else "cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env"
       ),
       "CANON_STATE": run_root,
       "CANON_P34_RUN_STAGE": stage,
@@ -206,7 +224,9 @@ def render(
       "CANON_P44_ROLLOUT_ONLY": "1" if stage == "rollout-only" else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "0" if system_optimization_arm is not None else "1"
+      ),
       "CANON_P34_CLEAN_ROWS": str(p34.P34_CLEAN_ROWS),
       "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
       "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "3600",
@@ -234,7 +254,21 @@ def render(
       "CANON_WANDB_GROUP": f"qwen3-4b-parity-{topology}chip",
       "MIN_TOKEN_BUCKET": str(topology_spec["global_m"]),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
-  })
+  }
+  if system_optimization_arm is not None:
+    environment.update(
+        v1opt.full_system_optimization_base_additions("deepswe-qwen4b")
+    )
+    environment.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
+    if system_optimization_arm == "treatment":
+      environment.update({
+          "CANON_P32_KEEP_TAPE": "stream",
+          "CANON_DP_REDUCE_ONCE": "1",
+      })
+  p34._set_env(main, environment)
   command = shlex.split(p34._env(document)["CANON_RUN_CMD"])
   expected_rows = f"--expected_filtered_rows={p34.P34_CLEAN_ROWS}"
   if expected_rows not in command:
@@ -272,7 +306,8 @@ def render(
       client_image=client_image,
       stage=stage,
       topology=topology,
-      fixed_lm_head=fixed_lm_head,
+      fixed_lm_head=effective_fixed_lm_head,
+      system_optimization_arm=system_optimization_arm,
   )
   return document
 
@@ -293,7 +328,7 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       for item in shlex.split(env["CANON_RUN_CMD"])
       if not item.startswith(omitted_prefixes)
   )
-  return {
+  signature = {
       "command": command,
       "stage": env["CANON_P34_RUN_STAGE"],
       "no_commit": env["CANON_P34_NO_COMMIT"],
@@ -304,6 +339,11 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "source_commit": env["CANON_EXPECT_COMMIT"],
       "whitelist_sha256": env["CANON_P34_WHITELIST_SHA256"],
   }
+  if "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM" in env:
+    signature["system_optimization_arm"] = env[
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+    ]
+  return signature
 
 
 def validate(
@@ -314,6 +354,7 @@ def validate(
     stage: str,
     topology: str,
     fixed_lm_head: bool = False,
+    system_optimization_arm: str | None = None,
 ) -> None:
   """Rejects topology, model, batch, artifact, or stage drift."""
   if stage not in _STAGE_STEPS:
@@ -322,6 +363,15 @@ def validate(
     topology_spec = _TOPOLOGIES[topology]
   except KeyError as exc:
     raise ValueError("P44 topology must be exactly 64 or 128") from exc
+  if system_optimization_arm is not None:
+    if system_optimization_arm not in _SYSTEM_OPTIMIZATION_ARMS:
+      raise ValueError(
+          "P44 system-optimization arm must be control or treatment"
+      )
+    if stage != "three-update":
+      raise ValueError(
+          "P44 system-optimization admission requires three-update"
+      )
   head = p34._head(document)
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
@@ -350,7 +400,9 @@ def validate(
       "CANON_P44_ROLLOUT_ONLY": "1" if stage == "rollout-only" else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "0" if system_optimization_arm is not None else "1"
+      ),
       "CANON_P34_CLEAN_ROWS": str(p34.P34_CLEAN_ROWS),
       "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
       "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "3600",
@@ -363,6 +415,19 @@ def validate(
       "CANON_LOGPROB_M": "256",
       "CANON_P38_FIXED_LM_HEAD": "1" if fixed_lm_head else "0",
   }
+  if system_optimization_arm is not None:
+    expected.update(
+        v1opt.full_system_optimization_base_additions("deepswe-qwen4b")
+    )
+    expected.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
+    if system_optimization_arm == "treatment":
+      expected.update({
+          "CANON_P32_KEEP_TAPE": "stream",
+          "CANON_DP_REDUCE_ONCE": "1",
+      })
   wrong = {
       key: env.get(key)
       for key, expected_value in expected.items()
@@ -370,6 +435,14 @@ def validate(
   }
   if wrong:
     raise ValueError(f"P44 rendered environment mismatch: {wrong}")
+  forbidden = {"CANON_DP_COLLECTIVE_REDUCE"}
+  if system_optimization_arm == "control":
+    forbidden.update({"CANON_P32_KEEP_TAPE", "CANON_DP_REDUCE_ONCE"})
+  elif system_optimization_arm is None:
+    forbidden.add("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM")
+  leaked = sorted(forbidden.intersection(env))
+  if leaked:
+    raise ValueError(f"P44 rendered environment has forbidden keys: {leaked}")
   required_args = (
       "--model_version=Qwen3-4B-Instruct-2507",
       "--batch_size=4",
@@ -399,9 +472,12 @@ def validate(
   )
   if any(value not in env["CANON_RUN_CMD"] for value in required_args):
     raise ValueError("P44 parity command lost a signed field")
-  if env.get("CANON_PROFILE_FILE") != (
-      "cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env"
-  ):
+  expected_profile = (
+      _STRICT_PROFILE
+      if system_optimization_arm is not None
+      else "cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env"
+  )
+  if env.get("CANON_PROFILE_FILE") != expected_profile:
     raise ValueError("P44 parity profile path drifted")
   if not env.get("CANON_P44_DEBUG_DIR", "").endswith("/debug"):
     raise ValueError("P44 parity artifact path is missing")
@@ -439,6 +515,14 @@ def main() -> None:
       action="store_true",
       help="experimental Qwen3-4B TP8 fixed-output-head construction",
   )
+  parser.add_argument(
+      "--system-optimization-arm",
+      choices=_SYSTEM_OPTIMIZATION_ARMS,
+      help=(
+          "strict three-update P44 admission arm; absent preserves the "
+          "historical warning-only carrier"
+      ),
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -456,6 +540,7 @@ def main() -> None:
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
       fixed_lm_head=args.fixed_lm_head,
+      system_optimization_arm=args.system_optimization_arm,
   )
   args.output.write_text(p34.dump_jobset(document))
   print(

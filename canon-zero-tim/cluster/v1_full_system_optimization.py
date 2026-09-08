@@ -35,6 +35,12 @@ _KEEP_TAPE_WORKLOADS = frozenset({
     "frozenlake-m15",
 })
 
+# Reduce-once deliberately changes the cross-group/rank summation order.  It
+# is admitted on the same three geometries as the streamed tape, with the
+# registered per-geometry anchors.  DeepSWE remains excluded until its Phase 2
+# gradient and row-mapping certification is complete.
+_REDUCE_ONCE_WORKLOADS = _KEEP_TAPE_WORKLOADS
+
 REGISTERED_FULL_WORKLOADS = frozenset({
     "gsm8k",
     *_P59_ONLY_WORKLOADS,
@@ -43,11 +49,12 @@ REGISTERED_FULL_WORKLOADS = frozenset({
 FULL_SYSTEM_OPTIMIZATION_ENV_NAMES = tuple(_BASE_ADDITIONS) + (
     "CANON_P67_P66_VMA_P59_ONLY",
     "CANON_P32_KEEP_TAPE",
+    "CANON_DP_REDUCE_ONCE",
 )
 
 
-def full_system_optimization_additions(workload: str) -> dict[str, str]:
-  """Returns a fresh exact env tuple for one registered production full job."""
+def full_system_optimization_base_additions(workload: str) -> dict[str, str]:
+  """Returns the common exact tuple without workload-specific admitted knives."""
   if workload not in REGISTERED_FULL_WORKLOADS:
     raise ValueError(
         f"unregistered V1 full system-optimization workload: {workload!r}"
@@ -55,6 +62,14 @@ def full_system_optimization_additions(workload: str) -> dict[str, str]:
   additions = dict(_BASE_ADDITIONS)
   if workload in _P59_ONLY_WORKLOADS:
     additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"
+  return additions
+
+
+def full_system_optimization_additions(workload: str) -> dict[str, str]:
+  """Returns a fresh exact env tuple for one registered production full job."""
+  additions = full_system_optimization_base_additions(workload)
   if workload in _KEEP_TAPE_WORKLOADS:
     additions["CANON_P32_KEEP_TAPE"] = "stream"
+  if workload in _REDUCE_ONCE_WORKLOADS:
+    additions["CANON_DP_REDUCE_ONCE"] = "1"
   return additions

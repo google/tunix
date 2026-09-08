@@ -1334,7 +1334,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "CANON_P61_BACKWARD_NUMERICAL_DIR", ""
     )
     if p61_capture_dir:
-      p61_contract = (
+      p61_dp4_oracle = (
           p33_workload
           and workload.name == "gsm8k-p59-dp4-tp1"
           and workload.dp_size == 4
@@ -1345,11 +1345,36 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and os.environ.get("CANON_P60_DETERMINISTIC_AB", "") == "1"
           and os.environ.get("CANON_P59_DP4_TAIL8", "0") == "0"
       )
-      if not p61_contract or not os.path.isabs(p61_capture_dir):
+      p61_dp2_reduce_once_admission = (
+          p33_workload
+          and workload.name == "gsm8k-p59-dp2-tp2"
+          and workload.dp_size == 2
+          and workload.tp_size == 2
+          and run_stage == "three-update"
+          and not p33_no_commit
+          and full_train
+          and os.environ.get("CANON_P60_DETERMINISTIC_AB", "") == "1"
+          and os.environ.get("CANON_P59_DP4_TAIL8", "0") == "0"
+          and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
+          == "1"
+          and os.environ.get("CANON_P66_P59_CHECK_VMA", "") == "1"
+      )
+      if (
+          not (p61_dp4_oracle or p61_dp2_reduce_once_admission)
+          or not os.path.isabs(p61_capture_dir)
+      ):
         raise alignment.AlignmentGateError(
             "CANON_P61_BACKWARD_NUMERICAL_DIR requires exact committed "
-            "gsm8k-p59-dp4-tp1 one-update deterministic DP4xTP1 geometry"
+            "gsm8k-p59-dp4-tp1 one-update deterministic DP4xTP1 geometry "
+            "or exact committed gsm8k-p59-dp2-tp2 three-update "
+            "deterministic rank-parallel checked-VMA geometry"
         )
+      # The three-update carrier profiles its warm third update, but its
+      # numerical A/B compares the frozen first update.  Preserve the P61
+      # one-transaction capture contract by disarming the local writer after
+      # update zero instead of overwriting the evidence on updates one/two.
+      if p61_dp2_reduce_once_admission and actor_trainer.train_steps != 0:
+        p61_capture_dir = ""
     p62_value = os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "")
     if p62_value not in ("", "0", "1"):
       raise alignment.AlignmentGateError(
@@ -1759,6 +1784,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     checked_vma_full = checked_vma_value == "1"
     first_update_gate_enabled = first_update_gate_value == "1"
+    deepswe_system_optimization_arm = os.environ.get(
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", ""
+    )
+    if deepswe_system_optimization_arm not in (
+        "",
+        "control",
+        "treatment",
+    ):
+      raise alignment.AlignmentGateError(
+          "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM must be absent, control, "
+          "or treatment"
+      )
     workload_identity = (
         workload.contract_name
         if p34_workload
@@ -1767,7 +1804,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else "legacy-segmented"
     )
     if checked_vma_full or first_update_gate_enabled:
-      exact_checked_vma_geometry = (
+      exact_registered_full_geometry = (
           full_train
           and not p33_no_commit
           and os.environ.get("CANON_V1_HP_FULL", "0") == "1"
@@ -1798,6 +1835,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   ) == "1"
               )
           )
+      )
+      exact_p44_v2_geometry = (
+          full_train
+          and not p33_no_commit
+          and run_stage == "three-update"
+          and deepswe_system_optimization_arm in ("control", "treatment")
+          and workload_identity in (
+              "p44-qwen4b-parity-64",
+              "p44-qwen4b-parity-128",
+          )
+          and (workload.dp_size, workload.tp_size, workload.global_m)
+          in ((4, 8, 1024), (8, 8, 2048))
+          and os.environ.get("CANON_PROFILE_FILE", "")
+          == (
+              "cluster/profiles/"
+              "qwen3-4b-dp-parity-deepswe-v2-admission.env"
+          )
+          and os.environ.get("CANON_PROFILE", "")
+          == f"qwen3-4b-dp{workload.dp_size}-tp8-deepswe-v2-admission"
+          and os.environ.get("CANON_V1_HP_FULL", "0") == "0"
+          and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "0")
+          == "1"
+          and os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+          and os.environ.get("CANON_P67_P66_VMA_P59_ONLY", "0") == "1"
+          and os.environ.get("CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "1")
+          == "0"
+      )
+      exact_checked_vma_geometry = (
+          exact_registered_full_geometry or exact_p44_v2_geometry
       )
       if not exact_checked_vma_geometry or not (
           checked_vma_full and first_update_gate_enabled
@@ -2479,6 +2545,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "state_fingerprints_before": before,
         "state_fingerprints_after": after,
     }
+    if deepswe_system_optimization_arm:
+      update_record.update({
+          "system_optimization_arm": deepswe_system_optimization_arm,
+          "dp_reduction_visibility": result["dp_reduction_visibility"],
+          "dp_staged_accumulations": result["dp_staged_accumulations"],
+      })
     update_path = os.environ.get("CANON_UPDATE_REPORT", "")
     if not update_path:
       raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")

@@ -36,6 +36,14 @@ case "$geometry" in
     prompts=4; generations=4; max_prompt=8192; max_response=1024
     long_prompt_examples="${CANON_P32_LONG_PROMPT_EXAMPLES:-12-36}"
     ;;
+  dp2-tp2-p45)
+    # Shape-only proxy for the P45 prompt/response cap.  The few-shot prefix
+    # supplies the prompt-side length spread; data/task semantics stay GSM8K.
+    mesh_dp=2; mesh_tp=2; trajectory_micro=2; vllm_max_seqs=8
+    zero_profile=qwen3-1p7b-dp2-tp2-p45-shape-gsm8k-v1-hp.env
+    prompts=4; generations=4; max_prompt=4096; max_response=2048
+    long_prompt_examples="${CANON_P32_LONG_PROMPT_EXAMPLES:-3-10}"
+    ;;
   *)
     echo "[V1.GSM8K.XPROF] unsupported V1_GSM8K_XPROF_GEOMETRY: $geometry" >&2
     exit 2
@@ -113,7 +121,7 @@ from tunix.rl import gsm8k_xprof
 geometry = gsm8k_xprof.geometry()
 mesh_shape = {
     "dp4-tp1": (4, 1), "dp2-tp2": (2, 2), "dp2-tp2-long": (2, 2),
-    "dp2-tp2-long8k": (2, 2),
+    "dp2-tp2-long8k": (2, 2), "dp2-tp2-p45": (2, 2),
 }[geometry]
 groups = gsm8k_xprof.geometry_groups()
 prompts = int(os.environ["V1_GSM8K_XPROF_PROMPTS"])

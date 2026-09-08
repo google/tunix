@@ -49,7 +49,7 @@ def _env(document: dict) -> dict[str, str]:
 
 class ThreeFullRendererTest(unittest.TestCase):
 
-  def _render(self, root: Path):
+  def _render(self, root: Path, *, p45_length_sort: bool = False):
     return renderer.render_three(
         source_commit="a" * 40,
         output_dir=root,
@@ -58,6 +58,7 @@ class ThreeFullRendererTest(unittest.TestCase):
         m15_run_id="m15a",
         campaign_root="v1hp-a",
         base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        p45_length_sort=p45_length_sort,
     )
 
   def test_exact_image_gate_imports_the_mounted_workspace(self):
@@ -77,6 +78,8 @@ class ThreeFullRendererTest(unittest.TestCase):
     self.assertIn("refusing to render from a dirty worktree", script)
     self.assertIn("V1_HP_CHECKED_VMA_WAVE_READY", script)
     self.assertIn("launch=not-executed", script)
+    self.assertIn("[--p45-length-sort]", script)
+    self.assertIn("p45_length_sort=$P45_LENGTH_SORT_MODE", script)
     self.assertEqual(script.count('"kubectl apply -f '), 3)
     self.assertFalse(
         any(line.strip().startswith("kubectl apply") for line in script.splitlines())
@@ -138,6 +141,7 @@ class ThreeFullRendererTest(unittest.TestCase):
       )
       self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
       self.assertEqual(values["CANON_P71_SCAN"], "fwd")
+      self.assertEqual(values["CANON_DP_REDUCE_ONCE"], "1")
       self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
       self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
       self.assertIn("--max_steps=200", values["CANON_RUN_CMD"])
@@ -217,6 +221,7 @@ class ThreeFullRendererTest(unittest.TestCase):
             values["CANON_DP_DISTINCT_SCHEDULE"], "first-group-warmup"
         )
         self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
+        self.assertEqual(values["CANON_DP_REDUCE_ONCE"], "1")
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
         self.assertEqual(values["CANON_P71_SCAN"], "fwd")
         self.assertEqual(
@@ -233,6 +238,42 @@ class ThreeFullRendererTest(unittest.TestCase):
             values["CANON_GCS_CACHE_BUCKET"],
             "gs://yuxzhang-tunix-models/cache/p33_compilation_cache",
         )
+        self.assertNotIn("CANON_P32_LENGTH_SORT", values)
+
+  def test_explicit_length_sort_changes_only_p45(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      control_paths = self._render(root / "control")
+      treatment_paths = self._render(
+          root / "treatment", p45_length_sort=True
+      )
+      control_envs = [
+          _env(yaml.safe_load(path.read_text(encoding="utf-8")))
+          for path in control_paths
+      ]
+      treatment_envs = [
+          _env(yaml.safe_load(path.read_text(encoding="utf-8")))
+          for path in treatment_paths
+      ]
+      for label, control, treatment in zip(
+          ("gsm8k", "p45", "m15"),
+          control_envs,
+          treatment_envs,
+          strict=True,
+      ):
+        if label == "p45":
+          self.assertEqual(treatment["CANON_P32_LENGTH_SORT"], "1")
+          treatment = dict(treatment)
+          treatment.pop("CANON_P32_LENGTH_SORT")
+        self.assertEqual(treatment, control, label)
+      index = json.loads(
+          (root / "treatment/manifest-index.json").read_text(encoding="utf-8")
+      )
+      self.assertIs(index["p45_length_sort"], True)
+      control_index = json.loads(
+          (root / "control/manifest-index.json").read_text(encoding="utf-8")
+      )
+      self.assertNotIn("p45_length_sort", control_index)
 
   def test_profiles_resolve_complete_workload_scoped_bundle(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -259,6 +300,7 @@ class ThreeFullRendererTest(unittest.TestCase):
             "test \"$CANON_XPROF_STEPS\" = 1"
             "; test \"$CANON_XPROF_LABELS\" = 1"
             "; test \"$CANON_PERF_TRACE_EXPORT_STEP\" = 2"
+            "; test \"$CANON_DP_REDUCE_ONCE\" = 1"
             "; test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = 0"
             "; test \"$JAX_COMPILATION_CACHE_DIR\" = /tmp/jax_compilation_cache"
             "; test \"$JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS\" = 0"

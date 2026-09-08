@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 5 || "$#" -gt 6 ]]; then
-  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--m15-tito-exact]" >&2
+if [[ "$#" -lt 5 || "$#" -gt 7 ]]; then
+  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <p45-run-id> <m15-run-id> [--m15-tito-exact] [--p45-length-sort]" >&2
   exit 2
 fi
 
@@ -13,14 +13,32 @@ P45_RUN_ID="$4"
 M15_RUN_ID="$5"
 M15_TITO_ARGS=()
 M15_TITO_MODE=off
-if [[ "$#" -eq 6 ]]; then
-  if [[ "$6" != "--m15-tito-exact" ]]; then
-    echo "optional sixth argument must be --m15-tito-exact" >&2
-    exit 2
-  fi
-  M15_TITO_ARGS=(--m15-tito-exact)
-  M15_TITO_MODE=exact
-fi
+P45_LENGTH_SORT_ARGS=()
+P45_LENGTH_SORT_MODE=off
+for OPTION in "${@:6}"; do
+  case "$OPTION" in
+    --m15-tito-exact)
+      if [[ "$M15_TITO_MODE" == exact ]]; then
+        echo "--m15-tito-exact may appear only once" >&2
+        exit 2
+      fi
+      M15_TITO_ARGS=(--m15-tito-exact)
+      M15_TITO_MODE=exact
+      ;;
+    --p45-length-sort)
+      if [[ "$P45_LENGTH_SORT_MODE" == on ]]; then
+        echo "--p45-length-sort may appear only once" >&2
+        exit 2
+      fi
+      P45_LENGTH_SORT_ARGS=(--p45-length-sort)
+      P45_LENGTH_SORT_MODE=on
+      ;;
+    *)
+      echo "unknown optional argument: $OPTION" >&2
+      exit 2
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -61,7 +79,8 @@ python3 "$RENDERER" \
   --campaign-root "$CAMPAIGN_ROOT" \
   --p45-run-id "$P45_RUN_ID" \
   --m15-run-id "$M15_RUN_ID" \
-  "${M15_TITO_ARGS[@]}"
+  "${M15_TITO_ARGS[@]}" \
+  "${P45_LENGTH_SORT_ARGS[@]}"
 
 INDEX="$OUTPUT_DIR/manifest-index.json"
 if [[ ! -s "$INDEX" ]]; then
@@ -71,7 +90,7 @@ fi
 
 sha256sum "$INDEX"
 printf '%s\n' \
-  "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR m15_tito=$M15_TITO_MODE launch=not-executed" \
+  "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR m15_tito=$M15_TITO_MODE p45_length_sort=$P45_LENGTH_SORT_MODE launch=not-executed" \
   "Review manifest-index.json and verify the pushed SHA by remote read-back before launch." \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml" \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml"

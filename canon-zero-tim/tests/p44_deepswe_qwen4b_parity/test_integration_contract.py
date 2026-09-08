@@ -145,6 +145,19 @@ class P44IntegrationContractTest(unittest.TestCase):
     self.assertLess(p39, p34)
     self.assertIn('--topology "$CANON_P44_TOPOLOGY"', text[p44 - 400:p43])
     self.assertIn('--debug-dir "$CANON_P44_DEBUG_DIR"', text[p44:p43])
+    self.assertIn("p44_classifier_arm_args", text[p44 - 600:p43])
+    self.assertIn(
+        '--system-optimization-arm', text[p44 - 600:p43]
+    )
+
+  def test_strict_carrier_emits_runtime_reduction_receipts(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text()
+    self.assertIn("exact_p44_v2_geometry", learner)
+    self.assertIn('"system_optimization_arm"', learner)
+    self.assertIn('"dp_reduction_visibility"', learner)
+    self.assertIn('"dp_staged_accumulations"', learner)
 
 
 if __name__ == "__main__":

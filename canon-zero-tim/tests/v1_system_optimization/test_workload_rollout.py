@@ -15,6 +15,7 @@ from v1_full_system_optimization import (  # pylint: disable=wrong-import-positi
     FULL_SYSTEM_OPTIMIZATION_ENV_NAMES,
     REGISTERED_FULL_WORKLOADS,
     full_system_optimization_additions,
+    full_system_optimization_base_additions,
 )
 
 
@@ -51,8 +52,10 @@ class FullSystemOptimizationTest(unittest.TestCase):
         # The streamed kept tape is armed only where it is hardware-certified.
         if workload == "deepswe-qwen4b":
           self.assertNotIn("CANON_P32_KEEP_TAPE", values)
+          self.assertNotIn("CANON_DP_REDUCE_ONCE", values)
         else:
           self.assertEqual(values["CANON_P32_KEEP_TAPE"], "stream")
+          self.assertEqual(values["CANON_DP_REDUCE_ONCE"], "1")
         self.assertTrue(set(values).issubset(FULL_SYSTEM_OPTIMIZATION_ENV_NAMES))
 
   def test_returns_fresh_copy_and_rejects_unregistered_neighbors(self):
@@ -69,6 +72,17 @@ class FullSystemOptimizationTest(unittest.TestCase):
       with self.subTest(workload=workload):
         with self.assertRaisesRegex(ValueError, "unregistered"):
           full_system_optimization_additions(workload)
+
+  def test_base_additions_exclude_workload_specific_knives(self):
+    for workload in sorted(REGISTERED_FULL_WORKLOADS):
+      with self.subTest(workload=workload):
+        values = full_system_optimization_base_additions(workload)
+        self.assertNotIn("CANON_P32_KEEP_TAPE", values)
+        self.assertNotIn("CANON_DP_REDUCE_ONCE", values)
+        if workload == "gsm8k":
+          self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
+        else:
+          self.assertEqual(values["CANON_P67_P66_VMA_P59_ONLY"], "1")
 
   def test_deepswe_full_prepare_is_clean_sha_bound_and_render_only(self):
     path = (
@@ -151,7 +165,10 @@ class FullSystemOptimizationTest(unittest.TestCase):
         "CANON_DP_DISTINCT_SCHEDULE=first-group-warmup",
         "CANON_DP_FINITE_FETCH=batched-commit",
         "CANON_P71_SCAN=fwd",
-    ) + (("CANON_P32_KEEP_TAPE=stream",) if keep_tape else ()):
+    ) + ((
+        "CANON_P32_KEEP_TAPE=stream",
+        "CANON_DP_REDUCE_ONCE=1",
+    ) if keep_tape else ()):
       self.assertIn(key_value, source)
     self.assertIn("CANON_DP_COLLECTIVE_REDUCE", source)
     self.assertRegex(source, r"CANON_DP_COLLECTIVE_REDUCE.{0,80}(absent|remain)")

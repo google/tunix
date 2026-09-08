@@ -24,6 +24,7 @@ import numpy as np
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from tunix.rl import deepswe_contract
 from tunix.rl import dp_training
 
 
@@ -59,6 +60,68 @@ class DPTrainingTest(absltest.TestCase):
     self.assertEqual(groups[-1], tuple(range(15, 256, 16)))
     self.assertEqual(
         sorted(index for group in groups for index in group), list(range(256))
+    )
+
+  def test_shared_rank_major_helper_rejects_invalid_contiguous_slices(self):
+    with self.assertRaisesRegex(ValueError, 'positive trajectory and DP sizes'):
+      dp_training.contiguous_rank_major_reverse_groups(
+          global_trajectories=0, dp_size=4
+      )
+    with self.assertRaisesRegex(ValueError, 'equal contiguous rank slices'):
+      dp_training.contiguous_rank_major_reverse_groups(
+          global_trajectories=15, dp_size=4
+      )
+
+  def test_all_deepswe_contracts_use_the_adapter_rank_major_geometry(self):
+    workloads = (
+        deepswe_contract.P34_WORKLOAD,
+        deepswe_contract.P39_PILOT_WORKLOAD,
+        deepswe_contract.P43_DEBUG_WORKLOAD,
+        deepswe_contract.P44_PARITY_64_WORKLOAD,
+        deepswe_contract.P44_PARITY_128_WORKLOAD,
+        deepswe_contract.P46_Q32_64_WORKLOAD,
+        deepswe_contract.P46_Q32_256_WORKLOAD,
+        deepswe_contract.P58_Q4_TIM_128_WORKLOAD,
+    )
+    for workload in workloads:
+      with self.subTest(contract=workload.contract_name):
+        workload.validate()
+        groups = dp_training.contiguous_rank_major_reverse_groups(
+            global_trajectories=workload.global_trajectories,
+            dp_size=workload.dp_size,
+        )
+        grouped_by_adapter_reshape = np.arange(
+            workload.global_trajectories
+        ).reshape(workload.dp_size, workload.local_trajectories).T
+        self.assertEqual(
+            groups,
+            tuple(
+                tuple(int(row) for row in group)
+                for group in grouped_by_adapter_reshape
+            ),
+        )
+        self.assertLen(groups, workload.local_trajectories)
+        self.assertTrue(all(len(group) == workload.dp_size for group in groups))
+        self.assertEqual(
+            sorted(row for group in groups for row in group),
+            list(range(workload.global_trajectories)),
+        )
+        expected_first = tuple(
+            rank * workload.local_trajectories
+            for rank in range(workload.dp_size)
+        )
+        self.assertEqual(groups[0], expected_first)
+    self.assertEqual(
+        dp_training.contiguous_rank_major_reverse_groups(
+            global_trajectories=64, dp_size=16
+        )[0],
+        tuple(range(0, 64, 4)),
+    )
+    self.assertNotEqual(
+        dp_training.contiguous_rank_major_reverse_groups(
+            global_trajectories=64, dp_size=16
+        )[0],
+        tuple(range(16)),
     )
 
   def test_contract_rejects_partial_prompt_group(self):

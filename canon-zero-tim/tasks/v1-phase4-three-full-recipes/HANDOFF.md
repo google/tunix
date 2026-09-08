@@ -119,6 +119,7 @@ CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
 CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
 CANON_P32_KEEP_TAPE=stream       # streamed kept tape: no forward recompute in the reverse pass
+CANON_DP_REDUCE_ONCE=1           # one checked fixed-order DP reduction per update
 ```
 
 `CANON_P32_KEEP_TAPE=stream` (2026-09-02, tasks/v1_forward_dedup) keeps each
@@ -126,6 +127,9 @@ group's forward tape for its reverse pass with at most two groups' tapes
 alive, so the reverse phase no longer replays or rebuilds the forward.  One-host
 DP2xTP2 and DP4xTP1 certification: gradient anchors bitwise, warm update
 29.19->19.07 s and 16.68->11.55 s, peak HBM at or below the flag-off baseline.
+`CANON_DP_REDUCE_ONCE=1` is admitted for these same registered recipes after
+the checked-VMA G4/D4/G5/G6 and negative-control gates; it remains absent from
+DeepSWE until that workload's separate certification.
 On P45 / M15 the two tapes are about 2.6-3.6 GB / 11.4-18.6 GB per chip
 (tasks/v1_forward_dedup/phase5.md).  `updates.jsonl` carries the
 `hbm_after_accumulation` receipt on every update, so the first update of a

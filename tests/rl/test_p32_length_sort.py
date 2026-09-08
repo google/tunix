@@ -10,6 +10,7 @@ group.
 """
 
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 from unittest import mock
@@ -40,6 +41,67 @@ def test_selector_parses_fail_closed():
   with mock.patch.dict(os.environ, {"CANON_P32_LENGTH_SORT": "yes"}, clear=False):
     with pytest.raises(FME, match="CANON_P32_LENGTH_SORT"):
       parse()
+
+
+def test_runtime_receipt_pins_geometry_and_permutation():
+  perm = np.asarray([3, 1, 2, 0], dtype=np.int32)
+  receipt = adapter_module._p32_length_sort_receipt(  # pylint: disable=protected-access
+      perm, 2
+  )
+  digest = hashlib.sha256(perm.astype(np.int64).tobytes()).hexdigest()
+  assert receipt == (
+      "[P32.LENGTH_SORT] enabled=1 rows=4 dp=2 groups=2 "
+      f"permutation_sha256={digest}"
+  )
+  with pytest.raises(FME, match="rank-one permutation divisible"):
+    adapter_module._p32_length_sort_receipt(  # pylint: disable=protected-access
+        perm[:3], 2
+    )
+
+
+def test_phase0_negative_selectors_and_faults_are_discriminating():
+  parse = adapter_module._v2_p0_negative_control  # pylint: disable=protected-access
+  for value in ("", "length-sort-no-inverse", "reduce-once-reassociate-tail"):
+    with mock.patch.dict(
+        os.environ, {"V2_P0_NEGATIVE_CONTROL": value}, clear=False
+    ):
+      assert parse() == value
+  with mock.patch.dict(
+      os.environ, {"V2_P0_NEGATIVE_CONTROL": "unknown"}, clear=False
+  ), pytest.raises(FME, match="V2_P0_NEGATIVE_CONTROL"):
+    parse()
+
+  values = tuple(np.float32(value) for value in (1.0e8, 1.0, -1.0e8, 1.0))
+  ordinary = None
+  held = None
+  accumulate = (  # pylint: disable=protected-access
+      adapter_module._v2_p0_accumulate_staged
+  )
+  for index, value in enumerate(values):
+    ordinary, held, injected = accumulate(
+        ordinary,
+        held,
+        value,
+        index=index,
+        group_count=len(values),
+        add=lambda left, right: np.float32(left + right),
+        mode="",
+    )
+    assert not injected
+  reassociated = None
+  held = None
+  for index, value in enumerate(values):
+    reassociated, held, injected = accumulate(
+        reassociated,
+        held,
+        value,
+        index=index,
+        group_count=len(values),
+        add=lambda left, right: np.float32(left + right),
+        mode="reduce-once-reassociate-tail",
+    )
+  assert injected and held is None
+  assert ordinary.tobytes() != reassociated.tobytes()
 
 
 def test_permutation_deals_sorted_rows_across_ranks():
@@ -307,7 +369,7 @@ def _run_update(stream, length_sort):
     stack.enter_context(mock.patch.object(
         adapter_module, "build_p28_segmented_engine_forward", return_value=object()
     ))
-    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+    output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
     os.environ.pop("CANON_P71_SCAN", None)
     os.environ.pop("CANON_P28_LAYER_SCAN", None)
     result = adapter.segmented_dp_grpo_value_and_grad(
@@ -318,15 +380,17 @@ def _run_update(stream, length_sort):
         eos_id=2,
         gradient_microbatch_sink=None,
     )
-  return adapter, result
+  return adapter, result, output.getvalue()
 
 
 def test_whole_update_returns_rows_in_batch_order_and_balances_groups():
   if len(jax.devices()) < 64:
     pytest.skip("needs the stream harness's 64 forced CPU devices")
   stream = _stream_module()
-  _, plain = _run_update(stream, length_sort=False)
-  adapter, sorted_run = _run_update(stream, length_sort=True)
+  _, plain, plain_output = _run_update(stream, length_sort=False)
+  adapter, sorted_run, sorted_output = _run_update(stream, length_sort=True)
+  assert "[P32.LENGTH_SORT]" not in plain_output
+  assert sorted_output.count("[P32.LENGTH_SORT] enabled=1 ") == 1
   # Per-row outputs: identical bytes in the batch's own row order.
   for key in ("per_token_logps", "token_entropy"):
     assert np.asarray(sorted_run[key]).tobytes() == np.asarray(plain[key]).tobytes(), key

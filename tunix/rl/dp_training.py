@@ -28,6 +28,30 @@ import jax.numpy as jnp
 import numpy as np
 
 
+def contiguous_rank_major_reverse_groups(
+    *, global_trajectories: int, dp_size: int
+) -> tuple[tuple[int, ...], ...]:
+  """Groups contiguous rank-owned rows by the same rank-local ordinal."""
+  if global_trajectories <= 0 or dp_size <= 0:
+    raise ValueError(
+        "rank-major reverse groups require positive trajectory and DP sizes: "
+        f"{global_trajectories}, {dp_size}"
+    )
+  if global_trajectories % dp_size:
+    raise ValueError(
+        "rank-major reverse groups require equal contiguous rank slices: "
+        f"{global_trajectories} % {dp_size}"
+    )
+  local_trajectories = global_trajectories // dp_size
+  return tuple(
+      tuple(
+          rank * local_trajectories + local_index
+          for rank in range(dp_size)
+      )
+      for local_index in range(local_trajectories)
+  )
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class DPTrainingContract:
   """Describes one fixed-placement DP training transaction."""
@@ -105,13 +129,20 @@ class DPTrainingContract:
           'rank-major reverse groups require equal local trajectory counts: '
           f'{sorted(local_counts)}'
       )
-    return tuple(
+    groups = contiguous_rank_major_reverse_groups(
+        global_trajectories=self.global_trajectories,
+        dp_size=self.dp_size,
+    )
+    expected = tuple(
         tuple(
             int(rank_indices[rank][local_index])
             for rank in range(self.dp_size)
         )
         for local_index in range(self.local_trajectories)
     )
+    if groups != expected:
+      raise AssertionError("contiguous rank ownership drifted from the DP contract")
+    return groups
 
   def validate_prompt_groups(self, group_ids: Sequence[int]) -> None:
     """Checks that every generation group stays on one DP rank."""
@@ -394,6 +425,12 @@ def fixed_dp_collective_count(dp_size: int) -> int:
   return len(reduce_rounds) + len(broadcast_rounds)
 
 
+def fixed_dp_vma_collective_count(dp_size: int) -> int:
+  """Returns collectives used by the VMA-checked fixed DP reduction."""
+  reduce_rounds, _ = fixed_dp_tree_permutations(dp_size)
+  return len(reduce_rounds) + 1
+
+
 def fixed_dp_sum(contributions: Sequence[Any]) -> Any:
   """Sums rank contributions with the same binary tree as the collective."""
   values = list(contributions)
@@ -462,6 +499,78 @@ def fixed_dp_collective(
     receiver = jnp.mod(rank, 2 * stride) == stride
     value = _select_tree(receiver, peer, value)
   return value
+
+
+def _publish_rank_zero_float32_bits(value: Any, axis_name: str) -> Any:
+  """Publishes rank zero's FP32 bits with a VMA-recognized collective.
+
+  ``ppermute`` does not tell JAX's VMA type system that a completed manual
+  broadcast is invariant.  A floating-point psum of rank zero plus zeros
+  would provide that proof, but can change the sign bit of zero.  Reinterpret
+  every FP32 leaf as signed int32, put the minimum int32 sentinel on every
+  non-source rank, and pmax instead.  The source bits are therefore copied
+  exactly for every possible FP32 bit pattern while pmax establishes the
+  data-axis invariant required by the enclosing checked shard_map.
+  """
+  rank = jax.lax.axis_index(axis_name)
+
+  def publish_leaf(leaf):
+    if leaf.dtype != jnp.float32:
+      raise TypeError(
+          'VMA-checked fixed DP reduction requires float32 gradients, got '
+          f'{leaf.dtype}'
+      )
+    bits = jax.lax.bitcast_convert_type(leaf, jnp.int32)
+    sentinel = jnp.full_like(bits, jnp.iinfo(jnp.int32).min)
+    source_bits = jnp.where(rank == 0, bits, sentinel)
+    published_bits = jax.lax.pmax(source_bits, axis_name)
+    return jax.lax.bitcast_convert_type(published_bits, jnp.float32)
+
+  return jax.tree.map(publish_leaf, value)
+
+
+def fixed_dp_vma_collective(
+    local_value: Any, *, dp_size: int, axis_name: str = 'dp'
+) -> Any:
+  """Returns the fixed-order DP sum through a checked-VMA shard_map.
+
+  The reduction half is byte-for-byte the registered fixed tree.  Only rank
+  zero owns the complete result after those rounds.  One bitwise pmax publish
+  replaces the manual ppermute broadcast tree so VMA can prove that the
+  result is invariant across the DP axis without adding floating arithmetic.
+  """
+  reduce_rounds, _ = fixed_dp_tree_permutations(dp_size)
+  rank = jax.lax.axis_index(axis_name)
+  value = local_value
+  for round_index, permutation in enumerate(reduce_rounds):
+    stride = 1 << round_index
+    peer = jax.tree.map(
+        lambda leaf: jax.lax.ppermute(
+            leaf, axis_name=axis_name, perm=permutation
+        ),
+        value,
+    )
+    combined = jax.tree.map(
+        lambda left, right: (
+            jax.lax.optimization_barrier(left)
+            + jax.lax.optimization_barrier(right)
+        ),
+        value,
+        peer,
+    )
+    receiver = jnp.mod(rank, 2 * stride) == 0
+    value = _select_tree(receiver, combined, value)
+  return _publish_rank_zero_float32_bits(value, axis_name)
+
+
+def gathered_tree_vma_dp_collective(
+    local_value: Any, *, dp_size: int, axis_name: str = 'dp'
+) -> Any:
+  """Makes the diagnostic gathered-tree selector VMA-checkable."""
+  value = gathered_tree_dp_collective(
+      local_value, dp_size=dp_size, axis_name=axis_name
+  )
+  return _publish_rank_zero_float32_bits(value, axis_name)
 
 
 def fixed_dp2_collective(local_value: Any, axis_name: str = 'dp') -> Any:
@@ -835,6 +944,7 @@ def _reducer_program_cache_key(
     dp_size: int,
     dp_axis: str,
     reduce_mode: str,
+    check_vma: bool,
     compare_mode: str,
     distinct_schedule: str,
     finite_fetch: str,
@@ -880,6 +990,7 @@ def _reducer_program_cache_key(
       int(dp_size),
       str(dp_axis),
       str(reduce_mode),
+      bool(check_vma),
       str(compare_mode),
       str(distinct_schedule),
       str(finite_fetch),
@@ -895,6 +1006,7 @@ def _build_reducer_programs(
     dp_size: int,
     dp_axis: str,
     reduce_mode: str,
+    check_vma: bool,
     compare_mode: str,
     distinct_schedule: str,
 ) -> _ReducerPrograms:
@@ -932,7 +1044,12 @@ def _build_reducer_programs(
         contribution,
     )
 
-  reduce_collective = select_dp_collective(reduce_mode)
+  if check_vma and reduce_mode == '':
+    reduce_collective = fixed_dp_vma_collective
+  elif check_vma and reduce_mode == 'tree':
+    reduce_collective = gathered_tree_vma_dp_collective
+  else:
+    reduce_collective = select_dp_collective(reduce_mode)
 
   def reduce_local(local_staged):
     local_value = jax.tree.map(
@@ -949,11 +1066,11 @@ def _build_reducer_programs(
   }
   try:
     reduce_mapped = jax.shard_map(
-        reduce_local, check_vma=False, **shard_map_kwargs
+        reduce_local, check_vma=check_vma, **shard_map_kwargs
     )
   except TypeError:
     reduce_mapped = jax.shard_map(
-        reduce_local, check_rep=False, **shard_map_kwargs
+        reduce_local, check_rep=check_vma, **shard_map_kwargs
     )
 
   permutation = tuple(
@@ -974,7 +1091,16 @@ def _build_reducer_programs(
         strict=True,
     ):
       exact = jnp.logical_and(exact, jnp.array_equal(local_leaf, peer_leaf))
-    return jnp.reshape(exact, (1,))
+    exact = jnp.reshape(exact, (1,))
+    if check_vma:
+      # The scalar receipt has no TP dimension, so every non-DP mesh axis
+      # must explicitly agree before out_specs may replicate it there.
+      for axis_name in mesh.axis_names:
+        if axis_name != dp_axis:
+          exact = (
+              jax.lax.pmin(exact.astype(jnp.int32), axis_name) != 0
+          )
+    return exact
 
   compare_kwargs = {
       'mesh': mesh,
@@ -983,11 +1109,11 @@ def _build_reducer_programs(
   }
   try:
     compare_mapped = jax.shard_map(
-        compare_local, check_vma=False, **compare_kwargs
+        compare_local, check_vma=check_vma, **compare_kwargs
     )
   except TypeError:
     compare_mapped = jax.shard_map(
-        compare_local, check_rep=False, **compare_kwargs
+        compare_local, check_rep=check_vma, **compare_kwargs
     )
 
   signature_sharding = jax.sharding.NamedSharding(
@@ -1002,6 +1128,12 @@ def _build_reducer_programs(
           fingerprints, axis_name=dp_axis, perm=permutation
       )
       matches = jnp.all(fingerprints == peer_fingerprints, axis=1)
+      if check_vma:
+        for axis_name in mesh.axis_names:
+          if axis_name != dp_axis:
+            matches = (
+                jax.lax.pmin(matches.astype(jnp.int32), axis_name) != 0
+            )
       return jnp.reshape(matches, (1, matches.shape[0]))
 
     compare_fingerprint_kwargs = {
@@ -1012,13 +1144,13 @@ def _build_reducer_programs(
     try:
       compare_fingerprint_mapped = jax.shard_map(
           compare_fingerprint_local,
-          check_vma=False,
+          check_vma=check_vma,
           **compare_fingerprint_kwargs,
       )
     except TypeError:
       compare_fingerprint_mapped = jax.shard_map(
           compare_fingerprint_local,
-          check_rep=False,
+          check_rep=check_vma,
           **compare_fingerprint_kwargs,
       )
     compare_fingerprint = jax.jit(compare_fingerprint_mapped)
@@ -1051,6 +1183,7 @@ def _reducer_programs_for(
     dp_size: int,
     dp_axis: str,
     reduce_mode: str,
+    check_vma: bool,
     compare_mode: str,
     distinct_schedule: str,
     finite_fetch: str,
@@ -1063,6 +1196,7 @@ def _reducer_programs_for(
         dp_size=dp_size,
         dp_axis=dp_axis,
         reduce_mode=reduce_mode,
+        check_vma=check_vma,
         compare_mode=compare_mode,
         distinct_schedule=distinct_schedule,
         finite_fetch=finite_fetch,
@@ -1089,6 +1223,7 @@ def _reducer_programs_for(
       dp_size=dp_size,
       dp_axis=dp_axis,
       reduce_mode=reduce_mode,
+      check_vma=check_vma,
       compare_mode=compare_mode,
       distinct_schedule=distinct_schedule,
   )
@@ -1117,6 +1252,7 @@ class FixedDPRankGradientReducer:
       dp_size: int,
       dp_axis: str = 'dp',
       require_distinct_fingerprints: bool = True,
+      check_vma: bool | None = None,
   ):
     _validate_tree_size(dp_size)
     leaves = jax.tree.leaves(template)
@@ -1155,7 +1291,15 @@ class FixedDPRankGradientReducer:
     self._dp_size = dp_size
     self._dp_axis = dp_axis
     self._require_distinct = require_distinct_fingerprints
+    # Reduce-once is the first production admission that requires the
+    # reducer's own shard_maps to participate in checked-VMA.  Keep the
+    # flag-off program identity unchanged; callers may override this only in
+    # structural tests that compare the two implementations directly.
+    self._check_vma = (
+        dp_reduce_once_mode() if check_vma is None else bool(check_vma)
+    )
     reduce_mode = dp_collective_reduce_mode()
+    self._reduce_mode = reduce_mode
     # P70.4 receipt-lightening wiring. Every mode defaults to the legacy
     # behavior; with all three flags unset the bundle below only records
     # the legacy mode names and never builds a new program.
@@ -1170,6 +1314,7 @@ class FixedDPRankGradientReducer:
         dp_size=dp_size,
         dp_axis=dp_axis,
         reduce_mode=reduce_mode,
+        check_vma=self._check_vma,
         compare_mode=self._compare_mode,
         distinct_schedule=self._distinct_schedule,
         finite_fetch=self._finite_fetch,
@@ -1474,6 +1619,15 @@ class FixedDPRankGradientReducer:
           else 'sync'
       )
       report['pending_finite_receipts'] = len(self._pending_finite_receipts)
+    if self._check_vma:
+      report['shard_map_check_vma'] = True
+      report['reduction_collectives'] = (
+          1
+          if self._reduce_mode == '1'
+          else fixed_dp_vma_collective_count(self._dp_size)
+          if self._reduce_mode == ''
+          else 2
+      )
     self._group_index += 1
     return reduced, report
 

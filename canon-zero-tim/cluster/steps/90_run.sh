@@ -1675,10 +1675,18 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --output "$classification" || exit 1
   elif [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
     classification="$CANON_STATE/p44_deepswe_${CANON_P44_TOPOLOGY}_${CANON_P34_RUN_STAGE}.classification.json"
+    p44_classifier_arm_args=()
+    if [ -n "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" ]; then
+      p44_classifier_arm_args=(
+        --system-optimization-arm
+        "$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+      )
+    fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tests/p44_deepswe_qwen4b_parity/classify_run.py" \
         --topology "$CANON_P44_TOPOLOGY" \
         --stage "$CANON_P34_RUN_STAGE" \
+        "${p44_classifier_arm_args[@]}" \
         --run-log "$LOG" \
         --debug-dir "$CANON_P44_DEBUG_DIR" \
         --weight-report "$CANON_P34_WEIGHT_REPORT" \
@@ -1686,6 +1694,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --update-report "$CANON_UPDATE_REPORT" \
         --alignment-report "$CANON_ALIGN_REPORT" \
         --output "$classification" || exit 1
+    unset p44_classifier_arm_args
   elif [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
     classification="$CANON_STATE/p43_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

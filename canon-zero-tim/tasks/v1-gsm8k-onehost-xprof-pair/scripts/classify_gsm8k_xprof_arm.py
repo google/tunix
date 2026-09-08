@@ -40,12 +40,14 @@ _GEOMETRIES = {
     "dp2-tp2": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 32},
     "dp2-tp2-long": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 8},
     "dp2-tp2-long8k": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 8},
+    "dp2-tp2-p45": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 8},
 }
 # The one-update capture of the long geometry carries ~10x the chunk
 # passes of the short ones, so its size caps are its own.
 _SIZE_CAPS = {
     "dp2-tp2-long": (3_000_000_000, 4_000_000_000),
     "dp2-tp2-long8k": (6_000_000_000, 8_000_000_000),
+    "dp2-tp2-p45": (4_000_000_000, 5_000_000_000),
 }
 _DEFAULT_GEOMETRY = "dp4-tp1"
 # Every committed update emits one pre-alignment verdict plus one per
@@ -472,7 +474,9 @@ def classify(
     ):
       reasons.append(f"trace_census_rc={trace_census_rc}")
   if require_p74_gap:
-    if arm != "zero-hp" or geometry not in ("dp2-tp2", "dp2-tp2-long", "dp2-tp2-long8k"):
+    if arm != "zero-hp" or geometry not in (
+        "dp2-tp2", "dp2-tp2-long", "dp2-tp2-long8k", "dp2-tp2-p45"
+    ):
       reasons.append("p74_gap_requirement_is_zero_hp_dp2_tp2_only")
     if p74_gap_census_rc != 0 or _P74_MARKER not in p74_gap_text:
       reasons.append(f"p74_gap_census_rc={p74_gap_census_rc}")

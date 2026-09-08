@@ -147,6 +147,7 @@ def render_three(
     m15_run_id: str,
     campaign_root: str,
     base_path: Path,
+    p45_length_sort: bool = False,
 ) -> tuple[Path, ...]:
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
@@ -210,6 +211,8 @@ def render_three(
       _set_env(document, _optimization_additions(label))
     else:
       _require_env(document, _optimization_additions(label))
+    if label == "p45" and p45_length_sort:
+      _set_env(document, {"CANON_P32_LENGTH_SORT": "1"})
     _write_yaml(path, document)
 
   expected_profiles = {
@@ -229,6 +232,7 @@ def render_three(
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
+        "CANON_DP_REDUCE_ONCE": "1",
         **_JAX_CACHE_ENV,
     }
     if label == "gsm8k":
@@ -265,6 +269,11 @@ def render_three(
     }
     if wrong:
       raise ValueError(f"{label} rendered V1 contract drifted: {wrong}")
+    if label == "p45" and p45_length_sort:
+      if env.get("CANON_P32_LENGTH_SORT") != "1":
+        raise ValueError("P45 length-sort treatment was not rendered exactly once")
+    elif "CANON_P32_LENGTH_SORT" in env:
+      raise ValueError(f"{label} must keep the length-sort selector absent")
     receipts.append({
         "recipe": label,
         "path": str(path),
@@ -278,10 +287,11 @@ def render_three(
         flush=True,
     )
   index = output_dir / "manifest-index.json"
+  index_receipt = {"schema": "v1-hp-three-full-v1", "manifests": receipts}
+  if p45_length_sort:
+    index_receipt["p45_length_sort"] = True
   index.write_text(
-      json.dumps({"schema": "v1-hp-three-full-v1", "manifests": receipts}, indent=2)
-      + "\n",
-      encoding="utf-8",
+      json.dumps(index_receipt, indent=2) + "\n", encoding="utf-8"
   )
   print(
       f"V1_HP_THREE_FULL_RENDER_PASS manifests=3 output={output_dir}",
@@ -335,6 +345,7 @@ def render_gsm8k_full(
       "CANON_DP_FINITE_FETCH": "batched-commit",
       "CANON_P71_SCAN": "fwd",
       "CANON_P32_KEEP_TAPE": "stream",
+      "CANON_DP_REDUCE_ONCE": "1",
       **_JAX_CACHE_ENV,
   }
   wrong = {
@@ -385,6 +396,11 @@ def main() -> int:
   parser.add_argument("--m15-run-id", required=True)
   parser.add_argument("--campaign-root", required=True)
   parser.add_argument(
+      "--p45-length-sort",
+      action="store_true",
+      help="render only P45 with length-sorted reverse groups",
+  )
+  parser.add_argument(
       "--base", type=Path, default=_CLUSTER_DIR / "jobset-64chip.yaml"
   )
   args = parser.parse_args()
@@ -396,6 +412,7 @@ def main() -> int:
       m15_run_id=args.m15_run_id,
       campaign_root=args.campaign_root,
       base_path=args.base,
+      p45_length_sort=args.p45_length_sort,
   )
   return 0
 

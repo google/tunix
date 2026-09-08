@@ -57,7 +57,13 @@ def _env(document: dict) -> dict[str, str]:
 
 class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
 
-  def _render(self, output: Path, *, m15_tito_exact: bool = False):
+  def _render(
+      self,
+      output: Path,
+      *,
+      m15_tito_exact: bool = False,
+      p45_length_sort: bool = False,
+  ):
     return renderer.render_two(
         source_commit="b" * 40,
         output_dir=output,
@@ -66,6 +72,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         campaign_root="v1p67-a",
         base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
         m15_tito_exact=m15_tito_exact,
+        p45_length_sort=p45_length_sort,
     )
 
   def test_renders_exactly_two_scoped_full_recipes_without_topology_drift(self):
@@ -93,6 +100,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         )
         self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
         self.assertEqual(values["CANON_P71_SCAN"], "fwd")
+        self.assertEqual(values["CANON_DP_REDUCE_ONCE"], "1")
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
         self.assertEqual(values["CANON_P33_ENABLE_EVAL"], "0")
         self.assertEqual(values["CANON_P33_DISABLE_EVAL"], "1")
@@ -120,10 +128,12 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
       self.assertEqual(p45["CANON_P57_DATA_SPLIT"], "")
       self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
+      self.assertNotIn("CANON_P32_LENGTH_SORT", p45)
       self.assertEqual(m15["CANON_P57_WORKLOAD_CANDIDATE"], "m15")
       self.assertEqual(m15["CANON_P57_DATA_SPLIT"], "main")
       self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15)
+      self.assertNotIn("CANON_P32_LENGTH_SORT", m15)
       index = (root / "manifest-index.json").read_text(encoding="utf-8")
       self.assertIn('"schema": "v1-p67-frozenlake-two-full-v1"', index)
       self.assertIn('"m15_tito_exact": false', index)
@@ -172,6 +182,61 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
       snapshot = (state / "env.sh").read_text(encoding="utf-8")
       self.assertIn("export CANON_M15_TOKEN_CONTINUITY=exact", snapshot)
 
+  def test_explicit_length_sort_changes_only_p45(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      control_paths = self._render(root / "control")
+      treatment_paths = self._render(
+          root / "treatment", p45_length_sort=True
+      )
+      control_envs = [
+          _env(yaml.safe_load(path.read_text(encoding="utf-8")))
+          for path in control_paths
+      ]
+      treatment_envs = [
+          _env(yaml.safe_load(path.read_text(encoding="utf-8")))
+          for path in treatment_paths
+      ]
+      p45 = treatment_envs[0]
+      self.assertEqual(p45["CANON_P32_LENGTH_SORT"], "1")
+      p45_without_selector = dict(p45)
+      p45_without_selector.pop("CANON_P32_LENGTH_SORT")
+      self.assertEqual(p45_without_selector, control_envs[0])
+      self.assertEqual(treatment_envs[1], control_envs[1])
+      index = (root / "treatment/manifest-index.json").read_text(
+          encoding="utf-8"
+      )
+      self.assertIn('"p45_length_sort": true', index)
+      control_index = (root / "control/manifest-index.json").read_text(
+          encoding="utf-8"
+      )
+      self.assertNotIn('"p45_length_sort"', control_index)
+
+      state = root / "state-p45-length-sort"
+      state.mkdir()
+      completed = subprocess.run(
+          ["bash", str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh")],
+          cwd=_REPO,
+          env={
+              **os.environ,
+              **p45,
+              "CANON_PKG": str(_REPO / "canon-zero-tim"),
+              "CANON_STATE": str(state),
+              "JOBSET_RESTART_ATTEMPT": "0",
+              "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+          },
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertEqual(
+          completed.returncode,
+          0,
+          msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+      )
+      snapshot = (state / "env.sh").read_text(encoding="utf-8")
+      self.assertIn("export CANON_P32_LENGTH_SORT=1", snapshot)
+
   def test_both_manifests_pass_real_env_resolution(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp)
@@ -213,6 +278,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         )
         self.assertIn("export CANON_DP_FINITE_FETCH=batched-commit", snapshot)
         self.assertIn("export CANON_P71_SCAN=fwd", snapshot)
+        self.assertIn("export CANON_DP_REDUCE_ONCE=1", snapshot)
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", snapshot)
         self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", snapshot)
         self.assertNotIn(
@@ -266,7 +332,9 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
     self.assertIn("V1_P67_FROZENLAKE_WAVE_READY", script)
     self.assertIn("launch=not-executed", script)
     self.assertIn("[--m15-tito-exact]", script)
+    self.assertIn("[--p45-length-sort]", script)
     self.assertIn("M15_TITO_MODE=off", script)
+    self.assertIn("P45_LENGTH_SORT_MODE=off", script)
     self.assertEqual(script.count('"kubectl apply -f '), 2)
     self.assertFalse(
         any(line.strip().startswith("kubectl apply") for line in script.splitlines())

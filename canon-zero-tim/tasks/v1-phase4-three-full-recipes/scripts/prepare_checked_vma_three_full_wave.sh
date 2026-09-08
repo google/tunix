@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -ne 6 ]]; then
-  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <gsm8k-run-id> <p45-run-id> <m15-run-id>" >&2
+if [[ "$#" -lt 6 || "$#" -gt 7 ]]; then
+  echo "usage: $0 <approved-40-sha> <output-dir> <campaign-root> <gsm8k-run-id> <p45-run-id> <m15-run-id> [--p45-length-sort]" >&2
   exit 2
 fi
 
@@ -12,6 +12,16 @@ CAMPAIGN_ROOT="$3"
 GSM8K_RUN_ID="$4"
 P45_RUN_ID="$5"
 M15_RUN_ID="$6"
+P45_LENGTH_SORT_ARGS=()
+P45_LENGTH_SORT_MODE=off
+if [[ "$#" -eq 7 ]]; then
+  if [[ "$7" != "--p45-length-sort" ]]; then
+    echo "optional seventh argument must be --p45-length-sort" >&2
+    exit 2
+  fi
+  P45_LENGTH_SORT_ARGS=(--p45-length-sort)
+  P45_LENGTH_SORT_MODE=on
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -52,7 +62,8 @@ python3 "$RENDERER" \
   --campaign-root "$CAMPAIGN_ROOT" \
   --gsm8k-run-id "$GSM8K_RUN_ID" \
   --p45-run-id "$P45_RUN_ID" \
-  --m15-run-id "$M15_RUN_ID"
+  --m15-run-id "$M15_RUN_ID" \
+  "${P45_LENGTH_SORT_ARGS[@]}"
 
 INDEX="$OUTPUT_DIR/manifest-index.json"
 if [[ ! -s "$INDEX" ]]; then
@@ -62,7 +73,7 @@ fi
 
 sha256sum "$INDEX"
 printf '%s\n' \
-  "V1_HP_CHECKED_VMA_WAVE_READY manifests=3 source=$SOURCE_SHA output=$OUTPUT_DIR launch=not-executed" \
+  "V1_HP_CHECKED_VMA_WAVE_READY manifests=3 source=$SOURCE_SHA output=$OUTPUT_DIR p45_length_sort=$P45_LENGTH_SORT_MODE launch=not-executed" \
   "Review manifest-index.json, verify the pushed SHA by read-back, and obtain launch approval." \
   "kubectl apply -f $OUTPUT_DIR/gsm8k/jobset-v1-hp-gsm8k-full.yaml" \
   "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml" \

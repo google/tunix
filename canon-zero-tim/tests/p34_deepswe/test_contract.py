@@ -45,7 +45,7 @@ def _devices(cross_host: bool = False):
 
 class DeepSWEContractTest(unittest.TestCase):
 
-  def test_signed_workload_and_rank_groups(self):
+  def test_signed_workload_geometry(self):
     workload = deepswe_contract.P34_WORKLOAD
     workload.validate()
     self.assertEqual(workload.name, workload.contract_name)
@@ -60,10 +60,6 @@ class DeepSWEContractTest(unittest.TestCase):
         workload.max_num_batched_tokens_per_dp * workload.dp_size,
         workload.global_m,
     )
-    self.assertEqual(workload.rank_major_rows(), tuple(
-        tuple(group * 16 + rank for rank in range(16))
-        for group in range(4)
-    ))
 
   def test_every_deepswe_contract_exposes_the_shared_adapter_identity(self):
     workloads = (

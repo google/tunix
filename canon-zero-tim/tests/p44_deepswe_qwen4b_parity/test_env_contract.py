@@ -28,7 +28,15 @@ SPEC.loader.exec_module(renderer)
 
 class P44EnvironmentContractTest(unittest.TestCase):
 
-  def _run(self, topology: str, stage: str = "three-update", override: str = ""):
+  def _run(
+      self,
+      topology: str,
+      stage: str = "three-update",
+      override: str = "",
+      *,
+      system_optimization_arm: str | None = None,
+      raw_overrides: dict[str, str] | None = None,
+  ):
     with tempfile.TemporaryDirectory() as root_text:
       root = Path(root_text)
       document = renderer.render(
@@ -44,6 +52,7 @@ class P44EnvironmentContractTest(unittest.TestCase):
           model_pvc="model-pvc",
           whitelist=renderer.p34.P34_CLEAN_WHITELIST,
           whitelist_sha256=renderer.p34.P34_CLEAN_WHITELIST_SHA256,
+          system_optimization_arm=system_optimization_arm,
       )
       environ = os.environ.copy()
       environ.update(renderer.p34._env(document))
@@ -53,7 +62,11 @@ class P44EnvironmentContractTest(unittest.TestCase):
           "CANON_PKG": str(PKG),
           "CANON_STATE": str(state),
           "INJECTED_WANDB_API_KEY": "test-only",
+          "JAX_PLATFORMS": "cpu",
+          "PYTHONPATH": str(ROOT),
       })
+      if raw_overrides:
+        environ.update(raw_overrides)
       if override:
         wrapper = root / "profile.env"
         wrapper.write_text(
@@ -67,8 +80,16 @@ class P44EnvironmentContractTest(unittest.TestCase):
             + "\n"
         )
         environ["CANON_PROFILE_FILE"] = str(wrapper)
+      command = (
+          f'"{PKG / "cluster/steps/00_env.sh"}"'
+          ' && source "$CANON_STATE/env.sh"'
+          f' && "{sys.executable}" -c '
+          "'import os; from tunix.rl import deepswe_contract; "
+          "deepswe_contract.validate_environment(os.environ); "
+          "print(\"[P44.PYTHON_CONTRACT] PASS\")'"
+      )
       return subprocess.run(
-          ["bash", str(PKG / "cluster/steps/00_env.sh")],
+          ["bash", "-c", command],
           cwd=ROOT,
           env=environ,
           text=True,
@@ -99,6 +120,54 @@ class P44EnvironmentContractTest(unittest.TestCase):
     result = self._run("64", override="export CANON_P43_DEEPSWE_DEBUG=1")
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("cannot overlap", result.stdout)
+
+  def test_strict_system_optimization_arms_pass_both_topologies(self):
+    for topology in ("64", "128"):
+      for arm in ("control", "treatment"):
+        with self.subTest(topology=topology, arm=arm):
+          result = self._run(
+              topology, system_optimization_arm=arm
+          )
+          self.assertEqual(result.returncode, 0, result.stdout)
+          self.assertIn(
+              f"[P44.V2] system optimization arm={arm} "
+              f"topology={topology} strict=1",
+              result.stdout,
+          )
+          self.assertIn("[P44.PYTHON_CONTRACT] PASS", result.stdout)
+
+  def test_strict_arms_fail_closed_on_cross_arm_and_policy_drift(self):
+    cases = (
+        (
+            "control",
+            {"CANON_DP_REDUCE_ONCE": "0"},
+            "control arm must keep stream and reduce-once absent",
+        ),
+        (
+            "treatment",
+            {"CANON_DP_REDUCE_ONCE": "0"},
+            "treatment arm requires stream and reduce-once",
+        ),
+        (
+            "control",
+            {"CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1"},
+            "common system-optimization tuple drifted",
+        ),
+        (
+            "control",
+            {"CANON_P59_CHECKED_VMA": "0"},
+            "common system-optimization tuple drifted",
+        ),
+    )
+    for arm, raw_overrides, message in cases:
+      with self.subTest(arm=arm, drift=raw_overrides):
+        result = self._run(
+            "64",
+            system_optimization_arm=arm,
+            raw_overrides=raw_overrides,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(message, result.stdout)
 
 
 if __name__ == "__main__":

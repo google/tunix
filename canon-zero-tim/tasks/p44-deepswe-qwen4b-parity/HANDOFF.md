@@ -17,6 +17,14 @@ This is a fast systems-debug lane. It does not replace or admit the Qwen3-32B
 production workload and does not claim bitwise, performance, quality, or
 zero-TIM equivalence between allocations.
 
+The repository now also contains a default-absent v2 Phase 2 strict
+system-optimization carrier for the same two topologies.  Its explicit
+`control|treatment` arms are three-update only; treatment differs only by
+streamed tape plus reduce-once.  Host and pinned-image gates are green, but the
+carrier is local/unpublished and neither topology has run its strict target
+pair.  It therefore admits no DeepSWE production default, anchor, HBM, or
+performance claim.  See runbook section 3a before attempting that pair.
+
 ## Publication contract
 
 The 64/128 topology migration is published by
@@ -90,6 +98,10 @@ Do not launch a local development worktree or an unverified symbolic branch.
   gate covers unfinished-request abort plus reset/model/reward/cleanup
   deadlines. No target has executed these changes.
 - Remote 64-device stages: NOT RUN.
+- v2 strict system-optimization control/treatment: NOT RUN on either 64 or
+  128 devices.  The offline carrier does not replace per-arm target approval,
+  published-source read-back, strict A=B=C, gradient anchors, HBM, or path
+  fingerprints.
 - Remote 256-device attempt `p44r02`: FAILED before mesh construction because
   the old splitter treated degenerate `process_index=0` as host identity. It
   nevertheless proved 256 Pathways devices, pinned R2E provisioning, Qwen3-4B

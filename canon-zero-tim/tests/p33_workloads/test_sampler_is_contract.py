@@ -14,6 +14,7 @@ _tree = ast.parse(_SOURCE.read_text(), filename=str(_SOURCE))
 _names = {
     "_canonical_alignment_sampler_is_valid",
     "_m15_apc_target_alignment_enabled",
+    "_v2_frozenlake_onehost_alignment_enabled",
     "_p57_tim_purity_enabled",
     "_p57_tim_is_enabled",
     "_validate_p57_tim_purity",
@@ -36,6 +37,9 @@ exec(
 )
 _sampler_is_valid = _namespace["_canonical_alignment_sampler_is_valid"]
 _m15_apc_target_enabled = _namespace["_m15_apc_target_alignment_enabled"]
+_v2_fl_onehost_enabled = _namespace[
+    "_v2_frozenlake_onehost_alignment_enabled"
+]
 _p57_purity_enabled = _namespace["_p57_tim_purity_enabled"]
 _p57_is_enabled = _namespace["_p57_tim_is_enabled"]
 _validate_p57_purity = _namespace["_validate_p57_tim_purity"]
@@ -101,6 +105,61 @@ class SamplerIsContractTest(unittest.TestCase):
     self.assertFalse(
         _sampler_is_valid(None, "frozenlake-dp8-tp8")
     )
+
+  def test_v2_frozenlake_onehost_no_is_requires_exact_identity(self):
+    good = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+        ),
+        "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp2-tp2",
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_DP_SIZE": "2",
+        "CANON_TP_SIZE": "2",
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_WANDB_ONLINE_REQUIRED": "0",
+        "WANDB_MODE": "disabled",
+    }
+    for workload in (
+        "frozenlake-p45-onehost-dp2-tp2",
+        "frozenlake-m15-onehost-dp2-tp2",
+    ):
+      env = {**good, "CANON_P32_WORKLOAD": workload}
+      self.assertTrue(_v2_fl_onehost_enabled(env))
+      self.assertTrue(
+          _sampler_is_valid(
+              None,
+              workload,
+              v2_frozenlake_onehost=_v2_fl_onehost_enabled(env),
+          )
+      )
+    for key, replacement in (
+        ("CANON_PROFILE_FILE", "cluster/profiles/not-v2.env"),
+        ("CANON_P32_WORKLOAD", "frozenlake"),
+        ("CANON_P33_RUN_STAGE", "one-update"),
+        ("CANON_P33_NO_COMMIT", "0"),
+        ("CANON_P32_TRAIN_ADMITTED", "0"),
+        ("CANON_P32_DP_REDUCTION_ADMITTED", "0"),
+        ("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "0"),
+        ("CANON_DP_SIZE", "4"),
+        ("CANON_TP_SIZE", "1"),
+        ("CANON_P66_P59_CHECK_VMA", "0"),
+        ("CANON_WANDB_ONLINE_REQUIRED", "1"),
+        ("WANDB_MODE", "online"),
+    ):
+      with self.subTest(key=key):
+        env = {**good, key: replacement}
+        self.assertFalse(_v2_fl_onehost_enabled(env))
+        self.assertFalse(
+            _sampler_is_valid(
+                None,
+                env["CANON_P32_WORKLOAD"],
+                v2_frozenlake_onehost=_v2_fl_onehost_enabled(env),
+            )
+        )
 
   def test_p57_purity_scope_requires_exact_profile_and_workload(self):
     good = {

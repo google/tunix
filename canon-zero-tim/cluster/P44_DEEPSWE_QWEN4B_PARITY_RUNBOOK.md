@@ -191,6 +191,47 @@ Applying is the explicit launch boundary:
 kubectl apply -f "$OUTPUT"
 ```
 
+### 3a. v2 strict system-optimization admission pair
+
+The historical command above remains warning-only when no arm is supplied.
+For v2 Phase 2 admission, run a matched pair on one selected topology with two
+fresh run IDs.  This lane is admitted only at `three-update`:
+
+```bash
+SYSTEM_OPTIMIZATION_ARM=control  # then treatment in a fresh JobSet
+
+python3 canon-zero-tim/cluster/render_p44_deepswe_parity.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output "$OUTPUT" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$RUN_ID" \
+  --stage three-update \
+  --topology "$TOPOLOGY" \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --whitelist "$WHITELIST" \
+  --whitelist-sha256 "$WHITELIST_SHA256" \
+  --system-optimization-arm "$SYSTEM_OPTIMIZATION_ARM"
+sha256sum "$OUTPUT"
+kubectl apply --server-side --dry-run=server -f "$OUTPUT"
+```
+
+Do not hand-edit YAML to construct the pair.  Both arms use the isolated
+`qwen3-4b-dp-parity-deepswe-v2-admission.env` profile and the same fixed head,
+rank-parallel checked-VMA, P59-only scope, first-update gate, P71 forward scan,
+and host-receipt selectors.  `control` requires both `CANON_P32_KEEP_TAPE` and
+`CANON_DP_REDUCE_ONCE` to be absent.  `treatment` is the only arm that sets
+`CANON_P32_KEEP_TAPE=stream` and `CANON_DP_REDUCE_ONCE=1`.  Collective reduce
+and length sort must be absent in both arms.
+
+This strict carrier is local-only until its exact source has been pushed and
+read back from `yuxzhang/canon-zero-tim`.  Do not launch an unpublished SHA.
+Each control or treatment application is a separate target-scale launch and
+requires its own user approval after the normal launch preflight.
+
 Use a fresh `RUN_ID` and output file for every attempt and stage. Expected
 names and evidence counts are:
 
@@ -260,6 +301,27 @@ one-update, `3` for three-update):
 ```text
 [P44.LOGPS_BATCH] configured_prompts=4 generations=4 execution_trajectories=16 observed_trajectories=16
 ```
+
+For a v2 strict arm, also require:
+
+```text
+[P44.V2] system optimization arm=<control|treatment> topology=<64|128> strict=1
+[P59.CHECKED_VMA] enabled=1
+[V1.FIRST_UPDATE] ...
+```
+
+The P44.V2 line appears once, checked-VMA appears once per update (three), and
+the first-update gate emits exactly two receipts.  The classification must be
+`PASS` with `claim_level=strict-zero-tim-system-optimization-arm`; every pre
+and post alignment boundary must be valid, finite, and have both
+`differing_bytes=0` and `differing_elements=0`.  It also requires exact w/r/wr,
+finite active gradients, a positive finite commit norm, no clip/TIS hits, and
+the expected reduction receipts.  Control has one fixed-tree transaction per
+local trajectory with zero staged accumulations; treatment has one reduce-once
+transaction and stages every local trajectory.  Compare the two accepted run
+directories only after both per-arm classifiers pass; record gradient anchors,
+HBM snapshots, path fingerprints, and update seconds.  A numerical red makes
+the performance result failure evidence, not an optimization result.
 
 Require at least one Qwen3-4B SwiGLU runtime line before accepting any stage:
 

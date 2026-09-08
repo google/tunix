@@ -42,6 +42,8 @@ esac
 # that measurement -- the preflight fails closed with both lists printed if
 # the first real run disagrees.
 geometry="${V1_GSM8K_XPROF_GEOMETRY:-dp4-tp1}"
+work_receipt=prompts8_generations8_response256_concurrency1
+xprof_budget_receipt=soft:1200000000,hard:1500000000
 case "$geometry" in
   dp4-tp1)
     topology=DP4xTP1
@@ -79,11 +81,73 @@ case "$geometry" in
     serial_mesh_bridge=0
     label="dp2tp2long8k-${label}"
     ;;
+  dp2-tp2-p45)
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-p45-shape-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    label="dp2tp2p45-${label}"
+    work_receipt=prompts4_generations4_prompt4096_response2048_concurrency1
+    xprof_budget_receipt=soft:4000000000,hard:5000000000
+    ;;
   *)
     echo "[V1.GSM8K.XPROF] unsupported V1_GSM8K_XPROF_GEOMETRY: $geometry" >&2
     exit 2
     ;;
 esac
+
+# Phase-0 numerical admission reuses the standard warm three-update XProf
+# carrier.  This outer-only selector adds a complete update-zero gradient
+# capture; it is deliberately not a CANON optimization flag and cannot arm a
+# native, non-DP2, or non-three-update run.
+v2_p0_capture_full_tree="${V2_P0_CAPTURE_FULL_TREE:-0}"
+case "$v2_p0_capture_full_tree" in
+  0) ;;
+  1)
+    if [ "$arm" != zero-hp ] || [ "$geometry" != dp2-tp2 ] || \
+       [ "$run_stage" != three-update ]; then
+      echo "[V2.P0] full-tree capture requires zero-hp dp2-tp2 three-update" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "[V2.P0] V2_P0_CAPTURE_FULL_TREE must be exactly 0 or 1" >&2
+    exit 2
+    ;;
+esac
+v2_p0_negative_control="${V2_P0_NEGATIVE_CONTROL:-}"
+case "$v2_p0_negative_control" in
+  "") ;;
+  length-sort-no-inverse)
+    if [ "${CANON_P32_LENGTH_SORT:-0}" != 1 ]; then
+      echo "[V2.P0] length-sort-no-inverse requires CANON_P32_LENGTH_SORT=1" >&2
+      exit 2
+    fi
+    ;;
+  reduce-once-reassociate-tail)
+    if [ "${CANON_DP_REDUCE_ONCE:-0}" != 1 ]; then
+      echo "[V2.P0] reduce-once-reassociate-tail requires CANON_DP_REDUCE_ONCE=1" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "[V2.P0] unsupported V2_P0_NEGATIVE_CONTROL: $v2_p0_negative_control" >&2
+    exit 2
+    ;;
+esac
+if [ -n "$v2_p0_negative_control" ] && \
+   { [ "$arm" != zero-hp ] || [ "$geometry" != dp2-tp2 ] || \
+     [ "$run_stage" != three-update ] || \
+     [ "$v2_p0_capture_full_tree" != 0 ]; }; then
+  echo "[V2.P0] negative controls require zero-hp dp2-tp2 three-update without full-tree capture" >&2
+  exit 2
+fi
+v2_p0_performance_eligible=1
+if [ "$v2_p0_capture_full_tree" = 1 ] || \
+   [ -n "$v2_p0_negative_control" ]; then
+  v2_p0_performance_eligible=0
+fi
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -128,6 +192,7 @@ container="v1_gsm8k_xprof_${arm//-/_}_${label}"
 runtime_files=(
   "$repo/tunix/rl/agentic/agentic_rl_learner.py"
   "$repo/tunix/rl/canonical_qwen3_adapter.py"
+  "$repo/tunix/rl/dp_training.py"
   "$repo/tunix/rl/gsm8k_xprof.py"
   "$repo/examples/math_gsm8k/qwen3_grpo_demo.py"
   "$repo/canon-zero-tim/cluster/profiles/$zero_profile"
@@ -143,6 +208,7 @@ runtime_files=(
   "$script_dir/census_gsm8k_p74_gap.py"
   "$script_dir/run_onehost_xprof_backward_zero.sh"
   "$script_dir/run_onehost_xprof_backward_p74_dp2tp2.sh"
+  "$repo/canon-zero-tim/tests/v1_gsm8k_xprof_pair/compare_dp2_reduce_once.py"
 )
 runtime_manifest_sha256="$(sha256sum "${runtime_files[@]}" | sha256sum | awk '{print $1}')"
 
@@ -211,8 +277,10 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
 {
   echo "[V1.GSM8K.XPROF] source=$source_sha diff_sha256=$source_diff_sha256 runtime_manifest_sha256=$runtime_manifest_sha256 image=$image image_id=$image_id model_snapshot=$hf_snapshot_sha"
   echo "[V1.GSM8K.XPROF] arm=$arm label=$label hostname=$expected_hostname topology=$topology"
-  echo "[V1.GSM8K.XPROF] work=prompts8_generations8_response256_concurrency1 stage=$run_stage steps=$max_steps capture=update:2->3"
-  echo "[V1.GSM8K.XPROF] tracers=host:1,python:0,tpu:TRACE_ONLY_XLA labels=1 xprof_budget=soft:1200000000,hard:1500000000,basis:logical_regular_file_bytes"
+  echo "[V1.GSM8K.XPROF] work=$work_receipt stage=$run_stage steps=$max_steps capture=update:2->3"
+  echo "[V2.P0] full_tree_capture=$v2_p0_capture_full_tree transaction=update:0 performance_eligible=$v2_p0_performance_eligible"
+  echo "[V2.P0] negative_control=${v2_p0_negative_control:-off} expected_result=red_or_anchor_change"
+  echo "[V1.GSM8K.XPROF] tracers=host:1,python:0,tpu:TRACE_ONLY_XLA labels=1 xprof_budget=$xprof_budget_receipt,basis:logical_regular_file_bytes"
   echo "[V1.GSM8K.XPROF] treatment=$([ "$arm" = native ] && echo stock-vanilla || echo strict-zero-hp-v1)"
 } >"$driver"
 {
@@ -220,6 +288,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
   sha256sum \
     "$repo/tunix/rl/agentic/agentic_rl_learner.py" \
     "$repo/tunix/rl/canonical_qwen3_adapter.py" \
+    "$repo/tunix/rl/dp_training.py" \
     "$repo/tunix/rl/gsm8k_xprof.py" \
     "$repo/examples/math_gsm8k/qwen3_grpo_demo.py" \
     "$script_dir/run_onehost_gsm8k_xprof_inner.sh" "$0" \
@@ -307,6 +376,16 @@ if [ "$arm" = zero-hp ]; then
     -e CANON_PRE_ALIGN_REPORT="$pre" -e CANON_ALIGN_REPORT="$align"
     -e CANON_UPDATE_REPORT="$update"
   )
+  if [ "$v2_p0_capture_full_tree" = 1 ]; then
+    docker_args+=(
+      -e CANON_P61_BACKWARD_NUMERICAL_DIR="$state/p61_numerical"
+    )
+  fi
+  if [ -n "$v2_p0_negative_control" ]; then
+    docker_args+=(
+      -e V2_P0_NEGATIVE_CONTROL="$v2_p0_negative_control"
+    )
+  fi
   # Checked-VMA geometries need the p66 RPA kernel shim: its gated
   # manual_axis_type annotation is what lets the pallas out_shape trace
   # under check_vma=True.  The dp4 arm keeps its historical mount set
@@ -403,7 +482,7 @@ if [ "$docker_rc" -eq 0 ]; then
       --geometry "$geometry" \
       >"$trace_census" 2>&1
     trace_census_rc=$?
-    if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ]; then
+    if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ] || [ "$geometry" = dp2-tp2-p45 ]; then
       python3 "$script_dir/census_gsm8k_p74_gap.py" \
         --run-root "$root" --output "$p74_gap_receipt" --geometry "$geometry" \
         >"$p74_gap_census" 2>&1
@@ -432,7 +511,7 @@ if [ "$arm" = zero-hp ]; then
     --require-hierarchy --hierarchy-census-rc "$hierarchy_census_rc"
     --trace-census-rc "$trace_census_rc"
   )
-  if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ]; then
+  if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ] || [ "$geometry" = dp2-tp2-p45 ]; then
     classifier_args+=(
       --require-p74-gap --p74-gap-census-rc "$p74_gap_census_rc"
     )
@@ -456,6 +535,11 @@ done < <(find "$xprof_dir" -type f -print0 | sort -z)
 while IFS= read -r -d '' path; do
   sha_inputs+=("$path")
 done < <(find "$perf_dir" -type f -name 'perfetto_trace_v2_*.pb' -print0 | sort -z)
+if [ "$v2_p0_capture_full_tree" = 1 ] && [ -d "$state/p61_numerical" ]; then
+  while IFS= read -r -d '' path; do
+    sha_inputs+=("$path")
+  done < <(find "$state/p61_numerical" -type f -print0 | sort -z)
+fi
 if ! gsm8k_xprof_choose_terminal \
     "$arm" "$root" "$docker_rc" "$classifier_rc"; then
   echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=select root=$root" >&2

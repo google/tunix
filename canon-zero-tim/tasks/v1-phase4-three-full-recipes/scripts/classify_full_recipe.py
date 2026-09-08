@@ -86,6 +86,7 @@ _ALIGN_RE = re.compile(
 )
 _FIRST_UPDATE_PREFIX = "[V1.FIRST_UPDATE] "
 _M15_TOKEN_PREFIX = "[CANON_M15_TOKEN_CONTINUITY] "
+_P32_LENGTH_SORT_PREFIX = "[P32.LENGTH_SORT] "
 
 
 def _require(condition: bool, reason: str, reasons: list[str]) -> None:
@@ -145,6 +146,70 @@ def _validate_m15_tito(
         reasons,
     )
   return receipts, exact_equal
+
+
+def _validate_p45_length_sort(
+    recipe: str,
+    env: dict[str, str],
+    text: str,
+    *,
+    expected_updates: int,
+    dp_size: int,
+    global_trajectories: int,
+    reasons: list[str],
+) -> tuple[bool, list[dict[str, str]]]:
+  """Validates the default-off P45-only length-sort treatment receipt."""
+  value = env.get("CANON_P32_LENGTH_SORT")
+  enabled = value == "1"
+  _require(
+      value in (None, "1"),
+      "resolved_env.CANON_P32_LENGTH_SORT_invalid",
+      reasons,
+  )
+  _require(
+      not enabled or recipe == "p45",
+      "resolved_env.CANON_P32_LENGTH_SORT_non_p45",
+      reasons,
+  )
+  receipt_lines = [
+      line.strip()
+      for line in text.splitlines()
+      if line.strip().startswith(_P32_LENGTH_SORT_PREFIX)
+  ]
+  receipts = [
+      dict(_FIELD_RE.findall(line.removeprefix(_P32_LENGTH_SORT_PREFIX)))
+      for line in receipt_lines
+  ]
+  expected_fields = {
+      "enabled": "1",
+      "rows": str(global_trajectories),
+      "dp": str(dp_size),
+      "groups": str(global_trajectories // dp_size),
+  }
+  valid_receipts = [
+      receipt
+      for receipt in receipts
+      if all(
+          receipt.get(name) == expected
+          for name, expected in expected_fields.items()
+      )
+      and re.fullmatch(r"[0-9a-f]{64}", receipt.get("permutation_sha256", ""))
+      and set(receipt) == set(expected_fields) | {"permutation_sha256"}
+  ]
+  if enabled and recipe == "p45":
+    _require(
+        len(receipts) == expected_updates,
+        f"p45_length_sort_receipts={len(receipts)} expected={expected_updates}",
+        reasons,
+    )
+    _require(
+        len(valid_receipts) == len(receipts),
+        "p45_length_sort_receipt_invalid",
+        reasons,
+    )
+  else:
+    _require(not receipts, "unexpected_p32_length_sort_receipt", reasons)
+  return enabled, valid_receipts
 
 
 def _sha256(path: Path) -> str:
@@ -394,6 +459,7 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
       "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
       "CANON_P59_CHECKED_VMA": "1",
       "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+      "CANON_DP_REDUCE_ONCE": "1",
       "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
       "CANON_CONTINUE_DECODE": "8",
       "CANON_FIXED_AR_GATHER": "1",
@@ -605,6 +671,15 @@ def classify(
   text = run_log.read_text(encoding="utf-8", errors="replace")
   token_receipts, exact_equal_token_receipts = _validate_m15_tito(
       recipe, env, text, reasons
+  )
+  length_sort_enabled, length_sort_receipts = _validate_p45_length_sort(
+      recipe,
+      env,
+      text,
+      expected_updates=expected_updates,
+      dp_size=dp_size,
+      global_trajectories=256,
+      reasons=reasons,
   )
   align_verdicts = [
       match.group(1)
@@ -1170,6 +1245,10 @@ def classify(
           "mode": env.get("CANON_M15_TOKEN_CONTINUITY"),
           "receipts": len(token_receipts),
           "exact_equal_receipts": len(exact_equal_token_receipts),
+      },
+      "p45_length_sort": {
+          "enabled": length_sort_enabled,
+          "receipts": len(length_sort_receipts),
       },
       "jax_persistent_cache": {
           "configuration": {

@@ -394,11 +394,17 @@ _M15_ONEHOST_TOKEN_CONTINUITY = (
     else False
 )
 if CANON_P57_WORKLOAD_CANDIDATE:
+  _frozenlake_onehost_m15_profile = (
+      os.getenv("CANON_P32_WORKLOAD", "")
+      == "frozenlake-m15-onehost-dp2-tp2"
+      and os.getenv("CANON_PROFILE_FILE", "")
+      == "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+  )
   if os.getenv("CANON_PROFILE_FILE", "") not in (
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
-  ) and not _M15_ONEHOST_TOKEN_CONTINUITY:
+  ) and not _M15_ONEHOST_TOKEN_CONTINUITY and not _frozenlake_onehost_m15_profile:
     raise ValueError("materialized P57 workloads require the P57 profile")
   p57_workload_spec = p57_workloads.candidate(
       CANON_P57_WORKLOAD_CANDIDATE
@@ -412,6 +418,7 @@ if CANON_P57_WORKLOAD_CANDIDATE:
     )
 else:
   p57_workload_spec = None
+  _frozenlake_onehost_m15_profile = False
 
 CANON_L3 = os.getenv("CANON_FROZENLAKE_L3", "") == "1"
 CANON_P27 = os.getenv("CANON_FROZENLAKE_P27", "") == "1"
@@ -643,17 +650,28 @@ ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
+frozenlake_onehost_proxy = False
 if CANON_P32_WORKLOAD:
   assert P32_WORKLOAD is not None
+  frozenlake_onehost_proxy = P32_WORKLOAD.frozenlake_four_chip_2x2_proxy
   # P57 uses one complete eight-row prompt group in every run kind.  In
   # particular, isolated evaluation retains trainer-side rescore, whose
   # caller-global row axis is sharded over DP8.  Keep this tied to the same
   # registry consumed by the renderer instead of maintaining a second
   # evaluation-only literal here.
   expected_generations = (
-      p57_workloads.GENERATIONS_PER_PROMPT if CANON_P57_RUN_KIND else 8
+      P32_WORKLOAD.num_generations
+      if frozenlake_onehost_proxy
+      else p57_workloads.GENERATIONS_PER_PROMPT
+      if CANON_P57_RUN_KIND
+      else 8
   )
-  if CANON_P57_CALIBRATION:
+  if frozenlake_onehost_proxy:
+    expected_prompt_length = P32_WORKLOAD.max_prompt_length
+    expected_response_length = P32_WORKLOAD.max_response_length
+    expected_env_steps = P32_WORKLOAD.frozenlake_max_turns
+    expected_temperature = 0.7
+  elif CANON_P57_CALIBRATION:
     # All recipes share one physical envelope. Their smaller preregistered
     # context caps are applied by the offline classifier to observed lengths,
     # so an engine-side truncation cannot make a recipe look artificially easy.
@@ -677,21 +695,28 @@ if CANON_P32_WORKLOAD:
         else (2 if CANON_P33_SHORT_ALIGNMENT else 5)
     )
     expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
-  expected_mini_batch_size, expected_sampler_is = (
-      _canonical_frozenlake_admission_geometry(
-          p38_precheck_only=CANON_P38_PRECHECK_ONLY,
-          apc_m15_target_arm=CANON_APC_M15_TARGET_DEBUG,
-          p57_tim_arm=CANON_P57_TIM_ARM,
-          p57_run_kind=CANON_P57_RUN_KIND,
-          p64_numeric_debug=CANON_P64_P45_NUMERIC_DEBUG,
-          v1_tp8_ab_arm=CANON_V1_FL_TP8_AB_ARM,
-      )
-  )
+  if frozenlake_onehost_proxy:
+    expected_mini_batch_size = P32_WORKLOAD.global_prompts
+    expected_sampler_is = "none"
+  else:
+    expected_mini_batch_size, expected_sampler_is = (
+        _canonical_frozenlake_admission_geometry(
+            p38_precheck_only=CANON_P38_PRECHECK_ONLY,
+            apc_m15_target_arm=CANON_APC_M15_TARGET_DEBUG,
+            p57_tim_arm=CANON_P57_TIM_ARM,
+            p57_run_kind=CANON_P57_RUN_KIND,
+            p64_numeric_debug=CANON_P64_P45_NUMERIC_DEBUG,
+            v1_tp8_ab_arm=CANON_V1_FL_TP8_AB_ARM,
+        )
+    )
   dp_workloads.validate_frozenlake_max_concurrency(
       P32_WORKLOAD, args.max_concurrency, os.environ
   )
   expected_geometry = {
-      "batch_size": (BATCH_SIZE, 32),
+      "batch_size": (
+          BATCH_SIZE,
+          P32_WORKLOAD.global_prompts if frozenlake_onehost_proxy else 32,
+      ),
       "mini_batch_size": (MINI_BATCH_SIZE, expected_mini_batch_size),
       "num_batches": (NUM_BATCHES, 150),
       "num_generations": (
@@ -1548,7 +1573,11 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": CANON_VLLM_ENABLE_PREFIX_CACHING,
         "dtype": "bfloat16",
-        **({"seed": 0} if CANON_P57_RUN_KIND else {}),
+        **(
+            {"seed": 0}
+            if CANON_P57_RUN_KIND or frozenlake_onehost_proxy
+            else {}
+        ),
     },
 }
 
@@ -1557,6 +1586,14 @@ if CANON_P57_RUN_KIND:
     raise ValueError(f"P57 experiment seed drifted: {SEED} != 42")
   print(
       f"[P57.SEED] CONTRACT_PASS data_shuffle_seed={SEED} "
+      "vllm_global_seed=0 per_request_seed=unsupported",
+      flush=True,
+  )
+elif frozenlake_onehost_proxy:
+  if SEED != 42:
+    raise ValueError(f"FrozenLake one-host seed drifted: {SEED} != 42")
+  print(
+      f"[V2.FL.SEED] CONTRACT_PASS data_shuffle_seed={SEED} "
       "vllm_global_seed=0 per_request_seed=unsupported",
       flush=True,
   )
@@ -1765,11 +1802,17 @@ if P45_CHECKPOINT.enabled:
         flush=True,
     )
 if CANON_P32_WORKLOAD:
-  wandb_attestation = dp_workloads.require_online_wandb_run(P32_WORKLOAD)
-  print(
-      f"[CANON_P33_WANDB] ONLINE_RUN_PASS {wandb_attestation}",
-      flush=True,
-  )
+  wandb_attestation = dp_workloads.require_workload_wandb_run(P32_WORKLOAD)
+  if P32_WORKLOAD.frozenlake_four_chip_2x2_proxy:
+    print(
+        f"[V2.FL.WANDB] DISABLED_LOCAL_PASS {wandb_attestation}",
+        flush=True,
+    )
+  else:
+    print(
+        f"[CANON_P33_WANDB] ONLINE_RUN_PASS {wandb_attestation}",
+        flush=True,
+    )
 if CANON_L3:
   contract = rl_cluster.rollout.canonical_engine_contract_attestation()
   print(f"[CANON_L3] engine contract admitted: {contract}", flush=True)

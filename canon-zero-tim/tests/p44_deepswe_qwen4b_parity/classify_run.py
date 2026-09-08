@@ -21,6 +21,7 @@ _METRICS_SCHEMA = "canon.p44.deepswe.batch-metrics.v1"
 _MANIFEST_SCHEMA = "canon.p44.deepswe.run-manifest.v1"
 _SOLVE_DEFINITION = "r2egym_final_reward_eq_1"
 _SHA = re.compile(r"[0-9a-f]{40}")
+_SYSTEM_OPTIMIZATION_ARMS = ("control", "treatment")
 _TOPOLOGY = {
     "64": {
         "contract": "p44-qwen4b-parity-64",
@@ -109,6 +110,7 @@ def _artifact_checks(
     stage: str,
     topology: str,
     expected_batches: int,
+    system_optimization_arm: str | None = None,
 ) -> tuple[dict[str, bool], list[dict[str, Any]]]:
   spec = _TOPOLOGY[topology]
   manifest_path = debug_dir / "run_manifest.json"
@@ -198,6 +200,12 @@ def _artifact_checks(
           and manifest.get("global_trajectories") == 16
           and manifest.get("solve_definition") == _SOLVE_DEFINITION
           and bool(_SHA.fullmatch(manifest.get("source_commit", "")))
+          and (
+              manifest.get("system_optimization_arm")
+              == system_optimization_arm
+              if system_optimization_arm is not None
+              else "system_optimization_arm" not in manifest
+          )
       ),
       "batch_metric_count": len(metrics) == expected_batches,
       "trajectory_batch_count": len(trajectory_paths) == expected_batches,
@@ -210,6 +218,38 @@ def _artifact_checks(
   return checks, metrics
 
 
+def _strict_policy(record: dict[str, Any]) -> bool:
+  policy = record.get("admission_policy", {})
+  return (
+      policy.get("enabled") is False
+      and policy.get("warning_only") is False
+      and policy.get("claim_level") == "strict-zero-tim"
+      and record.get("blocking_reds") == []
+      and record.get("warning_reds") == []
+      and record.get("reported_reds") == []
+      and record.get("reds") == []
+  )
+
+
+def _strict_boundary(record: dict[str, Any], name: str) -> bool:
+  boundary = record.get("boundaries", {}).get(name, {})
+  return (
+      boundary.get("valid") is True
+      and boundary.get("finite") is True
+      and boundary.get("differing_bytes") == 0
+      and boundary.get("differing_elements") == 0
+  )
+
+
+def _positive_finite(value: Any) -> bool:
+  return (
+      isinstance(value, (int, float))
+      and not isinstance(value, bool)
+      and value > 0.0
+      and value < float("inf")
+  )
+
+
 def classify(
     *,
     log_text: str,
@@ -220,10 +260,20 @@ def classify(
     updates: list[dict[str, Any]],
     stage: str,
     topology: str,
+    system_optimization_arm: str | None = None,
 ) -> dict[str, Any]:
   """Returns a systems-parity verdict without a quality or zero-TIM claim."""
   if stage not in _STAGE_UPDATES:
     raise ValueError(f"unknown P44 parity stage: {stage!r}")
+  if system_optimization_arm is not None:
+    if system_optimization_arm not in _SYSTEM_OPTIMIZATION_ARMS:
+      raise ValueError(
+          "P44 system-optimization arm must be control or treatment"
+      )
+    if stage != "three-update":
+      raise ValueError(
+          "P44 system-optimization admission requires three-update"
+      )
   try:
     spec = _TOPOLOGY[topology]
   except KeyError as exc:
@@ -237,6 +287,7 @@ def classify(
       stage=stage,
       topology=topology,
       expected_batches=expected_batches,
+      system_optimization_arm=system_optimization_arm,
   )
   hbm_by_update = [_hbm_free_bytes(record) for record in updates]
   free_hbm = [value for snapshot in hbm_by_update for value in snapshot]
@@ -244,6 +295,7 @@ def classify(
   train_steps_after = [record.get("train_steps_after") for record in updates]
   expected_steps_before = list(range(expected_updates))
   expected_steps_after = list(range(1, expected_updates + 1))
+  strict_system_optimization = system_optimization_arm is not None
 
   checks = {
       "attempt_zero": log_text.count(
@@ -316,21 +368,56 @@ def classify(
       ),
       "pre_alignment_count": len(pre_alignment) == expected_updates,
       "pre_alignment_nonblocking": all(
-          record.get("verdict") in ("PASS", "PASS_WITH_ALIGNMENT_WARNINGS")
-          and record.get("blocking_reds") == []
-          and record.get("N_action", 0) > 0
-          and record.get("admission_policy", {}).get("id") == _WARNING_POLICY
-          and record.get("admission_policy", {}).get("claim_level")
-          == "convergence-only"
+          (
+              record.get("verdict") == "PASS"
+              and record.get("N_action", 0) > 0
+              and _strict_policy(record)
+              and _strict_boundary(record, "S_decode_vs_S_prefill")
+              and _strict_boundary(record, "S_prefill_vs_T_old")
+              if strict_system_optimization
+              else record.get("verdict")
+              in ("PASS", "PASS_WITH_ALIGNMENT_WARNINGS")
+              and record.get("blocking_reds") == []
+              and record.get("N_action", 0) > 0
+              and record.get("admission_policy", {}).get("id")
+              == _WARNING_POLICY
+              and record.get("admission_policy", {}).get("claim_level")
+              == "convergence-only"
+          )
           for record in pre_alignment
       ),
       "alignment_count": len(alignment) == expected_alignment,
       "alignment_nonblocking": all(
-          record.get("verdict") in ("PASS", "PASS_WITH_ALIGNMENT_WARNINGS")
-          and record.get("blocking_reds") == []
-          and record.get("ratio_finite") is True
-          and record.get("gradient", {}).get("finite") is True
-          and record.get("admission_policy", {}).get("id") == _WARNING_POLICY
+          (
+              record.get("verdict") == "PASS"
+              and _strict_policy(record)
+              and all(
+                  _strict_boundary(record, boundary)
+                  for boundary in (
+                      "S_decode_vs_S_prefill",
+                      "S_prefill_vs_T_old",
+                      "T_old_vs_T_current",
+                  )
+              )
+              and record.get("exact")
+              == {
+                  "w_all_exactly_1": True,
+                  "r_all_exactly_1": True,
+                  "wr_all_exactly_1": True,
+              }
+              and record.get("ratio_finite") is True
+              and record.get("clip_hits") == 0
+              and record.get("tis_hits") == 0
+              and record.get("gradient", {}).get("finite") is True
+              if strict_system_optimization
+              else record.get("verdict")
+              in ("PASS", "PASS_WITH_ALIGNMENT_WARNINGS")
+              and record.get("blocking_reds") == []
+              and record.get("ratio_finite") is True
+              and record.get("gradient", {}).get("finite") is True
+              and record.get("admission_policy", {}).get("id")
+              == _WARNING_POLICY
+          )
           for record in alignment
       ),
       "update_count": len(updates) == expected_updates,
@@ -351,16 +438,53 @@ def classify(
       "gradient_health": all(
           record.get("gradient_finite") is True
           and any(bool(value) for value in record.get("gradient_activity", []))
+          and (
+              _positive_finite(record.get("commit_gradient_norm"))
+              if strict_system_optimization
+              else True
+          )
           for record in updates
       ),
       "fixed_dp_transaction": all(
           record.get("dp_replicas_exact") is True
           and record.get("dp_reduction_transactions")
-          == spec["local_trajectories"]
+          == (
+              1
+              if system_optimization_arm == "treatment"
+              else spec["local_trajectories"]
+          )
           and record.get("dp_reduction_rounds_per_transaction")
           == spec["reduction_rounds"]
           and record.get("dp_rank_pullbacks_per_transaction") == spec["dp"]
           for record in updates
+      ),
+      "system_optimization_receipts": (
+          all(
+              record.get("system_optimization_arm")
+              == system_optimization_arm
+              and record.get("dp_reduction_visibility")
+              == (
+                  "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+                  if system_optimization_arm == "treatment"
+                  else "EXPLICIT_FIXED_TREE"
+              )
+              and record.get("dp_staged_accumulations")
+              == (
+                  spec["local_trajectories"]
+                  if system_optimization_arm == "treatment"
+                  else 0
+              )
+              for record in updates
+          )
+          and log_text.count(
+              "[P44.V2] system optimization "
+              f"arm={system_optimization_arm} topology={topology} strict=1"
+          ) == 1
+          and log_text.count("[P59.CHECKED_VMA] enabled=1")
+          == expected_updates
+          and log_text.count("[V1.FIRST_UPDATE]") == 2
+          if strict_system_optimization
+          else True
       ),
       "optimizer_device_resident": all(
           record.get("optimizer_placement") == "device-resident"
@@ -394,8 +518,13 @@ def classify(
       "schema": "canon.p44.deepswe-parity.run.v1",
       "stage": stage,
       "topology": topology,
+      "system_optimization_arm": system_optimization_arm,
       "verdict": "PASS" if not failed else "FAIL",
-      "claim_level": "systems-debug-functional-parity-only",
+      "claim_level": (
+          "strict-zero-tim-system-optimization-arm"
+          if strict_system_optimization
+          else "systems-debug-functional-parity-only"
+      ),
       "expected_updates": expected_updates,
       "observed_batches": len(metrics),
       "minimum_hbm_free_bytes": min(free_hbm) if free_hbm else None,
@@ -411,6 +540,9 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--stage", choices=tuple(_STAGE_UPDATES), required=True)
   parser.add_argument("--topology", choices=tuple(_TOPOLOGY), required=True)
+  parser.add_argument(
+      "--system-optimization-arm", choices=_SYSTEM_OPTIMIZATION_ARMS
+  )
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--debug-dir", type=Path, required=True)
   parser.add_argument("--weight-report", type=Path, required=True)
@@ -431,6 +563,7 @@ def main() -> None:
       updates=_records(args.update_report, required=need_updates),
       stage=args.stage,
       topology=args.topology,
+      system_optimization_arm=args.system_optimization_arm,
   )
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite evidence: {args.output}")

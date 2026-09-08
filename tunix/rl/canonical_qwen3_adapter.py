@@ -2214,6 +2214,70 @@ def _p32_length_sort():
   )
 
 
+def _p32_length_sort_receipt(perm, data_size):
+  """Returns a bounded receipt proving the selected row order ran."""
+  permutation = np.asarray(perm, dtype=np.int64)
+  if permutation.ndim != 1 or permutation.size % data_size:
+    raise FunctionalMappingError(
+        "P32 length-sort receipt requires a rank-one permutation divisible "
+        f"by data_size, got shape={permutation.shape} data_size={data_size}"
+    )
+  digest = hashlib.sha256(permutation.tobytes()).hexdigest()
+  return (
+      "[P32.LENGTH_SORT] enabled=1 "
+      f"rows={permutation.size} dp={data_size} "
+      f"groups={permutation.size // data_size} "
+      f"permutation_sha256={digest}"
+  )
+
+
+def _v2_p0_negative_control():
+  """Returns the exact Phase-0 one-host fault injection, default off."""
+  value = os.environ.get("V2_P0_NEGATIVE_CONTROL", "")
+  if value in (
+      "",
+      "length-sort-no-inverse",
+      "reduce-once-reassociate-tail",
+  ):
+    return value
+  raise FunctionalMappingError(
+      "V2_P0_NEGATIVE_CONTROL must be unset, "
+      "length-sort-no-inverse, or reduce-once-reassociate-tail, got "
+      f"{value!r}"
+  )
+
+
+def _v2_p0_accumulate_staged(
+    even_total, odd_total, gradient, *, index, group_count, add, mode
+):
+  """Accumulates normally or injects an even-then-odd group tree."""
+  if mode != "reduce-once-reassociate-tail":
+    return (
+        gradient if even_total is None else add(even_total, gradient),
+        None,
+        False,
+    )
+  if group_count < 2:
+    raise FunctionalMappingError(
+        "reduce-once negative control needs at least two groups"
+    )
+  if index % 2:
+    odd_total = (
+        gradient if odd_total is None else add(odd_total, gradient)
+    )
+  else:
+    even_total = (
+        gradient if even_total is None else add(even_total, gradient)
+    )
+  if index != group_count - 1:
+    return even_total, odd_total, False
+  if even_total is None or odd_total is None:
+    raise FunctionalMappingError(
+        "reduce-once negative control lost an even or odd staged group"
+    )
+  return add(even_total, odd_total), None, True
+
+
 def _p32_length_sorted_permutation(row_lengths, data_size):
   """Row permutation that puts rows of similar length into the same group.
 
@@ -7822,7 +7886,13 @@ class Qwen3EngineForwardAdapter:
         self._data_size == 2
         and self._tp_size == 2
         and os.environ.get("CANON_P32_WORKLOAD", "")
-        in ("gsm8k-long-dp2-tp2", "gsm8k-long8k-dp2-tp2")
+        in (
+            "gsm8k-long-dp2-tp2",
+            "gsm8k-long8k-dp2-tp2",
+            "gsm8k-p45-shape-dp2-tp2",
+            "frozenlake-p45-onehost-dp2-tp2",
+            "frozenlake-m15-onehost-dp2-tp2",
+        )
     )
     if (
         self._data_size not in (8, 16)
@@ -8925,19 +8995,56 @@ class Qwen3EngineForwardAdapter:
     if p34:
       deepswe_contract.validate_environment(os.environ)
       contract = workload
-      reverse_groups = contract.rank_major_rows()
     else:
       dp_workloads.validate_environment(
           workload, require_reduction_admission=True
       )
       contract = workload.training_contract()
-      reverse_groups = contract.rank_major_reverse_groups()
+    reverse_groups = dp_training.contiguous_rank_major_reverse_groups(
+        global_trajectories=contract.global_trajectories,
+        dp_size=contract.dp_size,
+    )
     trainer_dp_axis = self._p32_grouped_trainer_dp_axis(trainer_state)
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
 
+    p32_length_sort = _p32_length_sort()
+    v2_p0_negative_control = _v2_p0_negative_control()
+    if v2_p0_negative_control:
+      negative_contract = (
+          not p34
+          and workload.name == "gsm8k-p59-dp2-tp2"
+          and (contract.dp_size, contract.tp_size) == (2, 2)
+          and os.environ.get("CANON_P33_RUN_STAGE", "") == "three-update"
+          and os.environ.get("CANON_P33_NO_COMMIT", "") == "0"
+          and os.environ.get("CANON_P29_FULL_TRAIN", "") == "1"
+          and os.environ.get("CANON_P60_DETERMINISTIC_AB", "") == "1"
+          and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") == "1"
+          and os.environ.get("CANON_P66_P59_CHECK_VMA", "") == "1"
+      )
+      if not negative_contract:
+        raise FunctionalMappingError(
+            "V2_P0_NEGATIVE_CONTROL requires exact committed "
+            "gsm8k-p59-dp2-tp2 three-update deterministic "
+            "rank-parallel checked-VMA geometry"
+        )
+      if (
+          v2_p0_negative_control == "length-sort-no-inverse"
+          and not p32_length_sort
+      ):
+        raise FunctionalMappingError(
+            "length-sort-no-inverse requires CANON_P32_LENGTH_SORT=1"
+        )
+      if (
+          v2_p0_negative_control == "reduce-once-reassociate-tail"
+          and not dp_training.dp_reduce_once_mode()
+      ):
+        raise FunctionalMappingError(
+            "reduce-once-reassociate-tail requires CANON_DP_REDUCE_ONCE=1"
+        )
+
     self._p32_row_permutation = None
-    if _p32_length_sort():
+    if p32_length_sort:
       # Sort rows by length and deal them across the ranks so every group's
       # rows are of similar length: the group pays its longest row's chunk
       # count.  The whole example is permuted (loss inputs included), so the
@@ -8957,6 +9064,9 @@ class Qwen3EngineForwardAdapter:
       perm = _p32_length_sorted_permutation(
           np.asarray(jax.device_get(row_lengths)), self._data_size
       )
+      # ``perm`` is already a host NumPy array because sorting itself needs
+      # the row lengths on the host.  The receipt therefore adds no D2H.
+      print(_p32_length_sort_receipt(perm, self._data_size), flush=True)
       train_example = _p32_gather_rows(train_example, perm)
       self._p32_row_permutation = perm
     prompts = jnp.asarray(train_example.prompt_ids)
@@ -9558,10 +9668,11 @@ class Qwen3EngineForwardAdapter:
 
     reducer = None
     staged_total = None
+    staged_fault_odd = None
     staged_receipts = []
 
     def reverse_reduce_group(index, spec):
-      nonlocal reducer, staged_total
+      nonlocal reducer, staged_fault_odd, staged_total
       if rank_parallel_backward:
         if p32_keep_tape:
           # The forward phase kept this group's tape: the replay that used to
@@ -9690,11 +9801,35 @@ class Qwen3EngineForwardAdapter:
                 getattr(reducer, "validate_staged", None)
             ) else None
             staged_receipts.append(receipt_program(staged_gradient))
-            staged_total = (
-                staged_gradient
-                if staged_total is None
-                else self._p59_staged_tree_add(staged_total, staged_gradient)
-            )
+            if v2_p0_negative_control == "reduce-once-reassociate-tail":
+              (
+                  staged_total,
+                  staged_fault_odd,
+                  negative_injected,
+              ) = _v2_p0_accumulate_staged(
+                  staged_total,
+                  staged_fault_odd,
+                  staged_gradient,
+                  index=index,
+                  group_count=len(reverse_specs),
+                  add=self._p59_staged_tree_add,
+                  mode=v2_p0_negative_control,
+              )
+            else:
+              staged_total = (
+                  staged_gradient
+                  if staged_total is None
+                  else self._p59_staged_tree_add(
+                      staged_total, staged_gradient
+                  )
+              )
+              negative_injected = False
+            if negative_injected:
+              print(
+                  "[V2.P0.NEGATIVE] injected="
+                  "reduce-once-reassociate-tail order=even-then-odd",
+                  flush=True,
+              )
           report = {
               "group": index,
               "trajectory_rows": self._p32_receipt_rows(reverse_groups[index]),
@@ -10149,6 +10284,20 @@ class Qwen3EngineForwardAdapter:
         total_gradient, update_reduction_report = reducer.finalize_staged(
             staged_total
         )
+      if update_reduction_report.get("shard_map_check_vma") is not True:
+        raise FunctionalMappingError(
+            "CANON_DP_REDUCE_ONCE=1 completed without a checked-VMA "
+            "gradient reducer"
+        )
+      print(
+          f"[P59.DP{contract.dp_size}] update_reduce_done "
+          "check_vma=1 "
+          "collectives="
+          f"{update_reduction_report['reduction_collectives']} "
+          "replicas_exact="
+          f"{int(update_reduction_report['post_reduction_replicas_exact'])}",
+          flush=True,
+      )
       staged_total = None
       signatures, finite, nonzero = jax.device_get((
           jnp.stack([item[0] for item in staged_receipts]),
@@ -10158,14 +10307,45 @@ class Qwen3EngineForwardAdapter:
       signatures = np.asarray(signatures, dtype=np.float64)
       finite = np.asarray(finite, dtype=np.bool_)
       nonzero = np.asarray(nonzero, dtype=np.int64)
+      staged_unique_counts = tuple(
+          len({
+              np.ascontiguousarray(rank_signature).tobytes()
+              for rank_signature in group_signatures
+          })
+          for group_signatures in signatures
+      )
+      # Distinct *values* are a discriminating G5 condition for the frozen
+      # numerical-admission batch, but not a universal training invariant:
+      # RLOO may legitimately give two ranks identical zero gradients.  The
+      # production cadence/count/placement gates remain unconditional; make
+      # distinctness fail closed only when the full-tree G5 carrier is armed.
+      if os.environ.get("CANON_P61_BACKWARD_NUMERICAL_DIR", "") and any(
+          unique_count != contract.dp_size
+          for unique_count in staged_unique_counts
+      ):
+        raise FunctionalMappingError(
+            "reduce-once G5 carrier lost a distinct DP rank contribution: "
+            f"unique_counts={staged_unique_counts} dp_size={contract.dp_size}"
+        )
       norms = []
       for group_index, report in enumerate(reports):
         report["gradient_finite"] = bool(np.all(finite[group_index]))
         report["gradient_nonzero"] = int(np.sum(nonzero[group_index]))
+        report["dp_reduction"][
+            "rank_local_fingerprint_unique_count"
+        ] = staged_unique_counts[group_index]
         # The rank-local contribution norm of this group: sqrt of the summed
         # per-rank squared sums (signature column 2).
         norms.append(float(np.sqrt(np.sum(signatures[group_index, :, 2]))))
       staged_group_norms = tuple(norms)
+      print(
+          f"[P59.DP{contract.dp_size}] staged_rank_contributions_checked "
+          f"groups={len(staged_unique_counts)}/"
+          f"{contract.local_trajectories} "
+          f"unique_min={min(staged_unique_counts)}/{contract.dp_size} "
+          f"unique_max={max(staged_unique_counts)}/{contract.dp_size}",
+          flush=True,
+      )
       with gsm8k_xprof.trace_annotation(
           "gradient_accumulate",
           group_index=last_index,
@@ -10223,10 +10403,16 @@ class Qwen3EngineForwardAdapter:
       # The per-row outputs go back to the learner in the batch's own row
       # order: the alignment gate compares them row by row against the
       # sampler's records (T_old vs T_current, ratio exactly 1).
-      inverse = np.argsort(self._p32_row_permutation)
-      per_token_logps, token_entropy = _p32_gather_rows(
-          (per_token_logps, token_entropy), inverse
-      )
+      if v2_p0_negative_control == "length-sort-no-inverse":
+        print(
+            "[V2.P0.NEGATIVE] injected=length-sort-no-inverse",
+            flush=True,
+        )
+      else:
+        inverse = np.argsort(self._p32_row_permutation)
+        per_token_logps, token_entropy = _p32_gather_rows(
+            (per_token_logps, token_entropy), inverse
+        )
     return {
         "loss_output": loss_output,
         "deferred_finite_receipts": deferred_finite_receipts,

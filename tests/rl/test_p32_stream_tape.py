@@ -147,8 +147,10 @@ class _FakeReducer:
         "rank_local_fingerprints_distinct": True,
         "reduction_transactions": 1,
         "reduction_rounds": 8,
+        "reduction_collectives": 8,
         "replica_check_flags": self.dp_size,
         "post_reduction_replicas_exact": True,
+        "shard_map_check_vma": True,
     }
 
 
@@ -446,6 +448,22 @@ def test_reduce_once_reduces_once_and_matches_the_fixed_tree_of_the_group_sum():
     np.testing.assert_allclose(
         np.asarray(left), np.asarray(right), rtol=1e-5, atol=1e-6
     )
+
+
+def test_reduce_once_g5_capture_rejects_duplicate_rank_signatures():
+  # This fixture intentionally has legitimate duplicate rank gradients.  They
+  # stay admitted for ordinary training, but the frozen G5 certification arm
+  # requires a batch whose rank signatures are all distinct and must reject
+  # this one.
+  with mock.patch.dict(
+      os.environ,
+      {"CANON_P61_BACKWARD_NUMERICAL_DIR": "/tmp/g5-negative-control"},
+      clear=False,
+  ), mock.patch.object(
+      canonical_qwen3_adapter.dp_workloads, "validate_environment"
+  ):
+    with pytest.raises(FME, match="G5 carrier lost a distinct DP rank"):
+      _run("stream", reduce_once="1")
 
 
 def test_reduce_once_streams_one_contribution_standing_for_every_group():

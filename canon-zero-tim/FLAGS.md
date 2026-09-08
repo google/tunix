@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 409 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 415 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -21,12 +21,13 @@
 | CANON_VLLM_ENABLE_PREFIX_CACHING | Phase3 APC:仅改变 A rollout 的 vLLM prefix-cache 读取路径；B rescore 继续固定 `reset_prefix_cache=True` 全量重算 | off；缺省/空/0 均关，仅 1 开；三个 production full recipes 当前统一 off | 试验；Qwen3-8B DP1×TP4 G-A/G-B/G-C/G-D、脏页阴性与匹配性能/XProf 已绿；M15 DP8×TP8 `m15i` G-E 在 A−B 红 1389 bytes/760 elements、B−C exact，故 target 修复前禁止 production APC | fresh target carrier 完成复现/首红定位/最小修复，随后对应 workload G-E 与脏页负控全绿后逐项转正；认证不可跨 workload 继承 |
 | CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY | FrozenLake有限差异的可观测训练策略。历史 Native/IS full 继续保留 broad warning；优化 Zero 仅精确 P45（candidate/split 均 absent）或 M15/main v1-hp、DP8×TP8、300-update、no-eval/no-checkpoint concept run 可开，且只将有限 `S_decode_vs_S_prefill` 与由其直接派生的 `w`/`wr`/clip/TIS 差异降为 warning。`S_prefill_vs_T_old`、`T_old_vs_T_current`、`r`、任意 nonfinite、梯度、副本与 optimizer transaction 始终 fatal | off；renderer 对精确 P45/M15 Zero concept arms 写 1 | 临时收敛曲线逃生阀；host/exact-image admission 已覆盖两条 identity，DP8×TP8 target 未跑。开启后只能声明 `convergence-only / alignment-degraded`，不得声明 Zero-TIM | 分别修复 P45/M15 carrier 并完成 strict 300-update target 后恢复 0；失败与 warning 剂量证据永久保留 |
 | CANON_DEEPSWE_ALIGNMENT_WARN_ONLY | DeepSWE有限差异的可观测训练策略。历史 P58 Native full 保留 broad serving/trainer warning；优化 Zero 只允许精确 Qwen3-4B-Instruct-2507、P58 Zero-HP/full/1,000-update、DP8×TP8 双角色、128 trajectories 的 production profile 开启，且只将有限 `S_decode_vs_S_prefill` 与由它直接派生的 `w`/`wr`/clip/TIS 差异降为 warning。`S_prefill_vs_T_old`、`T_old_vs_T_current`、`r`、任意 nonfinite、shape、gradient、replica 与 optimizer transaction 始终 fatal；precheck、checked-VMA、seam、one-host、ordinary Zero 都必须为 0/strict | off；renderer 仅对 Native 或精确 P58 Zero-HP production full 写 1 | P58.32 host policy/profile/classifier、P34 static、409/409 registry 与完整 digest-pinned image gates 通过；DP8×TP8 target 尚未跑。Zero-HP warning lane 只能声明 `convergence-only / alignment-degraded`，不得声明 Zero-TIM | 修复 DeepSWE decode/prefill carrier并完成同配置 strict target 后恢复 0；保留 warning 剂量和失败证据 |
+| CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM | v2 Phase 2 DeepSWE 严格 control/treatment 数值准入 selector。只准精确 P44 Qwen3-4B、three-update、DP4×TP8 或 DP8×TP8 strict profile；两臂共同启用 fixed head、rank-parallel checked-VMA、P59-only VMA scope、first-update gate 与 host-receipt bundle。`control` 保持 KEEP_TAPE/REDUCE_ONCE 真缺省，`treatment` 只增加 `KEEP_TAPE=stream` 与 `DP_REDUCE_ONCE=1`，因此明确暴露唯一会改变梯度归约顺序的刀 | absent/off；空值不构成 arm，renderer 仅在显式 `control|treatment` 时写入，既有六份 P44 render 逐字节语义不变 | 试验；renderer/profile/Python contract、负控、adjacent 与 pinned exact-image host 门已绿；DP4×TP8 与 DP8×TP8 strict target 两臂均未跑，不能从其他 workload/几何继承锚或性能结论 | P44 两几何完成 A=B=C、G4/D4/G5/G6、G1、逐臂 commit-norm/HBM/update 秒后，按 target 判决将 treatment 纳入 DeepSWE 默认包或否决并删除 selector；失败证据永久保留 |
 | CANON_M15_TOKEN_CONTINUITY | M15 later-turn token continuity selector。`verify` 仅观察 serving 实际 prompt IDs；`exact` 为 later turns 直接提交 initial tail + sampled assistant IDs + nonterminal environment IDs，关闭 chat-template 重应用并逐 token 回验。exact 任一不等立即 fatal。签名身份有三类：M15 APC debug DP8×TP8 off/on 的 layer/backward-no-commit 载具只准 exact；one-host DP1×TP4 允许 APC-off legacy verify、APC-off/on exact；P67 full 只准精确 M15/main Zero v1-hp DP8×TP8、300-update、no-eval/no-checkpoint exact。malformed/missing/negative arrays hard-fail | 全局 absent/off。P67 默认不写；只有显式 `--m15-tito-exact` 才写 exact。P45 永远 absent。APC debug 与 one-host 必须满足各自完整身份，禁止与 target 混用。空值、`0`、full verify、P45/GSM8K/Native/IS/eval、其他拓扑均 fatal | 历史 exact-default `3fc7ef8b` 已撤出 production default。Legacy r7 APC-off 17/17 equal；matched exact r8 17/17 equal，三轮 strict 且与 r7 prompt/trajectory hashes 全同。远端 E0v/E0w one-host APC-off/on exact pair 同样全零并记录 APC-on hits；这些均不继承到 DP8×TP8。P67 full exact 与 APC debug target 均未跑 | 默认 full 必须证明 selector absent且零 receipt；显式 exact M15 full 必须逐 prompt equal、env receipt 恰一。APC debug/one-host 按各自 classifier 判决；DP8×TP8 首次启用仍是独立 target gate |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向；默认 production clipping 继续使用 stock `optax.clip_by_global_norm`。Attempt-7 P62 no-commit 载具额外打印 element-finiteness、naive/max-scaled L2、DP/TP reduction 与 accumulator receipt；G5b 已证明 16/16 groups 与最终 accumulator 全 finite，旧 `norm=inf` 是 FP32 sum-of-squares overflow | off | 历史 segmented 路径已认证；P62 DP16×TP4 G5b target 仅认证 finite backward 与零 commit，未认证 optimizer transaction | 默认路径不变；仅精确 P63 full profiles 可启用 hybrid clip，首次真实 commit 与完整 horizon 仍是 target gate |
 | CANON_P59_RANK_PARALLEL_BACKWARD | 每个 trajectory group 的 DP rank-local VJP 从 host 逐-rank 串行改为一次手动 `shard_map`;TP1 保留 DP-manual/unit-TP carrier，TP>1 在同一物理设备上改用 engine `data/model` 二轴词汇并令 DP+TP 均 manual，使 inner engine shard_map 复用已绑定 TP collective；processed-logprob VJP 产出的 full logical-vocab cotangent 在 head VJP 入口显式约束为 `P(data,model)`，随后 fixed-head 只消费 TP-local vocab；projection 与 attention 的 P59-local 边界均只由精确的双 manual-axis context 选择，RPA 不再二次扩展已经 TP-local 的 GQA K/V；replicated-input TP hidden cotangent以 FP32、升序 rank、逐项 operand barrier 累加后只在边界 cast 一次；leading-DP 暂存后仍走原 fixed reduction，group 顺序不变 | off；仅显式 V1/P58.7 high-performance full profile 开 | **gradient-correctness KEEP / DP4 PERF KEEP / Attempt-3 repair one-host mechanism PASS / exact-image+target pending**:ordinary-JAX FP64 oracle relL2 `3.91e-16`，真实 Qwen 梯度 relL2 `1.582%` 过冻结梯度门，DP4 reverse 3.605x；串行与并行 AdamW 首步 delta relL2 `9.976%` 是已披露 trajectory difference。Attempt 3 的 GSM8K `g64m` 与 P45 `f45m` 均在 step-0 strict pre-alignment 逐字节全同且 0 FAIL，随后分别在 TP4/TP8 证明 attention 入口重复扩展已 local 的 KV；追加 patch 25 只在精确 P59 manual DP×TP context 跳过该扩展并强校验 local Q/K/V/cache。M15 `m15m` 在更早的独立 token-contract 门停止，不构成 P59 数值判决。host V1 21/21、P57 144/144、P59 34/34、APC 31/31、flags 366/366 通过；真实 v5p `DP2xTP2` RPA forward+VJP2、wrong-cache negative 与普通 `DP1xTP4` GQA control 通过且零 optimizer commit。installed-attention DP2×TP4/TP8 pinned-image 正负控与真实 DP16×TP4/DP8×TP8 optimizer commit 仍未验证 | Phase4 三个 full target 与 P58.7 full 归档后按 workload 转正；任一 real ALIGN FAIL 立即退役；全局默认仍 off |
 | CANON_P59_CHECKED_VMA | Production selector for the P66 checked-VMA repair. Registered Phase4 full contexts and the exact P58 Qwen3-4B Zero-HP full profile may set it; `00_env.sh` validates the closed workload/stage/arm geometry and derives the historical P66 implementation spelling as an internal compatibility alias. It changes only P59 backward VMA ownership and does not alter serving forward Zero-TIM or reduction order | off; registered full profiles only; P58 requires Zero/full/1,000 updates, DP8×TP8 and the complete HP bundle. P58.32 production may use narrow finite A-B warning admission, but diagnostics remain strict | P66 G1 causal PASS and G1.5 six-endpoint same-point ordinary-JAX oracle PASS; P58 construction validation in progress and target optimizer/convergence not run | each registered full horizon plus target receipts green, then fold into the final P59 production identity or retire per workload on any numerical red |
-| CANON_P59_DP4_SERIAL_MESH_BRIDGE / CANON_P61_BACKWARD_NUMERICAL_DIR | P59/P61 DP4 代理与 full-tree 数值载具，不是生产 recipe | off/空 | 载具完成；历史 serial/update 差异永久保留 | P59/P61 证据交付后退役载具，生产 profile 禁止开启 |
+| CANON_P59_DP4_SERIAL_MESH_BRIDGE / CANON_P61_BACKWARD_NUMERICAL_DIR | P59/P61 full-tree 数值载具，不是生产 recipe。历史主臂为精确 DP4×TP1 one-update；v2 Phase 0 另准入精确 DP2×TP2 three-update deterministic rank-parallel checked-VMA full-train，只写 update 0 的完整 model-before/gradient/model-after 树，供 reduce-once off/on 同输入 G4 对照，update 1/2 不覆盖证据 | off/空；DP2 扩展只能由 one-host runner 的 outer-only `V2_P0_CAPTURE_FULL_TREE=1` 进入，默认 bundle 不变 | DP4 载具完成；DP2 扩展 host admission/manifest/comparator CPU 门绿，one-host G4 尚未运行；历史 serial/update 差异永久保留 | v2 Phase 0 G4 证据交付后收回 DP2 临时准入；生产 profile 永远禁止开启；P59/P61 其余证据交付后退役载具 |
 | CANON_P66_BACKWARD_ARM / CANON_P66_BACKWARD_CAPTURE_DIR | P66 backward 诊断总开关：保留 DP4×TP1 `ordinary|segmented` 整树载具，并增加 one-host 完整 28 层 DP1×TP4 `tp4-serial|tp4-p59-old|tp4-p59|tp4-gather-off` 因果臂；G1.5 `tp4-vma-oracle` 在同一 checked-VMA candidate 之后旁路调用 ordinary serial pullback，比较 head/norm/layer27/14/0/embed 的参数、activation 与 cache cotangent，serial 结果绝不回灌；全部零 optimizer，TP4 臂只反传 group0，`grad_norm>1e6` 直接红停 | 空/off；仅 P66 wrapper 设置，生产 profile 禁止开启 | DP4×TP1 已跑；TP4 G1 verdict `H1_VMA_SUPPORTED`，P/R exact、U `1.5402e21` expected-red；final-source G1.5 host 16/16、pinned `2x37/37`、one-host 17/17 与六 endpoint/observer-neutrality 全 PASS；target 未跑 | G2 target 依赖闭包完成后退役，失败及分类证据永久保留 |
 | CANON_P66_P59_CHECK_VMA | P66 结构/修复诊断：把 P59 外层 `shard_map` 从历史 `check_vma=False` 切到官方 VMA 复制一致性检查；checked 路径把 DP-local 参数显式标成 varying，并让 VMA 转置拥有 TP replicated-input `psum`，避免 fixed-head/projection 再手工归约一次 | 0/off；仅 P66 focused probe/`tp4-p59*|tp4-vma-oracle` 设置 | G0 pinned-image DP2×TP4/TP8 真实 shim全绿；完整 28 层 G1 one-host 修复臂 finite、距 serial norm `0.1112%`，固定 gather 被排除；G1.5 六 endpoint 最差 rel-L2 `0.5257%` 且 observer-neutrality exact；target 未跑 | P59 TP 复制/归约语义在 target capsule 门通过后，再决定替换生产默认或退役 |
 | CANON_P67_P66_VMA_P59_ONLY | P67 serving 程序同一性修复：当 P66 checked-VMA 进程级 alias 开启时，只允许精确 P59 outer manual `data/model` pullback 消费 pcast/Pallas out-shape/RPA out-shape/embed invariant 登记；ordinary serving decode/prefill 保持历史图。它不关闭 P59 backward 修复，不改变数学值或 fixed TP reduction order，也不自行放宽 alignment gate | 0/off；`CANON_V1_FL_TP8_AB_ARM=serving-scope` 诊断，精确 P45-readiness/M15-main DP8×TP8 strict-zero 300-update FrozenLake V1 full profile，或精确 P58 Qwen3-4B Zero/full DP8×TP8 1,000-update HP profile可设 1；GSM8K、P58 Native/IS、非 HP Zero、Qwen3-32B 与其他 profile 禁止。P58.32 的 A-B warning 是独立、精确限定的 policy | host/exact-image gates通过；FrozenLake Wave 5 real P45 DP8×TP8 serving-scope 为48,594 action tokens、depth 2,472、A−B/B−C strict `0/0`、zero backward/commit，P45 serving recovery已验证；M15 serving、FrozenLake full backward/AdamW/perf/convergence未验证。P58 profile/environment/Python contract与完整 pinned-image gate通过，marker含 `vma_p59_only=1`；P58 target尚未重跑 | FrozenLake P45/M15各自300-update full horizon与P58 fresh target必须独立通过首commit backward-health/first-update与full-horizon gates；P58 warning target须保持 B-C/current exact 并记录 A-B 剂量，strict carrier 修复后再恢复 strict A=B=C |
@@ -46,9 +47,10 @@
 | CANON_DP_COMPARE_MODE | P70.4 刀1:DP reduce 后 replica 看门狗选择器,只作用于 `FixedDPRankGradientReducer` 的 replica compare。缺省/空/0/full=历史全量逐元素 ppermute 比对(整棵 reduced 树过邻居,程序与 receipt 逐字节不变);fingerprint-hybrid=每 reducer 生命周期(生产=每 update)前 `HYBRID_FULL_COMPARE_GROUPS`(=2)组保留全量比对且同组跑指纹程序作自检(指纹与全量判决不一致即红停),其余组只 ppermute 每 leaf 双独立 uint32 校验和(rot-add + rot-xor 两混合器,位精确 bitcast,2×N_leaf 标量)并在 mismatch 时报 rank/leaf/path;其他值 fatal。检出弱化:同内容不同位置的补偿性篡改需同时碰撞两个代数独立混合器(NOTES 碰撞论证);−0.0/+0.0 分歧从漏放变为检出(更严),同位 NaN 分歧交给有限位门(顺序与历史一致) | off | 试验;scratch host 门(pinned image CPU):kill-test 单比特翻转必响并指认 leaf、补偿双元素 swap 骗过 naive sum 但双校验和必响、flag-off 冻结 jaxpr/receipt 逐字节同、p69 冻结指纹回归绿;one-host/target 未跑 | P70.4 GATE(kill-test 双项+one-host 配对 walls/范数锚逐位/strict 绿/程序清单 diff)后按 workload 转正;任一红退役,判决记录保留 |
 | CANON_DP_DISTINCT_SCHEDULE | P70.4 刀2:per-rank distinct-fingerprint 签名的计算降频。缺省/空/0/every-group=历史每组每 rank 全量 `_gradient_signature`+sha256(receipt 逐字节不变);first-group-warmup=每 update 首组 + 进程前 `DISTINCT_FINGERPRINT_WARMUP_UPDATES`(=3)个 update 的所有组照旧计算,其余组跳过签名(receipt 指纹置 `skipped:receipt-schedule` 并加 `rank_local_fingerprint_mode=skipped`,distinctness 检查在 skipped 组不判);接线正确性属程序级性质:调度/staging/归约程序不随组变,首组+暖机组的检出对 wiring 类故障延迟有界(≤1 update);其他值 fatal。与 deterministic_repeat 互斥(adapter 显式红停) | off | 试验;scratch host 门:调度正确性 kill-test(首组/暖机/skip 序列断言)、flag-off 逐字节同、p69 回归绿;one-host/target 未跑 | 同 CANON_DP_COMPARE_MODE 的 P70.4 GATE;任一红退役,判决记录保留 |
 | CANON_DP_FINITE_FETCH | P70.4 刀3:isfinite 位取回的同步点。缺省/空/0/sync=历史逐组同步 device_get+立即 raise(程序与 receipt 逐字节不变);batched-commit=有限位仍逐组在设备端计算(staged+reduced 两段),host 取回合并为 commit 点前单次 int32 向量 `jax.device_get`(P68 批量收据通道),`drain_deferred_finite_receipts()` 在任何梯度进 optimizer commit 前校验全部收据,violation 在 commit 门 raise(带 group/stage/rank/leaf/path);fail-closed 语义不变,只移动 host 同步点(检出延迟 ≤1 update,仍先于 commit);receipt `post_reduction_all_finite=deferred-commit` 字符串逐 receipt 传播,严禁在 drain 前宣称 finite;其他值 fatal。与 deterministic_repeat 互斥 | off | 试验;scratch host 门:非有限注入 kill-test(commit 前必拦、commit callback 零调用)、flag-off 逐字节同、p68/p69 回归绿;one-host/target 未跑 | 同 CANON_DP_COMPARE_MODE 的 P70.4 GATE;任一红退役,判决记录保留 |
-| CANON_DP_REDUCE_ONCE | K2(tasks/v1_perf_arch phase2):每个 update 只做一次固定序 DP 归约。缺省/空/`0`=off(每组一次 reduce-and-broadcast,照旧);`1`=每组把 rank-local staged 梯度表在自己的 DP 分片上逐叶累加(`zt_tr_dp_staged_accum`,无集合通信),update 末尾对累加表做一次 `finalize_staged`(同一归约程序、同一固定树、同一 replica/有限性收据);每组收据改为 staged 表的逐 rank 签名/有限位/精确非零计数(单程序,末尾一次取回);sink 一次调用代表全部组(trainer 节拍与累加分母同步前进 G)。求和顺序有意改变(先跨组后跨 rank)⇒ 梯度比特变、锚重钉;logprob 契约不变。要求 RANK_PARALLEL=1、非 P66 臂、无 numeric debug / deterministic_repeat,否则 fail-closed;其他值 fatal。census `--dp-reduce-once 1` 要求每组 staged_accumulate、update 级 fixed_dp_reduce/gradient_accumulate 各 1 | off;CPU 门:reduce-once 梯度逐字节 == fixed_dp_sum(Σ_g staged)·scale,两次跑逐字节同,与逐组流 rtol 1e-5,sink 一次(index 0, microbatches=G),诊断模式拒;真归约器 2×2 CPU 网格两 update 通过;r5 捕获负控响。**一主机 dp2-tp2(2026-09-02 r4,commit 3090f17c + census 补丁)**:三 update 全 commit、transactions=1、replicas exact、strict 绿、hierarchy(stream+reduce-once)绿、P74 gap 绿;新锚 `1.6838101148605347 / 3.3025834560394287 / 1.8203867673873901`(update 1 第 7 位有效数字变,系有意重结合);warm **19.07→16.38s(−14.1%)**,HBM 39.79→42.84 GiB(staged 累加器 3.44 GB 常驻);raw /mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-k2_reduce_once_20260902_r4 | 可与 stream 一同进入 target 优化包(需用户批);DP16×TP4 上每 update 省 15 次 8 轮归约,收益应更大;r1-r3 三次 CODE_REJECT 均为 PartitionSpec 拼法相等性(已改为等价校验) |
+| CANON_DP_REDUCE_ONCE | K2(tasks/v1_perf_arch phase2):每个 update 只做一次固定序 DP 归约。缺省/空/`0`=off(每组一次 reduce-and-broadcast,照旧);`1`=每组把 rank-local staged 梯度表在自己的 DP 分片上逐叶累加(`zt_tr_dp_staged_accum`,无集合通信),update 末尾对累加表做一次 `finalize_staged`(同一归约程序、同一固定树、同一 replica/有限性收据);每组收据改为 staged 表的逐 rank 签名/有限位/精确非零计数(单程序,末尾一次取回);sink 一次调用代表全部组(trainer 节拍与累加分母同步前进 G)。求和顺序有意改变(先跨组后跨 rank)⇒ 梯度比特变、锚重钉;logprob 契约不变。要求 RANK_PARALLEL=1、无 P66 diagnostic arm / numeric debug / deterministic_repeat,否则 fail-closed;其他值 fatal。v2 Phase 0 起 treatment reducer 自身的 shard_map 强制 `check_vma=True`；fixed-tree 仍按原顺序 reduce 到 rank 0，再把 FP32 位解释为 int32，以非源 rank `int32.min` sentinel 做一次 `pmax` 精确发布，VMA 因而证明 DP invariant 且不增加浮点算术；flag-off 仍选择历史 unchecked reducer。census `--dp-reduce-once 1` 要求每组 staged_accumulate、update 级 fixed_dp_reduce/gradient_accumulate 各 1 | off;CPU 门:reduce-once 梯度逐字节 == fixed_dp_sum(Σ_g staged)·scale,两次跑逐字节同,与逐组流 rtol 1e-5,sink 一次(index 0, microbatches=G),诊断模式拒;真归约器 2×2 CPU 网格两 update 通过;r5 捕获负控响。v2 Phase 0 host 门另证 DP2×TP2/DP4×TP1 checked reducer 与 legacy 输出(含 `-0.0`)逐位同、`jax.transfer_guard('disallow')` 下执行、旧 reducer 开 VMA 必红；D4 census 为 DP2 `ppermute[data]=1+pmax[data]=1`、DP4 `2+1`，flag-off 仍为旧 DP2 `ppermute[data]=2`。**一主机 dp2-tp2(2026-09-02 r4,commit 3090f17c + census 补丁)**:三 update 全 commit、transactions=1、replicas exact、strict 绿、hierarchy(stream+reduce-once)绿、P74 gap 绿;新锚 `1.6838101148605347 / 3.3025834560394287 / 1.8203867673873901`(update 1 第 7 位有效数字变,系有意重结合);warm **19.07→16.38s(−14.1%)**,HBM 39.79→42.84 GiB(staged 累加器 3.44 GB 常驻);raw /mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-k2_reduce_once_20260902_r4。**Phase 0 checked-reducer full-tree pair(b4d9fde,r4)**:control/candidate 同一 update-0 WORK 与 310 个真实叶；G4 全叶为 `REASSOC_NOISE`，最差 cosine `0.9999999999999968`、rel-L2 `7.7658e-08`；G5 为 control 96 组 distinct + candidate 3 次 staged 2/2；G6 为两臂各 31 行 outer VMA + candidate 3 次 checked reducer。XProf trace 恰在百万事件上限截断，comparator 仅在 `trace_event_count>=1,000,000` 且 classification 唯一原因为 `trace_census_rc=1` 时放行；semantic/hierarchy census 与 99/99 alignment 均绿。P61 捕获会把 update-0 warmup LR 从 0 换成常数 `2e-7`，故这对 run 只证明 G4/G5/G6，**不作锚或性能接收发**。raw `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-v2p0g4{ctl,cand}_20260903_r4`，receipt `/tmp/v2_default_phase0/dp2_reduce_once_admission_r4.json` | 可与 stream 一同进入 target 优化包(需用户批);DP16×TP4 上每 update 省 15 次 8 轮归约,收益应更大;r1-r3 三次 CODE_REJECT 均为 PartitionSpec 拼法相等性(已改为等价校验) |
 | CANON_P32_LENGTH_SORT | tasks/v1_long_context phase3:分组 update 在分组前按行的真实长度(prompt_mask + completion_valid)降序稳定排序并按组轮发到各 DP rank,使同组各行长度接近(组的 chunk 数由最长行决定;P45/M15 日志估计可省 35–45% 的 chunk pass)。整棵 TrainExample 一个 gather 程序取同一排列(out_shardings 钉原 sharding),流式余切、末尾 eager 自检、收据行号一致;每行 logprob 不依赖同组邻居(paged 夹具测试钉住),只有组间梯度求和顺序改变 ⇒ **锚重钉**,非零比特。缺省/空/`0`=到达顺序、逐位不变;`1`=开;其他值拒绝。CPU 门 97 passed;一台机 dp2-tp2 / dp4-tp1 / dp2-tp2-long 三几何上**锚均逐位不变**(无需重钉);长几何(0.8k–2.1k 行)实测 chunk pass 69→59、update 12.31→10.62 s(−13.7%),收益与省掉的 chunk pass 同比例(tasks/v1_long_context_onehost/phase3.md)。 | off(候选,建议进 P45/M15 bundle) |
 | CANON_ONEHOST_JAX_CACHE_DIR | 一台机 xprof-pair 载具的可选持久编译缓存目录(宿主机路径,须在 /mnt/disks/tunix-data 挂载下);设了就把它作为容器内 `JAX_COMPILATION_CACHE_DIR` 并带上集群 JobSet 相同的 `JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0` / `JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=all`。只影响发射时的冷编译(step 1 ~300 s),普查只看被捕获的 update(compile 事件本就为 0)。缺省=不开,配方不变。 | off(载具工具) |
+| CANON_P32_LONG_PROMPT_EXAMPLES | 一台机长上下文载具的确定性数据构造器；值必须为 `lo-hi`，只在 GSM8K synthetic worked-example 前缀中控制每行追加的长度，不进入 production renderer/profile，也不改变模型或优化器定义 | off；仅 `dp2-tp2-long` / `dp2-tp2-long8k` 载具设置 | 长上下文几何锚与性能矩阵归档后保留在载具层；若删除载具则同 CL 退役 |
 | CANON_P28_BATCHED_REPORT(=1/=verify) | report 窗合并+remap jit 化(FL -14.5%) | GSM8K 默认;DP16 待验 | 同上 |
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
@@ -60,6 +62,18 @@
 | CANON_FUSED_TREE_OPS / CANON_PALLAS_NORM_MATMUL / CANON_PALLAS_INPUT_FUSION | P56 默认-off 候选实现；V1.1 不启用：P59 已取代主要 host-glue 靶，norm/input fusion 未进入最终 serving 配方 | off；保留历史 KEEP/边际/未转正事实；V1 profile 明确为 0 | V1 full 完成后按 P56 判决裁撤或另立新证据重开 |
 | CANON_SAMPLE_SPLIT_FUSION / CANON_ENGINE_LOGPROB_READBACK / CANON_ANCHOR_OVERLAP / CANON_GSM8K_VANILLA | P56 中性、被取代或仅对标/载具开关，不属于 V1 默认配方 | off；不进入三个 full recipe | 战役归档后退役；禁止借 V1 profile 开启 |
 | CANON_P3_APC_BOUNDARY_REPORT | Phase3 G-A 固定 token deep-prefix 边界报告路径;有值才运行 cache-hit prefill vs B full-reset 的前向探针 | 试验,缺省空/off | P3.1 结束后退役;证据保留 |
+
+### v2 Phase 4 lifecycle decision ledger (2026-09-04)
+
+| Family | Classification | Decision boundary |
+|---|---|---|
+| `CANON_P32_KEEP_TAPE` | default candidate; stream is the only production value | Do not delete legacy values until P45 and DeepSWE target anchors pass and the test-only reference replaces the existing batch comparison with equal discriminating power. |
+| `CANON_DP_REDUCE_ONCE` | default for admitted 1.7B/8B recipes; retain `0` as a kill-switch | DeepSWE admission and 32B HBM decide additional workload scope. The per-group path remains for at least one release and for geometries that cannot hold the staged table. |
+| `CANON_P32_LENGTH_SORT` | experiment, default off | P45 DP8xTP8 control/treatment decides defaultization. Until then only the explicit P45 renderer option may set `1`; GSM8K and M15 full manifests keep it absent. |
+| `CANON_P71_SCAN` | geometry-scoped selector; `fwd` admitted, other values not default | Keep the selector and its topology refusals. Do not weld or broaden it without TP>1 target evidence. |
+| `CANON_ONEHOST_JAX_CACHE_DIR`, `CANON_P32_LONG_PROMPT_EXAMPLES` | carrier tools | Never enter production bundles. Retain only while the one-host compilation/long-context carriers remain active. |
+| `CANON_FUSED_TREE_OPS` and unselected P56 fusion arms | retirement candidates | Remove only after target baseline anchors are frozen; each code deletion keeps or replaces its negative/control gate under R1. |
+| P38/P61/P62/P64/P66 families | diagnostics | Consolidation may rename entrypoints only in a separate CL; no diagnostic flag becomes a production default. Runtime markers and historical evidence names remain stable. |
 | CANON_XPROF_DIR/_SKIP_STEPS/_STEPS | XProf+perfetto 捕获(一次出双产物)；需要 Pathways XProf 的 V1 载具，其 DIR 固定为按 JobSet/attempt 隔离的 `gs://.../p33/<job>/attempt-<n>/xprof-update`，结束后硬门回收到本地证据目录；P58.37 起 1,000-update DeepSWE production full 明确全部 absent，XProf 只留在独立 one-host/P59 诊断载具 | 仪器；P58 production full off/absent | 长期保留 |
 | CANON_PERF_TRACE_DIR / CANON_PERF_TRACE_EXPORT_STEP | 官方 tunix.perf v2 语义时间线导出目录与零起点单步窗口；有 profile 的 V1 载具只序列化 warmed step 2，避免 full train 每步写盘；P58.37 起 DeepSWE production full 两者 absent，不创建 Perfetto exporter | 仪器；P58 production full off/absent | 长期保留(官方 Metrics 契约) |
 | CANON_XPROF_PYTHON_TRACER/_HOST_TRACER | tracer 档位;**python=0 是 device plane 的前提**(开着它训练捕获退化为 host-only) | 仪器;载具默认 python=0 | 长期保留 |
@@ -79,6 +93,29 @@
 | CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward)/ diagnostic=冻结权重 precheck 的一个完整 A-rollout/B-full-rescore/C-old-forward round | 仪器;载具旋钮 P51_XPROF_PHASE;Phase3 profile 固定 diagnostic skip=1 steps=1 | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证；Phase4 三个 full manifest 已锁定本地目录与 GCS root，restore/save 回执 host 绿；**Pathways target hit 未验** | 三个 full target 记录 hit/miss 与 JIT 后决定是否推广 |
+
+### Phase 0 reduce-once 接收补据（2026-09-04）
+
+- 标准、无 P61 的 `stream + CANON_DP_REDUCE_ONCE=1` 接收发在本地 tip `60142108` 上通过：
+  DP2×TP2 三锚逐位为 `1.6838101148605347 / 3.3025834560394287 / 1.8203867673873901`，
+  96 条 update alignment + 3 条 pre-alignment 全绿；DP4×TP1 三锚逐位为
+  `1.4907878637313843 / 2.2041752338409424 / 2.6263937950134277`，48 + 3 条 alignment 全绿。
+  两臂均为 3 commits、replica exact、semantic/hierarchy/module census GREEN；DP2 P74 gap
+  mean/max=`0.062512/0.064294 ms`、victim overlap=0。通用 trace JSON 分别在 1,000,447 / 1,000,429
+  events 截断，classifier 唯一 reason 为已用低事件负控钉住的 `trace_census_rc=1`，不覆盖独立普查。
+  Raw：`/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-v2p0accept-dp2_20260904_r1`、
+  `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_v2p0accept-dp4_20260904_r1`。
+
+### Phase 1 reduce-once 默认包状态（2026-09-04）
+
+- 本地未发布的 default-bundle CL 把 `CANON_DP_REDUCE_ONCE=1` 注入 GSM8K、FrozenLake P45/M15；
+  DeepSWE 继续缺席直到 Phase 2 完成 4B 几何、梯度与 `rank_major_rows` 认证。两个 renderer、full-run
+  classifier、相邻 HANDOFF/RUNBOOK 与 exact manifest golden 使用同一 truth table；
+  `CANON_DP_COLLECTIVE_REDUCE` 仍必须缺席。
+- Offline gate：expanded CPU `313 passed, 3 skipped, 132 subtests`；固定镜像最终收据
+  `V1_HP_EXACT_IMAGE_PASS ... frozenlake_system_optimization=1 ... manifests=3`；三份 unpublished render
+  均含 reduce-once。**Target 仍未验证**：P45 DP8×TP8 的 A=B=C、G1、HBM 与 update timing 在独立发射
+  通过前不得写成已认证或性能收益。
 
 ## C 层 · P38 诊断家族(~30 个 CANON_P38_*)
 
@@ -180,6 +217,7 @@ CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS
 CANON_DEEPSWE_REWARD_TIMEOUT_SECS
 CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS
 CANON_DEEPSWE_STEP_TIMEOUT_SECS
+CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM
 CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS
 CANON_DP_PROBE_LOCAL_SAMPLES
 CANON_DP_SIZE
@@ -239,6 +277,7 @@ CANON_MODE
 CANON_MODEL_DIR_NAME
 CANON_NUM_GENERATIONS
 CANON_N_LAYERS
+CANON_ONEHOST_JAX_CACHE_DIR
 CANON_OPT_STATE_RESIDENT
 CANON_OUT
 CANON_OUT_BYTES
@@ -284,6 +323,8 @@ CANON_P32_RC_STAGE
 CANON_P32_TRAIN_ADMITTED
 CANON_P32_WORKLOAD
 CANON_P32_KEEP_TAPE
+CANON_P32_LENGTH_SORT
+CANON_P32_LONG_PROMPT_EXAMPLES
 CANON_P33_DISABLE_EVAL
 CANON_P33_DP
 CANON_P33_DP4
@@ -556,7 +597,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 411 settable names (appendix inventory above; exclusions: none).
+Count: 415 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

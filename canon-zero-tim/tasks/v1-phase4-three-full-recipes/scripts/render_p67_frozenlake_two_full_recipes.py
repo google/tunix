@@ -113,6 +113,7 @@ def render_two(
     campaign_root: str,
     base_path: Path,
     m15_tito_exact: bool = False,
+    p45_length_sort: bool = False,
 ) -> tuple[Path, ...]:
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
@@ -184,6 +185,8 @@ def render_two(
       required_anti_affinity.append(anti_affinity_term)
     if label == "m15" and m15_tito_exact:
       _set_env(document, {"CANON_M15_TOKEN_CONTINUITY": "exact"})
+    if label == "p45" and p45_length_sort:
+      _set_env(document, {"CANON_P32_LENGTH_SORT": "1"})
     _write_yaml(path, document)
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -206,6 +209,7 @@ def render_two(
         "CANON_DP_FINITE_FETCH": "batched-commit",
         "CANON_P71_SCAN": "fwd",
         "CANON_P32_KEEP_TAPE": "stream",
+        "CANON_DP_REDUCE_ONCE": "1",
         "CANON_P33_ENABLE_EVAL": "0",
         "CANON_P33_DISABLE_EVAL": "1",
         "CANON_P31_ENABLE_EVAL": "0",
@@ -248,6 +252,11 @@ def render_two(
         and env.get("CANON_M15_TOKEN_CONTINUITY") != expected_tito
     ):
       raise ValueError("M15 exact TITO option was not rendered exactly once")
+    if label == "p45" and p45_length_sort:
+      if env.get("CANON_P32_LENGTH_SORT") != "1":
+        raise ValueError("P45 length-sort treatment was not rendered exactly once")
+    elif "CANON_P32_LENGTH_SORT" in env:
+      raise ValueError(f"{label} must keep the length-sort selector absent")
     receipts.append({
         "recipe": label,
         "path": str(path),
@@ -262,13 +271,15 @@ def render_two(
     )
 
   index = output_dir / "manifest-index.json"
+  index_receipt = {
+      "schema": "v1-p67-frozenlake-two-full-v1",
+      "m15_tito_exact": m15_tito_exact,
+      "manifests": receipts,
+  }
+  if p45_length_sort:
+    index_receipt["p45_length_sort"] = True
   index.write_text(
-      json.dumps({
-          "schema": "v1-p67-frozenlake-two-full-v1",
-          "m15_tito_exact": m15_tito_exact,
-          "manifests": receipts,
-      }, indent=2) + "\n",
-      encoding="utf-8",
+      json.dumps(index_receipt, indent=2) + "\n", encoding="utf-8"
   )
   print(
       f"V1_P67_FROZENLAKE_TWO_FULL_RENDER_PASS manifests=2 output={output_dir}",
@@ -290,6 +301,11 @@ def main() -> int:
       help="render exact M15 token input; default keeps the selector absent",
   )
   parser.add_argument(
+      "--p45-length-sort",
+      action="store_true",
+      help="render only P45 with length-sorted reverse groups",
+  )
+  parser.add_argument(
       "--base", type=Path, default=_CLUSTER_DIR / "jobset-64chip.yaml"
   )
   args = parser.parse_args()
@@ -301,6 +317,7 @@ def main() -> int:
       campaign_root=args.campaign_root,
       base_path=args.base,
       m15_tito_exact=args.m15_tito_exact,
+      p45_length_sort=args.p45_length_sort,
   )
   return 0
 
