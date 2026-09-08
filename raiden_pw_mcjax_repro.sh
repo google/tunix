@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904}
-export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904}
-export TUNIX_IMAGE=${TUNIX_IMAGE:-us-west1-docker.pkg.dev/supercomputer-testing/lancewang/tunix_base_image:tunix_0906}
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260908}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260908}
+export TUNIX_IMAGE=${TUNIX_IMAGE:-us-west1-docker.pkg.dev/supercomputer-testing/lancewang/tunix_base_image:tunix_0908}
 export REPRO_PY=${REPRO_PY:-/usr/local/google/home/lancewang/github/tunix/raiden_pathways_direct_api_repro.py}
 
 export SRC_PROJECT=${SRC_PROJECT:-cloud-tpu-inference-test}

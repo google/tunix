@@ -99,6 +99,8 @@ def main() -> None:
   slice_topology = None
   slice_size = None
   pw_instance_type = None
+  tpu_chips_per_worker = 4
+  affinity_block = """affinity:\n              podAffinity:\n                requiredDuringSchedulingIgnoredDuringExecution:\n                - topologyKey: cloud.google.com/gke-nodepool\n                  labelSelector:\n                    matchExpressions:\n                    - key: jobset.sigs.k8s.io/jobset-name\n                      operator: In\n                      values:\n                      - ${JOBSET_NAME}\n              podAntiAffinity:\n                requiredDuringSchedulingIgnoredDuringExecution:\n                - topologyKey: cloud.google.com/gke-nodepool\n                  labelSelector:\n                    matchExpressions:\n                    - key: jobset.sigs.k8s.io/jobset-name\n                      operator: Exists\n                    - key: jobset.sigs.k8s.io/jobset-name\n                      operator: NotIn\n                      values:\n                      - ${JOBSET_NAME}"""
   if args.tpu_slice and args.tpu_slice != ":":
     tpu_type, tpu_topology = args.tpu_slice.split(":")
     num_chips = math.prod([int(d) for d in tpu_topology.split("x")])
@@ -120,6 +122,12 @@ def main() -> None:
       slice_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct5lp-hightpu-4t"
+      if tpu_topology == "2x4":
+        # Single-host v5e 2x4 slices expose one 8-chip host per slice.
+        slice_size = 1
+        tpu_machine = "ct5lp-hightpu-8t"
+        tpu_chips_per_worker = 8
+        affinity_block = """affinity:\n              podAntiAffinity:\n                requiredDuringSchedulingIgnoredDuringExecution:\n                - topologyKey: cloud.google.com/gke-nodepool\n                  labelSelector:\n                    matchExpressions:\n                    - key: jobset.sigs.k8s.io/jobset-name\n                      operator: In\n                      values:\n                      - ${JOBSET_NAME}\n                - topologyKey: cloud.google.com/gke-nodepool\n                  labelSelector:\n                    matchExpressions:\n                    - key: jobset.sigs.k8s.io/jobset-name\n                      operator: Exists\n                    - key: jobset.sigs.k8s.io/jobset-name\n                      operator: NotIn\n                      values:\n                      - ${JOBSET_NAME}"""
       tpu_type = "tpu-v5-lite-podslice"
       pw_instance_type = "tpuv5e"
     elif tpu_type in ("tpuv6e", "tpu-v6e-slice"):
@@ -160,6 +168,10 @@ def main() -> None:
         PARALLELISM=num_chips // 4 if num_chips else None,
         PODSET_SLICE_TOPOLOGY=slice_topology,
         PODSET_SLICE_SIZE=slice_size,
+        TPU_CHIPS_PER_WORKER=tpu_chips_per_worker,
+        AFFINITY_BLOCK=string.Template(affinity_block).substitute(
+          JOBSET_NAME=jobset_name,
+        ),
         USER_CONTAINER=args.worker_container_name,
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,

@@ -45,27 +45,7 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
               cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+            ${AFFINITY_BLOCK}
             containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
@@ -74,9 +54,9 @@ spec:
                 privileged: true
               resources:
                 limits:
-                  google.com/tpu: "4"
+                  google.com/tpu: "${TPU_CHIPS_PER_WORKER}"
                 requests:
-                  google.com/tpu: "4"
+                  google.com/tpu: "${TPU_CHIPS_PER_WORKER}"
               command:
                 - bash
                 - -c

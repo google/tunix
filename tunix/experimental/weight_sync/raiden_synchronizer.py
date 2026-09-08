@@ -309,9 +309,12 @@ class RaidenSynchronizer:
     )
 
     task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    global_ids = jnp.array(
-        [d.id for d in mesh.devices.flatten()], dtype=jnp.int32
-    ).reshape(task_mesh_shape)
+    # Use mesh position rather than physical device id. create_device_mesh may
+    # reorder devices for topology, so device ids can diverge from the global
+    # shard indices the controller computes from mesh position.
+    global_ids = jnp.arange(mesh.devices.size, dtype=jnp.int32).reshape(
+      task_mesh_shape
+    )
     shard_idx = jax.device_put(
         global_ids,
         jax.sharding.NamedSharding(
