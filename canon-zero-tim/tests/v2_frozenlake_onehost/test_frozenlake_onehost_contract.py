@@ -556,6 +556,12 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertEqual(norm_calls[0].args[0].id, "scaled")
 
   def test_p45_r2_anchor_pins_the_deliberate_repin_receipt(self):
+    """tasks/v2_integrate (2026-09-08): the reverse chunk program moved the
+    P45 dp2-tp2 r2 anchor by [+0.013%, -0.53%, -0.56%, +0.16%] (update
+    -0.18%) under the same r32 capsule; re-pinned from the certify replay
+    p45_r2_v2int_b1_p45_r2_20260908_replay (previous values
+    [37.869327545166016, 6.235235691070557, 6.509113311767578,
+    7.796840667724609], update 23.40300178527832)."""
     registry = json.loads((
         ROOT
         / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
@@ -564,26 +570,29 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertEqual(
         registry["anchors"].get("p45:dp2-tp2:r2"),
         {
-            "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+            "run_id": "v2int_b1_p45_r2_20260908_replay",
             "training_capsule_sha256": (
                 "99b6dcaba5b816644a02037ef8f4e8ae"
                 "0199eb1106a4142e3d076b3f48d8539c"
             ),
             "micro_gradient_norms": [
-                37.869327545166016,
-                6.235235691070557,
-                6.509113311767578,
-                7.796840667724609,
+                37.87430953979492,
+                6.202442646026611,
+                6.472728252410889,
+                7.809017181396484,
                 0.0,
                 0.0,
                 0.0,
                 0.0,
             ],
-            "update_gradient_norm": 23.40300178527832,
+            "update_gradient_norm": 23.361648559570312,
         },
     )
 
   def test_p45_r3_anchor_pins_the_length_sorted_receipt(self):
+    """tasks/v2_integrate (2026-09-08): re-pinned from the certify replay
+    p45_r3_v2int_b1_p45_r3_20260908_replay after the reverse chunk program
+    (same <=0.6% per-row shift as r1/r2 under the r32 capsule)."""
     registry = json.loads((
         ROOT
         / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
@@ -592,22 +601,22 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertEqual(
         registry["anchors"].get("p45:dp2-tp2:r3"),
         {
-            "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+            "run_id": "v2int_b1_p45_r3_20260908_replay",
             "training_capsule_sha256": (
                 "99b6dcaba5b816644a02037ef8f4e8ae"
                 "0199eb1106a4142e3d076b3f48d8539c"
             ),
             "micro_gradient_norms": [
                 0.0,
-                6.509113311767578,
-                9.983430862426758,
+                6.472728252410889,
+                9.972514152526855,
                 0.0,
                 0.0,
                 0.0,
                 0.0,
-                37.86933135986328,
+                37.906280517578125,
             ],
-            "update_gradient_norm": 23.40300178527832,
+            "update_gradient_norm": 23.373065948486328,
         },
     )
 

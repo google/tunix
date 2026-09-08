@@ -16,47 +16,47 @@
     },
     "p45:dp2-tp2:r1": {
       "micro_gradient_norms": [
-        18.93467140197754,
-        3.117619276046753,
-        3.2545576095581055,
-        3.8984217643737793,
+        18.937162399291992,
+        3.1012227535247803,
+        3.236365795135498,
+        3.904510021209717,
         0.0,
         0.0,
         0.0,
         0.0
       ],
-      "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+      "run_id": "v2int_b1_p45_r1_20260908_replay",
       "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c"
     },
     "p45:dp2-tp2:r2": {
       "micro_gradient_norms": [
-        37.869327545166016,
-        6.235235691070557,
-        6.509113311767578,
-        7.796840667724609,
+        37.87430953979492,
+        6.202442646026611,
+        6.472728252410889,
+        7.809017181396484,
         0.0,
         0.0,
         0.0,
         0.0
       ],
-      "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+      "run_id": "v2int_b1_p45_r2_20260908_replay",
       "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c",
-      "update_gradient_norm": 23.40300178527832
+      "update_gradient_norm": 23.361648559570312
     },
     "p45:dp2-tp2:r3": {
       "micro_gradient_norms": [
         0.0,
-        6.509113311767578,
-        9.983430862426758,
+        6.472728252410889,
+        9.972514152526855,
         0.0,
         0.0,
         0.0,
         0.0,
-        37.86933135986328
+        37.906280517578125
       ],
-      "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+      "run_id": "v2int_b1_p45_r3_20260908_replay",
       "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c",
-      "update_gradient_norm": 23.40300178527832
+      "update_gradient_norm": 23.373065948486328
     }
   },
   "schema": "canon.v2-frozenlake-onehost.gradient-anchors.v2"
