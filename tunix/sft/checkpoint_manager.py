@@ -58,13 +58,30 @@ def _replicate_if_pspec_uses_unknown_mesh_axis(
 ) -> jax.sharding.PartitionSpec:
   if pspec is None:
     return jax.sharding.PartitionSpec()
+  seen_axes = set()
+  cleaned_spec = []
   for axis_name in pspec:
     if axis_name is None:
+      cleaned_spec.append(None)
       continue
     axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
-    if any(name is not None and name not in mesh.shape for name in axis_names):
-      return jax.sharding.PartitionSpec()
-  return pspec
+    valid_axes = []
+    for name in axis_names:
+      if name is None:
+        continue
+      if name not in mesh.shape:
+        return jax.sharding.PartitionSpec()
+      if name in seen_axes:
+        continue
+      valid_axes.append(name)
+      seen_axes.add(name)
+    if not valid_axes:
+      cleaned_spec.append(None)
+    elif len(valid_axes) == 1:
+      cleaned_spec.append(valid_axes[0])
+    else:
+      cleaned_spec.append(tuple(valid_axes))
+  return jax.sharding.PartitionSpec(*cleaned_spec)
 
 
 def _get_named_sharding(
