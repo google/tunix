@@ -463,6 +463,14 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     self.assertTrue(step_path.exists())
 
+  def test_get_trajectories_metadata_nonexistent_root_dir_returns_empty(
+      self,
+  ) -> None:
+    """Verifies get_trajectories_metadata on a non-existent root_dir gracefully returns empty list."""
+    nonexistent_root = self.tmp_dir / "does_not_exist"
+    store_instance = file_store.FileTrajectoryStore(root_dir=nonexistent_root)
+    self.assertEmpty(store_instance.get_trajectories_metadata())
+
 
 if __name__ == "__main__":
   absltest.main()

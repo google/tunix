@@ -53,18 +53,79 @@ class TrajectoryReaderTestCase(
         ],
     )
 
-  def test_get_trajectories_metadata(self) -> None:
-    """Tests that metadata for all stored trajectories is retrieved."""
-    metas = self.reader.get_trajectories_metadata()
-    self.assertCountEqual(
-        metas,
-        [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2],
-    )
+  @parameterized.named_parameters(
+      (
+          "all_trajectory_ids",
+          None,
+          [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2],
+      ),
+      ("empty_list", [], []),
+      (
+          "single_trajectory",
+          [trajectory_testing.TRAJECTORY_ID_1],
+          [trajectory_testing.METADATA_1],
+      ),
+      (
+          "multiple_trajectories",
+          [
+              trajectory_testing.TRAJECTORY_ID_1,
+              trajectory_testing.TRAJECTORY_ID_2,
+          ],
+          [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2],
+      ),
+  )
+  def test_get_trajectories_metadata(
+      self,
+      trajectory_ids: list[str] | None,
+      expected_metas: list[trajectory_lib.TrajectoryMetadata],
+  ) -> None:
+    """Tests that metadata for trajectories is retrieved."""
+    metas = self.reader.get_trajectories_metadata(trajectory_ids)
+    self.assertCountEqual(metas, expected_metas)
 
-  def test_get_trajectories_metadata_empty(self) -> None:
+  @parameterized.named_parameters(
+      ("all_trajectory_ids", None),
+      ("empty_list", []),
+  )
+  def test_get_trajectories_metadata_empty_store(
+      self, trajectory_ids: list[str] | None
+  ) -> None:
     """Tests that metadata retrieval on an empty store returns an empty list."""
     empty_reader = self._create_reader(initial_data=None)
-    self.assertEmpty(empty_reader.get_trajectories_metadata())
+    self.assertEmpty(empty_reader.get_trajectories_metadata(trajectory_ids))
+
+  @parameterized.named_parameters(
+      (
+          "single_trajectory",
+          [trajectory_testing.TRAJECTORY_ID_1],
+      ),
+      (
+          "multiple_trajectories",
+          [
+              trajectory_testing.TRAJECTORY_ID_1,
+              trajectory_testing.TRAJECTORY_ID_2,
+          ],
+      ),
+  )
+  def test_get_trajectories_metadata_empty_store_with_ids_raises(
+      self,
+      trajectory_ids: list[str],
+  ) -> None:
+    """Tests that querying explicit IDs on an empty store raises TrajectoryMetadataNotFoundError."""
+    empty_reader = self._create_reader(initial_data=None)
+    with self.assertRaisesRegex(
+        store.TrajectoryMetadataNotFoundError,
+        f"Trajectory metadata for ID '{trajectory_ids[0]}' not found.",
+    ):
+      empty_reader.get_trajectories_metadata(trajectory_ids)
+
+  def test_get_trajectories_metadata_not_found(self) -> None:
+    """Tests that passing a non-existent trajectory ID raises TrajectoryMetadataNotFoundError."""
+    with self.assertRaisesRegex(
+        store.TrajectoryMetadataNotFoundError,
+        "Trajectory metadata for ID 'non_existent_id' not found.",
+    ):
+      self.reader.get_trajectories_metadata(["non_existent_id"])
 
   @parameterized.named_parameters(
       ("empty_list", [], []),
@@ -93,7 +154,10 @@ class TrajectoryReaderTestCase(
 
   def test_get_trajectories_not_found(self) -> None:
     """Tests that loading a non-existent trajectory ID raises TrajectoryNotFoundError."""
-    with self.assertRaises(store.TrajectoryNotFoundError):
+    with self.assertRaisesRegex(
+        store.TrajectoryNotFoundError,
+        "Trajectory with ID 'non_existent_id' not found.",
+    ):
       self.reader.get_trajectories(["non_existent_id"])
 
 
@@ -358,5 +422,3 @@ class TrajectoryWriterTestCase(
     )
     with self.assertRaises(ValueError):
       self.writer.update_metadata(meta)
-
-
