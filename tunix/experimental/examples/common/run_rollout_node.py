@@ -63,7 +63,7 @@ def _chat_parser_for(model_id: str, tokenizer):
   name = model_id.lower()
   for family, parser_cls in CHAT_PARSERS.items():
     if family in name:
-      return parser_cls(tokenizer, enable_thinking=False)
+      return parser_cls(tokenizer, enable_thinking=True)
   return chat_parser_lib.DefaultChatTemplateParser(
       tokenizer, enable_thinking=False
   )
