@@ -40,6 +40,7 @@ MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
+LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
@@ -346,6 +347,7 @@ echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
+echo "  learning rate:  $LEARNING_RATE"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
@@ -437,6 +439,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
+    --learning_rate="$LEARNING_RATE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --trainer_backend="$TRAINER_BACKEND"
