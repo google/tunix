@@ -95,6 +95,14 @@ for root in [
     os.path.join(WORKSPACE_ROOT, "pathways-utils"),
     os.path.join(WORKSPACE_ROOT, "r2egym"),
 ]:
+  # A workspace entry is a checkout root, never a package directory: when
+  # the workspace is the repo itself, WORKSPACE_ROOT/tunix is the tunix
+  # package, and putting it on sys.path lets tunix/examples (a regular
+  # package) shadow the repo's examples namespace, so
+  # ``from examples.frozenlake import training_geometry`` (tunix.sft.utils)
+  # fails inside the one-host container.
+  if os.path.isfile(os.path.join(root, "__init__.py")):
+    continue
   if root not in sys.path:
     sys.path.insert(0, root)
 

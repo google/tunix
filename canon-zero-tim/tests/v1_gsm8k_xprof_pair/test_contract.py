@@ -1756,6 +1756,29 @@ class WandbGroupContractTest(unittest.TestCase):
     )
 
 
+class DemoWorkspaceRootsTest(unittest.TestCase):
+  """The demo never puts a package directory on sys.path.
+
+  With the container's working directory at the repo root, WORKSPACE_ROOT is
+  the repo and WORKSPACE_ROOT/tunix is the tunix package; on sys.path its
+  tunix/examples (a regular package) shadows the repo's examples namespace and
+  ``from examples.frozenlake import training_geometry`` in tunix.sft.utils
+  fails before the run starts (v2int_a_dp2_20260908_r1).
+  """
+
+  def test_package_directories_are_skipped(self):
+    demo = (
+        Path(__file__).resolve().parents[3]
+        / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    loop = demo[demo.index("for root in ["):demo.index("_DISTRIBUTED_INITIALIZED = False")]
+    self.assertIn('if os.path.isfile(os.path.join(root, "__init__.py")):', loop)
+    self.assertLess(
+        loop.index('if os.path.isfile(os.path.join(root, "__init__.py")):'),
+        loop.index("sys.path.insert(0, root)"),
+    )
+
+
 class LongContextGeometryTest(unittest.TestCase):
   """`dp2-tp2-long`: the long-context 2x2 carrier registered beside the short ones."""
 
