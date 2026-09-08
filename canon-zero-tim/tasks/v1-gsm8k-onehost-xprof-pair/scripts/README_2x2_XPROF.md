@@ -356,6 +356,8 @@ batch + reverse chunk program; EXTRA_ENV `CANON_DP_REDUCE_ONCE=1`, tape
 | `…dp2tp2-v2int_c_dp2_20260908_r1` (8c9d49f1, knife d=2) | 736 | bitwise | 39.21 GiB | 4.773 s (-4.3%) |
 | `…dp2tp2long-v2int_c_long_20260908_r1` (8c9d49f1, knife d=2) | 526 | bitwise | 42.40 GiB (+5.4%) | 6.438 s (-5.6%) |
 | `…dp2tp2-v2int_c_dp2_20260908_r2` (b7cd9502, lead budget 0 = the shipped tree) | 736 | bitwise | 39.21 GiB | 5.003 s |
+| `…dp2tp2long-v2int_c_long_20260908_r3` (06a0fdb9, published) | 526 | bitwise | 40.22 GiB | 6.845 s |
+| `…dp2tp2long8k-v2int_c_long8k_20260908_r1` (06a0fdb9, published) | truncated capture | bitwise (pinned) | 46.83 GiB | 12.50 s |
 
 The two-chunk lead (`_P77_LEAD_PACK_BUDGET_GIB`) costs one in-flight gradient
 pack: over the +5% HBM gate on dp2-tp2-long, so the shipped tree keeps the
