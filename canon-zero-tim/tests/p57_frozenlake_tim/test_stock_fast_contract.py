@@ -59,7 +59,7 @@ class P57StockFastContractTest(unittest.TestCase):
     )
     self.assertEqual(attestation["regime"], "stock-fast")
     self.assertEqual(len(attestation["absent_switches"]), 12)
-    self.assertEqual(len(attestation["zero_switches"]), 25)
+    self.assertEqual(len(attestation["zero_switches"]), 26)
 
   def test_runtime_and_offline_classifier_attest_the_same_switches(self):
     self.assertEqual(

@@ -34,6 +34,15 @@ classifier = _load(
 
 class P57ProvenanceDerivationTest(unittest.TestCase):
 
+  def test_pre_p78_exception_is_exact_artifact_not_a_generic_missing_receipt(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      output = Path(tmp) / "derived.json"
+      deriver.derive(SOURCE, output, Path(tmp) / "proof.json")
+      value = json.loads(output.read_text())
+      value["source_commit"] = "a" * 40
+      output.write_text(json.dumps(value))
+      self.assertEqual(classifier.classify(output)["verdict"], "FAIL")
+
   def test_committed_cal6_derives_without_mutating_measurements(self):
     source_before = SOURCE.read_bytes()
     with tempfile.TemporaryDirectory() as tmp:

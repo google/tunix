@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -42,7 +43,8 @@ _ZERO_SWITCHES = (
     "CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "CANON_P32_DP16_SEGMENTED",
     "CANON_FROZENLAKE_L3", "CANON_FROZENLAKE_P27",
     "CANON_P28_SEGMENTED_FORWARD", "CANON_P28_SEGMENTED_VJP",
-    "CANON_P28_SEGMENTED_TRAIN", "CANON_P28_G6_UPDATE",
+    "CANON_P28_SEGMENTED_TRAIN", "CANON_P78_SEGMENTED_ACTOR_LOGPS",
+    "CANON_P28_G6_UPDATE",
     "CANON_P28_BATCHED_REPORT", "CANON_P29_FULL_TRAIN",
     "CANON_ALIGNMENT_GATE", "CANON_ALIGNMENT_GATE_ONLY",
     "CANON_ALIGNMENT_UPDATE_CANARY", "CANON_ALIGNMENT_TRAIN",
@@ -278,11 +280,22 @@ def classify(stochastic_path: Path) -> dict[str, Any]:
   except (OSError, ValueError, json.JSONDecodeError) as exc:
     receipt = {}
     reasons.append(f"stochastic receipt unreadable: {exc}")
+  expected_attestation = _ZERO_TIM_OFF_ATTESTATION
+  # Preserve only the two immutable pre-P78 calibration artifacts. Do not
+  # pretend they observed a later flag or broadly admit missing P78 receipts.
+  if stochastic_path.is_file() and hashlib.sha256(stochastic_path.read_bytes()).hexdigest() in {
+      "b34084dcbeb0f877b793bef1a7383039413b63a17f4f4205d575de6190640276",
+      "ec03fe33990c300c7648a35a004a0a1deb488f92c7492c143d612c586928a531",
+  }:
+    expected_attestation = {
+        **_ZERO_TIM_OFF_ATTESTATION,
+        "zero_switches": [key for key in _ZERO_SWITCHES if key != "CANON_P78_SEGMENTED_ACTOR_LOGPS"],
+    }
   expected = {
       "schema": "p57-frozenlake-stock-rollout-calibration-v2",
       "arm": "mismatch",
       "inference_regime": "stock-fast",
-      "zero_tim_off_attestation": _ZERO_TIM_OFF_ATTESTATION,
+      "zero_tim_off_attestation": expected_attestation,
       "rollout_weight_sync": _STOCK_SYNC_RECEIPT,
       "fixed_lm_head": "0",
       "mode": _MODE,
