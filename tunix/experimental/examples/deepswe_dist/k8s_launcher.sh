@@ -37,6 +37,7 @@ export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
+export LEARNING_RATE=${LEARNING_RATE:-1e-6}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
 export LORA_RANK=${LORA_RANK:-64}
@@ -225,6 +226,7 @@ start_trainer() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
+        --learning_rate=${LEARNING_RATE} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --sampler=${SAMPLER} \

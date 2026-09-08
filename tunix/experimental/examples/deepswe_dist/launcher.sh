@@ -41,6 +41,7 @@ MAX_TURNS=${MAX_TURNS:-3}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
 SAMPLER=${SAMPLER:-inprocess_vllm}
@@ -201,6 +202,7 @@ echo "  max steps:      ${MAX_STEPS}"
 echo "  max turns:      ${MAX_TURNS}"
 echo "  prompt length:  ${MAX_PROMPT_LENGTH}"
 echo "  response len:   ${MAX_RESPONSE_LENGTH}"
+echo "  learning rate:  ${LEARNING_RATE}"
 echo "  beta:           ${BETA}"
 echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
@@ -243,6 +245,7 @@ echo "Launching trainer node..."
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
+    --learning_rate="$LEARNING_RATE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --sampler="$SAMPLER"
