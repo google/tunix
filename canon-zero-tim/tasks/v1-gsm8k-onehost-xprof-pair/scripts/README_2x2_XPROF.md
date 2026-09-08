@@ -335,3 +335,31 @@ Rules that came out of it:
   boundary's arithmetic with a probe before spending a certification run.
 - dp4-tp1 is not verified: the base's fused report accumulate rejects the
   TP1 embedding cotangent VMA (`v1_zero-hp_v2disp_basefix_dp4_20260906_r1`).
+
+## tasks/v2_integrate (2026-09-08): the merged branch, its fresh certifications and the bounded-lead knife
+
+`local/v2-integrate` = 6842edae + the v2 one-host line squashed into eight
+thematic commits + the dispatch lane squashed into four + a merge of the
+TiTO release line (cd955f99) + four follow-ups (demo sys.path, P61 capture
+on the FrozenLake no-commit carrier, the pack-budget backpressure knife, the
+FrozenLake launcher's second physical worktree).
+
+Fresh certifications on the merged tree (defaults: fwd_block + two-chunk
+batch + reverse chunk program; EXTRA_ENV `CANON_DP_REDUCE_ONCE=1`, tape
+`stream`):
+
+| run | dispatch/update | anchors (reduce-once+chunk) | peak HBM | warm reverse |
+|---|---|---|---|---|
+| `…dp2tp2-v2int_a_dp2_20260908_r2` (d2c40608) | 736 | bitwise | 39.21 GiB | 4.986 s |
+| `…dp2tp2long-v2int_a_long_20260908_r2` | 526 | bitwise | 40.22 GiB | 6.823 s |
+| `…dp2tp2long8k-v2int_a_long8k_20260908_r2/r3` | truncated capture (structural) | pinned from two byte-identical runs: 5.4485979080200195 / 4.931449890136719 / 3.995054006576538 | 46.83 GiB | 12.42 s |
+| `…dp2tp2-v2int_c_dp2_20260908_r1` (8c9d49f1, knife d=2) | 736 | bitwise | 39.21 GiB | 4.773 s (-4.3%) |
+
+The long8k xprof/P74 censuses stay RED on every run of that geometry (the
+profile capture ends before the update does: span 11.6 s vs a 12.4 s
+reverse; the legacy 2026-09-03 run had the same shape), so long8k is
+certified by anchors, HBM, timing and the hierarchy/semantic censuses only.
+The first launch of the merged tree (`v2int_a_dp2_20260908_r1`) died on an
+import: the demo had put the tunix package directory on sys.path, which let
+tunix/examples shadow the repo's examples namespace once the TiTO line
+imported examples.frozenlake at module level (fixed in d2c40608).

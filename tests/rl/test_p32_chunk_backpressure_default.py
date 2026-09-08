@@ -92,23 +92,37 @@ def _expected_waits(num_chunks, depth):
   )
 
 
-def test_rank_parallel_reverse_drains_every_depth_chunks_and_is_bitwise():
+def test_rank_parallel_reverse_waits_twice_per_chunk_on_every_carrier():
+  if len(jax.devices()) < 16:
+    pytest.skip("requires sixteen forced CPU devices")
+  # Budget 0: every carrier keeps the Phase 14 two waits per chunk.
+  waits = []
+  num_chunks, gradients = _one_pass(None, waits)
+  assert len(waits) == 2 * num_chunks, (len(waits), num_chunks)
+  # A FrozenLake carrier is bounded the same way (Phase 14 excluded it).
+  frozen_waits = []
+  _, frozen_gradients = _one_pass("frozenlake-p45-onehost-dp2-tp2", frozen_waits)
+  assert len(frozen_waits) == 2 * num_chunks
+  assert _bytes(gradients) == _bytes(frozen_gradients)
+
+
+def test_lead_depth_two_drains_every_second_chunk_and_is_bitwise():
   if len(jax.devices()) < 16:
     pytest.skip("requires sixteen forced CPU devices")
   depth = canonical_qwen3_adapter._P77_CHUNK_LEAD_DEPTH  # pylint: disable=protected-access
   assert depth == 2
   waits = []
   num_chunks, gradients = _one_pass(None, waits)
-  assert len(waits) == _expected_waits(num_chunks, depth), (len(waits), num_chunks)
-  assert len(waits) < 2 * num_chunks
-  # A FrozenLake carrier is bounded the same way (Phase 14 excluded it).
-  frozen_waits = []
-  _, frozen_gradients = _one_pass("frozenlake-p45-onehost-dp2-tp2", frozen_waits)
-  assert len(frozen_waits) == len(waits)
-  assert _bytes(gradients) == _bytes(frozen_gradients)
-  # Reference: a depth larger than the group drains only after its last chunk.
+  lead_waits = []
+  with mock.patch.object(canonical_qwen3_adapter, "_P77_LEAD_PACK_BUDGET_GIB", 1e9):
+    _, lead_gradients = _one_pass(None, lead_waits)
+  assert len(lead_waits) == _expected_waits(num_chunks, depth), (len(lead_waits), num_chunks)
+  assert len(lead_waits) < len(waits)
+  assert _bytes(gradients) == _bytes(lead_gradients)
+  # A depth larger than the group drains only after its last chunk.
   loose_waits = []
-  with mock.patch.object(canonical_qwen3_adapter, "_P77_CHUNK_LEAD_DEPTH", 10**6):
+  with mock.patch.object(canonical_qwen3_adapter, "_P77_LEAD_PACK_BUDGET_GIB", 1e9), \
+       mock.patch.object(canonical_qwen3_adapter, "_P77_CHUNK_LEAD_DEPTH", 10**6):
     _, loose_gradients = _one_pass(None, loose_waits)
   assert len(loose_waits) == 1
   assert _bytes(gradients) == _bytes(loose_gradients)
@@ -126,11 +140,14 @@ def test_flag_print_stays_flag_only():
 
 def test_lead_depth_follows_the_pack_budget():
   depth = canonical_qwen3_adapter._p77_chunk_lead_depth  # pylint: disable=protected-access
-  # 1.7B TP2 / TP4 and 8B TP8 packs lead by two chunks ...
-  assert depth(3.4) == 2 and depth(1.7) == 2 and depth(4.1) == 2
-  assert depth(canonical_qwen3_adapter._P77_LEAD_PACK_BUDGET_GIB) == 2  # pylint: disable=protected-access
-  # ... the 8B one-host packs keep the two waits at every boundary.
-  assert depth(8.2) == 0 and depth(16.4) == 0 and depth(32.8) == 0
+  # Budget 0 (the certified first version): every pack keeps the two waits.
+  assert canonical_qwen3_adapter._P77_LEAD_PACK_BUDGET_GIB == 0.0  # pylint: disable=protected-access
+  assert depth(1.7) == 0 and depth(3.4) == 0 and depth(4.1) == 0 and depth(16.4) == 0
+  with mock.patch.object(canonical_qwen3_adapter, "_P77_LEAD_PACK_BUDGET_GIB", 6.0):
+    # 1.7B TP2 / TP4 and 8B TP8 packs would lead by two chunks ...
+    assert depth(3.4) == 2 and depth(1.7) == 2 and depth(4.1) == 2 and depth(6.0) == 2
+    # ... the 8B one-host packs keep the two waits at every boundary.
+    assert depth(8.2) == 0 and depth(16.4) == 0 and depth(32.8) == 0
   gib = canonical_qwen3_adapter._p77_pack_gib  # pylint: disable=protected-access
   leaves = (jnp.zeros((1024, 1024), jnp.bfloat16), jnp.zeros((1024,), jnp.float32))
   assert gib(leaves, 2) == (1024 * 1024 + 1024) * 4 / 2 / 2**30

@@ -467,8 +467,13 @@ def _p77_chunk_backpressure_enabled() -> bool:
 # TP4 1.7 GiB and 8B TP8 4.1 GiB qualify; the 8B one-host carriers (TP4 8.2,
 # TP2 16.4, TP1 32.8 GiB; P45 dp2-tp2 already peaks at 89 of 102.8 GB) keep
 # the Phase 14 two waits at every boundary (depth 0), as does the flag arm.
+# The budget is 0 for now: the certified one-host cost of the lead is exactly
+# one pack (dp2-tp2-long 40.22 -> 42.40 GiB, +5.4%, for a 5.6% shorter warm
+# reverse; tasks/v2_integrate C.2), just over the +5% HBM gate, so every
+# carrier keeps the two waits until the 64-chip admission run shows the
+# headroom that would pay for the lead.
 _P77_CHUNK_LEAD_DEPTH = 2
-_P77_LEAD_PACK_BUDGET_GIB = 6.0
+_P77_LEAD_PACK_BUDGET_GIB = 0.0
 
 
 def _p77_pack_gib(engine_leaves, tp_size) -> float:
