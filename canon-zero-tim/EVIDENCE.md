@@ -350,3 +350,35 @@ No full-gradient-leaf parity, fresh-rollout Zero-TIM, optimizer, convergence,
 new speedup, other topology, Pathways or GKE claim. P59 sharing remains
 NOT_ADMITTED; the sorting candidate remains rejected. The subsequent
 `32f586bb` CL changes only a handoff test and carries no separate hardware claim.
+
+## v2int-f1a-p45-r1 — lazy selector refactor replay, 2026-09-08
+
+Source/evaluator `9dcf4fdbc81b36d7f490a74250ea15e66cff05b4`; same pinned
+image, P45 DP2xTP2 r2 capsule and scope as the recovered E.1 control above.
+Clean physical source, continuous idle120/120, installer37/37. No target run.
+
+- Root: `/mnt/disks/tunix-data/frozenlake-onehost-v2/p45_r2_v2int_f1a_p45_20260908_r1`.
+  `raw.log:11416`: `RUN_END docker_exit=0 elapsed_seconds=964 contention=0 timeout=0`.
+  Raw SHA256 `86cf448d7324259479d87e8315e2e7bc0274ade819fa482659bac0fd163ced16`.
+- Scoped `RECOVERY_CONTROL_PASS`: outer task `tasks/v2_integrate/f1a_p45_control.json`,
+  SHA256 `45a6728f62079a51b3ce95645b0a2928d2b70888151f76c2b71b6c391a699846`.
+  Standard reuse-only FAIL remains unchanged; observed tuple `(0,36,36,36,1,1,0)`.
+- `f1a_p45_comparison.json` in the same outer task: `NORM_RECEIPTS_EQUAL`,
+  all eight-by-seven input hashes and eight micro/update norm bits match
+  fresh E.1 r2. Update norm `23.361648559570312`; comparison SHA256
+  `1b8f4168f73d8a4194f6698d6aa3f6c3b448c0b5ccc96c0706617077371bc5d4`.
+  Strict exact alignment/finite/replica/rank receipts pass; outer checked-VMA
+  receipt count39 equals control39. No anchor or tolerance change.
+- Peak HBM `83923252736` bytes versus control `84670434816` (ratio0.9911754),
+  passes the pre-registered <=1.05 guard. Cold wall964s versus968s is not
+  warm timing or a speedup claim; no XProf/full-tree capture was requested.
+- All46 original checksum entries verify. Immutable compressed package:
+  outer task `tasks/v2_integrate/evidence/f1a_p45_r1/`,47 kept/0 dropped,
+  structure PASS; SHA256SUMS hash
+  `7dfbc3e6e228e1c526fcc83b0f0ee784415547bdccf5fb393249e8716dcd6c28`.
+  Generic completeness remains INCONCLUSIVE (no new serving archive/local
+  capsule copy); the scoped contract checks the external capsule and producer.
+
+F.1a's P45 no-commit refactor gate passes, not F.1's default-promotion exit.
+No full-gradient-leaf, fresh-rollout, optimizer, other-geometry, convergence,
+warm-performance or target claim. Final-source matrix gates remain open.
