@@ -354,6 +354,14 @@ batch + reverse chunk program; EXTRA_ENV `CANON_DP_REDUCE_ONCE=1`, tape
 | `…dp2tp2long-v2int_a_long_20260908_r2` | 526 | bitwise | 40.22 GiB | 6.823 s |
 | `…dp2tp2long8k-v2int_a_long8k_20260908_r2/r3` | truncated capture (structural) | pinned from two byte-identical runs: 5.4485979080200195 / 4.931449890136719 / 3.995054006576538 | 46.83 GiB | 12.42 s |
 | `…dp2tp2-v2int_c_dp2_20260908_r1` (8c9d49f1, knife d=2) | 736 | bitwise | 39.21 GiB | 4.773 s (-4.3%) |
+| `…dp2tp2long-v2int_c_long_20260908_r1` (8c9d49f1, knife d=2) | 526 | bitwise | 42.40 GiB (+5.4%) | 6.438 s (-5.6%) |
+| `…dp2tp2-v2int_c_dp2_20260908_r2` (b7cd9502, lead budget 0 = the shipped tree) | 736 | bitwise | 39.21 GiB | 5.003 s |
+
+The two-chunk lead (`_P77_LEAD_PACK_BUDGET_GIB`) costs one in-flight gradient
+pack: over the +5% HBM gate on dp2-tp2-long, so the shipped tree keeps the
+Phase 14 two waits at every chunk boundary on every carrier (FrozenLake
+included) and the lead stays a certified-but-disabled path until the 64-chip
+admission run shows its headroom.
 
 The long8k xprof/P74 censuses stay RED on every run of that geometry (the
 profile capture ends before the update does: span 11.6 s vs a 12.4 s
