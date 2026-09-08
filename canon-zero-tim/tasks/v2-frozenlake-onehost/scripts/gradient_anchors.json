@@ -15,6 +15,7 @@
       "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c"
     },
     "p45:dp2-tp2:r1": {
+      "capture_run_id": "v2fl_p45_r0d_capsule_20260904_r32",
       "micro_gradient_norms": [
         18.937162399291992,
         3.1012227535247803,
@@ -29,6 +30,7 @@
       "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c"
     },
     "p45:dp2-tp2:r2": {
+      "capture_run_id": "v2fl_p45_r0d_capsule_20260904_r32",
       "micro_gradient_norms": [
         37.87430953979492,
         6.202442646026611,
@@ -44,6 +46,7 @@
       "update_gradient_norm": 23.361648559570312
     },
     "p45:dp2-tp2:r3": {
+      "capture_run_id": "v2fl_p45_r0d_capsule_20260904_r32",
       "micro_gradient_norms": [
         0.0,
         6.472728252410889,

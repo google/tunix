@@ -112,6 +112,15 @@ Also check intentional sharing and device-transfer neutrality. The regression
 cases live in `tests/rl/test_p59_static_key_identity.py` (outer repository).
 Equal norm receipts alone do not prove full-gradient equality or key soundness.
 
+For replay-anchor registry changes, keep the run that measured the anchor
+distinct from the run that produced the input capsule. Test that a legitimate
+re-pin can reuse the same producer, while a foreign/malformed producer, wrong
+capsule SHA, moved micro/update norm or missing producer-bypass receipt still
+fails. Legacy fallback applies only to an absent producer field, never an
+explicit invalid value. Reclassification writes a new artifact and retains
+the original verdict. Tests: `tests/v2_frozenlake_onehost/test_classifier.py`
+(package root); registered-anchor contracts live beside it.
+
 ## 7. Flag lifecycle
 
 For changes that span renderers, profiles, process delivery, or paired treatment

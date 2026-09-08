@@ -571,6 +571,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         registry["anchors"].get("p45:dp2-tp2:r2"),
         {
             "run_id": "v2int_b1_p45_r2_20260908_replay",
+            "capture_run_id": "v2fl_p45_r0d_capsule_20260904_r32",
             "training_capsule_sha256": (
                 "99b6dcaba5b816644a02037ef8f4e8ae"
                 "0199eb1106a4142e3d076b3f48d8539c"
@@ -602,6 +603,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         registry["anchors"].get("p45:dp2-tp2:r3"),
         {
             "run_id": "v2int_b1_p45_r3_20260908_replay",
+            "capture_run_id": "v2fl_p45_r0d_capsule_20260904_r32",
             "training_capsule_sha256": (
                 "99b6dcaba5b816644a02037ef8f4e8ae"
                 "0199eb1106a4142e3d076b3f48d8539c"

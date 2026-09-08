@@ -661,7 +661,7 @@ def _valid_p75_group_hbm_receipts(receipts: list[dict[str, Any]]) -> bool:
 def _anchor(
     registry: dict[str, Any], workload: str, geometry: str, arm: str,
     *, gradient_groups: int, reduce_once: bool
-) -> tuple[list[float] | None, float | None, str | None, str | None]:
+) -> tuple[list[float] | None, float | None, str | None, str | None, str | None]:
   if registry.get("schema") != "canon.v2-frozenlake-onehost.gradient-anchors.v2":
     raise ValueError("gradient anchor registry schema changed")
   anchors = registry.get("anchors")
@@ -669,12 +669,16 @@ def _anchor(
     raise ValueError("gradient anchor registry has no anchors object")
   entry = anchors.get(f"{workload}:{geometry}:{arm}")
   if entry is None:
-    return None, None, None, None
+    return None, None, None, None, None
   if not isinstance(entry, dict):
     raise ValueError("gradient anchor entry is not an object")
   norms = entry.get("micro_gradient_norms")
   update_norm = entry.get("update_gradient_norm")
   run_id = entry.get("run_id")
+  # A replay can measure a new anchor without producing a new input capsule.
+  # Legacy entries used the capsule producer as run_id. Preserve that contract
+  # only when capture_run_id is absent, never when explicitly malformed.
+  capture_run_id = entry.get("capture_run_id", run_id)
   capsule_sha = entry.get("training_capsule_sha256")
   if (
       not isinstance(norms, list)
@@ -690,6 +694,11 @@ def _anchor(
     raise ValueError("gradient anchor entry is incomplete")
   if capsule_sha is not None and _SHA256_RE.fullmatch(str(capsule_sha)) is None:
     raise ValueError("gradient anchor capsule SHA is invalid")
+  if (
+      not isinstance(capture_run_id, str)
+      or re.fullmatch(r"[a-z0-9][a-z0-9_-]+", capture_run_id) is None
+  ):
+    raise ValueError("gradient anchor capture run identity is invalid")
   if reduce_once != (update_norm is not None):
     raise ValueError(
         "gradient anchor update norm does not match reduce-once arm"
@@ -699,6 +708,7 @@ def _anchor(
       None if update_norm is None else float(update_norm),
       run_id,
       capsule_sha,
+      capture_run_id,
   )
 
 
@@ -1544,6 +1554,7 @@ def classify(
       anchor_update_norm,
       anchor_run_id,
       anchor_capsule_sha,
+      anchor_capture_run_id,
   ) = _anchor(
       _json(anchor_registry),
       workload,
@@ -1571,7 +1582,7 @@ def classify(
         "gradient_anchor_capsule_sha",
     )
     require(
-        anchor_run_id == capsule_values.get("capture_run"),
+        anchor_capture_run_id == capsule_values.get("capture_run"),
         "gradient_anchor_capture_run",
     )
 
@@ -1613,6 +1624,7 @@ def classify(
           "anchor_registered": anchor_norms is not None,
           "anchor_exact": anchor_exact,
           "anchor_run_id": anchor_run_id,
+          "anchor_capture_run_id": anchor_capture_run_id,
           "anchor_training_capsule_sha256": anchor_capsule_sha,
           "anchor_update_gradient_norm": anchor_update_norm,
       },

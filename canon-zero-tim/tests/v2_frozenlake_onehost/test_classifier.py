@@ -536,6 +536,8 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
       *,
       anchor=False,
       anchor_run_id=None,
+      anchor_capture_run_id=None,
+      mutate_anchor=None,
       arm="r3",
       workload="m15",
       require_anchor=False,
@@ -565,6 +567,8 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
             ),
             "micro_gradient_norms": update["micro_gradient_norms"],
         }
+        if anchor_capture_run_id is not None:
+          registry["anchors"][key]["capture_run_id"] = anchor_capture_run_id
         if arm in ("r2", "r3"):
           registry["anchors"][key][
               "update_gradient_norm"
@@ -573,6 +577,8 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
           registry["anchors"][key][
               "training_capsule_sha256"
           ] = manifest.get("training_capsule", {}).get("sha256")
+        if mutate_anchor is not None:
+          mutate_anchor(registry["anchors"][key])
         anchor_path.write_text(json.dumps(registry), encoding="utf-8")
       return classifier.classify(
           root,
@@ -582,6 +588,27 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
           anchor_registry=anchor_path,
           require_anchor=require_anchor,
       )
+
+  def test_explicit_invalid_anchor_producer_never_uses_legacy_fallback(self):
+    for value in (None, "", 0, True, "invalid/path"):
+      with self.subTest(value=value):
+        registry = {
+            "schema": "canon.v2-frozenlake-onehost.gradient-anchors.v2",
+            "anchors": {
+                "p45:dp2-tp2:r2": {
+                    "run_id": "valid-legacy-producer-r1",
+                    "capture_run_id": value,
+                    "training_capsule_sha256": "d" * 64,
+                    "micro_gradient_norms": [1.0] * 8,
+                    "update_gradient_norm": 8.0,
+                },
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "capture run identity"):
+          classifier._anchor(
+              registry, "p45", "dp2-tp2", "r2",
+              gradient_groups=8, reduce_once=True,
+          )
 
   def test_clean_unregistered_run_is_measurement_only(self):
     result = self._classify()
@@ -1392,6 +1419,52 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     )
     self.assertEqual(replayed["receipts"]["sampler_contract"], 0)
 
+    # A newly measured gradient anchor may reuse an older input capsule.
+    repinned = self._classify(
+        replay,
+        anchor=True,
+        anchor_run_id="measurement-replay-r2",
+        anchor_capture_run_id="v2-capture-r1",
+        require_anchor=True,
+    )
+    self.assertEqual(repinned["verdict"], "PASS", repinned["reasons"])
+    self.assertEqual(
+        repinned["gradient"]["anchor_run_id"], "measurement-replay-r2"
+    )
+    self.assertEqual(
+        repinned["gradient"]["anchor_capture_run_id"], "v2-capture-r1"
+    )
+    # Separate provenance must not bypass any existing numerical/SHA gate.
+    for changed_field, value, reason in (
+        ("training_capsule_sha256", "f" * 64, "gradient_anchor_capsule_sha"),
+        ("update_gradient_norm", 123.0, "gradient_anchor_bitwise"),
+        ("micro_gradient_norms", [123.0] * 8, "gradient_anchor_bitwise"),
+    ):
+      with self.subTest(changed_field=changed_field):
+        rejected = self._classify(
+            replay,
+            anchor=True,
+            anchor_run_id="measurement-replay-r2",
+            anchor_capture_run_id="v2-capture-r1",
+            mutate_anchor=lambda entry: entry.update({changed_field: value}),
+            require_anchor=True,
+        )
+        self.assertEqual(rejected["verdict"], "FAIL")
+        self.assertIn(reason, rejected["reasons"])
+    foreign_producer = self._classify(
+        replay,
+        anchor=True,
+        anchor_run_id="measurement-replay-r2",
+        anchor_capture_run_id="foreign-producer-r1",
+        require_anchor=True,
+    )
+    self.assertEqual(foreign_producer["verdict"], "FAIL")
+    self.assertIn("gradient_anchor_capture_run", foreign_producer["reasons"])
+    with self.assertRaisesRegex(ValueError, "capture run identity"):
+      self._classify(
+          replay, anchor=True, anchor_capture_run_id="", require_anchor=True
+      )
+
     wrong_capture = self._classify(
         replay,
         anchor=True,
@@ -1418,6 +1491,17 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertEqual(rejected_replay["verdict"], "FAIL")
     self.assertIn(
         "training_capsule_producer_bypass", rejected_replay["reasons"]
+    )
+    repinned_without_bypass = self._classify(
+        missing_bypass,
+        anchor=True,
+        anchor_run_id="measurement-replay-r2",
+        anchor_capture_run_id="v2-capture-r1",
+        require_anchor=True,
+    )
+    self.assertEqual(repinned_without_bypass["verdict"], "FAIL")
+    self.assertIn(
+        "training_capsule_producer_bypass", repinned_without_bypass["reasons"]
     )
 
     def unexpected_sampler(root: Path) -> None:
