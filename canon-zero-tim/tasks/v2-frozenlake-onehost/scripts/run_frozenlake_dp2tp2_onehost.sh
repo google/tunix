@@ -76,8 +76,14 @@ case "$label" in *[!a-z0-9_-]*|'') echo "invalid fresh label: $label" >&2; exit 
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo="$(git -C "$script_dir" rev-parse --show-toplevel)"
-expected_repo=/mnt/disks/tunix-data/worktrees/gsm8k_rescore_fix_0828
-if [ "$repo" != "$expected_repo" ] || [ "$(realpath "$repo")" != "$repo" ]; then
+# Registered physical launch worktrees: the v2_default one-host tree and the
+# tasks/v2_integrate detached launch tree (Phase B/C carriers run from it).
+case "$repo" in
+  /mnt/disks/tunix-data/worktrees/gsm8k_rescore_fix_0828|\
+  /mnt/disks/tunix-data/worktrees/v2_integrate_launch2) ;;
+  *) echo "[V2.FL.ONEHOST] physical worktree mismatch: $repo" >&2; exit 2 ;;
+esac
+if [ "$(realpath "$repo")" != "$repo" ]; then
   echo "[V2.FL.ONEHOST] physical worktree mismatch: $repo" >&2
   exit 2
 fi
