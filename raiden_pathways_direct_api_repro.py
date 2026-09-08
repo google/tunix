@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import ipaddress
 import os
 import socket
@@ -146,10 +147,12 @@ def _ping_port(addr: str) -> bool:
     return False
 
 
-def _devices_per_host(devices: np.ndarray) -> int:
+def _devices_per_host(devices: np.ndarray, num_hosts: int = 4) -> int:
   flat = list(devices.flatten())
   num_processes = len(set(getattr(d, "process_index", 0) for d in flat))
-  return len(flat) // max(1, num_processes)
+  if num_processes > 1:
+    return len(flat) // num_processes
+  return len(flat) // max(1, num_hosts)
 
 
 def _format_mesh_devices(mesh: jax.sharding.Mesh) -> list[dict[str, object]]:
@@ -239,7 +242,8 @@ def _build_role_arrays(role: str) -> tuple[list[jax.Array], jax.sharding.Mesh]:
     raise ValueError(
         f"Whole-slice direct API repro requires 16 visible JAX devices, got {len(devices)}"
     )
-  mesh_devices = devices[:16].reshape((4, 4))
+  from jax.experimental import mesh_utils
+  mesh_devices = mesh_utils.create_device_mesh((4, 4), devices[:16])
   mesh = jax.sharding.Mesh(mesh_devices, ("fsdp", "tp"))
   if role == "source":
     for idx, (shape, pspec, _) in enumerate(specs):
@@ -275,12 +279,32 @@ def _slice_byte_sizes(arrays: list[jax.Array], mesh: jax.sharding.Mesh) -> jax.A
   return jax.device_put(jnp.array(slice_byte_sizes, dtype=jnp.int32), sizes_sharding)
 
 
-def _shard_idx(mesh: jax.sharding.Mesh) -> jax.Array:
-  task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-  global_ids = jnp.array([d.id for d in mesh.devices.flatten()], dtype=jnp.int32)
-  global_ids = global_ids.reshape(task_mesh_shape)
+def _shard_idx(mesh: jax.sharding.Mesh, devices_per_host: int = 4) -> jax.Array:
+  task_mesh_shape = [mesh.shape[a] for a in mesh.axis_names]
+  total_devices = mesh.devices.size
+  devices_per_host = min(devices_per_host, total_devices)
+  host_subgrid, host_grid = raiden_controller.compute_host_subgrid(
+      task_mesh_shape, devices_per_host
+  )
+  coords = np.indices(task_mesh_shape)
+
+  host_id = np.zeros(task_mesh_shape, dtype=np.int32)
+  stride = 1
+  for d in reversed(range(len(task_mesh_shape))):
+    host_coord_d = coords[d] // host_subgrid[d]
+    host_id += host_coord_d * stride
+    stride *= host_grid[d]
+
+  local_slot = np.zeros(task_mesh_shape, dtype=np.int32)
+  stride = 1
+  for d in reversed(range(len(task_mesh_shape))):
+    local_coord_d = coords[d] % host_subgrid[d]
+    local_slot += local_coord_d * stride
+    stride *= host_subgrid[d]
+
+  global_ids = host_id * devices_per_host + local_slot
   return jax.device_put(
-      global_ids,
+      jnp.array(global_ids, dtype=jnp.int32),
       jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*mesh.axis_names)),
   )
 
@@ -401,23 +425,36 @@ def _register_worker_units(
   )
   for task_idx, listener in enumerate(unique_listeners):
     shards = [ips[i] for i, item in enumerate(listeners) if item == listener]
-    ctrl_client.register_work_unit(
-        unit=raiden_controller.RaidenId(
-            unit_prefix, str(task_idx), "direct_api_repro_weights"
-        ),
-        shards=shards,
-        control_plane_rpc_address=listener,
-        mesh_shape=mesh_shape,
-        variables=variable_protos,
-        mesh_axes=mesh_axes,
+    unit_id = raiden_controller.RaidenId(
+        unit_prefix, str(task_idx), "direct_api_repro_weights"
     )
-    logging.info(
-        "Registered %s task %d listener=%s shards=%s",
-        role,
-        task_idx,
-        listener,
-        shards,
-    )
+    while True:
+      try:
+        ctrl_client.register_work_unit(
+            unit=unit_id,
+            shards=shards,
+            control_plane_rpc_address=listener,
+            mesh_shape=mesh_shape,
+            variables=variable_protos,
+            mesh_axes=mesh_axes,
+        )
+        logging.info(
+            "Registered %s task %d listener=%s shards=%s",
+            role,
+            task_idx,
+            listener,
+            shards,
+        )
+        break
+      except Exception as exc:
+        logging.warning(
+            "Waiting to register %s task %d with controller at %s: %s",
+            role,
+            task_idx,
+            controller_address,
+            exc,
+        )
+        time.sleep(1)
   return unique_listeners
 
 
@@ -451,6 +488,10 @@ def _run_destination_worker(args: argparse.Namespace) -> None:
   logging.info("Visible JAX devices=%d", jax.device_count())
   arrays, mesh = _build_role_arrays(args.role)
   _log_array_snapshots("destination:before_transfer", arrays)
+  num_local_dev = len(jax.local_devices())
+  global_shard_indices = [
+      jax.process_index() * num_local_dev + i for i in range(num_local_dev)
+  ]
   ws = weight_synchronizer.WeightSynchronizer(
       arrays,
       local_port=0,
@@ -458,6 +499,7 @@ def _run_destination_worker(args: argparse.Namespace) -> None:
       unsafe_skip_buffer_lock=False,
       parallelism=args.parallelism,
       auto_h2d=False,
+      global_shard_indices=global_shard_indices,
   )
   ctrl_client = raiden_controller.RaidenControllerClientFacade(
       args.controller_address
@@ -484,17 +526,21 @@ def _run_destination_worker(args: argparse.Namespace) -> None:
       f"{self_ip}:{ws.listener_port}",
       shards,
   )
+  logging.info("Destination waiting for transfer completion (monitoring listener)... ")
   last_register_time = time.time()
   while ws.is_listener_active:
     if time.time() - last_register_time > 10.0:
-      ctrl_client.register_work_unit(
-          unit=unit_id,
-          shards=shards,
-          control_plane_rpc_address=f"{self_ip}:{ws.listener_port}",
-          mesh_shape=mesh_shape,
-          variables=variable_protos,
-          mesh_axes=mesh_axes,
-      )
+      try:
+        ctrl_client.register_work_unit(
+            unit=unit_id,
+            shards=shards,
+            control_plane_rpc_address=f"{self_ip}:{ws.listener_port}",
+            mesh_shape=mesh_shape,
+            variables=variable_protos,
+            mesh_axes=mesh_axes,
+        )
+      except Exception:
+        pass
       last_register_time = time.time()
     time.sleep(0.1)
   logging.info("Destination listener inactive; running H2D")
@@ -567,47 +613,59 @@ def _run_controller_src(args: argparse.Namespace) -> None:
   )
   server = raiden_controller.RaidenControllerServer(controller)
   server.start()
-  src_units = [
-      raiden_controller.RaidenId(
-          "pathways_trainer", str(i), "direct_api_repro_weights"
-      )
-      for i in range(args.num_src_hosts)
-  ]
-  dst_units = [
-      raiden_controller.RaidenId(
-          "pathways_sampler", str(i), "direct_api_repro_weights"
-      )
-      for i in range(args.num_dst_hosts)
-  ]
   deadline = time.time() + 1800.0
-  required_units = tuple(src_units) if args.dst_controller_address else tuple(src_units + dst_units)
+  expected_shards = 16
   while True:
     registered = set(controller._registered_shards.keys())
-    if all(unit in registered for unit in required_units):
+    src_units = sorted(
+        [u for u in registered if u.job_name == "pathways_trainer"],
+        key=lambda u: int(u.job_replica_id),
+    )
+    dst_units = sorted(
+        [u for u in registered if u.job_name == "pathways_sampler"],
+        key=lambda u: int(u.job_replica_id),
+    )
+    src_shards = sum(len(controller._registered_shards[u]) for u in src_units)
+    dst_shards = sum(len(controller._registered_shards[u]) for u in dst_units)
+    if args.dst_controller_address:
+      ready = (src_shards >= expected_shards)
+    else:
+      ready = (src_shards >= expected_shards and dst_shards >= expected_shards)
+    if ready:
       break
     if time.time() > deadline:
       raise RuntimeError(
-          "Timeout waiting for required workers to register"
+          f"Timeout waiting for workers to register: src_shards={src_shards}/{expected_shards}, dst_shards={dst_shards}/{expected_shards}"
       )
     time.sleep(2)
   logging.info(
-      "Source controller registered units: %s",
-      sorted(str(unit) for unit in controller._registered_shards.keys()),
+      "Source controller registered source units: %s (total shards: %d)",
+      sorted(str(unit) for unit in src_units),
+      src_shards,
   )
-  time.sleep(5)
+  logging.info(
+      "Source controller registered destination units: %s (total shards: %d)",
+      sorted(str(unit) for unit in dst_units),
+      dst_shards,
+  )
+  time.sleep(2)
   dst_addr = args.dst_controller_address or f"{self_ip}:{src_port + 1}"
   if args.dst_controller_address:
     dst_facade = raiden_controller.RaidenControllerClientFacade(dst_addr)
     while True:
       try:
         metadata_list = dst_facade.get_metadata()
-        registered = {
-            raiden_controller.RaidenId(
-                m.unit.job_name, m.unit.job_replica_id, m.unit.data_name
-            )
-            for m in metadata_list
-        }
-        if all(unit in registered for unit in dst_units):
+        dst_units = sorted(
+            [
+                raiden_controller.RaidenId(
+                    m.unit.job_name, m.unit.job_replica_id, m.unit.data_name
+                )
+                for m in metadata_list
+            ],
+            key=lambda u: int(u.job_replica_id),
+        )
+        total_dst_shards = sum(len(m.shards) for m in metadata_list)
+        if total_dst_shards >= expected_shards:
           break
       except Exception as exc:  # pylint: disable=broad-exception-caught
         logging.warning("Failed to query destination metadata: %s", exc)
@@ -619,11 +677,7 @@ def _run_controller_src(args: argparse.Namespace) -> None:
     metadata_list = [
         metadata
         for metadata in controller.get_all_metadata()
-        if raiden_controller.RaidenId(
-            metadata.unit.job_name,
-            metadata.unit.job_replica_id,
-            metadata.unit.data_name,
-        ) in dst_units
+        if metadata.unit.job_name == "pathways_sampler"
     ]
     registered = {
         raiden_controller.RaidenId(
@@ -664,16 +718,18 @@ def _run_controller_src(args: argparse.Namespace) -> None:
       expected_block_count,
       args.group_size,
   )
+  skip_tiling = {i: False for i in range(num_variables)}
   future = controller.start_transfer(
       src_units=src_units,
       dst_units=dst_units,
       dst_mem_type=raiden_controller.RaidenMemoryType.DRAM,
       use_block_chunks=True,
       is_sender=True,
-      uuid=123456,
+      uuid=int(time.time()),
       req_id=args.req_id,
       expected_block_count=expected_block_count,
       group_size=args.group_size,
+      skip_tiling=skip_tiling,
       **({"dst_controller_address": dst_addr} if args.dst_controller_address else {}),
   )
   loop = asyncio.new_event_loop()
@@ -686,9 +742,27 @@ def _run_controller_src(args: argparse.Namespace) -> None:
     if args.dst_controller_address:
       dst_facade.shutdown()
   finally:
+    logging.info("Allowing destination workers to receive chunks and verify before shutdown...")
+    time.sleep(10.0)
     close_loop = asyncio.new_event_loop()
     try:
-      close_loop.run_until_complete(worker_rpc_client.shutdown_workers())
+      async def _shutdown_dst():
+        payload = worker_rpc_client._encode_shutdown()
+        dst_addrs = set()
+        for u in dst_units:
+          for a in worker_rpc_client.get_registered_endpoints(u):
+            dst_addrs.add(a)
+        if dst_addrs:
+          await asyncio.gather(
+              *[
+                  worker_rpc_client._send_rpc(addr, payload, timeout=10.0)
+                  for addr in dst_addrs
+              ],
+              return_exceptions=True,
+          )
+      close_loop.run_until_complete(_shutdown_dst())
+    except Exception as exc:
+      logging.warning("Shutdown dst exception: %s", exc)
     finally:
       close_loop.close()
       server.stop()
@@ -735,7 +809,11 @@ def _run_worker(args: argparse.Namespace) -> None:
   logging.info("Visible JAX devices=%d", jax.device_count())
   arrays, mesh = _build_role_arrays(args.role)
   _log_array_snapshots(f"{args.role}:before_transfer", arrays)
-  shard_idx = _shard_idx(mesh)
+  devices_per_host = _devices_per_host(
+      np.array(mesh.devices),
+      num_hosts=args.num_src_hosts if args.role == "source" else args.num_dst_hosts,
+  )
+  shard_idx = _shard_idx(mesh, devices_per_host=devices_per_host)
   slice_byte_sizes = _slice_byte_sizes(arrays, mesh)
   ws_info = _ffi_ws_info(
       args.role,
@@ -764,16 +842,24 @@ def _run_worker(args: argparse.Namespace) -> None:
       ips,
       gathered_ws_info,
   )
-  for listener in unique_listeners:
-    while not _ping_port(listener):
-      time.sleep(0.5)
-  for listener in unique_listeners:
-    while _ping_port(listener):
-      time.sleep(1)
   if args.role == "source":
-    raiden_ffi.destroy_weight_synchronizer()
-    logging.info("Source finished cleanly")
-    return
+    logging.info("Source worker ready and registered; standing by.")
+    last_reg_time = time.time()
+    while True:
+      time.sleep(1)
+      if time.time() - last_reg_time > 10.0:
+        try:
+          _register_worker_units(
+              args.role,
+              args.controller_address,
+              arrays,
+              mesh,
+              ips,
+              gathered_ws_info,
+          )
+        except Exception as exc:
+          logging.warning("Periodic re-registration failed: %s", exc)
+        last_reg_time = time.time()
   multihost_utils.sync_global_devices("direct_api_h2d_start")
   arrays = list(raiden_ffi.multi_h2d(arrays, shard_idx, mesh))
   for arr in arrays:
