@@ -1,5 +1,59 @@
 # Execution handoff: P74 one-host XProf and GSM8K DP16xTP4 full train
 
+## Current v2 one-host default delivery (2026-09-08, local candidate)
+
+This section supersedes the historical P74/P60 launch and mode guidance
+below for normal v2 training. Final-source hardware certification is pending;
+CPU/process tests are not a TPU or full-training certificate. Do not push or
+launch a target campaign based on this note.
+
+Use the common `scripts/run_onehost_gsm8k_xprof_zero_hp.sh` route (or
+`scripts/run_onehost_xprof_backward_zero.sh` for its backward label wrapper).
+For registered GSM8K DP4xTP1 and DP2xTP2 short/long/long8k, BOTH absent
+`CANON_P32_KEEP_TAPE` and `CANON_DP_REDUCE_ONCE` now resolve to stream/1
+before Docker forwarding and module/hierarchy census arguments. The shared
+owner is `cluster/v1_full_system_optimization.py`; the inner profiles and
+runtime parsers are unchanged. P71 remains the normal carrier's fwd_block
+default and chunk batch remains2; do not copy the full-target fwd override.
+
+Any explicit presence of either name preserves BOTH raw values, including
+empty/0 and partial overrides. Native, signed capture/negative controls and
+the P45-shaped GSM8K diagnostic do not acquire these defaults. FrozenLake
+r0/r1/r2 are separate vehicles and are not selected by this launcher.
+
+Certification must use the canonical onehost-geometry-certify sequence and
+judge, continuous non-system idle120, one TPU container, a fresh label and
+a clean physical worktree. Never stop someone else's container. Sequence
+fields have the following meanings; unset the reducer in the parent for a
+default test, not merely the keep field:
+
+| Intent | keep field | extra field |
+|---|---|---|
+| Normal default, verify against explicit bundle | empty (unset) | empty, with parent reducer unset |
+| Explicit optimized control | stream | CANON_DP_REDUCE_ONCE=1 |
+| Explicit legacy/off control | 0 | CANON_DP_REDUCE_ONCE=0 |
+
+A blank historical sequence field meant unset, not a permanent off value;
+do not replay old control lists blindly or rewrite their historical evidence.
+The P74-specialized wrapper deliberately retains P71=fwd and pins keep/reduce
+off when both were absent. It is NOT the latest v2 optimized-default wrapper.
+
+For DP2xTP2's current reverse-chunk program, use the registered
+reduce-once+chunk anchor and mode-aware censuses, not the old P74 64-window
+contract below. The three registered norms are
+1.6838672161102295 / 3.302103281021118 / 1.8242988586425781.
+Require strict alignment, checked-VMA receipts, actual program fingerprints,
+terminal classification and SHA verification before considering HBM/timing.
+Capture truncation never proves whole-update bubble/D2H absence.
+
+DP1xTP4 GSM8K is not registered in this branch; do not substitute P66 or
+another worktree. DP4's current chunk-mode anchor coverage remains pending.
+The inherited DP4 profile now accepts its already-declared V1 six-update
+horizon, retaining wrong-kind/tail/P66/no-commit refusals; six-update TPU
+execution itself remains unverified. Three-update is the certification start.
+
+## Historical P74 instructions and evidence
+
 > **Current as of 2026-08-28:** use the P74 commands in the next two sections.
 > The Native/Zero pair and P60 procedures later in this file are historical.
 > P74 is accepted on the immutable matched r3/r4 DP2xTP2 captures, but a run

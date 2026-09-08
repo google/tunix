@@ -1,5 +1,13 @@
 # GSM8K one-host Native vs Zero-HP XProf runbook
 
+For the current v2 normal-default route, read
+[HANDOFF.md: Current v2 one-host default delivery](HANDOFF.md#current-v2-one-host-default-delivery-2026-09-08-local-candidate)
+first. The P74 specialized wrapper and historical P60 mode/count contracts
+below are not the latest optimized bundle. Normal default selection requires
+both keep/reduce names absent; explicit off controls use0/0. Fresh one-host
+hardware remains required, with canonical idle120 sequencing and exact mode
+anchors. No target launch is authorized by this runbook.
+
 > **P60-2G supersedes the historical whole-update navigation contract.**
 > Historical clean source `5549b5b6` remains TARGET PASS for P60-2F's original
 > full-XPlane contract, but its exported UI trace has only one 62.66-second

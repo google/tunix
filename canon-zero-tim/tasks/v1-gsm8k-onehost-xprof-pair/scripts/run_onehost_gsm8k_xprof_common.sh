@@ -154,6 +154,15 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 source "$script_dir/finalize_gsm8k_xprof_evidence.sh"
 repo="$(git -C "$script_dir" rev-parse --show-toplevel)"
 pkg="$repo/canon-zero-tim"
+# Resolve before both Docker forwarding and host-side evidence consumers.
+# Explicit values (including empty/0), Native and signed diagnostics keep
+# their old semantics. The policy emits only the registered constant pair.
+if [ "$arm" = zero-hp ]; then
+  _canon_training_defaults="$(python3 "$pkg/cluster/v1_full_system_optimization.py" \
+    --onehost-defaults "$arm" "$geometry" "$run_stage")"
+  eval "$_canon_training_defaults"
+  unset _canon_training_defaults
+fi
 canon_env=/mnt/disks/tunix-data/claude_work/canon_env.sh
 assets=/mnt/disks/tunix-data/gsm8k_zero_tim
 model="$assets/models"
@@ -193,6 +202,7 @@ runtime_files=(
   "$repo/tunix/rl/agentic/agentic_rl_learner.py"
   "$repo/tunix/rl/canonical_qwen3_adapter.py"
   "$repo/tunix/rl/canonical_training_config.py"
+  "$pkg/cluster/v1_full_system_optimization.py"
   "$repo/tunix/rl/dp_training.py"
   "$repo/tunix/rl/gsm8k_xprof.py"
   "$repo/examples/math_gsm8k/qwen3_grpo_demo.py"
@@ -290,6 +300,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
     "$repo/tunix/rl/agentic/agentic_rl_learner.py" \
     "$repo/tunix/rl/canonical_qwen3_adapter.py" \
     "$repo/tunix/rl/canonical_training_config.py" \
+    "$pkg/cluster/v1_full_system_optimization.py" \
     "$repo/tunix/rl/dp_training.py" \
     "$repo/tunix/rl/gsm8k_xprof.py" \
     "$repo/examples/math_gsm8k/qwen3_grpo_demo.py" \

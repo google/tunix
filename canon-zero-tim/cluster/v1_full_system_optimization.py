@@ -92,6 +92,38 @@ def full_system_optimization_render_additions(workload: str) -> dict[str, str]:
   }
 
 
+def _pair_defaults(values: Mapping[str, str], workload: str) -> dict[str, str]:
+  if any(name in values for name in FULL_PROFILE_DEFAULT_NAMES):
+    return {}
+  bundle = full_system_optimization_additions(workload)
+  return {name: bundle[name] for name in FULL_PROFILE_DEFAULT_NAMES}
+
+
+def onehost_defaults(values: Mapping[str, str], *, arm: str, geometry: str,
+                     run_stage: str) -> dict[str, str]:
+  """Resolves the pair before one-host Docker and census argument delivery.
+
+  This is not workload admission. The common launcher validates capture and
+  negative-control signatures before calling this policy; the inner profile
+  retains its exact runtime admission. Native and specialized diagnostic
+  routes never acquire defaults. Do not import the full target's P71 mode:
+  the ordinary one-host carrier has its own existing forward program.
+  """
+  if arm not in ("native", "zero-hp"):
+    raise ValueError("one-host defaults require native or zero-hp arm")
+  if geometry not in (
+      "dp4-tp1", "dp2-tp2", "dp2-tp2-long", "dp2-tp2-long8k", "dp2-tp2-p45",
+  ):
+    raise ValueError("one-host defaults require a registered GSM8K geometry")
+  if run_stage not in ("three-update", "six-update"):
+    raise ValueError("one-host defaults require a committed update stage")
+  if (arm == "native" or geometry == "dp2-tp2-p45"
+      or values.get("V2_P0_CAPTURE_FULL_TREE", "") not in ("", "0")
+      or values.get("V2_P0_NEGATIVE_CONTROL", "")):
+    return {}
+  return _pair_defaults(values, "gsm8k")
+
+
 def full_profile_defaults(values: Mapping[str, str]) -> dict[str, str]:
   """Derives the registered pair only for an exact full-profile identity.
 
@@ -144,17 +176,23 @@ def full_profile_defaults(values: Mapping[str, str]) -> dict[str, str]:
   wrong = [name for name, value in expected.items() if values.get(name) != value]
   if wrong:
     raise ValueError("full-profile defaults identity mismatch: " + ",".join(wrong))
-  if any(name in values for name in FULL_PROFILE_DEFAULT_NAMES):
-    return {}
-  bundle = full_system_optimization_additions(workload)
-  return {name: bundle[name] for name in FULL_PROFILE_DEFAULT_NAMES}
+  return _pair_defaults(values, workload)
 
 
 def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--profile-defaults", action="store_true", required=True)
-  parser.parse_args()
-  for name, value in full_profile_defaults(os.environ).items():
+  route = parser.add_mutually_exclusive_group(required=True)
+  route.add_argument("--profile-defaults", action="store_true")
+  route.add_argument("--onehost-defaults", nargs=3,
+                     metavar=("ARM", "GEOMETRY", "STAGE"))
+  args = parser.parse_args()
+  if args.onehost_defaults:
+    arm, geometry, stage = args.onehost_defaults
+    defaults = onehost_defaults(os.environ, arm=arm, geometry=geometry,
+                                run_stage=stage)
+  else:
+    defaults = full_profile_defaults(os.environ)
+  for name, value in defaults.items():
     # Only fixed, allowlisted names and registered constant values reach stdout.
     print(f"export {name}={shlex.quote(value)}")
   return 0

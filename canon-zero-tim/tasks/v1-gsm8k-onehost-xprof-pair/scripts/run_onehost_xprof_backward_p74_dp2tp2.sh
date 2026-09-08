@@ -13,5 +13,12 @@ export CANON_DP_COMPARE_MODE=fingerprint-hybrid
 export CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
 export CANON_DP_FINITE_FETCH=batched-commit
 export CANON_P71_SCAN=fwd
+# Keep the historical P74 diagnostic on its original non-kept/per-group
+# program after the normal carrier's default promotion. Any explicit pair
+# presence retains the old manual-control semantics, including empty values.
+if [[ ! -v CANON_P32_KEEP_TAPE && ! -v CANON_DP_REDUCE_ONCE ]]; then
+  export CANON_P32_KEEP_TAPE=0
+  export CANON_DP_REDUCE_ONCE=0
+fi
 
 exec bash "$script_dir/run_onehost_xprof_backward_zero.sh" "$label"
