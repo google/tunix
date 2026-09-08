@@ -167,7 +167,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908-ffi"
       PRESET_USE_FFI="true"
       PRESET_PREFUSE_MOE_WEIGHTS="true"
       PRESET_PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
@@ -324,11 +324,11 @@ while [[ $# -gt 0 ]]; do
       USER_IMAGE="$2"
       shift 2
       ;;
-    --model=*|--preset=*)
+    --model=*|--preset=*|--model-name=*|--model_name=*)
       TARGET_PRESET="${1#*=}"
       shift
       ;;
-    --model|--preset)
+    --model|--preset|--model-name|--model_name)
       TARGET_PRESET="$2"
       shift 2
       ;;
@@ -528,11 +528,11 @@ while [[ $# -gt 0 ]]; do
       USER_NAMESPACE="$2"
       shift 2
       ;;
-    --queue=*|--kueue-queue=*)
+    --queue=*|--kueue-queue=*|--queue-name=*|--queue_name=*)
       USER_QUEUE="${1#*=}"
       shift
       ;;
-    --queue|--kueue-queue)
+    --queue|--kueue-queue|--queue-name|--queue_name)
       USER_QUEUE="$2"
       shift 2
       ;;
@@ -998,6 +998,8 @@ start_rollout_instance() {
   local sync_prefix
   sync_prefix=$(get_sync_prefix)
 
+  # Direct-TPU (mcjax) rollout pods must always use RAIDEN_USE_FFI=0 with native
+  # C++ TCP/DMA receiver WeightSynchronizer(auto_h2d=True).
   local rollout_ffi_env="USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0"
 
   echo "Rendering & Starting rollout (${target_id}) in namespace ${NAMESPACE}..."
