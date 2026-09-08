@@ -148,6 +148,76 @@ def _update(arm: str = "r3", workload: str = "m15") -> dict:
   return update
 
 
+def _retarget_r1_fixture(root: Path, *, workload: str, geometry: str) -> None:
+  """Retargets the complete DP2 R1 fixture to another registered geometry."""
+  geometry_spec = classifier._GEOMETRIES[geometry]  # pylint: disable=protected-access
+  dp_size = geometry_spec["dp"]
+  tp_size = geometry_spec["tp"]
+  groups = geometry_spec["gradient_groups"]
+  manifest_path = root / "run_manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  manifest.update({
+      "workload_name": f"frozenlake-{workload}-onehost-dp{dp_size}-tp{tp_size}",
+      "model_dir_name": geometry_spec["model_dir_name"],
+      "topology": {"dp": dp_size, "tp": tp_size, "devices": 4},
+      "gradient_groups": groups,
+      "global_m": geometry_spec["global_m"],
+      "vllm_hbm_utilization": geometry_spec["vllm_hbm_utilization"][workload],
+      "checked_vma": geometry_spec["checked_vma"],
+  })
+  manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+  alignment_path = root / "alignment.jsonl"
+  alignment_path.write_text(
+      "".join(
+          json.dumps(_alignment(pre=False)) + "\n" for _ in range(groups)
+      ),
+      encoding="utf-8",
+  )
+  update_path = root / "updates.json"
+  update = json.loads(update_path.read_text(encoding="utf-8"))
+  update.update({
+      "contract_name": manifest["workload_name"],
+      "dp_size": dp_size,
+      "tp_size": tp_size,
+      "global_m": geometry_spec["global_m"],
+      "microsteps": groups,
+      "gradient_activity": [True] * groups,
+      "micro_gradient_norms": [float(index + 1) for index in range(groups)],
+      "dp_reduction_transactions": 0 if dp_size == 1 else groups,
+      "dp_reduction_rounds_per_transaction": 0 if dp_size == 1 else 2,
+      "dp_rank_pullbacks_per_transaction": dp_size,
+  })
+  update_path.write_text(json.dumps(update), encoding="utf-8")
+
+  raw_path = root / "raw.log"
+  raw_lines = [
+      line
+      for line in raw_path.read_text(encoding="utf-8").splitlines()
+      if not line.startswith(("[P32.DP", "[P59.DP", "[P66.VMA]"))
+  ]
+  n_real = [3900 + index * 30 for index in range(16)]
+  forward_lines = []
+  for group in range(groups):
+    start = group * dp_size
+    values = ", ".join(str(value) for value in n_real[start:start + dp_size])
+    forward_lines.append(
+        f"[P32.DP{dp_size}] forward_group_issued "
+        f"group={group + 1}/{groups} rows=({start}, {start + dp_size}) "
+        f"n_real=({values})"
+    )
+  forward_lines.append(
+      f"[P59.DP{dp_size}] reducer_bucket_schedule programs=8 "
+      "max_local_bytes=2147483648 peak_local_bytes=2130875392 "
+      "total_local_bytes=16382087168"
+  )
+  if geometry_spec["checked_vma"]:
+    forward_lines.append("[P66.VMA] outer_check_enabled program=test")
+  raw_path.write_text(
+      "\n".join(forward_lines + raw_lines) + "\n", encoding="utf-8"
+  )
+
+
 class FrozenLakeOneHostClassifierTest(unittest.TestCase):
 
   def _fixture(
@@ -391,7 +461,7 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     anchor = root / "anchors.json"
     anchor.write_text(
         json.dumps({
-            "schema": "canon.v2-frozenlake-onehost.gradient-anchors.v1",
+            "schema": "canon.v2-frozenlake-onehost.gradient-anchors.v2",
             "anchors": {},
         }),
         encoding="utf-8",
@@ -424,7 +494,8 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         manifest = json.loads(
             (root / "run_manifest.json").read_text(encoding="utf-8")
         )
-        registry["anchors"][f"{workload}:{arm}"] = {
+        key = f"{workload}:dp2-tp2:{arm}"
+        registry["anchors"][key] = {
             "run_id": anchor_run_id or (
                 manifest.get("training_capsule", {}).get("capture_run")
                 if require_anchor
@@ -433,11 +504,11 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
             "micro_gradient_norms": update["micro_gradient_norms"],
         }
         if arm in ("r2", "r3"):
-          registry["anchors"][f"{workload}:{arm}"][
+          registry["anchors"][key][
               "update_gradient_norm"
           ] = update["update_gradient_norm"]
         if require_anchor:
-          registry["anchors"][f"{workload}:{arm}"][
+          registry["anchors"][key][
               "training_capsule_sha256"
           ] = manifest.get("training_capsule", {}).get("sha256")
         anchor_path.write_text(json.dumps(registry), encoding="utf-8")
@@ -475,6 +546,91 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         [(399, "adopted-to-idle", "bitwise-zero", 0)],
     )
     self.assertEqual(result["gradient"]["update_gradient_norm"], 12.5)
+
+  def test_r1_matrix_geometries_enforce_vma_and_geometry_scoped_anchors(self):
+    for geometry, expected_vma in (("dp4-tp1", 0), ("dp1-tp4", 1)):
+      with self.subTest(geometry=geometry):
+        with tempfile.TemporaryDirectory() as temporary:
+          root = Path(temporary)
+          anchor_path = self._fixture(root, arm="r1", workload="p45")
+          _retarget_r1_fixture(root, workload="p45", geometry=geometry)
+          update = json.loads((root / "updates.json").read_text())
+          registry = json.loads(anchor_path.read_text())
+          registry["anchors"][f"p45:{geometry}:r1"] = {
+              "run_id": f"{geometry}-measurement-r1",
+              "micro_gradient_norms": update["micro_gradient_norms"],
+          }
+          anchor_path.write_text(json.dumps(registry), encoding="utf-8")
+          result = classifier.classify(
+              root,
+              workload="p45",
+              geometry=geometry,
+              arm="r1",
+              docker_exit=0,
+              anchor_registry=anchor_path,
+          )
+        self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
+        self.assertEqual(result["geometry"], geometry)
+        self.assertEqual(
+            result["receipts"]["p66_outer_check_enabled"], expected_vma
+        )
+        self.assertTrue(result["gradient"]["anchor_exact"])
+
+  def test_matrix_geometry_negatives_fail_closed(self):
+    with self.assertRaisesRegex(ValueError, "DP1 has no reduce-once arm"):
+      with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        anchor_path = self._fixture(root, arm="r2", workload="p45")
+        classifier.classify(
+            root,
+            workload="p45",
+            geometry="dp1-tp4",
+            arm="r2",
+            docker_exit=0,
+            anchor_registry=anchor_path,
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      manifest_path = root / "run_manifest.json"
+      manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+      manifest["checked_vma"] = True
+      manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(
+        any(reason.startswith("manifest:") for reason in rejected["reasons"])
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      manifest_path = root / "run_manifest.json"
+      manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+      manifest["vllm_hbm_utilization"] = 0.20
+      manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(
+        any(reason.startswith("manifest:") for reason in rejected["reasons"])
+    )
 
   def test_reduce_once_report_accumulate_receipt_is_fail_closed(self):
     def missing(root: Path) -> None:
@@ -641,7 +797,7 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         update_path = root / "updates.json"
         update = json.loads(update_path.read_text(encoding="utf-8"))
         registry = json.loads(anchor_path.read_text(encoding="utf-8"))
-        registry["anchors"]["p45:r2"] = {
+        registry["anchors"]["p45:dp2-tp2:r2"] = {
             "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
             "training_capsule_sha256": (
                 "99b6dcaba5b816644a02037ef8f4e8ae"
@@ -657,6 +813,66 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
             root,
             workload="p45",
             arm="r2",
+            docker_exit=0,
+            anchor_registry=anchor_path,
+            require_anchor=False,
+        )
+      self.assertEqual(rejected["verdict"], "FAIL")
+      self.assertIn("gradient_anchor_bitwise", rejected["reasons"])
+
+  def test_r3_repin_rejects_adjacent_ulp_and_r2_group_order(self):
+    candidate = [
+        0.0,
+        6.509113311767578,
+        9.983430862426758,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        37.86933135986328,
+    ]
+    bad_candidates = [
+        candidate[:-1] + [37.869327545166016],
+        [
+            37.869327545166016,
+            6.235235691070557,
+            6.509113311767578,
+            7.796840667724609,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+    ]
+    for bad_norms in bad_candidates:
+      with (
+          self.subTest(bad_norms=bad_norms),
+          tempfile.TemporaryDirectory() as tmp,
+      ):
+        root = Path(tmp)
+        anchor_path = self._fixture(
+            root, arm="r3", mode="measure", workload="p45"
+        )
+        update_path = root / "updates.json"
+        update = json.loads(update_path.read_text(encoding="utf-8"))
+        registry = json.loads(anchor_path.read_text(encoding="utf-8"))
+        registry["anchors"]["p45:dp2-tp2:r3"] = {
+            "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+            "training_capsule_sha256": (
+                "99b6dcaba5b816644a02037ef8f4e8ae"
+                "0199eb1106a4142e3d076b3f48d8539c"
+            ),
+            "micro_gradient_norms": candidate,
+            "update_gradient_norm": 23.40300178527832,
+        }
+        anchor_path.write_text(json.dumps(registry), encoding="utf-8")
+        update["micro_gradient_norms"] = bad_norms
+        update["update_gradient_norm"] = 23.40300178527832
+        update_path.write_text(json.dumps(update), encoding="utf-8")
+        rejected = classifier.classify(
+            root,
+            workload="p45",
+            arm="r3",
             docker_exit=0,
             anchor_registry=anchor_path,
             require_anchor=False,
@@ -1459,7 +1675,7 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
       anchor_path = self._fixture(root)
       original = _update()["micro_gradient_norms"]
       registry = json.loads(anchor_path.read_text(encoding="utf-8"))
-      registry["anchors"]["m15:r3"] = {
+      registry["anchors"]["m15:dp2-tp2:r3"] = {
           "run_id": "measurement-run-r1",
           "micro_gradient_norms": original,
           "update_gradient_norm": _update()["update_gradient_norm"],
@@ -1616,7 +1832,10 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertNotIn("kubectl", runner + inner)
     self.assertNotIn("gcloud", runner + inner)
     self.assertNotIn("WANDB_API_KEY", runner + inner)
-    self.assertIn("--model qwen8b_tp2", runner)
+    self.assertIn("dp_size=4; tp_size=1; model_dir=qwen8b_tp1", runner)
+    self.assertIn("dp_size=2; tp_size=2; model_dir=qwen8b_tp2", runner)
+    self.assertIn("dp_size=1; tp_size=4; model_dir=qwen8b", runner)
+    self.assertIn('--model "$model_dir"', runner)
     self.assertIn("CANON_P66_P59_CHECK_VMA", inner)
     self.assertIn('"backward-no-commit"', inner)
     self.assertIn('"fixed-local-byte-buckets"', inner)
@@ -1625,7 +1844,9 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertIn("capture:measure", runner)
     self.assertIn("replay:certify", runner)
     self.assertIn('"$evidence_root"/*/training_capsule.npz', runner)
-    self.assertIn('capsule_dir_tail="${capsule_dir_name#${workload}_}"', runner)
+    self.assertIn(
+        'capsule_dir_tail="${capsule_dir_name#${run_identity}_}"', runner
+    )
     self.assertIn('capsule_capture_run="${capsule_dir_tail#*_}"', runner)
     self.assertIn("CANON_V2_TRAINING_CAPSULE_SHA256", runner + inner)
     self.assertIn('"training_capsule": {', inner)

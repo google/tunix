@@ -231,6 +231,10 @@ def _require_v2_identity(environ: Mapping[str, str]) -> None:
         f"V2 capsule workload must be p45 or m15, got {workload!r}"
     )
   active_mode = mode(environ)
+  vehicle_mode = environ.get("V2_FL_MODE", "")
+  allowed_vehicle_modes = (
+      ("measure",) if active_mode == "capture" else ("certify", "profile")
+  )
   exact = {
       "CANON_PROFILE_FILE": (
           "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
@@ -249,7 +253,6 @@ def _require_v2_identity(environ: Mapping[str, str]) -> None:
       "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
       "CANON_V1_HP_FULL": "0",
       "CANON_MODEL_DIR_NAME": "qwen8b_tp2",
-      "V2_FL_MODE": "measure" if active_mode == "capture" else "certify",
   }
   changed = {
       name: environ.get(name)
@@ -259,6 +262,11 @@ def _require_v2_identity(environ: Mapping[str, str]) -> None:
   if changed:
     raise P64TrainingCapsuleError(
         f"V2 training-capsule identity drifted: {changed}"
+    )
+  if vehicle_mode not in allowed_vehicle_modes:
+    raise P64TrainingCapsuleError(
+        "V2 training-capsule identity drifted: "
+        f"{{'V2_FL_MODE': {vehicle_mode!r}}}"
     )
   if environ.get("CANON_P64_P45_NUMERIC_DEBUG", "") not in ("", "0"):
     raise P64TrainingCapsuleError(

@@ -186,6 +186,49 @@ _P57_DP8_TP8_TOKEN_WIDTHS = {
 }
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _FrozenLakeOneHostContract:
+  """Closed identity for one four-chip FrozenLake matrix cell."""
+
+  recipe: str
+  model_dir_name: str
+  dp_size: int
+  tp_size: int
+  max_prompt_length: int
+  max_response_length: int
+  max_turns: int
+
+  @property
+  def profile_file(self) -> str:
+    return (
+        "cluster/profiles/qwen3-8b-"
+        f"dp{self.dp_size}-tp{self.tp_size}-frozenlake-onehost.env"
+    )
+
+
+_FROZENLAKE_ONEHOST_CONTRACTS = {
+    f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}":
+        _FrozenLakeOneHostContract(
+            recipe=recipe,
+            model_dir_name=model_dir_name,
+            dp_size=dp_size,
+            tp_size=tp_size,
+            max_prompt_length=4096,
+            max_response_length=response_length,
+            max_turns=max_turns,
+        )
+    for recipe, response_length, max_turns in (
+        ("p45", 2048, 5),
+        ("m15", 8192, 15),
+    )
+    for dp_size, tp_size, model_dir_name in (
+        (4, 1, "qwen8b_tp1"),
+        (2, 2, "qwen8b_tp2"),
+        (1, 4, "qwen8b"),
+    )
+}
+
+
 def _p57_stock_runtime_variant(
     values: Mapping[str, str], *, stage: str
 ) -> tuple[str, str, str, str]:
@@ -230,7 +273,7 @@ class DPWorkloadSpec:
   four_chip_proxy: bool = False
   four_chip_2x2_proxy: bool = False
   four_chip_2x2_long_proxy: bool = False
-  frozenlake_four_chip_2x2_proxy: bool = False
+  frozenlake_four_chip_proxy: bool = False
   unit_data_proxy: bool = False
   frozenlake_max_turns: int = 5
 
@@ -272,7 +315,7 @@ class DPWorkloadSpec:
         self.four_chip_proxy,
         self.four_chip_2x2_proxy,
         self.four_chip_2x2_long_proxy,
-        self.frozenlake_four_chip_2x2_proxy,
+        self.frozenlake_four_chip_proxy,
         self.unit_data_proxy,
     )
     if sum(proxies) > 1:
@@ -374,29 +417,25 @@ class DPWorkloadSpec:
             "long-context 2x2 proxy requires four devices and global M512"
         )
       return
-    if self.frozenlake_four_chip_2x2_proxy:
-      widths_and_turns = {
-          "frozenlake-p45-onehost-dp2-tp2": (4096, 2048, 5),
-          "frozenlake-m15-onehost-dp2-tp2": (4096, 8192, 15),
-      }
-      if self.name not in widths_and_turns:
+    if self.frozenlake_four_chip_proxy:
+      contract = _FROZENLAKE_ONEHOST_CONTRACTS.get(self.name)
+      if contract is None:
         raise ValueError(
-            "FrozenLake 2x2 one-host proxy geometry changed: "
+            "FrozenLake one-host proxy geometry changed: "
             f"name={self.name!r}"
         )
-      prompt_width, response_width, max_turns = widths_and_turns[self.name]
       expected = {
           "model_id": "Qwen/Qwen3-8B",
-          "model_dir_name": "qwen8b_tp2",
-          "dp_size": 2,
-          "tp_size": 2,
+          "model_dir_name": contract.model_dir_name,
+          "dp_size": contract.dp_size,
+          "tp_size": contract.tp_size,
           "global_prompts": 4,
           "num_generations": 4,
-          "local_trajectories": 8,
+          "local_trajectories": 16 // contract.dp_size,
           "local_m": 256,
-          "max_prompt_length": prompt_width,
-          "max_response_length": response_width,
-          "frozenlake_max_turns": max_turns,
+          "max_prompt_length": contract.max_prompt_length,
+          "max_response_length": contract.max_response_length,
+          "frozenlake_max_turns": contract.max_turns,
           "periodic_evaluation": False,
       }
       actual = {name: getattr(self, name) for name in expected}
@@ -407,11 +446,11 @@ class DPWorkloadSpec:
       }
       if wrong:
         raise ValueError(
-            f"FrozenLake 2x2 one-host proxy geometry changed: {wrong}"
+            f"FrozenLake one-host proxy geometry changed: {wrong}"
         )
-      if self.total_devices != 4 or self.global_m != 512:
+      if self.total_devices != 4 or self.global_m != contract.dp_size * 256:
         raise ValueError(
-            "FrozenLake 2x2 one-host proxy requires four devices and global M512"
+            "FrozenLake one-host proxy requires four devices and global M=DP*256"
         )
       return
     if self.unit_data_proxy:
@@ -472,9 +511,9 @@ class DPWorkloadSpec:
   def command(self, *, run_stage: str = "full") -> tuple[str, ...]:
     """Returns the frozen recipe command for review and launch wrappers."""
     self.validate()
-    if self.frozenlake_four_chip_2x2_proxy and run_stage != "backward-no-commit":
+    if self.frozenlake_four_chip_proxy and run_stage != "backward-no-commit":
       raise ValueError(
-          "FrozenLake 2x2 one-host proxy initially admits only "
+          "FrozenLake one-host proxy initially admits only "
           "backward-no-commit"
       )
     if run_stage == "p59-eight-update" and self.name != "gsm8k-p59-dp4-tp1":
@@ -527,12 +566,15 @@ class DPWorkloadSpec:
     if self.name.startswith("frozenlake"):
       candidate_args = (
           ("--p57_workload_candidate=m15", "--p57_data_split=main")
-          if self.name == "frozenlake-m15-onehost-dp2-tp2"
+          if (
+              self.frozenlake_four_chip_proxy
+              and _FROZENLAKE_ONEHOST_CONTRACTS[self.name].recipe == "m15"
+          )
           else ()
       )
       sampler_args = (
           ("--sampler_is=none",)
-          if self.frozenlake_four_chip_2x2_proxy
+          if self.frozenlake_four_chip_proxy
           else ()
       )
       return (
@@ -773,7 +815,7 @@ _WORKLOADS = {
         periodic_evaluation=False,
         dp_size=2,
         tp_size=2,
-        frozenlake_four_chip_2x2_proxy=True,
+        frozenlake_four_chip_proxy=True,
     ),
     "frozenlake-m15-onehost-dp2-tp2": DPWorkloadSpec(
         name="frozenlake-m15-onehost-dp2-tp2",
@@ -795,7 +837,97 @@ _WORKLOADS = {
         periodic_evaluation=False,
         dp_size=2,
         tp_size=2,
-        frozenlake_four_chip_2x2_proxy=True,
+        frozenlake_four_chip_proxy=True,
+        frozenlake_max_turns=15,
+    ),
+    "frozenlake-p45-onehost-dp4-tp1": DPWorkloadSpec(
+        name="frozenlake-p45-onehost-dp4-tp1",
+        model_id="Qwen/Qwen3-8B",
+        model_dir_name="qwen8b_tp1",
+        global_prompts=4,
+        num_generations=4,
+        local_trajectories=4,
+        max_prompt_length=4096,
+        max_response_length=2048,
+        max_steps=1,
+        learning_rate=1.0e-6,
+        beta=0.0,
+        optimizer_b1=0.9,
+        optimizer_b2=0.95,
+        weight_decay=0.0,
+        temperature=0.7,
+        wandb_project="zero-tim-frozenlake-p45-onehost-dp4-tp1",
+        periodic_evaluation=False,
+        dp_size=4,
+        tp_size=1,
+        frozenlake_four_chip_proxy=True,
+    ),
+    "frozenlake-p45-onehost-dp1-tp4": DPWorkloadSpec(
+        name="frozenlake-p45-onehost-dp1-tp4",
+        model_id="Qwen/Qwen3-8B",
+        model_dir_name="qwen8b",
+        global_prompts=4,
+        num_generations=4,
+        local_trajectories=16,
+        max_prompt_length=4096,
+        max_response_length=2048,
+        max_steps=1,
+        learning_rate=1.0e-6,
+        beta=0.0,
+        optimizer_b1=0.9,
+        optimizer_b2=0.95,
+        weight_decay=0.0,
+        temperature=0.7,
+        wandb_project="zero-tim-frozenlake-p45-onehost-dp1-tp4",
+        periodic_evaluation=False,
+        dp_size=1,
+        tp_size=4,
+        frozenlake_four_chip_proxy=True,
+    ),
+    "frozenlake-m15-onehost-dp4-tp1": DPWorkloadSpec(
+        name="frozenlake-m15-onehost-dp4-tp1",
+        model_id="Qwen/Qwen3-8B",
+        model_dir_name="qwen8b_tp1",
+        global_prompts=4,
+        num_generations=4,
+        local_trajectories=4,
+        max_prompt_length=4096,
+        max_response_length=8192,
+        max_steps=1,
+        learning_rate=1.0e-6,
+        beta=0.0,
+        optimizer_b1=0.9,
+        optimizer_b2=0.95,
+        weight_decay=0.0,
+        temperature=0.7,
+        wandb_project="zero-tim-frozenlake-m15-onehost-dp4-tp1",
+        periodic_evaluation=False,
+        dp_size=4,
+        tp_size=1,
+        frozenlake_four_chip_proxy=True,
+        frozenlake_max_turns=15,
+    ),
+    "frozenlake-m15-onehost-dp1-tp4": DPWorkloadSpec(
+        name="frozenlake-m15-onehost-dp1-tp4",
+        model_id="Qwen/Qwen3-8B",
+        model_dir_name="qwen8b",
+        global_prompts=4,
+        num_generations=4,
+        local_trajectories=16,
+        max_prompt_length=4096,
+        max_response_length=8192,
+        max_steps=1,
+        learning_rate=1.0e-6,
+        beta=0.0,
+        optimizer_b1=0.9,
+        optimizer_b2=0.95,
+        weight_decay=0.0,
+        temperature=0.7,
+        wandb_project="zero-tim-frozenlake-m15-onehost-dp1-tp4",
+        periodic_evaluation=False,
+        dp_size=1,
+        tp_size=4,
+        frozenlake_four_chip_proxy=True,
         frozenlake_max_turns=15,
     ),
 }
@@ -888,11 +1020,11 @@ def requested_max_steps(
   values = os.environ if environ is None else environ
   stage = values.get("CANON_P33_RUN_STAGE", "")
   if (
-      workload.frozenlake_four_chip_2x2_proxy
+      workload.frozenlake_four_chip_proxy
       and stage != "backward-no-commit"
   ):
     raise ValueError(
-        "FrozenLake 2x2 one-host proxy initially admits only "
+        "FrozenLake one-host proxy initially admits only "
         "backward-no-commit"
     )
   tail8 = values.get("CANON_P59_DP4_TAIL8", "0")
@@ -1071,15 +1203,16 @@ def expected_token_widths(
       values.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
       values.get("CANON_P57_DATA_SPLIT", ""),
   )
-  if getattr(workload, "frozenlake_four_chip_2x2_proxy", False):
+  if getattr(workload, "frozenlake_four_chip_proxy", False):
+    contract = _FROZENLAKE_ONEHOST_CONTRACTS[workload.name]
     expected_key = (
         ("m15", "main")
-        if workload.name == "frozenlake-m15-onehost-dp2-tp2"
+        if contract.recipe == "m15"
         else ("", "")
     )
     if p57_key != expected_key:
       raise ValueError(
-          "FrozenLake 2x2 one-host token widths require the exact registered "
+          "FrozenLake one-host token widths require the exact registered "
           f"candidate/split pair {expected_key!r}, got {p57_key!r}"
       )
     return (workload.max_prompt_length, workload.max_response_length)
@@ -1114,19 +1247,17 @@ def validate_frozenlake_max_concurrency(
   if max_concurrency == 256:
     return
   values = os.environ if environ is None else environ
-  if workload.frozenlake_four_chip_2x2_proxy:
-    expected_profile = (
-        "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
-    )
+  if workload.frozenlake_four_chip_proxy:
+    contract = _FROZENLAKE_ONEHOST_CONTRACTS[workload.name]
     required_proxy = {
-        "CANON_PROFILE_FILE": expected_profile,
+        "CANON_PROFILE_FILE": contract.profile_file,
         "CANON_P33_RUN_STAGE": "backward-no-commit",
         "CANON_P33_NO_COMMIT": "1",
         "CANON_P32_TRAIN_ADMITTED": "1",
         "CANON_P32_DP_REDUCTION_ADMITTED": "1",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1" if contract.tp_size > 1 else "0",
     }
     wrong_proxy = {
         name: values.get(name)
@@ -1137,7 +1268,7 @@ def validate_frozenlake_max_concurrency(
       wrong_proxy["max_concurrency"] = max_concurrency
     if wrong_proxy:
       raise ValueError(
-          "FrozenLake 2x2 one-host max_concurrency contract changed: "
+          "FrozenLake one-host max_concurrency contract changed: "
           f"{wrong_proxy}"
       )
     return
@@ -1252,23 +1383,22 @@ def validate_environment(
   """Validates topology, numerical switches, and reduction promotion."""
   workload.validate()
   values = os.environ if environ is None else environ
-  if workload.frozenlake_four_chip_2x2_proxy:
+  if workload.frozenlake_four_chip_proxy:
+    contract = _FROZENLAKE_ONEHOST_CONTRACTS[workload.name]
     expected_candidate = (
         ("m15", "main")
-        if workload.name == "frozenlake-m15-onehost-dp2-tp2"
+        if contract.recipe == "m15"
         else ("", "")
     )
     proxy_expected = {
-        "CANON_PROFILE_FILE": (
-            "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
-        ),
-        "CANON_MODEL_DIR_NAME": "qwen8b_tp2",
+        "CANON_PROFILE_FILE": contract.profile_file,
+        "CANON_MODEL_DIR_NAME": contract.model_dir_name,
         "CANON_P33_RUN_STAGE": "backward-no-commit",
         "CANON_P33_NO_COMMIT": "1",
         "CANON_P57_WORKLOAD_CANDIDATE": expected_candidate[0],
         "CANON_P57_DATA_SPLIT": expected_candidate[1],
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1" if contract.tp_size > 1 else "0",
         "CANON_P59_CHECKED_VMA": "0",
         "CANON_V1_HP_FULL": "0",
         "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
@@ -1280,7 +1410,7 @@ def validate_environment(
     }
     if proxy_wrong:
       raise ValueError(
-          "FrozenLake 2x2 one-host environment mismatch: "
+          "FrozenLake one-host environment mismatch: "
           f"{proxy_wrong}"
       )
   expected = {
@@ -1344,7 +1474,7 @@ def validate_environment(
     expected["CANON_P33_DISABLE_EVAL"] = "0" if evaluation_enabled else "1"
     expected["CANON_P31_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
     v1_hp_full = values.get("CANON_V1_HP_FULL", "0") == "1"
-    receipt_light_proxy = workload.frozenlake_four_chip_2x2_proxy
+    receipt_light_proxy = workload.frozenlake_four_chip_proxy
     expected.update({
         "CANON_DP_COMPARE_MODE": (
             "fingerprint-hybrid" if v1_hp_full or receipt_light_proxy else None
@@ -1425,12 +1555,12 @@ def validate_environment(
       wandb_project = "zero-tim-p57-frozenlake-tim"
     wandb_expected = {
         "CANON_WANDB_ONLINE_REQUIRED": (
-            "0" if workload.frozenlake_four_chip_2x2_proxy else "1"
+            "0" if workload.frozenlake_four_chip_proxy else "1"
         ),
         "CANON_P31_MONOTONIC_METRICS": "1",
         "CANON_WANDB_PROJECT": wandb_project,
         "WANDB_MODE": (
-            "disabled" if workload.frozenlake_four_chip_2x2_proxy else "online"
+            "disabled" if workload.frozenlake_four_chip_proxy else "online"
         ),
     }
     wandb_wrong = {
@@ -1439,7 +1569,7 @@ def validate_environment(
         if values.get(key) != expected_value
     }
     if wandb_wrong:
-      if workload.frozenlake_four_chip_2x2_proxy:
+      if workload.frozenlake_four_chip_proxy:
         raise ValueError(
             "FrozenLake one-host telemetry contract changed: "
             f"{wandb_wrong}"
@@ -1449,7 +1579,7 @@ def validate_environment(
           f"{wandb_wrong}"
       )
     required_wandb_fields = ["CANON_WANDB_GROUP", "CANON_WANDB_RUN_NAME"]
-    if not workload.frozenlake_four_chip_2x2_proxy:
+    if not workload.frozenlake_four_chip_proxy:
       required_wandb_fields.append("WANDB_API_KEY")
     for key in required_wandb_fields:
       if not values.get(key):
@@ -1719,7 +1849,7 @@ def require_workload_wandb_run(
 ) -> Mapping[str, str]:
   """Attests the typed workload's online or disabled W&B contract."""
   values = os.environ if environ is None else environ
-  if not workload.frozenlake_four_chip_2x2_proxy:
+  if not workload.frozenlake_four_chip_proxy:
     return require_online_wandb_run(workload, values)
   if values.get("CANON_WANDB_ONLINE_REQUIRED") != "0":
     raise RuntimeError("one-host FrozenLake proxy forbids online W&B admission")

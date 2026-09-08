@@ -10,22 +10,35 @@ import re
 from typing import Any
 
 
+_ARM_BASE = {
+    "report_adjoint_buckets": "0",
+    "chunk_dependency_ticket": "0",
+    "chunk_backpressure": "0",
+}
 _ARMS = {
-    "r0": {"keep_tape": "0", "reduce_once": "0", "length_sort": "0"},
+    "r0": {
+        "keep_tape": "0",
+        "reduce_once": "0",
+        "length_sort": "0",
+        **_ARM_BASE,
+    },
     "r1": {
         "keep_tape": "stream",
         "reduce_once": "0",
         "length_sort": "0",
+        **_ARM_BASE,
     },
     "r2": {
         "keep_tape": "stream",
         "reduce_once": "1",
         "length_sort": "0",
+        **_ARM_BASE,
     },
     "r3": {
         "keep_tape": "stream",
         "reduce_once": "1",
         "length_sort": "1",
+        **_ARM_BASE,
     },
 }
 _ADJACENT = {("r0", "r1"), ("r1", "r2"), ("r2", "r3")}
@@ -61,6 +74,29 @@ def _valid_input_hashes(value: Any) -> bool:
           )
       )
   )
+
+
+def _valid_n_real(value: Any) -> bool:
+  return (
+      isinstance(value, list)
+      and len(value) == 16
+      and all(isinstance(item, int) and item > 0 for item in value)
+  )
+
+
+def _valid_group_chunks(value: Any) -> bool:
+  return (
+      isinstance(value, list)
+      and len(value) == 8
+      and all(isinstance(item, int) and item > 0 for item in value)
+  )
+
+
+def _group_chunks(n_real: list[int], local_m: int) -> list[int]:
+  return [
+      (max(n_real[index:index + 2]) + local_m - 1) // local_m
+      for index in range(0, len(n_real), 2)
+  ]
 
 
 def compare(left_root: Path, right_root: Path) -> dict[str, Any]:
@@ -118,25 +154,46 @@ def compare(left_root: Path, right_root: Path) -> dict[str, Any]:
     input_reasons.append("input_hashes")
   if left_zero.get("action_tokens") != right_zero.get("action_tokens"):
     input_reasons.append("action_tokens")
-  if left_shape.get("n_real") != right_shape.get("n_real"):
-    input_reasons.append("landed_n_real")
-  if left_shape.get("group_chunks") != right_shape.get("group_chunks"):
-    input_reasons.append("group_chunks")
+  left_n_real = left_shape.get("n_real")
+  right_n_real = right_shape.get("n_real")
+  left_group_chunks = left_shape.get("group_chunks")
+  right_group_chunks = right_shape.get("group_chunks")
   for side, shape in (("left", left_shape), ("right", right_shape)):
     n_real = shape.get("n_real")
     group_chunks = shape.get("group_chunks")
-    if (
-        not isinstance(n_real, list)
-        or len(n_real) != 16
-        or any(not isinstance(value, int) or value <= 0 for value in n_real)
-    ):
+    if not _valid_n_real(n_real):
       input_reasons.append(f"{side}_landed_n_real_inventory")
-    if (
-        not isinstance(group_chunks, list)
-        or len(group_chunks) != 8
-        or any(not isinstance(value, int) or value <= 0 for value in group_chunks)
-    ):
+    if not _valid_group_chunks(group_chunks):
       input_reasons.append(f"{side}_group_chunk_inventory")
+
+  local_m = left_manifest.get("local_m")
+  if not isinstance(local_m, int) or local_m <= 0:
+    input_reasons.append("local_m_inventory")
+  elif _valid_n_real(left_n_real) and _valid_group_chunks(left_group_chunks):
+    if left_group_chunks != _group_chunks(left_n_real, local_m):
+      input_reasons.append("left_group_chunks_from_n_real")
+  if (
+      isinstance(local_m, int)
+      and local_m > 0
+      and _valid_n_real(right_n_real)
+      and _valid_group_chunks(right_group_chunks)
+      and right_group_chunks != _group_chunks(right_n_real, local_m)
+  ):
+    input_reasons.append("right_group_chunks_from_n_real")
+
+  input_relation = "exact-order"
+  if (left_arm, right_arm) == ("r2", "r3"):
+    input_relation = "stable-length-sort"
+    if _valid_n_real(left_n_real) and _valid_n_real(right_n_real):
+      if sorted(left_n_real) != sorted(right_n_real):
+        input_reasons.append("landed_n_real_multiset")
+      elif right_n_real != sorted(left_n_real, reverse=True):
+        input_reasons.append("length_sort_n_real_order")
+  else:
+    if left_n_real != right_n_real:
+      input_reasons.append("landed_n_real")
+    if left_group_chunks != right_group_chunks:
+      input_reasons.append("group_chunks")
 
   if classification_reasons:
     verdict = "FAIL"
@@ -157,6 +214,7 @@ def compare(left_root: Path, right_root: Path) -> dict[str, Any]:
       "input_reasons": input_reasons,
       "manifest_mismatches": manifest_mismatches,
       "matched_input": not input_reasons,
+      "input_relation": input_relation,
       "claim": (
           "causal adjacent-arm one-host input pair; timing may be reported"
           if verdict == "PASS"

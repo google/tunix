@@ -87,7 +87,55 @@ def _classification(arm: str) -> dict:
   }
 
 
+def _apply_expected_length_sort(classification: dict) -> None:
+  n_real = sorted(classification["landed_shape"]["n_real"], reverse=True)
+  classification["landed_shape"]["n_real"] = n_real
+  classification["landed_shape"]["group_chunks"] = [
+      (max(n_real[index:index + 2]) + 255) // 256
+      for index in range(0, len(n_real), 2)
+  ]
+
+
 class FrozenLakePairComparatorTest(unittest.TestCase):
+
+  def test_selector_schema_matches_the_six_field_run_manifest(self):
+    self.assertEqual(
+        comparator._ARMS,  # pylint: disable=protected-access
+        {
+            "r0": {
+                "keep_tape": "0",
+                "reduce_once": "0",
+                "length_sort": "0",
+                "report_adjoint_buckets": "0",
+                "chunk_dependency_ticket": "0",
+                "chunk_backpressure": "0",
+            },
+            "r1": {
+                "keep_tape": "stream",
+                "reduce_once": "0",
+                "length_sort": "0",
+                "report_adjoint_buckets": "0",
+                "chunk_dependency_ticket": "0",
+                "chunk_backpressure": "0",
+            },
+            "r2": {
+                "keep_tape": "stream",
+                "reduce_once": "1",
+                "length_sort": "0",
+                "report_adjoint_buckets": "0",
+                "chunk_dependency_ticket": "0",
+                "chunk_backpressure": "0",
+            },
+            "r3": {
+                "keep_tape": "stream",
+                "reduce_once": "1",
+                "length_sort": "1",
+                "report_adjoint_buckets": "0",
+                "chunk_dependency_ticket": "0",
+                "chunk_backpressure": "0",
+            },
+        },
+    )
 
   def _pair(self, mutate=None, *, left_arm="r1", right_arm="r2") -> dict:
     with tempfile.TemporaryDirectory() as temporary:
@@ -102,6 +150,8 @@ class FrozenLakePairComparatorTest(unittest.TestCase):
           "left_class": _classification(left_arm),
           "right_class": _classification(right_arm),
       }
+      if (left_arm, right_arm) == ("r2", "r3"):
+        _apply_expected_length_sort(payload["right_class"])
       if mutate is not None:
         mutate(payload)
       (left / "run_manifest.json").write_text(
@@ -122,6 +172,40 @@ class FrozenLakePairComparatorTest(unittest.TestCase):
     result = self._pair()
     self.assertEqual(result["verdict"], "PASS")
     self.assertTrue(result["performance_eligible"])
+
+  def test_r2_to_r3_requires_the_exact_length_sort_schedule(self):
+    result = self._pair(left_arm="r2", right_arm="r3")
+    self.assertEqual(result["verdict"], "PASS")
+    self.assertEqual(result["input_relation"], "stable-length-sort")
+    self.assertTrue(result["matched_input"])
+
+    def mutate_unsorted(payload):
+      payload["right_class"]["landed_shape"] = copy.deepcopy(
+          payload["left_class"]["landed_shape"]
+      )
+
+    result = self._pair(
+        mutate_unsorted, left_arm="r2", right_arm="r3"
+    )
+    self.assertEqual(result["verdict"], "INCOMPARABLE_INPUT")
+    self.assertIn("length_sort_n_real_order", result["input_reasons"])
+
+  def test_r2_to_r3_rejects_length_multiset_or_derived_chunk_drift(self):
+    def mutate_length(payload):
+      payload["right_class"]["landed_shape"]["n_real"][-1] += 1
+
+    result = self._pair(mutate_length, left_arm="r2", right_arm="r3")
+    self.assertEqual(result["verdict"], "INCOMPARABLE_INPUT")
+    self.assertIn("landed_n_real_multiset", result["input_reasons"])
+
+    def mutate_chunks(payload):
+      payload["right_class"]["landed_shape"]["group_chunks"][0] += 1
+
+    result = self._pair(mutate_chunks, left_arm="r2", right_arm="r3")
+    self.assertEqual(result["verdict"], "INCOMPARABLE_INPUT")
+    self.assertIn(
+        "right_group_chunks_from_n_real", result["input_reasons"]
+    )
 
   def test_input_hash_or_landed_length_drift_is_incomparable(self):
     def mutate_hash(payload):
@@ -167,6 +251,18 @@ class FrozenLakePairComparatorTest(unittest.TestCase):
       payload["right_manifest"]["selectors"]["reduce_once"] = "0"
 
     result = self._pair(mutate)
+    self.assertEqual(result["verdict"], "INCOMPARABLE_CONFIGURATION")
+    self.assertIn("right_selectors", result["configuration_reasons"])
+
+    def mutate_diagnostic_selector(payload):
+      payload["right_manifest"]["selectors"] = copy.deepcopy(
+          payload["right_manifest"]["selectors"]
+      )
+      payload["right_manifest"]["selectors"][
+          "chunk_dependency_ticket"
+      ] = "1"
+
+    result = self._pair(mutate_diagnostic_selector)
     self.assertEqual(result["verdict"], "INCOMPARABLE_CONFIGURATION")
     self.assertIn("right_selectors", result["configuration_reasons"])
 

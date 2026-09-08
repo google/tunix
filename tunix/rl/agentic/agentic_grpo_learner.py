@@ -161,22 +161,32 @@ def _v2_frozenlake_onehost_alignment_enabled(
     env: Mapping[str, str],
 ) -> bool:
   """Return whether the signed V2 FrozenLake one-host contract applies."""
-  return (
-      env.get("CANON_PROFILE_FILE")
-      == "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
-      and env.get("CANON_P32_WORKLOAD")
-      in (
-          "frozenlake-p45-onehost-dp2-tp2",
-          "frozenlake-m15-onehost-dp2-tp2",
+  cell = (
+      env.get("CANON_PROFILE_FILE"),
+      env.get("CANON_P32_WORKLOAD"),
+      env.get("CANON_DP_SIZE"),
+      env.get("CANON_TP_SIZE"),
+      env.get("CANON_P66_P59_CHECK_VMA"),
+  )
+  admitted_cells = {
+      (
+          f"cluster/profiles/qwen3-8b-dp{dp}-tp{tp}-"
+          "frozenlake-onehost.env",
+          f"frozenlake-{recipe}-onehost-dp{dp}-tp{tp}",
+          str(dp),
+          str(tp),
+          "0" if tp == 1 else "1",
       )
+      for recipe in ("p45", "m15")
+      for dp, tp in ((4, 1), (2, 2), (1, 4))
+  }
+  return (
+      cell in admitted_cells
       and env.get("CANON_P33_RUN_STAGE") == "backward-no-commit"
       and env.get("CANON_P33_NO_COMMIT") == "1"
       and env.get("CANON_P32_TRAIN_ADMITTED") == "1"
       and env.get("CANON_P32_DP_REDUCTION_ADMITTED") == "1"
       and env.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED") == "1"
-      and env.get("CANON_DP_SIZE") == "2"
-      and env.get("CANON_TP_SIZE") == "2"
-      and env.get("CANON_P66_P59_CHECK_VMA") == "1"
       and env.get("CANON_WANDB_ONLINE_REQUIRED") == "0"
       and env.get("WANDB_MODE") == "disabled"
   )

@@ -6,16 +6,26 @@ pkg="$repo/canon-zero-tim"
 root="${V2_FL_ROOT:?}"
 workload="${V2_FL_WORKLOAD:?}"
 arm="${V2_FL_ARM:?}"
-profile_rel=cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env
+geometry="${V2_FL_GEOMETRY:-dp2-tp2}"
+dp_size="${V2_FL_DP_SIZE:-2}"
+tp_size="${V2_FL_TP_SIZE:-2}"
+model_dir="${V2_FL_MODEL_DIR:-qwen8b_tp2}"
+profile_rel="${V2_FL_PROFILE_REL:-cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env}"
+case "$geometry:$dp_size:$tp_size:$model_dir:$profile_rel" in
+  "dp4-tp1:4:1:qwen8b_tp1:cluster/profiles/qwen3-8b-dp4-tp1-frozenlake-onehost.env") ;;
+  "dp2-tp2:2:2:qwen8b_tp2:cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env") ;;
+  "dp1-tp4:1:4:qwen8b:cluster/profiles/qwen3-8b-dp1-tp4-frozenlake-onehost.env") ;;
+  *) echo "[V2.FL.ONEHOST] unregistered geometry delivery tuple" >&2; exit 2 ;;
+esac
 
 case "$workload" in
   p45)
-    workload_name=frozenlake-p45-onehost-dp2-tp2
+    workload_name="frozenlake-p45-onehost-dp${dp_size}-tp${tp_size}"
     export CANON_P57_WORKLOAD_CANDIDATE=
     export CANON_P57_DATA_SPLIT=
     ;;
   m15)
-    workload_name=frozenlake-m15-onehost-dp2-tp2
+    workload_name="frozenlake-m15-onehost-dp${dp_size}-tp${tp_size}"
     export CANON_P57_WORKLOAD_CANDIDATE=m15
     export CANON_P57_DATA_SPLIT=main
     ;;
@@ -27,14 +37,22 @@ case "$arm" in
   r0c) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=1; chunk_backpressure=0 ;;
   r0d) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=0; chunk_backpressure=1 ;;
   r1) keep_tape=stream; reduce_once=0; length_sort=0; report_buckets=0 ;;
-  r2) keep_tape=stream; reduce_once=1; length_sort=0; report_buckets=0 ;;
-  r3) keep_tape=stream; reduce_once=1; length_sort=1; report_buckets=0 ;;
+  r2)
+    if [ "$dp_size" = 1 ]; then echo "[V2.FL.ONEHOST] DP1 has no reduce-once arm" >&2; exit 2; fi
+    keep_tape=stream; reduce_once=1; length_sort=0; report_buckets=0
+    ;;
+  r3)
+    keep_tape=stream
+    if [ "$dp_size" = 1 ]; then reduce_once=0; else reduce_once=1; fi
+    length_sort=1; report_buckets=0
+    ;;
   *) echo "[V2.FL.ONEHOST] unknown arm: $arm" >&2; exit 2 ;;
 esac
 chunk_ticket="${chunk_ticket:-0}"
 chunk_backpressure="${chunk_backpressure:-0}"
-if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && [ "$workload" != p45 ]; then
-  echo "[V2.FL.ONEHOST] $arm P75/P76/P77 capacity arm admits only P45" >&2
+if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && \
+   { [ "$workload" != p45 ] || [ "$geometry" != dp2-tp2 ]; }; then
+  echo "[V2.FL.ONEHOST] $arm P75/P76/P77 capacity arm admits only P45 DP2xTP2" >&2
   exit 2
 fi
 export CANON_PROFILE_FILE="$profile_rel"
@@ -95,8 +113,8 @@ from tunix.rl import dp_workloads
 
 short = os.environ["V2_FL_WORKLOAD"]
 name = {
-    "p45": "frozenlake-p45-onehost-dp2-tp2",
-    "m15": "frozenlake-m15-onehost-dp2-tp2",
+    "p45": f"frozenlake-p45-onehost-dp{os.environ['V2_FL_DP_SIZE']}-tp{os.environ['V2_FL_TP_SIZE']}",
+    "m15": f"frozenlake-m15-onehost-dp{os.environ['V2_FL_DP_SIZE']}-tp{os.environ['V2_FL_TP_SIZE']}",
 }[short]
 workload = dp_workloads.get_workload(name)
 manifest = {
@@ -115,7 +133,7 @@ manifest = {
     "stage": "backward-no-commit",
     "model_id": workload.model_id,
     "model_dir_name": workload.model_dir_name,
-    "topology": {"dp": 2, "tp": 2, "devices": 4},
+    "topology": {"dp": workload.dp_size, "tp": workload.tp_size, "devices": 4},
     "global_prompts": workload.global_prompts,
     "num_generations": workload.num_generations,
     "global_trajectories": workload.global_trajectories,
@@ -147,6 +165,19 @@ manifest = {
     "checked_vma": os.environ["CANON_P66_P59_CHECK_VMA"] == "1",
     "wandb_mode": os.environ["WANDB_MODE"],
     "classification_mode": os.environ["V2_FL_MODE"],
+    "xprof": (
+        {
+            "phase": os.environ["CANON_XPROF_PHASE"],
+            "skip_steps": int(os.environ["CANON_XPROF_SKIP_STEPS"]),
+            "steps": int(os.environ["CANON_XPROF_STEPS"]),
+            "host_tracer": int(os.environ["CANON_XPROF_HOST_TRACER"]),
+            "python_tracer": int(os.environ["CANON_XPROF_PYTHON_TRACER"]),
+            "tpu_trace_mode": os.environ["CANON_XPROF_TPU_TRACE_MODE"],
+            "labels": int(os.environ["CANON_XPROF_LABELS"]),
+        }
+        if os.environ["V2_FL_MODE"] == "profile"
+        else None
+    ),
     "training_capsule": {
         "mode": os.environ["V2_FL_CAPSULE_MODE"],
         "capture_run": os.environ.get("V2_FL_CAPSULE_CAPTURE_RUN") or None,
@@ -175,8 +206,8 @@ import shlex
 from tunix.rl import dp_workloads
 
 name = {
-    "p45": "frozenlake-p45-onehost-dp2-tp2",
-    "m15": "frozenlake-m15-onehost-dp2-tp2",
+    "p45": f"frozenlake-p45-onehost-dp{os.environ['V2_FL_DP_SIZE']}-tp{os.environ['V2_FL_TP_SIZE']}",
+    "m15": f"frozenlake-m15-onehost-dp{os.environ['V2_FL_DP_SIZE']}-tp{os.environ['V2_FL_TP_SIZE']}",
 }[os.environ["V2_FL_WORKLOAD"]]
 workload = dp_workloads.get_workload(name)
 dp_workloads.validate_environment(

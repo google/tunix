@@ -1,26 +1,53 @@
 #!/usr/bin/env bash
-# One-host-only Qwen3-8B FrozenLake DP2xTP2 no-commit capacity carrier.
+# One-host-only Qwen3-8B FrozenLake no-commit carrier.
+# Direct calls retain the historical DP2xTP2 default.  Other geometries enter
+# only through run_frozenlake_matrix_onehost.sh, which sets V2_FL_GEOMETRY.
 set -euo pipefail
 
-workload="${1:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify>}"
-arm="${2:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify>}"
-label="${3:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify>}"
-mode="${4:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify> [none|capture|replay] [capsule.npz]}"
+workload="${1:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile>}"
+arm="${2:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile>}"
+label="${3:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile>}"
+mode="${4:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile> [none|capture|replay] [capsule.npz]}"
 capsule_mode="${5:-none}"
 capsule_source="${6:-}"
+geometry="${V2_FL_GEOMETRY:-dp2-tp2}"
+case "$geometry" in
+  dp4-tp1)
+    dp_size=4; tp_size=1; model_dir=qwen8b_tp1
+    profile_rel=cluster/profiles/qwen3-8b-dp4-tp1-frozenlake-onehost.env
+    ;;
+  dp2-tp2)
+    dp_size=2; tp_size=2; model_dir=qwen8b_tp2
+    profile_rel=cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env
+    ;;
+  dp1-tp4)
+    dp_size=1; tp_size=4; model_dir=qwen8b
+    profile_rel=cluster/profiles/qwen3-8b-dp1-tp4-frozenlake-onehost.env
+    ;;
+  *) echo "invalid geometry: $geometry" >&2; exit 2 ;;
+esac
 case "$workload" in p45|m15) ;; *) echo "invalid workload: $workload" >&2; exit 2;; esac
 case "$arm" in r0|r0b|r0c|r0d|r1|r2|r3) ;; *) echo "invalid arm: $arm" >&2; exit 2;; esac
-if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && [ "$workload" != p45 ]; then
-  echo "$arm P75/P76/P77 capacity arm admits only workload p45" >&2
+if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && \
+   { [ "$workload" != p45 ] || [ "$geometry" != dp2-tp2 ]; }; then
+  echo "$arm P75/P76/P77 capacity arm admits only workload p45 DP2xTP2" >&2
   exit 2
 fi
-case "$mode" in measure|certify) ;; *) echo "invalid mode: $mode" >&2; exit 2;; esac
+if [ "$geometry" = dp1-tp4 ] && [ "$arm" = r2 ]; then
+  echo "DP1 has no reduce-once arm" >&2
+  exit 2
+fi
+case "$mode" in measure|certify|profile) ;; *) echo "invalid mode: $mode" >&2; exit 2;; esac
 case "$capsule_mode:$mode" in
   none:measure|none:certify) ;;
   capture:measure) ;;
-  replay:certify) ;;
+  replay:certify|replay:profile) ;;
   *) echo "invalid capsule/classification mode: $capsule_mode/$mode" >&2; exit 2;;
 esac
+if [ "$mode" = profile ] && { [ "$geometry" != dp2-tp2 ] || [ "$workload" != p45 ] || { [ "$arm" != r1 ] && [ "$arm" != r2 ]; }; }; then
+  echo "profile mode admits only P45 DP2xTP2 arm r1 or r2" >&2
+  exit 2
+fi
 if [ "$capsule_mode" = replay ] && [ -z "$capsule_source" ]; then
   echo "replay requires an absolute captured capsule path" >&2
   exit 2
@@ -52,13 +79,41 @@ model="$model_cache/snapshots/$model_revision"
 data=/mnt/disks/tunix-data/frozenlake/data_convergence_v1
 deps=/mnt/disks/tunix-data/frozenlake/deps
 evidence_root=/mnt/disks/tunix-data/frozenlake-onehost-v2
-root="$evidence_root/${workload}_${arm}_${label}"
+run_identity="$workload"
+if [ "$geometry" != dp2-tp2 ]; then
+  run_identity="${workload}_${geometry}"
+fi
+root="$evidence_root/${run_identity}_${arm}_${label}"
 canon_out="$root/canon"
 raw="$root/raw.log"
 driver="$root/driver.log"
-container="v2_fl_${workload}_${arm}_${label}"
+container="v2_fl_${workload}_${geometry}_${arm}_${label}"
 timeout_seconds="${V2_FL_TIMEOUT_SECONDS:-14400}"
 sp=/usr/local/lib/python3.12/site-packages/tpu_inference
+xprof_dir=
+perf_trace_dir=
+xprof_report=
+xprof_census=
+xprof_skip=
+xprof_steps=
+xprof_phase=
+xprof_host_tracer=
+xprof_python_tracer=
+xprof_tpu_trace_mode=
+xprof_labels=
+if [ "$mode" = profile ]; then
+  xprof_dir="$root/xprof-update"
+  perf_trace_dir="$root/perfetto"
+  xprof_report="$root/warm_xprof_repeat.json"
+  xprof_census="$root/xplane_census.json"
+  xprof_skip=0
+  xprof_steps=1
+  xprof_phase=update
+  xprof_host_tracer=1
+  xprof_python_tracer=0
+  xprof_tpu_trace_mode=TRACE_ONLY_XLA
+  xprof_labels=1
+fi
 seal_evidence() {
   find "$root" -type f ! -name SHA256SUMS -print0 \
     | sort -z | xargs -0 sha256sum >"$root/SHA256SUMS"
@@ -88,7 +143,11 @@ case "$capsule_mode" in
     capsule_sha256="$(sha256sum "$capsule_path" | awk '{print $1}')"
     capsule_binding_sha256="$(sha256sum "$capsule_path.model.json" | awk '{print $1}')"
     capsule_dir_name="$(basename "$(dirname "$capsule_path")")"
-    capsule_dir_tail="${capsule_dir_name#${workload}_}"
+    capsule_dir_tail="${capsule_dir_name#${run_identity}_}"
+    if [ "$capsule_dir_tail" = "$capsule_dir_name" ]; then
+      echo "replay capsule geometry identity is invalid: $capsule_dir_name" >&2
+      exit 2
+    fi
     case "$capsule_dir_tail" in
       r0_*|r0b_*|r0c_*|r0d_*|r1_*|r2_*|r3_*) ;;
       *) echo "replay capsule run identity is invalid: $capsule_dir_name" >&2; exit 2;;
@@ -109,6 +168,10 @@ esac
 # shellcheck disable=SC1090
 source "$canon_env"
 canon_preflight
+if [ "$mode" = profile ]; then
+  test -x /home/yuxuan/miniconda3/bin/python3
+  test "$(/home/yuxuan/miniconda3/bin/python3 -c 'import importlib.metadata; print(importlib.metadata.version("xprof"))')" = 2.23.1
+fi
 test "$(hostname)" = t1v-n-4a77ebd0-w-0
 test ! -e "$root"
 test -s "$model/config.json"
@@ -133,7 +196,7 @@ else
 fi
 train_sha256="$(sha256sum "$train_file" | awk '{print $1}')"
 test_sha256="$(sha256sum "$test_file" | awk '{print $1}')"
-runner_sha256="$(sha256sum "$0" "$script_dir/run_frozenlake_dp2tp2_inner.sh" "$script_dir/classify_frozenlake_dp2tp2.py" | sha256sum | awk '{print $1}')"
+runner_sha256="$(sha256sum "$0" "$script_dir/run_frozenlake_matrix_onehost.sh" "$script_dir/run_frozenlake_dp2tp2_inner.sh" "$script_dir/classify_frozenlake_dp2tp2.py" "$script_dir/classify_frozenlake_warm_xprof.py" "$script_dir/census_frozenlake_warm_xprof.py" | sha256sum | awk '{print $1}')"
 image_sha="${image_id#sha256:}"
 
 system_container='^(tpu-runtime|instance_agent|vbarcontrolagent|google-runtime-monitor|runtime-monitor|healthagent|google-collectd|collectd|monitoringagent)$'
@@ -161,20 +224,27 @@ if [ -n "$(other_containers)" ]; then
 fi
 
 mkdir -p "$root" "$root/wandb" "$root/logs"
+if [ "$mode" = profile ]; then
+  mkdir -p "$root/xprof-update" "$root/perfetto"
+fi
 {
   echo "[V2.FL.ONEHOST] source=$source_sha diff_sha256=$diff_sha"
   echo "[V2.FL.ONEHOST] image_id=$image_id model_revision=$model_revision"
-  echo "[V2.FL.ONEHOST] workload=$workload arm=$arm mode=$mode capsule_mode=$capsule_mode topology=DP2xTP2 stage=backward-no-commit"
+  echo "[V2.FL.ONEHOST] workload=$workload arm=$arm mode=$mode capsule_mode=$capsule_mode topology=DP${dp_size}xTP${tp_size} stage=backward-no-commit"
   echo "[V2.FL.ONEHOST] timeout_seconds=$timeout_seconds idle_120s=PASS root=$root"
 } >"$driver"
-bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen8b_tp2 \
+bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model "$model_dir" \
   >>"$driver" 2>&1
 
 {
   echo "[V2.FL.ONEHOST] RUN_BEGIN"
-  sha256sum "$0" "$script_dir/run_frozenlake_dp2tp2_inner.sh" \
+  sha256sum "$0" "$script_dir/run_frozenlake_matrix_onehost.sh" \
+    "$script_dir/run_frozenlake_dp2tp2_inner.sh" \
     "$script_dir/classify_frozenlake_dp2tp2.py" \
-    "$pkg/cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env" \
+    "$script_dir/classify_frozenlake_warm_xprof.py" \
+    "$script_dir/census_frozenlake_warm_xprof.py" \
+    "$pkg/$profile_rel" \
+    "$pkg/cluster/profiles/_qwen3-8b-frozenlake-four-chip-onehost.env" \
     "$repo/tunix/rl/dp_workloads.py" \
     "$repo/tunix/rl/canonical_qwen3_adapter.py" \
     "$repo/examples/frozenlake/train_frozenlake_qwen3.py"
@@ -209,10 +279,23 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e V2_FL_REPO="$repo" -e V2_FL_ROOT="$root" \
   -e V2_FL_WORKLOAD="$workload" -e V2_FL_ARM="$arm" -e V2_FL_LABEL="$label" \
+  -e V2_FL_GEOMETRY="$geometry" -e V2_FL_DP_SIZE="$dp_size" \
+  -e V2_FL_TP_SIZE="$tp_size" -e V2_FL_MODEL_DIR="$model_dir" \
+  -e V2_FL_PROFILE_REL="$profile_rel" \
   -e CANON_P75_REPORT_ADJOINT_BUCKETS="$report_adjoint_buckets" \
   -e CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_dependency_ticket" \
   -e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure" \
   -e V2_FL_MODE="$mode" \
+  -e CANON_XPROF_DIR="$xprof_dir" \
+  -e CANON_PERF_TRACE_DIR="$perf_trace_dir" \
+  -e V2_FL_XPROF_REPORT="$xprof_report" \
+  -e CANON_XPROF_SKIP_STEPS="$xprof_skip" \
+  -e CANON_XPROF_STEPS="$xprof_steps" \
+  -e CANON_XPROF_PHASE="$xprof_phase" \
+  -e CANON_XPROF_HOST_TRACER="$xprof_host_tracer" \
+  -e CANON_XPROF_PYTHON_TRACER="$xprof_python_tracer" \
+  -e CANON_XPROF_TPU_TRACE_MODE="$xprof_tpu_trace_mode" \
+  -e CANON_XPROF_LABELS="$xprof_labels" \
   -e V2_FL_CAPSULE_MODE="$capsule_mode" \
   -e V2_FL_CAPSULE_CAPTURE_RUN="$capsule_capture_run" \
   -e CANON_V2_TRAINING_CAPSULE_MODE="${capsule_mode#none}" \
@@ -255,23 +338,44 @@ elapsed=$(( $(date +%s) - started ))
 echo "[V2.FL.ONEHOST] RUN_END docker_exit=$docker_rc elapsed_seconds=$elapsed contention=$contention timeout=$timed_out" >>"$raw"
 sudo chmod -R a+rX "$root" || true
 
-classifier_args=(
-  "$script_dir/classify_frozenlake_dp2tp2.py"
-  --root "$root" --workload "$workload" --arm "$arm"
-  --docker-exit "$docker_rc"
-  --anchor-registry "$script_dir/gradient_anchors.json"
-  --output "$root/classification.json"
-)
-if [ "$mode" = certify ]; then
-  classifier_args+=(--require-anchor)
+xplane_census_rc=0
+if [ "$mode" = profile ]; then
+  set +e
+  /home/yuxuan/miniconda3/bin/python3 \
+    "$script_dir/census_frozenlake_warm_xprof.py" \
+    --root "$root" --arm "$arm" --output "$xprof_census" \
+    >>"$driver" 2>&1
+  xplane_census_rc=$?
+  set -e
+fi
+
+if [ "$mode" = profile ]; then
+  classifier_args=(
+    "$script_dir/classify_frozenlake_warm_xprof.py"
+    --root "$root" --arm "$arm"
+    --docker-exit "$docker_rc"
+    --anchor-registry "$script_dir/gradient_anchors.json"
+    --output "$root/classification.json"
+  )
+else
+  classifier_args=(
+    "$script_dir/classify_frozenlake_dp2tp2.py"
+    --root "$root" --workload "$workload" --geometry "$geometry" --arm "$arm"
+    --docker-exit "$docker_rc"
+    --anchor-registry "$script_dir/gradient_anchors.json"
+    --output "$root/classification.json"
+  )
+  if [ "$mode" = certify ]; then
+    classifier_args+=(--require-anchor)
+  fi
 fi
 set +e
 /mnt/disks/tunix-data/venvs/train/bin/python "${classifier_args[@]}" \
   >>"$driver" 2>&1
 classifier_rc=$?
 set -e
-if [ "$classifier_rc" -ne 0 ] || [ "$contention" -ne 0 ] || [ "$timed_out" -ne 0 ]; then
-  echo "[V2.FL.ONEHOST] RED docker=$docker_rc classifier=$classifier_rc evidence=$root" >>"$driver"
+if [ "$classifier_rc" -ne 0 ] || [ "$xplane_census_rc" -ne 0 ] || [ "$contention" -ne 0 ] || [ "$timed_out" -ne 0 ]; then
+  echo "[V2.FL.ONEHOST] RED docker=$docker_rc xplane_census=$xplane_census_rc classifier=$classifier_rc evidence=$root" >>"$driver"
   seal_evidence
   exit 1
 fi

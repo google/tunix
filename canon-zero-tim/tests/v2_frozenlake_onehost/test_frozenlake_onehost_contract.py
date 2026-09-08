@@ -1,13 +1,15 @@
-"""Fail-closed contracts for the FrozenLake DP2xTP2 one-host carriers."""
+"""Fail-closed contracts for the FrozenLake four-chip one-host carriers."""
 
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import unittest
@@ -25,6 +27,69 @@ PROFILE = (
     "qwen3-8b-dp2-tp2-frozenlake-onehost.env"
 )
 PROFILE_REL = "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+
+
+def _source_matrix_profile(
+    *,
+    dp_size: int,
+    tp_size: int,
+    recipe: str,
+    keep_tape: str,
+    reduce_once: str,
+    length_sort: str,
+    overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+  profile = (
+      "cluster/profiles/qwen3-8b-"
+      f"dp{dp_size}-tp{tp_size}-frozenlake-onehost.env"
+  )
+  values = {
+      "CANON_PROFILE_FILE": profile,
+      "CANON_P32_KEEP_TAPE": keep_tape,
+      "CANON_DP_REDUCE_ONCE": reduce_once,
+      "CANON_P32_LENGTH_SORT": length_sort,
+      "CANON_P75_REPORT_ADJOINT_BUCKETS": "0",
+      "CANON_P76_CHUNK_DEPENDENCY_TICKET": "0",
+      "CANON_P77_CHUNK_BACKPRESSURE": "0",
+      "CANON_P57_WORKLOAD_CANDIDATE": "m15" if recipe == "m15" else "",
+      "CANON_P57_DATA_SPLIT": "main" if recipe == "m15" else "",
+      "CANON_P57_RUN_KIND": "",
+      "CANON_P57_TIM_ARM": "",
+      "XLA_FLAGS": "--xla_allow_excess_precision=false",
+  }
+  values.update(overrides or {})
+  exports = "\n".join(
+      f"export {key}={shlex.quote(value)}" for key, value in values.items()
+  )
+  script = f"""
+set -euo pipefail
+{exports}
+export JAX_PLATFORMS=cpu
+export PYTHONPYCACHEPREFIX=/tmp/v2fl_profile_pycache
+source {shlex.quote('canon-zero-tim/' + profile)}
+{shlex.quote(sys.executable)} -c {shlex.quote(
+    "import os; from tunix.rl import dp_workloads; "
+    "workload = dp_workloads.get_workload(os.environ['CANON_P32_WORKLOAD']); "
+    "dp_workloads.validate_environment(workload, os.environ, "
+    "require_reduction_admission=True); print('PROFILE_CONTRACT_PASS')"
+)}
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  "$CANON_P32_WORKLOAD" "$CANON_MODEL_DIR_NAME" \
+  "$CANON_DP_SIZE" "$CANON_TP_SIZE" \
+  "$CANON_P32_KEEP_TAPE" "$CANON_DP_REDUCE_ONCE" \
+  "$CANON_P32_LENGTH_SORT" "$CANON_P66_P59_CHECK_VMA" \
+  "$CANON_P67_P66_VMA_P59_ONLY" \
+  "$CANON_EXPECT_MODEL_MESH_IDS" "$CANON_EXPECT_TRAIN_MESH_IDS" \
+  "$FL_VLLM_HBM_UTIL"
+"""
+  return subprocess.run(
+      ["bash", "-c", script],
+      cwd=ROOT,
+      text=True,
+      capture_output=True,
+      env={},
+      check=False,
+  )
 
 
 def _load_contract():
@@ -45,13 +110,15 @@ CONTRACT = _load_contract()
 
 def _environment(workload_name: str) -> dict[str, str]:
   workload = dp_workloads.get_workload(workload_name)
-  candidate = (
-      "m15" if workload_name == "frozenlake-m15-onehost-dp2-tp2" else ""
+  candidate = "m15" if workload_name.startswith("frozenlake-m15-") else ""
+  profile = (
+      "cluster/profiles/qwen3-8b-"
+      f"dp{workload.dp_size}-tp{workload.tp_size}-frozenlake-onehost.env"
   )
   split = "main" if candidate else ""
   return {
-      "CANON_PROFILE_FILE": PROFILE_REL,
-      "CANON_MODEL_DIR_NAME": "qwen8b_tp2",
+      "CANON_PROFILE_FILE": profile,
+      "CANON_MODEL_DIR_NAME": workload.model_dir_name,
       "CANON_P32_WORKLOAD": workload.name,
       "CANON_P32_TRAIN_ADMITTED": "1",
       "CANON_P32_DP_REDUCTION_ADMITTED": "1",
@@ -61,22 +128,22 @@ def _environment(workload_name: str) -> dict[str, str]:
       "CANON_P57_WORKLOAD_CANDIDATE": candidate,
       "CANON_P57_DATA_SPLIT": split,
       "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-      "CANON_P66_P59_CHECK_VMA": "1",
+      "CANON_P66_P59_CHECK_VMA": "1" if workload.tp_size > 1 else "0",
       "CANON_P59_CHECKED_VMA": "0",
       "CANON_V1_HP_FULL": "0",
       "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
-      "CANON_DP_SIZE": "2",
-      "CANON_TP_SIZE": "2",
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
       "CANON_TOTAL_DEVICES": "4",
-      "CANON_ENGINE_DP_SIZE": "2",
-      "CANON_QWEN3_TP_SIZE": "2",
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
       "CANON_GLOBAL_PROMPTS": "4",
-      "CANON_LOCAL_PROMPTS": "2",
+      "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
       "CANON_NUM_GENERATIONS": "4",
-      "CANON_LOCAL_TRAJECTORIES": "8",
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
       "CANON_GLOBAL_TRAJECTORIES": "16",
       "CANON_LOGPROB_M": "256",
-      "MIN_TOKEN_BUCKET": "512",
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_FIXED_AR": "1",
       "CANON_FIXED_AR_EMBED": "1",
       "CANON_RPA_VJP2": "1",
@@ -101,7 +168,7 @@ def _environment(workload_name: str) -> dict[str, str]:
       "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
       "CANON_P30_RELEASE_CAPTURED_STATE": "1",
       "CANON_P30_RESHARD_ACCUMULATOR": "1",
-      "FL_SHARED_MESH": "2,2",
+      "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
       "CANON_P33_ENABLE_EVAL": "0",
       "CANON_P33_DISABLE_EVAL": "1",
       "CANON_P31_ENABLE_EVAL": "0",
@@ -169,7 +236,10 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
       )
       self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
     installer = (ROOT / "canon-zero-tim/install.sh").read_text()
-    self.assertIn('if [ "$MODEL" = qwen8b_tp2 ]; then', installer)
+    self.assertIn(
+        'if [ "$MODEL" = qwen8b_tp1 ] || [ "$MODEL" = qwen8b_tp2 ]; then',
+        installer,
+    )
     probe = (
         ROOT
         / "canon-zero-tim/tests/v2_frozenlake_onehost/"
@@ -216,7 +286,8 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     ).read_text(encoding="utf-8")
     self.assertIn("_v2_frozenlake_onehost_alignment_enabled", learner)
     self.assertIn("[V2.FL.SAMPLER] CONTRACT_PASS", learner)
-    self.assertIn('env.get("CANON_P66_P59_CHECK_VMA") == "1"', learner)
+    self.assertIn("cell in admitted_cells", learner)
+    self.assertIn('"0" if tp == 1 else "1"', learner)
 
   def test_hbm_stage_diagnostic_is_measure_r0_and_r0b_only(self):
     learner = (
@@ -230,7 +301,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
         "run_frozenlake_dp2tp2_inner.sh"
     ).read_text(encoding="utf-8")
-    self.assertIn("workload.frozenlake_four_chip_2x2_proxy", learner)
+    self.assertIn("workload.frozenlake_four_chip_proxy", learner)
     self.assertIn('os.environ.get("V2_FL_MODE", "") == "measure"', learner)
     self.assertIn(
         'os.environ.get("V2_FL_ARM", "") in ("r0", "r0b")', learner
@@ -348,7 +419,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         "gradient_anchors.json"
     ).read_text(encoding="utf-8"))
     self.assertEqual(
-        registry["anchors"].get("p45:r2"),
+        registry["anchors"].get("p45:dp2-tp2:r2"),
         {
             "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
             "training_capsule_sha256": (
@@ -369,6 +440,34 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         },
     )
 
+  def test_p45_r3_anchor_pins_the_length_sorted_receipt(self):
+    registry = json.loads((
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "gradient_anchors.json"
+    ).read_text(encoding="utf-8"))
+    self.assertEqual(
+        registry["anchors"].get("p45:dp2-tp2:r3"),
+        {
+            "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+            "training_capsule_sha256": (
+                "99b6dcaba5b816644a02037ef8f4e8ae"
+                "0199eb1106a4142e3d076b3f48d8539c"
+            ),
+            "micro_gradient_norms": [
+                0.0,
+                6.509113311767578,
+                9.983430862426758,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                37.86933135986328,
+            ],
+            "update_gradient_norm": 23.40300178527832,
+        },
+    )
+
   def test_onehost_proxy_preserves_the_three_epoch_dataset_capacity(self):
     source = TRAIN_ENTRYPOINT.read_text(encoding="utf-8")
     self.assertIn("NUM_EPOCHS = 3", source)
@@ -379,46 +478,54 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertNotIn("expected_available_updates", source)
 
   def test_p45_and_m15_proxy_workloads_have_exact_distinct_envelopes(self):
-    cases = {
-        "frozenlake-p45-onehost-dp2-tp2": (4096, 2048, 5, ()),
-        "frozenlake-m15-onehost-dp2-tp2": (
-            4096,
+    for recipe, response, turns, candidate_args in (
+        ("p45", 2048, 5, ()),
+        (
+            "m15",
             8192,
             15,
             ("--p57_workload_candidate=m15", "--p57_data_split=main"),
         ),
-    }
-    for name, (prompt, response, turns, candidate_args) in cases.items():
-      with self.subTest(name=name):
-        workload = dp_workloads.get_workload(name)
-        self.assertEqual((workload.dp_size, workload.tp_size), (2, 2))
-        self.assertEqual(workload.model_id, "Qwen/Qwen3-8B")
-        self.assertEqual(workload.model_dir_name, "qwen8b_tp2")
-        self.assertEqual(workload.global_trajectories, 16)
-        self.assertEqual(workload.gradient_groups, 8)
-        self.assertEqual(workload.global_m, 512)
-        self.assertEqual(
-            (workload.max_prompt_length, workload.max_response_length),
-            (prompt, response),
-        )
-        self.assertEqual(workload.frozenlake_max_turns, turns)
-        command = workload.command(run_stage="backward-no-commit")
-        for argument in (
-            "--mesh_dp=2",
-            "--mesh_tp=2",
-            "--batch_size=4",
-            "--mini_batch_size=4",
-            "--num_generations=4",
-            f"--max_prompt_length={prompt}",
-            f"--max_response_length={response}",
-            f"--env_max_steps={turns}",
-            "--max_concurrency=16",
-            "--sampler_is=none",
-        ) + candidate_args:
-          self.assertIn(argument, command)
-        self.assertEqual(command.count("--sampler_is=none"), 1)
-        with self.assertRaisesRegex(ValueError, "only backward-no-commit"):
-          workload.command(run_stage="one-update")
+    ):
+      for dp_size, tp_size, model_dir in (
+          (4, 1, "qwen8b_tp1"),
+          (2, 2, "qwen8b_tp2"),
+          (1, 4, "qwen8b"),
+      ):
+        name = f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}"
+        with self.subTest(name=name):
+          prompt = 4096
+          workload = dp_workloads.get_workload(name)
+          self.assertEqual(
+              (workload.dp_size, workload.tp_size), (dp_size, tp_size)
+          )
+          self.assertEqual(workload.model_id, "Qwen/Qwen3-8B")
+          self.assertEqual(workload.model_dir_name, model_dir)
+          self.assertEqual(workload.global_trajectories, 16)
+          self.assertEqual(workload.gradient_groups, 16 // dp_size)
+          self.assertEqual(workload.global_m, dp_size * 256)
+          self.assertEqual(
+              (workload.max_prompt_length, workload.max_response_length),
+              (prompt, response),
+          )
+          self.assertEqual(workload.frozenlake_max_turns, turns)
+          command = workload.command(run_stage="backward-no-commit")
+          for argument in (
+              f"--mesh_dp={dp_size}",
+              f"--mesh_tp={tp_size}",
+              "--batch_size=4",
+              "--mini_batch_size=4",
+              "--num_generations=4",
+              f"--max_prompt_length={prompt}",
+              f"--max_response_length={response}",
+              f"--env_max_steps={turns}",
+              "--max_concurrency=16",
+              "--sampler_is=none",
+          ) + candidate_args:
+            self.assertIn(argument, command)
+          self.assertEqual(command.count("--sampler_is=none"), 1)
+          with self.assertRaisesRegex(ValueError, "only backward-no-commit"):
+            workload.command(run_stage="one-update")
 
     for production_name in ("frozenlake", "frozenlake-dp8-tp8"):
       with self.subTest(production_name=production_name):
@@ -427,10 +534,11 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         ).command()
         self.assertNotIn("--sampler_is=none", production_command)
 
-  def test_both_proxy_environments_pass_and_wrong_seams_reject(self):
+  def test_all_proxy_environments_pass_and_wrong_seams_reject(self):
     for name in (
-        "frozenlake-p45-onehost-dp2-tp2",
-        "frozenlake-m15-onehost-dp2-tp2",
+        f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}"
+        for recipe in ("p45", "m15")
+        for dp_size, tp_size in ((4, 1), (2, 2), (1, 4))
     ):
       workload = dp_workloads.get_workload(name)
       environ = _environment(name)
@@ -445,9 +553,12 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
       dp_workloads.validate_frozenlake_max_concurrency(workload, 16, environ)
       for key, replacement in (
           ("CANON_PROFILE_FILE", "cluster/profiles/not-this.env"),
-          ("CANON_MODEL_DIR_NAME", "qwen8b"),
-          ("CANON_TP_SIZE", "4"),
-          ("CANON_P66_P59_CHECK_VMA", "0"),
+          ("CANON_MODEL_DIR_NAME", "not-this-model"),
+          ("CANON_TP_SIZE", "8"),
+          (
+              "CANON_P66_P59_CHECK_VMA",
+              "0" if workload.tp_size > 1 else "1",
+          ),
           ("CANON_P33_RUN_STAGE", "one-update"),
       ):
         with self.subTest(name=name, key=key), self.assertRaises(ValueError):
@@ -456,6 +567,92 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
               {**environ, key: replacement},
               require_reduction_admission=True,
           )
+
+  def test_each_matrix_workload_rejects_bent_topology_and_model(self):
+    for name in (
+        f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}"
+        for recipe in ("p45", "m15")
+        for dp_size, tp_size in ((4, 1), (2, 2), (1, 4))
+    ):
+      workload = dp_workloads.get_workload(name)
+      for field, value in (
+          ("dp_size", 8),
+          ("tp_size", 8),
+          ("model_dir_name", "qwen8b_tp8"),
+          ("local_trajectories", workload.local_trajectories + 1),
+          ("max_response_length", workload.max_response_length - 1),
+      ):
+        with self.subTest(name=name, field=field), self.assertRaises(
+            ValueError
+        ):
+          dataclasses.replace(workload, **{field: value}).validate()
+
+  def test_new_topology_profiles_resolve_exact_default_and_sorting_arms(self):
+    for recipe in ("p45", "m15"):
+      for dp_size, tp_size, model_dir, arm in (
+          (4, 1, "qwen8b_tp1", ("stream", "1", "0")),
+          (1, 4, "qwen8b", ("stream", "0", "0")),
+          (1, 4, "qwen8b", ("stream", "0", "1")),
+      ):
+        keep_tape, reduce_once, length_sort = arm
+        result = _source_matrix_profile(
+            dp_size=dp_size,
+            tp_size=tp_size,
+            recipe=recipe,
+            keep_tape=keep_tape,
+            reduce_once=reduce_once,
+            length_sort=length_sort,
+        )
+        expected_hbm = (
+            "0.65" if recipe == "p45" else "0.66"
+        ) if dp_size == 4 else "0.56"
+        with self.subTest(recipe=recipe, dp=dp_size, tp=tp_size, arm=arm):
+          self.assertEqual(result.returncode, 0, result.stderr)
+          self.assertEqual(
+              result.stdout.splitlines()[-1],
+              (
+                  f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}|"
+                  f"{model_dir}|{dp_size}|{tp_size}|{keep_tape}|"
+                  f"{reduce_once}|{length_sort}|"
+                  f"{'0|0' if tp_size == 1 else '1|1'}|"
+                  f"{'0,2,1,3' if dp_size == 4 else '0,1,2,3'}|"
+                  f"{'0,2,1,3' if dp_size == 4 else '0,1,2,3'}|"
+                  f"{expected_hbm}"
+              ),
+          )
+          self.assertIn("PROFILE_CONTRACT_PASS", result.stdout.splitlines())
+
+  def test_new_topology_profiles_reject_crossed_seams(self):
+    cases = (
+        _source_matrix_profile(
+            dp_size=1,
+            tp_size=4,
+            recipe="p45",
+            keep_tape="stream",
+            reduce_once="1",
+            length_sort="0",
+        ),
+        _source_matrix_profile(
+            dp_size=4,
+            tp_size=1,
+            recipe="p45",
+            keep_tape="stream",
+            reduce_once="1",
+            length_sort="0",
+            overrides={"CANON_P75_REPORT_ADJOINT_BUCKETS": "1"},
+        ),
+        _source_matrix_profile(
+            dp_size=1,
+            tp_size=4,
+            recipe="m15",
+            keep_tape="stream",
+            reduce_once="0",
+            length_sort="0",
+            overrides={"CANON_P57_DATA_SPLIT": "selection"},
+        ),
+    )
+    for result in cases:
+      self.assertNotEqual(result.returncode, 0, result.stdout)
 
   def test_m15_candidate_pair_cannot_cross_into_p45(self):
     p45 = dp_workloads.get_workload("frozenlake-p45-onehost-dp2-tp2")

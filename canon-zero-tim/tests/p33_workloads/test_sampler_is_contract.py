@@ -107,35 +107,46 @@ class SamplerIsContractTest(unittest.TestCase):
     )
 
   def test_v2_frozenlake_onehost_no_is_requires_exact_identity(self):
-    good = {
-        "CANON_PROFILE_FILE": (
-            "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
-        ),
-        "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp2-tp2",
+    common = {
         "CANON_P33_RUN_STAGE": "backward-no-commit",
         "CANON_P33_NO_COMMIT": "1",
         "CANON_P32_TRAIN_ADMITTED": "1",
         "CANON_P32_DP_REDUCTION_ADMITTED": "1",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
-        "CANON_DP_SIZE": "2",
-        "CANON_TP_SIZE": "2",
-        "CANON_P66_P59_CHECK_VMA": "1",
         "CANON_WANDB_ONLINE_REQUIRED": "0",
         "WANDB_MODE": "disabled",
     }
-    for workload in (
-        "frozenlake-p45-onehost-dp2-tp2",
-        "frozenlake-m15-onehost-dp2-tp2",
-    ):
-      env = {**good, "CANON_P32_WORKLOAD": workload}
-      self.assertTrue(_v2_fl_onehost_enabled(env))
-      self.assertTrue(
-          _sampler_is_valid(
-              None,
-              workload,
-              v2_frozenlake_onehost=_v2_fl_onehost_enabled(env),
+    good_cells = []
+    for recipe in ("p45", "m15"):
+      for dp_size, tp_size in ((4, 1), (2, 2), (1, 4)):
+        workload = (
+            f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}"
+        )
+        env = {
+            **common,
+            "CANON_PROFILE_FILE": (
+                f"cluster/profiles/qwen3-8b-dp{dp_size}-tp{tp_size}-"
+                "frozenlake-onehost.env"
+            ),
+            "CANON_P32_WORKLOAD": workload,
+            "CANON_DP_SIZE": str(dp_size),
+            "CANON_TP_SIZE": str(tp_size),
+            "CANON_P66_P59_CHECK_VMA": "0" if tp_size == 1 else "1",
+        }
+        good_cells.append(env)
+        with self.subTest(workload=workload):
+          self.assertTrue(_v2_fl_onehost_enabled(env))
+          self.assertTrue(
+              _sampler_is_valid(
+                  None,
+                  workload,
+                  v2_frozenlake_onehost=_v2_fl_onehost_enabled(env),
+              )
           )
-      )
+
+    good = good_cells[2]
+    workload = good["CANON_P32_WORKLOAD"]
+    self.assertEqual(workload, "frozenlake-p45-onehost-dp1-tp4")
     for key, replacement in (
         ("CANON_PROFILE_FILE", "cluster/profiles/not-v2.env"),
         ("CANON_P32_WORKLOAD", "frozenlake"),
@@ -144,8 +155,8 @@ class SamplerIsContractTest(unittest.TestCase):
         ("CANON_P32_TRAIN_ADMITTED", "0"),
         ("CANON_P32_DP_REDUCTION_ADMITTED", "0"),
         ("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "0"),
-        ("CANON_DP_SIZE", "4"),
-        ("CANON_TP_SIZE", "1"),
+        ("CANON_DP_SIZE", "2"),
+        ("CANON_TP_SIZE", "2"),
         ("CANON_P66_P59_CHECK_VMA", "0"),
         ("CANON_WANDB_ONLINE_REQUIRED", "1"),
         ("WANDB_MODE", "online"),

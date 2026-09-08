@@ -151,6 +151,22 @@ def test_v2_capsule_identity_and_namespace_fail_closed():
     with pytest.raises(capsule.P64TrainingCapsuleError, match="identity drifted"):
       capsule.validate_identity(wrong_tp)
 
+    replay_profile = _env(path, mode="replay")
+    replay_profile["V2_FL_MODE"] = "profile"
+    capsule.validate_identity(replay_profile)
+    for capsule_mode, vehicle_mode in (
+        ("capture", "profile"),
+        ("capture", "certify"),
+        ("replay", "measure"),
+        ("replay", "invalid"),
+    ):
+      wrong_vehicle_mode = _env(path, mode=capsule_mode)
+      wrong_vehicle_mode["V2_FL_MODE"] = vehicle_mode
+      with pytest.raises(
+          capsule.P64TrainingCapsuleError, match="identity drifted"
+      ):
+        capsule.validate_identity(wrong_vehicle_mode)
+
     mixed = {
         **values,
         "CANON_P64_TRAINING_CAPSULE_MODE": "capture",

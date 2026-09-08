@@ -394,11 +394,21 @@ _M15_ONEHOST_TOKEN_CONTINUITY = (
     else False
 )
 if CANON_P57_WORKLOAD_CANDIDATE:
+  _onehost_workload_name = os.getenv("CANON_P32_WORKLOAD", "")
+  _onehost_m15_profiles = {
+      "frozenlake-m15-onehost-dp4-tp1": (
+          "cluster/profiles/qwen3-8b-dp4-tp1-frozenlake-onehost.env"
+      ),
+      "frozenlake-m15-onehost-dp2-tp2": (
+          "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+      ),
+      "frozenlake-m15-onehost-dp1-tp4": (
+          "cluster/profiles/qwen3-8b-dp1-tp4-frozenlake-onehost.env"
+      ),
+  }
   _frozenlake_onehost_m15_profile = (
-      os.getenv("CANON_P32_WORKLOAD", "")
-      == "frozenlake-m15-onehost-dp2-tp2"
-      and os.getenv("CANON_PROFILE_FILE", "")
-      == "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+      _onehost_m15_profiles.get(_onehost_workload_name)
+      == os.getenv("CANON_PROFILE_FILE", "")
   )
   if os.getenv("CANON_PROFILE_FILE", "") not in (
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
@@ -653,7 +663,7 @@ NUM_BATCHES = args.num_batches
 frozenlake_onehost_proxy = False
 if CANON_P32_WORKLOAD:
   assert P32_WORKLOAD is not None
-  frozenlake_onehost_proxy = P32_WORKLOAD.frozenlake_four_chip_2x2_proxy
+  frozenlake_onehost_proxy = P32_WORKLOAD.frozenlake_four_chip_proxy
   # P57 uses one complete eight-row prompt group in every run kind.  In
   # particular, isolated evaluation retains trainer-side rescore, whose
   # caller-global row axis is sharded over DP8.  Keep this tied to the same
@@ -1803,7 +1813,7 @@ if P45_CHECKPOINT.enabled:
     )
 if CANON_P32_WORKLOAD:
   wandb_attestation = dp_workloads.require_workload_wandb_run(P32_WORKLOAD)
-  if P32_WORKLOAD.frozenlake_four_chip_2x2_proxy:
+  if P32_WORKLOAD.frozenlake_four_chip_proxy:
     print(
         f"[V2.FL.WANDB] DISABLED_LOCAL_PASS {wandb_attestation}",
         flush=True,

@@ -1517,7 +1517,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     hbm_stage_diagnostic = (
         p33_workload
         and p33_no_commit
-        and workload.frozenlake_four_chip_2x2_proxy
+        and workload.frozenlake_four_chip_proxy
         and run_stage == "backward-no-commit"
         and os.environ.get("V2_FL_MODE", "") == "measure"
         and os.environ.get("V2_FL_ARM", "") in ("r0", "r0b")
@@ -2267,6 +2267,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               fingerprint(_p28_reference_state(self.rl_cluster))
               if ref_state is not None else None
           ),
+          "train_steps": actor_trainer.train_steps,
       }
       changed = {
           name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
@@ -4292,9 +4293,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         p58_replay_profiled_repeat = (
             p58_trajectory_replay and deepswe_debug.no_commit(os.environ)
         )
+        v2_frozenlake_profile_arm = _canon_v2_frozenlake_profile_arm()
+        v2_frozenlake_profiled_repeat = bool(v2_frozenlake_profile_arm)
+        profiled_repeat = (
+            p58_replay_profiled_repeat or v2_frozenlake_profiled_repeat
+        )
         replay_warmup_result = None
         replay_xprof_arm = ""
-        if p58_replay_profiled_repeat:
+        if profiled_repeat:
           # Compile and execute the exact optimized segmented backward before
           # tracing.  The no-commit path computes finite gradient norms but
           # never writes the accumulator, model, optimizer, reference, or
@@ -4309,25 +4315,42 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             raise RuntimeError(
                 "P58.23 optimized warmup did not preserve no-commit state"
             )
-          replay_xprof_arm = deepswe_debug.onehost_xprof_arm(os.environ)
-          print(
-              "[P58.ONEHOST.XPROF] warmup_complete "
-              f"arm={replay_xprof_arm} commits=0 state_unchanged=1 "
-              "carrier=P28+P30+P71-fwd",
-              flush=True,
-          )
+          if p58_replay_profiled_repeat:
+            replay_xprof_arm = deepswe_debug.onehost_xprof_arm(os.environ)
+            print(
+                "[P58.ONEHOST.XPROF] warmup_complete "
+                f"arm={replay_xprof_arm} commits=0 state_unchanged=1 "
+                "carrier=P28+P30+P71-fwd",
+                flush=True,
+            )
+          else:
+            replay_xprof_arm = v2_frozenlake_profile_arm
+            print(
+                "[V2.FL.XPROF] warmup_complete "
+                f"arm={replay_xprof_arm} commits=0 state_unchanged=1 "
+                "workload=p45 topology=dp2-tp2",
+                flush=True,
+            )
           perf_v2 = self.rl_cluster.perf_v2
           if not hasattr(perf_v2, "process_and_commit_timelines"):
             raise RuntimeError(
                 "P58.23 optimized replay requires the PerfMetrics v2 tracer"
             )
           perf_v2.process_and_commit_timelines()
-          print(
-              "[P58.ONEHOST.XPROF] semantic_warmup_discarded "
-              f"arm={replay_xprof_arm} next_export=profiled-repeat-only",
-              flush=True,
-          )
-          _canon_xprof_onehost_update_entry(replay_xprof_arm)
+          if p58_replay_profiled_repeat:
+            print(
+                "[P58.ONEHOST.XPROF] semantic_warmup_discarded "
+                f"arm={replay_xprof_arm} next_export=profiled-repeat-only",
+                flush=True,
+            )
+            _canon_xprof_onehost_update_entry(replay_xprof_arm)
+          else:
+            print(
+                "[V2.FL.XPROF] semantic_warmup_discarded "
+                f"arm={replay_xprof_arm} next_export=profiled-repeat-only",
+                flush=True,
+            )
+            _canon_xprof_v2_frozenlake_update_entry(replay_xprof_arm)
         else:
           _canon_xprof_update_entry()
         # TraceAnnotation starts its TraceMe interval at construction time,
@@ -4478,6 +4501,39 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           if verdict != "PASS":
             raise RuntimeError(
                 f"P58.23 optimized backward no-commit failed: {replay_report}"
+            )
+          prompt_queue.put(None)
+          _ = producer_future.result()
+          self.rl_cluster.close()
+          return
+        if v2_frozenlake_profiled_repeat:
+          _canon_xprof_v2_frozenlake_update_complete(replay_xprof_arm)
+          self.rl_cluster.perf_v2.export()
+          profile_report = _canon_v2_frozenlake_profile_report(
+              replay_xprof_arm, replay_warmup_result, segmented_result
+          )
+          report_path = os.environ["V2_FL_XPROF_REPORT"]
+          if os.path.exists(report_path):
+            raise FileExistsError(
+                f"refusing to overwrite V2 FrozenLake XProf report: {report_path}"
+            )
+          with open(report_path, "x", encoding="utf-8") as report_file:
+            json.dump(profile_report, report_file, indent=2, sort_keys=True)
+            report_file.write("\n")
+          print(
+              "[V2.FL.XPROF] repeat_complete "
+              f"arm={replay_xprof_arm} verdict={profile_report['verdict']} "
+              "commits=0 gradient_repeat_exact="
+              f"{int(profile_report['gradient_repeat_exact'])} "
+              "alignment_repeat_exact="
+              f"{int(profile_report['alignment_repeat_exact'])} "
+              f"state_repeat_exact={int(profile_report['state_repeat_exact'])}",
+              flush=True,
+          )
+          if profile_report["verdict"] != "PASS":
+            raise RuntimeError(
+                "V2 FrozenLake warm XProf repeat failed: "
+                f"{profile_report['reasons']}"
             )
           prompt_queue.put(None)
           _ = producer_future.result()
@@ -5473,6 +5529,146 @@ _CANON_XPROF_TPU_TRACE_MODES = (
 )
 
 
+def _canon_v2_frozenlake_profile_arm(
+    values: Mapping[str, str] | None = None,
+) -> str:
+  """Returns the exact P45 R1/R2 same-process warm XProf arm."""
+  values = os.environ if values is None else values
+  if values.get("V2_FL_MODE", "") != "profile":
+    return ""
+  arm = values.get("V2_FL_ARM", "")
+  if arm not in ("r1", "r2"):
+    raise ValueError(
+        "V2 FrozenLake warm XProf admits only arm r1 or r2, "
+        f"got {arm!r}"
+    )
+  expected = {
+      "V2_FL_WORKLOAD": "p45",
+      "V2_FL_CAPSULE_MODE": "replay",
+      "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp2-tp2",
+      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+      "CANON_P33_NO_COMMIT": "1",
+      "CANON_P33_RUN_STAGE": "backward-no-commit",
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P66_P59_CHECK_VMA": "1",
+      "CANON_P32_KEEP_TAPE": "stream",
+      "CANON_DP_REDUCE_ONCE": "0" if arm == "r1" else "1",
+      "CANON_P32_LENGTH_SORT": "0",
+      "CANON_P75_REPORT_ADJOINT_BUCKETS": "0",
+      "CANON_P76_CHUNK_DEPENDENCY_TICKET": "0",
+      "CANON_P77_CHUNK_BACKPRESSURE": "0",
+      "CANON_XPROF_SKIP_STEPS": "0",
+      "CANON_XPROF_STEPS": "1",
+      "CANON_XPROF_PHASE": "update",
+      "CANON_XPROF_HOST_TRACER": "1",
+      "CANON_XPROF_PYTHON_TRACER": "0",
+      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_ONLY_XLA",
+      "CANON_XPROF_LABELS": "1",
+  }
+  wrong = {
+      name: values.get(name)
+      for name, expected_value in expected.items()
+      if values.get(name) != expected_value
+  }
+  for name in (
+      "CANON_XPROF_DIR",
+      "CANON_PERF_TRACE_DIR",
+      "V2_FL_XPROF_REPORT",
+  ):
+    value = values.get(name, "")
+    if not value or not os.path.isabs(value):
+      wrong[name] = value
+  if wrong:
+    raise ValueError(
+        "V2 FrozenLake warm XProf contract changed: "
+        f"arm={arm} wrong={wrong}"
+    )
+  return arm
+
+
+def _canon_v2_frozenlake_profile_report(
+    arm: str, warmup: Mapping[str, Any], profiled: Mapping[str, Any]
+) -> dict[str, Any]:
+  """Builds the fail-closed exact-repeat receipt for the warm profile."""
+  if arm not in ("r1", "r2"):
+    raise ValueError(f"invalid V2 FrozenLake warm XProf arm: {arm!r}")
+  reasons = []
+  for label, result in (("warmup", warmup), ("profiled", profiled)):
+    if result.get("verdict") != "PASS":
+      reasons.append(f"{label}_verdict={result.get('verdict')!r}")
+    if result.get("commits") != 0:
+      reasons.append(f"{label}_commits={result.get('commits')!r}")
+    if result.get("train_steps_before") != result.get("train_steps_after"):
+      reasons.append(f"{label}_train_step_changed")
+    for field in (
+        "model_changed_paths",
+        "optimizer_changed_paths",
+        "accumulator_changed_paths",
+        "reference_changed_paths",
+    ):
+      if result.get(field) != []:
+        reasons.append(f"{label}_{field}={result.get(field)!r}")
+    if result.get("state_fingerprints_before") != result.get(
+        "state_fingerprints_after"
+    ):
+      reasons.append(f"{label}_state_fingerprint_changed")
+
+  warmup_norms = list(warmup.get("micro_gradient_norms", ()))
+  profiled_norms = list(profiled.get("micro_gradient_norms", ()))
+  gradient_repeat_exact = bool(warmup_norms) and warmup_norms == profiled_norms
+  if not gradient_repeat_exact:
+    reasons.append("micro_gradient_norms_changed")
+  warmup_update_norm = warmup.get("update_gradient_norm")
+  profiled_update_norm = profiled.get("update_gradient_norm")
+  update_norm_repeat_exact = warmup_update_norm == profiled_update_norm
+  if not update_norm_repeat_exact:
+    reasons.append("update_gradient_norm_changed")
+  if arm == "r1" and (
+      warmup_update_norm is not None or profiled_update_norm is not None
+  ):
+    reasons.append("r1_unexpected_update_gradient_norm")
+  if arm == "r2" and (
+      warmup_update_norm is None or profiled_update_norm is None
+  ):
+    reasons.append("r2_missing_update_gradient_norm")
+  alignment_repeat_exact = (
+      warmup.get("alignment_hashes") == profiled.get("alignment_hashes")
+      and bool(warmup.get("alignment_hashes"))
+  )
+  if not alignment_repeat_exact:
+    reasons.append("alignment_hashes_changed")
+  state_repeat_exact = (
+      warmup.get("state_fingerprints_before")
+      == profiled.get("state_fingerprints_before")
+  )
+  if not state_repeat_exact:
+    reasons.append("repeat_started_from_different_state")
+  return {
+      "schema": "canon.v2-frozenlake-onehost.warm-xprof.v1",
+      "verdict": "PASS" if not reasons else "FAIL",
+      "reasons": reasons,
+      "arm": arm,
+      "repeat_count": 2,
+      "commits": 0,
+      "gradient_warmup_norms": warmup_norms,
+      "gradient_profiled_norms": profiled_norms,
+      "gradient_repeat_exact": gradient_repeat_exact,
+      "update_gradient_warmup_norm": warmup_update_norm,
+      "update_gradient_profiled_norm": profiled_update_norm,
+      "update_gradient_norm_repeat_exact": update_norm_repeat_exact,
+      "alignment_repeat_exact": alignment_repeat_exact,
+      "state_repeat_exact": state_repeat_exact,
+      "profiled_hbm_before": profiled.get("hbm_before"),
+      "profiled_hbm_after": profiled.get("hbm_after_reverse"),
+      "profiled_state_fingerprints_before": profiled.get(
+          "state_fingerprints_before"
+      ),
+      "profiled_state_fingerprints_after": profiled.get(
+          "state_fingerprints_after"
+      ),
+  }
+
+
 def _canon_xprof_profile_options(
     *, host_tracer: int, python_tracer: int, tpu_trace_mode: str
 ) -> jax.profiler.ProfileOptions:
@@ -5571,6 +5767,48 @@ def _canon_xprof_onehost_update_complete(arm: str) -> None:
   )
 
 
+def _canon_xprof_v2_frozenlake_update_entry(arm: str) -> None:
+  """Opens the exact P45 no-commit profiled repeat."""
+  if _canon_v2_frozenlake_profile_arm() != arm:
+    raise RuntimeError("V2 FrozenLake XProf arm changed before update entry")
+  if not _canon_xprof_configure():
+    raise RuntimeError("V2 FrozenLake XProf requires a trace directory")
+  exact = (
+      _CANON_XPROF["mode"] == "update"
+      and _CANON_XPROF["skip"] == 0
+      and _CANON_XPROF["steps"] == 1
+      and _CANON_XPROF["host_tracer"] == 1
+      and _CANON_XPROF["python_tracer"] == 0
+      and _CANON_XPROF["tpu_trace_mode"] == "TRACE_ONLY_XLA"
+  )
+  if not exact or _CANON_XPROF["armed"] or _CANON_XPROF["started"]:
+    raise RuntimeError(
+        "V2 FrozenLake XProf requires a fresh immediate update window"
+    )
+  _CANON_XPROF["armed"] = True
+  print(
+      f"[V2.FL.XPROF] phase=update armed arm={arm} "
+      "anchor=p45_profiled_repeat",
+      flush=True,
+  )
+  _canon_xprof_update_entry()
+
+
+def _canon_xprof_v2_frozenlake_update_complete(arm: str) -> None:
+  """Closes the P45 no-commit trace without advancing training state."""
+  if _canon_v2_frozenlake_profile_arm() != arm:
+    raise RuntimeError("V2 FrozenLake XProf arm changed before trace stop")
+  if not _CANON_XPROF["started"]:
+    raise RuntimeError("V2 FrozenLake XProf trace never started")
+  jax.profiler.stop_trace()
+  _CANON_XPROF["started"] = False
+  print(
+      f"[V2.FL.XPROF] phase=update stopped arm={arm} "
+      "anchor=p45_profiled_repeat_complete",
+      flush=True,
+  )
+
+
 def _canon_xprof_step_boundary():
   """Drives the xprof capture window at global-step boundaries.
 
@@ -5638,7 +5876,10 @@ def _canon_xprof_configure() -> bool:
     steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
     from tunix.rl import deepswe_debug  # pylint: disable=g-import-not-at-top
 
-    onehost_immediate = bool(deepswe_debug.onehost_xprof_arm())
+    onehost_immediate = bool(
+        deepswe_debug.onehost_xprof_arm()
+        or _canon_v2_frozenlake_profile_arm()
+    )
     if skip < 0 or steps < 1 or (skip == 0 and not onehost_immediate):
       raise ValueError(
           "CANON_XPROF_STEPS must be >= 1 and CANON_XPROF_SKIP_STEPS must "

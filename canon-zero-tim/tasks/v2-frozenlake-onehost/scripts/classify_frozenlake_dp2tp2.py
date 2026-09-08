@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed classifier for a FrozenLake DP2xTP2 no-commit carrier."""
+"""Fail-closed classifier for FrozenLake four-chip no-commit carriers."""
 
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ from typing import Any
 
 
 _FORWARD_RE = re.compile(
-    r"^\[P32\.DP2\] (forward_group_(?:issued|done)) "
-    r"group=(\d+)/8 .* n_real=\(([^)]*)\)$",
+    r"^\[P32\.DP(\d+)\] (forward_group_(?:issued|done)) "
+    r"group=(\d+)/(\d+) .* n_real=\(([^)]*)\)$",
     re.MULTILINE,
 )
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SOURCE_RE = re.compile(r"[0-9a-f]{40}\Z")
 _BUCKET_RE = re.compile(
-    r"^\[P59\.DP2\] reducer_bucket_schedule "
+    r"^\[P59\.DP(\d+)\] reducer_bucket_schedule "
     r"programs=(\d+) max_local_bytes=(\d+) "
     r"peak_local_bytes=(\d+) total_local_bytes=(\d+)$",
     re.MULTILINE,
@@ -125,6 +125,35 @@ _QWEN8B_TP2_BUCKET_RECEIPT = {
     "peak_local_bytes": 2_130_875_392,
     "total_local_bytes": 16_382_087_168,
 }
+_GEOMETRIES = {
+    "dp4-tp1": {
+        "dp": 4,
+        "tp": 1,
+        "model_dir_name": "qwen8b_tp1",
+        "gradient_groups": 4,
+        "global_m": 1024,
+        "checked_vma": False,
+        "vllm_hbm_utilization": {"p45": 0.65, "m15": 0.66},
+    },
+    "dp2-tp2": {
+        "dp": 2,
+        "tp": 2,
+        "model_dir_name": "qwen8b_tp2",
+        "gradient_groups": 8,
+        "global_m": 512,
+        "checked_vma": True,
+        "vllm_hbm_utilization": None,
+    },
+    "dp1-tp4": {
+        "dp": 1,
+        "tp": 4,
+        "model_dir_name": "qwen8b",
+        "gradient_groups": 16,
+        "global_m": 256,
+        "checked_vma": True,
+        "vllm_hbm_utilization": {"p45": 0.56, "m15": 0.56},
+    },
+}
 _ARMS = {
     "r0": {
         "keep_tape": "0",
@@ -185,6 +214,8 @@ _ARMS = {
 }
 _WORKLOADS = {
     "p45": {
+        # Retained for the published DP2xTP2 fixture schema.  Matrix runs use
+        # the geometry-derived workload_name assembled by classify().
         "name": "frozenlake-p45-onehost-dp2-tp2",
         "prompt": 4096,
         "response": 2048,
@@ -292,20 +323,27 @@ def _peak_hbm(update: dict[str, Any]) -> tuple[int | None, int | None]:
   return (max(peaks) if peaks else None, min(limits) if limits else None)
 
 
-def _forward_lengths(text: str) -> tuple[list[int], list[int], str | None]:
+def _forward_lengths(
+    text: str, *, dp_size: int, gradient_groups: int
+) -> tuple[list[int], list[int], str | None]:
   matches = list(_FORWARD_RE.finditer(text))
   groups = []
   lengths = []
   marker = None
   for match in matches:
-    this_marker = match.group(1)
+    receipt_dp = int(match.group(1))
+    this_marker = match.group(2)
     marker = this_marker if marker is None else marker
     if marker != this_marker:
       raise ValueError("mixed forward_group_issued/forward_group_done markers")
-    groups.append(int(match.group(2)))
-    fields = [field.strip() for field in match.group(3).split(",")]
-    if len(fields) != 2:
-      raise ValueError("DP2 forward receipt does not contain two rank lengths")
+    if receipt_dp != dp_size or int(match.group(4)) != gradient_groups:
+      raise ValueError("forward receipt topology/group total changed")
+    groups.append(int(match.group(3)))
+    fields = [field.strip() for field in match.group(5).split(",")]
+    if len(fields) != dp_size:
+      raise ValueError(
+          f"DP{dp_size} forward receipt does not contain {dp_size} rank lengths"
+      )
     lengths.extend(int(field) for field in fields)
   return groups, lengths, marker
 
@@ -580,14 +618,15 @@ def _valid_p75_group_hbm_receipts(receipts: list[dict[str, Any]]) -> bool:
 
 
 def _anchor(
-    registry: dict[str, Any], workload: str, arm: str
+    registry: dict[str, Any], workload: str, geometry: str, arm: str,
+    *, gradient_groups: int, reduce_once: bool
 ) -> tuple[list[float] | None, float | None, str | None, str | None]:
-  if registry.get("schema") != "canon.v2-frozenlake-onehost.gradient-anchors.v1":
+  if registry.get("schema") != "canon.v2-frozenlake-onehost.gradient-anchors.v2":
     raise ValueError("gradient anchor registry schema changed")
   anchors = registry.get("anchors")
   if not isinstance(anchors, dict):
     raise ValueError("gradient anchor registry has no anchors object")
-  entry = anchors.get(f"{workload}:{arm}")
+  entry = anchors.get(f"{workload}:{geometry}:{arm}")
   if entry is None:
     return None, None, None, None
   if not isinstance(entry, dict):
@@ -598,7 +637,7 @@ def _anchor(
   capsule_sha = entry.get("training_capsule_sha256")
   if (
       not isinstance(norms, list)
-      or len(norms) != 8
+      or len(norms) != gradient_groups
       or any(not isinstance(value, (int, float)) for value in norms)
       or not isinstance(run_id, str)
       or not run_id
@@ -610,7 +649,7 @@ def _anchor(
     raise ValueError("gradient anchor entry is incomplete")
   if capsule_sha is not None and _SHA256_RE.fullmatch(str(capsule_sha)) is None:
     raise ValueError("gradient anchor capsule SHA is invalid")
-  if (arm in ("r2", "r3")) != (update_norm is not None):
+  if reduce_once != (update_norm is not None):
     raise ValueError(
         "gradient anchor update norm does not match reduce-once arm"
     )
@@ -630,13 +669,29 @@ def classify(
     docker_exit: int,
     anchor_registry: Path,
     require_anchor: bool = False,
+    geometry: str = "dp2-tp2",
 ) -> dict[str, Any]:
   if workload not in _WORKLOADS:
     raise ValueError(f"unknown workload {workload!r}")
   if arm not in _ARMS:
     raise ValueError(f"unknown arm {arm!r}")
+  if geometry not in _GEOMETRIES:
+    raise ValueError(f"unknown geometry {geometry!r}")
   spec = _WORKLOADS[workload]
-  arm_spec = _ARMS[arm]
+  geometry_spec = _GEOMETRIES[geometry]
+  arm_spec = dict(_ARMS[arm])
+  if geometry == "dp1-tp4":
+    if arm == "r2":
+      raise ValueError("DP1 has no reduce-once arm")
+    if arm == "r3":
+      arm_spec["reduce_once"] = "0"
+  if arm in ("r0b", "r0c", "r0d") and geometry != "dp2-tp2":
+    raise ValueError("P75/P76/P77 arms are admitted only on DP2xTP2")
+  dp_size = geometry_spec["dp"]
+  tp_size = geometry_spec["tp"]
+  gradient_groups = geometry_spec["gradient_groups"]
+  reduce_once = arm_spec["reduce_once"] == "1"
+  workload_name = f"frozenlake-{workload}-onehost-dp{dp_size}-tp{tp_size}"
   required = {
       name: root / name
       for name in (
@@ -669,6 +724,7 @@ def classify(
         "schema": "canon.v2-frozenlake-onehost.classification.v1",
         "verdict": "INCONCLUSIVE",
         "workload": workload,
+        "geometry": geometry,
         "arm": arm,
         "reasons": reasons,
     }
@@ -688,30 +744,34 @@ def classify(
   expected_manifest = {
       "schema": "canon.v2-frozenlake-onehost.run.v1",
       "workload": workload,
-      "workload_name": spec["name"],
+      "workload_name": workload_name,
       "arm": arm,
       "stage": "backward-no-commit",
       "model_id": "Qwen/Qwen3-8B",
-      "model_dir_name": "qwen8b_tp2",
-      "topology": {"dp": 2, "tp": 2, "devices": 4},
+      "model_dir_name": geometry_spec["model_dir_name"],
+      "topology": {"dp": dp_size, "tp": tp_size, "devices": 4},
       "global_prompts": 4,
       "num_generations": 4,
       "global_trajectories": 16,
-      "gradient_groups": 8,
+      "gradient_groups": gradient_groups,
       "local_m": 256,
-      "global_m": 512,
+      "global_m": geometry_spec["global_m"],
       "max_prompt_length": spec["prompt"],
       "max_response_length": spec["response"],
       "max_turns": spec["max_turns"],
       "data_shuffle_seed": 42,
       "vllm_global_seed": 0,
-      "vllm_hbm_utilization": spec["vllm_hbm_utilization"],
+      "vllm_hbm_utilization": (
+          spec["vllm_hbm_utilization"]
+          if geometry == "dp2-tp2"
+          else geometry_spec["vllm_hbm_utilization"][workload]
+      ),
       "selectors": arm_spec,
       "reducer_schedule": {
           "kind": "fixed-local-byte-buckets",
           "max_local_bytes": _REDUCER_MAX_LOCAL_BYTES,
       },
-      "checked_vma": True,
+      "checked_vma": geometry_spec["checked_vma"],
       "wandb_mode": "disabled",
       "classification_mode": "certify" if require_anchor else "measure",
       "hbm_stage_diagnostic": (
@@ -805,7 +865,10 @@ def classify(
   require(_exact_boundaries(pre), "pre_alignment_not_exact")
   require(_exact_boundaries(alignment), "alignment_not_exact")
   require(len(pre) == 1, f"pre_alignment_records={len(pre)}")
-  require(len(alignment) == 8, f"alignment_records={len(alignment)}")
+  require(
+      len(alignment) == gradient_groups,
+      f"alignment_records={len(alignment)}",
+  )
   require(
       "S_decode_vs_S_prefill" in pre[0].get("boundaries", {})
       and "S_prefill_vs_T_old" in pre[0].get("boundaries", {}),
@@ -834,23 +897,25 @@ def classify(
   )
 
   expected_update = {
-      "contract_name": spec["name"],
-      "dp_size": 2,
-      "tp_size": 2,
-      "global_m": 512,
+      "contract_name": workload_name,
+      "dp_size": dp_size,
+      "tp_size": tp_size,
+      "global_m": geometry_spec["global_m"],
       "verdict": "PASS",
       "mode": "backward-no-commit",
-      "microsteps": 8,
+      "microsteps": gradient_groups,
       "commits": 0,
       "train_steps_before": 0,
       "train_steps_after": 0,
       "gradient_finite": True,
       "dp_replicas_exact": True,
       "dp_axis": "dp",
-      "dp_reduction_transactions": 1 if arm in ("r2", "r3") else 8,
+      "dp_reduction_transactions": (
+          0 if dp_size == 1 else 1 if reduce_once else gradient_groups
+      ),
       # Fixed DPRank reduction is one ordered reduce plus one broadcast.
-      "dp_reduction_rounds_per_transaction": 2,
-      "dp_rank_pullbacks_per_transaction": 2,
+      "dp_reduction_rounds_per_transaction": 0 if dp_size == 1 else 2,
+      "dp_rank_pullbacks_per_transaction": dp_size,
       "dp_pullback_invocations_per_transaction": 1,
       "model_changed_paths": [],
       "optimizer_changed_paths": [],
@@ -869,11 +934,11 @@ def classify(
   norms = update.get("micro_gradient_norms")
   valid_norms = (
       isinstance(activity, list)
-      and len(activity) == 8
+      and len(activity) == gradient_groups
       and all(isinstance(value, bool) for value in activity)
       and any(activity)
       and isinstance(norms, list)
-      and len(norms) == 8
+      and len(norms) == gradient_groups
       and all(
           isinstance(value, (int, float)) and math.isfinite(value)
           for value in norms
@@ -882,7 +947,7 @@ def classify(
   )
   require(valid_norms, "gradient_activity_or_norms")
   update_gradient_norm = update.get("update_gradient_norm")
-  if arm in ("r2", "r3"):
+  if reduce_once:
     require(
         isinstance(update_gradient_norm, (int, float))
         and math.isfinite(update_gradient_norm)
@@ -896,11 +961,16 @@ def classify(
     )
 
   try:
-    groups, n_real, forward_marker = _forward_lengths(raw)
+    groups, n_real, forward_marker = _forward_lengths(
+        raw, dp_size=dp_size, gradient_groups=gradient_groups
+    )
   except ValueError as exc:
     groups, n_real, forward_marker = [], [], None
     reasons.append(f"forward_receipts:{exc}")
-  require(groups == list(range(1, 9)), f"forward_groups={groups}")
+  require(
+      groups == list(range(1, gradient_groups + 1)),
+      f"forward_groups={groups}",
+  )
   require(len(n_real) == 16, f"n_real_count={len(n_real)}")
   expected_marker = (
       "forward_group_done"
@@ -912,8 +982,8 @@ def classify(
   max_static = spec["prompt"] + spec["response"]
   require(max_n_real <= max_static, f"n_real_over_cap={max_n_real}>{max_static}")
   group_chunks = [
-      (max(n_real[index:index + 2]) + 255) // 256
-      for index in range(0, len(n_real), 2)
+      (max(n_real[index:index + dp_size]) + 255) // 256
+      for index in range(0, len(n_real), dp_size)
   ] if len(n_real) == 16 else []
   if "min_group_chunks" in spec:
     max_group_chunks = max(group_chunks, default=0)
@@ -928,7 +998,10 @@ def classify(
     )
 
   p66_receipts = raw.count("[P66.VMA] outer_check_enabled")
-  require(p66_receipts >= 1, f"p66_outer_check_receipts={p66_receipts}")
+  if geometry_spec["checked_vma"]:
+    require(p66_receipts >= 1, f"p66_outer_check_receipts={p66_receipts}")
+  else:
+    require(p66_receipts == 0, f"unexpected_p66_outer_check_receipts={p66_receipts}")
   seed_receipt = raw.count(
       "[V2.FL.SEED] CONTRACT_PASS data_shuffle_seed=42 "
       "vllm_global_seed=0 per_request_seed=unsupported"
@@ -952,32 +1025,59 @@ def classify(
   bucket_receipt = None
   if len(bucket_matches) == 1:
     bucket_receipt = {
-        "programs": int(bucket_matches[0].group(1)),
-        "max_local_bytes": int(bucket_matches[0].group(2)),
-        "peak_local_bytes": int(bucket_matches[0].group(3)),
-        "total_local_bytes": int(bucket_matches[0].group(4)),
+        "dp": int(bucket_matches[0].group(1)),
+        "programs": int(bucket_matches[0].group(2)),
+        "max_local_bytes": int(bucket_matches[0].group(3)),
+        "peak_local_bytes": int(bucket_matches[0].group(4)),
+        "total_local_bytes": int(bucket_matches[0].group(5)),
     }
   require(
       len(bucket_matches) == 1,
       f"reducer_bucket_receipts={len(bucket_matches)}",
   )
+  expected_dp2_bucket = {"dp": 2, **_QWEN8B_TP2_BUCKET_RECEIPT}
+  valid_bucket_receipt = (
+      isinstance(bucket_receipt, dict)
+      and bucket_receipt.get("dp") == dp_size
+      and isinstance(bucket_receipt.get("programs"), int)
+      and bucket_receipt["programs"] > 1
+      and bucket_receipt.get("max_local_bytes") == _REDUCER_MAX_LOCAL_BYTES
+      and 0 < bucket_receipt.get("peak_local_bytes", 0) <= _REDUCER_MAX_LOCAL_BYTES
+      and bucket_receipt.get("total_local_bytes", 0)
+      >= bucket_receipt.get("peak_local_bytes", 0)
+  )
   require(
-      bucket_receipt == _QWEN8B_TP2_BUCKET_RECEIPT,
+      (
+          bucket_receipt == expected_dp2_bucket
+          if geometry == "dp2-tp2"
+          else valid_bucket_receipt
+      ),
       f"reducer_bucket_schedule={bucket_receipt}",
   )
+  bucket_values = bucket_receipt or {
+      "programs": -1,
+      "peak_local_bytes": -1,
+      "total_local_bytes": -1,
+  }
   report_accumulate_receipts = [
       tuple(int(value) for value in match)
       for match in _REDUCE_ONCE_REPORT_ACCUMULATE_RE.findall(raw)
   ]
-  if arm in ("r2", "r3"):
-    require(
-        report_accumulate_receipts
-        == [
-            (group, 8, 399, 8, 1, 2130875392, 7, 0)
-            for group in range(2, 9)
-        ],
-        f"reduce_once_report_accumulate={report_accumulate_receipts}",
+  if reduce_once:
+    valid_report_accumulate = (
+        len(report_accumulate_receipts) == gradient_groups - 1
+        and [item[0] for item in report_accumulate_receipts]
+        == list(range(2, gradient_groups + 1))
+        and all(item[1] == gradient_groups for item in report_accumulate_receipts)
+        and len({item[2] for item in report_accumulate_receipts}) == 1
+        and all(item[2] > 0 for item in report_accumulate_receipts)
+        and all(item[3] == bucket_values["programs"] for item in report_accumulate_receipts)
+        and all(item[4] == 1 for item in report_accumulate_receipts)
+        and all(item[5] == bucket_values["peak_local_bytes"] for item in report_accumulate_receipts)
+        and all(item[6] == bucket_values["programs"] - 1 for item in report_accumulate_receipts)
+        and all(item[7] == 0 for item in report_accumulate_receipts)
     )
+    require(valid_report_accumulate, f"reduce_once_report_accumulate={report_accumulate_receipts}")
   else:
     require(
         not report_accumulate_receipts,
@@ -995,10 +1095,24 @@ def classify(
       )
       for match in _REDUCE_ONCE_ACCUMULATOR_LOAN_RE.findall(raw)
   ]
-  if arm in ("r2", "r3"):
+  if reduce_once:
+    expected_leaves = (
+        report_accumulate_receipts[0][2]
+        if report_accumulate_receipts
+        else None
+    )
     require(
-        accumulator_loan_receipts
-        == [(399, 16382087168, "base-to-staged", 399, 399, 1, 0)],
+        len(accumulator_loan_receipts) == 1
+        and accumulator_loan_receipts[0]
+        == (
+            expected_leaves,
+            bucket_values["total_local_bytes"],
+            "base-to-staged",
+            expected_leaves,
+            expected_leaves,
+            int(geometry_spec["checked_vma"]),
+            0,
+        ),
         f"reduce_once_accumulator_loan={accumulator_loan_receipts}",
     )
   else:
@@ -1010,10 +1124,15 @@ def classify(
       (int(match[0]), match[1], match[2], int(match[3]))
       for match in _REDUCE_ONCE_ACCUMULATOR_RESET_RE.findall(raw)
   ]
-  if arm in ("r2", "r3"):
+  if reduce_once:
+    expected_leaves = (
+        report_accumulate_receipts[0][2]
+        if report_accumulate_receipts
+        else None
+    )
     require(
         accumulator_reset_receipts
-        == [(399, "adopted-to-idle", "bitwise-zero", 0)],
+        == [(expected_leaves, "adopted-to-idle", "bitwise-zero", 0)],
         f"reduce_once_accumulator_reset={accumulator_reset_receipts}",
     )
   else:
@@ -1037,7 +1156,7 @@ def classify(
   ]
   if arm in ("r0b", "r0c", "r0d"):
     require(
-        len(p75_bucket_matches) == 8
+        len(p75_bucket_matches) == gradient_groups
         and len(set(p75_bucket_matches)) == 1
         and p75_bucket_matches[0][0] > 1
         and p75_bucket_matches[0][1] == _REDUCER_MAX_LOCAL_BYTES
@@ -1086,7 +1205,7 @@ def classify(
   ]
   if arm == "r0d":
     require(
-        len(p77_backpressure_matches) == 8
+        len(p77_backpressure_matches) == gradient_groups
         and [item[0] for item in p77_backpressure_matches] == group_chunks
         and [item[1] for item in p77_backpressure_matches] == group_chunks
         and all(item[2] > 0 for item in p77_backpressure_matches)
@@ -1105,7 +1224,7 @@ def classify(
   if expected_manifest["hbm_stage_diagnostic"]:
     hbm_stage_group = (
         1
-        if arm == "r0b" and len(group_chunks) == 8
+        if arm == "r0b" and len(group_chunks) == gradient_groups
         else group_chunks.index(max(group_chunks)) if group_chunks else None
     )
     outer_hbm_stages = [
@@ -1134,7 +1253,7 @@ def classify(
     require(
         isinstance(update_hbm_stages, list)
         and raw_hbm_stages == update_hbm_stages
-        and len(group_chunks) == 8
+        and len(group_chunks) == gradient_groups
         and _valid_hbm_stage_receipts(
             outer_hbm_stages,
             group_index=hbm_stage_group,
@@ -1265,14 +1384,19 @@ def classify(
       anchor_run_id,
       anchor_capsule_sha,
   ) = _anchor(
-      _json(anchor_registry), workload, arm
+      _json(anchor_registry),
+      workload,
+      geometry,
+      arm,
+      gradient_groups=gradient_groups,
+      reduce_once=reduce_once,
   )
   anchor_exact = (
       anchor_norms is not None
       and norms == anchor_norms
       and (
           update_gradient_norm == anchor_update_norm
-          if arm in ("r2", "r3")
+          if reduce_once
           else anchor_update_norm is None
       )
   )
@@ -1301,8 +1425,9 @@ def classify(
       "schema": "canon.v2-frozenlake-onehost.classification.v1",
       "verdict": verdict,
       "workload": workload,
+      "geometry": geometry,
       "arm": arm,
-      "claim_level": "onehost-qwen8b-dp2-tp2-no-commit",
+      "claim_level": f"onehost-qwen8b-{geometry}-no-commit",
       "classification_mode": "certify" if require_anchor else "measure",
       "claim_excludes": [
           "DP8xTP8",
@@ -1380,6 +1505,9 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--root", required=True, type=Path)
   parser.add_argument("--workload", required=True, choices=sorted(_WORKLOADS))
+  parser.add_argument(
+      "--geometry", default="dp2-tp2", choices=sorted(_GEOMETRIES)
+  )
   parser.add_argument("--arm", required=True, choices=sorted(_ARMS))
   parser.add_argument("--docker-exit", required=True, type=int)
   parser.add_argument("--anchor-registry", required=True, type=Path)
@@ -1395,6 +1523,7 @@ def main() -> int:
       docker_exit=args.docker_exit,
       anchor_registry=args.anchor_registry,
       require_anchor=args.require_anchor,
+      geometry=args.geometry,
   )
   args.output.write_text(
       json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"

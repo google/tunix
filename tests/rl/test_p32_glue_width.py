@@ -87,3 +87,51 @@ def test_long_context_two_by_two_proxy_is_admitted():
       adapter._p32_group_spec(  # pylint: disable=protected-access
           prompt, completion, jnp.ones_like(prompt, dtype=bool), jnp.ones_like(completion, dtype=bool), 1.0
       )
+
+
+def test_frozenlake_four_chip_matrix_is_exactly_admitted():
+  adapter, _ = harness._group_adapter(rank_parallel=False)  # pylint: disable=protected-access
+  from unittest import mock  # pylint: disable=g-import-not-at-top
+
+  for recipe in ("p45", "m15"):
+    for dp_size, tp_size in ((4, 1), (2, 2), (1, 4)):
+      adapter._data_size = dp_size  # pylint: disable=protected-access
+      adapter._tp_size = tp_size  # pylint: disable=protected-access
+      row = jnp.arange(dp_size, dtype=jnp.int32)[:, None]
+      prompt = jnp.concatenate((1 + row % 2, 2 + row % 3), axis=1)
+      completion = 3 + row % 2
+      workload = (
+          f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}"
+      )
+      with mock.patch.dict(
+          os.environ, {"CANON_P32_WORKLOAD": workload}, clear=False
+      ):
+        spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+            prompt,
+            completion,
+            jnp.ones_like(prompt, dtype=bool),
+            jnp.ones_like(completion, dtype=bool),
+            1.0,
+        )
+      assert spec["packed_ids"].shape[0] == dp_size
+
+  adapter._data_size = 2  # pylint: disable=protected-access
+  adapter._tp_size = 4  # pylint: disable=protected-access
+  row = jnp.arange(2, dtype=jnp.int32)[:, None]
+  with mock.patch.dict(
+      os.environ,
+      {"CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp2-tp4"},
+      clear=False,
+  ):
+    import pytest  # pylint: disable=g-import-not-at-top
+
+    with pytest.raises(
+        adapter_module.FunctionalMappingError, match="grouped reverse requires"
+    ):
+      adapter._p32_group_spec(  # pylint: disable=protected-access
+          row + 1,
+          row + 2,
+          jnp.ones_like(row, dtype=bool),
+          jnp.ones_like(row, dtype=bool),
+          1.0,
+      )

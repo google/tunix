@@ -7,7 +7,7 @@
 #   --from-path    inside a container: read them straight off the filesystem (no docker, no
 #                  network, no image on disk).  This is the mode a GKE pod uses.
 #   --model        qwen1p7b (default) | qwen1p7b_tp1 | qwen1p7b_tp2 |
-#                  qwen4b | qwen4b_tp4 | qwen8b | qwen8b_tp2 | qwen8b_tp8 |
+#                  qwen4b | qwen4b_tp4 | qwen8b | qwen8b_tp1 | qwen8b_tp2 | qwen8b_tp8 |
 #                  qwen32b
 #                  -- selects model modules
 #
@@ -266,9 +266,9 @@ if [ "$MODEL" = qwen4b_tp4 ]; then
   # projection manifest instead of forking identical numerical code.
   cp "$PKG/src/engine_shims/models/qwen4b/qwen3_p22xh.py" "$OUT/"
 fi
-if [ "$MODEL" = qwen8b_tp2 ]; then
+if [ "$MODEL" = qwen8b_tp1 ] || [ "$MODEL" = qwen8b_tp2 ]; then
   # The reviewed Qwen3-8B RMSNorm shim is hidden-width-specific but not
-  # TP-width-specific.  Pair it with the isolated TP2 projection contract.
+  # TP-width-specific. Pair it with the isolated TP1/TP2 projection contract.
   cp "$PKG/src/engine_shims/models/qwen8b/qwen3_p22xh.py" "$OUT/"
 fi
 cp "$PKG/src/engine_shims/models/$MODEL"/*.py "$OUT/"

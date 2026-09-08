@@ -8624,31 +8624,35 @@ class Qwen3EngineForwardAdapter:
         == "gsm8k-p66-dp1-tp4"
         and bool(_p66_tp4_arm())
     )
-    # The long-context 2x2 carrier: the same cut as the P59 DP2xTP2 proxy
-    # with fewer, longer rows (gsm8k-long-dp2-tp2).
-    long_two_by_two_proxy = (
-        self._data_size == 2
-        and self._tp_size == 2
-        and os.environ.get("CANON_P32_WORKLOAD", "")
+    workload_name = os.environ.get("CANON_P32_WORKLOAD", "")
+    # Closed one-host long-context carriers.  Each tuple signs both the
+    # workload identity and the physical DP/TP geometry; no prefix admission.
+    long_four_chip_proxy = (
+        (self._data_size, self._tp_size, workload_name)
         in (
-            "gsm8k-long-dp2-tp2",
-            "gsm8k-long8k-dp2-tp2",
-            "gsm8k-p45-shape-dp2-tp2",
-            "frozenlake-p45-onehost-dp2-tp2",
-            "frozenlake-m15-onehost-dp2-tp2",
+            (2, 2, "gsm8k-long-dp2-tp2"),
+            (2, 2, "gsm8k-long8k-dp2-tp2"),
+            (2, 2, "gsm8k-p45-shape-dp2-tp2"),
+            (4, 1, "frozenlake-p45-onehost-dp4-tp1"),
+            (2, 2, "frozenlake-p45-onehost-dp2-tp2"),
+            (1, 4, "frozenlake-p45-onehost-dp1-tp4"),
+            (4, 1, "frozenlake-m15-onehost-dp4-tp1"),
+            (2, 2, "frozenlake-m15-onehost-dp2-tp2"),
+            (1, 4, "frozenlake-m15-onehost-dp1-tp4"),
         )
     )
     if (
         self._data_size not in (8, 16)
         and not p59_four_chip_proxy
         and not p59_two_by_two_proxy
-        and not long_two_by_two_proxy
+        and not long_four_chip_proxy
         and not p66_tp4_proxy
     ):
       raise FunctionalMappingError(
           "P32 grouped reverse requires data size 8 or 16, the exact "
           "P59 four-chip proxy, the exact P59 DP2xTP2 proxy, the "
-          "long-context DP2xTP2 proxy, or the exact P66 DP1xTP4 proxy; "
+          "registered long-context four-chip proxy, or the exact P66 "
+          "DP1xTP4 proxy; "
           f"got {self._data_size}"
       )
     prompt = jnp.asarray(prompt)
@@ -11477,11 +11481,12 @@ class Qwen3EngineForwardAdapter:
           flush=True,
       )
       staged_total = None
-      signatures, finite, nonzero = jax.device_get((
-          jnp.stack([item[0] for item in staged_receipts]),
-          jnp.stack([item[1] for item in staged_receipts]),
-          jnp.stack([item[2] for item in staged_receipts]),
-      ))
+      with gsm8k_xprof.trace_annotation("staged_receipt_fetch"):
+        signatures, finite, nonzero = jax.device_get((
+            jnp.stack([item[0] for item in staged_receipts]),
+            jnp.stack([item[1] for item in staged_receipts]),
+            jnp.stack([item[2] for item in staged_receipts]),
+        ))
       signatures = np.asarray(signatures, dtype=np.float64)
       finite = np.asarray(finite, dtype=np.bool_)
       nonzero = np.asarray(nonzero, dtype=np.int64)
