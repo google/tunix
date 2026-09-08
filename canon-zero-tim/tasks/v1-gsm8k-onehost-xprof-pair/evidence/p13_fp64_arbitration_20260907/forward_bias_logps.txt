@@ -1,0 +1,8 @@
+A (canonical) - fp64: signed mean=+0.00060 mean|d|=0.01062 max|d|=0.8634 median=+0.00000 frac_negative=0.325 n=16233
+C (stock TPU) - fp64: signed mean=-0.00056 mean|d|=0.01084 max|d|=0.7378 median=+0.00000 frac_negative=0.337 n=16233
+A - C: signed mean=+0.00116 mean|d|=0.01276
+  completion positions [0,128): A-fp64 mean=+0.00060  C-fp64 mean=-0.00033 n=8192
+  completion positions [128,256): A-fp64 mean=+0.00059  C-fp64 mean=-0.00079 n=8041
+11:13:35Z
+
+[exited with code 0]
