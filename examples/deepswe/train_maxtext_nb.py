@@ -372,6 +372,7 @@ from examples.deepswe import r2e_gym_helper
 
 r2e_gym_helper.patch_kubernetes_runtime()
 r2e_gym_helper.patch_k8s_agent_sandbox()
+r2e_gym_helper.patch_pathwaysutils_profiler()
 
 if args.enable_jax_profiler and jax.process_index() == 0:
   try:
@@ -1245,3 +1246,6 @@ if (
 
 print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)
+print("Training finished successfully! Exiting process cleanly...", flush=True)
+import os
+os._exit(0)
