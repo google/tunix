@@ -104,14 +104,84 @@ class FrozenLakeTp8AbDiagnosticTest(unittest.TestCase):
 
   def test_engine_patch_scopes_embed_and_rpa_vma(self):
     package = ROOT / "canon-zero-tim"
-    for relative in (
-        "patches/tpu_inference/02-embed.patch",
-        "patches/tpu_inference/29-rpa-p66-vma-output.patch",
+    embed = (package / "patches/tpu_inference/02-embed.patch").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "CANON_P67_P66_VMA_P59_ONLY",
+        "get_abstract_mesh",
+        "CANON_P59_RANK_PARALLEL_BACKWARD",
     ):
-      text = (package / relative).read_text(encoding="utf-8")
-      self.assertIn("CANON_P67_P66_VMA_P59_ONLY", text)
-      self.assertIn("get_abstract_mesh", text)
-      self.assertIn("CANON_P59_RANK_PARALLEL_BACKWARD", text)
+      self.assertIn(marker, embed)
+    rpa = (
+        package / "patches/tpu_inference/29-rpa-p66-vma-output.patch"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        "from p22_pallas_matmul import p66_vma_output_manual_axis_type", rpa
+    )
+    for operand in ("q", "kv_cache"):
+      self.assertIn(
+          "manual_axis_type="
+          f"p66_vma_output_manual_axis_type(jax, {operand})",
+          rpa,
+      )
+
+  def test_shared_rpa_output_helper_preserves_scope_and_operand_types(self):
+    manual = object()
+    automatic = object()
+    context = types.SimpleNamespace()
+    fake_jax = types.SimpleNamespace(
+        sharding=types.SimpleNamespace(
+            AxisType=types.SimpleNamespace(Manual=manual),
+            get_abstract_mesh=lambda: context,
+            ManualAxisType=lambda **kwargs: kwargs,
+        ),
+        typeof=lambda value: value,
+    )
+    q = types.SimpleNamespace(mat=types.SimpleNamespace(
+        varying=frozenset(("data",)), unreduced=(), reduced=()
+    ))
+    kv = types.SimpleNamespace(mat=types.SimpleNamespace(
+        varying=frozenset(("model",)), unreduced=(), reduced=()
+    ))
+    env = {
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    }
+    cases = (
+        (("data", "model"), (manual, manual), (1, 4), True),
+        (("data", "model"), (manual, manual), (2, 2), True),
+        (("data", "model"), (manual, manual), (8, 8), True),
+        (("data", "model"), (manual, manual), (4, 1), False),
+        (("data", "model"), (automatic, manual), (2, 2), False),
+        (("attn_head",), (manual,), (8,), False),
+    )
+    helper = PALLAS_MATMUL.p66_vma_output_manual_axis_type
+    with mock.patch.dict(os.environ, env, clear=True):
+      for names, axis_types, sizes, enabled in cases:
+        context.axis_names = names
+        context.axis_types = axis_types
+        context.shape = dict(zip(names, sizes))
+        for value in (q, kv):
+          with self.subTest(names=names, sizes=sizes, varying=value.mat.varying):
+            expected = {"varying": value.mat.varying} if enabled else None
+            self.assertEqual(helper(fake_jax, value), expected)
+      context.axis_names = ("data", "model")
+      context.axis_types = (manual, manual)
+      context.shape = {"data": 1, "model": 4}
+      for key in (
+          "CANON_P66_P59_CHECK_VMA",
+          "CANON_P59_RANK_PARALLEL_BACKWARD",
+      ):
+        with self.subTest(off=key), mock.patch.dict(os.environ, {key: "0"}):
+          self.assertIsNone(helper(fake_jax, q))
+      for kind in ("reduced", "unreduced"):
+        bad_mat = types.SimpleNamespace(**vars(q.mat))
+        setattr(bad_mat, kind, frozenset(("data",)))
+        with self.subTest(invalid=kind):
+          with self.assertRaisesRegex(ValueError, "reduced/unreduced"):
+            helper(fake_jax, types.SimpleNamespace(mat=bad_mat))
 
   def _raw(self, workload: str, arm: str = "p66-off") -> str:
     checked_vma = "0" if arm == "p66-off" else "1"
