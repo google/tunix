@@ -946,6 +946,18 @@ reuse-only FAIL is retained; no new speedup or full-train claim. This closes
 only the parser refactor's P45 gate; default promotion and the final-source
 model/topology gates remain open. Evidence: `EVIDENCE.md`, v2int-f1a-p45-r1.
 
+## V1 DP4 six-update profile contract (v2_integrate F.1 repair)
+
+`CANON_P33_RUN_STAGE=six-update` was already admitted by the V1 DP4 child
+profile and common launcher. Its inherited P59 profile now admits that
+stage only for `CANON_P59_KIND=v1` with `CANON_P59_DP4_TAIL8=0`;
+existing P66 stage and no-commit guards still apply. No new stage, default,
+numerical option or lifecycle is introduced. Both profiles have real-process
+positive and wrong-kind/tail/P66/no-commit negatives in the DP4 carrier test.
+Three-lane ledger: forward/backward math = exempt (stage delivery repair,
+no kernel/optimizer change); six-update TPU execution remains NOT VERIFIED;
+performance = exempt, no timing claim. Three-update values are unchanged.
+
 ## Full-profile default delivery (v2_integrate F.1b, 2026-09-08)
 
 `cluster/v1_full_system_optimization.py` remains the single owner of the

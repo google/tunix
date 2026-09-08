@@ -34,6 +34,38 @@ ADAPTER = ROOT / "tunix/rl/canonical_qwen3_adapter.py"
 
 class DP4CarrierTest(unittest.TestCase):
 
+  def test_six_update_profile_chain_is_reserved_for_committed_v1(self):
+    environment = {
+        "PATH": "/usr/bin:/bin", "CANON_P59_KIND": "v1",
+        "CANON_P33_RUN_STAGE": "six-update", "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_DP4_TAIL8": "0",
+    }
+    for profile in (PROFILE, V1_PROFILE):
+      for overrides, admitted in (
+          ({}, True),
+          ({"CANON_P59_KIND": ""}, False),
+          ({"CANON_P59_KIND": "p59"}, False),
+          ({"CANON_P59_DP4_TAIL8": "1"}, False),
+          ({"CANON_P33_NO_COMMIT": "1"}, False),
+          ({"CANON_P66_BACKWARD_ARM": "ordinary",
+            "CANON_P66_BACKWARD_CAPTURE_DIR": "/tmp/test-only-capture"}, False),
+      ):
+        with self.subTest(profile=profile.name, overrides=overrides):
+          result = subprocess.run(
+              ["bash", "-euo", "pipefail", "-c",
+               'source "$1"; printf "PROFILE_STAGE_PASS:%s:%s\\n" '
+               '"$CANON_P33_RUN_STAGE" "$CANON_P33_NO_COMMIT"',
+               "v1-stage-test", str(profile)],
+              env={**environment, **overrides},
+              text=True, capture_output=True, check=False,
+          )
+          if admitted:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "PROFILE_STAGE_PASS:six-update:0\n")
+          else:
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn("PROFILE_STAGE_PASS", result.stdout)
+
   def test_profile_resolves_exact_proxy_and_p56_recipe(self):
     keys = (
         "CANON_PROFILE",
