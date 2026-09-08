@@ -1,5 +1,99 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — v2_integrate (2026-09-08): run the M15 FrozenLake DP8xTP8 exact-TiTO record-full full train from `yuxzhang/canon-zero-tim`
+
+This section supersedes the P74/P57 pair-candidate section below for the
+launch procedure; that section stays authoritative for the TiTO evidence
+contract (record-full semantics, capsules, GCS finalization, return bundle).
+
+**What this tree is.** `yuxzhang/canon-zero-tim` was fast-forwarded from the
+TiTO release tip `cd955f99` to the v2_integrate tip: the v2 one-host line
+(kept-tape stream, reduce-once, length sort, long-context carriers, FrozenLake
+one-host matrix) squashed into eight commits, the dispatch lane (per-chunk
+reverse program, forward block, two-chunk batch, host-glue folds, P61/fp64
+tools) squashed into four, one merge commit with the TiTO line, and five
+follow-ups (demo sys.path, FrozenLake no-commit P61 capture, the bounded-lead
+backpressure with its budget set to 0, the FrozenLake launcher's second
+physical worktree, ledgers). The whole tree is on `local/v2-integrate`;
+`git log --oneline cd955f99..HEAD` lists the 19 commits.
+
+**What the M15 recipe resolves to on this tree.** The full-system bundle
+(`cluster/v1_full_system_optimization.py`) still pins `CANON_P71_SCAN=fwd`,
+`CANON_P32_KEEP_TAPE=stream`, `CANON_DP_REDUCE_ONCE=1`. Two selectors are
+now defaults and are *not* written by the renderer: `CANON_P32_CHUNK_BATCH`
+(empty -> 2 chunks of a group's forward per program) and the reverse chunk
+program (`zt_tr_bwd_chunk`, one program per reverse chunk, always on for the
+rank-parallel reverse). The rank-parallel reverse waits for device readiness
+twice at every chunk boundary on every carrier (Phase 14 semantics, FrozenLake
+included; the two-chunk lead exists but its budget is 0). This exact selector
+combination (`fwd` + batch 2 + chunk program + two waits) ran on the one-host
+8B proxies: P45 dp2-tp2 (runtime PASS, peak HBM after reverse 83.6 GB of
+102.8) and M15 dp2-tp2 at the 12,288-token static width = 48 chunks per
+sequence (runtime PASS, peak 91.0 GB of 102.8). The 1.7B GSM8K carriers are
+certified on the merged tree with bitwise anchors (dp2-tp2 736 launches,
+dp2-tp2-long 526, dp2-tp2-long8k pinned from two byte-identical runs).
+
+**Known, accepted for this first version.** (1) No 8B fp64 re-pin yet: the
+reverse chunk program's fp64 arbitration was done on 1.7B; the 8B one-host
+anchors moved with it and are re-registered in the next stage. (2) The
+FrozenLake one-host classifier still expects the legacy per-layer pullback
+inventory; `[P59.LAYER_PROGRAM_REUSE] enabled=0 static_keys=36` is the
+pre-existing state on every 8B one-host run since 2026-09-05 (F4 open item),
+so the first update compiles 36 layer pullbacks plus the chunk program:
+expect several extra minutes before the first `[V1.FIRST_UPDATE]` receipt.
+(3) The 64-chip `classify_full_recipe.py` was not re-run against a chunk-mode
+log; the training run is the deliverable, its offline classification may
+need the chunk-mode inventory (fix in the next stage). (4) The learner's
+first-update gate (`tunix/rl/v1_first_update_gate.py`) checks schema,
+finiteness, non-zero and `stable_norm <= 1e6`; it pins no gradient anchor, so
+the moved anchors do not trip it.
+
+**Procedure (each step separately approved; never launch through a pipe).**
+
+1. Read back the published SHA and check out exactly it in a clean tree:
+   `git ls-remote --heads origin yuxzhang/canon-zero-tim` must equal the SHA
+   recorded in this section's push receipt (below); `git status --porcelain`
+   empty.
+2. Render the pair (M15 is launched first; P45 later):
+   ```bash
+   bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+     <published-40-character-sha> \
+     /tmp/v1-p67-frozenlake-full-<fresh-wave-id> \
+     <fresh-campaign-root> \
+     <fresh-p45-run-id> \
+     <fresh-m15-run-id> \
+     --token-continuity both-exact \
+     --token-continuity-debug-mode record-full
+   ```
+   (`--train-geometry dp8-tp8-b256` is the default; add
+   `--target-cluster bodaborg` only for that cluster.) The readiness line must
+   say `token_continuity=both-exact token_continuity_debug=record-full
+   launch=not-executed`.
+3. Review `manifest-index.json` and the M15 YAML plus its resolved env:
+   same published SHA, `CANON_P59_CHECKED_VMA=1`, `CANON_P67_P66_VMA_P59_ONLY=1`,
+   `CANON_V1_HP_FIRST_UPDATE_GATE=1`, `CANON_P71_SCAN=fwd`,
+   `CANON_P32_KEEP_TAPE=stream`, `CANON_DP_REDUCE_ONCE=1`, no
+   `CANON_P32_CHUNK_BATCH` / `CANON_P28_LAYER_SCAN` /
+   `CANON_P77_CHUNK_BACKPRESSURE` keys (the defaults apply), eval off,
+   checkpoint mode `disabled`, 300 updates, M15/main identity,
+   `CANON_P57_TOKEN_CONTINUITY=exact`.
+4. Launch only the M15 manifest:
+   `kubectl apply -f <out>/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml`.
+   The first update is the admission: the gate fails closed and the job exits
+   if the pre-commit accumulator is not finite/non-zero/stable; if it passes,
+   the same job continues to 300 updates. Watch, in order: `[P59.CHECKED_VMA]
+   enabled=1`, `[P59.LAYER_PROGRAM_REUSE]`, `[V1.FIRST_UPDATE]`, the first
+   `[PERF] stage=p32_vag_reverse` line (record its seconds and the per-group
+   chunk counts: this is the first real 12k KPI), `hbm_after_reverse` in the
+   update record (the number that decides whether the two-chunk lead budget
+   can be turned on for TP8 in the next stage), then the TiTO receipts of the
+   section below.
+5. P45 uses the same rendered pair; apply its YAML only after M15's first
+   update is green. GSM8K DP16xTP4 is rendered by `render_three_full_recipes.py`
+   as before (its demo now keeps package directories off sys.path).
+
+**Push receipt.** (filled by the operator who pushed; see the git log)
+
 ## START HERE — P74/P57 P45/M15 exact-TiTO record-full pair candidate
 
 This section supersedes every older token-continuity launch instruction below.
