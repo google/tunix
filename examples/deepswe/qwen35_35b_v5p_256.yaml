@@ -150,8 +150,8 @@ spec:
                   --node_selector_val sandbox-cpu-pool \
                   --max_steps 5 \
                   --rollout_micro_batch_size 32 \
-                  --max_concurrency 256 \
-                  --max_warmpool_size 2 \
+                  --max_concurrency 64 \
+                  --max_warmpool_size 1 \
                   --max_num_batched_tokens 32768 \
                   --overlong_filter False \
                   --save_interval_steps 5 \
