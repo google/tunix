@@ -130,6 +130,9 @@ def run_comparison(
     print(f"Vanilla Extracted: {v_ans} | Correct: {v_corr}")
     print(f"Jax-Inf Extracted: {j_ans} | Correct: {j_corr}")
     print(f"Text Match: {text_match} | Reward Match: {reward_match}")
+    if not text_match:
+      print(f"  [Vanilla]: {repr(v_resp[-100:])}")
+      print(f"  [Jax-Inf]: {repr(j_resp[-100:])}")
 
   print(f"\nTotal compared: {len(vanilla_detailed)}")
   print(f"Exact text matches: {matches}/{len(vanilla_detailed)}")
