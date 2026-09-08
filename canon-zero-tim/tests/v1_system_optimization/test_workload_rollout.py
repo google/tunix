@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
@@ -120,11 +121,7 @@ class FullSystemOptimizationTest(unittest.TestCase):
     for path in frozen_handoffs:
       with self.subTest(path=path):
         source = path.read_text(encoding="utf-8")
-        first_section = next(
-            line for line in source.splitlines() if line.startswith("## ")
-        )
-        self.assertIn("P74", first_section)
-        self.assertIn(frozen_wrapper, source)
+        self._assert_current_frozenlake_route(source)
         self._assert_documented_system_tuple(source)
 
     deepswe_handoff = (
@@ -158,6 +155,53 @@ class FullSystemOptimizationTest(unittest.TestCase):
         self._assert_documented_system_tuple(
           source, keep_tape="P58" not in str(path)
       )
+
+  def _assert_current_frozenlake_route(self, source: str):
+    sections = list(re.finditer(r"^## ", source, re.MULTILINE))
+    self.assertTrue(sections, "missing operator entry section")
+    start = sections[0].start()
+    end = sections[1].start() if len(sections) > 1 else len(source)
+    current = source[start:end]
+    self.assertTrue(current.startswith("## START HERE"))
+    # Historical phase labels are not the contract. Require the executable
+    # route and selected bundle in the current entry, not only in old notes.
+    for required in (
+        "prepare_p67_frozenlake_two_full_wave.sh",
+        "CANON_P71_SCAN=fwd",
+        "CANON_P32_KEEP_TAPE=stream",
+        "CANON_DP_REDUCE_ONCE=1",
+    ):
+      self.assertRegex(current, rf"(?<![\w-]){re.escape(required)}(?![\w.-])")
+
+  def test_current_route_does_not_inherit_historical_instructions(self):
+    route = (
+        "prepare_p67_frozenlake_two_full_wave.sh\n"
+        "CANON_P71_SCAN=fwd\n"
+        "CANON_P32_KEEP_TAPE=stream\n"
+        "CANON_DP_REDUCE_ONCE=1\n"
+    )
+    current = "## START HERE — v2 integration\n" + route
+    historical = "## Historical — P74\n" + route
+    self._assert_current_frozenlake_route(current + historical)
+    for required in route.splitlines():
+      with self.subTest(missing=required), self.assertRaises(AssertionError):
+        self._assert_current_frozenlake_route(
+            current.replace(required, "REMOVED") + historical
+        )
+    for old, new in (
+        ("CANON_P71_SCAN=fwd", "CANON_P71_SCAN=fwd_block"),
+        ("CANON_DP_REDUCE_ONCE=1", "CANON_DP_REDUCE_ONCE=10"),
+        ("CANON_P32_KEEP_TAPE=stream", "CANON_P32_KEEP_TAPE=streaming"),
+    ):
+      with self.subTest(wrong=new), self.assertRaises(AssertionError):
+        self._assert_current_frozenlake_route(current.replace(old, new) + historical)
+    for invalid in (
+        "# No operator section\n",
+        "## Historical\n" + route + current,
+        "## START HERE\nNo route here.\n" + historical,
+    ):
+      with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+        self._assert_current_frozenlake_route(invalid)
 
   def _assert_documented_system_tuple(self, source: str, *, keep_tape=True):
     for key_value in (
