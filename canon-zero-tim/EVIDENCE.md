@@ -318,3 +318,35 @@ image publication, loaded-weight equality, HBM, training, recovery or throughput
 claim. The E2B handoff's current phase ladder supersedes historical E4B launch
 instructions and requires three Zero updates plus fresh-process resume before
 the five-update comparison.
+## v2int-e1-recovery-r2 — scoped recovered P45 control, 2026-09-08
+
+Source/evaluator `54de5c7d865eb7de30b7408b1d42c8bec8e43932`, image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+Physical clean source, idle-120, installer 37/37; P45 Qwen3-8B DP2xTP2 r2,
+16 trajectories / eight groups / zero optimizer commits, same r32 capsule.
+
+- Raw root: `/mnt/disks/tunix-data/frozenlake-onehost-v2/p45_r2_v2int_e1_recovery_20260908_r2`.
+  `raw.log:11415`: `RUN_END docker_exit=0 elapsed_seconds=968 contention=0 timeout=0`;
+  raw SHA256 `ebd1794d8d9df1c5a9223a63c75f79b6b56382fa2a15473cc14e21f32d9b8958`.
+- Independent `RECOVERY_CONTROL_PASS`: outer task
+  `/home/yuxuan/code_rl_repro/tasks/v2_integrate/e1_recovery_fresh_control.json`,
+  SHA256 `0371912d2f31242d008844add1ca767cbe474d07163ea6e659394602ebdebae5`.
+  Standard FAIL embedded unchanged: only `(0,36,36,36,1,1,0)` versus the
+  deferred optimization tuple `(1,36,1,1,1,1,0)`; no numerical exemption.
+- Eight micro norm bits and update `23.361648559570312` match the registry;
+  eight-by-seven input hashes match RPA-only control. Comparison file in the
+  same outer task: `e1_recovery_control_comparison.json`, SHA256
+  `794e32e082c0c847b8733496b3aa4777e304bb60a8d891d5373827bf4d04475d`.
+  Strict alignment, checked-VMA, finite, replica and rank receipts pass.
+- Immutable compressed package: outer task `evidence/e1_recovery_r2/`,
+  SHA256SUMS hash `92ccf23bfbbd212c95ccb78076bdda402c57d15de93d530bad89b0b619743854`.
+  All 46 original checksum entries verify. Generic five-piece completeness is
+  INCONCLUSIVE (replay has no new serving archive or local capsule copy);
+  do not call this a signed full-training package. The scoped contract verifies
+  the external capsule SHA and producer binding instead. Original artifacts
+  and standard classification remain untouched.
+
+No full-gradient-leaf parity, fresh-rollout Zero-TIM, optimizer, convergence,
+new speedup, other topology, Pathways or GKE claim. P59 sharing remains
+NOT_ADMITTED; the sorting candidate remains rejected. The subsequent
+`32f586bb` CL changes only a handoff test and carries no separate hardware claim.
