@@ -53,6 +53,7 @@ CANON_DP_COMPARE_MODE=fingerprint-hybrid
 CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
 CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
+CANON_P32_KEEP_TAPE=stream
 ```
 
 The training-curve wave is deliberately non-TITO:

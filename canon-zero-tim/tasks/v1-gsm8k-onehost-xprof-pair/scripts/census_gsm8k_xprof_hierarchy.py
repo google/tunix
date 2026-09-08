@@ -24,6 +24,7 @@ EXPECTED_COUNTS = {
     "forward_groups": 1,
     "forward_group": 16,
     "loss_pullback": 1,
+    "group_loss_pullback": 0,
     "reverse_group": 16,
     "replay_forward": 16,
     "model_backward": 16,
@@ -39,6 +40,7 @@ COMPILER_EVENTS = (
 )
 GROUP_NAMES = (
     "forward_group",
+    "group_loss_pullback",
     "reverse_group",
     "replay_forward",
     "model_backward",
@@ -117,8 +119,28 @@ def validate_hierarchy(
     expected_update_step: int = 2,
     expected_groups: int = 16,
     require_step_marker: bool = True,
+    keep_tape: bool = False,
+    stream_tape: bool = False,
 ) -> list[str]:
-  """Pure interval/count validator used by real and synthetic censuses."""
+  """Pure interval/count validator used by real and synthetic censuses.
+
+  With ``keep_tape`` (CANON_P32_KEEP_TAPE=1) the forward phase keeps each
+  group's tape and the reverse never replays it, so the ``replay_forward``
+  span family must be ABSENT; seeing one means the kept tape was not
+  consumed and the run silently fell back to the replay.
+
+  With ``stream_tape`` (CANON_P32_KEEP_TAPE=stream, implies ``keep_tape``)
+  the loss cotangent is built per group and the forward of group g+1 is
+  issued right after the reverse of group g was dispatched: there is no
+  ``forward_groups`` parent; ``forward_group[0]`` and
+  ``group_loss_pullback[0]`` close before ``reverse_group[0]`` opens; for
+  every later group, ``forward_group[g+1]`` and ``group_loss_pullback[g+1]``
+  lie inside ``reverse_group[g]``, after ``model_backward[g]`` closed and
+  before ``report_adjoint[g]`` opens (the pipelined two-tape window); and
+  the single batch ``loss_pullback`` (the end-of-update bitwise self-check)
+  runs after the last reverse and before the optimizer commit.
+  """
+  keep_tape = keep_tape or stream_tape
   reasons = []
   by_name = {
       name: [span for span in spans if span.name == name]
@@ -127,6 +149,14 @@ def validate_hierarchy(
   for name, expected in EXPECTED_COUNTS.items():
     actual = len(by_name[name])
     adjusted_expected = expected_groups if expected == 16 else expected
+    if keep_tape and name == "replay_forward":
+      if actual:
+        reasons.append(f"keep_tape_unexpected_replay_forward={actual}")
+      continue
+    if stream_tape and name == "forward_groups":
+      adjusted_expected = 0
+    if stream_tape and name == "group_loss_pullback":
+      adjusted_expected = expected_groups
     if actual != adjusted_expected:
       reasons.append(f"{name}:count={actual} expected={adjusted_expected}")
 
@@ -204,11 +234,16 @@ def validate_hierarchy(
       reasons.append(f"{child_name}:outside_zero_tim_update")
 
   grouped = {
-      name: _grouped(
-          by_name,
-          name,
-          expected_groups=expected_groups,
-          reasons=reasons,
+      name: (
+          {}
+          if (keep_tape and name == "replay_forward")
+          or (not stream_tape and name == "group_loss_pullback")
+          else _grouped(
+              by_name,
+              name,
+              expected_groups=expected_groups,
+              reasons=reasons,
+          )
       )
       for name in GROUP_NAMES
   }
@@ -245,6 +280,58 @@ def validate_hierarchy(
   for index, span in grouped["forward_group"].items():
     if forward_parent is not None and not _contains(forward_parent, span):
       reasons.append(f"forward_group[{index}]:outside_forward_groups")
+  if stream_tape:
+    for index, reverse in grouped["reverse_group"].items():
+      issued = grouped["forward_group"].get(index)
+      cotangent = grouped["group_loss_pullback"].get(index)
+      following = grouped["forward_group"].get(index + 1)
+      if update is not None:
+        for name, span in (
+            (f"forward_group[{index}]", issued),
+            (f"group_loss_pullback[{index}]", cotangent),
+        ):
+          if span is not None and not _contains(update, span):
+            reasons.append(f"{name}:outside_zero_tim_update")
+      if (
+          issued is not None
+          and cotangent is not None
+          and issued.end_ns > cotangent.start_ns
+      ):
+        reasons.append(
+            f"forward_group[{index}]:after_group_loss_pullback[{index}]"
+        )
+      if cotangent is not None and cotangent.end_ns > reverse.start_ns:
+        reasons.append(
+            f"group_loss_pullback[{index}]:after_reverse_group[{index}]"
+        )
+      following_cotangent = grouped["group_loss_pullback"].get(index + 1)
+      backward = grouped["model_backward"].get(index)
+      adjoint = grouped["report_adjoint"].get(index)
+      for name, span in (
+          (f"forward_group[{index + 1}]", following),
+          (f"group_loss_pullback[{index + 1}]", following_cotangent),
+      ):
+        if span is None:
+          continue
+        if not _contains(reverse, span):
+          reasons.append(f"{name}:outside_reverse_group[{index}]")
+        if backward is not None and span.start_ns < backward.end_ns:
+          reasons.append(f"{name}:before_model_backward[{index}]_closed")
+        if adjoint is not None and span.end_ns > adjoint.start_ns:
+          reasons.append(f"{name}:after_report_adjoint[{index}]")
+    last_reverse = grouped["reverse_group"].get(expected_groups - 1)
+    if (
+        loss is not None
+        and last_reverse is not None
+        and loss.start_ns < last_reverse.end_ns
+    ):
+      reasons.append("loss_pullback:before_last_reverse_group")
+    if (
+        loss is not None
+        and optimizer is not None
+        and loss.end_ns > optimizer.start_ns
+    ):
+      reasons.append("loss_pullback:after_optimizer_commit")
   for index, reverse in grouped["reverse_group"].items():
     train = trains.get(index)
     if train is not None and not _contains(train, reverse):
@@ -287,16 +374,17 @@ def validate_hierarchy(
     reasons.append("last_train:gradient_accumulate_overlaps_optimizer")
 
   ordered = []
-  if forward_parent is not None:
-    ordered.append(("forward_groups", forward_parent))
-  if loss is not None:
-    ordered.append(("loss_pullback", loss))
+  if not stream_tape:
+    if forward_parent is not None:
+      ordered.append(("forward_groups", forward_parent))
+    if loss is not None:
+      ordered.append(("loss_pullback", loss))
   ordered.extend(
       (f"train[{index}]", trains[index])
       for index in range(expected_groups)
       if index in trains
   )
-  if len(ordered) == expected_groups + 2:
+  if len(ordered) == expected_groups + (0 if stream_tape else 2):
     for (left_name, left), (right_name, right) in zip(ordered, ordered[1:]):
       if left.end_ns > right.start_ns:
         reasons.append(f"update:order={left_name}>{right_name}")
@@ -393,7 +481,22 @@ def main() -> int:
       default=DEFAULT_GEOMETRY,
       help="registered carrier geometry the run was launched with",
   )
+  parser.add_argument(
+      "--p32-keep-tape",
+      default="",
+      help=(
+          "the CANON_P32_KEEP_TAPE value the run was launched with; 1 "
+          "requires the replay_forward span family to be absent; stream "
+          "additionally requires the per-group group_loss_pullback spans, "
+          "no forward_groups parent and the two-tape window order"
+      ),
+  )
   args = parser.parse_args()
+  if args.p32_keep_tape not in ("", "0", "1", "stream"):
+    raise ValueError(
+        "--p32-keep-tape must be empty, 0, 1 or stream: "
+        f"{args.p32_keep_tape!r}"
+    )
   expected_groups = GEOMETRIES[args.geometry]["groups"]
   xplane = _resolve_xplane(args.run_root)
   spans, device_step_counts, compiler_counts = read_xplane(xplane)
@@ -403,6 +506,8 @@ def main() -> int:
       compiler_counts=compiler_counts,
       expected_update_step=args.expected_update_step,
       expected_groups=expected_groups,
+      keep_tape=args.p32_keep_tape in ("1", "stream"),
+      stream_tape=args.p32_keep_tape == "stream",
   )
   counts = {
       name: sum(span.name == name for span in spans)

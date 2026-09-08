@@ -144,6 +144,7 @@ def validate_backward_family(
     layer_count: int = ZERO_LAYER_COUNT,
     block_layers: int = P71_BWD_BLOCK_LAYERS,
     geometry: str = DEFAULT_GEOMETRY,
+    keep_tape: bool = False,
 ) -> list[str]:
   """Returns fail-closed reasons for one mode's backward program inventory.
 
@@ -234,6 +235,15 @@ def validate_backward_family(
               f"bwd_layer_execs_per_layer={observed_execs} "
               f"outside={low}..{high}"
           )
+  # CANON_P32_KEEP_TAPE=1 makes the forward phase keep the tape, so the
+  # reverse never rebuilds it: the scanned tape program must be ABSENT, and
+  # seeing it means the kept tape was not consumed (a silent fallback).
+  if keep_tape:
+    if FWD_TAPE_SCAN in names:
+      reasons.append(
+          f"keep_tape_unexpected_forward_tape_scan={names[FWD_TAPE_SCAN]}"
+      )
+    return reasons
   # E1 rebuilds the per-chunk forward tape as one scanned program and E2'
   # inherits it, so its absence means the requested rung did not run.
   if p71_scan in ("fwd", "bwd"):
@@ -280,6 +290,7 @@ def validate_module_counts(
     layer_count: int = ZERO_LAYER_COUNT,
     block_layers: int = P71_BWD_BLOCK_LAYERS,
     geometry: str = DEFAULT_GEOMETRY,
+    keep_tape: bool = False,
 ) -> list[str]:
   """Returns fail-closed reasons for one TensorCore TPU plane."""
   if geometry not in GEOMETRIES:
@@ -309,6 +320,7 @@ def validate_module_counts(
           layer_count=layer_count,
           block_layers=block_layers,
           geometry=geometry,
+          keep_tape=keep_tape,
       )
   )
   tail_exact = {
@@ -355,12 +367,26 @@ def main() -> None:
           "the expected backward program inventory (native ignores it)"
       ),
   )
+  parser.add_argument(
+      "--p32-keep-tape",
+      default="",
+      help=(
+          "the CANON_P32_KEEP_TAPE value the run was launched with; 1 or "
+          "stream requires the forward tape scan program to be absent"
+      ),
+  )
   parser.add_argument("--p71-layers", type=int, default=ZERO_LAYER_COUNT)
   parser.add_argument(
       "--p71-block-layers", type=int, default=P71_BWD_BLOCK_LAYERS
   )
   args = parser.parse_args()
   p71_scan = p71_scan_mode(args.p71_scan)
+  if args.p32_keep_tape not in ("", "0", "1", "stream"):
+    raise ValueError(
+        "--p32-keep-tape must be empty, 0, 1 or stream: "
+        f"{args.p32_keep_tape!r}"
+    )
+  keep_tape = args.p32_keep_tape in ("1", "stream")
   # Reject an impossible geometry before reading a 1 GB xplane.
   expected_block_indices(args.p71_layers, args.p71_block_layers)
 
@@ -402,6 +428,7 @@ def main() -> None:
         layer_count=args.p71_layers,
         block_layers=args.p71_block_layers,
         geometry=args.geometry,
+        keep_tape=keep_tape,
     )
     if args.arm == "native":
       # The stock learner runs one monolithic forward/backward train_step

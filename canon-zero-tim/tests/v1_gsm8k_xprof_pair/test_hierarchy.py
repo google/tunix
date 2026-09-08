@@ -95,6 +95,65 @@ def _fixture(groups: int = 16):
   return spans, device_steps, compiler_counts
 
 
+def _stream_fixture(groups: int = 16):
+  """One synthetic CANON_P32_KEEP_TAPE=stream update.
+
+  No forward_groups parent: forward_group[0] and group_loss_pullback[0] close
+  before train[0] / reverse_group[0] opens; inside every reverse_group[g],
+  after model_backward[g] closed and before report_adjoint[g] opens, the
+  forward of g+1 is issued and group_loss_pullback[g+1] closes (the pipelined
+  two-tape window).  The reverse never replays.  The batch loss_pullback
+  self-check runs after the last reverse and before the optimizer commit,
+  inside the last train.
+  """
+  train_base = 40
+  stride = 50
+  optimizer_start = train_base + groups * stride + 20
+  update_end = optimizer_start + 70
+  spans = [
+      _span("zero_tim_update", 0, update_end, update_step=2),
+      _span("forward_group", 10, 5, group_index=0),
+      _span("group_loss_pullback", 20, 8, group_index=0),
+      _span("loss_pullback", optimizer_start - 12, 8),
+      _span("optimizer_commit", optimizer_start, 50, update_step=2),
+  ]
+  for index in range(groups):
+    train_start = train_base + index * stride
+    train_duration = (
+        optimizer_start + 55 - train_start if index == groups - 1 else 32
+    )
+    spans.append(_span(
+        "train",
+        train_start,
+        train_duration,
+        _r="1",
+        step_num=2 * groups + index,
+    ))
+    start = train_start + 1
+    spans.extend((
+        _span("reverse_group", start, 30, group_index=index),
+        _span("model_backward", start + 2, 6, group_index=index),
+        _span("report_adjoint", start + 13, 3, group_index=index),
+        _span("fixed_dp_reduce", start + 17, 4, group_index=index),
+        _span(
+            "gradient_accumulate",
+            start + 23,
+            4,
+            group_index=index,
+            micro_step=index,
+            is_last_accumulate=int(index == groups - 1),
+        ),
+    ))
+    if index + 1 < groups:
+      spans.extend((
+          _span("forward_group", start + 8, 2, group_index=index + 1),
+          _span("group_loss_pullback", start + 10, 2, group_index=index + 1),
+      ))
+  device_steps = {f"/device:TPU:{index}": 100 for index in range(8)}
+  compiler_counts = {name: 0 for name in HIERARCHY.COMPILER_EVENTS}
+  return spans, device_steps, compiler_counts
+
+
 class HierarchyTest(unittest.TestCase):
 
   def test_parent_annotations_are_constructed_after_trace_start(self):
@@ -479,3 +538,116 @@ class HierarchyTest(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class StreamTapeHierarchyTest(unittest.TestCase):
+
+  def _validate(self, fixture, groups, **kwargs):
+    spans, device_steps, compiler_counts = fixture
+    return HIERARCHY.validate_hierarchy(
+        spans,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=groups,
+        **kwargs,
+    )
+
+  def test_stream_fixture_is_green_only_under_the_stream_mode(self):
+    for groups in (16, 32):
+      fixture = _stream_fixture(groups=groups)
+      self.assertEqual(
+          self._validate(fixture, groups, stream_tape=True), []
+      )
+      # Judged as a batch keep-tape capture it rings on the missing parent
+      # and the unexpected per-group cotangents; judged flag-off it also
+      # rings on the absent replay.
+      batch = self._validate(fixture, groups, keep_tape=True)
+      self.assertIn("forward_groups:count=0 expected=1", batch)
+      self.assertIn(f"group_loss_pullback:count={groups} expected=0", batch)
+      off = self._validate(fixture, groups)
+      self.assertIn(f"replay_forward:count=0 expected={groups}", off)
+
+  def test_batch_fixture_rings_under_the_stream_mode(self):
+    fixture = _fixture(groups=32)
+    stream = self._validate(fixture, 32, stream_tape=True)
+    self.assertIn("forward_groups:count=1 expected=0", stream)
+    self.assertIn("group_loss_pullback:count=0 expected=32", stream)
+    self.assertIn("keep_tape_unexpected_replay_forward=32", stream)
+
+  def test_stream_window_order_is_enforced(self):
+    spans, device_steps, compiler_counts = _stream_fixture(groups=16)
+
+    def moved(name, index, start):
+      return [
+          _span(name, start, span.duration_ns, **span.stats)
+          if span.name == name and span.stats.get("group_index") == index
+          else span
+          for span in spans
+      ]
+
+    reverse_3 = next(
+        span for span in spans
+        if span.name == "reverse_group" and span.stats["group_index"] == 3
+    )
+    adjoint_3 = next(
+        span for span in spans
+        if span.name == "report_adjoint" and span.stats["group_index"] == 3
+    )
+    # forward_group[4] issued before reverse_group[3] opened (the unpipelined
+    # order): it must live inside reverse_group[3].
+    early_forward = moved("forward_group", 4, reverse_3.start_ns - 8)
+    reasons = HIERARCHY.validate_hierarchy(
+        early_forward,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+        stream_tape=True,
+    )
+    self.assertIn("forward_group[4]:outside_reverse_group[3]", reasons)
+    # group_loss_pullback[4] built after report_adjoint[3] opened: the
+    # cotangent no longer hides behind the reverse.
+    late_cotangent = moved("group_loss_pullback", 4, adjoint_3.start_ns + 1)
+    reasons = HIERARCHY.validate_hierarchy(
+        late_cotangent,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+        stream_tape=True,
+    )
+    self.assertIn("group_loss_pullback[4]:after_report_adjoint[3]", reasons)
+    # group_loss_pullback[3] closing after reverse_group[3] opened.
+    late_own_cotangent = moved(
+        "group_loss_pullback", 3, reverse_3.start_ns + 2
+    )
+    reasons = HIERARCHY.validate_hierarchy(
+        late_own_cotangent,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+        stream_tape=True,
+    )
+    self.assertIn("group_loss_pullback[3]:after_reverse_group[3]", reasons)
+    # The batch self-check running before the last reverse closed.
+    last_reverse = next(
+        span for span in spans
+        if span.name == "reverse_group" and span.stats["group_index"] == 15
+    )
+    early_loss = [
+        _span("loss_pullback", last_reverse.start_ns + 1, 8)
+        if span.name == "loss_pullback"
+        else span
+        for span in spans
+    ]
+    reasons = HIERARCHY.validate_hierarchy(
+        early_loss,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+        stream_tape=True,
+    )
+    self.assertIn("loss_pullback:before_last_reverse_group", reasons)

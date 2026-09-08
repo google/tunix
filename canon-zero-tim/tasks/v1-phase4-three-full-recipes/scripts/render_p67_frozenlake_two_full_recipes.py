@@ -52,6 +52,29 @@ def _env(document: dict) -> dict[str, str]:
   }
 
 
+def _require_env(document, values: dict[str, str]) -> None:
+  """Requires the rendered env to already carry exactly ``values``.
+
+  render_p57_frozenlake_tim.py injects the reviewed system-optimization bundle
+  itself for high-performance zero renders, so this wrapper verifies it
+  instead of injecting it a second time; a missing or different value is a
+  contract drift and fails closed.
+  """
+  present = {
+      item["name"]: item.get("value")
+      for item in _container(document)["env"]
+  }
+  wrong = {
+      name: present.get(name)
+      for name, value in values.items()
+      if present.get(name) != value
+  }
+  if wrong:
+    raise ValueError(
+        f"rendered env does not carry the system bundle: {sorted(wrong)}"
+    )
+
+
 def _set_env(document: dict, values: dict[str, str]) -> None:
   entries = _container(document)["env"]
   existing = {entry["name"] for entry in entries}
@@ -137,7 +160,7 @@ def render_two(
     additions = full_system_optimization_additions(
         f"frozenlake-{label}"
     )
-    _set_env(document, additions)
+    _require_env(document, additions)
     head = document["spec"]["replicatedJobs"][0]["template"]["spec"][
         "template"
     ]["spec"]
@@ -182,6 +205,7 @@ def render_two(
         "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
         "CANON_DP_FINITE_FETCH": "batched-commit",
         "CANON_P71_SCAN": "fwd",
+        "CANON_P32_KEEP_TAPE": "stream",
         "CANON_P33_ENABLE_EVAL": "0",
         "CANON_P33_DISABLE_EVAL": "1",
         "CANON_P31_ENABLE_EVAL": "0",

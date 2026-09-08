@@ -781,9 +781,11 @@ if not CANON_GSM8K_L3:
       CANON_GSM8K_ACTIVE
       and os.getenv("CANON_GSM8K_VANILLA", "") == "1"
   )
-  selected_wandb_group = (
-      os.environ.get("CANON_WANDB_GROUP", "") if vanilla_wandb else ""
-  )
+  # Both arms honor CANON_WANDB_GROUP: require_online_wandb_run (P33) fails
+  # closed unless the live run's group equals it, and every registered zero
+  # profile that sets a group -- the DP16xTP4 target and the DP2xTP2 carrier
+  # -- must therefore hand it to W&B, not only the vanilla arm.
+  selected_wandb_group = os.environ.get("CANON_WANDB_GROUP", "")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=TB_LOG_DIR,
       project_name=(

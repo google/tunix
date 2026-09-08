@@ -1425,3 +1425,27 @@ fi
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class WandbGroupContractTest(unittest.TestCase):
+  """The GSM8K demo must hand CANON_WANDB_GROUP to W&B on both arms.
+
+  require_online_wandb_run compares the live run's group against
+  CANON_WANDB_GROUP for every arm, so narrowing the group to the vanilla arm
+  (as commit 653a10d5 did) fails every zero profile that sets one at start-up
+  -- the DP2xTP2 carrier and the DP16xTP4 target among them.
+  """
+
+  def test_group_is_not_narrowed_to_the_vanilla_arm(self):
+    demo = (
+        Path(__file__).resolve().parents[3]
+        / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        'selected_wandb_group = os.environ.get("CANON_WANDB_GROUP", "")',
+        demo,
+    )
+    self.assertNotIn(
+        'os.environ.get("CANON_WANDB_GROUP", "") if vanilla_wandb else ""',
+        demo,
+    )

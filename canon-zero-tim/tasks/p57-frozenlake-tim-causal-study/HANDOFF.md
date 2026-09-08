@@ -23,7 +23,8 @@ commit/push and either target launch each need separate approval.
 Both manifests must resolve checked-VMA/P67/first-update protection plus
 `CANON_DP_COMPARE_MODE=fingerprint-hybrid`,
 `CANON_DP_DISTINCT_SCHEDULE=first-group-warmup`,
-`CANON_DP_FINITE_FETCH=batched-commit`, and `CANON_P71_SCAN=fwd`.
+`CANON_DP_FINITE_FETCH=batched-commit`, `CANON_P71_SCAN=fwd`, and
+`CANON_P32_KEEP_TAPE=stream` (streamed kept tape, certified 2026-09-02).
 `CANON_DP_COLLECTIVE_REDUCE` remains absent. P74 itself has no flag: it is the
 checked-VMA source path selected by `CANON_P59_CHECKED_VMA=1`.
 

@@ -48,6 +48,11 @@ class FullSystemOptimizationTest(unittest.TestCase):
           self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
         else:
           self.assertEqual(values["CANON_P67_P66_VMA_P59_ONLY"], "1")
+        # The streamed kept tape is armed only where it is hardware-certified.
+        if workload == "deepswe-qwen4b":
+          self.assertNotIn("CANON_P32_KEEP_TAPE", values)
+        else:
+          self.assertEqual(values["CANON_P32_KEEP_TAPE"], "stream")
         self.assertTrue(set(values).issubset(FULL_SYSTEM_OPTIMIZATION_ENV_NAMES))
 
   def test_returns_fresh_copy_and_rejects_unregistered_neighbors(self):
@@ -117,7 +122,7 @@ class FullSystemOptimizationTest(unittest.TestCase):
     ]
     self.assertTrue(any("P74" in sec for sec in h2_sections))
     self.assertIn("prepare_deepswe_zero_hp_full.sh", source)
-    self._assert_documented_system_tuple(source)
+    self._assert_documented_system_tuple(source, keep_tape=False)
 
     for path, wrapper in (
         (
@@ -136,15 +141,17 @@ class FullSystemOptimizationTest(unittest.TestCase):
       with self.subTest(path=path):
         source = path.read_text(encoding="utf-8")
         self.assertIn(wrapper, source)
-        self._assert_documented_system_tuple(source)
+        self._assert_documented_system_tuple(
+          source, keep_tape="P58" not in str(path)
+      )
 
-  def _assert_documented_system_tuple(self, source: str):
+  def _assert_documented_system_tuple(self, source: str, *, keep_tape=True):
     for key_value in (
         "CANON_DP_COMPARE_MODE=fingerprint-hybrid",
         "CANON_DP_DISTINCT_SCHEDULE=first-group-warmup",
         "CANON_DP_FINITE_FETCH=batched-commit",
         "CANON_P71_SCAN=fwd",
-    ):
+    ) + (("CANON_P32_KEEP_TAPE=stream",) if keep_tape else ()):
       self.assertIn(key_value, source)
     self.assertIn("CANON_DP_COLLECTIVE_REDUCE", source)
     self.assertRegex(source, r"CANON_DP_COLLECTIVE_REDUCE.{0,80}(absent|remain)")

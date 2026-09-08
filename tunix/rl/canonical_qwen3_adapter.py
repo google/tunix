@@ -271,6 +271,45 @@ def _p71_scan_mode() -> str:
 # remainder span at the top of the stack (divide-or-remainder, never a
 # padded or wrapped block).  Module-level on purpose so the block-size
 # ladder is one documented constant, not a new runtime flag.
+def _p32_keep_tape_mode() -> str:
+  """Returns how the grouped forward keeps its tape for the reverse pass.
+
+  '' / '0' (off): the reverse pass rebuilds each group's forward -- a second
+  full replay for the cache inputs and a scanned tape for the per-layer hidden
+  inputs -- exactly as before.  '1' ("batch"): the forward phase keeps, per
+  group and per chunk, the per-layer input caches, the per-layer input hidden
+  and the pre-norm hidden its own layer loop already produced, for every group
+  of the update, and the reverse pass consumes them instead of recomputing.
+  'stream': the same tape, but the forward of group g+1 is issued right after
+  the reverse of group g is dispatched (so it runs behind that reverse) and
+  each group's tape is released as soon as its reverse consumed it, so at
+  most two groups' tapes are alive at once; group g's loss cotangent is
+  taken from the batch loss program as soon as group g's logprobs exist, and
+  the update ends with the batch-wide loss pullback that checks every
+  streamed cotangent bit for bit.  The retained tensors are the
+  very arrays that forward produced, so the reverse pass sees bit-identical
+  operands to the ones a replay would have reproduced; only the replay and
+  the tape rebuild disappear.  Requires CANON_P59_RANK_PARALLEL_BACKWARD=1
+  and the per-layer forward (CANON_P28_LAYER_SCAN unset); other combinations
+  fail closed.  Any other value is fatal.
+  """
+  value = os.environ.get("CANON_P32_KEEP_TAPE", "")
+  if value in ("", "0"):
+    return ""
+  if value == "1":
+    return "batch"
+  if value == "stream":
+    return "stream"
+  raise FunctionalMappingError(
+      f"CANON_P32_KEEP_TAPE must be unset, 0, 1, or stream, got {value!r}"
+  )
+
+
+def _p32_keep_tape() -> bool:
+  """Returns whether the grouped forward keeps its tape for the reverse pass."""
+  return bool(_p32_keep_tape_mode())
+
+
 _P71_BWD_BLOCK_LAYERS = 7
 
 
@@ -7767,11 +7806,19 @@ class Qwen3EngineForwardAdapter:
     )
 
   def _p32_forward_group(
-      self, segmented, engine_leaves, spec, *, keep_cache_inputs
+      self, segmented, engine_leaves, spec, *, keep_cache_inputs,
+      keep_tape=False,
   ):
     """Runs independent DP-rank sequences through segmented Qwen."""
+    if keep_tape and not keep_cache_inputs:
+      raise FunctionalMappingError(
+          "keep_tape requires keep_cache_inputs: the tape is consumed "
+          "together with the per-chunk cache inputs"
+      )
     caches = tuple(self._fresh_caches())
     cache_inputs = []
+    hidden_inputs = []
+    final_hiddens = []
     chunk_logps = []
     chunk_entropies = []
     counts = {
@@ -7793,6 +7840,12 @@ class Qwen3EngineForwardAdapter:
         )
         counts["embed_forward"] += 1
         layer_scan_mode = segmented.layer_scan_mode()
+        if keep_tape and layer_scan_mode == "1":
+          raise FunctionalMappingError(
+              "CANON_P32_KEEP_TAPE=1 requires the per-layer forward; the "
+              "scanned forward (CANON_P28_LAYER_SCAN=1) does not expose "
+              "per-layer inputs to keep"
+          )
         scan_caches = scan_hidden = None
         if layer_scan_mode:
           scan_caches, scan_hidden = segmented.run_layers_scan(
@@ -7804,7 +7857,12 @@ class Qwen3EngineForwardAdapter:
           counts["layer_forward"] += len(caches)
         else:
           next_caches = []
+          chunk_hidden_ins = []
           for layer_index, cache in enumerate(caches):
+            if keep_tape:
+              # This hidden is exactly the layer's input -- the tape entry the
+              # reverse pass would otherwise rebuild by re-running the layers.
+              chunk_hidden_ins.append(hidden)
             cache, hidden = segmented.run_layer_forward(
                 layer_index,
                 engine_leaves,
@@ -7819,6 +7877,9 @@ class Qwen3EngineForwardAdapter:
             self._p50_scan_verify(
                 hidden, scan_hidden, caches, scan_caches, chunk_index
             )
+          if keep_tape:
+            hidden_inputs.append(tuple(chunk_hidden_ins))
+            final_hiddens.append(hidden)
         normalized = segmented.run_norm_forward(
             hidden, state_leaves=engine_leaves
         )
@@ -7856,7 +7917,14 @@ class Qwen3EngineForwardAdapter:
         "logps": logps,
         "entropy": entropy,
         "cache_inputs": tuple(cache_inputs),
-        "final_caches": caches if keep_cache_inputs else (),
+        # With the tape kept the reverse pass only needs the final caches'
+        # shapes, which the last chunk's input caches share, so do not hold a
+        # second full cache set per group.
+        "final_caches": (
+            caches if keep_cache_inputs and not keep_tape else ()
+        ),
+        "hidden_inputs": tuple(hidden_inputs),
+        "final_hiddens": tuple(final_hiddens),
         "counts": counts,
     }
 
@@ -8060,7 +8128,7 @@ class Qwen3EngineForwardAdapter:
           tree_zeros(segmented._head_local_leaves),  # pylint: disable=protected-access
       )
     dcache_carry = tuple(
-        tree_zeros(cache) for cache in replay["final_caches"]
+        tree_zeros(cache) for cache in (replay["final_caches"] or replay["cache_inputs"][-1])
     )
     counts = dict(replay["counts"])
     counts.update({
@@ -8105,12 +8173,34 @@ class Qwen3EngineForwardAdapter:
             spec, chunk_index
         )
         caches = replay["cache_inputs"][chunk_index]
-        hidden = segmented.run_embed_forward(
-            input_ids, state_leaves=engine_leaves
-        )
-        counts["embed_forward"] += 1
+        kept_hidden_ins = replay.get("hidden_inputs") or ()
         stacked_cache_ins = stacked_hidden_ins = None
-        if p71_scan_fwd:
+        if kept_hidden_ins:
+          # The forward phase kept this chunk's per-layer inputs and its
+          # pre-norm hidden: consume them and skip the embed, the replay and
+          # the tape rebuild, each of which would recompute these very arrays.
+          hidden_ins = tuple(kept_hidden_ins[chunk_index])
+          if len(hidden_ins) != len(caches):
+            raise FunctionalMappingError(
+                "kept tape depth does not match the cache depth: "
+                f"{len(hidden_ins)} != {len(caches)}"
+            )
+          hidden = replay["final_hiddens"][chunk_index]
+          stacked_cache_ins = jax.tree.map(lambda *xs: jnp.stack(xs), *caches)
+          stacked_hidden_ins = jnp.stack(hidden_ins)
+          if rank_parallel and not p71_block_bwd:
+            layer_tape = list(zip(caches, hidden_ins))
+          else:
+            layer_tape = None
+          tape_depth = len(caches)
+        else:
+          hidden = segmented.run_embed_forward(
+              input_ids, state_leaves=engine_leaves
+          )
+          counts["embed_forward"] += 1
+        if kept_hidden_ins:
+          pass
+        elif p71_scan_fwd:
           stacked_cache_ins, stacked_hidden_ins, hidden = (
               segmented.run_layers_fwd_tape_scan(
                   engine_leaves, caches, hidden, metadata
@@ -8697,8 +8787,26 @@ class Qwen3EngineForwardAdapter:
       )
     rank_parallel_backward = rank_parallel_value == "1"
     p66_tp4_arm = _p66_tp4_arm()
+    p32_keep_tape_mode = _p32_keep_tape_mode()
+    p32_keep_tape = bool(p32_keep_tape_mode)
+    p32_stream_tape = p32_keep_tape_mode == "stream"
+    if p32_keep_tape and (not rank_parallel_backward or p66_tp4_arm):
+      raise FunctionalMappingError(
+          "CANON_P32_KEEP_TAPE=1 requires CANON_P59_RANK_PARALLEL_BACKWARD=1 "
+          "and is not admitted under the P66 TP4 arm"
+      )
+    if p32_keep_tape and deterministic_repeat:
+      raise FunctionalMappingError(
+          "CANON_P32_KEEP_TAPE releases each group's tape after its reverse; "
+          "deterministic_repeat cannot reverse a group twice from it"
+      )
     numeric_debug_mode = _backward_numeric_debug_mode()
     numeric_debug = bool(numeric_debug_mode)
+    if p32_stream_tape and numeric_debug:
+      raise FunctionalMappingError(
+          "CANON_P32_KEEP_TAPE=stream is not admitted under backward numeric "
+          "debug: its loss cotangents exist per group, not per batch"
+      )
     p64_capsule_mode = (
         p64_training_capsule.mode()
         if numeric_debug_mode == "p64"
@@ -8830,47 +8938,53 @@ class Qwen3EngineForwardAdapter:
       )
     p32_forward_start = time.perf_counter()
     p32_forward_durations = []
-    forwards = []
-    with gsm8k_xprof.trace_annotation("forward_groups"):
-      for index, spec in enumerate(specs):
-        with gsm8k_xprof.trace_annotation(
-            "forward_group", group_index=index
-        ):
-          p32_group_start = time.perf_counter()
-          forward = self._p32_forward_group(
-              segmented, engine_leaves, spec, keep_cache_inputs=False
-          )
+
+    def run_forward_group(index, spec):
+      with gsm8k_xprof.trace_annotation(
+          "forward_group", group_index=index
+      ):
+        p32_group_start = time.perf_counter()
+        forward = self._p32_forward_group(
+            segmented,
+            engine_leaves,
+            spec,
+            keep_cache_inputs=p32_keep_tape,
+            keep_tape=p32_keep_tape,
+        )
+        if not p32_stream_tape:
+          # Streaming leaves this forward in flight so the host can build the
+          # previous group's loss cotangent while the device runs it; its
+          # duration is then the issue time, not the device time.
           forward["logps"].block_until_ready()
-          p32_forward_durations.append(time.perf_counter() - p32_group_start)
-          forwards.append(forward)
-          print(
-              f"[P32.DP{contract.dp_size}] forward_group_done "
-              f"group={index + 1}/{contract.local_trajectories} "
-              f"rows={reverse_groups[index]} "
-              f"n_real={spec['host_n_real']}",
-              flush=True,
-          )
-    forwards = tuple(forwards)
-    if os.environ.get("CANON_PERF_LOG", "1") != "0" and p32_forward_durations:
-      print(
-          "[PERF] stage=p32_vag_forward seconds=%.3f groups=%d"
-          " mean=%.3f max=%.3f"
-          % (
-              time.perf_counter() - p32_forward_start,
-              len(p32_forward_durations),
-              sum(p32_forward_durations) / len(p32_forward_durations),
-              max(p32_forward_durations),
-          ),
-          flush=True,
-      )
-    grouped_logps = jnp.stack(
-        tuple(result["logps"] for result in forwards), axis=0
-    ).astype(jnp.float32)
-    grouped_entropy = jnp.stack(
-        tuple(result["entropy"] for result in forwards), axis=0
-    ).astype(jnp.float32)
-    per_token_logps = self._ungroup_batch_rows(grouped_logps)
-    token_entropy = self._ungroup_batch_rows(grouped_entropy)
+        p32_forward_durations.append(time.perf_counter() - p32_group_start)
+        print(
+            f"[P32.DP{contract.dp_size}] "
+            f"{'forward_group_issued' if p32_stream_tape else 'forward_group_done'} "
+            f"group={index + 1}/{contract.local_trajectories} "
+            f"rows={reverse_groups[index]} "
+            f"n_real={spec['host_n_real']}",
+            flush=True,
+        )
+        return forward
+
+    def print_forward_stage():
+      if (
+          os.environ.get("CANON_PERF_LOG", "1") != "0"
+          and p32_forward_durations
+      ):
+        print(
+            "[PERF] stage=p32_vag_forward seconds=%.3f groups=%d"
+            " mean=%.3f max=%.3f"
+            % (
+                sum(p32_forward_durations)
+                if p32_stream_tape
+                else time.perf_counter() - p32_forward_start,
+                len(p32_forward_durations),
+                sum(p32_forward_durations) / len(p32_forward_durations),
+                max(p32_forward_durations),
+            ),
+            flush=True,
+        )
 
     from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
 
@@ -8879,17 +8993,123 @@ class Qwen3EngineForwardAdapter:
           logps, entropy, train_example, algo_config
       ).primary_loss.unreduced_sum
 
-    with gsm8k_xprof.trace_annotation("loss_pullback"):
+    def batch_loss_pullback(grouped_logps, grouped_entropy):
+      per_token_logps = self._ungroup_batch_rows(grouped_logps)
+      token_entropy = self._ungroup_batch_rows(grouped_entropy)
       unreduced_value, loss_pullback = jax.vjp(
           unreduced_loss, per_token_logps, token_entropy
       )
       dlogps, dentropy = loss_pullback(jnp.ones_like(unreduced_value))
-      grouped_dlogps = self._group_batch_rows(dlogps)
-      grouped_dentropy = self._group_batch_rows(dentropy)
-      loss_output = algo_core.grpo_loss_from_precomputed_logps(
-          per_token_logps, token_entropy, train_example, algo_config
-      )
-      scale = loss_output.primary_loss.compute_scale()
+      return per_token_logps, token_entropy, dlogps, dentropy
+
+    if p32_stream_tape:
+      # Stream: the reverse loop below issues the forward of group g+1 right
+      # after it dispatched the reverse of group g, so the forward phase has
+      # no loop of its own.  The per-group cotangent runs as one compiled
+      # program (the update is host-bound, and the eager op-by-op pullback
+      # costs about 80 ms of host time per group); the eager batch pullback
+      # at the end of the update checks every compiled slice bit for bit.
+      # The compiled program is cached on the adapter across updates: a fresh
+      # jax.jit per update would recompile every update (the hierarchy census
+      # forbids any compile inside a captured update).
+      cached = getattr(self, "_p32_stream_cotangent", None)
+      if cached is None or cached[0] is not algo_config:
+
+        def batch_loss_cotangent(grouped_logps, grouped_entropy, example):
+          self._p32_stream_cotangent_traces += 1
+          per_token_logps = self._ungroup_batch_rows(grouped_logps)
+          token_entropy = self._ungroup_batch_rows(grouped_entropy)
+
+          def unreduced(logps, entropy):
+            return algo_core.grpo_loss_from_precomputed_logps(
+                logps, entropy, example, algo_config
+            ).primary_loss.unreduced_sum
+
+          unreduced_value, loss_pullback = jax.vjp(
+              unreduced, per_token_logps, token_entropy
+          )
+          return loss_pullback(jnp.ones_like(unreduced_value))
+
+        self._p32_stream_cotangent_traces = 0
+        cached = (algo_config, jax.jit(batch_loss_cotangent))
+        self._p32_stream_cotangent = cached
+      stream_cotangent_fn = cached[1]
+      # Group g's loss cotangent is the group-g slice of the batch loss
+      # pullback evaluated on the logprobs known so far (later groups' rows
+      # still hold zeros): the per-token loss and its cotangent never mix rows,
+      # so that slice is the one the batch pullback at the end of the update
+      # reproduces -- and that pullback checks every streamed slice bit for
+      # bit before any gradient is returned.
+      forwards = [None] * len(specs)
+      grouped_logps = [None] * len(specs)
+      grouped_dlogps = [None] * len(specs)
+      grouped_dentropy = [None] * len(specs)
+      stream_logps = None
+      stream_entropy = None
+      scale = None
+
+      def stream_lookahead(index):
+        """Issues group ``index``'s forward and builds its loss cotangent."""
+        nonlocal stream_logps, stream_entropy, scale
+        forwards[index] = run_forward_group(index, specs[index])
+        if stream_logps is None:
+          stream_logps = jnp.zeros(
+              (len(specs),) + tuple(forwards[index]["logps"].shape),
+              jnp.float32,
+          )
+          stream_entropy = jnp.zeros(
+              (len(specs),) + tuple(forwards[index]["entropy"].shape),
+              jnp.float32,
+          )
+        with gsm8k_xprof.trace_annotation(
+            "group_loss_pullback", group_index=index
+        ):
+          stream_logps = stream_logps.at[index].set(
+              forwards[index]["logps"].astype(jnp.float32)
+          )
+          stream_entropy = stream_entropy.at[index].set(
+              forwards[index]["entropy"].astype(jnp.float32)
+          )
+          stream_dlogps, stream_dentropy = stream_cotangent_fn(
+              stream_logps, stream_entropy, train_example
+          )
+          grouped_dlogps[index] = self._group_batch_rows(stream_dlogps)[index]
+          grouped_dentropy[index] = self._group_batch_rows(
+              stream_dentropy
+          )[index]
+          grouped_logps[index] = stream_logps[index]
+          if scale is None:
+            # The loss scale is a function of the masks alone; the batch
+            # loss at the end of the update re-derives it and must agree.
+            scale = algo_core.grpo_loss_from_precomputed_logps(
+                self._ungroup_batch_rows(stream_logps),
+                self._ungroup_batch_rows(stream_entropy),
+                train_example,
+                algo_config,
+            ).primary_loss.compute_scale()
+    else:
+      forwards = []
+      with gsm8k_xprof.trace_annotation("forward_groups"):
+        for index, spec in enumerate(specs):
+          forwards.append(run_forward_group(index, spec))
+      forwards = tuple(forwards)
+      print_forward_stage()
+      grouped_logps = jnp.stack(
+          tuple(result["logps"] for result in forwards), axis=0
+      ).astype(jnp.float32)
+      grouped_entropy = jnp.stack(
+          tuple(result["entropy"] for result in forwards), axis=0
+      ).astype(jnp.float32)
+      with gsm8k_xprof.trace_annotation("loss_pullback"):
+        per_token_logps, token_entropy, dlogps, dentropy = (
+            batch_loss_pullback(grouped_logps, grouped_entropy)
+        )
+        grouped_dlogps = self._group_batch_rows(dlogps)
+        grouped_dentropy = self._group_batch_rows(dentropy)
+        loss_output = algo_core.grpo_loss_from_precomputed_logps(
+            per_token_logps, token_entropy, train_example, algo_config
+        )
+        scale = loss_output.primary_loss.compute_scale()
     if p66_tp4_arm:
       reverse = self._p32_reverse_group(
           segmented,
@@ -8999,12 +9219,17 @@ class Qwen3EngineForwardAdapter:
     def reverse_reduce_group(index, spec):
       nonlocal reducer
       if rank_parallel_backward:
-        with gsm8k_xprof.trace_annotation(
-            "replay_forward", group_index=index
-        ):
-          replay = self._p32_forward_group(
-              segmented, engine_leaves, spec, keep_cache_inputs=True
-          )
+        if p32_keep_tape:
+          # The forward phase kept this group's tape: the replay that used to
+          # regenerate it is exactly the computation it already did.
+          replay = forwards[index]
+        else:
+          with gsm8k_xprof.trace_annotation(
+              "replay_forward", group_index=index
+          ):
+            replay = self._p32_forward_group(
+                segmented, engine_leaves, spec, keep_cache_inputs=True
+            )
         with gsm8k_xprof.trace_annotation(
             "model_backward", group_index=index
         ):
@@ -9016,6 +9241,18 @@ class Qwen3EngineForwardAdapter:
               grouped_dentropy[index],
               replay=replay,
           )
+        if p32_stream_tape and index + 1 < len(specs):
+          # Two-tape window, pipelined: the device is busy with this group's
+          # reverse, so issue the next group's forward and build its
+          # cotangent now, behind it.  Only tapes index and index+1 are
+          # alive; tape index is released just below.
+          stream_lookahead(index + 1)
+        if p32_keep_tape:
+          # Release the consumed tape so the peak stays at the groups not yet
+          # reversed rather than at every group of the update.
+          for key in ("cache_inputs", "final_caches", "hidden_inputs",
+                      "final_hiddens"):
+            forwards[index][key] = ()
         if not bool(np.asarray(jnp.array_equal(
             reverse["replay_logps"], grouped_logps[index]
         ))):
@@ -9313,6 +9550,12 @@ class Qwen3EngineForwardAdapter:
     )
     with reverse_parent:
       for index, spec in enumerate(reverse_specs):
+        if p32_stream_tape and index == 0:
+          # Group 0 has no earlier reverse to hide behind: issue its forward
+          # and build its cotangent up front.  Every later group's forward
+          # and cotangent are issued by reverse_reduce_group right after it
+          # dispatched the previous group's reverse.
+          stream_lookahead(0)
         train_transaction = (
             xprof_train_schedule.transaction(index)
             if xprof_train_schedule is not None
@@ -9439,6 +9682,37 @@ class Qwen3EngineForwardAdapter:
                 seen.add(id(value))
                 if not value.is_deleted():
                   value.delete()
+    if p32_stream_tape:
+      print_forward_stage()
+      with gsm8k_xprof.trace_annotation("loss_pullback"):
+        per_token_logps, token_entropy, dlogps, dentropy = (
+            batch_loss_pullback(stream_logps, stream_entropy)
+        )
+        batch_dlogps = self._group_batch_rows(dlogps)
+        batch_dentropy = self._group_batch_rows(dentropy)
+        for index in range(len(specs)):
+          if not (
+              bool(np.asarray(jnp.array_equal(
+                  batch_dlogps[index], grouped_dlogps[index]
+              )))
+              and bool(np.asarray(jnp.array_equal(
+                  batch_dentropy[index], grouped_dentropy[index]
+              )))
+          ):
+            raise FunctionalMappingError(
+                f"P32 stream loss cotangent of group {index} differs from "
+                "the batch loss pullback"
+            )
+        loss_output = algo_core.grpo_loss_from_precomputed_logps(
+            per_token_logps, token_entropy, train_example, algo_config
+        )
+        if not bool(np.asarray(jnp.array_equal(
+            scale, loss_output.primary_loss.compute_scale()
+        ))):
+          raise FunctionalMappingError(
+              "P32 stream loss scale differs from the batch loss scale"
+          )
+        grouped_logps = stream_logps
     deferred_finite_receipts = None
     if reducer is not None and getattr(
         reducer, "pending_finite_receipt_count", 0

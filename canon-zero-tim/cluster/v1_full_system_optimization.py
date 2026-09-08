@@ -23,6 +23,18 @@ _P59_ONLY_WORKLOADS = frozenset({
     "deepswe-qwen4b",
 })
 
+# The streamed kept tape (tasks/v1_forward_dedup): the reverse pass consumes
+# the forward's own tape group by group instead of recomputing it, with at
+# most two groups' tapes alive.  Hardware-certified on 2026-09-02 on the
+# one-host DP2xTP2 and DP4xTP1 GSM8K carriers (gradient anchors bitwise,
+# forward programs halved / thirded, peak HBM at or below the flag-off
+# baseline).  DeepSWE is not armed until its geometry has been certified.
+_KEEP_TAPE_WORKLOADS = frozenset({
+    "gsm8k",
+    "frozenlake-p45",
+    "frozenlake-m15",
+})
+
 REGISTERED_FULL_WORKLOADS = frozenset({
     "gsm8k",
     *_P59_ONLY_WORKLOADS,
@@ -30,6 +42,7 @@ REGISTERED_FULL_WORKLOADS = frozenset({
 
 FULL_SYSTEM_OPTIMIZATION_ENV_NAMES = tuple(_BASE_ADDITIONS) + (
     "CANON_P67_P66_VMA_P59_ONLY",
+    "CANON_P32_KEEP_TAPE",
 )
 
 
@@ -42,4 +55,6 @@ def full_system_optimization_additions(workload: str) -> dict[str, str]:
   additions = dict(_BASE_ADDITIONS)
   if workload in _P59_ONLY_WORKLOADS:
     additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"
+  if workload in _KEEP_TAPE_WORKLOADS:
+    additions["CANON_P32_KEEP_TAPE"] = "stream"
   return additions

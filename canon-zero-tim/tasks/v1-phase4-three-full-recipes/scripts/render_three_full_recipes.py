@@ -86,6 +86,29 @@ def _env(document: dict) -> dict[str, str]:
   }
 
 
+def _require_env(document, values: dict[str, str]) -> None:
+  """Requires the rendered env to already carry exactly ``values``.
+
+  render_p57_frozenlake_tim.py injects the reviewed system-optimization bundle
+  itself for high-performance zero renders, so this wrapper verifies it
+  instead of injecting it a second time; a missing or different value is a
+  contract drift and fails closed.
+  """
+  present = {
+      item["name"]: item.get("value")
+      for item in _container(document)["env"]
+  }
+  wrong = {
+      name: present.get(name)
+      for name, value in values.items()
+      if present.get(name) != value
+  }
+  if wrong:
+    raise ValueError(
+        f"rendered env does not carry the system bundle: {sorted(wrong)}"
+    )
+
+
 def _set_env(document: dict, values: dict[str, str]) -> None:
   entries = _container(document)["env"]
   existing = {entry["name"] for entry in entries}
@@ -180,7 +203,13 @@ def render_three(
     raise ValueError(f"Phase4 must render exactly three manifests, got {len(outputs)}")
   for label, path in zip(("gsm8k", "p45", "m15"), outputs, strict=True):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    _set_env(document, _optimization_additions(label))
+    if label == "gsm8k":
+      # The GSM8K document comes from the P33 JobSet path, which does not
+      # inject the bundle; the FrozenLake documents come from render_p57,
+      # which does, so they are verified rather than re-injected.
+      _set_env(document, _optimization_additions(label))
+    else:
+      _require_env(document, _optimization_additions(label))
     _write_yaml(path, document)
 
   expected_profiles = {
@@ -305,6 +334,7 @@ def render_gsm8k_full(
       "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
       "CANON_DP_FINITE_FETCH": "batched-commit",
       "CANON_P71_SCAN": "fwd",
+      "CANON_P32_KEEP_TAPE": "stream",
       **_JAX_CACHE_ENV,
   }
   wrong = {
