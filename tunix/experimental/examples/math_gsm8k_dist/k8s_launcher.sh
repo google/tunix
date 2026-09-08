@@ -51,7 +51,7 @@ COMMANDS:
 
 OPTIONS:
   --image <IMAGE>           Container image to run
-                            Default: gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2
+                            Default: gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908
   --model, --preset <NAME>  Model preset to use:
                               - 'qwen3.5-35b' (Qwen3.5-35B-A3B MoE, multi-host Pathways FFI, 2x rollout replicas)
                               - 'qwen3-0.6b' (Default: Qwen3-0.6B, tpuv5:2x2x2 train, tpuv5:2x2x1 roll)
@@ -136,7 +136,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908"
       PRESET_USE_FFI="false"
       PRESET_PREFUSE_MOE_WEIGHTS="false"
       PRESET_PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
@@ -167,7 +167,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908"
       PRESET_USE_FFI="true"
       PRESET_PREFUSE_MOE_WEIGHTS="true"
       PRESET_PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
@@ -197,7 +197,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=1
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908"
       PRESET_USE_FFI="false"
       PRESET_PREFUSE_MOE_WEIGHTS="false"
       PRESET_PATHWAYS_PROXY_SERVER_IMAGE=""
@@ -226,7 +226,7 @@ load_preset_defaults() {
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
       PRESET_MAX_STEPS=2
-      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2"
+      PRESET_DEFAULT_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-dev-0908"
       PRESET_USE_FFI="false"
       PRESET_PREFUSE_MOE_WEIGHTS="false"
       PRESET_PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
