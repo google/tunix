@@ -85,6 +85,122 @@ from tunix.sft import utils as sft_utils
 ArrayLike = typing.ArrayLike
 
 
+def _p61_write_algo_config(
+    directory: str, algo_config: Any, *, pad_id: int, eos_id: int
+) -> dict[str, Any]:
+  """Writes the scalar fields of the algorithm config next to a P61 capture.
+
+  The fp64 reference of tasks/v2_dispatch Phase 13 re-evaluates the update's
+  loss on the captured example; it needs the exact loss configuration (beta,
+  epsilon, aggregation mode, temperature, ...) and the tokenizer's pad/eos
+  ids.  Only JSON scalars are written; refuses to overwrite.
+  """
+  if not directory or not os.path.isabs(directory):
+    raise alignment.AlignmentGateError(
+        "P61 numerical capture directory must be an absolute path"
+    )
+  os.makedirs(directory, mode=0o755, exist_ok=True)
+  fields = {}
+  for field in dataclasses.fields(algo_config):
+    value = getattr(algo_config, field.name, None)
+    if value is None or isinstance(value, (bool, int, float, str)):
+      fields[field.name] = value
+  # The training temperature is set on the config from the rollout config
+  # after construction (not a dataclass field); the loss path reads it.
+  temperature = getattr(algo_config, "temperature", None)
+  if isinstance(temperature, (int, float)):
+    fields["temperature"] = float(temperature)
+  record = {
+      "schema": "canon-p61-algo-config-v1",
+      "algo_config": fields,
+      "pad_id": int(pad_id),
+      "eos_id": int(eos_id),
+  }
+  path = os.path.join(directory, "algo_config.json")
+  with open(path, "x", encoding="utf-8") as output_file:
+    json.dump(record, output_file, indent=2, sort_keys=True)
+    output_file.write("\n")
+  return record
+
+
+def _p61_stock_gradient_requested() -> bool:
+  """CANON_P61_STOCK_GRADIENT=1: the P61 capture also derives the first
+  update's gradient with the STOCK forward and backward (tasks/v2_dispatch
+  Phase 13b) -- the trainer's own nnx model on the TPU, the stock per-token
+  logps helper with ``canonical_actor=False`` and the canonical path's own
+  loss seam -- and skips ``model_after`` to keep the capture's disk
+  footprint.  A P61-family diagnostic value; meaningless without
+  CANON_P61_BACKWARD_NUMERICAL_DIR."""
+  value = os.environ.get("CANON_P61_STOCK_GRADIENT", "")
+  if value not in ("", "0", "1"):
+    raise alignment.AlignmentGateError(
+        "CANON_P61_STOCK_GRADIENT must be unset/0/1"
+    )
+  return value == "1"
+
+
+def _p61_capture_stock_gradient(
+    directory: str, model, train_example, algo_config, *, pad_id: int,
+    eos_id: int, rows_per_step: int = 4,
+) -> None:
+  """Writes the stock-path gradient of the first update next to the P61
+  capture, evaluated at the certified run's importance-ratio-one point
+  (old logps := the stock forward's own, the seam's rule when old is
+  absent), row microbatches summed and scaled by the batch's loss scale
+  exactly as the fp64 reference does (``fp64_reference.py``)."""
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
+  from tunix.rl import common as rl_common  # pylint: disable=g-import-not-at-top
+
+  graphdef, state = nnx.split(model)
+  temperature = float(getattr(algo_config, "temperature", 1.0))
+  example = train_example.replace(old_per_token_logps=None)
+
+  def unreduced(params, rows):
+    logps, entropy = rl_common.compute_per_token_logps(
+        graphdef, params, prompt_tokens=rows.prompt_ids,
+        completion_tokens=rows.completion_ids, pad_id=pad_id, eos_id=eos_id,
+        stop_gradient=False, return_entropy=True, temperature=temperature,
+        canonical_actor=False, prompt_mask=rows.prompt_mask,
+        completion_mask=rows.completion_mask,
+    )
+    output = algo_core.grpo_loss_from_precomputed_logps(
+        logps, entropy, rows, algo_config
+    )
+    return output.primary_loss.unreduced_sum, logps
+
+  grad_fn = jax.jit(jax.value_and_grad(unreduced, has_aux=True))
+  rows = int(example.completion_ids.shape[0])
+  accumulator = None
+  logps_rows = []
+  for start in range(0, rows, rows_per_step):
+    stop = min(start + rows_per_step, rows)
+    part = jax.tree.map(
+        lambda value: value[start:stop] if value.ndim >= 1 else value,
+        example,
+    )
+    (_, logps), grads = grad_fn(state, part)
+    logps_rows.append(logps)
+    accumulator = (
+        grads if accumulator is None
+        else jax.tree.map(jnp.add, accumulator, grads)
+    )
+  zeros = jnp.zeros(example.completion_ids.shape, jnp.float32)
+  scale = algo_core.grpo_loss_from_precomputed_logps(
+      zeros, zeros, example, algo_config
+  ).primary_loss.compute_scale()
+  accumulator = jax.tree.map(lambda value: value * scale, accumulator)
+  _p61_capture_tree(directory, "stock_gradient", accumulator)
+  _p61_capture_tree(
+      directory, "stock_logps", jnp.concatenate(logps_rows, axis=0)
+  )
+  print(
+      "[P61.STOCK_GRADIENT] rows=%d rows_per_step=%d scale=%.9e temperature=%g"
+      % (rows, rows_per_step, float(scale), temperature),
+      flush=True,
+  )
+
+
 def _p61_capture_tree(
     directory: str, capture_name: str, tree: Any
 ) -> dict[str, Any]:
@@ -1815,10 +1931,30 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "model_before",
           nnx.state(actor_trainer.model, nnx.Param),
       )
+      # tasks/v2_dispatch Phase 13: the fp64 reference needs the update's
+      # example and loss configuration next to the gradient it re-derives.
+      _p61_capture_tree(p61_capture_dir, "example", train_example)
+      _p61_write_algo_config(
+          p61_capture_dir,
+          self.algo_config,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+      )
     start = time.perf_counter()
     with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
     ):
+      if p61_capture_dir and _p61_stock_gradient_requested():
+        # Phase 13b: the stock backward of the same update, before the
+        # canonical update touches the model.
+        _p61_capture_stock_gradient(
+            p61_capture_dir,
+            actor_trainer.model,
+            train_example,
+            self.algo_config,
+            pad_id=self.rl_cluster.rollout.pad_id(),
+            eos_id=self.rl_cluster.rollout.eos_id(),
+        )
       common = {
           "trainer_state": trainer_state,
           "train_example": train_example,
@@ -2439,6 +2575,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "gradient",
           actor_trainer.grad_accumulator.get(),
       )
+      # Phase 13: the engine's per-token logps of this update, the value
+      # the fp64 reference's own logps are checked against.
+      _p61_capture_tree(
+          p61_capture_dir, "logps", result["per_token_logps"]
+      )
     optimizer_annotation = (
         xprof_train_schedule.optimizer_commit()
         if xprof_train_schedule is not None
@@ -2463,11 +2604,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "P61 numerical capture requires a positive learning rate and a "
             f"material parameter update: {commit_evidence}"
         )
-      _p61_capture_tree(
-          p61_capture_dir,
-          "model_after",
-          nnx.state(actor_trainer.model, nnx.Param),
-      )
+      if not _p61_stock_gradient_requested():
+        # The stock-gradient capture skips model_after (never compared
+        # there) to keep the capture at three trees on disk.
+        _p61_capture_tree(
+            p61_capture_dir,
+            "model_after",
+            nnx.state(actor_trainer.model, nnx.Param),
+        )
     elapsed = time.perf_counter() - start
     hbm_after_commit = memory_snapshot()
     emit_sharding_inventory("after_commit")
