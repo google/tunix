@@ -95,6 +95,17 @@ def _fixtures():
   return _load_module_by_path(path, _FIXTURES_NAME)
 
 
+def _pallas_matmul_shim():
+  path = (
+      Path(canonical_qwen3_adapter.__file__).resolve().parents[2]
+      / "canon-zero-tim"
+      / "src"
+      / "engine_shims"
+      / "p22_pallas_matmul.py"
+  )
+  return _load_module_by_path(path, "p22_pallas_matmul")
+
+
 def _build_engine(runner=None):
   fixtures = _fixtures()
   runner = runner or fixtures._SegmentedRunner()
@@ -802,7 +813,7 @@ def _run_rank_parallel_chain(engine, runner, operands):
   return outputs
 
 
-@pytest.mark.parametrize(("dp", "tp"), ((4, 1), (2, 2), (2, 4)))
+@pytest.mark.parametrize(("dp", "tp"), ((4, 1), (2, 2), (2, 4), (1, 4)))
 def test_homogeneous_layers_share_one_rank_parallel_program(
     dp, tp, capsys
 ):
@@ -824,7 +835,13 @@ def test_homogeneous_layers_share_one_rank_parallel_program(
       ),
       mock.patch.dict(
           os.environ,
-          {"CANON_P66_P59_CHECK_VMA": "1" if tp > 1 else "0"},
+          {
+              "CANON_P66_P59_CHECK_VMA": "1" if tp > 1 else "0",
+              "CANON_P32_WORKLOAD": (
+                  "frozenlake-p45-onehost-dp1-tp4" if dp == 1 else ""
+              ),
+              "CANON_P66_BACKWARD_ARM": "",
+          },
           clear=False,
       ),
   ):
@@ -876,6 +893,133 @@ def test_homogeneous_layers_share_one_rank_parallel_program(
   assert receipts.count("[P66.VMA] outer_check_enabled") == (
       2 if tp > 1 else 0
   )
+
+
+def test_p59_unit_data_admission_is_exact_and_requires_checked_vma():
+  admitted = canonical_qwen3_adapter._p59_unit_data_admitted  # pylint: disable=protected-access
+  for workload in (
+      "frozenlake-p45-onehost-dp1-tp4",
+      "frozenlake-m15-onehost-dp1-tp4",
+  ):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_WORKLOAD": workload,
+            "CANON_P66_P59_CHECK_VMA": "1",
+            "CANON_P66_BACKWARD_ARM": "",
+        },
+        clear=False,
+    ):
+      assert admitted(data_size=1, tp_size=4)
+      assert not admitted(data_size=1, tp_size=2)
+      assert not admitted(data_size=2, tp_size=2)
+
+  for workload in (
+      "",
+      "frozenlake-p45-onehost-dp2-tp2",
+      "gsm8k-p66-dp1-tp4",
+      "frozenlake-p45-onehost-dp1-tp4-extra",
+  ):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_WORKLOAD": workload,
+            "CANON_P66_P59_CHECK_VMA": "1",
+            "CANON_P66_BACKWARD_ARM": "",
+        },
+        clear=False,
+    ):
+      assert not admitted(data_size=1, tp_size=4)
+
+  with mock.patch.dict(
+      os.environ,
+      {
+          "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp1-tp4",
+          "CANON_P66_P59_CHECK_VMA": "0",
+          "CANON_P66_BACKWARD_ARM": "",
+      },
+      clear=False,
+  ), pytest.raises(
+      canonical_qwen3_adapter.FunctionalMappingError,
+      match="singleton P59 requires CANON_P66_P59_CHECK_VMA=1",
+  ):
+    admitted(data_size=1, tp_size=4)
+
+  for arm in (
+      "tp4-p59-old",
+      "tp4-p59",
+      "tp4-gather-off",
+      "tp4-vma-oracle",
+  ):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_WORKLOAD": "gsm8k-p66-dp1-tp4",
+            "CANON_P66_P59_CHECK_VMA": "0",
+            "CANON_P66_BACKWARD_ARM": arm,
+        },
+        clear=False,
+    ):
+      assert admitted(data_size=1, tp_size=4)
+  with mock.patch.dict(
+      os.environ,
+      {
+          "CANON_P32_WORKLOAD": "gsm8k-p66-dp1-tp4",
+          "CANON_P66_P59_CHECK_VMA": "0",
+          "CANON_P66_BACKWARD_ARM": "tp4-serial",
+      },
+      clear=False,
+  ):
+    assert not admitted(data_size=1, tp_size=4)
+
+
+def test_dp1_tp4_manual_p59_context_keeps_pallas_output_vma():
+  if len(jax.devices()) < 4:
+    pytest.skip("requires four forced CPU devices")
+  if not hasattr(
+      jax.core.ShapedArray((), np.dtype("float32")), "mat"
+  ):
+    pytest.skip("checked-VMA requires the pinned JAX manual-axis API")
+  shim = _pallas_matmul_shim()
+  mesh = jax.sharding.Mesh(
+      np.asarray(jax.devices()[:4]).reshape(1, 4),
+      ("data", "model"),
+  )
+  sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec("data", "model")
+  )
+  value = jax.device_put(
+      jnp.arange(4, dtype=jnp.float32).reshape(1, 4), sharding
+  )
+  observed = []
+
+  def local_fn(local_value):
+    manual_axis_type = shim.p66_vma_output_manual_axis_type(
+        jax, local_value
+    )
+    assert manual_axis_type is not None
+    observed.append(manual_axis_type)
+    return local_value
+
+  mapped = jax.shard_map(
+      local_fn,
+      mesh=mesh,
+      in_specs=jax.sharding.PartitionSpec("data", "model"),
+      out_specs=jax.sharding.PartitionSpec("data", "model"),
+      check_vma=True,
+  )
+  scoped = {
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P66_P59_CHECK_VMA": "1",
+      "CANON_P67_P66_VMA_P59_ONLY": "1",
+  }
+  with mock.patch.dict(os.environ, scoped, clear=False):
+    with jax.transfer_guard("disallow"):
+      result = jax.block_until_ready(mapped(value))
+    assert shim.p66_vma_output_manual_axis_type(jax, value) is None
+
+  assert observed
+  assert _tree_bytes(result) == _tree_bytes(value)
 
 
 def test_nonhomogeneous_layer_key_keeps_distinct_programs(capsys):

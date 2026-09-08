@@ -38,6 +38,32 @@
 | CANON_KV_UNIFIED | U 臂读路径统一实验 | off | **否决区**:生产红(43→9 仍 0.28),非修复 | 可删,判决记录永存 |
 | MIN_TOKEN_BUCKET / max_num_batched_tokens(非 CANON 但同级) | R2:全局/每 rank 桶契约 | 钉死 256 族 | 已认证 | 永不自由化;新几何走契约注册 |
 
+### CANON_P59_RANK_PARALLEL_BACKWARD DP1×TP4 精确补充（2026-09-06）
+
+- v2 FrozenLake one-host 的 `frozenlake-p45-onehost-dp1-tp4` 与
+  `frozenlake-m15-onehost-dp1-tp4` 是仅有的非 P66、unit-DP P59 admission。
+  两者的 default stream tape 依赖 P59，因此必须同时保持
+  `CANON_P66_P59_CHECK_VMA=1`；VMA off 立即 fatal。其他 DP1 workload、错误
+  TP 或前缀相似名称仍拒绝。P66 的四个既有 mapped 诊断臂语义不变。
+- 此补充当前只有固定镜像 CPU 的 DP1×TP4 两层真实 mapped-VJP 逐位、
+  `transfer_guard('disallow')` 与负控证据；完整 Qwen3-8B one-host
+  reverse/gradient/HBM 尚未通过，不得外推为 target 或 GKE 认证。
+- `CANON_P67_P66_VMA_P59_ONLY=1` 的 P59-context 判定承认这个 size-one
+  manual data axis，仍要求 `data/model` 两轴都是 Manual、model size > 1、
+  rank-parallel 与 checked-VMA 同时开启。这样 Pallas out-shape 在外层
+  checked `shard_map` 中始终取得非空 `manual_axis_type`；普通 serving
+  不在该 abstract mesh 内，继续返回 `None`，不改变其程序。
+- Projection 的 `_p59_local_tp_context()` 同样只负责核对执行上下文，不复制
+  workload 白名单：size-one manual data axis 仅在 rank-parallel 已开、
+  `data/model` 双轴都是 Manual、model size > 1，且 context 与 live engine
+  mesh 的 data/model size 精确相等时成立。具体 P45/M15 准入仍只由 adapter
+  上述白名单和 checked-VMA 门决定；ordinary serving、错误 mesh 与 TP1 不变。
+- Attention 的 `_p59_local_attention_context()` 使用同一职责边界：不读取
+  P66/GSM8K 诊断 selector，只在 rank-parallel、精确双 Manual 轴、positive
+  data、model size > 1 与 live engine data/model size 精确相等时识别已经
+  DP/TP-local 的 Q/K/V/cache。它不改变 RPA 算术或 local-KV shape 检查；
+  ordinary serving、flag-off 与 topology mismatch 继续不选或 fail-closed。
+
 ## B 层 · perf/仪器类(observational;发布协议 = 每负载 =verify 首步绿 → =1)
 
 | Flag | 语义 | 生命周期 | 日落 |

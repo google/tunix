@@ -244,8 +244,24 @@ class P66ContractTest(unittest.TestCase):
     self.assertIn("p66_unit_rank", rank_assembly)
     self.assertIn('"tp4-vma-oracle"', rank_assembly)
     attention_patch = ATTENTION_PATCH.read_text(encoding="utf-8")
-    self.assertIn('== "gsm8k-p66-dp1-tp4"', attention_patch)
-    self.assertIn('"tp4-vma-oracle"', attention_patch)
+    self.assertNotIn("CANON_P32_WORKLOAD", attention_patch)
+    self.assertNotIn("CANON_P66_BACKWARD_ARM", attention_patch)
+    self.assertIn("CANON_P59_RANK_PARALLEL_BACKWARD", attention_patch)
+    self.assertIn(
+        'tuple(context.axis_names) != ("data", "model")', attention_patch
+    )
+    self.assertIn(
+        'axis_types.get("data") is not jax.sharding.AxisType.Manual',
+        attention_patch,
+    )
+    self.assertIn(
+        'axis_types.get("model") is not jax.sharding.AxisType.Manual',
+        attention_patch,
+    )
+    self.assertIn("data_size < 1", attention_patch)
+    self.assertIn("model_size <= 1", attention_patch)
+    self.assertIn('data_size != int(mesh.shape["data"])', attention_patch)
+    self.assertIn('model_size != int(mesh.shape["model"])', attention_patch)
     for shim in PALLAS_VMA_SHIMS:
       source = shim.read_text(encoding="utf-8")
       self.assertIn("p66_vma_output_manual_axis_type", source, shim)

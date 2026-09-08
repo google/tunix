@@ -79,6 +79,12 @@ $docker run --rm \
       "$qwen8b_overlay/rpa_kernel_p66.py"
     cp "$qwen1p7b_overlay/rpa_kernel_p66.py" \
       /usr/local/lib/python3.12/site-packages/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py
+    XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+      PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
+        canon-zero-tim/tests/p59_backward/probe_p59_local_projection_context.py
+    XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+      PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
+        canon-zero-tim/tests/p59_backward/probe_p59_local_attention_context.py
     XLA_FLAGS=--xla_force_host_platform_device_count=8 \
       PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
         canon-zero-tim/tests/p59_backward/probe_tp4_installed_shim_composition.py
@@ -95,5 +101,5 @@ $docker run --rm \
       PYTHONPATH="$qwen8b_overlay:/workspace" python3 \
         canon-zero-tim/tests/p59_backward/probe_tp4_installed_attention_composition.py
 
-    echo "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 p66_unit_data_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x37/37"
+    echo "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 local_projection_context=1 local_attention_context=1 p66_unit_data_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP1xTP4,DP2xTP2,DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x37/37"
   '

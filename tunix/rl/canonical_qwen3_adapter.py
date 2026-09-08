@@ -240,6 +240,42 @@ def _p66_tp4_arm() -> str:
   ) else ""
 
 
+_P59_SINGLETON_DATA_WORKLOADS = frozenset((
+    "frozenlake-p45-onehost-dp1-tp4",
+    "frozenlake-m15-onehost-dp1-tp4",
+))
+
+
+def _p59_unit_data_admitted(*, data_size: int, tp_size: int) -> bool:
+  """Admits only certified unit-DP TP4 mappings.
+
+  P66 owns its diagnostic DP1xTP4 arms, including the deliberately unchecked
+  controls.  The two FrozenLake one-host carriers are production treatments:
+  they may use the same singleton mapped program only with checked VMA still
+  enabled.  Every other unit-data workload remains rejected.
+  """
+  data_size = int(data_size)
+  tp_size = int(tp_size)
+  if (data_size, tp_size) != (1, 4):
+    return False
+  if _p66_tp4_arm() in (
+      "tp4-p59-old",
+      "tp4-p59",
+      "tp4-gather-off",
+      "tp4-vma-oracle",
+  ):
+    return True
+  workload = os.environ.get("CANON_P32_WORKLOAD", "")
+  if workload not in _P59_SINGLETON_DATA_WORKLOADS:
+    return False
+  if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+    raise FunctionalMappingError(
+        "FrozenLake DP1xTP4 singleton P59 requires "
+        "CANON_P66_P59_CHECK_VMA=1"
+    )
+  return True
+
+
 def _p71_scan_mode() -> str:
   """Returns the CANON_P71_SCAN mode for the grouped reverse pass.
 
@@ -4779,18 +4815,11 @@ class _P28SegmentedEngineForward:
     aligned_args = tuple(
         _p59_align_to_mesh(value, mesh, module_name) for value in args
     )
-    p66_unit_data = (
-        int(mesh.shape[data_axis]) == 1
-        and int(mesh.shape[model_axis]) == 4
-        and _p66_tp4_arm()
-        in (
-            "tp4-p59-old",
-            "tp4-p59",
-            "tp4-gather-off",
-            "tp4-vma-oracle",
-        )
+    unit_data_admitted = _p59_unit_data_admitted(
+        data_size=int(mesh.shape[data_axis]),
+        tp_size=int(mesh.shape[model_axis]),
     )
-    if int(mesh.shape[data_axis]) <= 1 and not p66_unit_data:
+    if int(mesh.shape[data_axis]) <= 1 and not unit_data_admitted:
       raise FunctionalMappingError(
           f"{module_name} requires a multi-rank data mesh"
       )
@@ -9806,18 +9835,11 @@ class Qwen3EngineForwardAdapter:
       )
     p66_arm = _p66_tp4_arm()
     p66_oracle = p66_arm == "tp4-vma-oracle"
-    p66_unit_data = (
-        self._data_size == 1
-        and self._tp_size == 4
-        and p66_arm
-        in (
-            "tp4-p59-old",
-            "tp4-p59",
-            "tp4-gather-off",
-            "tp4-vma-oracle",
-        )
+    unit_data_admitted = _p59_unit_data_admitted(
+        data_size=self._data_size,
+        tp_size=self._tp_size,
     )
-    if rank_parallel and self._data_size <= 1 and not p66_unit_data:
+    if rank_parallel and self._data_size <= 1 and not unit_data_admitted:
       raise FunctionalMappingError(
           "P59 rank-parallel backward requires more than one DP rank"
       )
@@ -10855,6 +10877,17 @@ class Qwen3EngineForwardAdapter:
           f"[P66.TP4] admission arm={p66_tp4_arm} topology=DP1xTP4 "
           "global_trajectories=16 local_M=256 global_M=256 "
           "reverse_groups=1/16 optimizer_commits=0",
+          flush=True,
+      )
+    elif (
+        rank_parallel_backward
+        and _p59_unit_data_admitted(
+            data_size=contract.dp_size, tp_size=contract.tp_size
+        )
+    ):
+      print(
+          "[P59.DP1] singleton_data_admission topology=DP1xTP4 "
+          f"workload={workload.name} checked_vma=1 host_transfers=0",
           flush=True,
       )
     p59_xprof_directory = _p59_xprof_backward_directory(

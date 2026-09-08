@@ -47,7 +47,10 @@ def p67_p59_vma_context(jax) -> bool:
     return (
         axis_types.get("data") is jax.sharding.AxisType.Manual
         and axis_types.get("model") is jax.sharding.AxisType.Manual
-        and int(context.shape["data"]) > 1
+        # The exact FrozenLake singleton P59 carrier keeps a manual data
+        # axis even though its size is one.  Output VMA metadata is still
+        # mandatory for the outer checked shard_map in that geometry.
+        and int(context.shape["data"]) >= 1
         and int(context.shape["model"]) > 1
     )
 

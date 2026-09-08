@@ -47,22 +47,15 @@ def _p59_local_tp_context() -> bool:
         )
     data_size = int(context.shape["data"])
     model_size = int(context.shape["model"])
-    p66_unit_data = (
-        data_size == 1
-        and model_size == 4
-        and os.environ.get("CANON_P66_BACKWARD_ARM", "")
-        in (
-            "tp4-p59-old",
-            "tp4-p59",
-            "tp4-gather-off",
-            "tp4-vma-oracle",
-        )
-    )
+    # The adapter owns workload admission, including the exact checked-VMA
+    # singleton carrier.  This shim only verifies that P59's live manual map
+    # is the same topology as the engine; a size-one data axis is still a
+    # valid manual axis and must not depend on a diagnostic P66 selector.
     if (
-        (data_size <= 1 and not p66_unit_data)
+        data_size < 1
         or model_size <= 1
-        or int(context.shape["data"]) != int(mesh.shape["data"])
-        or int(context.shape["model"]) != int(mesh.shape["model"])
+        or data_size != int(mesh.shape["data"])
+        or model_size != int(mesh.shape["model"])
     ):
         raise RuntimeError(
             "P59 local projection context and engine topology differ"

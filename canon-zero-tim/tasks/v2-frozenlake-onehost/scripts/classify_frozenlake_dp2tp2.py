@@ -57,6 +57,11 @@ _P59_LAYER_PROGRAM_REUSE_RE = re.compile(
     r"host_transfers=(\d+)$",
     re.MULTILINE,
 )
+_P59_SINGLETON_DATA_RE = re.compile(
+    r"^\[P59\.DP1\] singleton_data_admission topology=DP1xTP4 "
+    r"workload=(\S+) checked_vma=(\d+) host_transfers=(\d+)$",
+    re.MULTILINE,
+)
 _KNOWN_POST_TRAINING_FINALIZER_RE = re.compile(
     r"Exception ignored in: <finalize object at 0x[0-9a-f]+; dead>\n"
     r"Traceback \(most recent call last\):\n"
@@ -1041,17 +1046,24 @@ def classify(
       tuple(int(field) for field in match)
       for match in _P59_LAYER_PROGRAM_REUSE_RE.findall(raw)
   ]
-  expected_layer_program_reuse_receipts = (
-      [(1, 36, 1, 1, 1, int(geometry_spec["checked_vma"]), 0)]
-      if dp_size > 1
-      else []
-  )
+  expected_layer_program_reuse_receipts = [(
+      1, 36, 1, 1, 1, int(geometry_spec["checked_vma"]), 0
+  )]
   require(
       layer_program_reuse_receipts
       == expected_layer_program_reuse_receipts,
       "p59_layer_program_reuse_receipts="
       f"{layer_program_reuse_receipts};"
       f"expected={expected_layer_program_reuse_receipts}",
+  )
+  singleton_data_receipts = _P59_SINGLETON_DATA_RE.findall(raw)
+  expected_singleton_data_receipts = (
+      [(workload_name, "1", "0")] if geometry == "dp1-tp4" else []
+  )
+  require(
+      singleton_data_receipts == expected_singleton_data_receipts,
+      "p59_singleton_data_receipts="
+      f"{singleton_data_receipts};expected={expected_singleton_data_receipts}",
   )
   p70_tree_start_donation_receipts = raw.count(_P70_TREE_START_DONATION)
   require(
@@ -1612,6 +1624,7 @@ def classify(
       "receipts": {
           "p66_outer_check_enabled": p66_receipts,
           "p59_layer_program_reuse": layer_program_reuse_receipts,
+          "p59_singleton_data_admission": singleton_data_receipts,
           "p70_tree_start_donation": p70_tree_start_donation_receipts,
           "deterministic_rollout_seed": seed_receipt,
           "disabled_local_wandb": disabled_wandb_receipt,

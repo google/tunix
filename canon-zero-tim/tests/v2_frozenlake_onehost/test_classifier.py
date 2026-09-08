@@ -227,14 +227,18 @@ def _retarget_r1_fixture(root: Path, *, workload: str, geometry: str) -> None:
       "max_local_bytes=2147483648 peak_local_bytes=2130875392 "
       "total_local_bytes=16382087168"
   )
-  if dp_size > 1:
-    forward_lines.append(
-        "[P59.LAYER_PROGRAM_REUSE] enabled=1 layers=36 "
-        "static_keys=1 mapped_programs=1 logical_calls_per_layer=1 "
-        f"checked_vma={int(geometry_spec['checked_vma'])} host_transfers=0"
-    )
+  forward_lines.append(
+      "[P59.LAYER_PROGRAM_REUSE] enabled=1 layers=36 "
+      "static_keys=1 mapped_programs=1 logical_calls_per_layer=1 "
+      f"checked_vma={int(geometry_spec['checked_vma'])} host_transfers=0"
+  )
   if geometry_spec["checked_vma"]:
     forward_lines.append("[P66.VMA] outer_check_enabled program=test")
+  if dp_size == 1:
+    forward_lines.append(
+        "[P59.DP1] singleton_data_admission topology=DP1xTP4 "
+        f"workload={manifest['workload_name']} checked_vma=1 host_transfers=0"
+    )
   if geometry_spec["segmented_actor_logps"][workload] == "1":
     forward_lines.append(
         "[P78.ACTOR_LOGPS] segmented_engine_ready "
@@ -681,7 +685,48 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         self.assertEqual(
             result["receipts"]["p66_outer_check_enabled"], expected_vma
         )
+        self.assertEqual(
+            result["receipts"]["p59_singleton_data_admission"],
+            [(
+                "frozenlake-p45-onehost-dp1-tp4", "1", "0"
+            )] if geometry == "dp1-tp4" else [],
+        )
         self.assertTrue(result["gradient"]["anchor_exact"])
+
+  def test_dp1_singleton_p59_receipt_fails_closed(self):
+    exact = (
+        "[P59.DP1] singleton_data_admission topology=DP1xTP4 "
+        "workload=frozenlake-p45-onehost-dp1-tp4 "
+        "checked_vma=1 host_transfers=0"
+    )
+    replacements = {
+        "missing": "",
+        "wrong-workload": exact.replace("frozenlake-p45", "frozenlake-m15"),
+        "vma-off": exact.replace("checked_vma=1", "checked_vma=0"),
+        "host-transfer": exact.replace("host_transfers=0", "host_transfers=1"),
+        "duplicate": exact + "\n" + exact,
+    }
+    for name, replacement in replacements.items():
+      with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        anchor_path = self._fixture(root, arm="r1", workload="p45")
+        _retarget_r1_fixture(root, workload="p45", geometry="dp1-tp4")
+        raw_path = root / "raw.log"
+        raw = raw_path.read_text(encoding="utf-8")
+        raw_path.write_text(raw.replace(exact, replacement), encoding="utf-8")
+        result = classifier.classify(
+            root,
+            workload="p45",
+            geometry="dp1-tp4",
+            arm="r1",
+            docker_exit=0,
+            anchor_registry=anchor_path,
+        )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertTrue(any(
+          reason.startswith("p59_singleton_data_receipts=")
+          for reason in result["reasons"]
+      ))
 
   def test_matrix_geometry_negatives_fail_closed(self):
     with self.assertRaisesRegex(ValueError, "DP1 has no reduce-once arm"):
