@@ -59,14 +59,16 @@ def _import_vllm_sampler():
   return vllm_sampler
 
 
-def _chat_parser_for(model_id: str, tokenizer):
+def _chat_parser_for(
+    model_id: str, tokenizer: Any, *, enable_thinking: bool = False
+):
   """Selects the chat template parser by model family."""
   name = model_id.lower()
   for family, parser_cls in CHAT_PARSERS.items():
     if family in name:
-      return parser_cls(tokenizer, enable_thinking=False)
+      return parser_cls(tokenizer, enable_thinking=enable_thinking)
   return chat_parser_lib.DefaultChatTemplateParser(
-      tokenizer, enable_thinking=False
+      tokenizer, enable_thinking=enable_thinking
   )
 
 
@@ -151,6 +153,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=int,
       default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "64")),
       help="Maximum concurrent trajectory collections inside this worker.",
+  )
+  parser.add_argument(
+      "--enable_thinking",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help="Enable the model family's thinking chat-template mode.",
   )
 
   parser.add_argument(
@@ -239,7 +247,11 @@ def _create_vanilla_worker(args, tokenizer):
   )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
+  chat_parser = _chat_parser_for(
+      args.model_id or args.model_name,
+      tokenizer,
+      enable_thinking=args.enable_thinking,
+  )
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
       config=config,
@@ -267,7 +279,11 @@ def _create_vllm_worker(args, tokenizer):
     )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
+  chat_parser = _chat_parser_for(
+      args.model_id or args.model_name,
+      tokenizer,
+      enable_thinking=args.enable_thinking,
+  )
   logging.info("Creating RolloutWorker wrapper...")
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,

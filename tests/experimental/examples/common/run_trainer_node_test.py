@@ -440,6 +440,12 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.mesh_tp, 1)
     self.assertEqual(args.checkpoint_save_interval_steps, 1)
     self.assertEqual(args.checkpoint_max_to_keep, 10)
+    self.assertEqual(args.mini_batch_size, 1)
+    self.assertEqual(args.num_generations, 1)
+    self.assertEqual(args.adam_b1, 0.9)
+    self.assertEqual(args.adam_b2, 0.999)
+    self.assertEqual(args.weight_decay, 1.0e-4)
+    self.assertIsNone(args.max_grad_norm)
     self.assertFalse(args.use_lora)
 
     custom_argv = [
@@ -464,6 +470,18 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "32",
         "--lora_alpha",
         "64.0",
+        "--adam_b2",
+        "0.99",
+        "--weight_decay",
+        "0.01",
+        "--max_grad_norm",
+        "1.0",
+        "--mini_batch_size",
+        "2",
+        "--num_generations",
+        "8",
+        "--train_micro_batch_size",
+        "4",
     ]
     args_custom = run_trainer_node._parse_args(custom_argv)
     self.assertEqual(args_custom.port, 20050)
@@ -477,6 +495,79 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertTrue(args_custom.use_lora)
     self.assertEqual(args_custom.lora_rank, 32)
     self.assertEqual(args_custom.lora_alpha, 64.0)
+    self.assertEqual(args_custom.adam_b2, 0.99)
+    self.assertEqual(args_custom.weight_decay, 0.01)
+    self.assertEqual(args_custom.max_grad_norm, 1.0)
+    self.assertEqual(args_custom.mini_batch_size, 2)
+    self.assertEqual(args_custom.num_generations, 8)
+    self.assertEqual(args_custom.train_micro_batch_size, 4)
+
+  def test_gradient_accumulation_uses_prompt_level_mini_batch(self):
+    # pylint: disable=protected-access
+    args = run_trainer_node._parse_args(
+        [
+            "--mini_batch_size=2",
+            "--num_generations=8",
+            "--train_micro_batch_size=4",
+        ]
+    )
+
+    steps = run_trainer_node._gradient_accumulation_steps(args)
+    # pylint: enable=protected-access
+
+    self.assertEqual(steps, 4)
+
+  def test_gradient_accumulation_requires_exact_divisibility(self):
+    # pylint: disable=protected-access
+    args = run_trainer_node._parse_args(
+        [
+            "--mini_batch_size=2",
+            "--num_generations=3",
+            "--train_micro_batch_size=4",
+        ]
+    )
+
+    with self.assertRaisesRegex(ValueError, "must be divisible"):
+      run_trainer_node._gradient_accumulation_steps(args)
+    # pylint: enable=protected-access
+
+  def test_build_optimizer_applies_adamw_and_gradient_clipping(self):
+    args = run_trainer_node._parse_args(  # pylint: disable=protected-access
+        [
+            "--learning_rate=1e-6",
+            "--adam_b1=0.9",
+            "--adam_b2=0.99",
+            "--weight_decay=0.01",
+            "--max_grad_norm=1.0",
+        ]
+    )
+    adamw = object()
+    clipped = object()
+    chained = object()
+    with mock.patch.object(
+        run_trainer_node.optax, "adamw", return_value=adamw
+    ) as mock_adamw:
+      with mock.patch.object(
+          run_trainer_node.optax,
+          "clip_by_global_norm",
+          return_value=clipped,
+      ) as mock_clip:
+        with mock.patch.object(
+            run_trainer_node.optax, "chain", return_value=chained
+        ) as mock_chain:
+          # pylint: disable=protected-access
+          optimizer = run_trainer_node._build_optimizer(args)
+          # pylint: enable=protected-access
+
+    self.assertIs(optimizer, chained)
+    mock_adamw.assert_called_once_with(
+        learning_rate=1e-6,
+        b1=0.9,
+        b2=0.99,
+        weight_decay=0.01,
+    )
+    mock_clip.assert_called_once_with(1.0)
+    mock_chain.assert_called_once_with(clipped, adamw)
 
   def test_create_mesh_validates_device_count(self):
     args = mock.MagicMock(mesh_fsdp=2, mesh_tp=2)
