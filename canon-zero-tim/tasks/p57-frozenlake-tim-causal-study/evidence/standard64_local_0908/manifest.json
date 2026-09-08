@@ -1,0 +1,159 @@
+{
+  "schema": "p57-standard64-local-admission-v1",
+  "base": "06a0fdb99897d3d50a2f6443e990ce753936f1ee",
+  "branch": "local/fl-standard64-0908",
+  "release_sha": null,
+  "uncommitted": true,
+  "local_image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "image_id_is_registry_digest": false,
+  "TPU_launched": false,
+  "claimed_level": "host and CPU pinned-image admission only",
+  "passed": {
+    "p57_host": 263,
+    "v1_host": 108,
+    "flag_audit": 439,
+    "standard_source_math_renderer": 13,
+    "actual_learner_mocked_logps": 1,
+    "complete_pinned_image": "P45_EXACT_IMAGE_CPU_PASS",
+    "final_focused_pinned_image": 11
+  },
+  "unchanged": [
+    "canon-zero-tim/cluster/jobset-64chip.yaml",
+    "tunix/rl/algo_core.py",
+    "canon-zero-tim/src/engine_shims",
+    "canon-zero-tim/MANIFEST.sha256"
+  ],
+  "test_scope": "Stock/precomputed loss source slices; complete learner method with mocked logps; no real Qwen TPU VJP or convergence.",
+  "program_and_gate_files": [
+    {
+      "sha256": "50b7d54b5b0827f69dbe9cb1e3d4c4a3c9871ec334781d6cae0812442bc3fd54",
+      "path": "canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env"
+    },
+    {
+      "sha256": "b3519f1aed1b5c68c6b899808e634b8165abda971dad7b9a138c8911cb614b32",
+      "path": "canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+    },
+    {
+      "sha256": "48aac4d7a99903a36c00baff0aa965bc22dc0f09a6e81c2f2a1004e9e519e08d",
+      "path": "canon-zero-tim/cluster/render_p57_frozenlake_tim.py"
+    },
+    {
+      "sha256": "75fe90b4a8af6ac4b16de9e97ba9758ad51bfd22098b79672a29008d0256a6b2",
+      "path": "canon-zero-tim/cluster/steps/00_env.sh"
+    },
+    {
+      "sha256": "74258b6401e2d782c0090df6036d3e5c3788b643a3251a0e5e5120d25b369f7c",
+      "path": "canon-zero-tim/cluster/steps/90_run.sh"
+    },
+    {
+      "sha256": "e2630e8087125141e442d01d858462fb98f5b39a9034a0507063e9b566e4f514",
+      "path": "canon-zero-tim/cluster/steps/p57_runtime_contract.sh"
+    },
+    {
+      "sha256": "3183be7666007444da70323d0371516e70458cc2fd6bd19a034a0238aa486c53",
+      "path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_checkpoint_eval.py"
+    },
+    {
+      "sha256": "7c92bdff1c75ffb548b38b8e5a4950bd423eea14dddaca4a5ced02edcf2de032",
+      "path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_standard_receipts.py"
+    },
+    {
+      "sha256": "3c780c20acae6c3bd1accfbc830d1120bc8a8a710efbe7e6e700b41fd04fdf99",
+      "path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_stock_discovery.py"
+    },
+    {
+      "sha256": "b5253bffc58724d15610e5c4e8758d8f9efce9b73b9e69aec732b723db669b88",
+      "path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh"
+    },
+    {
+      "sha256": "b791c9c45e6a9b3caff85ddf0348c11e187a6a9ec3fb68488c873fe821e5d3ff",
+      "path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_three_arm_manifests.py"
+    },
+    {
+      "sha256": "fad5b9aefd22d3c94ea3c36dd389c3e278ac24490755d9a02ccf384d78c61c0e",
+      "path": "canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh"
+    },
+    {
+      "sha256": "761fd5c7637f0e14c3d105fcef7c160f0e91daa9895127e02bccb7cfd701d091",
+      "path": "canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh"
+    },
+    {
+      "sha256": "40afb3264e96e92d0a07ab89f280ee9fcdefcdb502657e9222bc8df5e1f2ab31",
+      "path": "canon-zero-tim/tests/p57_frozenlake_tim/test_provenance_derivation.py"
+    },
+    {
+      "sha256": "a7c6a30e4d4f4a88708d2c0e20075f866abb15b8396d3e9282dbb40c67cfcbca",
+      "path": "canon-zero-tim/tests/p57_frozenlake_tim/test_standard.py"
+    },
+    {
+      "sha256": "0152617fabe601f444ccf8357c5b15405480d6e311c1d400c2d205b34cbb096d",
+      "path": "canon-zero-tim/tests/p57_frozenlake_tim/test_stock_fast_contract.py"
+    },
+    {
+      "sha256": "3d60d9f4cbdbef83afb0b16b424bf7b5a35f02c776d4351c2bfd3eff08867f61",
+      "path": "examples/frozenlake/train_frozenlake_qwen3.py"
+    },
+    {
+      "sha256": "a70b57dd73b7f028a5943eba0b07b8805e7f6c6c6c07d2cf6d5fbde9a2a8e7ff",
+      "path": "tests/rl/agentic/agentic_grpo_learner_test.py"
+    },
+    {
+      "sha256": "1a9d141eb4650087562e42f1f999b0733faec41913d90ceeb4fc5c5d237c8d8b",
+      "path": "tunix/rl/agentic/agentic_grpo_learner.py"
+    },
+    {
+      "sha256": "48e94c4dd32c3451a7005e75053a7db53c87e321270bdbdc8cf3397fd2a0d833",
+      "path": "tunix/rl/alignment.py"
+    },
+    {
+      "sha256": "70cd9770e8ca0f0470f56aac2e18aca7560daedce393527676efcb4cb820a744",
+      "path": "tunix/rl/dp_workloads.py"
+    },
+    {
+      "sha256": "8b60b5c236604f0d40a7baf32870f219ad10b7fcec8990f82c4ec1a93e400b13",
+      "path": "tunix/rl/frozenlake_checkpoint.py"
+    }
+  ],
+  "raw_logs": [
+    {
+      "sha256": "b7d240afa0d607fca1e6c73189e09523306dbc60c632a362ad37d93769429f2f",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_host_r1.log"
+    },
+    {
+      "sha256": "4fdffe36d12d27c9b693ff0cd487172b2039fdde94300c4df78ec088a334cede",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_host_r2.log"
+    },
+    {
+      "sha256": "fcda5f4c91f2a61585c35464aeaf5a95b7aebc77136521a9dd1b88f08e2b66c2",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_host_r3.log"
+    },
+    {
+      "sha256": "b0424cd1b1ad51c402b7a45c1155a09429984a02c2a6d625acc972a4e4a29997",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_v1_r1.log"
+    },
+    {
+      "sha256": "0590fbe02743ee446dfb87fcb1f4bd568a2c3bc1e958e2f5cc2e513180771c99",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_exact_image_r1.log"
+    },
+    {
+      "sha256": "52d97dffa2f37ce2b391a02b0f8eb161c8df1393aced5ab0fe099ab722ec6f18",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_exact_image_r2.log"
+    },
+    {
+      "sha256": "ed6cdd4a84707f13a7f8ff6ef12ebc7e5d2334000504d91239e263556339c949",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_learner_r3.log"
+    },
+    {
+      "sha256": "7fd8558b3ea96ff0a053918a3a9c659cd7e0452542362fa9512b9b4a33aa43af",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_exact_image_r4.log"
+    },
+    {
+      "sha256": "4333e803bd34020fb94a938fa7ac39b28c8da5c13e39e4403ffe66ea2bea9d1f",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_final_focused_image_r5.log"
+    },
+    {
+      "sha256": "6b49fd1c7bae151a2edda03883228d6524234f45c83c5ebecec57b8167fc354d",
+      "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/standard64_flags_r2.log"
+    }
+  ]
+}

@@ -1,5 +1,10 @@
 # P57 300-update FrozenLake runbook
 
+For the new Native64 **trainer-old/no-TIS** baseline, use
+[STANDARD64.md](STANDARD64.md), `wave=standard`. Existing `wave=native` remains
+rollout-old/Bypass. The new instructions do not supersede existing Zero or TiTO
+routes and do not authorize a launch. Reuse the collector section below.
+
 This runbook is the authoritative operator procedure for the two-workload,
 three-treatment concept study. It renders JobSets but never applies them.
 Every `kubectl apply`, commit, and push requires separate user approval. Never

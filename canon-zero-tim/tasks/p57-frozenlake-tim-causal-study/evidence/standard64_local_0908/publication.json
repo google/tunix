@@ -1,0 +1,77 @@
+{
+  "schema": "p57-standard64-committed-admission-v1",
+  "published_base": "069010dd2a6ecf7fdb000a2cec186c8b1fa94d4f",
+  "admission_repair_commit": "b7828eeff2c038ba02b29dcf6fc83f6291588f32",
+  "standard_code_commit": "48b7dc69ddd3eef93a3f304086da9523b79a5e32",
+  "standard_code_tree": "2649c24aaa4f6e6c8b1e254ffa470e8f3664de3f",
+  "ledger_commit": "containing commit (self-reference excluded)",
+  "user_approved_actions": [
+    "commit",
+    "fast-forward push"
+  ],
+  "target_launched": false,
+  "claimed_level": "host and CPU pinned-image admission only",
+  "local_image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "image_id_is_registry_digest": false,
+  "original_manifest": {
+    "path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/evidence/standard64_local_0908/manifest.json",
+    "sha256": "1a0f5502aaafb598667603f297ff2d28e4b2670943687ebce32a145eec6f72c5",
+    "preserved_unmodified": true
+  },
+  "program_and_gate_files_verified": 22,
+  "original_raw_logs_verified": 10,
+  "rebase_difference": {
+    "before_code_commit": "c0b5e7fd9b4f6b61abf74c3a26e0cd6e1f482c17",
+    "after_code_commit": "48b7dc69ddd3eef93a3f304086da9523b79a5e32",
+    "paths": [
+      "debug_logs/full_train_perf_20260908/PERF_ANALYSIS.md",
+      "debug_logs/full_train_perf_20260908/SHA256SUMS",
+      "debug_logs/full_train_perf_20260908/frozenlake_m15_zero_r10.log",
+      "debug_logs/full_train_perf_20260908/frozenlake_p45_zero_r10a.log",
+      "debug_logs/full_train_perf_20260908/wandb_data/3osny0pb_canon-p57-fl-zero-m15-r10-06a0fdb9/config.yaml",
+      "debug_logs/full_train_perf_20260908/wandb_data/3osny0pb_canon-p57-fl-zero-m15-r10-06a0fdb9/history.csv",
+      "debug_logs/full_train_perf_20260908/wandb_data/3osny0pb_canon-p57-fl-zero-m15-r10-06a0fdb9/history.jsonl",
+      "debug_logs/full_train_perf_20260908/wandb_data/3osny0pb_canon-p57-fl-zero-m15-r10-06a0fdb9/summary.json",
+      "debug_logs/full_train_perf_20260908/wandb_data/ablation_summary.csv",
+      "debug_logs/full_train_perf_20260908/wandb_data/ablation_summary.md",
+      "debug_logs/full_train_perf_20260908/wandb_data/tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9/config.yaml",
+      "debug_logs/full_train_perf_20260908/wandb_data/tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9/history.csv",
+      "debug_logs/full_train_perf_20260908/wandb_data/tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9/history.jsonl",
+      "debug_logs/full_train_perf_20260908/wandb_data/tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9/summary.json"
+    ],
+    "only_upstream_log_evidence": true,
+    "all_other_tracked_blobs_equal": true,
+    "non_upstream_log_tree_sha256": "6f02fa8033b81416cc25ddaeb68eb909edeb62ce6acedb23ed9d80d864b469e6"
+  },
+  "unchanged_paths": [
+    "canon-zero-tim/cluster/jobset-64chip.yaml",
+    "tunix/rl/algo_core.py",
+    "canon-zero-tim/src/engine_shims",
+    "canon-zero-tim/MANIFEST.sha256"
+  ],
+  "no_TPU_rerun_reason": "No kernel or mesh change; 22 tested program/gate blobs and all other non-upstream-log tracked blobs equal across rebase. Full CPU image and final focused image receipts preserved. No TPU certification inherited.",
+  "post_rebase_gates": {
+    "p57_host": 263,
+    "v1_host": 108,
+    "flag_audit": 439,
+    "clean_preflight": "PASS before docs-only final audit amendment",
+    "raw_logs": [
+      {
+        "sha256": "394833a2e41e0c0c3e326c0ab6721b06625628286624a9a60861a946a1fe8e4a",
+        "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/publication_p57_r1.log"
+      },
+      {
+        "sha256": "b29facd8c700ad085c878743f244fd784f0dc88fbf76fd4c21340929b330a4e2",
+        "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/publication_v1_r1.log"
+      },
+      {
+        "sha256": "6b49fd1c7bae151a2edda03883228d6524234f45c83c5ebecec57b8167fc354d",
+        "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/publication_flags_r1.log"
+      },
+      {
+        "sha256": "a2eb9f93765fc390c32bb8fcc2881a22b6c57bf3eb9d7d47eecf2c9af0e92587",
+        "path": "/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/publication_clean_preflight_r1.log"
+      }
+    ]
+  }
+}

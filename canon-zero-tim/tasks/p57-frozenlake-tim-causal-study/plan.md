@@ -1,5 +1,15 @@
 # Plan
 
+## 2026-09-08 Standard baseline extension
+
+The user approved preparing a new Native64 trainer-old/no-TIS control, reusing
+the P57 runner. Source selection and local admission are complete; target is not.
+See [STANDARD64.md](STANDARD64.md) for the exact recipe, release boundary and
+operator commands, and [manifest](evidence/standard64_local_0908/manifest.json)
+for evidence. No old Native/Bypass curve is relabelled and the historical study
+below is preserved. This three-CL publication was approved on 2026-09-08;
+TPU/Kubernetes and future publication actions still require fresh approval.
+
 ## Outcome
 
 Estimate the functional and systems effects of trainer-inference mismatch on

@@ -1,5 +1,23 @@
 # P57 300-update execution handoff
 
+## 2026-09-08 — new Native64 trainer-old/no-TIS baseline
+
+For the newly requested comparison use [STANDARD64.md](STANDARD64.md): existing
+Native P45/M15 64-chip wrapper, explicit `wave=standard`, frozen trainer-old and
+no TIS weights. Existing `native` still means rollout-old/Bypass; do not relabel
+old experiments. Native tokenization/eval/checkpoint and YAML scheduling are
+retained. The optimized Zero route below is **not** the new baseline route.
+
+Implementation: `local/fl-standard64-0908`, originally tested on `06a0fdb9`,
+with this three-CL publication approved onto evidence-only base `069010dd`.
+The release audit binds committed code to the tested files. No TPU/Kubernetes
+launch is authorized or performed. Follow the linked clean published-SHA
+render/collector/approval/full/postflight instructions. EVIDENCE.md records
+local gates; a host or pinned-image PASS is never a target PASS.
+Code CLs: admission `b7828eef`, Standard `48b7dc69`; the following ledger CL
+contains [publication audit](evidence/standard64_local_0908/publication.json).
+Use the published full SHA that includes the ledger, not either code CL alone.
+
 ## START HERE — optimized Zero references use the P74-enabled two-full wrapper
 
 For the next strict Zero P45 and M15/main full references, do not use the

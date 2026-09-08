@@ -1,5 +1,16 @@
 # State
 
+## 2026-09-08 active extension — Standard Native64
+
+- Implemented on `local/fl-standard64-0908`, originally tested on published base `06a0fdb9`; this three-CL publication is approved onto newer evidence-only base `069010dd`. Target remains unapproved.
+- New opt-in Standard keeps rollout evidence but uses frozen trainer-old with no TIS. Legacy Native/IS/Zero and worker scheduling unchanged; inherited P78-off admission gap repaired.
+- Local gates PASS: P57 263/263, V1 108/108, flags 439/439, full CPU pinned image and 11/11 final focused image checks. Real learner method uses mocked model logps; no real TPU backward/convergence claim.
+- Operator procedure: [STANDARD64.md](STANDARD64.md); evidence: [manifest](evidence/standard64_local_0908/manifest.json), 22 program/gate hashes and 10 raw logs including failed intermediate gates.
+- Committed code: admission `b7828eeff2c038ba02b29dcf6fc83f6291588f32`, Standard `48b7dc69ddd3eef93a3f304086da9523b79a5e32`. [Publication audit](evidence/standard64_local_0908/publication.json) proves all 22 hashes still match; post-rebase P57 263/263, V1 108/108 and flags439/439 PASS.
+- Next: publication readback → clean published SHA/image/identity freeze → separately approved P45/M15 full. Target NOT RUN. Do not use dirty test manifests. Future commits/pushes also require new approval.
+
+## Previous step-boundary campaign (historical; does not certify Standard)
+
 - Status: G4 passed; source CL `ec9884e9` prepared for publication
 - Objective: measure native/no-IS, native/token-IS, and complete zero-TIM/no-IS on both the original P45 FrozenLake workload and frozen M15 using signed 300-update training and seven-point rollout-only held-out curves.
 - Definition of done: all six cells pass local/target arm receipts, complete 300 updates and exact evaluations at `0,50,100,150,200,250,300`, and produce within-workload `is-mismatch`, `zero-mismatch`, and `zero-is` contrasts under the registered claim ceiling.
