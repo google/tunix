@@ -211,14 +211,13 @@ class PrewarmDatasetIterator:
     self.next_batch = None
     self.prev_batch_images: list[str] = []
 
-    # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
+    # 1. Prime Slot 1 (Current Batch - pre-warming in background)
     try:
       self.current_batch = next(self.dataset_iter)
       logging.info(
-          "[PrewarmDatasetIterator] Warming initial batch on K8s and waiting"
-          " for pods to be ready..."
+          "[PrewarmDatasetIterator] Warming initial batch on K8s in background..."
       )
-      self._warm_batch(self.current_batch, wait=True)
+      self._warm_batch(self.current_batch, wait=False)
     except StopIteration:
       pass
 
