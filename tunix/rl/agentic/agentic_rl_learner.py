@@ -1819,9 +1819,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             flush=True,
         )
 
+    # tasks/v2_integrate B.1c: the no-commit path below only measures each
+    # microbatch's norm, so a P61 capture keeps the commit path's accumulator
+    # arithmetic on the host (float32 scale, float32 add in microbatch order,
+    # the microbatch count as the denominator) for the gradient tree.
+    p61_no_commit_accumulator = None
+    p61_no_commit_denominator = 0.0
+
     def consume_scaled(index, gradients, multiplier, microbatches=1):
       nonlocal reduce_once_accumulator_adoption_pending
       nonlocal reduce_once_accumulator_adopted
+      nonlocal p61_no_commit_accumulator, p61_no_commit_denominator
 
       def accumulate_or_adopt():
         nonlocal reduce_once_accumulator_adoption_pending
@@ -1895,6 +1903,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for value in jax.tree.leaves(gradients)
           ))
           norm.block_until_ready()
+          if p61_capture_dir:
+            host_multiplier = np.float32(np.asarray(multiplier))
+            scaled = jax.tree.map(
+                lambda value: np.asarray(value, np.float32) * host_multiplier,
+                gradients,
+            )
+            if p61_no_commit_accumulator is None:
+              p61_no_commit_accumulator = scaled
+            else:
+              jax.tree.map(
+                  lambda acc, value: np.add(acc, value, out=acc),
+                  p61_no_commit_accumulator,
+                  scaled,
+              )
+            p61_no_commit_denominator += float(microbatches)
       else:
         norm = accumulate_or_adopt()
       micro_norms.append(norm)
@@ -2013,13 +2036,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         result, micro_norms
     )
     if p61_capture_dir and p33_no_commit:
-      # The no-commit path discards its accumulator below and returns before
-      # the commit path's capture point: take the update's gradient and the
-      # engine's per-token logps here (the commit path captures the same
-      # two trees after its precommit gate).
-      _p61_capture_tree(
-          p61_capture_dir, "gradient", actor_trainer.grad_accumulator.get()
-      )
+      # The no-commit path returns before the commit path's capture point.
+      # Its measuring-only arms never fill the trainer accumulator, so the
+      # gradient comes from the host accumulation kept in consume_scaled
+      # (scaled sum over microbatches divided by their count, the commit
+      # path's GradAccumulator.get arithmetic); the adopted (reduce-once)
+      # arms hold the reduced gradient in the trainer accumulator.
+      if p61_no_commit_accumulator is not None:
+        host_scale = np.float32(1.0 / max(p61_no_commit_denominator, 1.0))
+        gradient_tree = jax.tree.map(
+            lambda acc: acc * host_scale, p61_no_commit_accumulator
+        )
+      else:
+        gradient_tree = actor_trainer.grad_accumulator.get()
+      _p61_capture_tree(p61_capture_dir, "gradient", gradient_tree)
       _p61_capture_tree(p61_capture_dir, "logps", result["per_token_logps"])
     if perf_log.enabled():
       value_and_grad_done = time.perf_counter()
