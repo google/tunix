@@ -132,3 +132,59 @@ class _AlgoDataclass:
   temperature: float = 1.0
   kl_loss_mode: str = "low_var_kl"
   kl_clamp_value: float | None = None
+
+
+import collections  # noqa: E402
+
+
+def _multi_turn_example_type(script):
+  """A FrozenLake-style example type: environment tokens sit inside the
+  completion span, valid for the forward (completion_valid_mask) but outside
+  the loss (completion_mask).  A namedtuple flattens with attribute keys, so
+  the capture carries the same ``.field`` leaf paths as the learner's example."""
+  return collections.namedtuple(
+      "_MultiTurnExample", list(script.EXAMPLE_FIELDS) + ["completion_valid_mask"],
+      defaults=(None,) * (len(script.EXAMPLE_FIELDS) + 1),
+  )
+
+
+def test_fp64_reference_forward_uses_the_validity_mask(tmp_path):
+  script = _load_script()
+  config = _tiny_config()
+  model = qwen3_model.Qwen3(config, rngs=nnx.Rngs(3))
+  base = _example()
+  valid = np.asarray(base.completion_mask)
+  holes = valid.copy()
+  holes[0, 2:4] = False  # row 0: two environment tokens inside a 6-token turn
+  multi_turn = _multi_turn_example_type(script)(
+      **{name: getattr(base, name) for name in script.EXAMPLE_FIELDS if name != "completion_mask"},
+      completion_mask=jnp.asarray(holes), completion_valid_mask=jnp.asarray(valid),
+  )
+  root = tmp_path / "multi_turn"
+  learner._p61_capture_tree(str(root), "model_before", nnx.state(model, nnx.Param))  # pylint: disable=protected-access
+  learner._p61_capture_tree(str(root), "example", multi_turn)  # pylint: disable=protected-access
+  learner._p61_write_algo_config(str(root), _AlgoDataclass(), pad_id=0, eos_id=2)  # pylint: disable=protected-access
+  graphdef, state = script.build_model(config, script.load_capture(root, "model_before"))
+  loaded = script.load_example(root)
+  assert np.array_equal(np.asarray(loaded.completion_mask), holes)
+  valid_mask = script.load_valid_mask(root)
+  assert valid_mask is not None and np.array_equal(np.asarray(valid_mask), valid)
+  algo, pad_id, eos_id = script.load_algo_config(root)
+  grad_fn = script.make_grad_fn(graphdef, algo, pad_id, eos_id)
+  # The forward under the validity mask is bitwise the forward of a row whose
+  # loss mask is the validity mask: environment tokens stay in the context.
+  (_, with_validity), _ = grad_fn(state, loaded, valid_mask)
+  (_, as_full_turn), _ = grad_fn(state, loaded.replace(completion_mask=jnp.asarray(valid)))
+  assert np.asarray(with_validity).tobytes() == np.asarray(as_full_turn).tobytes()
+  # Without it the loss mask doubles as validity and the tokens after the
+  # hole see a different context (the bug the 8B row-12 probe exposed).
+  (_, loss_mask_only), _ = grad_fn(state, loaded)
+  assert not np.allclose(np.asarray(loss_mask_only)[0, 4:6], np.asarray(with_validity)[0, 4:6])
+  # Trimming keeps the validity extent and returns the trimmed mask alongside.
+  row = script.example_rows(loaded, slice(0, 1))
+  trimmed, trimmed_valid = script.trim_example(row, pad_id, multiple=1, valid_mask=valid_mask[0:1])
+  assert trimmed.completion_mask.shape[1] == 6 and trimmed_valid.shape == (1, 6)
+  # A single-turn capture has no validity leaf.
+  single = tmp_path / "single_turn"
+  learner._p61_capture_tree(str(single), "example", base)  # pylint: disable=protected-access
+  assert script.load_valid_mask(single) is None
