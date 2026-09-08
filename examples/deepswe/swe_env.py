@@ -111,6 +111,7 @@ def _init_global_fleet(
     num_generations: int = 8,
     batch_size: int = 8,
     max_warmpool_replicas: int | None = None,
+    scaffold: str = "openhands",
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -144,6 +145,40 @@ def _init_global_fleet(
     effective_max_concurrent = max(
         max_concurrency, batch_size * num_generations * 2
     )
+
+    template = None
+    if scaffold == "openhands":
+      session_key = os.getenv("SANDBOX_SESSION_KEY", "")
+      template = TemplateSpec(
+          keepalive_command=[
+              "tini",
+              "--",
+              "/agent-server/.venv/bin/python",
+              "-m",
+              "openhands.agent_server",
+              "--host",
+              "0.0.0.0",
+              "--port",
+              "8000",
+          ],
+          extra_pod_spec={
+              "containers": [{
+                  "ports": [{"containerPort": 8000}],
+                  "readinessProbe": {
+                      "httpGet": {"path": "/health", "port": 8000},
+                      "periodSeconds": 2,
+                      "failureThreshold": 150,
+                  },
+                  "env": [
+                      {"name": "OH_SESSION_API_KEYS_0", "value": session_key}
+                  ]
+                  if session_key
+                  else [],
+              }]
+          },
+          node_selector=node_sel,
+      )
+
     fleet_cfg = FleetConfig(
         clusters=[
             ClusterConfig(
@@ -159,6 +194,7 @@ def _init_global_fleet(
         if max_warmpool_replicas is not None
         else num_generations,
         warm_per_task=True,
+        template=template,
     )
     fleet_inst = SandboxFleet(fleet_cfg)
     if tasks is not None:
@@ -430,6 +466,7 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env = None
+    self.workspace = None
     self.handle = None
     self.verbose = verbose
     self.scaffold = scaffold
@@ -450,19 +487,14 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["pair_index"] = pair_index
 
   def _initial_observation(self) -> Any:
-    if not self.env:
+    if not self.env and not self.workspace:
       if self.use_agent_sandbox:
         _patch_r2egym_for_agent_sandbox()
         from agent_sandbox_rl import Task  # pytype: disable=import-error
-        from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
-            make_fleet_repo_env,
-            r2egym_command_files,
-        )
 
         fleet = self.fleet or _get_global_fleet()
         msg = (
-            "[SWEEnv] Acquiring SandboxHandle from SandboxFleet and"
-            " constructing FleetRepoEnv!"
+            "[SWEEnv] Acquiring SandboxHandle from SandboxFleet!"
         )
         logging.info(msg)
         task = Task(
@@ -475,15 +507,23 @@ class SWEEnv(BaseTaskEnv):
             metadata={"ds": self.entry},
         )
         self.handle = fleet.acquire(task)
-        if self.scaffold == "r2egym":
-          cmd_files = r2egym_command_files()
-        elif self.scaffold == "sweagent":
-          cmd_files = SWEAGENT_COMMAND_FILES
-        elif self.scaffold == "openhands":
-          cmd_files = OPENHANDS_COMMAND_FILES
+        if self.scaffold == "openhands":
+          from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
+          self.workspace = make_handle_workspace(
+              self.handle, api_key=os.getenv("SANDBOX_SESSION_KEY")
+          )
         else:
-          cmd_files = r2egym_command_files()
-        self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
+          from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
+              make_fleet_repo_env,
+              r2egym_command_files,
+          )
+          if self.scaffold == "r2egym":
+            cmd_files = r2egym_command_files()
+          elif self.scaffold == "sweagent":
+            cmd_files = SWEAGENT_COMMAND_FILES
+          else:
+            cmd_files = r2egym_command_files()
+          self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
       else:
         # Initialize standard local Docker RepoEnv
         global EnvArgs, RepoEnv, Action
@@ -505,10 +545,19 @@ class SWEEnv(BaseTaskEnv):
         elif self.scaffold == "openhands":
           self.env.add_commands(OPENHANDS_COMMAND_FILES)
     else:
-      self.env.reset()
+      if self.env is not None:
+        self.env.reset()
 
-    self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
+    if self.env is not None:
+      self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
     self.total_steps = 0
+
+    if self.workspace is not None:
+      return str(
+          self.entry.get("problem_statement")
+          or self.entry.get("instruction")
+          or ""
+      )
 
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()  # pytype: disable=attribute-error
@@ -525,6 +574,23 @@ class SWEEnv(BaseTaskEnv):
     if not action_obj.function_name:
       return EnvStepResult(observation="", reward=0, done=False, info={})
 
+    if self.scaffold == "openhands" and self.workspace is not None:
+      # Parse bash / tool call
+      cmd = action_obj.parameters.get("command") or action_obj.parameters.get("cmd")
+      if action_obj.function_name in ("finish", "submit"):
+        return EnvStepResult(
+            observation="Task submitted.", reward=0, done=True, info={}
+        )
+
+      result = self.workspace.execute_command(cmd)
+      obs = (
+          result.stdout
+          if result.exit_code == 0
+          else f"{result.stdout}\n{result.stderr}"
+      )
+      self.total_steps += 1
+      return EnvStepResult(observation=obs, reward=0, done=False, info={})
+
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
       raise ValueError("Environment not initialized")
@@ -540,6 +606,13 @@ class SWEEnv(BaseTaskEnv):
     """Close the environment and clean up resources."""
     if self.env is not None:
       self.env.close()
+
+    if getattr(self, "workspace", None) is not None:
+      try:
+        self.workspace.cleanup()
+      except Exception as e:
+        logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
+      self.workspace = None
 
     fleet = self.fleet or _GLOBAL_FLEET
     if (

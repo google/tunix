@@ -769,6 +769,7 @@ if USE_AGENT_SANDBOX:
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
       max_warmpool_replicas=args.max_warmpool_replicas,
+      scaffold=args.scaffold,
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,
