@@ -111,6 +111,7 @@ def _init_global_fleet(
     num_generations: int = 8,
     batch_size: int = 8,
     max_warmpool_replicas: int | None = None,
+    scaffold: str = "openhands",
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -363,6 +364,13 @@ SWEAGENT_COMMAND_FILES = [
     os.path.join(R2EGYM_PATH, "agenthub/tools/submit.py"),
 ]
 
+OPENHANDS_COMMAND_FILES = [
+    os.path.join(R2EGYM_PATH, "agenthub/tools/str_replace_editor.py"),
+    os.path.join(R2EGYM_PATH, "agenthub/tools/execute_bash.py"),
+    os.path.join(R2EGYM_PATH, "agenthub/tools/finish.py"),
+    os.path.join(R2EGYM_PATH, "agenthub/tools/submit.py"),
+]
+
 
 def _unpack_entry(entry: dict) -> dict:
   """Utility to clean up and unpack the dataset entry."""
@@ -410,7 +418,7 @@ class SWEEnv(BaseTaskEnv):
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
         verbose: Verbose output toggle.
-        scaffold: Scaffold tool set ('r2egym' or 'sweagent').
+        scaffold: Scaffold tool set ('r2egym', 'sweagent', or 'openhands').
         max_steps: Maximum interaction steps.
         use_agent_sandbox: If True, strictly forces SandboxFleet and
           AgentSandboxRuntime.
@@ -432,7 +440,8 @@ class SWEEnv(BaseTaskEnv):
     assert scaffold in [
         "r2egym",
         "sweagent",
-    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+        "openhands",
+    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent', 'openhands']"
     super().__init__(max_steps=max_steps)
 
     if not hasattr(self, "extra_kwargs"):
@@ -467,8 +476,14 @@ class SWEEnv(BaseTaskEnv):
             metadata={"ds": self.entry},
         )
         self.handle = fleet.acquire(task)
-        # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
-        cmd_files = r2egym_command_files()
+        if self.scaffold == "r2egym":
+          cmd_files = r2egym_command_files()
+        elif self.scaffold == "sweagent":
+          cmd_files = SWEAGENT_COMMAND_FILES
+        elif self.scaffold == "openhands":
+          cmd_files = OPENHANDS_COMMAND_FILES
+        else:
+          cmd_files = r2egym_command_files()
         self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
       else:
         # Initialize standard local Docker RepoEnv
@@ -486,8 +501,10 @@ class SWEEnv(BaseTaskEnv):
         )
         if self.scaffold == "r2egym":
           self.env.add_commands(R2EGYM_COMMAND_FILES)
-        else:
+        elif self.scaffold == "sweagent":
           self.env.add_commands(SWEAGENT_COMMAND_FILES)
+        elif self.scaffold == "openhands":
+          self.env.add_commands(OPENHANDS_COMMAND_FILES)
     else:
       self.env.reset()
 

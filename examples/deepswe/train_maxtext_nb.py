@@ -349,6 +349,13 @@ parser.add_argument(
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="Logging level for the script and relevant libraries.",
 )
+parser.add_argument(
+    "--scaffold",
+    type=str,
+    default="openhands",
+    choices=["r2egym", "sweagent", "openhands"],
+    help="Agent scaffold/sandbox toolset to use ('r2egym', 'sweagent', or 'openhands').",
+)
 
 args, _ = parser.parse_known_args()
 
@@ -762,6 +769,7 @@ if USE_AGENT_SANDBOX:
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
       max_warmpool_replicas=args.max_warmpool_replicas,
+      scaffold=args.scaffold,
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,
@@ -1155,13 +1163,14 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine=rl_engine,
     reward_fns=None,
     agent_class=swe_agent.SWEAgent,
-    agent_kwargs={},
+    agent_kwargs={"scaffold": args.scaffold},
     env_class=swe_env.SWEEnv,
     env_kwargs={
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
         "verbose": True,
+        "scaffold": args.scaffold,
         "use_agent_sandbox": USE_AGENT_SANDBOX,
         "fleet": fleet,
     },
