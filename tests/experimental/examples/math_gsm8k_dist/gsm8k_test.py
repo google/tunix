@@ -48,7 +48,7 @@ class GSM8KTest(absltest.TestCase):
     obs, _ = env.reset()
     self.assertEqual(obs, {"prompts": "What is 2+2?"})
     next_obs, reward, done, info = env.step(
-        "2+2=4.</reasoning><answer>\\boxed{4}</answer>"
+        "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>"
     )
     self.assertEqual(next_obs["gold_answer"], "4")
     self.assertEqual(reward, 1.0)
@@ -56,9 +56,53 @@ class GSM8KTest(absltest.TestCase):
     self.assertTrue(info["correct"])
     self.assertTrue(info["format_correct"])
 
+  def test_format_parity_with_non_experimental_recipe(self):
+    """is_gsm8k_format_correct must match examples/math_gsm8k's predicate.
+
+    Reasoning is satisfied by <reasoning>..</reasoning> OR native <think>..
+    </think>; the answer by \\boxed OR <answer>..</answer>.
+    """
+    # Qwen-native shape: <think> reasoning + \boxed answer, no custom tags.
+    self.assertTrue(
+        gsm8k.is_gsm8k_format_correct(
+            "<think>2+2=4</think>The answer is \\boxed{4}"
+        )
+    )
+    # Explicit reasoning tags + <answer> block, no \boxed.
+    self.assertTrue(
+        gsm8k.is_gsm8k_format_correct(
+            "<reasoning>work</reasoning><answer>4</answer>"
+        )
+    )
+    # Answer present but no reasoning of either kind -> not format-correct.
+    self.assertFalse(gsm8k.is_gsm8k_format_correct("The answer is \\boxed{4}"))
+    # Reasoning present but no answer of either kind -> not format-correct.
+    self.assertFalse(
+        gsm8k.is_gsm8k_format_correct("<think>2+2=4</think> so it is four")
+    )
+
+  def test_extract_boxed_answer_falls_back_to_answer_block(self):
+    # No \boxed anywhere, but a non-empty <answer> block: use its contents.
+    self.assertEqual(
+        gsm8k.extract_boxed_answer("<answer>42</answer>"), "42"
+    )
+    # \boxed still wins when present.
+    self.assertEqual(
+        gsm8k.extract_boxed_answer("<answer>\\boxed{7}</answer>"), "7"
+    )
+
+  def test_think_and_boxed_scores_as_correct(self):
+    # The real Qwen thinking-mode shape end to end: format + answer -> 1.0.
+    reward, info = gsm8k.score_gsm8k_completion(
+        "<think>2+2=4</think>\\boxed{4}", "4"
+    )
+    self.assertEqual(reward, 1.0)
+    self.assertTrue(info["format_correct"])
+    self.assertTrue(info["answer_correct"])
+
   def test_scores_formatted_wrong_answer_with_format_reward(self):
     reward, info = gsm8k.score_gsm8k_completion(
-        "2+2=5.</reasoning><answer>\\boxed{5}</answer>", "4"
+        "<reasoning>2+2=5.</reasoning><answer>\\boxed{5}</answer>", "4"
     )
     self.assertEqual(reward, 0.1)
     self.assertTrue(info["format_correct"])
@@ -150,7 +194,7 @@ class GSM8KTest(absltest.TestCase):
     # 1. Format correct and answer correct -> reward 1.0
     item1 = types.SimpleNamespace(
         metadata={
-            "text": "Reasoning step.</reasoning><answer>\\boxed{42}</answer>",
+            "text": "<reasoning>Reasoning step.</reasoning><answer>\\boxed{42}</answer>",
             "gold_answer": "42",
             "prompt_id": "p1",
         }
@@ -160,7 +204,7 @@ class GSM8KTest(absltest.TestCase):
     # 2. Format correct, wrong answer -> reward 0.1
     item2 = types.SimpleNamespace(
         metadata={
-            "text": "Reasoning step.</reasoning><answer>\\boxed{100}</answer>",
+            "text": "<reasoning>Reasoning step.</reasoning><answer>\\boxed{100}</answer>",
             "gold_answer": "42",
             "prompt_id": "p2",
         }
@@ -190,7 +234,7 @@ class GSM8KTest(absltest.TestCase):
     # 5. Uses 'answer' key in metadata fallback
     item5 = types.SimpleNamespace(
         metadata={
-            "text": "Reasoning.</reasoning><answer>\\boxed{15}</answer>",
+            "text": "<reasoning>Reasoning.</reasoning><answer>\\boxed{15}</answer>",
             "answer": "15",
         }
     )

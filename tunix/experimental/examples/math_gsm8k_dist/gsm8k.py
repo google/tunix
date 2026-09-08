@@ -112,6 +112,7 @@ def load_gsm8k_dataset(
   )
 
 
+# TODO(tunix-dev): Consolidate GSM8K shared codepath.
 def extract_boxed_answer(text: str) -> str | None:
   """Extracts the final boxed answer from the VTC answer block."""
   answer_blocks = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
@@ -134,24 +135,20 @@ def extract_boxed_answer(text: str) -> str | None:
   fallback = re.search(r"\\boxed\s*\{?\s*([a-zA-Z0-9\.,\-]+)\s*\}?", content)
   if fallback:
     return fallback.group(1).strip()
+  if answer_blocks and answer_blocks[-1].strip():
+    return answer_blocks[-1].strip()
   return None
 
 
 def is_gsm8k_format_correct(text: str) -> bool:
   """Checks the reasoning-then-boxed-answer format used by the GSM8K recipe."""
-  has_reasoning = text.count("</reasoning>") == 1
-  has_answer = text.count("<answer>") == 1 and text.count("</answer>") == 1
-  reasoning_end = text.find("</reasoning>")
-  answer_open = text.find("<answer>")
-  answer_close = text.find("</answer>")
-  return (
-      has_reasoning
-      and has_answer
-      and reasoning_end != -1
-      and answer_open != -1
-      and answer_close != -1
-      and reasoning_end < answer_open < answer_close
+  has_reasoning = ("<reasoning>" in text and "</reasoning>" in text) or (
+      "<think>" in text and "</think>" in text
   )
+  has_answer = (r"\boxed" in text) or (
+      "<answer>" in text and "</answer>" in text
+  )
+  return bool(has_reasoning and has_answer)
 
 
 def normalize_answer(text: Any) -> str | None:
