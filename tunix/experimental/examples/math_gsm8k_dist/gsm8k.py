@@ -210,7 +210,7 @@ def make_gsm8k_reward_fn(
           "prompt_id",
           getattr(item, "group_id", getattr(item, "prompt_id", "unknown")),
       )
-      logging.debug(
+      logging.info(
           "[Orchestrator] Sampler response for %s:\n"
           "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
           "Gold Answer: %s, Extracted Answer: %s",
@@ -266,6 +266,21 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
     completion = action.action if hasattr(action, "action") else str(action)
     reward, info = gsm8k_env_reward(self.task, action)
     info["correct"] = bool(info["answer_correct"])
+    prompt_text = self.task.get("question", "") or self.task.get("prompts", "")
+    prompt_preview = (
+        prompt_text[:120] + ("..." if len(prompt_text) > 120 else "")
+    )
+    logging.info(
+        "[RolloutNode] Prompt: %s | Reward: %.2f | Correct: %s\n"
+        "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
+        "Gold Answer: %s | Extracted Answer: %s",
+        prompt_preview,
+        reward,
+        info["correct"],
+        completion,
+        info.get("gold_answer", ""),
+        info.get("extracted_answer", ""),
+    )
     return base_environment.EnvStepResult(
         observation={
             "answer": str(completion),
