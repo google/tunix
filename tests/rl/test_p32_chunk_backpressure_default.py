@@ -1,11 +1,12 @@
-"""Phase 14 (tasks/v2_dispatch): the GSM8K carrier's rank-parallel reverse
-bounds the host's dispatch lead at every chunk boundary without a flag.
+"""Phase 14 (tasks/v2_dispatch) / Phase C (tasks/v2_integrate): the
+rank-parallel reverse bounds the host's dispatch lead without a flag.
 
-The two P77 readiness waits (before the whole-tree start/add and after it)
-run on every chunk of every group whenever the reverse is rank-parallel,
-the P76 device ticket is off and the workload is not a FrozenLake carrier;
-they read no value and change no arithmetic, so the gradients are bitwise
-the ones of the unbounded loop.
+Without CANON_P77_CHUNK_BACKPRESSURE one readiness wait follows every
+_P77_CHUNK_LEAD_DEPTH-th chunk's accumulation and the group's last chunk,
+on every carrier (FrozenLake included), whenever the reverse is
+rank-parallel and the P76 device ticket is off; the waits read no value and
+change no arithmetic, so the gradients are bitwise the ones of a loop that
+drains only at the group's end.
 """
 
 import importlib.util
@@ -83,17 +84,34 @@ def _bytes(tree):
   return tuple(np.asarray(leaf).tobytes() for leaf in jax.tree.leaves(tree))
 
 
-def test_gsm8k_rank_parallel_reverse_waits_twice_per_chunk_and_is_bitwise():
+def _expected_waits(num_chunks, depth):
+  return sum(
+      1
+      for finished in range(1, num_chunks + 1)
+      if finished % depth == 0 or finished == num_chunks
+  )
+
+
+def test_rank_parallel_reverse_drains_every_depth_chunks_and_is_bitwise():
   if len(jax.devices()) < 16:
     pytest.skip("requires sixteen forced CPU devices")
+  depth = canonical_qwen3_adapter._P77_CHUNK_LEAD_DEPTH  # pylint: disable=protected-access
+  assert depth == 2
   waits = []
   num_chunks, gradients = _one_pass(None, waits)
-  assert len(waits) == 2 * num_chunks, (len(waits), num_chunks)
-  # A FrozenLake workload keeps the flag-only P77 behaviour: no waits.
+  assert len(waits) == _expected_waits(num_chunks, depth), (len(waits), num_chunks)
+  assert len(waits) < 2 * num_chunks
+  # A FrozenLake carrier is bounded the same way (Phase 14 excluded it).
   frozen_waits = []
   _, frozen_gradients = _one_pass("frozenlake-p45-onehost-dp2-tp2", frozen_waits)
-  assert frozen_waits == []
+  assert len(frozen_waits) == len(waits)
   assert _bytes(gradients) == _bytes(frozen_gradients)
+  # Reference: a depth larger than the group drains only after its last chunk.
+  loose_waits = []
+  with mock.patch.object(canonical_qwen3_adapter, "_P77_CHUNK_LEAD_DEPTH", 10**6):
+    _, loose_gradients = _one_pass(None, loose_waits)
+  assert len(loose_waits) == 1
+  assert _bytes(gradients) == _bytes(loose_gradients)
 
 
 def test_flag_print_stays_flag_only():
@@ -102,4 +120,29 @@ def test_flag_print_stays_flag_only():
       canonical_qwen3_adapter.Qwen3EngineForwardAdapter._p32_reverse_group  # pylint: disable=protected-access
   )
   assert "if p77_flag_backpressure:" in source
-  assert "_p32_workload_is_frozenlake()" in source
+  assert "chunk_lead_depth = _p77_chunk_lead_depth(" in source
+  assert "chunk_index == 0" in source
+
+
+def test_lead_depth_follows_the_pack_budget():
+  depth = canonical_qwen3_adapter._p77_chunk_lead_depth  # pylint: disable=protected-access
+  # 1.7B TP2 / TP4 and 8B TP8 packs lead by two chunks ...
+  assert depth(3.4) == 2 and depth(1.7) == 2 and depth(4.1) == 2
+  assert depth(canonical_qwen3_adapter._P77_LEAD_PACK_BUDGET_GIB) == 2  # pylint: disable=protected-access
+  # ... the 8B one-host packs keep the two waits at every boundary.
+  assert depth(8.2) == 0 and depth(16.4) == 0 and depth(32.8) == 0
+  gib = canonical_qwen3_adapter._p77_pack_gib  # pylint: disable=protected-access
+  leaves = (jnp.zeros((1024, 1024), jnp.bfloat16), jnp.zeros((1024,), jnp.float32))
+  assert gib(leaves, 2) == (1024 * 1024 + 1024) * 4 / 2 / 2**30
+
+
+def test_big_pack_keeps_two_waits_per_chunk_and_is_bitwise():
+  if len(jax.devices()) < 16:
+    pytest.skip("requires sixteen forced CPU devices")
+  waits = []
+  num_chunks, gradients = _one_pass(None, waits)
+  bounded_waits = []
+  with mock.patch.object(canonical_qwen3_adapter, "_P77_LEAD_PACK_BUDGET_GIB", 0.0):
+    _, bounded_gradients = _one_pass(None, bounded_waits)
+  assert len(bounded_waits) == 2 * num_chunks
+  assert _bytes(gradients) == _bytes(bounded_gradients)

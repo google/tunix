@@ -458,9 +458,32 @@ def _p77_chunk_backpressure_enabled() -> bool:
   )
 
 
-def _p32_workload_is_frozenlake() -> bool:
-  """Whether the committed workload is one of the FrozenLake carriers."""
-  return os.environ.get("CANON_P32_WORKLOAD", "").startswith("frozenlake")
+# tasks/v2_integrate Phase C: without the P77 flag the rank-parallel reverse
+# waits for device readiness once after every _P77_CHUNK_LEAD_DEPTH-th
+# chunk's accumulation (and after a group's last chunk), so at most that many
+# reverse chunks -- each a whole per-chip float32 gradient pack allocated at
+# dispatch -- are in flight ahead of the device.  The lead is affordable only
+# while one pack is small next to the chip's headroom: 1.7B TP2 3.4 GiB, 1.7B
+# TP4 1.7 GiB and 8B TP8 4.1 GiB qualify; the 8B one-host carriers (TP4 8.2,
+# TP2 16.4, TP1 32.8 GiB; P45 dp2-tp2 already peaks at 89 of 102.8 GB) keep
+# the Phase 14 two waits at every boundary (depth 0), as does the flag arm.
+_P77_CHUNK_LEAD_DEPTH = 2
+_P77_LEAD_PACK_BUDGET_GIB = 6.0
+
+
+def _p77_pack_gib(engine_leaves, tp_size) -> float:
+  """Float32 bytes of one rank's gradient pack per chip, in GiB."""
+  elements = sum(
+      int(np.prod(leaf.shape)) for leaf in jax.tree.leaves(engine_leaves)
+  )
+  return elements * 4 / max(int(tp_size), 1) / float(2**30)
+
+
+def _p77_chunk_lead_depth(pack_gib) -> int:
+  """The flagless lead depth for one per-chip gradient pack size."""
+  if pack_gib <= _P77_LEAD_PACK_BUDGET_GIB:
+    return _P77_CHUNK_LEAD_DEPTH
+  return 0
 
 
 def _p77_wait_for_chunk_completion(completed) -> None:
@@ -10970,21 +10993,30 @@ class Qwen3EngineForwardAdapter:
           "exclusive"
       )
     p77_flag_backpressure = chunk_backpressure
+    chunk_lead_depth = 0
     if (
         rank_parallel
         and not chunk_dependency_ticket
-        and not _p32_workload_is_frozenlake()
+        and not p77_flag_backpressure
     ):
-      # tasks/v2_dispatch Phase 14: on the GSM8K carrier the rank-parallel
-      # reverse always bounds the host's dispatch lead at chunk boundaries
-      # with the two P77 readiness waits.  Phase 8/9 removed the per-call
+      # tasks/v2_dispatch Phase 14 / tasks/v2_integrate Phase C: without the
+      # flag the rank-parallel reverse bounds the host's dispatch lead at
+      # chunk boundaries on every carrier.  Phase 8/9 removed the per-call
       # host relabels (tens of thousands of device_puts per update), and
       # the faster host then queues whole chunks of layer pullbacks ahead
       # of the device, whose model-sized outputs are allocated at dispatch:
       # +3.6 GiB of purely transient peak HBM on dp2-tp2-long (43.08 vs
-      # 39.39 GiB) with the resident profile unchanged.  Readiness only:
-      # no value reaches the host, arithmetic and dispatch count unchanged.
+      # 39.39 GiB) with the resident profile unchanged.  Phase 14 waited
+      # twice at every boundary (about 0.66 s of drains per dp2-tp2 update);
+      # the flagless arm now waits once after every _P77_CHUNK_LEAD_DEPTH-th
+      # chunk's accumulation and after the group's last chunk.  Readiness
+      # only: no value reaches the host, arithmetic and dispatch count
+      # unchanged.  The flag arm keeps its two waits at every boundary, and
+      # so does a carrier whose per-chip pack exceeds the lead budget.
       chunk_backpressure = True
+      chunk_lead_depth = _p77_chunk_lead_depth(
+          _p77_pack_gib(engine_leaves, self._tp_size)
+      )
     p66_arm = _p66_tp4_arm()
     p66_oracle = p66_arm == "tp4-vma-oracle"
     unit_data_admitted = _p59_unit_data_admitted(
@@ -11115,6 +11147,7 @@ class Qwen3EngineForwardAdapter:
     prefetched_chunk_inputs = None
     chunk_backpressure_pullback_waits = 0
     chunk_backpressure_accumulation_waits = 0
+    chunks_finished = 0
     # tasks/v2_dispatch Phase 15: under the certified configuration --
     # rank-parallel pullbacks consuming the kept tape, no diagnostic arm,
     # no host-side chunk scheduling hook -- every chunk after the
@@ -11140,7 +11173,9 @@ class Qwen3EngineForwardAdapter:
       nonlocal grad_pack, prefetched_chunk_inputs
       nonlocal chunk_backpressure_pullback_waits
       nonlocal chunk_backpressure_accumulation_waits
-      if chunk_backpressure:
+      nonlocal chunks_finished
+      chunks_finished += 1
+      if chunk_backpressure and chunk_lead_depth == 0:
         # PJRT allocates the tree-add outputs when host dispatches that
         # program.  Complete the already-dispatched pullbacks first so
         # their model-sized outputs and temporaries cannot overlap those
@@ -11164,11 +11199,17 @@ class Qwen3EngineForwardAdapter:
         # untouched; the old accumulator remains governed by the existing
         # tree-add donation contract.
         self._p70_release_consumed_grad_pack(chunk_pack)
-      if chunk_backpressure:
-        # Complete the add before dispatching either the next chunk or the
-        # report adjoint.  Together with the pre-add boundary above this
-        # reproduces the two causal value completions in R22 without its
-        # allocator queries.
+      if chunk_backpressure and (
+          chunk_lead_depth == 0
+          or chunks_finished % chunk_lead_depth == 0
+          or chunk_index == 0
+      ):
+        # Flag arm: complete the add before dispatching either the next
+        # chunk or the report adjoint; together with the pre-add boundary
+        # above this reproduces the two causal value completions in R22
+        # without its allocator queries.  Flagless arm: the periodic drain
+        # that bounds the lead to _P77_CHUNK_LEAD_DEPTH chunks (the loop
+        # runs the chunks in reverse, so chunk 0 is the group's last).
         _p77_wait_for_chunk_completion(grad_pack)
         chunk_backpressure_accumulation_waits += 1
       if chunk_dependency_ticket and chunk_index > 0:

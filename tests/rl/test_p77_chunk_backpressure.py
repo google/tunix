@@ -137,7 +137,12 @@ def test_wait_calls_bracket_accumulation_and_are_flag_guarded():
       node
       for node in ast.walk(tree)
       if isinstance(node, ast.If)
-      and ast.unparse(node.test) == "chunk_backpressure"
+      and (
+          ast.unparse(node.test) == "chunk_backpressure"
+          # Phase C (tasks/v2_integrate): the flagless arm adds the lead
+          # depth to the guard; chunk_backpressure stays the first conjunct.
+          or ast.unparse(node.test).startswith("chunk_backpressure and ")
+      )
   ]
   guarded_calls = {
       call
