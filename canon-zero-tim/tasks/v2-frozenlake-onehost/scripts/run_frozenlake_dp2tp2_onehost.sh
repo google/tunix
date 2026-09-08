@@ -59,8 +59,8 @@ if [ "$geometry" = dp1-tp4 ] && [ "$arm" = r2 ]; then
   exit 2
 fi
 case "$mode" in measure|certify|profile) ;; *) echo "invalid mode: $mode" >&2; exit 2;; esac
-if [ "$capture_full_tree" = 1 ] && [ "$mode" != measure ]; then
-  echo "P61 full-tree capture admits only measure mode" >&2
+if [ "$capture_full_tree" = 1 ] && [ "$mode" = profile ]; then
+  echo "P61 full-tree capture admits measure or certify (replay) mode, not profile" >&2
   exit 2
 fi
 case "$capsule_mode:$mode" in

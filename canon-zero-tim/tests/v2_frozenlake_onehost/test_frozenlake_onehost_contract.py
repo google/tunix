@@ -393,7 +393,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     ).read_text(encoding="utf-8")
     self.assertIn('capture_full_tree="${V2_FL_CAPTURE_FULL_TREE:-0}"', onehost)
     self.assertIn(
-        'if [ "$capture_full_tree" = 1 ] && [ "$mode" != measure ]; then',
+        'if [ "$capture_full_tree" = 1 ] && [ "$mode" = profile ]; then',
         onehost,
     )
     self.assertIn(
