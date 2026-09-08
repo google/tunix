@@ -27,6 +27,16 @@ case "$geometry" in
   *) echo "invalid geometry: $geometry" >&2; exit 2 ;;
 esac
 case "$workload" in p45|m15) ;; *) echo "invalid workload: $workload" >&2; exit 2;; esac
+segmented_actor_logps_default=0
+if [ "$workload" = p45 ] && [ "$geometry" = dp4-tp1 ]; then
+  segmented_actor_logps_default=1
+fi
+segmented_actor_logps="${V2_FL_P78_SEGMENTED_ACTOR_LOGPS:-$segmented_actor_logps_default}"
+case "$segmented_actor_logps" in 0|1) ;; *) echo "invalid P78 segmented actor-logps selector" >&2; exit 2;; esac
+if [ "$segmented_actor_logps" = 1 ] && { [ "$workload" != p45 ] || [ "$geometry" != dp4-tp1 ]; }; then
+  echo "P78 segmented actor logps admit only P45 DP4xTP1" >&2
+  exit 2
+fi
 case "$arm" in r0|r0b|r0c|r0d|r1|r2|r3) ;; *) echo "invalid arm: $arm" >&2; exit 2;; esac
 if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && \
    { [ "$workload" != p45 ] || [ "$geometry" != dp2-tp2 ]; }; then
@@ -285,6 +295,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P75_REPORT_ADJOINT_BUCKETS="$report_adjoint_buckets" \
   -e CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_dependency_ticket" \
   -e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure" \
+  -e CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps" \
   -e V2_FL_MODE="$mode" \
   -e CANON_XPROF_DIR="$xprof_dir" \
   -e CANON_PERF_TRACE_DIR="$perf_trace_dir" \

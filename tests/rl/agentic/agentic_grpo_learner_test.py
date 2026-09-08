@@ -894,6 +894,44 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertEqual(fingerprint["eligible_leaves"], 1)
     self.assertEqual(fingerprint["sampled_bytes"], 256 * 2)
 
+  def test_p28_reference_state_accepts_explicitly_absent_worker_role(self):
+    worker = inference_worker.InferenceWorker({})
+    cluster = types.SimpleNamespace(
+        reference=None, inference_worker=worker
+    )
+
+    self.assertIsNone(agentic_rl_learner._p28_reference_state(cluster))
+
+  def test_p28_reference_state_does_not_hide_worker_failures(self):
+    class _CapabilityFailure:
+
+      @staticmethod
+      def has_model_state(role):
+        del role
+        raise RuntimeError("capability lookup failed")
+
+      @staticmethod
+      def get_model_state(role):
+        del role
+        raise AssertionError("state lookup must not run")
+
+    with self.assertRaisesRegex(RuntimeError, "capability lookup failed"):
+      agentic_rl_learner._p28_reference_state(types.SimpleNamespace(
+          reference=None, inference_worker=_CapabilityFailure()
+      ))
+
+    class _LegacyFailure:
+
+      @staticmethod
+      def get_model_state(role):
+        del role
+        raise ValueError("legacy worker failure")
+
+    with self.assertRaisesRegex(ValueError, "legacy worker failure"):
+      agentic_rl_learner._p28_reference_state(types.SimpleNamespace(
+          reference=None, inference_worker=_LegacyFailure()
+      ))
+
   def test_p28_fingerprint_lightweight_accumulator(self):
     state = {"denom": jnp.asarray(0.0, dtype=jnp.float32)}
     with self.assertRaisesRegex(
@@ -2200,6 +2238,139 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
+          testcase_name="beta_zero",
+          beta=0.0,
+          force_compute_kl=False,
+          expected=False,
+      ),
+      dict(
+          testcase_name="nonzero_beta",
+          beta=0.1,
+          force_compute_kl=False,
+          expected=True,
+      ),
+      dict(
+          testcase_name="forced_zero_beta",
+          beta=0.0,
+          force_compute_kl=True,
+          expected=True,
+      ),
+  )
+  def test_requires_reference_model(
+      self, beta, force_compute_kl, expected
+  ):
+    self.assertEqual(
+        agentic_grpo_learner.requires_reference_model(
+            beta=beta, force_compute_kl=force_compute_kl
+        ),
+        expected,
+    )
+
+  def test_beta_zero_train_example_is_bitwise_equal_without_reference(self):
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    mesh = pxla.thread_resources.env.physical_mesh
+
+    def make_learner(reference_present):
+      model = test_common.ToyTransformer(
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
+      )
+      reference = (
+          test_common.ToyTransformer(
+              config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+              rngs=nnx.Rngs(1),
+          )
+          if reference_present
+          else None
+      )
+      cluster_config = rl_cluster_lib.ClusterConfig(
+          role_to_mesh={
+              rl_cluster_lib.Role.ACTOR: mesh,
+              rl_cluster_lib.Role.REFERENCE: mesh,
+              rl_cluster_lib.Role.ROLLOUT: mesh,
+          },
+          rollout_engine="vanilla",
+          offload_to_cpu=False,
+          training_config=rl_cluster_lib.RLTrainingConfig(
+              actor_optimizer=optax.sgd(1e-3),
+              eval_every_n_steps=10,
+              max_steps=10,
+          ),
+          rollout_config=base_rollout.RolloutConfig(
+              max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
+          ),
+      )
+      cluster = rl_cluster_lib.RLCluster(
+          actor=model,
+          reference=reference,
+          tokenizer=tokenizer,
+          cluster_config=cluster_config,
+      )
+      learner = agentic_grpo_learner.GRPOLearner(
+          rl_cluster=cluster,
+          reward_fns=reward_fn_1,
+          algo_config=agentic_grpo_learner.GRPOConfig(
+              beta=0.0,
+              force_compute_kl=False,
+              max_response_length=10,
+              num_generations=2,
+              num_iterations=1,
+          ),
+          chat_parser=MockChatParser(),
+      )
+      return cluster, learner
+
+    class MockTraj:
+
+      def __init__(self, index):
+        self.traj = {
+            "conversation_text": [
+                {"role": "assistant", "content": f"msg {index}"}
+            ],
+            "conversation_tokens": np.array([1, 2, 3]),
+            "conversation_masks": np.array([1, 1, 1]),
+            "old_logprobs": None,
+            "policy_version": 0,
+            "trajectory_reward": 1.0,
+            "prompt_tokens": np.array([4, 5]),
+            "original_input": {"prompts": "hello"},
+            "group_id": "test_group",
+        }
+
+    trajectories = [MockTraj(0), MockTraj(1)]
+    outputs = []
+    for reference_present in (True, False):
+      cluster, learner = make_learner(reference_present)
+      with (
+          mock.patch.object(
+              cluster,
+              "get_actor_per_token_logps",
+              return_value=jnp.full((2, 10), -1.0),
+          ),
+          mock.patch.object(
+              cluster,
+              "get_ref_per_token_logps",
+              side_effect=AssertionError("beta-zero consumed reference"),
+          ),
+      ):
+        outputs.append(learner._process_results(trajectories, expected_step=1))
+
+    self.assertEqual(
+        jax.tree_util.tree_structure(outputs[0]),
+        jax.tree_util.tree_structure(outputs[1]),
+    )
+    for with_reference, without_reference in zip(
+        jax.tree.leaves(outputs[0]), jax.tree.leaves(outputs[1]), strict=True
+    ):
+      np.testing.assert_array_equal(
+          np.asarray(with_reference), np.asarray(without_reference)
+      )
+
+  @parameterized.named_parameters(
+      dict(
           testcase_name="use_rollout_logps_true",
           use_rollout_logps=True,
           return_logprobs=True,
@@ -2328,6 +2499,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             actor_kwargs["completion_mask"][:, :3],
             np.ones((2, 3), dtype=np.bool_),
         )
+        self.assertEqual(actor_kwargs["host_prompt_lengths"], (2, 2))
+        self.assertEqual(actor_kwargs["host_completion_lengths"], (3, 3))
         self.assertIsNotNone(train_example.old_per_token_logps)
         # If get_actor_per_token_logps is called, logps should be all -1.0
         # as per the mock return value.

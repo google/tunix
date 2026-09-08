@@ -104,3 +104,7 @@ class InferenceWorker:
     if role not in self._model_states:
       raise ValueError(f"Model role {role} is not available.")
     return self._model_states[role][1]
+
+  def has_model_state(self, role: str) -> bool:
+    """Reports whether ``role`` has an authoritative inference state."""
+    return role in self._model_states

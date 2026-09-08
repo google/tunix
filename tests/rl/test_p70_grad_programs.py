@@ -618,7 +618,7 @@ def test_tree_start_and_tree_add_match_eager_expressions_bitwise():
   _assert_bitwise_equal(added, eager_added)
 
 
-def test_tree_add_donates_accumulator_and_start_does_not():
+def test_tree_add_donates_accumulator_and_default_start_does_not():
   adapter = _bare_adapter()
   pack = _mixed_pack()
   started = adapter._p70_grad_tree_start(pack)  # pylint: disable=protected-access
@@ -630,6 +630,57 @@ def test_tree_add_donates_accumulator_and_start_does_not():
   # only call site rebinds the accumulator to the result immediately.
   assert all(leaf.is_deleted() for leaf in jax.tree.leaves(started))
   assert not any(leaf.is_deleted() for leaf in jax.tree.leaves(second))
+
+
+def test_rank_parallel_tree_start_donates_pack_and_aliases_outputs():
+  adapter = _bare_adapter()
+  warm = _mixed_pack()
+  jax.block_until_ready(
+      adapter._p70_grad_tree_start(  # pylint: disable=protected-access
+          warm, donate_pack=True
+      )
+  )
+  assert all(leaf.is_deleted() for leaf in jax.tree.leaves(warm))
+
+  pack = _mixed_pack()
+  expected = _eager_tree_start(_mixed_pack())
+  with jax.transfer_guard("disallow"):
+    started = adapter._p70_grad_tree_start(  # pylint: disable=protected-access
+        pack, donate_pack=True
+    )
+    jax.block_until_ready(started)
+
+  assert all(leaf.is_deleted() for leaf in jax.tree.leaves(pack))
+  assert not any(leaf.is_deleted() for leaf in jax.tree.leaves(started))
+  _assert_bitwise_equal(started, expected)
+  assert _bits(jax.tree.leaves(started)[0])[0] == 0
+  assert _bits(jax.tree.leaves(started)[3])[0] == 0
+
+  program = adapter._p70_tree_start_donated_fn  # pylint: disable=protected-access
+  analysis = program.lower(
+      adapter._p70_tree_start_zeros,  # pylint: disable=protected-access
+      _mixed_pack(),
+  ).compile().memory_analysis()
+  pack_bytes = sum(leaf.nbytes for leaf in jax.tree.leaves(_mixed_pack()))
+  assert analysis.alias_size_in_bytes >= pack_bytes
+
+
+def test_rank_parallel_reverse_selects_donated_tree_start():
+  source = textwrap.dedent(inspect.getsource(
+      canonical_qwen3_adapter.Qwen3EngineForwardAdapter._p32_reverse_group  # pylint: disable=protected-access
+  ))
+  tree = ast.parse(source)
+  calls = [
+      node
+      for node in ast.walk(tree)
+      if isinstance(node, ast.Call)
+      and isinstance(node.func, ast.Attribute)
+      and node.func.attr == "_p70_grad_tree_start"
+  ]
+  assert len(calls) == 1
+  keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+  assert isinstance(keywords.get("donate_pack"), ast.Constant)
+  assert keywords["donate_pack"].value is True
 
 
 def test_consumed_pack_release_preserves_tree_ops_bitwise_without_host_transfer():

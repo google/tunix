@@ -81,6 +81,9 @@ def _result(arm: str = "r2") -> dict:
       "optimizer_changed_paths": [],
       "accumulator_changed_paths": [],
       "reference_changed_paths": [],
+      "gradient_accumulator_mode": (
+          "lazy-reduce-once" if arm == "r2" else "materialized"
+      ),
       "state_fingerprints_before": state,
       "state_fingerprints_after": copy.deepcopy(state),
       "micro_gradient_norms": [1.0, 2.0, 0.0, 0.0],
@@ -167,9 +170,8 @@ def _write_classifier_fixture(root: Path, arm: str) -> Path:
   ))
   if arm == "r2":
     raw.extend((
-        "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN]",
+        "[V2.REDUCE_ONCE.LAZY_ACCUMULATOR]",
         "[V2.REDUCE_ONCE.ACCUMULATOR_RESET]",
-        "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN]",
         "[V2.REDUCE_ONCE.ACCUMULATOR_RESET]",
         "[PERF] stage=grad_accumulate seconds=10.000 variant=adopt-scaled",
         "[PERF] stage=grad_accumulate seconds=1.000 variant=adopt-scaled",

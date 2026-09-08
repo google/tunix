@@ -19,6 +19,7 @@ import functools
 import os
 import tempfile
 from typing import Any, Tuple
+import unittest
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -1840,6 +1841,196 @@ class PeftTrainerTest(parameterized.TestCase):
       with self.assertRaisesRegex(ValueError, "adopted discard is reserved"):
         trainer.discard_adopted_precomputed_gradients()
 
+  def test_lazy_reduce_once_accumulator_is_empty_and_bitwise_reusable(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=3,
+        gradient_accumulation_steps=16,
+        checkpoint_root_directory=None,
+    )
+    baseline_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    lazy_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    baseline = peft_trainer.PeftTrainer(
+        baseline_model, optax.adamw(1e-3), config
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_DP_REDUCE_ONCE": "1",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+        "V2_P0_NEGATIVE_CONTROL": "",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      lazy = peft_trainer.PeftTrainer(
+          lazy_model, optax.adamw(1e-3), config
+      )
+      self.assertEqual(lazy.gradient_accumulator_mode(), "lazy-reduce-once")
+      self.assertEmpty(jax.tree.leaves(lazy.grad_accumulator.grads))
+      with self.assertRaisesRegex(ValueError, "no base storage to loan"):
+        lazy.loan_precomputed_gradient_accumulator()
+
+      def gradient_for(trainer, transaction):
+        def fill(value):
+          data = (
+              jnp.arange(value[...].size, dtype=jnp.float32)
+              .reshape(value[...].shape)
+              + jnp.asarray(transaction, jnp.float32)
+          )
+          if data.size:
+            data = data.at[0].set(jnp.asarray(-0.0, jnp.float32))
+          return type(value)(data)
+
+        return jax.tree.map(
+            fill,
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+
+      for transaction in (1, 2):
+        baseline_gradient = gradient_for(baseline, transaction)
+        lazy_gradient = gradient_for(lazy, transaction)
+        lazy_inputs = tuple(jax.tree.leaves(lazy_gradient))
+        multiplier = jnp.asarray(0.25, jnp.float32)
+        baseline_norm = (
+            baseline.accumulate_precomputed_scaled_gradient_microbatch(
+                baseline_gradient,
+                multiplier,
+                microbatch_index=0,
+                microbatches=16,
+            )
+        )
+        with jax.transfer_guard("disallow"):
+          lazy_norm = lazy.adopt_precomputed_scaled_gradient(
+              lazy_gradient,
+              multiplier,
+              microbatch_index=0,
+              microbatches=16,
+          )
+        np.testing.assert_array_equal(
+            np.asarray(lazy_norm).view(np.uint32),
+            np.asarray(baseline_norm).view(np.uint32),
+        )
+        self.assertTrue(all(value.is_deleted() for value in lazy_inputs))
+        lazy_commit = lazy.commit_precomputed_gradients()
+        baseline_commit = baseline.commit_precomputed_gradients()
+        np.testing.assert_array_equal(
+            np.asarray(lazy_commit).view(np.uint32),
+            np.asarray(baseline_commit).view(np.uint32),
+        )
+        self.assertEmpty(jax.tree.leaves(lazy.grad_accumulator.grads))
+        self.assertEqual(float(lazy.grad_accumulator.denom[...]), 0.0)
+        for actual, expected in zip(
+            jax.tree.leaves(nnx.state(lazy.model, nnx.Param)),
+            jax.tree.leaves(nnx.state(baseline.model, nnx.Param)),
+            strict=True,
+        ):
+          np.testing.assert_array_equal(
+              np.asarray(actual).view(np.uint32),
+              np.asarray(expected).view(np.uint32),
+          )
+        for actual, expected in zip(
+            jax.tree.leaves(
+                nnx.state(lazy.optimizer, nnx.optimizer.OptState)
+            ),
+            jax.tree.leaves(
+                nnx.state(baseline.optimizer, nnx.optimizer.OptState)
+            ),
+            strict=True,
+        ):
+          np.testing.assert_array_equal(
+              np.asarray(actual).view(np.uint32),
+              np.asarray(expected).view(np.uint32),
+          )
+
+      lazy_gradient = gradient_for(lazy, 3)
+      lazy_inputs = tuple(jax.tree.leaves(lazy_gradient))
+      multiplier = jnp.asarray(0.25, jnp.float32)
+      with mock.patch.dict(
+          os.environ, {"CANON_P33_NO_COMMIT": "1"}, clear=False
+      ):
+        with jax.transfer_guard("disallow"):
+          lazy.adopt_precomputed_scaled_gradient(
+              lazy_gradient,
+              multiplier,
+              microbatch_index=0,
+              microbatches=16,
+          )
+          denominator = lazy.discard_adopted_precomputed_gradients()
+      self.assertTrue(all(value.is_deleted() for value in lazy_inputs))
+      self.assertEqual(float(denominator), 16.0)
+      self.assertEmpty(jax.tree.leaves(lazy.grad_accumulator.grads))
+      self.assertEqual(float(lazy.grad_accumulator.denom[...]), 0.0)
+      self.assertEqual(lazy.train_steps, 2)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="flag_off", overrides={"CANON_DP_REDUCE_ONCE": "0"}),
+      dict(
+          testcase_name="p0_control",
+          overrides={"V2_P0_NEGATIVE_CONTROL": "1"},
+      ),
+      dict(
+          testcase_name="non_p33",
+          overrides={"CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0"},
+      ),
+  )
+  def test_lazy_reduce_once_accumulator_admission_is_fail_closed(
+      self, overrides
+  ):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=16,
+        checkpoint_root_directory=None,
+    )
+    baseline_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    baseline = peft_trainer.PeftTrainer(
+        baseline_model, optax.sgd(1e-3), config
+    )
+    env = {
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_DP_REDUCE_ONCE": "1",
+        "V2_P0_NEGATIVE_CONTROL": "",
+        **overrides,
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      trainer = peft_trainer.PeftTrainer(
+          model, optax.sgd(1e-3), config
+      )
+    self.assertEqual(trainer.gradient_accumulator_mode(), "materialized")
+    self.assertNotEmpty(jax.tree.leaves(trainer.grad_accumulator.grads))
+    actual_state = nnx.state(trainer.grad_accumulator)
+    baseline_state = nnx.state(baseline.grad_accumulator)
+    self.assertEqual(
+        jax.tree.structure(actual_state), jax.tree.structure(baseline_state)
+    )
+    for actual, expected in zip(
+        jax.tree.leaves(actual_state),
+        jax.tree.leaves(baseline_state),
+        strict=True,
+    ):
+      actual_array = np.asarray(actual)
+      expected_array = np.asarray(expected)
+      self.assertEqual(
+          (actual_array.shape, actual_array.dtype, actual_array.tobytes()),
+          (expected_array.shape, expected_array.dtype, expected_array.tobytes()),
+      )
+
   def test_p63_finite_overflow_commits_nonzero_clipped_update(self):
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=100,
@@ -2015,6 +2206,11 @@ class PeftTrainerTest(parameterized.TestCase):
     )
     self.assertEqual(device_trainer.optimizer_state_memory_kinds(), ("device",))
 
+    self.assertEqual(
+        offload_trainer.optimizer_initialization_mode(), "device"
+    )
+    self.assertEqual(device_trainer.optimizer_initialization_mode(), "device")
+
     env = {
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_ALIGNMENT_UPDATE_CANARY": "1",
@@ -2098,6 +2294,7 @@ class PeftTrainerTest(parameterized.TestCase):
       self.assertGreaterEqual(offload_timing["optimizer_d2h_seconds"], 0.0)
       self.assertGreater(device_timing["adam_commit_seconds"], 0.0)
       self.assertGreater(offload_timing["adam_commit_seconds"], 0.0)
+
       for actual, expected in zip(device_norms, offload_norms, strict=True):
         np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
       for device_value, offload_value in zip(
@@ -2126,6 +2323,94 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertLen(set(device_commit_impl_ids), 1)
     self.assertLen(set(offload_step_impl_ids), 1)
     self.assertLen(set(offload_commit_impl_ids), 1)
+
+  @unittest.skipUnless(
+      tuple(int(part) for part in jax.__version__.split(".")[:2]) >= (0, 10),
+      "pinned-host CPU output placement requires JAX 0.10 or later",
+  )
+  def test_p30_direct_pinned_host_optimizer_init_matches_post_init_offload(self):
+    model = nnx.Linear(31, 17, rngs=nnx.Rngs(0))
+    direct_model = nnx.clone(model)
+    tx = optax.adamw(1.0e-3, b1=0.9, b2=0.95, weight_decay=0.0)
+
+    expected = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    expected_state = peft_trainer._put_state_on_memory_kind(  # pylint: disable=protected-access
+        nnx.state(expected, nnx.optimizer.OptState), "pinned_host"
+    )
+    nnx.update(expected, expected_state)
+
+    actual = peft_trainer._optimizer_with_state_initialized_on_pinned_host(  # pylint: disable=protected-access
+        direct_model, tx, nnx.Param
+    )
+    actual_state = peft_trainer._put_state_on_memory_kind(  # pylint: disable=protected-access
+        nnx.state(actual, nnx.optimizer.OptState), "pinned_host"
+    )
+    nnx.update(actual, actual_state)
+
+    expected_leaves = jax.tree.leaves(
+        nnx.state(expected, nnx.optimizer.OptState)
+    )
+    actual_leaves = jax.tree.leaves(
+        nnx.state(actual, nnx.optimizer.OptState)
+    )
+    self.assertLen(actual_leaves, len(expected_leaves))
+    for expected_leaf, actual_leaf in zip(
+        expected_leaves, actual_leaves, strict=True
+    ):
+      self.assertEqual(actual_leaf.dtype, expected_leaf.dtype)
+      self.assertEqual(actual_leaf.shape, expected_leaf.shape)
+      self.assertEqual(actual_leaf.sharding.memory_kind, "pinned_host")
+      self.assertTrue(
+          expected_leaf.sharding.is_equivalent_to(
+              actual_leaf.sharding, actual_leaf.ndim
+          )
+      )
+      np.testing.assert_array_equal(
+          np.asarray(actual_leaf), np.asarray(expected_leaf)
+      )
+    self.assertIs(actual.tx, tx)
+
+  @unittest.skipUnless(
+      tuple(int(part) for part in jax.__version__.split(".")[:2]) >= (0, 10),
+      "pinned-host CPU output placement requires JAX 0.10 or later",
+  )
+  def test_p30_tpu_offload_selects_direct_pinned_host_initialization(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        optimizer_offload=True,
+    )
+    model = nnx.Linear(31, 17, rngs=nnx.Rngs(0))
+    with mock.patch.object(jax, "default_backend", return_value="tpu"):
+      trainer = peft_trainer.PeftTrainer(
+          model, optax.adamw(1.0e-3), config
+      )
+    self.assertEqual(
+        trainer.optimizer_initialization_mode(), "direct-pinned-host"
+    )
+    self.assertEqual(
+        trainer.optimizer_state_memory_kinds(), ("pinned_host",)
+    )
+
+  def test_p30_cpu_offload_keeps_device_then_offload_initialization(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        optimizer_offload=True,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    with mock.patch.object(
+        peft_trainer,
+        "_optimizer_with_state_initialized_on_pinned_host",
+        side_effect=AssertionError("TPU-only initializer called on CPU"),
+    ):
+      trainer = peft_trainer.PeftTrainer(
+          model, optax.adamw(1.0e-3), config
+      )
+    self.assertEqual(trainer.optimizer_initialization_mode(), "device")
+    self.assertEqual(
+        trainer.optimizer_state_memory_kinds(), ("pinned_host",)
+    )
 
   def test_p30_post_commit_gc_runs_after_cached_bindings_clear(self):
     config = peft_trainer.TrainingConfig(

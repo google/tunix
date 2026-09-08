@@ -60,6 +60,17 @@ class FunctionalMappingError(ValueError):
   """Raised when a trainer-to-engine weight map is not a bijection."""
 
 
+def _p78_segmented_actor_logps_enabled() -> bool:
+  """Parses the default-off standalone segmented actor-logprob selector."""
+  value = os.environ.get("CANON_P78_SEGMENTED_ACTOR_LOGPS", "")
+  if value not in ("", "0", "1"):
+    raise FunctionalMappingError(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS must be unset/0/1, "
+        f"got {value!r}"
+    )
+  return value == "1"
+
+
 def _p62_numeric_debug_enabled() -> bool:
   """Parses the exact default-off Attempt-7 numerical observer."""
   value = os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "")
@@ -2958,6 +2969,317 @@ class SegmentedBlockVjpContract:
   block_depth: int
 
 
+def _p59_physical_sharding_signature(leaf):
+  """Returns a hashable exact device-to-slice layout for one array leaf."""
+  sharding = getattr(leaf, "sharding", None)
+  if sharding is None:
+    return None
+
+  def index_entry_signature(entry):
+    if isinstance(entry, slice):
+      return ("slice", entry.start, entry.stop, entry.step)
+    if entry is None:
+      return ("none",)
+    return ("index", int(entry))
+
+  try:
+    device_indices = sharding.devices_indices_map(tuple(leaf.shape))
+  except (AttributeError, TypeError, ValueError):
+    return ("opaque", repr(sharding))
+  return (
+      "physical",
+      str(getattr(sharding, "memory_kind", None)),
+      tuple(sorted(
+          (
+              str(device.platform),
+              int(device.process_index),
+              int(device.id),
+              tuple(index_entry_signature(entry) for entry in index),
+          )
+          for device, index in device_indices.items()
+      )),
+  )
+
+
+def _p59_program_tree_signature(tree):
+  """Returns a host-only exact abstract/physical program signature.
+
+  NamedSharding may omit trailing ``None`` entries and unit mesh axes while
+  preserving exactly the same device-to-slice placement.  Program residency
+  follows the physical input layout, so the signature records that layout
+  rather than its non-canonical PartitionSpec spelling.
+  """
+  leaves, treedef = jax.tree.flatten(tree)
+  return (
+      treedef,
+      tuple(
+          (
+              tuple(leaf.shape),
+              str(leaf.dtype),
+              bool(getattr(leaf, "weak_type", False)),
+              _p59_physical_sharding_signature(leaf),
+          )
+          for leaf in leaves
+      ),
+  )
+
+
+def _p59_layer_graph_program_key(graphdef, layer_index):
+  """Normalizes only non-execution layer metadata in an NNX GraphDef.
+
+  Qwen decoder layers differ statically in diagnostic path prefixes and in
+  the identity of freshly allocated uniform initializer closures. The normal
+  ``prefix`` is not read when a reconstructed layer executes against supplied
+  state. P22.XH's private prefix is read only to classify an RMSNorm site by
+  its suffix and to format diagnostics, so replacing only its layer-number
+  token preserves that classification. Every other GraphDef field remains in
+  the equality/hash key, so a distinct site suffix, activation, projection
+  shape, quantizer, attention rule, or other static field fails closed into a
+  separate executable.
+  """
+  normalized_attributes = []
+  prefix_occurrences = 0
+  initializer_occurrences = 0
+  prefix_token = f".layers.{int(layer_index)}."
+  for name, attribute in graphdef.attributes:
+    value = getattr(attribute, "value", None)
+    if name in ("prefix", "_p22xh_prefix") and isinstance(value, str):
+      count = value.count(prefix_token)
+      if count:
+        normalized = value.replace(prefix_token, ".layers.{layer}.")
+        if re.search(r"\.layers\.\d+\.", normalized):
+          raise FunctionalMappingError(
+              "P59 layer-program prefix normalization left another layer "
+              f"index in {value!r}"
+          )
+        attribute = dataclasses.replace(attribute, value=normalized)
+        prefix_occurrences += count
+    elif (
+        name == "kernel_init"
+        and callable(value)
+        and getattr(value, "__qualname__", "") == "uniform.<locals>.init"
+    ):
+      attribute = dataclasses.replace(
+          attribute, value="p59-construction-only-uniform-init"
+      )
+      initializer_occurrences += 1
+    normalized_attributes.append((name, attribute))
+  return (
+      dataclasses.replace(graphdef, attributes=normalized_attributes),
+      prefix_occurrences,
+      initializer_occurrences,
+  )
+
+
+def _p59_layer_program_key_component_counts(program_keys):
+  """Counts unique host-static components of P59 layer program keys.
+
+  This observer never materializes an array or inspects a value. It only
+  partitions the immutable GraphDef/abstract-layout tuples that already form
+  the executable-reuse key, so a live mismatch can be assigned to static
+  graph metadata, abstract state, or physical placement without weakening the
+  fail-closed key.
+  """
+  program_keys = tuple(program_keys)
+  if not program_keys:
+    raise FunctionalMappingError("P59 layer program keys must be nonempty")
+  graph_keys = []
+  normalization_keys = []
+  state_treedefs = []
+  state_abstracts = []
+  state_physical_layouts = []
+  for (
+      graph_key,
+      prefix_count,
+      initializer_count,
+      state_signature,
+  ) in program_keys:
+    state_treedef, leaf_signatures = state_signature
+    graph_keys.append(graph_key)
+    normalization_keys.append((prefix_count, initializer_count))
+    state_treedefs.append(state_treedef)
+    state_abstracts.append(tuple(leaf[:3] for leaf in leaf_signatures))
+    state_physical_layouts.append(tuple(leaf[3] for leaf in leaf_signatures))
+  return {
+      "graph_keys": len(set(graph_keys)),
+      "graph_no_outer_keys": len(set(
+          graph_key.with_no_outer_index() for graph_key in graph_keys
+      )),
+      "normalization_keys": len(set(normalization_keys)),
+      "state_treedefs": len(set(state_treedefs)),
+      "state_abstracts": len(set(state_abstracts)),
+      "state_physical_layouts": len(set(state_physical_layouts)),
+      "product_keys": len(set(program_keys)),
+  }
+
+
+def _p59_static_difference_paths(left, right, *, limit=64):
+  """Returns bounded host-static difference paths without reading arrays."""
+  differences = []
+  truncated = False
+  visited_pairs = set()
+
+  def add(path, kind):
+    nonlocal truncated
+    if len(differences) >= limit:
+      truncated = True
+      return
+    differences.append((path, kind))
+
+  def visit(left_value, right_value, path):
+    nonlocal truncated
+    if truncated or left_value is right_value:
+      return
+    if type(left_value) is not type(right_value):
+      add(
+          path,
+          "type:"
+          f"{type(left_value).__module__}.{type(left_value).__qualname__}"
+          "->"
+          f"{type(right_value).__module__}.{type(right_value).__qualname__}",
+      )
+      return
+    if isinstance(left_value, (jax.Array, np.ndarray)):
+      add(path, f"array-identity:{type(left_value).__qualname__}")
+      return
+    recursive_pair = (
+        dataclasses.is_dataclass(left_value)
+        or isinstance(left_value, (Mapping, tuple, list))
+        or (
+            not isinstance(left_value, type)
+            and not callable(left_value)
+            and hasattr(left_value, "__dict__")
+        )
+    )
+    if recursive_pair:
+      pair = (id(left_value), id(right_value))
+      if pair in visited_pairs:
+        return
+      visited_pairs.add(pair)
+    if dataclasses.is_dataclass(left_value) and not isinstance(
+        left_value, type
+    ):
+      for field in dataclasses.fields(left_value):
+        visit(
+            getattr(left_value, field.name),
+            getattr(right_value, field.name),
+            f"{path}.{field.name}",
+        )
+      return
+    if isinstance(left_value, Mapping):
+      left_keys = tuple(left_value)
+      right_keys = tuple(right_value)
+      if left_keys != right_keys:
+        add(path, "mapping-keys")
+        return
+      for key in left_keys:
+        visit(left_value[key], right_value[key], f"{path}[{key!r}]")
+      return
+    if isinstance(left_value, (tuple, list)):
+      if len(left_value) != len(right_value):
+        add(path, "sequence-length")
+        return
+      for index, (left_item, right_item) in enumerate(
+          zip(left_value, right_value, strict=True)
+      ):
+        item_path = f"{path}[{index}]"
+        left_named = (
+            isinstance(left_item, tuple)
+            and len(left_item) == 2
+            and isinstance(left_item[0], str)
+        )
+        right_named = (
+            isinstance(right_item, tuple)
+            and len(right_item) == 2
+            and isinstance(right_item[0], str)
+        )
+        if left_named and right_named:
+          if left_item[0] != right_item[0]:
+            add(
+                item_path,
+                f"named-pair-key:{left_item[0]!r}->{right_item[0]!r}",
+            )
+            continue
+          visit(
+              left_item[1],
+              right_item[1],
+              f"{path}[{index}:{left_item[0]!r}]",
+          )
+          continue
+        visit(left_item, right_item, item_path)
+      return
+    try:
+      equal = left_value == right_value
+    except (TypeError, ValueError):
+      equal = False
+    if isinstance(equal, (bool, np.bool_)) and bool(equal):
+      return
+    left_fields = getattr(left_value, "__dict__", None)
+    right_fields = getattr(right_value, "__dict__", None)
+    if (
+        isinstance(left_fields, dict)
+        and isinstance(right_fields, dict)
+        and not isinstance(left_value, type)
+        and not callable(left_value)
+    ):
+      left_names = tuple(sorted(left_fields))
+      right_names = tuple(sorted(right_fields))
+      if left_names != right_names:
+        add(path, "object-fields")
+        return
+      for name in left_names:
+        visit(
+            left_fields[name],
+            right_fields[name],
+            f"{path}.{name}",
+        )
+      return
+    if isinstance(left_value, type):
+      kind = "type-identity"
+    elif callable(left_value):
+      kind = (
+          "callable-identity:"
+          f"{getattr(left_value, '__module__', type(left_value).__module__)}."
+          f"{getattr(left_value, '__qualname__', type(left_value).__qualname__)}"
+      )
+    elif isinstance(left_value, (str, int, float, bool, type(None))):
+      kind = f"scalar:{type(left_value).__qualname__}"
+    else:
+      kind = (
+          "object-identity:"
+          f"{type(left_value).__module__}.{type(left_value).__qualname__}"
+      )
+    add(path, kind)
+
+  if limit < 1:
+    raise FunctionalMappingError("P59 static difference limit must be positive")
+  visit(left, right, "graph")
+  return tuple(differences), truncated
+
+
+def _p59_layer_graph_difference_profiles(program_keys, *, limit=64):
+  """Groups normalized layer GraphDefs by deterministic difference paths."""
+  program_keys = tuple(program_keys)
+  if not program_keys:
+    raise FunctionalMappingError("P59 layer program keys must be nonempty")
+  reference_graph = program_keys[0][0]
+  grouped = {}
+  for layer_index, program_key in enumerate(program_keys[1:], start=1):
+    differences, truncated = _p59_static_difference_paths(
+        reference_graph, program_key[0], limit=limit
+    )
+    signature = (differences, truncated)
+    grouped.setdefault(signature, []).append(layer_index)
+  return tuple(
+      {
+          "layers": tuple(layers),
+          "differences": differences,
+          "truncated": truncated,
+      }
+      for (differences, truncated), layers in grouped.items()
+  )
+
+
 class _P28SegmentedEngineForward:
   """Host-orchestrated Qwen3 forward with one JIT per real decoder layer.
 
@@ -3253,6 +3575,8 @@ class _P28SegmentedEngineForward:
     local_layer_pullback_tape_fns = []
     local_layer_leaves = []
     local_layer_contracts = []
+    local_layer_program_keys = []
+    local_layer_program_key_stats = []
     for layer_index in range(start_layer, end_layer):
 
       def run_layer(
@@ -3272,6 +3596,19 @@ class _P28SegmentedEngineForward:
       layer_graphdef, layer_state = nnx.split(layers[layer_index])
       layer_treedef = jax.tree_util.tree_structure(layer_state)
       layer_leaves = tuple(jax.tree_util.tree_leaves(layer_state))
+      graph_key, prefix_count, initializer_count = (
+          _p59_layer_graph_program_key(layer_graphdef, layer_index)
+      )
+      local_layer_program_keys.append((
+          graph_key,
+          prefix_count,
+          initializer_count,
+          _p59_program_tree_signature(layer_leaves),
+      ))
+      local_layer_program_key_stats.append((
+          prefix_count,
+          initializer_count,
+      ))
 
       def fwd_layer(
           leaves, cache, hidden, attention_metadata,
@@ -3446,6 +3783,42 @@ class _P28SegmentedEngineForward:
     self._local_layer_leaves = tuple(local_layer_leaves)
     self._local_layer_full_indices = tuple(local_layer_full_indices)
     self._local_layer_contracts = tuple(local_layer_contracts)
+    self._p59_layer_pullback_program_keys = tuple(local_layer_program_keys)
+    self._p59_layer_pullback_program_key_stats = tuple(
+        local_layer_program_key_stats
+    )
+    if os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") == "1":
+      component_counts = _p59_layer_program_key_component_counts(
+          self._p59_layer_pullback_program_keys
+      )
+      print(
+          "[P59.LAYER_PROGRAM_KEY_COMPONENTS] "
+          f"layers={len(self._p59_layer_pullback_program_keys)} "
+          f"graph_keys={component_counts['graph_keys']} "
+          f"graph_no_outer_keys={component_counts['graph_no_outer_keys']} "
+          f"normalization_keys={component_counts['normalization_keys']} "
+          f"state_treedefs={component_counts['state_treedefs']} "
+          f"state_abstracts={component_counts['state_abstracts']} "
+          "state_physical_layouts="
+          f"{component_counts['state_physical_layouts']} "
+          f"product_keys={component_counts['product_keys']} "
+          "array_values_read=0 host_transfers=0",
+          flush=True,
+      )
+      if component_counts["graph_keys"] > 1:
+        difference_profiles = _p59_layer_graph_difference_profiles(
+            self._p59_layer_pullback_program_keys
+        )
+        print(
+            "[P59.LAYER_GRAPH_DIFF] reference_layer=0 payload="
+            + json.dumps(
+                difference_profiles,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + " array_values_read=0 host_transfers=0",
+            flush=True,
+        )
     self._norm_fn = jax.jit(norm)
     self._embed_local_fn = embed_local_fn
     self._embed_pullback_fn = embed_pullback_fn
@@ -4535,6 +4908,10 @@ class _P28SegmentedEngineForward:
         )
       return result
 
+    invoke._p59_check_vma = p66_check_vma
+    invoke._p59_manual_axes = tuple(sorted(manual_axes))
+    invoke._p59_module_name = module_name
+
     return invoke
 
   @staticmethod
@@ -4826,60 +5203,118 @@ class _P28SegmentedEngineForward:
     if functions is None:
       functions = [None] * len(self._local_layer_pullback_fns)
       self._p59_layer_pullback_fns = functions
-    if functions[layer_index] is None:
-      pullback_fn = (
-          getattr(
-              self,
-              "_local_layer_pullback_vma_fns",
-              self._local_layer_pullback_fns,
-          )[layer_index]
-          if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
-          else self._local_layer_pullback_fns[layer_index]
+    programs = getattr(self, "_p59_layer_pullback_programs", None)
+    if programs is None:
+      programs = {}
+      self._p59_layer_pullback_programs = programs
+      self._p59_layer_pullback_program_origins = {}
+    p66_check_vma_value = os.environ.get(
+        "CANON_P66_P59_CHECK_VMA", "0"
+    )
+    if p66_check_vma_value not in ("0", "1"):
+      raise FunctionalMappingError(
+          "CANON_P66_P59_CHECK_VMA must be exactly 0 or 1, got "
+          f"{p66_check_vma_value!r}"
       )
-
-      def local_pullback(
-          leaves,
-          local_cache,
-          local_hidden,
-          local_metadata,
-          local_dcache,
-          local_dhidden,
-      ):
-        gradients, dcache, dhidden = pullback_fn(
-            leaves,
-            local_cache,
-            local_hidden,
-            local_metadata,
-            local_dcache,
-            local_dhidden,
-        )
-        return self._p59_stage_rank_gradient(gradients), dcache, dhidden
-
-      functions[layer_index] = self._p59_parallel_map(
-          local_pullback,
-          (
+    module_name = f"zt_tr_dp_parallel_bwd_layer_{layer_index:02d}"
+    if functions[layer_index] is None:
+      program_key = (
+          p66_check_vma_value,
+          self._p59_layer_pullback_program_keys[layer_index],
+          _p59_program_tree_signature((
               local_leaves,
               cache,
               hidden,
               attention_metadata,
               dnext_cache,
               dnext_hidden,
-          ),
-          lambda data_axis, axis_size, aligned, manual_axes: (
-              _rank_staged_specs(aligned[0], data_axis, manual_axes),
-              _rank_local_leading_specs(
-                  aligned[1], data_axis, axis_size, "P59 cache output",
-                  manual_axes,
-              ),
-              _rank_local_leading_specs(
-                  aligned[2], data_axis, axis_size, "P59 layer output",
-                  manual_axes,
-              ),
-          ),
-          rank_local_arg_indices=(1, 2, 4, 5),
-          module_name=f"zt_tr_dp_parallel_bwd_layer_{layer_index:02d}",
-          scope_name=f"zt/tr/dp_parallel/layer/{layer_index:02d}/bwd",
+          )),
       )
+      shared_program = programs.get(program_key)
+      if shared_program is not None:
+        functions[layer_index] = shared_program
+        if bool(getattr(shared_program, "_p59_check_vma", False)):
+          print(
+              f"[P66.VMA] outer_check_enabled module={module_name} "
+              "manual_axes="
+              f"{list(shared_program._p59_manual_axes)} "
+              "shared_program="
+              f"{self._p59_layer_pullback_program_origins[program_key]}",
+              flush=True,
+          )
+      else:
+        pullback_fn = (
+            getattr(
+                self,
+                "_local_layer_pullback_vma_fns",
+                self._local_layer_pullback_fns,
+            )[layer_index]
+            if p66_check_vma_value == "1"
+            else self._local_layer_pullback_fns[layer_index]
+        )
+
+        def local_pullback(
+            leaves,
+            local_cache,
+            local_hidden,
+            local_metadata,
+            local_dcache,
+            local_dhidden,
+        ):
+          gradients, dcache, dhidden = pullback_fn(
+              leaves,
+              local_cache,
+              local_hidden,
+              local_metadata,
+              local_dcache,
+              local_dhidden,
+          )
+          return self._p59_stage_rank_gradient(gradients), dcache, dhidden
+
+        functions[layer_index] = self._p59_parallel_map(
+            local_pullback,
+            (
+                local_leaves,
+                cache,
+                hidden,
+                attention_metadata,
+                dnext_cache,
+                dnext_hidden,
+            ),
+            lambda data_axis, axis_size, aligned, manual_axes: (
+                _rank_staged_specs(aligned[0], data_axis, manual_axes),
+                _rank_local_leading_specs(
+                    aligned[1], data_axis, axis_size, "P59 cache output",
+                    manual_axes,
+                ),
+                _rank_local_leading_specs(
+                    aligned[2], data_axis, axis_size, "P59 layer output",
+                    manual_axes,
+                ),
+            ),
+            rank_local_arg_indices=(1, 2, 4, 5),
+            module_name=module_name,
+            scope_name=f"zt/tr/dp_parallel/layer/{layer_index:02d}/bwd",
+        )
+        programs[program_key] = functions[layer_index]
+        self._p59_layer_pullback_program_origins[program_key] = module_name
+      if (
+          all(function is not None for function in functions)
+          and not getattr(self, "_p59_layer_program_reuse_announced", False)
+      ):
+        mapped_programs = len({id(function) for function in functions})
+        layers = len(functions)
+        static_keys = len(set(self._p59_layer_pullback_program_keys))
+        print(
+            "[P59.LAYER_PROGRAM_REUSE] "
+            f"enabled={int(mapped_programs < layers)} "
+            f"layers={layers} static_keys={static_keys} "
+            f"mapped_programs={mapped_programs} logical_calls_per_layer=1 "
+            f"checked_vma={int(p66_check_vma_value == '1')} "
+            "host_transfers=0",
+            flush=True,
+        )
+        self._p59_layer_program_reuse_announced = True
     return functions[layer_index]
 
   def run_block_pullback_rank_parallel_prepared(
@@ -8593,6 +9028,8 @@ class Qwen3EngineForwardAdapter:
       temperature,
       *,
       allow_empty_completion=False,
+      host_prompt_length=None,
+      host_completion_length=None,
   ):
     """Builds one fixed-M schedule with one sequence per DP rank.
 
@@ -8684,13 +9121,37 @@ class Qwen3EngineForwardAdapter:
     completion_length = jnp.sum(
         completion_valid, axis=1, dtype=jnp.int32
     )
-    host_n_real = np.asarray(jax.device_get(n_real), dtype=np.int32)
-    host_prompt_length = np.asarray(
-        jax.device_get(prompt_length), dtype=np.int32
+    host_lengths_supplied = (
+        host_prompt_length is not None or host_completion_length is not None
     )
-    host_completion_length = np.asarray(
-        jax.device_get(completion_length), dtype=np.int32
-    )
+    if host_lengths_supplied:
+      if host_prompt_length is None or host_completion_length is None:
+        raise FunctionalMappingError(
+            "P32 host prompt/completion lengths must be supplied together"
+        )
+      host_prompt_length = np.asarray(host_prompt_length, dtype=np.int32)
+      host_completion_length = np.asarray(
+          host_completion_length, dtype=np.int32
+      )
+      if (
+          host_prompt_length.shape != (self._data_size,)
+          or host_completion_length.shape != (self._data_size,)
+      ):
+        raise FunctionalMappingError(
+            "P32 host lengths must contain one scalar per data rank: "
+            f"prompt={host_prompt_length.shape} "
+            f"completion={host_completion_length.shape} "
+            f"data={self._data_size}"
+        )
+      host_n_real = host_prompt_length + host_completion_length
+    else:
+      host_n_real = np.asarray(jax.device_get(n_real), dtype=np.int32)
+      host_prompt_length = np.asarray(
+          jax.device_get(prompt_length), dtype=np.int32
+      )
+      host_completion_length = np.asarray(
+          jax.device_get(completion_length), dtype=np.int32
+      )
     if np.any(host_n_real < 2) or np.any(host_prompt_length < 1):
       raise FunctionalMappingError(
           "P32 grouped reverse requires a nonempty prompt and at least two "
@@ -8754,7 +9215,7 @@ class Qwen3EngineForwardAdapter:
         0,
         jnp.asarray(num_chunks * self._sequence_bucket - 1, jnp.int32),
     )
-    return {
+    result = {
         "packed_ids": packed_ids,
         "next_ids": next_ids,
         "source_rows": source_rows,
@@ -8767,6 +9228,12 @@ class Qwen3EngineForwardAdapter:
         "num_chunks": num_chunks,
         "temperature": jnp.asarray(temperature, jnp.float32),
     }
+    if host_lengths_supplied:
+      result["host_lengths_match"] = jnp.all(
+          (prompt_length == jnp.asarray(host_prompt_length))
+          & (completion_length == jnp.asarray(host_completion_length))
+      )
+    return result
 
   def _p32_group_chunk_inputs(self, spec, chunk_index):
     """Constructs one global-M engine call from data-rank-local sequences."""
@@ -8997,7 +9464,7 @@ class Qwen3EngineForwardAdapter:
         tuple((tuple(leaf.shape), str(leaf.dtype)) for leaf in leaves),
     )
 
-  def _p70_grad_tree_start(self, pack):
+  def _p70_grad_tree_start(self, pack, *, donate_pack=False):
     """One jitted `0 + x` start over the whole per-chunk gradient pack.
 
     Replaces the per-leaf eager `jnp.asarray(0, dtype) + value` strip
@@ -9005,11 +9472,15 @@ class Qwen3EngineForwardAdapter:
     and the scalar zeros are runtime operands: a trace-time constant zero
     lets XLA fold `add(0, x) -> x`, which would drop the legacy
     signed-zero canonicalization of the first microbatch's cotangents.
-    Built once, cached on this instance behind a structure/shape/dtype
-    signature guard (the `_p59_report_adjoint_fn` lazy-build pattern).
+    Built once per ownership mode and cached on this instance behind a
+    structure/shape/dtype signature guard (the
+    `_p59_report_adjoint_fn` lazy-build pattern).  Rank-parallel reverse
+    donates the first chunk pack because this dispatch is its last consumer;
+    the serial/default helper remains non-donating for callers that retain
+    their input handles.
     """
     signature = self._p70_grad_tree_signature(pack)
-    if getattr(self, "_p70_tree_start_fn", None) is None:
+    if getattr(self, "_p70_tree_start_signature", None) is None:
       leaves = jax.tree_util.tree_leaves(pack)
       zero_dtypes = []
       for leaf in leaves:
@@ -9018,6 +9489,26 @@ class Qwen3EngineForwardAdapter:
       leaf_zero_index = tuple(
           zero_dtypes.index(leaf.dtype) for leaf in leaves
       )
+
+      self._p70_tree_start_signature = signature
+      self._p70_tree_start_leaf_zero_index = leaf_zero_index
+      self._p70_tree_start_zeros = tuple(
+          jnp.asarray(0, dtype) for dtype in zero_dtypes
+      )
+    elif self._p70_tree_start_signature != signature:
+      raise FunctionalMappingError(
+          "P70 tree-start gradient pack signature changed after the "
+          "jitted program was built"
+      )
+
+    program_attribute = (
+        "_p70_tree_start_donated_fn"
+        if donate_pack
+        else "_p70_tree_start_fn"
+    )
+    program = getattr(self, program_attribute, None)
+    if program is None:
+      leaf_zero_index = self._p70_tree_start_leaf_zero_index
 
       def start(zeros, tree):
         tree_leaves, treedef = jax.tree_util.tree_flatten(tree)
@@ -9029,21 +9520,21 @@ class Qwen3EngineForwardAdapter:
             ],
         )
 
-      self._p70_tree_start_signature = signature
-      self._p70_tree_start_zeros = tuple(
-          jnp.asarray(0, dtype) for dtype in zero_dtypes
-      )
-      self._p70_tree_start_fn = _xprof_jit(
+      jit_kwargs = {"donate_argnums": (1,)} if donate_pack else {}
+      program = _xprof_jit(
           start,
           module_name="zt_tr_grad_tree_start",
           scope_name="zt/tr/grad/tree_start",
+          **jit_kwargs,
       )
-    elif self._p70_tree_start_signature != signature:
-      raise FunctionalMappingError(
-          "P70 tree-start gradient pack signature changed after the "
-          "jitted program was built"
-      )
-    return self._p70_tree_start_fn(self._p70_tree_start_zeros, pack)
+      setattr(self, program_attribute, program)
+      if donate_pack:
+        print(
+            "[P70.TREE_START] donation enabled=1 operand=chunk_pack "
+            "arithmetic=runtime-zero-add host_transfers=0",
+            flush=True,
+        )
+    return program(self._p70_tree_start_zeros, pack)
 
   def _p59_staged_tree_add(self, accumulator, staged):
     """One jitted, donating `a + b` over a staged DP gradient table.
@@ -9792,7 +10283,7 @@ class Qwen3EngineForwardAdapter:
               "after_pullbacks", chunk_index, (grad_pack, chunk_pack)
           )
         grad_pack = (
-            self._p70_grad_tree_start(chunk_pack)
+            self._p70_grad_tree_start(chunk_pack, donate_pack=True)
             if grad_pack is None
             else self._p70_grad_tree_add(grad_pack, chunk_pack)
         )
@@ -13243,6 +13734,244 @@ class Qwen3EngineForwardAdapter:
         jax.tree.map(lambda value: value[0], diagnostics),
     )
 
+  def compute_per_token_logps_segmented(
+      self,
+      *,
+      graphdef,
+      state,
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      images=None,
+      stop_gradient=True,
+      return_entropy=False,
+      segment_ids=None,
+      segment_positions=None,
+      temperature=1.0,
+      chunk_size=0,
+      prompt_mask=None,
+      completion_mask=None,
+      host_prompt_lengths=None,
+      host_completion_lengths=None,
+  ):
+    """Scores old-policy rows through the reusable host-segmented engine."""
+    del graphdef, eos_id, segment_positions
+    if not _p78_segmented_actor_logps_enabled():
+      raise FunctionalMappingError(
+          "segmented actor logps require CANON_P78_SEGMENTED_ACTOR_LOGPS=1"
+      )
+    workload_name = os.environ.get("CANON_P32_WORKLOAD", "")
+    if (
+        workload_name != "frozenlake-p45-onehost-dp4-tp1"
+        or self._data_size != 4
+        or self._tp_size != 1
+    ):
+      raise FunctionalMappingError(
+          "segmented actor logps require the exact P45 DP4xTP1 one-host "
+          f"carrier, got workload={workload_name!r} "
+          f"dp={self._data_size} tp={self._tp_size}"
+      )
+    if not stop_gradient:
+      raise FunctionalMappingError(
+          "segmented actor logps are a standalone old-policy scorer and "
+          "require stop_gradient=True"
+      )
+    if images is not None:
+      raise FunctionalMappingError("canonical Qwen3 adapter is text-only")
+    if segment_ids is not None:
+      raise FunctionalMappingError(
+          "canonical Qwen3 adapter does not yet admit sequence packing"
+      )
+    if chunk_size:
+      raise FunctionalMappingError(
+          "canonical engine adapter owns its fixed-M chunking; chunk_size must be 0"
+      )
+    if prompt_tokens.ndim != 2 or completion_tokens.ndim != 2:
+      raise FunctionalMappingError("prompt/completion tokens must be rank 2")
+    if prompt_tokens.shape[0] != completion_tokens.shape[0]:
+      raise FunctionalMappingError("prompt/completion batch sizes differ")
+    batch_size = int(prompt_tokens.shape[0])
+    if batch_size == 0 or batch_size % self._data_size:
+      raise FunctionalMappingError(
+          "segmented actor-logprob batch must be a nonzero multiple of the "
+          f"data size: batch={batch_size} data={self._data_size}"
+      )
+    if (
+        prompt_tokens.shape[1] + completion_tokens.shape[1]
+        > self._max_model_len
+    ):
+      raise FunctionalMappingError(
+          "one sequence exceeds the live engine max-model-length contract: "
+          f"{prompt_tokens.shape[1]}+{completion_tokens.shape[1]}"
+      )
+    if prompt_mask is None:
+      prompt_mask = prompt_tokens != pad_id
+    else:
+      prompt_mask = jnp.asarray(prompt_mask, dtype=jnp.bool_)
+    if completion_mask is None:
+      completion_mask = completion_tokens != pad_id
+    else:
+      completion_mask = jnp.asarray(completion_mask, dtype=jnp.bool_)
+    if prompt_mask.shape != prompt_tokens.shape:
+      raise FunctionalMappingError("prompt mask shape differs from prompt tokens")
+    if completion_mask.shape != completion_tokens.shape:
+      raise FunctionalMappingError(
+          "completion mask shape differs from completion tokens"
+      )
+    if host_prompt_lengths is None or host_completion_lengths is None:
+      raise FunctionalMappingError(
+          "segmented actor logps require host-derived prompt and completion "
+          "lengths to avoid a device-to-host scheduling read"
+      )
+    host_prompt_lengths = np.asarray(host_prompt_lengths, dtype=np.int32)
+    host_completion_lengths = np.asarray(
+        host_completion_lengths, dtype=np.int32
+    )
+    if (
+        host_prompt_lengths.shape != (batch_size,)
+        or host_completion_lengths.shape != (batch_size,)
+    ):
+      raise FunctionalMappingError(
+          "segmented actor-logprob host lengths must match the batch: "
+          f"prompt={host_prompt_lengths.shape} "
+          f"completion={host_completion_lengths.shape} batch={batch_size}"
+      )
+
+    segmented = getattr(self, "_p32_d3b_segmented_engine", None)
+    if segmented is None:
+      segmented = build_p28_segmented_engine_forward(
+          self._runner,
+          execution_mesh=self._execution_mesh,
+          execution_model=self._execution_model,
+      )
+      self._p32_d3b_segmented_engine = segmented
+      print(
+          "[P78.ACTOR_LOGPS] segmented_engine_ready "
+          f"data={self._data_size} tp={self._tp_size} "
+          f"local_M={self._sequence_bucket} global_M={self._bucket}",
+          flush=True,
+      )
+    deferred = getattr(self, "_p78_deferred_trainer_forward", None)
+    if deferred is None:
+      model_config = self._runner.model_config
+      deferred = _P78DeferredTrainerForward(
+          segmented=segmented,
+          trainer_state=state,
+          engine_state_contract=self._engine_state_contract,
+          key_mappings=self._key_mappings,
+          transpose_keys=self._transpose_keys,
+          key_mapping_hook_fns=self._hook_fns,
+          num_kv_heads=model_config.get_total_num_kv_heads(),
+          head_dim=model_config.get_head_size(),
+          tp_size=self._tp_size,
+      )
+      self._p78_deferred_trainer_forward = deferred
+      print(
+          "[P78.ACTOR_LOGPS] deferred_weight_map_ready "
+          f"source_leaves={deferred.source_leaf_count} "
+          f"target_leaves={deferred.target_leaf_count} "
+          f"module_programs={deferred.module_program_count} "
+          "mapped_leaf_outputs=0 source=trainer-state",
+          flush=True,
+      )
+    trainer_leaves = deferred.source_leaves(state)
+
+    grouped_inputs = jax.tree.map(
+        self._group_batch_rows,
+        (prompt_tokens, completion_tokens, prompt_mask, completion_mask),
+    )
+    local_batch = batch_size // self._data_size
+    grouped_prompt_lengths = host_prompt_lengths.reshape(
+        self._data_size, local_batch
+    ).swapaxes(0, 1)
+    grouped_completion_lengths = host_completion_lengths.reshape(
+        self._data_size, local_batch
+    ).swapaxes(0, 1)
+    specs = tuple(
+        self._p32_group_spec(
+            grouped_inputs[0][index],
+            grouped_inputs[1][index],
+            grouped_inputs[2][index],
+            grouped_inputs[3][index],
+            temperature,
+            allow_empty_completion=True,
+            host_prompt_length=grouped_prompt_lengths[index],
+            host_completion_length=grouped_completion_lengths[index],
+        )
+        for index in range(local_batch)
+    )
+    forwards = tuple(
+        self._p32_forward_group(
+            deferred,
+            trainer_leaves,
+            spec,
+            keep_cache_inputs=False,
+        )
+        for spec in specs
+    )
+    grouped_logps = jnp.stack(
+        tuple(result["logps"] for result in forwards), axis=0
+    )
+    grouped_entropy = jnp.stack(
+        tuple(result["entropy"] for result in forwards), axis=0
+    )
+    host_lengths_match = jnp.stack(
+        tuple(spec["host_lengths_match"] for spec in specs), axis=0
+    )
+    # A caller-provided length mismatch cannot silently select too few chunks.
+    # Keep the check on device so schedule construction introduces no D2H; the
+    # strict finite/alignment gate rejects the NaN before any gradient commit.
+    grouped_logps = jnp.where(
+        host_lengths_match[:, None, None], grouped_logps, jnp.nan
+    )
+    grouped_entropy = jnp.where(
+        host_lengths_match[:, None, None], grouped_entropy, jnp.nan
+    )
+    logps = self._ungroup_batch_rows(grouped_logps)
+    entropy = self._ungroup_batch_rows(grouped_entropy)
+    output_sharding = jax.sharding.NamedSharding(
+        self._execution_mesh, jax.sharding.PartitionSpec("data", None)
+    )
+    logps = _safe_sharding_constraint(logps, output_sharding)
+    entropy = _safe_sharding_constraint(entropy, output_sharding)
+    logps = jax.lax.stop_gradient(logps)
+    entropy = jax.lax.stop_gradient(entropy)
+    print(
+        "[P78.ACTOR_LOGPS] dispatch "
+        f"batch={batch_size} groups={local_batch} "
+        f"chunks={','.join(str(spec['num_chunks']) for spec in specs)} "
+        f"local_M={self._sequence_bucket} global_M={self._bucket} "
+        "outer_jit=0 d2h_lengths=0 length_guard=device-finite",
+        flush=True,
+    )
+    if return_entropy:
+      return logps, entropy
+    return logps
+
+  def release_segmented_actor_logps_programs(self, *, outputs):
+    """Evicts P78-only executables after their final output is device-ready."""
+    if not _p78_segmented_actor_logps_enabled():
+      raise FunctionalMappingError(
+          "segmented actor program release requires "
+          "CANON_P78_SEGMENTED_ACTOR_LOGPS=1"
+      )
+    deferred = getattr(self, "_p78_deferred_trainer_forward", None)
+    if deferred is None:
+      raise FunctionalMappingError(
+          "segmented actor program release requires a completed P78 scorer"
+      )
+    outputs = jax.block_until_ready(outputs)
+    module_programs = deferred.release_program_caches()
+    del self._p78_deferred_trainer_forward
+    print(
+        "[P78.ACTOR_LOGPS] program_cache_release "
+        f"module_programs={module_programs} outputs_ready=1 "
+        "shared_engine=retained global_jax_clear_caches=0",
+        flush=True,
+    )
+    return outputs
+
   def compute_per_token_logps(
       self,
       *,
@@ -13547,6 +14276,371 @@ def _transform_value(
   return generate_utils._apply_dtype_cast(  # pylint: disable=protected-access
       value, target_value.dtype, source_path
   )
+
+
+@dataclasses.dataclass(frozen=True)
+class _P78DeferredTarget:
+  """One engine target produced inside its consuming module program."""
+
+  source_index: int
+  source_path: str
+  scan_axis: int | None
+  scan_index: int | None
+  target_shape: tuple[int, ...]
+  target_dtype: Any
+
+
+class _P78DeferredTrainerForward:
+  """Runs segmented C without materializing a full mapped engine state.
+
+  The ordinary differentiable path maps every trainer leaf because its reverse
+  must return a complete engine cotangent. Standalone old-policy scoring has no
+  parameter cotangent. It can therefore slice/transpose/cast only the leaves
+  consumed by one embed/layer/norm/head program and keep those transforms
+  inside that program. No mapped parameter array escapes as a JAX output.
+  """
+
+  def __init__(
+      self,
+      *,
+      segmented,
+      trainer_state,
+      engine_state_contract,
+      key_mappings,
+      transpose_keys,
+      key_mapping_hook_fns,
+      **shape_kwargs,
+  ):
+    self._segmented = segmented
+    self._transpose_keys = transpose_keys
+    self._key_mapping_hook_fns = key_mapping_hook_fns
+    self._shape_kwargs = shape_kwargs
+
+    source_flat = tuple(trainer_state.flat_state())
+    source_leaves = tuple(jax.tree.leaves(trainer_state))
+    if len(source_flat) != len(source_leaves):
+      raise FunctionalMappingError(
+          "P78 trainer flat-state and JAX leaf counts differ: "
+          f"{len(source_flat)} != {len(source_leaves)}"
+      )
+    source_paths = []
+    for index, ((path, variable), leaf) in enumerate(
+        zip(source_flat, source_leaves, strict=True)
+    ):
+      value = getattr(variable, "value", variable)
+      if value is not leaf:
+        raise FunctionalMappingError(
+            "P78 trainer flat-state order differs from JAX leaf order at "
+            f"leaf {index}"
+        )
+      source_paths.append(_flat_path(path))
+    if len(set(source_paths)) != len(source_paths):
+      raise FunctionalMappingError("P78 trainer source paths are not unique")
+    self._source_signature = tuple(
+        (path, tuple(leaf.shape), str(leaf.dtype))
+        for path, leaf in zip(source_paths, source_leaves, strict=True)
+    )
+
+    target_flat = tuple(engine_state_contract.flat_state())
+    target_paths = tuple(_flat_path(path) for path, _ in target_flat)
+    target_indices = {path: index for index, path in enumerate(target_paths)}
+    if len(target_indices) != len(target_paths):
+      raise FunctionalMappingError("P78 engine target paths are not unique")
+    source_contract = generate_utils.build_flat_dict(
+        target_flat, dict(key_mappings)
+    )
+    targets: list[_P78DeferredTarget | None] = [None] * len(target_paths)
+
+    def register(
+        *, source_index, source_path, target_path, target_param,
+        scan_axis=None, scan_index=None
+    ):
+      if target_path not in target_indices:
+        raise FunctionalMappingError(
+            f"P78 mapping names an unknown engine target: {target_path}"
+        )
+      target_index = target_indices[target_path]
+      if targets[target_index] is not None:
+        raise FunctionalMappingError(
+            f"P78 engine target is mapped more than once: {target_path}"
+        )
+      target_value = getattr(target_param, "value", target_param)
+      targets[target_index] = _P78DeferredTarget(
+          source_index=source_index,
+          source_path=source_path,
+          scan_axis=scan_axis,
+          scan_index=scan_index,
+          target_shape=tuple(target_value.shape),
+          target_dtype=target_value.dtype,
+      )
+
+    for source_index, (source_path, source_leaf) in enumerate(
+        zip(source_paths, source_leaves, strict=True)
+    ):
+      if "rng" in source_path:
+        continue
+      if source_path not in source_contract:
+        raise FunctionalMappingError(
+            f"P78 trainer source has no engine mapping: {source_path}"
+        )
+      target_param, target_path, sharding_spec = source_contract[source_path]
+      scan_axis = generate_utils._get_layer_axis_from_sharding_spec(  # pylint: disable=protected-access
+          sharding_spec
+      )
+      if scan_axis is None:
+        register(
+            source_index=source_index,
+            source_path=source_path,
+            target_path=target_path,
+            target_param=target_param,
+        )
+        continue
+      target_params = tuple(target_param)
+      scanned_target_paths = tuple(target_path)
+      layer_count = int(source_leaf.shape[scan_axis])
+      if (
+          len(target_params) != layer_count
+          or len(scanned_target_paths) != layer_count
+      ):
+        raise FunctionalMappingError(
+            "P78 scanned source/target layer counts differ: "
+            f"source={source_path} layers={layer_count} "
+            f"params={len(target_params)} paths={len(scanned_target_paths)}"
+        )
+      for scan_index, (one_path, one_param) in enumerate(
+          zip(scanned_target_paths, target_params, strict=True)
+      ):
+        register(
+            source_index=source_index,
+            source_path=source_path,
+            target_path=one_path,
+            target_param=one_param,
+            scan_axis=scan_axis,
+            scan_index=scan_index,
+        )
+
+    missing_targets = tuple(
+        target_paths[index]
+        for index, target in enumerate(targets)
+        if target is None
+    )
+    if missing_targets:
+      raise FunctionalMappingError(
+          f"P78 engine mapping is not target-complete: {missing_targets}"
+      )
+    self._targets = tuple(target for target in targets if target is not None)
+    if len(self._targets) != int(segmented._num_state_leaves):  # pylint: disable=protected-access
+      raise FunctionalMappingError(
+          "P78 mapping and segmented engine leaf counts differ: "
+          f"{len(self._targets)} != {segmented._num_state_leaves}"  # pylint: disable=protected-access
+      )
+
+    self._embed_program, self._embed_sources = self._make_program(
+        segmented._embed_full_indices,  # pylint: disable=protected-access
+        segmented._embed_local_fn,  # pylint: disable=protected-access
+        module_name="zt_tr_p78_fwd_embed",
+        scope_name="zt/tr/p78/embed/fwd",
+    )
+    layer_programs = []
+    layer_sources = []
+    for index, target_group in enumerate(
+        segmented._local_layer_full_indices  # pylint: disable=protected-access
+    ):
+      program, sources = self._make_program(
+          target_group,
+          segmented._local_layer_fns[index],  # pylint: disable=protected-access
+          module_name="zt_tr_p78_fwd_layer",
+          scope_name="zt/tr/p78/layer/fwd",
+      )
+      layer_programs.append(program)
+      layer_sources.append(sources)
+    self._layer_programs = tuple(layer_programs)
+    self._layer_sources = tuple(layer_sources)
+    self._norm_program, self._norm_sources = self._make_program(
+        segmented._norm_full_indices,  # pylint: disable=protected-access
+        segmented._norm_local_fn,  # pylint: disable=protected-access
+        module_name="zt_tr_p78_fwd_norm",
+        scope_name="zt/tr/p78/final_norm/fwd",
+    )
+    self._head_program, self._head_sources = self._make_program(
+        segmented._head_full_indices,  # pylint: disable=protected-access
+        segmented._head_local_fn,  # pylint: disable=protected-access
+        module_name="zt_tr_p78_fwd_head",
+        scope_name="zt/tr/p78/lm_head/fwd",
+    )
+    self._released = False
+
+  @property
+  def source_leaf_count(self):
+    return len(self._source_signature)
+
+  @property
+  def target_leaf_count(self):
+    return len(self._targets)
+
+  @property
+  def module_program_count(self):
+    return len(self._layer_programs) + 3
+
+  def source_leaves(self, trainer_state):
+    self._require_active()
+    source_flat = tuple(trainer_state.flat_state())
+    source_leaves = tuple(jax.tree.leaves(trainer_state))
+    if len(source_flat) != len(source_leaves):
+      raise FunctionalMappingError(
+          "P78 trainer flat-state and JAX leaf counts changed"
+      )
+    signature = tuple(
+        (_flat_path(path), tuple(leaf.shape), str(leaf.dtype))
+        for (path, variable), leaf in zip(
+            source_flat, source_leaves, strict=True
+        )
+    )
+    if signature != self._source_signature:
+      raise FunctionalMappingError("P78 trainer state contract changed")
+    for index, ((_, variable), leaf) in enumerate(
+        zip(source_flat, source_leaves, strict=True)
+    ):
+      if getattr(variable, "value", variable) is not leaf:
+        raise FunctionalMappingError(
+            "P78 trainer flat-state order differs from JAX leaf order at "
+            f"leaf {index}"
+        )
+    return source_leaves
+
+  def _require_active(self):
+    if self._released:
+      raise FunctionalMappingError(
+          "P78 deferred programs were already released"
+      )
+
+  def release_program_caches(self):
+    """Clears only the wrapper programs owned by this standalone scorer."""
+    self._require_active()
+    programs = (
+        self._embed_program,
+        *self._layer_programs,
+        self._norm_program,
+        self._head_program,
+    )
+    clearers = tuple(
+        getattr(program, "clear_cache", None) for program in programs
+    )
+    if not all(callable(clear) for clear in clearers):
+      raise FunctionalMappingError(
+          "P78 deferred program does not support local cache eviction"
+      )
+    for clear in clearers:
+      clear()
+    self._released = True
+    return len(programs)
+
+  def _make_program(
+      self, target_indices, local_program, *, module_name, scope_name
+  ):
+    selected = tuple(self._targets[index] for index in target_indices)
+    source_indices = tuple(
+        dict.fromkeys(target.source_index for target in selected)
+    )
+    source_positions = {
+        source_index: position
+        for position, source_index in enumerate(source_indices)
+    }
+    transpose_keys = self._transpose_keys
+    hook_fns = self._key_mapping_hook_fns
+    shape_kwargs = self._shape_kwargs
+
+    def invoke(selected_sources, *args):
+      mapped = []
+      for target in selected:
+        value = selected_sources[source_positions[target.source_index]]
+        if target.scan_axis is not None:
+          value = jax.lax.index_in_dim(
+              value,
+              target.scan_index,
+              target.scan_axis,
+              keepdims=False,
+          )
+        mapped.append(
+            _transform_value(
+                value,
+                source_path=target.source_path,
+                target_param=jax.ShapeDtypeStruct(
+                    target.target_shape, target.target_dtype
+                ),
+                transpose_keys=transpose_keys,
+                key_mapping_hook_fns=hook_fns,
+                rollout_engine="vllm_jax",
+                shape_kwargs=shape_kwargs,
+            )
+        )
+      return local_program(tuple(mapped), *args)
+
+    return (
+        _xprof_jit(
+            invoke, module_name=module_name, scope_name=scope_name
+        ),
+        source_indices,
+    )
+
+  def _select_sources(self, state_leaves, source_indices):
+    state_leaves = tuple(state_leaves)
+    if len(state_leaves) != len(self._source_signature):
+      raise FunctionalMappingError(
+          "P78 runtime trainer leaf count changed: "
+          f"{len(state_leaves)} != {len(self._source_signature)}"
+      )
+    return tuple(state_leaves[index] for index in source_indices)
+
+  def layer_scan_mode(self):
+    mode = self._segmented.layer_scan_mode()
+    if mode:
+      raise FunctionalMappingError(
+          "P78 deferred trainer mapping requires per-layer forward programs"
+      )
+    return ""
+
+  def run_embed_forward(self, input_ids, *, state_leaves=None):
+    self._require_active()
+    if state_leaves is None:
+      raise FunctionalMappingError("P78 embed requires trainer state leaves")
+    return self._embed_program(
+        self._select_sources(state_leaves, self._embed_sources), input_ids
+    )
+
+  def run_layer_forward(
+      self, layer_index, state_leaves, cache, hidden, attention_metadata
+  ):
+    self._require_active()
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._layer_programs):
+      raise FunctionalMappingError(
+          f"P78 layer index out of range: {layer_index}"
+      )
+    return self._layer_programs[layer_index](
+        self._select_sources(
+            state_leaves, self._layer_sources[layer_index]
+        ),
+        cache,
+        hidden,
+        attention_metadata,
+    )
+
+  def run_norm_forward(self, hidden, *, state_leaves=None):
+    self._require_active()
+    if state_leaves is None:
+      raise FunctionalMappingError("P78 norm requires trainer state leaves")
+    return self._norm_program(
+        self._select_sources(state_leaves, self._norm_sources), hidden
+    )
+
+  def run_head_forward(self, hidden, *, state_leaves=None):
+    self._require_active()
+    if state_leaves is None:
+      raise FunctionalMappingError("P78 head requires trainer state leaves")
+    return self._head_program(
+        self._select_sources(state_leaves, self._head_sources), hidden
+    )
 
 
 @dataclasses.dataclass(frozen=True)

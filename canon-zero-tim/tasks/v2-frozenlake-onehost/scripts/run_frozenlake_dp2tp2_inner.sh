@@ -50,6 +50,12 @@ case "$arm" in
 esac
 chunk_ticket="${chunk_ticket:-0}"
 chunk_backpressure="${chunk_backpressure:-0}"
+segmented_actor_logps="${CANON_P78_SEGMENTED_ACTOR_LOGPS:-}"
+case "$segmented_actor_logps" in 0|1) ;; *) echo "[V2.FL.ONEHOST] missing/invalid P78 selector" >&2; exit 2;; esac
+if [ "$segmented_actor_logps" = 1 ] && { [ "$workload" != p45 ] || [ "$geometry" != dp4-tp1 ]; }; then
+  echo "[V2.FL.ONEHOST] P78 admits only P45 DP4xTP1" >&2
+  exit 2
+fi
 if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && \
    { [ "$workload" != p45 ] || [ "$geometry" != dp2-tp2 ]; }; then
   echo "[V2.FL.ONEHOST] $arm P75/P76/P77 capacity arm admits only P45 DP2xTP2" >&2
@@ -74,6 +80,7 @@ if [ "${CANON_P77_CHUNK_BACKPRESSURE:-}" != "$chunk_backpressure" ]; then
   exit 2
 fi
 export CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure"
+export CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps"
 export CANON_WANDB_RUN_NAME="v2-fl-${workload}-${arm}-${V2_FL_LABEL:?}"
 export CANON_P57_RUN_KIND=
 export CANON_P57_TIM_ARM=
@@ -91,6 +98,10 @@ if [ "${CANON_P77_CHUNK_BACKPRESSURE:-}" != "$chunk_backpressure" ]; then
   echo "[V2.FL.ONEHOST] profile changed chunk-backpressure selector" >&2
   exit 2
 fi
+if [ "${CANON_P78_SEGMENTED_ACTOR_LOGPS:-}" != "$segmented_actor_logps" ]; then
+  echo "[V2.FL.ONEHOST] profile changed P78 selector" >&2
+  exit 2
+fi
 
 python3 "$pkg/tasks/p41-optimizer-residency/scripts/admit_frozenlake_runtime.py" \
   --gymnasium-wheel "${V2_FL_DEPS:?}/gymnasium-1.3.0-py3-none-any.whl" \
@@ -98,11 +109,32 @@ python3 "$pkg/tasks/p41-optimizer-residency/scripts/admit_frozenlake_runtime.py"
   --report "$root/runtime.json"
 
 python3 - <<'PY'
+import os
 import jax
+from jax._src import mesh_utils
+
 devices = jax.devices()
 print(f"[V2.FL.ONEHOST] devices={len(devices)} ids={[d.id for d in devices]} backend={jax.default_backend()}", flush=True)
 if len(devices) != 4 or jax.default_backend() != "tpu":
   raise SystemExit("FrozenLake one-host carrier requires exactly four TPU devices")
+shape = (int(os.environ["V2_FL_DP_SIZE"]), int(os.environ["V2_FL_TP_SIZE"]))
+arranged = mesh_utils.create_device_mesh(
+    shape, devices, allow_split_physical_axes=True
+)
+actual_ids = [int(device.id) for device in arranged.reshape(-1)]
+expected_ids = [
+    int(value)
+    for value in os.environ["CANON_EXPECT_TRAIN_MESH_IDS"].split(",")
+]
+if actual_ids != expected_ids:
+  raise SystemExit(
+      "FrozenLake one-host training mesh mismatch: "
+      f"expected={expected_ids} actual={actual_ids}"
+  )
+print(
+    f"[V2.FL.ONEHOST] TRAIN_MESH_PASS shape={shape} ids={actual_ids}",
+    flush=True,
+)
 PY
 
 python3 - <<'PY'
@@ -157,6 +189,9 @@ manifest = {
             "CANON_P76_CHUNK_DEPENDENCY_TICKET"
         ],
         "chunk_backpressure": os.environ["CANON_P77_CHUNK_BACKPRESSURE"],
+        "segmented_actor_logps": os.environ[
+            "CANON_P78_SEGMENTED_ACTOR_LOGPS"
+        ],
     },
     "reducer_schedule": {
         "kind": "fixed-local-byte-buckets",

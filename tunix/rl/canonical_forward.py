@@ -35,6 +35,12 @@ class CanonicalForwardAdapter(Protocol):
   def compute_per_token_logps(self, **kwargs: Any) -> Any:
     ...
 
+  def compute_per_token_logps_segmented(self, **kwargs: Any) -> Any:
+    ...
+
+  def release_segmented_actor_logps_programs(self, **kwargs: Any) -> Any:
+    ...
+
 
 _adapter: CanonicalForwardAdapter | None = None
 
@@ -81,6 +87,28 @@ def require_registered() -> CanonicalForwardAdapter:
 
 def compute_per_token_logps(**kwargs: Any) -> Any:
   return require_registered().compute_per_token_logps(**kwargs)
+
+
+def compute_per_token_logps_segmented(**kwargs: Any) -> Any:
+  """Runs the registered host-segmented actor scorer outside an outer JIT."""
+  adapter = require_registered()
+  scorer = getattr(adapter, "compute_per_token_logps_segmented", None)
+  if scorer is None:
+    raise CanonicalForwardError(
+        "registered canonical adapter has no segmented actor scorer"
+    )
+  return scorer(**kwargs)
+
+
+def release_segmented_actor_logps_programs(**kwargs: Any) -> Any:
+  """Waits for segmented scorer outputs and evicts only its private JITs."""
+  adapter = require_registered()
+  release = getattr(adapter, "release_segmented_actor_logps_programs", None)
+  if release is None:
+    raise CanonicalForwardError(
+        "registered canonical adapter cannot release segmented actor programs"
+    )
+  return release(**kwargs)
 
 
 def attestation() -> dict[str, Any]:

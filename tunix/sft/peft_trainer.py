@@ -352,6 +352,42 @@ def _state_logical_bytes(state: Any) -> int:
   )
 
 
+def _optimizer_with_state_initialized_on_pinned_host(
+    model: nnx.Module,
+    optimizer: optax.GradientTransformation,
+    wrt: nnx.filterlib.Filter,
+) -> nnx.Optimizer:
+  """Builds an optimizer whose transformation state starts on pinned host.
+
+  ``nnx.Optimizer`` initializes Optax state eagerly.  Initializing against a
+  device-resident model and moving the result afterward creates the complete
+  optimizer-state tree in HBM first, which defeats offload's peak-memory
+  purpose.  Compile once to obtain the exact output shardings, change only
+  their memory kind, and make the eager initializer write those outputs
+  directly to pinned host memory.
+  """
+
+  def init_on_pinned_host(params):
+    compiled = jax.jit(optimizer.init).lower(params).compile()
+    host_shardings = jax.tree.map(
+        lambda sharding: sharding.with_memory_kind("pinned_host"),
+        compiled.output_shardings,
+    )
+    del compiled
+    with jax.transfer_guard("disallow"):
+      initialized = jax.jit(
+          optimizer.init, out_shardings=host_shardings
+      )(params)
+    return jax.block_until_ready(initialized)
+
+  initialization_optimizer = optimizer._replace(init=init_on_pinned_host)
+  result = nnx.Optimizer(model, initialization_optimizer, wrt=wrt)
+  # NNX retains the transformation for updates.  Restore the caller's exact
+  # object so only initialization placement, not update semantics, changes.
+  result.tx = optimizer
+  return result
+
+
 def _precomputed_expected_microbatches(environ) -> int:
   """Returns the fail-closed segmented optimizer transaction length."""
   p41_optimizer_bench = environ.get("CANON_P41_OPTIMIZER_BENCH", "") == "1"
@@ -404,6 +440,16 @@ def _requires_precomputed_gradient_accumulator(environ) -> bool:
   return (
       environ.get("CANON_P28_SEGMENTED_TRAIN", "") == "1"
       and environ.get("CANON_P28_G6_UPDATE", "") == "1"
+  )
+
+
+def _lazy_reduce_once_accumulator_admitted(environ) -> bool:
+  """Returns whether a P33 reduce-once transaction adopts its first payload."""
+  return (
+      _requires_precomputed_gradient_accumulator(environ)
+      and environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+      and environ.get("CANON_DP_REDUCE_ONCE", "") == "1"
+      and not environ.get("V2_P0_NEGATIVE_CONTROL", "")
   )
 
 
@@ -513,7 +559,14 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    if self.config.optimizer_offload and jax.default_backend() == "tpu":
+      self.optimizer = _optimizer_with_state_initialized_on_pinned_host(
+          self.model, optimizer, wrt_target
+      )
+      self._optimizer_initialization_mode = "direct-pinned-host"
+    else:
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+      self._optimizer_initialization_mode = "device"
     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)). Set optimizer_state_dtype to override, e.g.
     # jnp.float32.
@@ -529,12 +582,23 @@ class PeftTrainer:
     accumulator_dtype = self.config.gradient_accumulator_dtype
     if accumulator_dtype is None:
       accumulator_dtype = jnp.float32
+    self._lazy_reduce_once_accumulator = (
+        _lazy_reduce_once_accumulator_admitted(os.environ)
+    )
     self.grad_accumulator = GradientAccumulator(
         self.model,
         wrt_target,
-        allocate_grads=_uses_cond_path,
+        allocate_grads=(
+            _uses_cond_path and not self._lazy_reduce_once_accumulator
+        ),
         accumulator_dtype=accumulator_dtype,
     )
+    if self._lazy_reduce_once_accumulator:
+      print(
+          "[V2.REDUCE_ONCE.LAZY_ACCUMULATOR] enabled=1 "
+          "leaves=0 logical_bytes=0 state=empty host_transfers=0",
+          flush=True,
+      )
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -1015,6 +1079,50 @@ class PeftTrainer:
         nnx.state(self.optimizer, nnx.optimizer.OptState)
     )
 
+  def optimizer_initialization_mode(self) -> str:
+    """Reports whether Optax state was materialized directly on host."""
+    return self._optimizer_initialization_mode
+
+  def gradient_accumulator_mode(self) -> str:
+    """Reports the storage lifecycle of the precomputed accumulator."""
+    if self._lazy_reduce_once_accumulator:
+      return "lazy-reduce-once"
+    return "materialized"
+
+  def lazy_reduce_once_accumulator_enabled(self) -> bool:
+    """Returns whether the admitted transaction starts without grad storage."""
+    if self._lazy_reduce_once_accumulator:
+      leaves = jax.tree.leaves(self.grad_accumulator.grads)
+      if self._p28_precomputed_microstep == 0 and leaves:
+        raise ValueError(
+            "lazy reduce-once accumulator retained gradients while idle"
+        )
+    return self._lazy_reduce_once_accumulator
+
+  def _release_lazy_reduce_once_accumulator(self) -> tuple[ArrayLike, int]:
+    """Retires a completed accumulator payload and restores empty ownership."""
+    if not self._lazy_reduce_once_accumulator:
+      raise ValueError("lazy accumulator release requires its admitted mode")
+    leaves = tuple(jax.tree.leaves(self.grad_accumulator.grads))
+    if not leaves or any(not isinstance(leaf, jax.Array) for leaf in leaves):
+      raise ValueError("lazy accumulator release requires an adopted JAX tree")
+    denominator = self.grad_accumulator.denom[...]
+    jax.block_until_ready((leaves, denominator))
+    for leaf in leaves:
+      if not leaf.is_deleted():
+        leaf.delete()
+    self.grad_accumulator.grads = nnx.data({})
+    denominator_bits = jax.lax.bitcast_convert_type(
+        denominator, jnp.uint32
+    )
+    self.grad_accumulator.denom.set_value(jax.lax.bitcast_convert_type(
+        jax.lax.bitwise_xor(denominator_bits, denominator_bits),
+        jnp.float32,
+    ))
+    if jax.tree.leaves(self.grad_accumulator.grads):
+      raise ValueError("lazy accumulator release did not restore empty storage")
+    return denominator, len(leaves)
+
   def apply_precomputed_gradient_microbatches(
       self, gradient_microbatches: Sequence[Any]
   ) -> tuple[ArrayLike, ...]:
@@ -1268,6 +1376,10 @@ class PeftTrainer:
   def loan_precomputed_gradient_accumulator(self) -> Any:
     """Returns the idle FP32 accumulator tree for reduce-once donation."""
     self._validate_precomputed_gradient_contract()
+    if self._lazy_reduce_once_accumulator:
+      raise ValueError(
+          "lazy reduce-once accumulator has no base storage to loan"
+      )
     if self._p28_precomputed_microstep != 0:
       raise ValueError(
           "gradient accumulator loan requires an idle transaction: "
@@ -1307,7 +1419,12 @@ class PeftTrainer:
           f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
       )
     old_leaves = jax.tree.leaves(self.grad_accumulator.grads)
-    if not old_leaves or any(
+    if self._lazy_reduce_once_accumulator:
+      if old_leaves:
+        raise ValueError(
+            "lazy gradient adoption requires empty accumulator storage"
+        )
+    elif not old_leaves or any(
         not isinstance(leaf, jax.Array) or not leaf.is_deleted()
         for leaf in old_leaves
     ):
@@ -1533,7 +1650,16 @@ class PeftTrainer:
             time.perf_counter() - optimizer_transaction_start
         ),
     }
-    if os.environ.get("CANON_P30_RESHARD_ACCUMULATOR", "") == "1":
+    if self._lazy_reduce_once_accumulator:
+      _, released_leaves = self._release_lazy_reduce_once_accumulator()
+      print(
+          "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
+          f"leaves={released_leaves} transition=committed-to-empty "
+          f"retired_handles={released_leaves} remaining_leaves=0 "
+          "host_transfers=0",
+          flush=True,
+      )
+    elif os.environ.get("CANON_P30_RESHARD_ACCUMULATOR", "") == "1":
       active_mesh = jax.sharding.get_mesh()
       if active_mesh.empty:
         active_mesh = pxla.thread_resources.env.physical_mesh
@@ -1629,6 +1755,25 @@ class PeftTrainer:
           "adopted discard cadence mismatch: "
           f"{self._p28_precomputed_microstep} != {expected_microsteps}"
       )
+    if self._lazy_reduce_once_accumulator:
+      denominator, released_leaves = (
+          self._release_lazy_reduce_once_accumulator()
+      )
+      self._jitted_precomputed_gradient_step_fn = None
+      self._jitted_precomputed_gradient_scaled_step_fn = None
+      self._jitted_precomputed_gradient_pair_step_fn = None
+      self._jitted_precomputed_gradient_commit_fn = None
+      self._jitted_precomputed_gradient_discard_fn = None
+      self._jitted_precomputed_gradient_adopted_discard_fn = None
+      self._p28_precomputed_microstep = 0
+      print(
+          "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
+          f"leaves={released_leaves} transition=adopted-to-empty "
+          f"retired_handles={released_leaves} remaining_leaves=0 "
+          "host_transfers=0",
+          flush=True,
+      )
+      return denominator
     if self._jitted_precomputed_gradient_adopted_discard_impl is None:
       self._jitted_precomputed_gradient_adopted_discard_impl = nnx.jit(
           self._precomputed_gradient_adopted_discard,

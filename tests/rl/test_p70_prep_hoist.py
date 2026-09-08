@@ -35,6 +35,7 @@ inventory reconstructed from tasks/v1_hp_zero_tim/phases/v1-p70-tail-fusion.md
 and tasks/v1_hp_zero_tim/p70a_acceptance_20260827.md.
 """
 
+import dataclasses
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -397,3 +398,510 @@ def test_rank_parallel_prepared_matches_unprepared_dp2_tp2():
       engine.run_block_pullback_rank_parallel_prepared(
           prepared, 99, cache, hidden, metadata, dnext_cache, dnext_hidden
       )
+
+
+class _ProgramKeyLayer(nnx.Module):
+
+  def __init__(self, prefix, activation, p22xh_site="input_layernorm"):
+    self.prefix = prefix
+    self._p22xh_prefix = f"{prefix}.{p22xh_site}"
+    self.kernel_init = jax.nn.initializers.uniform()
+    self.activation = activation
+    self.weight = nnx.Param(jnp.asarray(1.0, jnp.float32))
+
+
+def test_layer_program_key_normalizes_only_non_execution_metadata():
+  left_graphdef, _ = nnx.split(_ProgramKeyLayer("model.layers.0.x", "silu"))
+  right_graphdef, _ = nnx.split(_ProgramKeyLayer("model.layers.1.x", "silu"))
+  changed_graphdef, _ = nnx.split(
+      _ProgramKeyLayer("model.layers.1.x", "gelu")
+  )
+  changed_site_graphdef, _ = nnx.split(
+      _ProgramKeyLayer(
+          "model.layers.1.x", "silu", "post_attention_layernorm"
+      )
+  )
+  left_key, left_prefixes, left_initializers = (
+      canonical_qwen3_adapter._p59_layer_graph_program_key(  # pylint: disable=protected-access
+          left_graphdef, 0
+      )
+  )
+  right_key, right_prefixes, right_initializers = (
+      canonical_qwen3_adapter._p59_layer_graph_program_key(  # pylint: disable=protected-access
+          right_graphdef, 1
+      )
+  )
+  changed_key, _, _ = (
+      canonical_qwen3_adapter._p59_layer_graph_program_key(  # pylint: disable=protected-access
+          changed_graphdef, 1
+      )
+  )
+  changed_site_key, _, _ = (
+      canonical_qwen3_adapter._p59_layer_graph_program_key(  # pylint: disable=protected-access
+          changed_site_graphdef, 1
+      )
+  )
+  assert left_key == right_key
+  assert (left_prefixes, left_initializers) == (2, 1)
+  assert (right_prefixes, right_initializers) == (2, 1)
+  assert changed_key != left_key
+  assert changed_site_key != left_key
+
+
+def test_layer_program_key_component_observer_is_fail_closed():
+  @dataclasses.dataclass(frozen=True)
+  class GraphKey:
+    semantic: str
+    outer_index: int | None
+
+    def with_no_outer_index(self):
+      return dataclasses.replace(self, outer_index=None)
+
+  treedef = jax.tree.structure((jnp.asarray(0, jnp.float32),))
+  abstract = ((4, 8), "bfloat16", False)
+  physical_a = ("physical", "device", (("tpu", 0, 0),))
+  physical_b = ("physical", "device", (("tpu", 0, 1),))
+
+  def key(graph, physical):
+    return (graph, 7, 7, (treedef, (abstract + (physical,),)))
+
+  component_counts = (
+      canonical_qwen3_adapter._p59_layer_program_key_component_counts
+  )
+  equal = component_counts(
+      (
+          key(GraphKey("graph-a", 0), physical_a),
+          key(GraphKey("graph-a", 0), physical_a),
+      )
+  )
+  assert equal == {
+      "graph_keys": 1,
+      "graph_no_outer_keys": 1,
+      "normalization_keys": 1,
+      "state_treedefs": 1,
+      "state_abstracts": 1,
+      "state_physical_layouts": 1,
+      "product_keys": 1,
+  }
+
+  graph_changed = (
+      component_counts(
+          (
+              key(GraphKey("graph-a", 0), physical_a),
+              key(GraphKey("graph-b", 0), physical_a),
+          )
+      )
+  )
+  assert graph_changed == {
+      **equal,
+      "graph_keys": 2,
+      "graph_no_outer_keys": 2,
+      "product_keys": 2,
+  }
+
+  outer_changed = component_counts(
+      (
+          key(GraphKey("graph-a", 0), physical_a),
+          key(GraphKey("graph-a", 1), physical_a),
+      )
+  )
+  assert outer_changed == {
+      **equal,
+      "graph_keys": 2,
+      "product_keys": 2,
+  }
+
+  physical_changed = (
+      component_counts(
+          (
+              key(GraphKey("graph-a", 0), physical_a),
+              key(GraphKey("graph-a", 0), physical_b),
+          )
+      )
+  )
+  assert physical_changed == {
+      **equal,
+      "state_physical_layouts": 2,
+      "product_keys": 2,
+  }
+
+  with pytest.raises(
+      FunctionalMappingError, match="layer program keys must be nonempty"
+  ):
+    component_counts(())
+
+
+def test_layer_graph_difference_observer_is_bounded_and_value_safe():
+  @dataclasses.dataclass(frozen=True)
+  class Nested:
+    semantic: str
+    outer_index: int
+    callback: object
+    value: object
+
+  def callback_factory():
+    return lambda x: x
+
+  left = Nested("silu", 0, callback_factory(), np.asarray([1], np.int32))
+  right = Nested("gelu", 1, callback_factory(), np.asarray([1], np.int32))
+  difference_paths = canonical_qwen3_adapter._p59_static_difference_paths  # pylint: disable=protected-access
+  differences, truncated = difference_paths(left, right)
+  assert not truncated
+  assert differences == (
+      ("graph.semantic", "scalar:str"),
+      ("graph.outer_index", "scalar:int"),
+      (
+          "graph.callback",
+          "callable-identity:"
+          "test_p70_prep_hoist."
+          "test_layer_graph_difference_observer_is_bounded_and_value_safe."
+          "<locals>.callback_factory.<locals>.<lambda>",
+      ),
+      ("graph.value", "array-identity:ndarray"),
+  )
+  limited, was_truncated = difference_paths(left, right, limit=2)
+  assert limited == differences[:2]
+  assert was_truncated
+  assert difference_paths(left, left) == ((), False)
+  device_left = jnp.asarray([1.0], jnp.float32)
+  device_right = jnp.asarray([1.0], jnp.float32)
+  with jax.transfer_guard("disallow"):
+    device_differences = difference_paths(device_left, device_right)
+  assert device_differences == (
+      (("graph", "array-identity:ArrayImpl"),),
+      False,
+  )
+  with pytest.raises(
+      FunctionalMappingError, match="difference limit must be positive"
+  ):
+    difference_paths(left, right, limit=0)
+
+
+def test_layer_graph_difference_profiles_group_matching_layers():
+  @dataclasses.dataclass(frozen=True)
+  class GraphKey:
+    activation: str
+
+    def with_no_outer_index(self):
+      return self
+
+  treedef = jax.tree.structure((jnp.asarray(0, jnp.float32),))
+  signature = (treedef, (((1,), "float32", False, None),))
+  keys = (
+      (GraphKey("silu"), 0, 0, signature),
+      (GraphKey("gelu"), 0, 0, signature),
+      (GraphKey("gelu"), 0, 0, signature),
+  )
+  profiles = (
+      canonical_qwen3_adapter._p59_layer_graph_difference_profiles(keys)  # pylint: disable=protected-access
+  )
+  assert profiles == ({
+      "layers": (1, 2),
+      "differences": (("graph.activation", "scalar:str"),),
+      "truncated": False,
+  },)
+
+
+def test_layer_graph_difference_names_attributes_and_compares_static_objects():
+  @dataclasses.dataclass(frozen=True)
+  class Attribute:
+    value: object
+
+  @dataclasses.dataclass(frozen=True)
+  class Graph:
+    attributes: tuple
+
+  class Config:
+
+    def __init__(self, output_size, fuse_matmuls):
+      self.output_size = output_size
+      self.fuse_matmuls = fuse_matmuls
+
+  class Method:
+
+    def __init__(self, output_size, fuse_matmuls):
+      self.linear_config = Config(output_size, fuse_matmuls)
+
+  left = Graph((
+      ("method", Attribute(Method(8, True))),
+      ("method", Attribute(Method(16, True))),
+  ))
+  equal = Graph((
+      ("method", Attribute(Method(8, True))),
+      ("method", Attribute(Method(16, True))),
+  ))
+  changed = Graph((
+      ("method", Attribute(Method(8, True))),
+      ("method", Attribute(Method(16, False))),
+  ))
+  difference_paths = canonical_qwen3_adapter._p59_static_difference_paths  # pylint: disable=protected-access
+  assert difference_paths(left, equal) == ((), False)
+  assert difference_paths(left, changed) == ((
+      (
+          "graph.attributes[1:'method'].value.linear_config.fuse_matmuls",
+          "scalar:bool",
+      ),
+  ), False)
+
+
+def test_layer_graph_difference_handles_named_pair_drift_and_cycles():
+  class Cyclic:
+
+    def __init__(self, mode):
+      self.mode = mode
+      self.child = self
+
+  difference_paths = canonical_qwen3_adapter._p59_static_difference_paths  # pylint: disable=protected-access
+  left = (("method", Cyclic("silu")),)
+  right = (("method", Cyclic("gelu")),)
+  assert difference_paths(left, right) == ((
+      ("graph[0:'method'].mode", "scalar:str"),
+  ), False)
+  renamed = (("quant_method", Cyclic("silu")),)
+  assert difference_paths(left, renamed) == ((
+      ("graph[0]", "named-pair-key:'method'->'quant_method'"),
+  ), False)
+
+
+def test_layer_program_key_component_receipt_is_rank_parallel_only(capsys):
+  fixtures = _fixtures()
+  with mock.patch.dict(
+      os.environ,
+      {**_SEGMENTED_ENV, "CANON_P59_RANK_PARALLEL_BACKWARD": "1"},
+      clear=False,
+  ):
+    _build_rank_parallel_engine(fixtures, 4, 1)
+  receipts = capsys.readouterr().out
+  assert receipts.count("[P59.LAYER_PROGRAM_KEY_COMPONENTS]") == 1
+  assert (
+      "[P59.LAYER_PROGRAM_KEY_COMPONENTS] layers=2 graph_keys=1 "
+      "graph_no_outer_keys=1 normalization_keys=1 state_treedefs=1 "
+      "state_abstracts=1 "
+      "state_physical_layouts=1 product_keys=1 array_values_read=0 "
+      "host_transfers=0"
+  ) in receipts
+
+  with mock.patch.dict(
+      os.environ,
+      {**_SEGMENTED_ENV, "CANON_P59_RANK_PARALLEL_BACKWARD": "0"},
+      clear=False,
+  ):
+    _build_rank_parallel_engine(fixtures, 4, 1)
+  assert "[P59.LAYER_PROGRAM_KEY_COMPONENTS]" not in capsys.readouterr().out
+
+
+def test_layer_graph_difference_receipt_reaches_engine_construction(capsys):
+  fixtures = _fixtures()
+  with mock.patch.dict(
+      os.environ,
+      {**_SEGMENTED_ENV, "CANON_P59_RANK_PARALLEL_BACKWARD": "1"},
+      clear=False,
+  ):
+    _build_rank_parallel_engine(fixtures, 4, 1, graph_difference=True)
+  receipts = capsys.readouterr().out
+  marker = "[P59.LAYER_GRAPH_DIFF] reference_layer=0 payload="
+  assert receipts.count(marker) == 1
+  payload = receipts.split(marker, maxsplit=1)[1].split(
+      " array_values_read=0 host_transfers=0", maxsplit=1
+  )[0]
+  assert '"layers":[1]' in payload
+  assert '"scalar:str"' in payload
+
+
+def _build_rank_parallel_engine(
+    fixtures, dp, tp, *, distinct_keys=False, graph_difference=False
+):
+  mesh = jax.sharding.Mesh(
+      np.asarray(jax.devices()[: dp * tp]).reshape(dp, tp),
+      ("data", "model"),
+  )
+  runner = fixtures._CompleteSegmentedRunner()
+  for layer_index, layer in enumerate(runner.model.model.layers):
+    layer.scale = nnx.Param(
+        jnp.full((tp,), 1.5 + 0.5 * layer_index, jnp.float32)
+    )
+    layer._p22xh_prefix = (
+        f"model.layers.{layer_index}.input_layernorm"
+    )
+    if graph_difference:
+      layer.p59_test_activation = "gelu" if layer_index else "silu"
+  graphdef, state = nnx.split(runner.model)
+  replicated = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec()
+  )
+  model_sharded = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec("model")
+  )
+  state = jax.tree.map(
+      lambda value: jax.device_put(
+          value,
+          model_sharded
+          if value.ndim == 1 and value.shape == (tp,)
+          else replicated,
+      ),
+      state,
+  )
+  runner.model = nnx.merge(graphdef, state)
+  _, runner.state = nnx.split(runner.model)
+  runner.state_leaves = tuple(jax.tree.leaves(runner.state))
+  runner.mesh = mesh
+  with mock.patch.dict(
+      os.environ,
+      {**_SEGMENTED_ENV, "CANON_P66_P59_CHECK_VMA": "1" if tp > 1 else "0"},
+      clear=False,
+  ):
+    engine = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+        runner
+    )
+  if distinct_keys:
+    engine._p59_layer_pullback_program_keys = tuple(  # pylint: disable=protected-access
+        (key, layer_index)
+        for layer_index, key in enumerate(
+            engine._p59_layer_pullback_program_keys  # pylint: disable=protected-access
+        )
+    )
+  rank_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec("data", None, "model")
+  )
+  model_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec("model")
+  )
+  hidden = jax.device_put(
+      jnp.arange(dp * 3 * tp, dtype=jnp.float32).reshape(dp, 3, tp)
+      / 7.0,
+      rank_sharding,
+  )
+  cache = jax.device_put(jnp.ones_like(hidden) / 11.0, rank_sharding)
+  operands = (
+      cache,
+      hidden,
+      jax.device_put(jnp.full((tp,), 0.125, jnp.float32), model_sharding),
+      jax.device_put(jnp.ones_like(cache) / 5.0, rank_sharding),
+      jax.device_put(jnp.ones_like(hidden) / 3.0, rank_sharding),
+  )
+  return engine, runner, operands
+
+
+def _run_rank_parallel_chain(engine, runner, operands):
+  prepared = engine.prepare_block_pullback_group(
+      tuple(runner.state_leaves), label="P59"
+  )
+  dcache, dhidden = operands[-2:]
+  outputs = []
+  for layer_index in reversed(range(len(prepared))):
+    result = engine.run_block_pullback_rank_parallel_prepared(
+        prepared,
+        layer_index,
+        *operands[:3],
+        dcache,
+        dhidden,
+    )
+    result = jax.block_until_ready(result)
+    outputs.append(result)
+    dcache, dhidden = result[1:]
+  return outputs
+
+
+@pytest.mark.parametrize(("dp", "tp"), ((4, 1), (2, 2), (2, 4)))
+def test_homogeneous_layers_share_one_rank_parallel_program(
+    dp, tp, capsys
+):
+  if len(jax.devices()) < dp * tp:
+    pytest.skip(f"requires {dp * tp} forced CPU devices")
+  if tp > 1 and not hasattr(
+      jax.core.ShapedArray((), np.dtype("float32")), "mat"
+  ):
+    pytest.skip("checked-VMA requires the pinned JAX manual-axis API")
+  fixtures = _fixtures()
+
+  def rank_local_layer(module, cache, layer_hidden, metadata):
+    output = layer_hidden * module.scale[...] + metadata + cache * 0.1
+    return cache + output, output
+
+  with (
+      mock.patch.object(
+          fixtures._SegmentedLayer, "__call__", rank_local_layer
+      ),
+      mock.patch.dict(
+          os.environ,
+          {"CANON_P66_P59_CHECK_VMA": "1" if tp > 1 else "0"},
+          clear=False,
+      ),
+  ):
+    baseline, baseline_runner, baseline_operands = (
+        _build_rank_parallel_engine(
+            fixtures, dp, tp, distinct_keys=True
+        )
+    )
+    shared, shared_runner, shared_operands = _build_rank_parallel_engine(
+        fixtures, dp, tp
+    )
+    assert (
+        shared._p59_layer_pullback_program_keys[0]  # pylint: disable=protected-access
+        == shared._p59_layer_pullback_program_keys[1]  # pylint: disable=protected-access
+    )
+    shared_prepared = shared.prepare_block_pullback_group(
+        tuple(shared_runner.state_leaves), label="P59 signature"
+    )
+    assert (
+        canonical_qwen3_adapter._p59_program_tree_signature(  # pylint: disable=protected-access
+            (shared_prepared[0], *shared_operands)
+        )
+        == canonical_qwen3_adapter._p59_program_tree_signature(  # pylint: disable=protected-access
+            (shared_prepared[1], *shared_operands)
+        )
+    )
+    with jax.transfer_guard("disallow"):
+      baseline_outputs = _run_rank_parallel_chain(
+          baseline, baseline_runner, baseline_operands
+      )
+    capsys.readouterr()
+    with jax.transfer_guard("disallow"):
+      shared_outputs = _run_rank_parallel_chain(
+          shared, shared_runner, shared_operands
+      )
+    receipts = capsys.readouterr().out
+
+  assert _tree_bytes(shared_outputs) == _tree_bytes(baseline_outputs)
+  assert len(shared._p59_layer_pullback_programs) == 1  # pylint: disable=protected-access
+  assert len({
+      id(function)
+      for function in shared._p59_layer_pullback_fns  # pylint: disable=protected-access
+  }) == 1
+  assert (
+      "[P59.LAYER_PROGRAM_REUSE] enabled=1 layers=2 static_keys=1 "
+      "mapped_programs=1 logical_calls_per_layer=1 "
+      f"checked_vma={int(tp > 1)} host_transfers=0"
+  ) in receipts
+  assert receipts.count("[P66.VMA] outer_check_enabled") == (
+      2 if tp > 1 else 0
+  )
+
+
+def test_nonhomogeneous_layer_key_keeps_distinct_programs(capsys):
+  fixtures = _fixtures()
+
+  def rank_local_layer(module, cache, layer_hidden, metadata):
+    output = layer_hidden * module.scale[...] + metadata + cache * 0.1
+    return cache + output, output
+
+  with (
+      mock.patch.object(
+          fixtures._SegmentedLayer, "__call__", rank_local_layer
+      ),
+      mock.patch.dict(
+          os.environ, {"CANON_P66_P59_CHECK_VMA": "0"}, clear=False
+      ),
+  ):
+    engine, runner, operands = _build_rank_parallel_engine(
+        fixtures, 4, 1, distinct_keys=True
+    )
+    with jax.transfer_guard("disallow"):
+      _run_rank_parallel_chain(engine, runner, operands)
+  receipts = capsys.readouterr().out
+  assert len(engine._p59_layer_pullback_programs) == 2  # pylint: disable=protected-access
+  assert (
+      "[P59.LAYER_PROGRAM_REUSE] enabled=0 layers=2 static_keys=2 "
+      "mapped_programs=2 logical_calls_per_layer=1 checked_vma=0 "
+      "host_transfers=0"
+  ) in receipts

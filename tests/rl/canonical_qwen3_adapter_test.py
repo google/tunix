@@ -1065,6 +1065,334 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         0,
     )
 
+  def test_p78_segmented_actor_logps_reuses_p32_without_d2h(self):
+    adapter, runner = self._make_p32_group_adapter(sequence_bucket=4)
+    adapter._data_size = 4  # pylint: disable=protected-access
+    adapter._tp_size = 1  # pylint: disable=protected-access
+    adapter._bucket = 16  # pylint: disable=protected-access
+    runner.mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "model")
+    )
+    runner.model_config.hf_config = types.SimpleNamespace(
+        tie_word_embeddings=False
+    )
+    adapter._execution_mesh = runner.mesh  # pylint: disable=protected-access
+    adapter._execution_model = None  # pylint: disable=protected-access
+    adapter._key_mappings = {  # pylint: disable=protected-access
+        ".".join(str(part) for part in path): (
+            ".".join(str(part) for part in path),
+            tuple(None for _ in leaf.shape),
+        )
+        for (path, _), leaf in zip(
+            runner.state.flat_state(),
+            jax.tree.leaves(runner.state),
+            strict=True,
+        )
+    }
+    row = jnp.arange(4, dtype=jnp.int32)[:, None]
+    prompt = jnp.concatenate(
+        (1 + row % 2, 2 + row % 2, jnp.zeros_like(row)), axis=1
+    )
+    completion = jnp.concatenate(
+        (2 + row % 2, 1 + row % 2, jnp.zeros_like(row)), axis=1
+    )
+    prompt_mask = prompt != 0
+    completion_mask = completion != 0
+    prompt_lengths = tuple(
+        int(value) for value in np.count_nonzero(np.asarray(prompt_mask), axis=1)
+    )
+    completion_lengths = tuple(
+        int(value)
+        for value in np.count_nonzero(np.asarray(completion_mask), axis=1)
+    )
+    env = {
+        "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp4-tp1",
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1",
+    }
+    with (
+        mock.patch.dict(os.environ, env, clear=False),
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "map_trainer_state_to_engine_leaves",
+            side_effect=AssertionError("P78 eagerly mapped the full state"),
+        ),
+    ):
+      reference_spec = adapter._p32_group_spec(  # pylint: disable=protected-access
+          prompt,
+          completion,
+          prompt_mask,
+          completion_mask,
+          0.7,
+      )
+      segmented = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner
+      )
+      reference = adapter._p32_forward_group(  # pylint: disable=protected-access
+          segmented,
+          tuple(runner.state_leaves),
+          reference_spec,
+          keep_cache_inputs=False,
+      )
+      jax.block_until_ready((reference["logps"], reference["entropy"]))
+      p78_output = io.StringIO()
+      with (
+          contextlib.redirect_stdout(p78_output),
+          mock.patch.object(
+              jax,
+              "device_get",
+              side_effect=AssertionError("segmented actor scorer performed D2H"),
+          ),
+          jax.transfer_guard_device_to_host("disallow"),
+      ):
+        actual_logps, actual_entropy = (
+            adapter.compute_per_token_logps_segmented(
+                graphdef=None,
+                state=runner.state,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                pad_id=0,
+                eos_id=3,
+                stop_gradient=True,
+                return_entropy=True,
+                temperature=0.7,
+                prompt_mask=prompt_mask,
+                completion_mask=completion_mask,
+                host_prompt_lengths=prompt_lengths,
+                host_completion_lengths=completion_lengths,
+            )
+        )
+        jax.block_until_ready((actual_logps, actual_entropy))
+
+      np.testing.assert_array_equal(
+          np.asarray(actual_logps), np.asarray(reference["logps"])
+      )
+      np.testing.assert_array_equal(
+          np.asarray(actual_entropy), np.asarray(reference["entropy"])
+      )
+      cached_segmented = adapter._p32_d3b_segmented_engine  # pylint: disable=protected-access
+      deferred = adapter._p78_deferred_trainer_forward  # pylint: disable=protected-access
+      private_programs = (
+          deferred._embed_program,  # pylint: disable=protected-access
+          *deferred._layer_programs,  # pylint: disable=protected-access
+          deferred._norm_program,  # pylint: disable=protected-access
+          deferred._head_program,  # pylint: disable=protected-access
+      )
+      self.assertTrue(all(program._cache_size() for program in private_programs))  # pylint: disable=protected-access
+      release_output = io.StringIO()
+      with (
+          contextlib.redirect_stdout(release_output),
+          mock.patch.object(
+              jax,
+              "clear_caches",
+              side_effect=AssertionError("P78 used a global cache clear"),
+          ),
+          jax.transfer_guard("disallow"),
+      ):
+        released_logps = adapter.release_segmented_actor_logps_programs(
+            outputs=actual_logps
+        )
+      self.assertIs(released_logps, actual_logps)
+      self.assertFalse(hasattr(adapter, "_p78_deferred_trainer_forward"))
+      self.assertTrue(
+          all(program._cache_size() == 0 for program in private_programs)  # pylint: disable=protected-access
+      )
+      self.assertIs(  # The training reverse retains this exact object.
+          adapter._p32_d3b_segmented_engine,  # pylint: disable=protected-access
+          cached_segmented,
+      )
+      self.assertIn(
+          "[P78.ACTOR_LOGPS] program_cache_release "
+          f"module_programs={len(private_programs)} outputs_ready=1 "
+          "shared_engine=retained global_jax_clear_caches=0",
+          release_output.getvalue(),
+      )
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "already released",
+      ):
+        deferred.source_leaves(runner.state)
+
+      mismatched = adapter.compute_per_token_logps_segmented(
+          graphdef=None,
+          state=runner.state,
+          prompt_tokens=prompt,
+          completion_tokens=completion,
+          pad_id=0,
+          eos_id=3,
+          stop_gradient=True,
+          temperature=0.7,
+          prompt_mask=prompt_mask,
+          completion_mask=completion_mask,
+          host_prompt_lengths=tuple(value + 1 for value in prompt_lengths),
+          host_completion_lengths=completion_lengths,
+      )
+      self.assertTrue(np.isnan(np.asarray(mismatched)).all())
+      rebuilt = adapter._p78_deferred_trainer_forward  # pylint: disable=protected-access
+      self.assertIsNot(rebuilt, deferred)
+      rebuilt_programs = (
+          rebuilt._embed_program,  # pylint: disable=protected-access
+          *rebuilt._layer_programs,  # pylint: disable=protected-access
+          rebuilt._norm_program,  # pylint: disable=protected-access
+          rebuilt._head_program,  # pylint: disable=protected-access
+      )
+      self.assertTrue(
+          all(program._cache_size() for program in rebuilt_programs)  # pylint: disable=protected-access
+      )
+      self.assertIs(  # The training reverse will reuse this exact object.
+          adapter._p32_d3b_segmented_engine,  # pylint: disable=protected-access
+          cached_segmented,
+      )
+      self.assertEqual(
+          p78_output.getvalue().count(
+              "[P78.ACTOR_LOGPS] deferred_weight_map_ready "
+          ),
+          1,
+      )
+      self.assertIn(
+          "mapped_leaf_outputs=0 source=trainer-state",
+          p78_output.getvalue(),
+      )
+
+  def test_p78_deferred_mapping_keeps_scanned_weights_inside_modules(self):
+    source = _state({
+        "trainer": {
+            "embedding": jnp.arange(6, dtype=jnp.float32).reshape(2, 3),
+            "head": jnp.asarray([5.0], jnp.float32),
+            "layers": jnp.arange(8, dtype=jnp.float32).reshape(2, 4),
+            "norm": jnp.asarray([3.0], jnp.float32),
+        }
+    })
+    target = _state({
+        "engine": {
+            "embedding": jnp.zeros((3, 2), jnp.bfloat16),
+            "head": jnp.zeros((1,), jnp.bfloat16),
+            "layers": {
+                "0": {"weight": jnp.zeros((4,), jnp.bfloat16)},
+                "1": {"weight": jnp.zeros((4,), jnp.bfloat16)},
+            },
+            "norm": jnp.zeros((1,), jnp.bfloat16),
+        }
+    })
+    mappings = {
+        "trainer.embedding": ("engine.embedding", (None, None)),
+        "trainer.head": ("engine.head", (None,)),
+        "trainer.layers": (
+            "engine.layers.*.weight", ("layer", None)
+        ),
+        "trainer.norm": ("engine.norm", (None,)),
+    }
+    paths = tuple(
+        ".".join(str(part) for part in path)
+        for path, _ in target.flat_state()
+    )
+
+    class FakeSegmented:
+
+      _num_state_leaves = len(paths)
+      _embed_full_indices = (paths.index("engine.embedding"),)
+      _local_layer_full_indices = (
+          (paths.index("engine.layers.0.weight"),),
+          (paths.index("engine.layers.1.weight"),),
+      )
+      _norm_full_indices = (paths.index("engine.norm"),)
+      _head_full_indices = (paths.index("engine.head"),)
+      _embed_local_fn = staticmethod(
+          jax.jit(lambda leaves, ids: ids + jnp.sum(leaves[0]))
+      )
+      _local_layer_fns = (
+          jax.jit(
+              lambda leaves, cache, hidden, metadata: (
+                  cache,
+                  hidden + jnp.sum(leaves[0]) + metadata,
+              )
+          ),
+          jax.jit(
+              lambda leaves, cache, hidden, metadata: (
+                  cache,
+                  hidden + jnp.sum(leaves[0]) + metadata,
+              )
+          ),
+      )
+      _norm_local_fn = staticmethod(
+          jax.jit(lambda leaves, hidden: hidden * leaves[0][0])
+      )
+      _head_local_fn = staticmethod(
+          jax.jit(lambda leaves, hidden: hidden + leaves[0][0])
+      )
+
+      @staticmethod
+      def layer_scan_mode():
+        return ""
+
+    eager = canonical_qwen3_adapter.map_trainer_state_to_engine_leaves(
+        trainer_state=source,
+        engine_state_contract=target,
+        key_mappings=mappings,
+        transpose_keys={"embedding": (1, 0)},
+    )
+    eager_values = dict(zip(eager.paths, eager.leaves, strict=True))
+    deferred = canonical_qwen3_adapter._P78DeferredTrainerForward(  # pylint: disable=protected-access
+        segmented=FakeSegmented(),
+        trainer_state=source,
+        engine_state_contract=target,
+        key_mappings=mappings,
+        transpose_keys={"embedding": (1, 0)},
+        key_mapping_hook_fns=None,
+    )
+    source_leaves = deferred.source_leaves(source)
+    ids = jnp.asarray([1.0], jnp.float32)
+    cache = jnp.asarray(0.0, jnp.float32)
+    metadata = jnp.asarray(0.25, jnp.float32)
+    with (
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "map_trainer_state_to_engine_leaves",
+            side_effect=AssertionError("deferred path performed eager mapping"),
+        ),
+        jax.transfer_guard_device_to_host("disallow"),
+    ):
+      actual = deferred.run_embed_forward(ids, state_leaves=source_leaves)
+      for layer_index in range(2):
+        cache, actual = deferred.run_layer_forward(
+            layer_index, source_leaves, cache, actual, metadata
+        )
+      actual = deferred.run_norm_forward(
+          actual, state_leaves=source_leaves
+      )
+      actual = deferred.run_head_forward(
+          actual, state_leaves=source_leaves
+      )
+      jax.block_until_ready(actual)
+
+    expected = ids + jnp.sum(eager_values["engine.embedding"])
+    for layer_index in range(2):
+      expected = (
+          expected
+          + jnp.sum(eager_values[f"engine.layers.{layer_index}.weight"])
+          + metadata
+      )
+    expected = expected * eager_values["engine.norm"][0]
+    expected = expected + eager_values["engine.head"][0]
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    self.assertEqual(deferred.target_leaf_count, 5)
+    self.assertEqual(deferred.module_program_count, 5)
+
+    changed = _state({
+        "trainer": {
+            "embedding": jnp.zeros((3, 2), jnp.float32),
+            "head": jnp.asarray([5.0], jnp.float32),
+            "layers": jnp.arange(8, dtype=jnp.float32).reshape(2, 4),
+            "norm": jnp.asarray([3.0], jnp.float32),
+        }
+    })
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "trainer state contract changed",
+    ):
+      deferred.source_leaves(changed)
+
   def test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2(self):
     if len(jax.devices()) < 4:
       self.skipTest("requires four forced CPU or accelerator devices")

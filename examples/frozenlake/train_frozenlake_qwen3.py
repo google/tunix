@@ -43,7 +43,11 @@ from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
 from tunix.oss import utils as oss_utils
 from tunix.sft import metrics_logger
-from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
+from tunix.rl.agentic.agentic_grpo_learner import (
+    GRPOConfig,
+    GRPOLearner,
+    requires_reference_model,
+)
 from tunix.rl.agentic import token_continuity as token_continuity_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -641,6 +645,7 @@ else:
 
 NUM_ITERATIONS = 1
 BETA = args.beta
+FORCE_COMPUTE_KL = False
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 
@@ -1452,11 +1457,33 @@ if ENABLE_FLASH_ATTENTION:
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
-# Reference: keep bf16 storage (frozen, never updated -> HBM savings safe).
-qwen_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_DOWNLOAD_DIR, config, shared_mesh, dtype=MODEL_DTYPE
+# Reference log probabilities are mathematically absent when both beta and the
+# explicit diagnostic override are zero.  Do not materialize an unused frozen
+# 8B model on the colocated trainer mesh in that case.  The consuming learner
+# uses the same predicate below, so admission and execution cannot disagree.
+REFERENCE_MODEL_REQUIRED = requires_reference_model(
+    beta=BETA, force_compute_kl=FORCE_COMPUTE_KL
 )
-show_hbm_usage("after loading qwen_ref")
+qwen_ref = (
+    params_lib.create_model_from_safe_tensors(
+        MODEL_DOWNLOAD_DIR, config, shared_mesh, dtype=MODEL_DTYPE
+    )
+    if REFERENCE_MODEL_REQUIRED
+    else None
+)
+if frozenlake_onehost_proxy:
+  print(
+      "[V2.FL.REFERENCE] ADMISSION_PASS "
+      f"required={int(REFERENCE_MODEL_REQUIRED)} beta={BETA} "
+      f"force_compute_kl={int(FORCE_COMPUTE_KL)} "
+      f"model={'present' if qwen_ref is not None else 'absent'}",
+      flush=True,
+  )
+show_hbm_usage(
+    "after loading qwen_ref"
+    if qwen_ref is not None
+    else "after eliding qwen_ref"
+)
 
 # Actor: storage MUST be fp32. At LR=1e-6 with typical weight magnitudes
 # ~1e-2, Adam updates are ~1e-6, well below bf16 ULP (~7.8e-5). bf16 storage
@@ -1705,6 +1732,7 @@ grpo_config = GRPOConfig(
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
+    force_compute_kl=FORCE_COMPUTE_KL,
     epsilon=EPSILON,
     epsilon_high=EPSILON_HIGH,
     system_prompt="",

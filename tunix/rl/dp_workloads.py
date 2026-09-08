@@ -77,6 +77,7 @@ P57_STOCK_FAST_ZERO_SWITCHES = (
     "CANON_P28_SEGMENTED_FORWARD",
     "CANON_P28_SEGMENTED_VJP",
     "CANON_P28_SEGMENTED_TRAIN",
+    "CANON_P78_SEGMENTED_ACTOR_LOGPS",
     "CANON_P28_G6_UPDATE",
     "CANON_P28_BATCHED_REPORT",
     "CANON_P29_FULL_TRAIN",
@@ -117,6 +118,7 @@ P57_STOCK_TRAIN_ZERO_SWITCHES = (
     "CANON_P30_FUSED_PAIR_ACCUMULATION",
     "CANON_P30_REUSE_SEGMENTED_ENGINE",
     "CANON_P30_RELEASE_CAPTURED_STATE",
+    "CANON_P78_SEGMENTED_ACTOR_LOGPS",
     "CANON_P30_RESHARD_ACCUMULATOR",
     "CANON_ALIGNMENT_GATE_ONLY",
     "CANON_ALIGNMENT_UPDATE_CANARY",
@@ -1383,6 +1385,20 @@ def validate_environment(
   """Validates topology, numerical switches, and reduction promotion."""
   workload.validate()
   values = os.environ if environ is None else environ
+  segmented_actor_logps = values.get(
+      "CANON_P78_SEGMENTED_ACTOR_LOGPS", ""
+  )
+  if segmented_actor_logps not in ("", "0", "1"):
+    raise ValueError(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS must be unset/0/1"
+    )
+  if (
+      segmented_actor_logps == "1"
+      and workload.name != "frozenlake-p45-onehost-dp4-tp1"
+  ):
+    raise ValueError(
+        "segmented actor logps require frozenlake-p45-onehost-dp4-tp1"
+    )
   if workload.frozenlake_four_chip_proxy:
     contract = _FROZENLAKE_ONEHOST_CONTRACTS[workload.name]
     expected_candidate = (

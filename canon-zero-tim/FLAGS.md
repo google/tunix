@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 418 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 423 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -33,6 +33,7 @@
 | CANON_P67_P66_VMA_P59_ONLY | P67 serving 程序同一性修复：当 P66 checked-VMA 进程级 alias 开启时，只允许精确 P59 outer manual `data/model` pullback 消费 pcast/Pallas out-shape/RPA out-shape/embed invariant 登记；ordinary serving decode/prefill 保持历史图。它不关闭 P59 backward 修复，不改变数学值或 fixed TP reduction order，也不自行放宽 alignment gate | 0/off；`CANON_V1_FL_TP8_AB_ARM=serving-scope` 诊断，精确 P45-readiness/M15-main DP8×TP8 strict-zero 300-update FrozenLake V1 full profile，或精确 P58 Qwen3-4B Zero/full DP8×TP8 1,000-update HP profile可设 1；GSM8K、P58 Native/IS、非 HP Zero、Qwen3-32B 与其他 profile 禁止。P58.32 的 A-B warning 是独立、精确限定的 policy | host/exact-image gates通过；FrozenLake Wave 5 real P45 DP8×TP8 serving-scope 为48,594 action tokens、depth 2,472、A−B/B−C strict `0/0`、zero backward/commit，P45 serving recovery已验证；M15 serving、FrozenLake full backward/AdamW/perf/convergence未验证。P58 profile/environment/Python contract与完整 pinned-image gate通过，marker含 `vma_p59_only=1`；P58 target尚未重跑 | FrozenLake P45/M15各自300-update full horizon与P58 fresh target必须独立通过首commit backward-health/first-update与full-horizon gates；P58 warning target须保持 B-C/current exact 并记录 A-B 剂量，strict carrier 修复后再恢复 strict A=B=C |
 | CANON_V1_HP_FIRST_UPDATE_GATE | Exact registered full-run numerical admission. On train step 0, observes the complete accumulator before AdamW and requires the workload-specific denominator/microsteps, all-finite, nonzero, and stable-L2 in `(0,1e6]`; after AdamW it requires finite/coherent optimizer evidence before outer weight sync/checkpoint. P58 Qwen3-4B uses 16 rank-major gradient groups and denominator 16 despite eight outer prompt chunks. The bound is a regression sentinel, not a clip value | off; registered Phase4 full contexts plus exact P58 Zero-HP full, always requiring `CANON_P59_CHECKED_VMA=1` | Phase4 pre-registered in V1.P4.9; P58.11 construction validation in progress; target first commits pending | retain as a long-term first-commit safety gate or retire per workload only after target full horizons establish a tighter envelope |
 | CANON_V1_FL_TP8_AB_ARM | FrozenLake DP8×TP8 serving A/B first-red 双臂 selector：`p66-off` 整体关闭 checked-VMA 作定罪臂；`serving-scope` 保留 P59 checked-VMA backward、仅将共享 serving kernel 圈回历史程序作候选修复臂。两臂固定完整 32-prompt/256-trajectory P45 或 M15/main 几何，单轮 pre-backward 受控退出，zero backward/zero optimizer commit | 空/off；仅 `qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env` 可设两个登记值 | host resolved-env、Attempt-9 red/recovery/B−C-negative classifier、双 P45 64-chip renderer、fixed-image focused/full gates 通过；DP8×TP8 target 未跑，任何 arm 的 Kubernetes Complete 不替代 classification JSON | 双臂给出可归因判决并由后续 TP8 trainer-forward/backward oracle 收口后退役；失败证据永久保留 |
+| CANON_P78_SEGMENTED_ACTOR_LOGPS | P78 old-policy trainer C scorer 数值 selector：只在精确 `frozenlake-p45-onehost-dp4-tp1` 上，把 `RLCluster` 的 standalone `common.compute_per_token_logps` 外层 giant-jit 改派到 adapter 已有 P32 host-segmented engine；保持 global M=1024、local M=256 与原 `_sequence_group` 算术，不降低训练 reverse 的 local M。每个模块程序内部才切片/转置/cast该模块所需 trainer leaf，映射参数不作为 JAX 输出逃逸，因此 C 仍独立来自 trainer state而不物化完整399-leaf engine state。序列长度由 learner 已持有的 NumPy masks 计算后传入，device mask 独立复算并以 finite guard fail-closed；不做任何 device-to-host 取回。缺省/空/0 精确直调历史 common scorer；其他值、缺 host lengths、其他 workload/DP/TP 均 fatal | off；one-host runner 只对 P45 DP4×TP1 measurement 默认写 1，P45 DP2×TP2、DP1×TP4 与 M15 全部写 0 | 试验；初版 CPU/fixed-image 门绿但 R11 在80.5 GiB入场后因完整映射保活于首个25 MiB cache处仅余897 KiB而 `INCONCLUSIVE`。后续 deferred-map scratch 通过逐位 parity、`jax.transfer_guard_device_to_host('disallow')`、零 mapped-leaf output及缺映射负控；修订后仓内门与真实 strict A=B=C/梯度/HBM/XProf待跑 | fresh R12 exact one-host 同时通过 strict Zero-TIM、geometry gradient anchor/HBM 与 actor-score XProf 后才可进入 P45 DP4默认包；其余 workload/geometry必须逐一独立准入，任一数值红即否决并保留证据 |
 | CANON_OPT_STATE_RESIDENT / CANON_P30_OPT_STATE_OFFLOAD | 优化器驻留/卸载 | resident=生产默认 | 默认开 | resident 焊死后 OFFLOAD 降级为逃生开关保留 |
 | CANON_KV_UNIFIED | U 臂读路径统一实验 | off | **否决区**:生产红(43→9 仍 0.28),非修复 | 可删,判决记录永存 |
 | MIN_TOKEN_BUCKET / max_num_batched_tokens(非 CANON 但同级) | R2:全局/每 rank 桶契约 | 钉死 256 族 | 已认证 | 永不自由化;新几何走契约注册 |
@@ -524,6 +525,7 @@ CANON_P71_SCAN
 CANON_P75_REPORT_ADJOINT_BUCKETS
 CANON_P76_CHUNK_DEPENDENCY_TICKET
 CANON_P77_CHUNK_BACKPRESSURE
+CANON_P78_SEGMENTED_ACTOR_LOGPS
 CANON_V1_HP_FIRST_UPDATE_GATE
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
@@ -608,7 +610,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 422 settable names (appendix inventory above; exclusions: none).
+Count: 423 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

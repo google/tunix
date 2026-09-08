@@ -469,6 +469,9 @@ def _p28_reference_state(rl_cluster):
   worker = getattr(rl_cluster, "inference_worker", None)
   if worker is None:
     return None
+  has_model_state = getattr(worker, "has_model_state", None)
+  if callable(has_model_state) and not has_model_state("reference"):
+    return None
   return worker.get_model_state("reference")
 
 
@@ -1634,17 +1637,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
 
     reduce_once_accumulator_loan = None
-    reduce_once_accumulator_loan_active = False
-    reduce_once_accumulator_loan_adopted = False
+    reduce_once_accumulator_adoption_pending = False
+    reduce_once_accumulator_adopted = False
+    reduce_once_lazy_accumulator = False
     if (
         p33_workload
         and dp_training.dp_reduce_once_mode()
         and not os.environ.get("V2_P0_NEGATIVE_CONTROL", "")
     ):
-      reduce_once_accumulator_loan = (
-          actor_trainer.loan_precomputed_gradient_accumulator()
+      reduce_once_lazy_accumulator = (
+          actor_trainer.lazy_reduce_once_accumulator_enabled()
       )
-      reduce_once_accumulator_loan_active = True
+      if not reduce_once_lazy_accumulator:
+        reduce_once_accumulator_loan = (
+            actor_trainer.loan_precomputed_gradient_accumulator()
+        )
+      reduce_once_accumulator_adoption_pending = True
 
     def consume_microbatch(index, gradients):
       if segmented_no_commit:
@@ -1683,21 +1691,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
     def consume_scaled(index, gradients, multiplier, microbatches=1):
-      nonlocal reduce_once_accumulator_loan_active
-      nonlocal reduce_once_accumulator_loan_adopted
+      nonlocal reduce_once_accumulator_adoption_pending
+      nonlocal reduce_once_accumulator_adopted
 
       def accumulate_or_adopt():
-        nonlocal reduce_once_accumulator_loan_active
-        nonlocal reduce_once_accumulator_loan_adopted
-        if reduce_once_accumulator_loan_active:
+        nonlocal reduce_once_accumulator_adoption_pending
+        nonlocal reduce_once_accumulator_adopted
+        if reduce_once_accumulator_adoption_pending:
           norm = actor_trainer.adopt_precomputed_scaled_gradient(
               gradients,
               multiplier,
               microbatch_index=index,
               microbatches=microbatches,
           )
-          reduce_once_accumulator_loan_active = False
-          reduce_once_accumulator_loan_adopted = True
+          reduce_once_accumulator_adoption_pending = False
+          reduce_once_accumulator_adopted = True
           return norm
         return actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
             gradients,
@@ -1748,7 +1756,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           norm = jnp.asarray(
               numeric_receipt["stable_norm"], dtype=jnp.float32
           )
-        elif reduce_once_accumulator_loan_active:
+        elif reduce_once_accumulator_adoption_pending:
           norm = accumulate_or_adopt()
         else:
           norm = jnp.sqrt(sum(
@@ -1770,8 +1778,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
     def discard_adopted_accumulator():
-      nonlocal reduce_once_accumulator_loan_adopted
-      if not reduce_once_accumulator_loan_adopted:
+      nonlocal reduce_once_accumulator_adopted
+      if not reduce_once_accumulator_adopted:
         raise alignment.AlignmentGateError(
             "adopted accumulator reset requested without ownership"
         )
@@ -1784,13 +1792,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         denominator = (
             actor_trainer.discard_adopted_precomputed_gradients()
         )
-      reduce_once_accumulator_loan_adopted = False
-      print(
-          "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
-          f"leaves={reset_leaves} transition=adopted-to-idle "
-          "alias_mode=bitwise-zero host_transfers=0",
-          flush=True,
-      )
+      reduce_once_accumulator_adopted = False
+      if not reduce_once_lazy_accumulator:
+        print(
+            "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
+            f"leaves={reset_leaves} transition=adopted-to-idle "
+            "alias_mode=bitwise-zero host_transfers=0",
+            flush=True,
+        )
       return denominator
 
     if p61_capture_dir:
@@ -1844,9 +1853,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       value_and_grad_call_done = time.perf_counter()
     result["loss"].block_until_ready()
-    if reduce_once_accumulator_loan_active:
+    if reduce_once_accumulator_adoption_pending:
       raise alignment.AlignmentGateError(
-          "reduce-once returned without adopting its accumulator loan"
+          "reduce-once returned without adopting its accumulator storage"
       )
     # CANON_DP_REDUCE_ONCE=1 streams one reduced, scaled gradient. Preserve
     # its norm as the update-quality anchor while displaying rank-local
@@ -2124,7 +2133,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"{numeric_marker} final accumulator contract failed: "
             f"{accumulator_record}"
         )
-      if reduce_once_accumulator_loan_adopted:
+      if reduce_once_accumulator_adopted:
         discarded_denominator = discard_adopted_accumulator()
       else:
         with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
@@ -2149,7 +2158,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           flush=True,
       )
 
-    if p33_no_commit and reduce_once_accumulator_loan_adopted:
+    if p33_no_commit and reduce_once_accumulator_adopted:
       discard_adopted_accumulator()
 
     p58_all_filtered = (
@@ -2339,9 +2348,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "optimizer_memory_kinds_before": list(
               optimizer_memory_kinds_before
           ),
-            "optimizer_placement": optimizer_placement,
-            "state_fingerprints_before": before,
-            "state_fingerprints_after": after_no_commit,
+          "optimizer_initialization_mode": (
+              actor_trainer.optimizer_initialization_mode()
+          ),
+          "gradient_accumulator_mode": (
+              actor_trainer.gradient_accumulator_mode()
+          ),
+          "optimizer_placement": optimizer_placement,
+          "state_fingerprints_before": before,
+          "state_fingerprints_after": after_no_commit,
         }
       if hbm_stage_diagnostic:
         no_commit_record["hbm_stage_receipts"] = hbm_stage_receipts
@@ -2663,6 +2678,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             optimizer_memory_kinds_after
         ),
         "optimizer_placement": optimizer_placement,
+        "gradient_accumulator_mode": (
+            actor_trainer.gradient_accumulator_mode()
+        ),
         "state_fingerprints_before": before,
         "state_fingerprints_after": after,
     }

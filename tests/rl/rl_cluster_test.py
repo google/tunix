@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import functools
 import os
-import os
+import types
 import unittest
 from unittest import mock
 
@@ -29,6 +30,7 @@ import numpy as np
 import optax
 from transformers import tokenization_utils_base
 from tunix.generate import mappings
+from tunix.rl import canonical_forward
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
@@ -59,6 +61,227 @@ class RlClusterTest(parameterized.TestCase):
     chex.set_n_cpu_devices(cls.num_cpus)
     print(f'Setting up test with {cls.num_cpus} CPU devices before JAX init')
     cls.device_count = jax.device_count()
+
+  def test_same_step_actor_anchor_reuses_live_state_without_transfer(self):
+    cluster = object.__new__(rl_cluster_lib.RLCluster)
+    model = nnx.Linear(31, 17, rngs=nnx.Rngs(0))
+    actor_state = nnx.state(model)
+    cluster._actor_trainer = types.SimpleNamespace(
+        model=model, train_steps=7
+    )
+    cluster._anchor_policy_state = utils.put_params_on_memory_kind(
+        actor_state, "pinned_host"
+    )
+    cluster._anchor_policy_train_steps = 7
+    cluster._default_memory_kind = "device"
+    cluster.cluster_config = types.SimpleNamespace(offload_to_cpu=False)
+
+    with mock.patch.object(
+        utils,
+        "put_params_on_memory_kind",
+        side_effect=AssertionError("same-step anchor performed a host transfer"),
+    ):
+      with jax.transfer_guard("disallow"):
+        selected, temporary, source = (
+            cluster._actor_policy_state_for_logps(  # pylint: disable=protected-access
+                actor_state, actor_state_on_device=True
+            )
+        )
+
+    self.assertIs(selected, actor_state)
+    self.assertFalse(temporary)
+    self.assertEqual(source, "live-same-step")
+    for live, anchor in zip(
+        jax.tree.leaves(selected),
+        jax.tree.leaves(cluster._anchor_policy_state),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(live), np.asarray(anchor))
+
+  def test_stale_actor_anchor_retains_host_to_device_copy(self):
+    cluster = object.__new__(rl_cluster_lib.RLCluster)
+    model = nnx.Linear(31, 17, rngs=nnx.Rngs(0))
+    actor_state = nnx.state(model)
+    anchor_state = {"anchor": object()}
+    copied_state = {"copied": object()}
+    cluster._actor_trainer = types.SimpleNamespace(
+        model=model, train_steps=8
+    )
+    cluster._anchor_policy_state = anchor_state
+    cluster._anchor_policy_train_steps = 7
+    cluster._default_memory_kind = "device"
+    cluster.cluster_config = types.SimpleNamespace(offload_to_cpu=False)
+
+    with mock.patch.object(
+        cluster, "_is_state_on_device", return_value=False
+    ):
+      with mock.patch.object(
+          utils, "put_params_on_memory_kind", return_value=copied_state
+      ) as put:
+        selected, temporary, source = (
+            cluster._actor_policy_state_for_logps(  # pylint: disable=protected-access
+                actor_state, actor_state_on_device=True
+            )
+        )
+
+    self.assertIs(selected, copied_state)
+    self.assertTrue(temporary)
+    self.assertEqual(source, "anchor-host-copy")
+    put.assert_called_once_with(anchor_state, "device")
+
+  def test_p78_actor_logps_dispatches_segmented_scorer_with_host_lengths(self):
+    cluster = object.__new__(rl_cluster_lib.RLCluster)
+    model = nnx.Linear(7, 11, rngs=nnx.Rngs(0))
+    actor_state = nnx.state(model)
+    cluster._actor_trainer = types.SimpleNamespace(
+        model=model, train_steps=3
+    )
+    cluster._anchor_policy_state = actor_state
+    cluster._anchor_policy_train_steps = 3
+    cluster._default_memory_kind = "device"
+    cluster.cluster_config = types.SimpleNamespace(
+        offload_to_cpu=False,
+        training_config=types.SimpleNamespace(
+            data_sharding_axis=("dp",), compute_logps_chunk_size=None
+        ),
+    )
+    cluster.get_rollout_config = mock.Mock(
+        return_value=types.SimpleNamespace(temperature=0.7)
+    )
+    cluster._get_mesh_and_logical_axis_rules_cm = mock.Mock(
+        return_value=contextlib.nullcontext((None, None))
+    )
+
+    prompt_tokens = jnp.arange(4 * 5, dtype=jnp.int32).reshape(4, 5)
+    completion_tokens = jnp.arange(4 * 9, dtype=jnp.int32).reshape(4, 9)
+    prompt_mask = jnp.ones_like(prompt_tokens, dtype=jnp.bool_)
+    completion_mask = jnp.ones_like(completion_tokens, dtype=jnp.bool_)
+    observed = {}
+
+    def segmented_scorer(**kwargs):
+      observed.update(kwargs)
+      return jnp.zeros_like(kwargs["completion_tokens"], dtype=jnp.float32)
+
+    with (
+        mock.patch.dict(
+            os.environ, {"CANON_P78_SEGMENTED_ACTOR_LOGPS": "1"}
+        ),
+        mock.patch.object(cluster, "_is_state_on_device", return_value=True),
+        mock.patch.object(
+            rl_cluster_lib.sharding_utils,
+            "shard_input",
+            side_effect=lambda value, _: value,
+        ),
+        mock.patch.object(
+            canonical_forward,
+            "compute_per_token_logps_segmented",
+            side_effect=segmented_scorer,
+        ) as segmented,
+        mock.patch.object(
+            canonical_forward,
+            "release_segmented_actor_logps_programs",
+            side_effect=lambda **kwargs: kwargs["outputs"],
+        ) as release,
+        mock.patch.object(
+            rl_cluster_lib.common,
+            "compute_per_token_logps",
+            side_effect=AssertionError("outer-jit scorer was dispatched"),
+        ),
+    ):
+      actual = cluster.get_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=0,
+          eos_id=10,
+          micro_batch_size=4,
+          prompt_mask=prompt_mask,
+          completion_mask=completion_mask,
+          host_prompt_lengths=(5, 5, 5, 5),
+          host_completion_lengths=(9, 9, 9, 9),
+      )
+
+    segmented.assert_called_once()
+    release.assert_called_once()
+    self.assertEqual(observed["host_prompt_lengths"], (5, 5, 5, 5))
+    self.assertEqual(observed["host_completion_lengths"], (9, 9, 9, 9))
+    self.assertNotIn("canonical_actor", observed)
+    np.testing.assert_array_equal(
+        np.asarray(actual), np.zeros((4, 9), dtype=np.float32)
+    )
+
+  def test_p78_flag_off_dispatches_existing_outer_jit_scorer(self):
+    cluster = object.__new__(rl_cluster_lib.RLCluster)
+    model = nnx.Linear(7, 11, rngs=nnx.Rngs(0))
+    actor_state = nnx.state(model)
+    cluster._actor_trainer = types.SimpleNamespace(
+        model=model, train_steps=3
+    )
+    cluster._anchor_policy_state = actor_state
+    cluster._anchor_policy_train_steps = 3
+    cluster._default_memory_kind = "device"
+    cluster.cluster_config = types.SimpleNamespace(
+        offload_to_cpu=False,
+        training_config=types.SimpleNamespace(
+            data_sharding_axis=("dp",), compute_logps_chunk_size=None
+        ),
+    )
+    cluster.get_rollout_config = mock.Mock(
+        return_value=types.SimpleNamespace(temperature=0.7)
+    )
+    cluster._get_mesh_and_logical_axis_rules_cm = mock.Mock(
+        return_value=contextlib.nullcontext((None, None))
+    )
+    prompt_tokens = jnp.ones((4, 5), dtype=jnp.int32)
+    completion_tokens = jnp.ones((4, 9), dtype=jnp.int32)
+    observed = {}
+
+    def stock_scorer(*args, **kwargs):
+      observed["args"] = args
+      observed["kwargs"] = kwargs
+      return jnp.zeros_like(kwargs["completion_tokens"], dtype=jnp.float32)
+
+    with (
+        mock.patch.dict(
+            os.environ, {"CANON_P78_SEGMENTED_ACTOR_LOGPS": "0"}
+        ),
+        mock.patch.object(cluster, "_is_state_on_device", return_value=True),
+        mock.patch.object(
+            rl_cluster_lib.sharding_utils,
+            "shard_input",
+            side_effect=lambda value, _: value,
+        ),
+        mock.patch.object(
+            rl_cluster_lib.common,
+            "compute_per_token_logps",
+            side_effect=stock_scorer,
+        ) as stock,
+        mock.patch.object(
+            canonical_forward,
+            "compute_per_token_logps_segmented",
+            side_effect=AssertionError("segmented scorer was dispatched"),
+        ),
+        mock.patch.object(
+            canonical_forward,
+            "release_segmented_actor_logps_programs",
+            side_effect=AssertionError("segmented program release was called"),
+        ),
+    ):
+      actual = cluster.get_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=0,
+          eos_id=10,
+          micro_batch_size=4,
+      )
+
+    stock.assert_called_once()
+    self.assertLen(observed["args"], 2)
+    self.assertTrue(observed["kwargs"]["canonical_actor"])
+    self.assertNotIn("host_prompt_lengths", observed["kwargs"])
+    self.assertNotIn("host_completion_lengths", observed["kwargs"])
+    np.testing.assert_array_equal(
+        np.asarray(actual), np.zeros((4, 9), dtype=np.float32)
+    )
 
   def test_model_loading_with_resharding(self):
     split_index = self.device_count // 2

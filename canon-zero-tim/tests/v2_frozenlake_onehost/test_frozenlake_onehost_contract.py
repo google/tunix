@@ -51,6 +51,9 @@ def _source_matrix_profile(
       "CANON_P75_REPORT_ADJOINT_BUCKETS": "0",
       "CANON_P76_CHUNK_DEPENDENCY_TICKET": "0",
       "CANON_P77_CHUNK_BACKPRESSURE": "0",
+      "CANON_P78_SEGMENTED_ACTOR_LOGPS": (
+          "1" if recipe == "p45" and dp_size == 4 else "0"
+      ),
       "CANON_P57_WORKLOAD_CANDIDATE": "m15" if recipe == "m15" else "",
       "CANON_P57_DATA_SPLIT": "main" if recipe == "m15" else "",
       "CANON_P57_RUN_KIND": "",
@@ -179,6 +182,11 @@ def _environment(workload_name: str) -> dict[str, str]:
       "CANON_P75_REPORT_ADJOINT_BUCKETS": "0",
       "CANON_P76_CHUNK_DEPENDENCY_TICKET": "0",
       "CANON_P77_CHUNK_BACKPRESSURE": "0",
+      "CANON_P78_SEGMENTED_ACTOR_LOGPS": (
+          "1"
+          if workload_name == "frozenlake-p45-onehost-dp4-tp1"
+          else "0"
+      ),
       "CANON_WANDB_ONLINE_REQUIRED": "0",
       "CANON_P31_MONOTONIC_METRICS": "1",
       "CANON_WANDB_PROJECT": workload.wandb_project,
@@ -248,6 +256,72 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertIn('"CANON_QWEN3_TP_SIZE": "2"', probe)
     self.assertIn("V2_QWEN8B_TP2_IMPORT_PASS", probe)
 
+  def test_p22xh_layer_prefix_affects_only_site_suffix_and_diagnostics(self):
+    wrapper = (
+        ROOT / "canon-zero-tim/src/engine_shims/models/qwen8b/qwen3_p22xh.py"
+    )
+    tree = ast.parse(wrapper.read_text(encoding="utf-8"))
+    site_definition = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_site"
+    )
+    namespace = {}
+    exec(
+        compile(
+            ast.Module(body=[site_definition], type_ignores=[]),
+            str(wrapper),
+            "exec",
+        ),
+        namespace,
+    )
+    expected_sites = {
+        "input_layernorm": "input",
+        "post_attention_layernorm": "post",
+        "q_norm": "q",
+        "k_norm": "k",
+    }
+    for suffix, expected in expected_sites.items():
+      self.assertEqual(
+          namespace["_site"](f"model.layers.0.{suffix}"), expected
+      )
+      self.assertEqual(
+          namespace["_site"](f"model.layers.35.{suffix}"), expected
+      )
+    with self.assertRaisesRegex(RuntimeError, "unregistered RMSNorm prefix"):
+      namespace["_site"]("model.layers.0.not_a_norm")
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    site_control_reads = 0
+    prefix_attributes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "_p22xh_prefix"
+    ]
+    self.assertGreater(len(prefix_attributes), 1)
+    for node in prefix_attributes:
+      if isinstance(node.ctx, ast.Store):
+        continue
+      parent = parents[node]
+      if isinstance(parent, ast.FormattedValue):
+        continue
+      if (
+          isinstance(parent, ast.Call)
+          and isinstance(parent.func, ast.Name)
+          and parent.func.id == "_site"
+      ):
+        site_control_reads += 1
+        continue
+      self.fail(
+          "_p22xh_prefix gained an execution use outside _site: "
+          f"{ast.dump(parent)}"
+      )
+    self.assertEqual(site_control_reads, 1)
+
   def test_onehost_proxy_pins_vllm_seed_without_impersonating_p57(self):
     source = TRAIN_ENTRYPOINT.read_text(encoding="utf-8")
     initialization = source.index("frozenlake_onehost_proxy = False")
@@ -288,6 +362,21 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertIn("[V2.FL.SAMPLER] CONTRACT_PASS", learner)
     self.assertIn("cell in admitted_cells", learner)
     self.assertIn('"0" if tp == 1 else "1"', learner)
+
+  def test_beta_zero_elides_only_an_unconsumed_reference_model(self):
+    source = TRAIN_ENTRYPOINT.read_text(encoding="utf-8")
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn("FORCE_COMPUTE_KL = False", source)
+    self.assertIn("REFERENCE_MODEL_REQUIRED = requires_reference_model(", source)
+    self.assertIn("if REFERENCE_MODEL_REQUIRED", source)
+    self.assertIn("else None", source)
+    self.assertIn("force_compute_kl=FORCE_COMPUTE_KL", source)
+    self.assertIn("[V2.FL.REFERENCE] ADMISSION_PASS", source)
+    self.assertEqual(learner.count("if requires_reference_model("), 2)
+    self.assertIn("def requires_reference_model(", learner)
+    self.assertIn("return force_compute_kl or beta != 0.0", learner)
 
   def test_hbm_stage_diagnostic_is_measure_r0_and_r0b_only(self):
     learner = (
@@ -346,7 +435,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
         'os.environ["V2_FL_ARM"] in ("r0", "r0b")', inner
     )
 
-  def test_reduce_once_accumulator_loan_is_fail_closed_in_the_learner(self):
+  def test_reduce_once_lazy_accumulator_is_fail_closed_in_the_learner(self):
     learner = (
         ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
     ).read_text(encoding="utf-8")
@@ -373,6 +462,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     ]
 
     self.assertIn("loan_precomputed_gradient_accumulator", called_attributes)
+    self.assertIn("lazy_reduce_once_accumulator_enabled", called_attributes)
     self.assertIn("adopt_precomputed_scaled_gradient", called_attributes)
     self.assertIn(
         "discard_adopted_precomputed_gradients", called_attributes
@@ -384,7 +474,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     )
     self.assertIn('os.environ.get("V2_P0_NEGATIVE_CONTROL", "")', learner)
     self.assertIn(
-        "reduce-once returned without adopting its accumulator loan", learner
+        "reduce-once returned without adopting its accumulator storage", learner
     )
     self.assertIn("[V2.REDUCE_ONCE.ACCUMULATOR_RESET]", learner)
     self.assertNotIn("not p33_no_commit or numeric_debug", learner)
@@ -568,6 +658,44 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
               require_reduction_admission=True,
           )
 
+      if name == "frozenlake-p45-onehost-dp4-tp1":
+        dp_workloads.validate_environment(
+            workload,
+            {**environ, "CANON_P78_SEGMENTED_ACTOR_LOGPS": "0"},
+            require_reduction_admission=True,
+        )
+      else:
+        with self.assertRaisesRegex(
+            ValueError, "segmented actor logps require"
+        ):
+          dp_workloads.validate_environment(
+              workload,
+              {**environ, "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1"},
+              require_reduction_admission=True,
+          )
+
+  def test_p78_delivery_is_default_on_only_for_p45_dp4(self):
+    runner = (
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "run_frozenlake_dp2tp2_onehost.sh"
+    ).read_text(encoding="utf-8")
+    inner = (
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "run_frozenlake_dp2tp2_inner.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        '-e CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps"',
+        runner,
+    )
+    self.assertIn(
+        'V2_FL_P78_SEGMENTED_ACTOR_LOGPS:-$segmented_actor_logps_default',
+        runner,
+    )
+    self.assertIn("P78 segmented actor logps admit only P45 DP4xTP1", runner)
+    self.assertIn("profile changed P78 selector", inner)
+
   def test_each_matrix_workload_rejects_bent_topology_and_model(self):
     for name in (
         f"frozenlake-{recipe}-onehost-dp{dp_size}-tp{tp_size}"
@@ -604,7 +732,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
             length_sort=length_sort,
         )
         expected_hbm = (
-            "0.65" if recipe == "p45" else "0.66"
+            "0.52" if recipe == "p45" else "0.66"
         ) if dp_size == 4 else "0.56"
         with self.subTest(recipe=recipe, dp=dp_size, tp=tp_size, arm=arm):
           self.assertEqual(result.returncode, 0, result.stderr)
@@ -615,12 +743,59 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
                   f"{model_dir}|{dp_size}|{tp_size}|{keep_tape}|"
                   f"{reduce_once}|{length_sort}|"
                   f"{'0|0' if tp_size == 1 else '1|1'}|"
-                  f"{'0,2,1,3' if dp_size == 4 else '0,1,2,3'}|"
-                  f"{'0,2,1,3' if dp_size == 4 else '0,1,2,3'}|"
+                  "0,2,1,3|0,2,1,3|"
                   f"{expected_hbm}"
               ),
           )
           self.assertIn("PROFILE_CONTRACT_PASS", result.stdout.splitlines())
+
+  def test_dp1_tp4_profile_pins_the_physical_onehost_mesh_order(self):
+    wrapper = (
+        ROOT
+        / "canon-zero-tim/cluster/profiles/"
+        "qwen3-8b-dp1-tp4-frozenlake-onehost.env"
+    ).read_text(encoding="utf-8")
+    shared = (
+        ROOT
+        / "canon-zero-tim/cluster/profiles/"
+        "_qwen3-8b-frozenlake-four-chip-onehost.env"
+    ).read_text(encoding="utf-8")
+    self.assertIn("_CANON_FL4_MESH_IDS=0,2,1,3", wrapper)
+    self.assertIn(
+        "qwen3-8b-dp1-tp4-frozenlake-onehost.env:1:4:qwen8b:1:0,2,1,3",
+        shared,
+    )
+    self.assertNotIn(
+        "qwen3-8b-dp1-tp4-frozenlake-onehost.env:1:4:qwen8b:1:0,1,2,3",
+        shared,
+    )
+
+  def test_onehost_inner_asserts_the_created_training_mesh_order(self):
+    inner = (
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "run_frozenlake_dp2tp2_inner.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn("mesh_utils.create_device_mesh(", inner)
+    self.assertIn("allow_split_physical_axes=True", inner)
+    self.assertIn('os.environ["CANON_EXPECT_TRAIN_MESH_IDS"]', inner)
+    self.assertIn("if actual_ids != expected_ids:", inner)
+    self.assertIn("[V2.FL.ONEHOST] TRAIN_MESH_PASS", inner)
+
+  def test_dp4_p45_hbm_cap_is_smallest_two_decimal_full_width_envelope(self):
+    # R8 measured these aggregate bytes after removing the unused reference.
+    total_hbm_bytes = 382.97 * 1024**3
+    model_resident_bytes = 183.08 * 1024**3
+    kv_bytes_per_token = 36 * 2 * 8 * 128 * 2
+    full_width_kv_bytes = 16 * 6400 * kv_bytes_per_token
+    self.assertLess(
+        0.51 * total_hbm_bytes - model_resident_bytes,
+        full_width_kv_bytes,
+    )
+    self.assertGreaterEqual(
+        0.52 * total_hbm_bytes - model_resident_bytes,
+        full_width_kv_bytes,
+    )
 
   def test_new_topology_profiles_reject_crossed_seams(self):
     cases = (

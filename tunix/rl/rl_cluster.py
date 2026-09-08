@@ -244,6 +244,7 @@ class RLCluster:
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
+    self._anchor_policy_train_steps = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
@@ -632,6 +633,7 @@ class RLCluster:
     self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
         nnx.state(self.actor_trainer.model), "pinned_host"
     )
+    self._anchor_policy_train_steps = self.actor_trainer.train_steps
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -693,6 +695,52 @@ class RLCluster:
             shardings,
         ),
         initializer=False,
+    )
+
+  def _actor_policy_state_for_logps(
+      self,
+      actor_state: jaxtyping.PyTree,
+      actor_state_on_device: bool,
+  ) -> tuple[jaxtyping.PyTree, bool, str]:
+    """Selects the exact start-of-step actor state for log-prob scoring.
+
+    JAX arrays are immutable: while the actor's train step still equals the
+    step recorded with the anchor snapshot, the live device arrays are the
+    same start-of-step values.  Reusing their handles avoids materializing a
+    second full actor beside them.  A stale step or CPU-offloaded actor keeps
+    the historical anchor path.
+
+    Returns:
+      The selected state, whether it is a temporary host-to-device copy, and
+      a stable source name for runtime attestation.
+    """
+    actor_train_steps = self.actor_trainer.train_steps
+    same_anchor_step = (
+        self._anchor_policy_train_steps is not None
+        and self._anchor_policy_train_steps == actor_train_steps
+    )
+    if (
+        actor_state_on_device
+        and not self.cluster_config.offload_to_cpu
+        and same_anchor_step
+    ):
+      print(
+          "[V2.FL.ANCHOR] LIVE_ACTOR_REUSE "
+          f"anchor_train_steps={self._anchor_policy_train_steps} "
+          f"actor_train_steps={actor_train_steps} host_transfers=0",
+          flush=True,
+      )
+      return actor_state, False, "live-same-step"
+
+    anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+    if anchor_on_device:
+      return self._anchor_policy_state, False, "anchor-device"
+    return (
+        rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        ),
+        True,
+        "anchor-host-copy",
     )
 
   def _maybe_load_model_from_cpu(self, model: nnx.Module, role: Role):
@@ -1279,6 +1327,8 @@ class RLCluster:
       temperature: float | None = None,
       prompt_mask: jax.Array | None = None,
       completion_mask: jax.Array | None = None,
+      host_prompt_lengths: tuple[int, ...] | None = None,
+      host_completion_lengths: tuple[int, ...] | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1301,6 +1351,15 @@ class RLCluster:
           " first."
       )
     micro_batch_size = micro_batch_size or batch_size
+    segmented_actor_logps = os.environ.get(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS", ""
+    )
+    if segmented_actor_logps not in ("", "0", "1"):
+      raise ValueError(
+          "CANON_P78_SEGMENTED_ACTOR_LOGPS must be unset/0/1, "
+          f"got {segmented_actor_logps!r}"
+      )
+    segmented_actor_logps = segmented_actor_logps == "1"
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
       dest_prompt_tokens = sharding_utils.shard_input(
           prompt_tokens,
@@ -1328,42 +1387,80 @@ class RLCluster:
       # full_batch_size or num_iterations > 1. Only offload the live actor when
       # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
       # was both unnecessary and risked leaving stray weights pinned to host.
+      actor_trainer_state = nnx.state(self.actor_trainer.model)
       actor_trainer_state_on_device = self._is_state_on_device(
-          nnx.state(self.actor_trainer.model)
+          actor_trainer_state
       )
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+        del actor_trainer_state
         gc.collect()
       graphdef, _ = nnx.split(self.actor_trainer.model)
-      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
-      if anchor_on_device:
-        anchor_policy_state = self._anchor_policy_state
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        anchor_policy_state, temporary_anchor_copy, _ = (
+            self._actor_policy_state_for_logps(
+                None, actor_state_on_device=False
+            )
+        )
       else:
-        anchor_policy_state = rl_utils.put_params_on_memory_kind(
-            self._anchor_policy_state, self._default_memory_kind
+        anchor_policy_state, temporary_anchor_copy, _ = (
+            self._actor_policy_state_for_logps(
+                actor_trainer_state, actor_trainer_state_on_device
+            )
         )
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
       ):
-        outs.append(
-            common.compute_per_token_logps(
-                graphdef,
-                anchor_policy_state,
-                prompt_tokens=dest_prompt_tokens[batch_slice],
-                completion_tokens=dest_completion_tokens[batch_slice],
-                pad_id=pad_id,
-                eos_id=eos_id,
-                stop_gradient=True,
-                temperature=temperature,
-                chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
-                canonical_actor=True,
-                prompt_mask=dest_prompt_mask[batch_slice],
-                completion_mask=dest_completion_mask[batch_slice],
+        if segmented_actor_logps:
+          from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+          if host_prompt_lengths is None or host_completion_lengths is None:
+            raise ValueError(
+                "segmented actor logps require host-derived sequence lengths"
+            )
+          outs.append(
+              canonical_forward.compute_per_token_logps_segmented(
+                  graphdef=graphdef,
+                  state=anchor_policy_state,
+                  prompt_tokens=dest_prompt_tokens[batch_slice],
+                  completion_tokens=dest_completion_tokens[batch_slice],
+                  pad_id=pad_id,
+                  eos_id=eos_id,
+                  stop_gradient=True,
+                  temperature=temperature,
+                  chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+                  prompt_mask=dest_prompt_mask[batch_slice],
+                  completion_mask=dest_completion_mask[batch_slice],
+                  host_prompt_lengths=host_prompt_lengths[batch_slice],
+                  host_completion_lengths=host_completion_lengths[batch_slice],
+              )
+          )
+        else:
+          outs.append(
+              common.compute_per_token_logps(
+                  graphdef,
+                  anchor_policy_state,
+                  prompt_tokens=dest_prompt_tokens[batch_slice],
+                  completion_tokens=dest_completion_tokens[batch_slice],
+                  pad_id=pad_id,
+                  eos_id=eos_id,
+                  stop_gradient=True,
+                  temperature=temperature,
+                  chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+                  canonical_actor=True,
+                  prompt_mask=dest_prompt_mask[batch_slice],
+                  completion_mask=dest_completion_mask[batch_slice],
+              )
+          )
+      actor_per_token_logps = jnp.concatenate(outs, axis=0)
+      if segmented_actor_logps:
+        actor_per_token_logps = (
+            canonical_forward.release_segmented_actor_logps_programs(
+                outputs=actor_per_token_logps
             )
         )
-      actor_per_token_logps = jnp.concatenate(outs, axis=0)
-      if not anchor_on_device:
+      if temporary_anchor_copy:
         del anchor_policy_state
       gc.collect()
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
@@ -1412,6 +1509,7 @@ class RLCluster:
           self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
               nnx.state(self.actor_trainer.model), "pinned_host"
           )
+          self._anchor_policy_train_steps = self.actor_trainer.train_steps
 
   def snapshot_anchor_policy(self) -> None:
     """Takes the pinned-host anchor snapshot off the sync critical path."""
@@ -1419,6 +1517,7 @@ class RLCluster:
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"
       )
+      self._anchor_policy_train_steps = self.actor_trainer.train_steps
 
   def sync_weights_for_resume(self) -> None:
     """Synchronizes a restored actor before its first resumed rollout."""

@@ -148,7 +148,9 @@ def test_wait_calls_bracket_accumulation_and_are_flag_guarded():
   assert "if chunk_backpressure and not rank_parallel" in source
   assert "if chunk_dependency_ticket and chunk_backpressure" in source
   pack_wait = source.index("_p77_wait_for_chunk_completion(chunk_pack)")
-  add_dispatch = source.index("self._p70_grad_tree_start(chunk_pack)")
+  add_dispatch = source.index(
+      "self._p70_grad_tree_start(chunk_pack, donate_pack=True)"
+  )
   release = source.index("_p70_release_consumed_grad_pack(chunk_pack)")
   accumulation_wait = source.index(
       "_p77_wait_for_chunk_completion(grad_pack)"

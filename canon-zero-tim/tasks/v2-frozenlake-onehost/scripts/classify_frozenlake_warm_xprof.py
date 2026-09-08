@@ -218,6 +218,11 @@ def classify(
   require(update.get("verdict") == "PASS", "update.verdict")
   require(update.get("commits") == 0, "update.commits")
   require(update.get("micro_gradient_norms") == profiled_norms, "update.norms")
+  require(
+      update.get("gradient_accumulator_mode")
+      == ("lazy-reduce-once" if arm == "r2" else "materialized"),
+      "update.gradient_accumulator_mode",
+  )
 
   p66_count = raw.count("[P66.VMA] outer_check_enabled")
   require(p66_count == 39, f"p66_count={p66_count}")
@@ -225,13 +230,18 @@ def classify(
   require(raw.count("[V2.FL.XPROF] phase=update armed") == 1, "armed_marker")
   require(raw.count("[V2.FL.XPROF] phase=update stopped") == 1, "stopped_marker")
   require(raw.count("[V2.FL.XPROF] repeat_complete") == 1, "repeat_marker")
-  expected_loan = 2 if arm == "r2" else 0
   require(
-      raw.count("[V2.REDUCE_ONCE.ACCUMULATOR_LOAN]") == expected_loan,
+      raw.count("[V2.REDUCE_ONCE.ACCUMULATOR_LOAN]") == 0,
       "loan_count",
   )
   require(
-      raw.count("[V2.REDUCE_ONCE.ACCUMULATOR_RESET]") == expected_loan,
+      raw.count("[V2.REDUCE_ONCE.LAZY_ACCUMULATOR]")
+      == (1 if arm == "r2" else 0),
+      "lazy_accumulator_count",
+  )
+  require(
+      raw.count("[V2.REDUCE_ONCE.ACCUMULATOR_RESET]")
+      == (2 if arm == "r2" else 0),
       "reset_count",
   )
 
@@ -243,7 +253,10 @@ def classify(
     perf[stage].append(float(seconds))
   require(all(len(values) == 2 for values in perf.values()), f"perf_counts={perf}")
   adoption = [float(value) for value in _GRAD.findall(raw)]
-  require(len(adoption) == expected_loan, f"adoption_count={len(adoption)}")
+  require(
+      len(adoption) == (2 if arm == "r2" else 0),
+      f"adoption_count={len(adoption)}",
+  )
 
   xplanes = sorted((root / "xprof-update").glob("plugins/profile/*/*.xplane.pb"))
   traces = sorted((root / "xprof-update").glob("plugins/profile/*/*.trace.json.gz"))

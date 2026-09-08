@@ -50,6 +50,13 @@ _P77_BACKPRESSURE_RE = re.compile(
     r"wait_api=(block_until_ready) host_transfers=(\d+)$",
     re.MULTILINE,
 )
+_P59_LAYER_PROGRAM_REUSE_RE = re.compile(
+    r"^\[P59\.LAYER_PROGRAM_REUSE\] enabled=(\d+) "
+    r"layers=(\d+) static_keys=(\d+) mapped_programs=(\d+) "
+    r"logical_calls_per_layer=(\d+) checked_vma=(\d+) "
+    r"host_transfers=(\d+)$",
+    re.MULTILINE,
+)
 _KNOWN_POST_TRAINING_FINALIZER_RE = re.compile(
     r"Exception ignored in: <finalize object at 0x[0-9a-f]+; dead>\n"
     r"Traceback \(most recent call last\):\n"
@@ -102,11 +109,27 @@ _REDUCE_ONCE_ACCUMULATOR_LOAN_RE = re.compile(
     r"check_vma=(\d+) host_transfers=(\d+)$",
     re.MULTILINE,
 )
+_REDUCE_ONCE_LAZY_ACCUMULATOR_RE = re.compile(
+    r"^\[V2\.REDUCE_ONCE\.LAZY_ACCUMULATOR\] enabled=1 "
+    r"leaves=(\d+) logical_bytes=(\d+) state=(\S+) "
+    r"host_transfers=(\d+)$",
+    re.MULTILINE,
+)
 _REDUCE_ONCE_ACCUMULATOR_RESET_RE = re.compile(
+    r"^\[V2\.REDUCE_ONCE\.ACCUMULATOR_RESET\] enabled=1 "
+    r"leaves=(\d+) transition=(\S+) retired_handles=(\d+) "
+    r"remaining_leaves=(\d+) host_transfers=(\d+)$",
+    re.MULTILINE,
+)
+_REDUCE_ONCE_ACCUMULATOR_RESET_LEGACY_RE = re.compile(
     r"^\[V2\.REDUCE_ONCE\.ACCUMULATOR_RESET\] enabled=1 "
     r"leaves=(\d+) transition=(\S+) alias_mode=(\S+) "
     r"host_transfers=(\d+)$",
     re.MULTILINE,
+)
+_P70_TREE_START_DONATION = (
+    "[P70.TREE_START] donation enabled=1 operand=chunk_pack "
+    "arithmetic=runtime-zero-add host_transfers=0"
 )
 _HBM_OUTER_PREFIX = (
     "before_replay",
@@ -133,7 +156,8 @@ _GEOMETRIES = {
         "gradient_groups": 4,
         "global_m": 1024,
         "checked_vma": False,
-        "vllm_hbm_utilization": {"p45": 0.65, "m15": 0.66},
+        "vllm_hbm_utilization": {"p45": 0.52, "m15": 0.66},
+        "segmented_actor_logps": {"p45": "1", "m15": "0"},
     },
     "dp2-tp2": {
         "dp": 2,
@@ -143,6 +167,7 @@ _GEOMETRIES = {
         "global_m": 512,
         "checked_vma": True,
         "vllm_hbm_utilization": None,
+        "segmented_actor_logps": {"p45": "0", "m15": "0"},
     },
     "dp1-tp4": {
         "dp": 1,
@@ -152,6 +177,7 @@ _GEOMETRIES = {
         "global_m": 256,
         "checked_vma": True,
         "vllm_hbm_utilization": {"p45": 0.56, "m15": 0.56},
+        "segmented_actor_logps": {"p45": "0", "m15": "0"},
     },
 }
 _ARMS = {
@@ -766,7 +792,12 @@ def classify(
           if geometry == "dp2-tp2"
           else geometry_spec["vllm_hbm_utilization"][workload]
       ),
-      "selectors": arm_spec,
+      "selectors": {
+          **arm_spec,
+          "segmented_actor_logps": geometry_spec[
+              "segmented_actor_logps"
+          ][workload],
+      },
       "reducer_schedule": {
           "kind": "fixed-local-byte-buckets",
           "max_local_bytes": _REDUCER_MAX_LOCAL_BYTES,
@@ -923,6 +954,10 @@ def classify(
       "reference_changed_paths": [],
       "optimizer_placement": "pinned-host-offload",
       "optimizer_memory_kinds_before": ["pinned_host"],
+      "optimizer_initialization_mode": "direct-pinned-host",
+      "gradient_accumulator_mode": (
+          "lazy-reduce-once" if reduce_once else "materialized"
+      ),
   }
   wrong_update = {
       key: update.get(key)
@@ -1002,6 +1037,28 @@ def classify(
     require(p66_receipts >= 1, f"p66_outer_check_receipts={p66_receipts}")
   else:
     require(p66_receipts == 0, f"unexpected_p66_outer_check_receipts={p66_receipts}")
+  layer_program_reuse_receipts = [
+      tuple(int(field) for field in match)
+      for match in _P59_LAYER_PROGRAM_REUSE_RE.findall(raw)
+  ]
+  expected_layer_program_reuse_receipts = (
+      [(1, 36, 1, 1, 1, int(geometry_spec["checked_vma"]), 0)]
+      if dp_size > 1
+      else []
+  )
+  require(
+      layer_program_reuse_receipts
+      == expected_layer_program_reuse_receipts,
+      "p59_layer_program_reuse_receipts="
+      f"{layer_program_reuse_receipts};"
+      f"expected={expected_layer_program_reuse_receipts}",
+  )
+  p70_tree_start_donation_receipts = raw.count(_P70_TREE_START_DONATION)
+  require(
+      p70_tree_start_donation_receipts == 1,
+      "p70_tree_start_donation_receipts="
+      f"{p70_tree_start_donation_receipts};expected=1",
+  )
   seed_receipt = raw.count(
       "[V2.FL.SEED] CONTRACT_PASS data_shuffle_seed=42 "
       "vllm_global_seed=0 per_request_seed=unsupported"
@@ -1020,6 +1077,75 @@ def classify(
   require(
       sampler_receipt == expected_sampler_receipts,
       f"sampler_receipts={sampler_receipt};expected={expected_sampler_receipts}",
+  )
+  reference_admission_receipt = raw.count(
+      "[V2.FL.REFERENCE] ADMISSION_PASS "
+      "required=0 beta=0.0 force_compute_kl=0 model=absent"
+  )
+  require(
+      reference_admission_receipt == 1,
+      f"reference_admission_receipts={reference_admission_receipt};expected=1",
+  )
+  live_actor_anchor_receipt = raw.count(
+      "[V2.FL.ANCHOR] LIVE_ACTOR_REUSE "
+      "anchor_train_steps=0 actor_train_steps=0 host_transfers=0"
+  )
+  expected_live_actor_anchor_receipts = 0 if capsule_mode == "replay" else 1
+  require(
+      live_actor_anchor_receipt == expected_live_actor_anchor_receipts,
+      "live_actor_anchor_receipts="
+      f"{live_actor_anchor_receipt};"
+      f"expected={expected_live_actor_anchor_receipts}",
+  )
+  segmented_actor_logps = geometry_spec["segmented_actor_logps"][workload]
+  expected_p78_dispatches = (
+      1 if segmented_actor_logps == "1" and capsule_mode != "replay" else 0
+  )
+  p78_engine_ready = raw.count(
+      "[P78.ACTOR_LOGPS] segmented_engine_ready "
+      "data=4 tp=1 local_M=256 global_M=1024"
+  )
+  p78_deferred_map_ready = re.findall(
+      r"^\[P78\.ACTOR_LOGPS\] deferred_weight_map_ready "
+      r"source_leaves=[1-9][0-9]* target_leaves=399 "
+      r"module_programs=39 mapped_leaf_outputs=0 "
+      r"source=trainer-state$",
+      raw,
+      flags=re.MULTILINE,
+  )
+  p78_dispatches = re.findall(
+      r"^\[P78\.ACTOR_LOGPS\] dispatch batch=16 groups=4 "
+      r"chunks=[1-9][0-9]*(?:,[1-9][0-9]*){3} "
+      r"local_M=256 global_M=1024 "
+      r"outer_jit=0 d2h_lengths=0 length_guard=device-finite$",
+      raw,
+      flags=re.MULTILINE,
+  )
+  p78_program_releases = raw.count(
+      "[P78.ACTOR_LOGPS] program_cache_release "
+      "module_programs=39 outputs_ready=1 shared_engine=retained "
+      "global_jax_clear_caches=0"
+  )
+  require(
+      p78_engine_ready == (1 if expected_p78_dispatches else 0),
+      "p78_segmented_engine_ready="
+      f"{p78_engine_ready};expected={1 if expected_p78_dispatches else 0}",
+  )
+  require(
+      len(p78_deferred_map_ready) == (1 if expected_p78_dispatches else 0),
+      "p78_deferred_weight_map_ready="
+      f"{len(p78_deferred_map_ready)};"
+      f"expected={1 if expected_p78_dispatches else 0}",
+  )
+  require(
+      len(p78_dispatches) == expected_p78_dispatches,
+      f"p78_dispatches={len(p78_dispatches)};"
+      f"expected={expected_p78_dispatches}",
+  )
+  require(
+      p78_program_releases == expected_p78_dispatches,
+      f"p78_program_cache_releases={p78_program_releases};"
+      f"expected={expected_p78_dispatches}",
   )
   bucket_matches = list(_BUCKET_RE.finditer(raw))
   bucket_receipt = None
@@ -1096,23 +1222,8 @@ def classify(
       for match in _REDUCE_ONCE_ACCUMULATOR_LOAN_RE.findall(raw)
   ]
   if reduce_once:
-    expected_leaves = (
-        report_accumulate_receipts[0][2]
-        if report_accumulate_receipts
-        else None
-    )
     require(
-        len(accumulator_loan_receipts) == 1
-        and accumulator_loan_receipts[0]
-        == (
-            expected_leaves,
-            bucket_values["total_local_bytes"],
-            "base-to-staged",
-            expected_leaves,
-            expected_leaves,
-            int(geometry_spec["checked_vma"]),
-            0,
-        ),
+        not accumulator_loan_receipts,
         f"reduce_once_accumulator_loan={accumulator_loan_receipts}",
     )
   else:
@@ -1120,10 +1231,38 @@ def classify(
         not accumulator_loan_receipts,
         "unexpected_reduce_once_accumulator_loan",
     )
+  lazy_accumulator_receipts = [
+      (int(match[0]), int(match[1]), match[2], int(match[3]))
+      for match in _REDUCE_ONCE_LAZY_ACCUMULATOR_RE.findall(raw)
+  ]
+  if reduce_once:
+    require(
+        lazy_accumulator_receipts == [(0, 0, "empty", 0)],
+        f"reduce_once_lazy_accumulator={lazy_accumulator_receipts}",
+    )
+  else:
+    require(
+        not lazy_accumulator_receipts,
+        "unexpected_reduce_once_lazy_accumulator",
+    )
   accumulator_reset_receipts = [
-      (int(match[0]), match[1], match[2], int(match[3]))
+      (
+          int(match[0]),
+          match[1],
+          int(match[2]),
+          int(match[3]),
+          int(match[4]),
+      )
       for match in _REDUCE_ONCE_ACCUMULATOR_RESET_RE.findall(raw)
   ]
+  legacy_accumulator_reset_receipts = [
+      (int(match[0]), match[1], match[2], int(match[3]))
+      for match in _REDUCE_ONCE_ACCUMULATOR_RESET_LEGACY_RE.findall(raw)
+  ]
+  require(
+      not legacy_accumulator_reset_receipts,
+      f"legacy_reduce_once_accumulator_reset={legacy_accumulator_reset_receipts}",
+  )
   if reduce_once:
     expected_leaves = (
         report_accumulate_receipts[0][2]
@@ -1132,7 +1271,7 @@ def classify(
     )
     require(
         accumulator_reset_receipts
-        == [(expected_leaves, "adopted-to-idle", "bitwise-zero", 0)],
+        == [(expected_leaves, "adopted-to-empty", expected_leaves, 0, 0)],
         f"reduce_once_accumulator_reset={accumulator_reset_receipts}",
     )
   else:
@@ -1472,12 +1611,17 @@ def classify(
       },
       "receipts": {
           "p66_outer_check_enabled": p66_receipts,
+          "p59_layer_program_reuse": layer_program_reuse_receipts,
+          "p70_tree_start_donation": p70_tree_start_donation_receipts,
           "deterministic_rollout_seed": seed_receipt,
           "disabled_local_wandb": disabled_wandb_receipt,
           "sampler_contract": sampler_receipt,
+          "reference_admission": reference_admission_receipt,
+          "live_actor_anchor_reuse": live_actor_anchor_receipt,
           "reducer_bucket_schedule": bucket_receipt,
           "reduce_once_report_accumulate": report_accumulate_receipts,
           "reduce_once_accumulator_loan": accumulator_loan_receipts,
+          "reduce_once_lazy_accumulator": lazy_accumulator_receipts,
           "reduce_once_accumulator_reset": accumulator_reset_receipts,
           "hbm_stage_receipts": raw_hbm_stages,
           "report_adjoint_memory": (

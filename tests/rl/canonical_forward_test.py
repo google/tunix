@@ -30,6 +30,12 @@ class _Adapter:
   def compute_per_token_logps(self, **kwargs):
     return kwargs["sentinel"]
 
+  def compute_per_token_logps_segmented(self, **kwargs):
+    return kwargs["sentinel"] + 1
+
+  def release_segmented_actor_logps_programs(self, **kwargs):
+    return kwargs["outputs"] + 1
+
 
 class CanonicalForwardTest(absltest.TestCase):
 
@@ -50,6 +56,13 @@ class CanonicalForwardTest(absltest.TestCase):
       canonical_forward.register(adapter)
       self.assertEqual(
           canonical_forward.compute_per_token_logps(sentinel=7), 7
+      )
+      self.assertEqual(
+          canonical_forward.compute_per_token_logps_segmented(sentinel=7), 8
+      )
+      self.assertEqual(
+          canonical_forward.release_segmented_actor_logps_programs(outputs=8),
+          9,
       )
       self.assertEqual(
           canonical_forward.attestation()["implementation_id"],

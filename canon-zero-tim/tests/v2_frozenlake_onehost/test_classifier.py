@@ -90,7 +90,10 @@ def _manifest(
       "data_shuffle_seed": 42,
       "vllm_global_seed": 0,
       "vllm_hbm_utilization": spec["vllm_hbm_utilization"],
-      "selectors": classifier._ARMS[arm],  # pylint: disable=protected-access
+      "selectors": {
+          **classifier._ARMS[arm],  # pylint: disable=protected-access
+          "segmented_actor_logps": "0",
+      },
       "reducer_schedule": {
           "kind": "fixed-local-byte-buckets",
           "max_local_bytes": 2 * 1024**3,
@@ -136,6 +139,10 @@ def _update(arm: str = "r3", workload: str = "m15") -> dict:
       "reference_changed_paths": [],
       "optimizer_placement": "pinned-host-offload",
       "optimizer_memory_kinds_before": ["pinned_host"],
+      "optimizer_initialization_mode": "direct-pinned-host",
+      "gradient_accumulator_mode": (
+          "lazy-reduce-once" if arm in ("r2", "r3") else "materialized"
+      ),
       "hbm_before": [
           {"peak_bytes_in_use": 60, "bytes_limit": 100} for _ in range(4)
       ],
@@ -165,6 +172,9 @@ def _retarget_r1_fixture(root: Path, *, workload: str, geometry: str) -> None:
       "vllm_hbm_utilization": geometry_spec["vllm_hbm_utilization"][workload],
       "checked_vma": geometry_spec["checked_vma"],
   })
+  manifest["selectors"]["segmented_actor_logps"] = geometry_spec[
+      "segmented_actor_logps"
+  ][workload]
   manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
   alignment_path = root / "alignment.jsonl"
@@ -194,7 +204,13 @@ def _retarget_r1_fixture(root: Path, *, workload: str, geometry: str) -> None:
   raw_lines = [
       line
       for line in raw_path.read_text(encoding="utf-8").splitlines()
-      if not line.startswith(("[P32.DP", "[P59.DP", "[P66.VMA]"))
+      if not line.startswith((
+          "[P32.DP",
+          "[P59.DP",
+          "[P59.LAYER_PROGRAM_REUSE]",
+          "[P66.VMA]",
+          "[P78.ACTOR_LOGPS]",
+      ))
   ]
   n_real = [3900 + index * 30 for index in range(16)]
   forward_lines = []
@@ -211,8 +227,35 @@ def _retarget_r1_fixture(root: Path, *, workload: str, geometry: str) -> None:
       "max_local_bytes=2147483648 peak_local_bytes=2130875392 "
       "total_local_bytes=16382087168"
   )
+  if dp_size > 1:
+    forward_lines.append(
+        "[P59.LAYER_PROGRAM_REUSE] enabled=1 layers=36 "
+        "static_keys=1 mapped_programs=1 logical_calls_per_layer=1 "
+        f"checked_vma={int(geometry_spec['checked_vma'])} host_transfers=0"
+    )
   if geometry_spec["checked_vma"]:
     forward_lines.append("[P66.VMA] outer_check_enabled program=test")
+  if geometry_spec["segmented_actor_logps"][workload] == "1":
+    forward_lines.append(
+        "[P78.ACTOR_LOGPS] segmented_engine_ready "
+        "data=4 tp=1 local_M=256 global_M=1024"
+    )
+    forward_lines.append(
+        "[P78.ACTOR_LOGPS] deferred_weight_map_ready "
+        "source_leaves=17 target_leaves=399 module_programs=39 "
+        "mapped_leaf_outputs=0 source=trainer-state"
+    )
+    forward_lines.append(
+        "[P78.ACTOR_LOGPS] dispatch batch=16 groups=4 "
+        "chunks=16,16,16,16 "
+        "local_M=256 global_M=1024 outer_jit=0 d2h_lengths=0 "
+        "length_guard=device-finite"
+    )
+    forward_lines.append(
+        "[P78.ACTOR_LOGPS] program_cache_release "
+        "module_programs=39 outputs_ready=1 shared_engine=retained "
+        "global_jax_clear_caches=0"
+    )
   raw_path.write_text(
       "\n".join(forward_lines + raw_lines) + "\n", encoding="utf-8"
   )
@@ -336,6 +379,15 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     ]
     lines.append("[P66.VMA] outer_check_enabled program=test")
     lines.append(
+        "[P59.LAYER_PROGRAM_REUSE] enabled=1 layers=36 "
+        "static_keys=1 mapped_programs=1 logical_calls_per_layer=1 "
+        "checked_vma=1 host_transfers=0"
+    )
+    lines.append(
+        "[P70.TREE_START] donation enabled=1 operand=chunk_pack "
+        "arithmetic=runtime-zero-add host_transfers=0"
+    )
+    lines.append(
         "[V2.FL.SEED] CONTRACT_PASS data_shuffle_seed=42 "
         "vllm_global_seed=0 per_request_seed=unsupported"
     )
@@ -345,21 +397,27 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         "use_rollout_logps=1 tis_weights=absent"
     )
     lines.append(
+        "[V2.FL.REFERENCE] ADMISSION_PASS "
+        "required=0 beta=0.0 force_compute_kl=0 model=absent"
+    )
+    lines.append(
+        "[V2.FL.ANCHOR] LIVE_ACTOR_REUSE "
+        "anchor_train_steps=0 actor_train_steps=0 host_transfers=0"
+    )
+    lines.append(
         "[P59.DP2] reducer_bucket_schedule programs=8 "
         "max_local_bytes=2147483648 peak_local_bytes=2130875392 "
         "total_local_bytes=16382087168"
     )
     if arm in ("r2", "r3"):
       lines.append(
-          "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN] enabled=1 "
-          "leaves=399 local_bytes=16382087168 "
-          "transition=base-to-staged base_handles_retired=399 "
-          "staged_handles_retired=399 check_vma=1 host_transfers=0"
+          "[V2.REDUCE_ONCE.LAZY_ACCUMULATOR] enabled=1 "
+          "leaves=0 logical_bytes=0 state=empty host_transfers=0"
       )
       lines.append(
           "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
-          "leaves=399 transition=adopted-to-idle "
-          "alias_mode=bitwise-zero host_transfers=0"
+          "leaves=399 transition=adopted-to-empty retired_handles=399 "
+          "remaining_leaves=0 host_transfers=0"
       )
       lines.extend(
           "[V2.REDUCE_ONCE.REPORT_ACCUMULATE] enabled=1 "
@@ -528,6 +586,10 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertFalse(result["landed_shape"]["cap_coverage"])
     self.assertEqual(result["receipts"]["p66_outer_check_enabled"], 1)
     self.assertEqual(
+        result["receipts"]["p59_layer_program_reuse"],
+        [(1, 36, 1, 1, 1, 1, 0)],
+    )
+    self.assertEqual(
         result["receipts"]["reducer_bucket_schedule"]["programs"], 8
     )
     self.assertEqual(
@@ -539,13 +601,58 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     )
     self.assertEqual(
         result["receipts"]["reduce_once_accumulator_loan"],
-        [(399, 16382087168, "base-to-staged", 399, 399, 1, 0)],
+        [],
+    )
+    self.assertEqual(
+        result["receipts"]["reduce_once_lazy_accumulator"],
+        [(0, 0, "empty", 0)],
     )
     self.assertEqual(
         result["receipts"]["reduce_once_accumulator_reset"],
-        [(399, "adopted-to-idle", "bitwise-zero", 0)],
+        [(399, "adopted-to-empty", 399, 0, 0)],
     )
     self.assertEqual(result["gradient"]["update_gradient_norm"], 12.5)
+
+  def test_layer_program_reuse_receipt_fails_closed(self):
+    receipt = (
+        "[P59.LAYER_PROGRAM_REUSE] enabled=1 layers=36 "
+        "static_keys=1 mapped_programs=1 logical_calls_per_layer=1 "
+        "checked_vma=1 host_transfers=0"
+    )
+
+    def missing(root: Path) -> None:
+      path = root / "raw.log"
+      raw = path.read_text(encoding="utf-8")
+      path.write_text(raw.replace(receipt + "\n", ""), encoding="utf-8")
+
+    def forged(root: Path) -> None:
+      path = root / "raw.log"
+      raw = path.read_text(encoding="utf-8")
+      path.write_text(
+          raw.replace(
+              receipt,
+              receipt.replace("mapped_programs=1", "mapped_programs=2"),
+          ),
+          encoding="utf-8",
+      )
+
+    def duplicate(root: Path) -> None:
+      path = root / "raw.log"
+      with path.open("a", encoding="utf-8") as output:
+        output.write(receipt + "\n")
+
+    for name, mutation in (
+        ("missing", missing),
+        ("forged", forged),
+        ("duplicate", duplicate),
+    ):
+      with self.subTest(name=name):
+        result = self._classify(mutation)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any(
+            reason.startswith("p59_layer_program_reuse_receipts=")
+            for reason in result["reasons"]
+        ))
 
   def test_r1_matrix_geometries_enforce_vma_and_geometry_scoped_anchors(self):
     for geometry, expected_vma in (("dp4-tp1", 0), ("dp1-tp4", 1)):
@@ -617,7 +724,128 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
       _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
       manifest_path = root / "run_manifest.json"
       manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-      manifest["vllm_hbm_utilization"] = 0.20
+      manifest["vllm_hbm_utilization"] = 0.51
+      manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(
+        any(reason.startswith("manifest:") for reason in rejected["reasons"])
+    )
+
+  def test_p78_dispatch_and_manifest_receipts_fail_closed(self):
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      raw_path = root / "raw.log"
+      lines = raw_path.read_text(encoding="utf-8").splitlines()
+      dispatch_index = next(
+          index
+          for index, line in enumerate(lines)
+          if line.startswith("[P78.ACTOR_LOGPS] dispatch ")
+      )
+      lines.pop(dispatch_index)
+      raw_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p78_dispatches=0;expected=1", rejected["reasons"])
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      raw_path = root / "raw.log"
+      raw = raw_path.read_text(encoding="utf-8").replace(
+          "dispatch batch=16 groups=4 chunks=16,16,16,16",
+          "dispatch batch=4 groups=1 chunks=16",
+      )
+      raw_path.write_text(raw, encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p78_dispatches=0;expected=1", rejected["reasons"])
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      raw_path = root / "raw.log"
+      lines = [
+          line
+          for line in raw_path.read_text(encoding="utf-8").splitlines()
+          if not line.startswith(
+              "[P78.ACTOR_LOGPS] deferred_weight_map_ready "
+          )
+      ]
+      raw_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p78_deferred_weight_map_ready=0;expected=1",
+        rejected["reasons"],
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      raw_path = root / "raw.log"
+      lines = [
+          line
+          for line in raw_path.read_text(encoding="utf-8").splitlines()
+          if not line.startswith(
+              "[P78.ACTOR_LOGPS] program_cache_release "
+          )
+      ]
+      raw_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+      rejected = classifier.classify(
+          root,
+          workload="p45",
+          geometry="dp4-tp1",
+          arm="r1",
+          docker_exit=0,
+          anchor_registry=anchor_path,
+      )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p78_program_cache_releases=0;expected=1",
+        rejected["reasons"],
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor_path = self._fixture(root, arm="r1", workload="p45")
+      _retarget_r1_fixture(root, workload="p45", geometry="dp4-tp1")
+      manifest_path = root / "run_manifest.json"
+      manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+      manifest["selectors"]["segmented_actor_logps"] = "0"
       manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
       rejected = classifier.classify(
           root,
@@ -679,12 +907,10 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         ordinary["receipts"]["reduce_once_report_accumulate"], []
     )
 
-  def test_reduce_once_accumulator_loan_receipt_is_fail_closed(self):
+  def test_reduce_once_lazy_accumulator_receipt_is_fail_closed(self):
     marker = (
-        "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN] enabled=1 "
-        "leaves=399 local_bytes=16382087168 "
-        "transition=base-to-staged base_handles_retired=399 "
-        "staged_handles_retired=399 check_vma=1 host_transfers=0"
+        "[V2.REDUCE_ONCE.LAZY_ACCUMULATOR] enabled=1 "
+        "leaves=0 logical_bytes=0 state=empty host_transfers=0"
     )
 
     def missing(root: Path) -> None:
@@ -696,7 +922,7 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     rejected = self._classify(missing, arm="r2")
     self.assertEqual(rejected["verdict"], "FAIL")
     self.assertTrue(any(
-        reason.startswith("reduce_once_accumulator_loan=")
+        reason.startswith("reduce_once_lazy_accumulator=")
         for reason in rejected["reasons"]
     ))
 
@@ -711,6 +937,24 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     rejected = self._classify(host_transfer, arm="r3")
     self.assertEqual(rejected["verdict"], "FAIL")
     self.assertTrue(any(
+        reason.startswith("reduce_once_lazy_accumulator=")
+        for reason in rejected["reasons"]
+    ))
+
+    def forged_legacy_loan(root: Path) -> None:
+      path = root / "raw.log"
+      path.write_text(
+          path.read_text(encoding="utf-8")
+          + "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN] enabled=1 "
+          "leaves=399 local_bytes=16382087168 "
+          "transition=base-to-staged base_handles_retired=399 "
+          "staged_handles_retired=399 check_vma=1 host_transfers=0\n",
+          encoding="utf-8",
+      )
+
+    rejected = self._classify(forged_legacy_loan, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
         reason.startswith("reduce_once_accumulator_loan=")
         for reason in rejected["reasons"]
     ))
@@ -720,12 +964,46 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertEqual(
         ordinary["receipts"]["reduce_once_accumulator_loan"], []
     )
+    self.assertEqual(
+        ordinary["receipts"]["reduce_once_lazy_accumulator"], []
+    )
+
+  def test_p70_tree_start_donation_receipt_is_fail_closed(self):
+    marker = (
+        "[P70.TREE_START] donation enabled=1 operand=chunk_pack "
+        "arithmetic=runtime-zero-add host_transfers=0"
+    )
+
+    def missing(root: Path) -> None:
+      path = root / "raw.log"
+      lines = path.read_text(encoding="utf-8").splitlines()
+      lines.remove(marker)
+      path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(missing, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p70_tree_start_donation_receipts=0;expected=1",
+        rejected["reasons"],
+    )
+
+    def duplicated(root: Path) -> None:
+      path = root / "raw.log"
+      raw = path.read_text(encoding="utf-8")
+      path.write_text(raw + marker + "\n", encoding="utf-8")
+
+    rejected = self._classify(duplicated, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p70_tree_start_donation_receipts=2;expected=1",
+        rejected["reasons"],
+    )
 
   def test_reduce_once_accumulator_reset_receipt_is_fail_closed(self):
     marker = (
         "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
-        "leaves=399 transition=adopted-to-idle "
-        "alias_mode=bitwise-zero host_transfers=0"
+        "leaves=399 transition=adopted-to-empty retired_handles=399 "
+        "remaining_leaves=0 host_transfers=0"
     )
 
     def missing(root: Path) -> None:
@@ -1033,9 +1311,15 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
       (root / "run_manifest.json").write_text(json.dumps(manifest))
       raw_path = root / "raw.log"
       raw_path.write_text(
-          raw_path.read_text(encoding="utf-8").replace(
+          raw_path.read_text(encoding="utf-8")
+          .replace(
               "[V2.FL.SAMPLER] CONTRACT_PASS sampler_is=none "
               "use_rollout_logps=1 tis_weights=absent\n",
+              "",
+          )
+          .replace(
+              "[V2.FL.ANCHOR] LIVE_ACTOR_REUSE "
+              "anchor_train_steps=0 actor_train_steps=0 host_transfers=0\n",
               "",
           ),
           encoding="utf-8",
@@ -1758,6 +2042,40 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
           encoding="utf-8",
       )
 
+    def no_live_actor_anchor_receipt(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      (root / "raw.log").write_text(
+          raw.replace(
+              "[V2.FL.ANCHOR] LIVE_ACTOR_REUSE "
+              "anchor_train_steps=0 actor_train_steps=0 host_transfers=0\n",
+              "",
+          ),
+          encoding="utf-8",
+      )
+
+    def no_reference_admission_receipt(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      (root / "raw.log").write_text(
+          raw.replace(
+              "[V2.FL.REFERENCE] ADMISSION_PASS "
+              "required=0 beta=0.0 force_compute_kl=0 model=absent\n",
+              "",
+          ),
+          encoding="utf-8",
+      )
+
+    def present_reference_admission_receipt(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      (root / "raw.log").write_text(
+          raw.replace(
+              "[V2.FL.REFERENCE] ADMISSION_PASS "
+              "required=0 beta=0.0 force_compute_kl=0 model=absent",
+              "[V2.FL.REFERENCE] ADMISSION_PASS "
+              "required=0 beta=0.0 force_compute_kl=0 model=present",
+          ),
+          encoding="utf-8",
+      )
+
     def no_reducer_bucket_receipt(root: Path) -> None:
       raw = (root / "raw.log").read_text(encoding="utf-8")
       (root / "raw.log").write_text(
@@ -1783,6 +2101,11 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
       update["dp_reduction_transactions"] = 8
       (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
 
+    def post_init_offload(root: Path) -> None:
+      update = _update()
+      update["optimizer_initialization_mode"] = "device"
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+
     for name, mutation, reason in (
         ("vllm_hbm", wrong_vllm_hbm_utilization, "manifest:"),
         ("alignment", bad_alignment, "pre_alignment_not_exact"),
@@ -1791,10 +2114,26 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         ("seed", no_seed_receipt, "seed_receipts=0"),
         ("wandb", no_disabled_wandb_receipt, "disabled_wandb_receipts=0"),
         ("sampler", no_sampler_receipt, "sampler_receipts=0"),
+        (
+            "reference_admission",
+            no_reference_admission_receipt,
+            "reference_admission_receipts=0",
+        ),
+        (
+            "reference_present",
+            present_reference_admission_receipt,
+            "reference_admission_receipts=0",
+        ),
+        (
+            "live_actor_anchor",
+            no_live_actor_anchor_receipt,
+            "live_actor_anchor_receipts=0",
+        ),
         ("bucket", no_reducer_bucket_receipt, "reducer_bucket_receipts=0"),
         ("hash", no_token_hash, "input_hash_inventory"),
         ("length", too_short, "landed_n_real_max=2000"),
         ("reduction", wrong_reduction, "update:"),
+        ("optimizer_init", post_init_offload, "update:"),
     ):
       with self.subTest(name=name):
         result = self._classify(mutation)

@@ -520,6 +520,11 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
 
 
+def requires_reference_model(*, beta: float, force_compute_kl: bool) -> bool:
+  """Returns whether GRPO will consume reference-model log probabilities."""
+  return force_compute_kl or beta != 0.0
+
+
 class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   """An RLLearner that implements the GRPO algorithm in an agentic setting.
 
@@ -659,7 +664,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
-        if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
+        if requires_reference_model(
+            beta=self.algo_config.beta,
+            force_compute_kl=self.algo_config.force_compute_kl,
+        )
         else None,
     ])
 
@@ -846,6 +854,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_valid_mask = jnp.asarray(
         padded_completion_valid_masks, dtype=jnp.bool_
     )
+    host_prompt_lengths = tuple(
+        int(np.count_nonzero(mask)) for mask in padded_prompt_masks
+    )
+    host_completion_lengths = tuple(
+        int(np.count_nonzero(mask))
+        for mask in padded_completion_valid_masks
+    )
     if bool(jnp.any(completion_mask.astype(jnp.bool_) & ~completion_valid_mask)):
       raise ValueError("assistant completion mask is not a subset of valid tokens")
     logging.debug(
@@ -904,6 +919,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             micro_batch_size=compute_logps_micro_batch_size,
             prompt_mask=prompt_mask,
             completion_mask=completion_valid_mask,
+            host_prompt_lengths=host_prompt_lengths,
+            host_completion_lengths=host_completion_lengths,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -926,6 +943,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           micro_batch_size=compute_logps_micro_batch_size,
           prompt_mask=prompt_mask,
           completion_mask=completion_valid_mask,
+          host_prompt_lengths=host_prompt_lengths,
+          host_completion_lengths=host_completion_lengths,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -948,7 +967,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if group_id is not None:
       perf_tags[perf_constants.GROUP_ID] = group_id
 
-    if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0:
+    if requires_reference_model(
+        beta=self.algo_config.beta,
+        force_compute_kl=self.algo_config.force_compute_kl,
+    ):
       with self.rl_cluster.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE,
           devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
