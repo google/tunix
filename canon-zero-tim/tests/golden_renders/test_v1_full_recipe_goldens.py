@@ -66,8 +66,8 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
   def test_three_full_manifests_match_exact_goldens_twice(self):
     expected = (
         "8b4fd423073bc1b8fc39a3a4bac60d418411392018c2e1bf7df37d0062ccc341",
-        "86d1f6666c2425011be5484ebbe9c8d2240685793f4f09c167ab60b10cea40ce",
-        "ef25b597442d1059a62ee91b42bec969804c14c0359fe50cea7140d8e94b2b51",
+        "3c45bec9589dc7ec15b6c09e8453c49a5c2c398b6f90198ab66454f5669822be",
+        "ed474832d17ec87d07c1f307c528f39b58e04972443a98e3033482d0b9b623c1",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_three(Path(tmp) / "first")
@@ -79,8 +79,8 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_frozenlake_two_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "c35b41922623642f920a5656d27dc04c010a31ae64599b7768376205c21a9998",
-        "0e4c9fdfde5b2c3ac88116c0df3cd02370a47d1d70592033836c906687a16eea",
+        "7a492a35cca91f524f4e1533a2421277803dc55e3fcb26e37429eb2dd8006186",
+        "5a4610c1d3572926a371b594e570e519adc815659aa373fc739acda7faa24f87",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_two(Path(tmp) / "first")
@@ -89,6 +89,37 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
       self.assertEqual(tuple(map(_sha256, second)), expected)
       for path in (*first, *second):
         self.assertEqual(_env(path)["CANON_DP_REDUCE_ONCE"], "1")
+
+  def test_frozenlake_image_receipt_is_the_only_legacy_golden_delta(self):
+    # The TiTO provenance change added CANON_CLIENT_IMAGE to FrozenLake.
+    # Retain all old goldens as a reconstruction oracle: removing precisely
+    # that independently checked receipt must recover every old byte hash.
+    legacy = {
+        "three": (
+            "8b4fd423073bc1b8fc39a3a4bac60d418411392018c2e1bf7df37d0062ccc341",
+            "86d1f6666c2425011be5484ebbe9c8d2240685793f4f09c167ab60b10cea40ce",
+            "ef25b597442d1059a62ee91b42bec969804c14c0359fe50cea7140d8e94b2b51",
+        ),
+        "two": (
+            "c35b41922623642f920a5656d27dc04c010a31ae64599b7768376205c21a9998",
+            "0e4c9fdfde5b2c3ac88116c0df3cd02370a47d1d70592033836c906687a16eea",
+        ),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+      for label, render in (("three", self._render_three), ("two", self._render_two)):
+        for path, expected in zip(render(Path(tmp) / label), legacy[label], strict=True):
+          raw = path.read_text(encoding="utf-8")
+          document = THREE.yaml.safe_load(raw)
+          pod = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+          main = next(item for item in pod["containers"] if item["name"] == "jax-tpu")
+          receipts = [item for item in main["env"] if item["name"] == "CANON_CLIENT_IMAGE"]
+          is_frozenlake = _env(path)["CANON_PROFILE_FILE"] != THREE._GSM8K_PROFILE
+          self.assertEqual(receipts, [{"name": "CANON_CLIENT_IMAGE", "value": main["image"]}]
+                           if is_frozenlake else [])
+          main["env"] = [item for item in main["env"] if item["name"] != "CANON_CLIENT_IMAGE"]
+          header = "\n".join(raw.splitlines()[:2]) + "\n"
+          reconstructed = header + THREE.yaml.safe_dump(document, sort_keys=False)
+          self.assertEqual(hashlib.sha256(reconstructed.encode()).hexdigest(), expected)
 
 
 if __name__ == "__main__":
