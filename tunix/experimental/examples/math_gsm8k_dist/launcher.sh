@@ -402,7 +402,9 @@ echo "  trainer backend:$TRAINER_BACKEND"
 echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
 echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
+echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
+echo "  rollout mesh:   fsdp=$ROLLOUT_FSDP tp=$ROLLOUT_TP"
 echo "  inference:      $RUN_INFERENCE_NODE"
 echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
 echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
@@ -564,11 +566,91 @@ ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
+on_shutdown_signal() {
+  SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
+  if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
+    DRAIN_START_SECONDS=$seconds
+    print_setion "graceful shutdown"
+    echo "Received $1. Draining workers so the trainer can finalize its"
+    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
+    echo "the in-flight checkpoint and kill workers immediately."
+    exit 130
+  elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
+    echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
+    echo "Press Ctrl+C again if you really want to abandon the checkpoint."
+  else
+    echo "Received $1. Killing workers immediately."
+    FORCE_KILL=1
+  fi
+}
+
 cleanup() {
-  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
-  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  echo "Workers stopped."
+  trap - EXIT ERR
+  local trainer_pids=()
+  local worker_pids=()
+  local all_pids=()
+
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    trainer_pids+=("$TRAINER_PID")
+    all_pids+=("$TRAINER_PID")
+  fi
+  for pid in "${ROLLOUT_PID:-}" "${INFERENCE_PID:-}"; do
+    if [[ -n "$pid" ]]; then
+      worker_pids+=("$pid")
+      all_pids+=("$pid")
+    fi
+  done
+
+  if (( ${#all_pids[@]} == 0 )); then
+    return
+  fi
+
+  echo "Cleaning up worker processes: ${all_pids[*]}"
+  echo "Waiting worker processes shutdown (grace period: ${TRAINER_SHUTDOWN_GRACE_SECS} seconds)"
+  # SIGTERM only: the trainer installs a SIGTERM handler that finalizes any
+  # in-flight checkpoint before exiting. Wait (without a hard timeout, capped by
+  # TRAINER_SHUTDOWN_GRACE_SECS) so the checkpoint can be finalized.
+  # Non-trainer workers (rollout, inference) do not perform checkpoint
+  # finalization and are forcefully killed after WORKER_SHUTDOWN_GRACE_SECS if
+  # they fail to exit promptly.
+  kill "${all_pids[@]}" 2>/dev/null || true
+  local waited=0
+  local poll_interval=2
+  while true; do
+    if (( FORCE_KILL == 1 )); then
+      echo "Aborting after ${waited}s at user request."
+      break
+    fi
+    local alive=0
+    for pid in "${worker_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        if (( waited >= WORKER_SHUTDOWN_GRACE_SECS )); then
+          kill -9 "$pid" 2>/dev/null || true
+        else
+          alive=1
+        fi
+      fi
+    done
+    for pid in "${trainer_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        if (( waited >= TRAINER_SHUTDOWN_GRACE_SECS )); then
+          kill -9 "$pid" 2>/dev/null || true
+        else
+          alive=1
+        fi
+      fi
+    done
+    if (( alive == 0 )); then
+      break
+    fi
+    sleep "$poll_interval" || true
+    waited=$((waited + poll_interval))
+  done
+  for pid in "${all_pids[@]}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  wait "${all_pids[@]}" 2>/dev/null || true
+  echo "Workers stopped after ${waited}s of graceful drain."
 }
 trap on_error ERR
 trap cleanup EXIT

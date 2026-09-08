@@ -74,13 +74,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
-  parser.add_argument("--trainer_addr", type=str, default="localhost:20000")
-  parser.add_argument(
-      "--rollout_addr",
-      type=str,
-      default="localhost:20001",
-      help="Comma-separated RolloutWorker addresses (one worker per address).",
-  )
   parser.add_argument(
       "--scheduler_url",
       type=str,
@@ -89,15 +82,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Optional py-inference-scheduler sidecar URL (e.g."
           " http://localhost:8100). When set, rollout requests are routed by"
           " the sidecar instead of prefix-hash/round-robin."
-      ),
-  )
-  parser.add_argument(
-      "--inference_addr",
-      type=str,
-      default="",
-      help=(
-          "Optional reference InferenceWorker address. Required when --beta is "
-          "non-zero because KL scoring needs a reference worker."
       ),
   )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
