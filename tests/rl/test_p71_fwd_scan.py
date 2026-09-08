@@ -254,12 +254,30 @@ def _per_layer_reference_tape(engine, leaves, caches, hidden, metadata):
 
 def test_flag_ladder_off_synonyms_fwd_and_reserved_fatal():
   parse = canonical_qwen3_adapter._p71_scan_mode  # pylint: disable=protected-access
-  for off_value in (None, "", "0", "off"):
-    env = {} if off_value is None else {"CANON_P71_SCAN": off_value}
+  # tasks/v2_dispatch Phase 16: absent/empty selects the certified forward
+  # block unless the layer-scan rung is selected; '0' and 'off' are off.
+  for default_value in (None, ""):
+    env = {} if default_value is None else {"CANON_P71_SCAN": default_value}
     with mock.patch.dict(os.environ, env, clear=False):
-      if off_value is None:
+      if default_value is None:
         os.environ.pop("CANON_P71_SCAN", None)
+      os.environ.pop("CANON_P28_LAYER_SCAN", None)
+      assert parse() == "fwd_block"
+      with mock.patch.dict(os.environ, {"CANON_P28_LAYER_SCAN": "1"}, clear=False):
+        assert parse() == ""
+  for off_value in ("0", "off"):
+    with mock.patch.dict(os.environ, {"CANON_P71_SCAN": off_value}, clear=False):
       assert parse() == ""
+  chunk_batch = canonical_qwen3_adapter._p32_chunk_batch  # pylint: disable=protected-access
+  with mock.patch.dict(os.environ, {}, clear=False):
+    os.environ.pop("CANON_P32_CHUNK_BATCH", None)
+    os.environ.pop("CANON_P28_LAYER_SCAN", None)
+    assert chunk_batch() == 2
+    with mock.patch.dict(os.environ, {"CANON_P28_LAYER_SCAN": "1"}, clear=False):
+      assert chunk_batch() == 1
+  for per_chunk in ("0", "1"):
+    with mock.patch.dict(os.environ, {"CANON_P32_CHUNK_BATCH": per_chunk}, clear=False):
+      assert chunk_batch() == 1
   with mock.patch.dict(
       os.environ, {"CANON_P71_SCAN": "fwd"}, clear=False
   ):
@@ -427,6 +445,27 @@ def _group_adapter(rank_parallel):
   adapter._p32_group_chunk_inputs = types.MethodType(  # pylint: disable=protected-access
       sharded_group_chunk_inputs, adapter
   )
+
+  def chunk_inputs_traced(self, group_spec, start):
+    # The same slices with the chunk start as a traced operand: the form
+    # the batched forward and the reverse chunk program call in-graph
+    # (the toy runner has no engine metadata class).
+    bucket = self._sequence_bucket
+    ids = jax.lax.dynamic_slice_in_dim(
+        group_spec["packed_ids"], start, bucket, axis=1
+    )
+    targets = jax.lax.dynamic_slice_in_dim(
+        group_spec["next_ids"], start, bucket, axis=1
+    )
+    return (
+        jax.lax.with_sharding_constraint(ids.reshape(-1), cache_sharding),
+        jax.lax.with_sharding_constraint(targets.reshape(-1), cache_sharding),
+        start,
+    )
+
+  adapter._p32_chunk_inputs_traced = types.MethodType(  # pylint: disable=protected-access
+      chunk_inputs_traced, adapter
+  )
   return adapter, runner
 
 
@@ -460,7 +499,8 @@ def _reverse_pair(rank_parallel):
   if rank_parallel:
     env["CANON_P59_RANK_PARALLEL_BACKWARD"] = "1"
   with mock.patch.dict(os.environ, env, clear=False):
-    os.environ.pop("CANON_P71_SCAN", None)
+    os.environ["CANON_P71_SCAN"] = "off"  # per-layer forward (default is fwd_block)
+    os.environ["CANON_P32_CHUNK_BATCH"] = "1"  # per-chunk loop (default is 2)
     engine = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
         runner
     )
@@ -535,7 +575,8 @@ def test_fwd_conflicts_fail_closed():
   adapter, runner = _group_adapter(False)
   spec = _two_chunk_spec(adapter)
   with mock.patch.dict(os.environ, _SEGMENTED_ENV, clear=False):
-    os.environ.pop("CANON_P71_SCAN", None)
+    os.environ["CANON_P71_SCAN"] = "off"  # per-layer forward (default is fwd_block)
+    os.environ["CANON_P32_CHUNK_BATCH"] = "1"  # per-chunk loop (default is 2)
     engine = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
         runner
     )

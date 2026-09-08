@@ -319,7 +319,6 @@ def arm(values: Mapping[str, str] | None = None) -> str:
       "CANON_XPROF_SKIP_STEPS": "2",
       "CANON_XPROF_STEPS": "1",
       "CANON_XPROF_HOST_TRACER": "1",
-      "CANON_XPROF_PYTHON_TRACER": "0",
       "CANON_XPROF_LABELS": "1",
   }
   wrong = {
@@ -327,6 +326,12 @@ def arm(values: Mapping[str, str] | None = None) -> str:
       for name, expected in common.items()
       if values.get(name) != expected
   }
+  # The Python tracer is off for certification captures; 1 is admitted for
+  # an attribution capture of the host's eager launches (tasks/v2_dispatch
+  # phase7 R3), which changes only the host plane of the profile and is
+  # not certification evidence.
+  if values.get("CANON_XPROF_PYTHON_TRACER") not in ("0", "1"):
+    wrong["CANON_XPROF_PYTHON_TRACER"] = values.get("CANON_XPROF_PYTHON_TRACER")
   # The capture phase is a signed two-value contract paired with the TPU
   # trace mode: update (backward window, the certification default) takes
   # TRACE_ONLY_XLA, while step (rollout diagnostic window) must leave the

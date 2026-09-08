@@ -276,10 +276,41 @@ def _p59_unit_data_admitted(*, data_size: int, tp_size: int) -> bool:
   return True
 
 
+def _p32_chunk_batch() -> int:
+  """Returns CANON_P32_CHUNK_BATCH: chunks of a group's forward per program.
+
+  Unset/empty means the certified default of two chunks per program
+  (one chunk per program when the layer-scan rung is selected); '0' and
+  '1' mean one chunk per program (the per-chunk loop); an integer 2..64
+  runs that many chunks of a group as one
+  straight-line program (a Python loop over the same per-chunk programs,
+  no scan, no widening of the 256-token chunk); anything else fails
+  closed.  Groups with fewer chunks than a full batch, and the remainder
+  of a group, keep the per-chunk loop.
+  """
+  value = os.environ.get("CANON_P32_CHUNK_BATCH", "")
+  if value == "":
+    # tasks/v2_dispatch Phase 16: the certified GSM8K recipe is the default.
+    # A recipe that selects the layer-scan rung keeps the per-chunk loop
+    # (the two are exclusive; see _p32_forward_group), as do the explicit
+    # '0' and '1'.
+    return 1 if os.environ.get("CANON_P28_LAYER_SCAN", "") else 2
+  if value in ("0", "1"):
+    return 1
+  if not value.isdigit() or not 2 <= int(value) <= 64:
+    raise FunctionalMappingError(
+        "CANON_P32_CHUNK_BATCH must be unset/0/1 or an integer 2..64, "
+        f"got {value!r}"
+    )
+  return int(value)
+
+
 def _p71_scan_mode() -> str:
   """Returns the CANON_P71_SCAN mode for the grouped reverse pass.
 
-  '' (off; absent, empty, '0' and 'off' are all off) | 'fwd' (E1: the
+  Absent/empty selects the certified default 'fwd_block' (the per-layer
+  forward when the layer-scan rung is selected); '0' and 'off' are off
+  ('') | 'fwd' (E1: the
   grouped reverse pass rebuilds its per-chunk forward tape as ONE scanned
   program instead of one jitted fwd_layer program per layer; every
   pullback keeps its legacy per-layer program) | 'bwd' (E2', includes
@@ -292,9 +323,18 @@ def _p71_scan_mode() -> str:
   until that segment lands.
   """
   value = os.environ.get("CANON_P71_SCAN", "")
-  if value in ("", "0", "off"):
+  if value == "":
+    # tasks/v2_dispatch Phase 16: the certified GSM8K recipe's forward
+    # rung is the default; a recipe that selects the layer-scan rung keeps
+    # the per-layer forward (the two are exclusive), as do the explicit
+    # '0' and 'off'.
+    return "" if os.environ.get("CANON_P28_LAYER_SCAN", "") else "fwd_block"
+  if value in ("0", "off"):
     return ""
-  if value in ("fwd", "bwd"):
+  if value in ("fwd", "bwd", "fwd_block"):
+    # 'fwd_block' is the forward-side rung: the grouped FORWARD runs every
+    # layer of a chunk as one unrolled program (no scan, no parameter or
+    # cache stacking); the reverse keeps its per-layer programs.
     return value
   if value == "full":
     raise FunctionalMappingError(
@@ -302,8 +342,8 @@ def _p71_scan_mode() -> str:
         "segment; only off/fwd/bwd exist in E2'"
     )
   raise FunctionalMappingError(
-      "CANON_P71_SCAN must be unset/0/off/fwd/bwd (full reserved), "
-      f"got {value!r}"
+      "CANON_P71_SCAN must be unset/0/off/fwd/bwd/fwd_block (full "
+      f"reserved), got {value!r}"
   )
 
 
@@ -418,6 +458,11 @@ def _p77_chunk_backpressure_enabled() -> bool:
   )
 
 
+def _p32_workload_is_frozenlake() -> bool:
+  """Whether the committed workload is one of the FrozenLake carriers."""
+  return os.environ.get("CANON_P32_WORKLOAD", "").startswith("frozenlake")
+
+
 def _p77_wait_for_chunk_completion(completed) -> None:
   """Bounds PJRT allocation by waiting for an existing device result.
 
@@ -426,8 +471,16 @@ def _p77_wait_for_chunk_completion(completed) -> None:
   gradient pack's last consumer was dispatched and before any next-chunk
   pullback can be dispatched.  Arithmetic, array identity, sharding and VMA
   types are unchanged.
+
+  Only the tree's first leaf is waited for: the callers pass a tree whose
+  first leaf was produced by the last program they dispatched (the chunk
+  pack's embed cotangent, the accumulator's add), and the device runs its
+  programs in dispatch order, so that one readiness covers the chunk.
+  Waiting leaf by leaf cost one host round trip per leaf -- about 15 ms per
+  chunk boundary on the 310-leaf pack (tasks/v2_dispatch/phase14.md,
+  K14 vs K14b) -- for the same guarantee.
   """
-  jax.block_until_ready(completed)
+  jax.block_until_ready(jax.tree.leaves(completed)[0])
 
 
 _P71_BWD_BLOCK_LAYERS = 7
@@ -696,6 +749,89 @@ def fused_micro_scale(tree, scale, count):
       tree,
   )
 
+
+
+def _p59_canonical_sharding(sharding):
+  """Spells a NamedSharding without trailing ``None`` axes.
+
+  XLA hands program outputs back in the shortest spelling (``P()`` for a
+  replicated leaf, ``P(None, 'tp')`` for one sharded on its second axis)
+  while freshly loaded state carries the padded spelling (``P(None,)``,
+  ``P(None, 'tp', None)``); the layouts are identical (see
+  peft_trainer._align_accumulator_sharding_spelling).  A cached-program
+  signature must not tell them apart, or the first commit makes every
+  later update look like a layout change (dp2-tp2 runs
+  v2disp_p1_dp2_20260906_r3: trainer_state[1] P(None,) -> P();
+  v2disp_basefix_dp2_20260906_r2: trainer_state[3]
+  P(None, 'tp', None) -> P(None, 'tp')).
+  """
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    return sharding
+  spec = tuple(sharding.spec)
+  trimmed = spec
+  while trimmed and trimmed[-1] is None:
+    trimmed = trimmed[:-1]
+  if trimmed == spec:
+    return sharding
+  return jax.sharding.NamedSharding(
+      sharding.mesh,
+      jax.sharding.PartitionSpec(*trimmed),
+      memory_kind=sharding.memory_kind,
+  )
+
+
+def _p59_respell_replicated(tree):
+  """Re-spells leaves in the canonical (trailing-None-free) spelling.
+
+  Equivalent layouts only: ``device_put`` to an equivalent NamedSharding
+  moves no data."""
+
+  def respell(leaf):
+    if not isinstance(leaf, jax.Array):
+      return leaf
+    canonical = _p59_canonical_sharding(leaf.sharding)
+    if canonical is leaf.sharding:
+      return leaf
+    with jax.transfer_guard("allow"):
+      return jax.device_put(leaf, canonical)
+
+  return jax.tree.map(respell, tree)
+
+
+def _p59_signature_difference(cached, current, parts):
+  """Names the first component of a cached-program signature that changed.
+
+  ``cached``/``current`` are ``((treedef, ((shape, dtype), ...)), (sharding,
+  ...), plan)`` triples; ``parts`` maps leaf ranges to tree names so the
+  message says which tree and which leaf moved instead of "changed".
+  """
+  def part_of(index):
+    offset = 0
+    for name, count in parts:
+      if index < offset + count:
+        return f"{name}[{index - offset}]"
+      offset += count
+    return f"leaf[{index}]"
+
+  (old_treedef, old_leaves), old_shardings, old_plan = cached
+  (new_treedef, new_leaves), new_shardings, new_plan = current
+  if old_treedef != new_treedef:
+    return "tree structure changed"
+  for index, (old_leaf, new_leaf) in enumerate(zip(old_leaves, new_leaves)):
+    if old_leaf != new_leaf:
+      return f"{part_of(index)} shape/dtype {old_leaf} -> {new_leaf}"
+  if len(old_leaves) != len(new_leaves):
+    return f"leaf count {len(old_leaves)} -> {len(new_leaves)}"
+  for index, (old_sharding, new_sharding) in enumerate(
+      zip(old_shardings, new_shardings)
+  ):
+    if old_sharding != new_sharding:
+      return (
+          f"{part_of(index)} sharding {old_sharding} -> {new_sharding}"
+      )
+  if old_plan != new_plan:
+    return "report adjoint plan changed"
+  return "no visible difference (unhashable component?)"
 
 class P35ReplayStageProbeComplete(RuntimeError):
   """Stops the default-off P35.3c probe without a numerical verdict."""
@@ -2465,7 +2601,30 @@ def _p32_gather_rows(tree, perm):
   return jax.tree_util.tree_unflatten(treedef, out)
 
 
-def _p32_entry_caches(final_caches, chunk_start, *, data_size):
+def _p32_entry_cache_rebuild(caches, start, data_size):
+  """The entry-cache rebuild body of ``_p32_entry_caches``, traceable so a
+  program that consumes the rebuilt caches in-graph (the reverse chunk
+  program, tasks/v2_dispatch Phase 15) computes exactly the arrays the
+  standalone program emits."""
+  def one(cache):
+    if cache.ndim < 2 or cache.shape[0] % int(data_size):
+      raise FunctionalMappingError(
+          "entry cache rebuild expects a paged cache of shape "
+          f"(data_size * blocks_per_req, block_size, ...); got {cache.shape} "
+          f"for data_size={data_size}"
+      )
+    blocks_per_req = cache.shape[0] // int(data_size)
+    block_size = cache.shape[1]
+    pages = jnp.arange(cache.shape[0], dtype=jnp.int32) % blocks_per_req
+    offsets = jnp.arange(block_size, dtype=jnp.int32)
+    position = pages[:, None] * block_size + offsets[None, :]
+    keep = position < start
+    keep = keep.reshape(keep.shape + (1,) * (cache.ndim - 2))
+    return jnp.where(keep, cache, jnp.zeros((), cache.dtype))
+  return jax.tree.map(one, caches)
+
+
+def _p32_entry_caches(final_caches, chunk_start, *, data_size, zero_carry=False):
   """Rebuilds the KV caches a chunk pass started from, out of the final ones.
 
   Chunk ``c`` writes exactly its own positions ``[c*bucket, c*bucket+q_len)``
@@ -2482,6 +2641,11 @@ def _p32_entry_caches(final_caches, chunk_start, *, data_size):
   positions ``[(i % blocks_per_req)*block_size, ...)``.  ``chunk_start`` is a
   runtime operand so every chunk of every group shares one compiled program;
   ``out_shardings`` are pinned to the caches' own shardings.
+
+  ``zero_carry=True`` (the first reversed chunk of a group) additionally
+  returns the zero cache cotangents the reverse starts from -- shaped and
+  sharded like the caches -- so the group needs no separate zeros program
+  (tasks/v2_dispatch Phase 11); the result is then ``(caches, zeros)``.
   """
   leaves, treedef = jax.tree_util.tree_flatten(tuple(final_caches))
   shardings = tuple(leaf.sharding for leaf in leaves)
@@ -2490,33 +2654,42 @@ def _p32_entry_caches(final_caches, chunk_start, *, data_size):
       tuple((tuple(leaf.shape), str(leaf.dtype)) for leaf in leaves),
       tuple(str(sharding) for sharding in shardings),
       int(data_size),
+      bool(zero_carry),
   )
   program = _P32_ENTRY_CACHE_PROGRAMS.get(key)
   if program is None:
     def rebuild(caches, start):
-      def one(cache):
-        if cache.ndim < 2 or cache.shape[0] % int(data_size):
-          raise FunctionalMappingError(
-              "entry cache rebuild expects a paged cache of shape "
-              f"(data_size * blocks_per_req, block_size, ...); got {cache.shape} "
-              f"for data_size={data_size}"
-          )
-        blocks_per_req = cache.shape[0] // int(data_size)
-        block_size = cache.shape[1]
-        pages = jnp.arange(cache.shape[0], dtype=jnp.int32) % blocks_per_req
-        offsets = jnp.arange(block_size, dtype=jnp.int32)
-        position = pages[:, None] * block_size + offsets[None, :]
-        keep = position < start
-        keep = keep.reshape(keep.shape + (1,) * (cache.ndim - 2))
-        return jnp.where(keep, cache, jnp.zeros((), cache.dtype))
-      return jax.tree.map(one, caches)
+      rebuilt = _p32_entry_cache_rebuild(caches, start, data_size)
+      if zero_carry:
+        return rebuilt, jax.tree.map(jnp.zeros_like, caches)
+      return rebuilt
+    pinned = jax.tree_util.tree_unflatten(treedef, list(shardings))
     program = jax.jit(
         rebuild,
-        out_shardings=jax.tree_util.tree_unflatten(treedef, list(shardings)),
+        out_shardings=(pinned, pinned) if zero_carry else pinned,
     )
     _P32_ENTRY_CACHE_PROGRAMS[key] = program
-  start = jnp.asarray(int(chunk_start), dtype=jnp.int32)
+  if isinstance(chunk_start, jax.Array):
+    start = chunk_start
+  else:
+    start = jnp.asarray(int(chunk_start), dtype=jnp.int32)
   return program(tuple(final_caches), start)
+
+
+# The train-example leaves the grouped update's loss programs read (the
+# stream step, the stream loss and the end-of-update oracle); placed on the
+# engine mesh once per update by _p32_commit_example.
+_P32_EXAMPLE_FIELDS = (
+    "prompt_ids",
+    "prompt_mask",
+    "completion_ids",
+    "completion_mask",
+    "completion_valid_mask",
+    "advantages",
+    "old_per_token_logps",
+    "ref_per_token_logps",
+    "sampler_is_weights",
+)
 
 
 def _p32_zero_trees(trees):
@@ -3808,6 +3981,8 @@ class _P28SegmentedEngineForward:
     self._layer_scan_stack = None
     self._p71_fwd_scan_fn = None
     self._p71_fwd_scan_signature = None
+    self._p71_fwd_block_fn = None
+    self._p71_fwd_block_signature = None
     self._p71_bwd_block_fns = {}
     self._p71_bwd_block_signatures = {}
     self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
@@ -4384,6 +4559,167 @@ class _P28SegmentedEngineForward:
     self._ensure_layer_scan(engine_leaves)
     return self._layer_acc_fn(layer_grads, chunk_grads)
 
+  def run_layers_fwd_block(self, engine_leaves, caches, hidden, metadata):
+    """Runs every layer of one chunk as ONE unrolled forward program.
+
+    The body calls the same per-layer fwd_layer programs in a plain Python
+    loop traced into a straight-line graph: no lax.scan, no stacked
+    parameter copy and no per-chunk cache stacking (the costs that make a
+    scanned forward unfit for long contexts).  Each layer's parameters and
+    cache stay separate operands; the outputs are the per-layer new caches
+    and the per-layer layer inputs (the tape the reverse already consumes)
+    plus the final hidden state.  One compiled program per operand
+    signature, cached behind the same guard as the E1 scan, XProf module
+    zt_tr_fwd_block.
+    """
+    self._reject_outer_transform(engine_leaves, caches, hidden, metadata)
+    state_leaves = tuple(engine_leaves)
+    if len(state_leaves) != self._num_state_leaves:
+      raise FunctionalMappingError(
+          "P28 layer state leaf count changed: "
+          f"{len(state_leaves)} != {self._num_state_leaves}"
+      )
+    caches = tuple(caches)
+    if len(caches) != len(self._local_layer_fns):
+      raise FunctionalMappingError(
+          f"P71 fwd_block expects {len(self._local_layer_fns)} caches, "
+          f"got {len(caches)}"
+      )
+    per_layer_leaves = tuple(
+        tuple(state_leaves[index] for index in full_indices)
+        for full_indices in self._local_layer_full_indices
+    )
+    operands = (per_layer_leaves, caches, hidden, metadata)
+    signature = (
+        jax.tree_util.tree_structure(operands),
+        tuple(
+            (tuple(leaf.shape), str(leaf.dtype))
+            for leaf in jax.tree_util.tree_leaves(operands)
+        ),
+    )
+    return self._fwd_block_program(operands, signature)(
+        per_layer_leaves, caches, hidden, metadata
+    )
+
+  def _fwd_block_program(self, operands, signature):
+    """Builds (once) and returns the fwd_block program for ``operands``."""
+    if self._p71_fwd_block_fn is None:
+      layer_fns = self._local_layer_fns
+
+      def fwd_layers_block(per_layer_leaves, caches, hidden, metadata):
+        new_caches = []
+        hidden_ins = []
+        for layer_index, (leaves, cache) in enumerate(
+            zip(per_layer_leaves, caches)
+        ):
+          hidden_ins.append(hidden)
+          with jax.named_scope(f"p71_fwd_block_layer_{layer_index}"):
+            cache, hidden = layer_fns[layer_index](
+                leaves, cache, hidden, metadata
+            )
+          new_caches.append(cache)
+        return tuple(new_caches), tuple(hidden_ins), hidden
+
+      self._p71_fwd_block_signature = signature
+      self._p71_fwd_block_fn = self._bind_execution_mesh(
+          _xprof_jit(
+              fwd_layers_block,
+              module_name="zt_tr_fwd_block",
+              scope_name="zt/tr/layers/fwd_block",
+          ),
+          "layer-forward-block",
+      )
+    elif self._p71_fwd_block_signature != signature:
+      raise FunctionalMappingError(
+          "P71 fwd_block operand signature changed after the block "
+          "program was built"
+      )
+    return self._p71_fwd_block_fn
+
+  def forward_chunk_callables(self, engine_leaves):
+    """The traceable pieces of one chunk's forward, for a batched program.
+
+    Returns ``((embed_fn, embed_leaves), per_layer, (norm_fn, norm_leaves),
+    (head_fn, head_leaves))`` where ``per_layer`` is the tuple of per-layer
+    ``(fn, leaves)`` pairs; every leaf tuple is selected here, outside the
+    trace, and must be handed to the program as an operand on EVERY call
+    (never captured: the engine state changes after each commit).  The
+    host-boundary guards stay on the run_* entry points.
+    """
+    self._require_full_loss_endpoints()
+    state_leaves = tuple(engine_leaves)
+    if len(state_leaves) != self._num_state_leaves:
+      raise FunctionalMappingError(
+          "P28 layer state leaf count changed: "
+          f"{len(state_leaves)} != {self._num_state_leaves}"
+      )
+    embed_leaves = self._endpoint_leaves(
+        state_leaves, self._embed_full_indices, self._embed_local_leaves,
+        "embed",
+    )
+    norm_leaves = self._endpoint_leaves(
+        state_leaves, self._norm_full_indices, self._norm_local_leaves,
+        "final norm",
+    )
+    head_leaves = self._endpoint_leaves(
+        state_leaves, self._head_full_indices, self._head_local_leaves,
+        "lm head",
+    )
+    per_layer = tuple(
+        (
+            self._local_layer_fns[layer_index],
+            tuple(state_leaves[index] for index in full_indices),
+        )
+        for layer_index, full_indices in enumerate(
+            self._local_layer_full_indices
+        )
+    )
+    return (
+        (self._embed_local_fn, embed_leaves),
+        per_layer,
+        (self._norm_local_fn, norm_leaves),
+        (self._head_local_fn, head_leaves),
+    )
+
+  def reverse_chunk_callables(self, engine_leaves):
+    """The traceable pieces of one chunk's rank-parallel reverse.
+
+    Returns ``((embed_bwd, embed_leaves), layer_bwd, (norm_fn, norm_bwd,
+    norm_leaves), (head_fn, head_bwd, head_leaves))``: the mapped pullback
+    callables the run_*_rank_parallel entry points built on their first
+    (per-program) call -- each carries its compiled program and mesh as
+    ``_p59_compiled`` / ``_p59_mesh`` -- and the endpoint leaves selected
+    here, outside the trace, to be handed to the program as operands on
+    every call (the per-layer leaves are the group's prepared pack).
+    Fails closed while any mapped program is still unbuilt: the
+    per-program chunk that builds them is the chunk program's bootstrap.
+    """
+    (_, embed_leaves), per_layer_fwd, (norm_fn, norm_leaves), (
+        head_fn, head_leaves
+    ) = self.forward_chunk_callables(engine_leaves)
+    layer_bwd = tuple(getattr(self, "_p59_layer_pullback_fns", None) or ())
+    endpoints = {
+        "embed": getattr(self, "_p59_embed_pullback_fn", None),
+        "norm": getattr(self, "_p59_norm_pullback_fn", None),
+        "head": getattr(self, "_p59_head_pullback_fn", None),
+    }
+    missing = [name for name, fn in endpoints.items() if fn is None]
+    if len(layer_bwd) != len(per_layer_fwd) or any(
+        fn is None for fn in layer_bwd
+    ):
+      missing.append("layers")
+    if missing:
+      raise FunctionalMappingError(
+          "P32 reverse chunk program requires every rank-parallel pullback "
+          f"program to be built by one per-chunk pass first; missing: {missing}"
+      )
+    return (
+        (endpoints["embed"], embed_leaves),
+        layer_bwd,
+        (norm_fn, endpoints["norm"], norm_leaves),
+        (head_fn, endpoints["head"], head_leaves),
+    )
+
   def run_layers_fwd_tape_scan(self, engine_leaves, caches, hidden, metadata):
     """P71-E1: rebuilds one chunk's layer tape as one scanned program.
 
@@ -4884,6 +5220,9 @@ class _P28SegmentedEngineForward:
         return local_fn(*localized_args)
 
       mapped_local_fn = vma_local_fn
+    out_specs = out_specs_factory(
+        data_axis, int(mesh.shape[data_axis]), aligned_args, manual_axes
+    )
     mapped = jax.shard_map(
         mapped_local_fn,
         mesh=mesh,
@@ -4907,17 +5246,58 @@ class _P28SegmentedEngineForward:
             else _manual_axis_specs(value, data_axis, manual_axes)
             for index, value in enumerate(aligned_args)
         ),
-        out_specs=out_specs_factory(
-            data_axis, int(mesh.shape[data_axis]), aligned_args, manual_axes
-        ),
+        out_specs=out_specs,
         axis_names=manual_axes,
         check_vma=p66_check_vma,
     )
-    compiled = _xprof_jit(
-        mapped, module_name=module_name, scope_name=scope_name
+    # At TP>1 the map's mesh differs from the trainer's only in its axis
+    # names, and every call used to relabel each operand onto it and each
+    # result back (one host device_put per array: 22 per layer pullback,
+    # 40k per update on the one-host attribution capture).  Pin the
+    # program's in_shardings to the spellings its operands arrive with and
+    # its out_shardings to the trainer spelling the relabel used to
+    # produce: the same physical layouts (the relabel itself asserted the
+    # two meshes share one device order), so the values are unchanged and
+    # nothing is copied at the call boundary; a caller that hands an
+    # operand in another spelling still gets it resharded by jit.
+    pinned = mesh != trainer_mesh and all(
+        isinstance(getattr(leaf, "sharding", None), jax.sharding.NamedSharding)
+        for leaf in jax.tree.leaves(args)
     )
+    if pinned:
+      trainer_data_axis, trainer_model_axis_name = _p59_mesh_roles(
+          trainer_mesh, module_name
+      )
+      model_axis_name = _p59_mesh_roles(mesh, module_name)[1]
+      trainer_specs = _p59_translate_partition_specs(
+          _p59_translate_partition_specs(
+              out_specs, data_axis, trainer_data_axis
+          ),
+          model_axis_name,
+          trainer_model_axis_name,
+      )
+      compiled = _xprof_jit(
+          mapped,
+          module_name=module_name,
+          scope_name=scope_name,
+          in_shardings=jax.tree.map(lambda leaf: leaf.sharding, args),
+          out_shardings=jax.tree.map(
+              lambda spec: jax.sharding.NamedSharding(trainer_mesh, spec),
+              trainer_specs,
+              is_leaf=lambda value: isinstance(
+                  value, jax.sharding.PartitionSpec
+              ),
+          ),
+      )
+    else:
+      compiled = _xprof_jit(
+          mapped, module_name=module_name, scope_name=scope_name
+      )
 
     def invoke(*runtime_args):
+      if pinned:
+        with _p59_localize_engine_shard_maps(mesh, module_name):
+          return compiled(*runtime_args)
       aligned_runtime_args = tuple(
           _p59_align_to_mesh(value, mesh, module_name)
           for value in runtime_args
@@ -4940,6 +5320,12 @@ class _P28SegmentedEngineForward:
     invoke._p59_check_vma = p66_check_vma
     invoke._p59_manual_axes = tuple(sorted(manual_axes))
     invoke._p59_module_name = module_name
+    invoke._p59_pinned = pinned
+    # tasks/v2_dispatch Phase 15: the reverse chunk program calls this map
+    # in-graph and needs the compiled map plus the tracing context the
+    # eager invoke uses, so the nested engine maps are built identically.
+    invoke._p59_compiled = compiled
+    invoke._p59_mesh = mesh
 
     return invoke
 
@@ -7342,6 +7728,308 @@ class Qwen3EngineForwardAdapter:
     bucket = int(self._sequence_bucket)
     return ((int(self._max_model_len) + bucket - 1) // bucket) * bucket
 
+  def _p32_glue_sharding(self, like):
+    """Sharding of the (data_size, glue_width) glue buffers.
+
+    The buffers live where the chunk inputs live: on the engine's mesh
+    with the engine's data axis (``_input_sharding``, whose spec names the
+    engine mesh's data axis, or replicates when that mesh has none).  The
+    trainer-side axis name (``_dp_axis``) must not be used here: the
+    engine mesh names its axes differently (``('dp', 'tp')`` on the
+    one-host carrier) and the CPU fixtures cannot see that.
+    """
+    del like  # the engine input sharding is the contract, not the operand
+    base = getattr(self, "_input_sharding", None)
+    if not isinstance(base, jax.sharding.NamedSharding):
+      return None
+    row_axis = base.spec[0] if len(base.spec) else None
+    return jax.sharding.NamedSharding(
+        base.mesh, jax.sharding.PartitionSpec(row_axis)
+    )
+
+  def _p32_spec_sharding(self, ndim):
+    """Sharding of a group-spec array: rows over the engine data axis for
+    arrays with a leading per-rank axis (the ``_input_sharding`` derivation
+    the glue buffers use), replicated for scalars; None when the engine has
+    no NamedSharding (CPU fixtures).  A spec array left uncommitted is
+    re-sliced per device by ``shard_args`` on EVERY program that consumes
+    it (the ``jit__multi_slice`` launches of the census); committed to the
+    consumers' own row sharding it crosses each call boundary untouched.
+    """
+    rows = self._p32_glue_sharding(None)
+    if rows is None:
+      return None
+    if int(ndim) == 0:
+      return jax.sharding.NamedSharding(rows.mesh, jax.sharding.PartitionSpec())
+    return rows
+
+  def _p32_start_scalar(self, chunk_start):
+    """A chunk-start operand as a committed device scalar, cached by value.
+
+    ``jnp.asarray(python_int, int32)`` dispatched one convert program per
+    chunk pass in the forward, the batched forward and the reverse (224
+    launches per update on the one-host census); every chunk of every
+    group starts at one of a handful of values, so one committed scalar
+    per value serves the whole process.  Replicated on the engine mesh
+    (the spec-array derivation) so its consumers compile once for it.
+    """
+    scalars = self.__dict__.setdefault("_p32_start_scalars", {})
+    key = int(chunk_start)
+    value = scalars.get(key)
+    if value is None:
+      value = jnp.asarray(key, jnp.int32)
+      sharding = self._p32_spec_sharding(0)
+      if sharding is not None:
+        value = jax.device_put(value, sharding)
+      scalars[key] = value
+    return value
+
+  def _p32_commit_example(self, train_example):
+    """Places the loss's example leaves on the engine mesh once per update.
+
+    The stream step, the stream loss and the end-of-update oracle take the
+    train example as an operand; a leaf left on one device (or on the host)
+    is re-sliced or re-copied to every device on EVERY call -- one
+    jit__multi_slice launch and three host copies per group on the one-host
+    census (tasks/v2_dispatch Phase 11).  Replicated on the engine mesh
+    (the scalar spec-array derivation) every consumer compiles once for it
+    and takes it as it is.  Values are untouched; without a NamedSharding
+    engine (CPU fixtures) the example is returned as it came.
+    """
+    sharding = self._p32_spec_sharding(0)
+    if sharding is None:
+      return train_example
+    updates = {}
+    for name in _P32_EXAMPLE_FIELDS:
+      value = getattr(train_example, name, None)
+      if isinstance(value, jax.Array):
+        if value.committed and value.sharding == sharding:
+          continue
+        updates[name] = jax.device_put(value, sharding)
+      elif isinstance(value, np.ndarray):
+        updates[name] = jax.device_put(value, sharding)
+    return train_example.replace(**updates) if updates else train_example
+
+  def _p32_group_index_scalar(self, index):
+    """A group index operand as a committed device scalar, cached by value
+    (the stream step took a Python int: one host transfer per group)."""
+    scalars = self.__dict__.setdefault("_p32_group_index_scalars", {})
+    key = int(index)
+    value = scalars.get(key)
+    if value is None:
+      value = jnp.asarray(key, jnp.int32)
+      sharding = self._p32_spec_sharding(0)
+      if sharding is not None:
+        value = jax.device_put(value, sharding)
+      scalars[key] = value
+    return value
+
+  def _p32_pair_equal(self, left, right):
+    """``array_equal`` of one replay/forward pair as ONE program.
+
+    The eager form dispatched an equal and an all per group (64 launches
+    per update on the one-host census); the flag has to be produced while
+    both arrays are alive (the streamed tape is released right after), so
+    it stays per group, in one launch.  A shape change is a mismatch, as
+    array_equal reports it.
+    """
+    if tuple(left.shape) != tuple(right.shape):
+      return jnp.asarray(False)
+    fn = getattr(self, "_p32_pair_equal_program", None)
+    if fn is None:
+      fn = jax.jit(lambda a, b: jnp.all(jnp.equal(a, b)))
+      self._p32_pair_equal_program = fn
+    return fn(left, right)
+
+  def _p32_group_rows_fn(self):
+    """One program: a group's logprob and entropy rows out of the glue buffers.
+
+    The forward's tail gathered each row's completion slots from the glue
+    (``take_along_axis``) and masked the invalid ones eagerly, twice per
+    group (six launches per group, 192 per update on the one-host census).
+    Gathers and selects are exact; the outputs keep the rows sharding the
+    eager ops produced from their sharded inputs.
+    """
+    fn = getattr(self, "_p32_group_rows_program", None)
+    if fn is None:
+
+      def group_rows(flat_logps, flat_entropies, completion_valid, source_rows):
+        zeros = jnp.zeros(completion_valid.shape, jnp.float32)
+        logps = jnp.where(
+            completion_valid,
+            jnp.take_along_axis(flat_logps, source_rows, axis=1),
+            zeros,
+        )
+        entropy = jnp.where(
+            completion_valid,
+            jnp.take_along_axis(flat_entropies, source_rows, axis=1),
+            zeros,
+        )
+        return logps, entropy
+
+      rows = self._p32_spec_sharding(2)
+      fn = (
+          jax.jit(group_rows) if rows is None
+          else jax.jit(group_rows, out_shardings=(rows, rows))
+      )
+      self._p32_group_rows_program = fn
+    return fn
+
+  def _p32_glue_zeros(self, like):
+    """Two zero glue buffers per group, one cached program per sharding."""
+    shape = (int(self._data_size), int(self._p32_glue_width()))
+    sharding = self._p32_glue_sharding(like)
+    if sharding is None:
+      return jnp.zeros(shape, jnp.float32), jnp.zeros(shape, jnp.float32)
+    programs = self.__dict__.setdefault("_p32_glue_zero_programs", {})
+    program = programs.get(sharding)
+    if program is None:
+      def fwd_glue_zeros():
+        return jnp.zeros(shape, jnp.float32), jnp.zeros(shape, jnp.float32)
+
+      program = jax.jit(fwd_glue_zeros, out_shardings=(sharding, sharding))
+      programs[sharding] = program
+    return program()
+
+  def _p32_rows_glue_fn(self):
+    """One program per forward chunk: rows logprobs/entropy into the glue.
+
+    Folds the logits cast, the processed-rows program, the two reshapes
+    and the two dynamic-update-slices that wrote each chunk's rows into
+    the fixed-width glue buffers (12 launches per chunk eagerly) into the
+    rows program itself; the module keeps the ``zt_tr_fwd_logprob`` name.
+    """
+    fn = getattr(self, "_p32_rows_glue_program", None)
+    if fn is None:
+      rows_fn = self._p28_processed_rows_fn
+      data_size = int(self._data_size)
+      bucket = int(self._sequence_bucket)
+
+      def fwd_logprob(raw_logits, target_ids, temperature, flat_logps, flat_entropies, start):
+        target_logps, entropy = rows_fn(
+            raw_logits.astype(jnp.float32), target_ids, temperature
+        )
+        flat_logps = jax.lax.dynamic_update_slice_in_dim(
+            flat_logps, target_logps.reshape(data_size, bucket), start, axis=1
+        )
+        flat_entropies = jax.lax.dynamic_update_slice_in_dim(
+            flat_entropies, entropy.reshape(data_size, bucket), start, axis=1
+        )
+        return flat_logps, flat_entropies
+
+      fn = _xprof_jit(
+          fwd_logprob, module_name="zt_tr_fwd_logprob", scope_name="zt/tr/logprob/fwd"
+      )
+      self._p32_rows_glue_program = fn
+    return fn
+
+  def _p32_rows_glue_pullback_fn(self):
+    """One program per reverse chunk: glue cotangent slices to dlogits.
+
+    Folds the logits cast, the two dynamic slices of the chunk's
+    cotangents, the processed-rows pullback and the cast back to the head
+    dtype (14 launches per chunk eagerly) into the ``zt_tr_bwd_logprob``
+    program.
+    """
+    fn = getattr(self, "_p32_rows_glue_pullback_program", None)
+    if fn is None:
+      pullback_fn = self._p28_processed_rows_pullback_fn
+      bucket = int(self._sequence_bucket)
+
+      def bwd_logprob(raw_logits, target_ids, temperature, flat_dlogps, flat_dentropy, start):
+        dchunk_logps = jax.lax.dynamic_slice_in_dim(
+            flat_dlogps, start, bucket, axis=1
+        ).reshape(-1)
+        dchunk_entropy = jax.lax.dynamic_slice_in_dim(
+            flat_dentropy, start, bucket, axis=1
+        ).reshape(-1)
+        dlogits = pullback_fn(
+            raw_logits.astype(jnp.float32),
+            target_ids,
+            temperature,
+            dchunk_logps,
+            dchunk_entropy,
+        )
+        return dlogits.astype(raw_logits.dtype)
+
+      fn = _xprof_jit(
+          bwd_logprob, module_name="zt_tr_bwd_logprob", scope_name="zt/tr/logprob/bwd"
+      )
+      self._p32_rows_glue_pullback_program = fn
+    return fn
+
+  def _p32_flat_cotangents_fn(self, like):
+    """One program per group: batch cotangents scattered into the glue."""
+    sharding = self._p32_glue_sharding(like)
+    programs = self.__dict__.setdefault("_p32_flat_cotangent_programs", {})
+    program = programs.get(sharding)
+    if program is None:
+      data_size = int(self._data_size)
+      width = int(self._p32_glue_width())
+
+      def bwd_flat_cotangents(dlogps, dentropy, completion_valid, source_rows):
+        rank_rows = jnp.arange(data_size, dtype=jnp.int32)[:, None]
+        zeros = jnp.zeros((data_size, width), jnp.float32)
+        flat_dlogps = zeros.at[rank_rows, source_rows].add(
+            jnp.where(completion_valid, dlogps, 0.0)
+        )
+        flat_dentropy = zeros.at[rank_rows, source_rows].add(
+            jnp.where(completion_valid, dentropy, 0.0)
+        )
+        return flat_dlogps, flat_dentropy
+
+      kwargs = {} if sharding is None else {"out_shardings": (sharding, sharding)}
+      program = jax.jit(bwd_flat_cotangents, **kwargs)
+      programs[sharding] = program
+    return program
+
+  def _p32_forward_zeros(self):
+    """The fresh caches and the two zero glue buffers of one group's forward.
+
+    One program per group instead of the fresh-caches program plus the
+    glue-zeros program (tasks/v2_dispatch Phase 11): the values are zeros
+    either way and every output keeps the sharding its own producer pinned
+    (``_cache_sharding`` for the caches, ``_p32_glue_sharding`` for the
+    glue).  Without the cache geometry or a NamedSharding glue (the CPU
+    fixtures replace ``_fresh_caches``), the two producers run as before.
+    """
+    shape = getattr(self, "_cache_shape", None)
+    cache_sharding = getattr(self, "_cache_sharding", None)
+    glue = self._p32_glue_sharding(None)
+    if (
+        shape is None
+        or glue is None
+        or not isinstance(cache_sharding, jax.sharding.NamedSharding)
+    ):
+      caches = tuple(self._fresh_caches())
+      flat_logps, flat_entropies = self._p32_glue_zeros(None)
+      return caches, flat_logps, flat_entropies
+    count = len(self._runner.kv_caches)
+    glue_shape = (int(self._data_size), int(self._p32_glue_width()))
+    key = (
+        count, tuple(shape), str(self._cache_dtype), str(cache_sharding),
+        glue_shape, str(glue),
+    )
+    programs = self.__dict__.setdefault("_p32_forward_zero_programs", {})
+    program = programs.get(key)
+    if program is None:
+      cache_shape, dtype = tuple(shape), self._cache_dtype
+
+      def forward_zeros():
+        return (
+            [jnp.zeros(cache_shape, dtype) for _ in range(count)],
+            jnp.zeros(glue_shape, jnp.float32),
+            jnp.zeros(glue_shape, jnp.float32),
+        )
+
+      program = jax.jit(
+          forward_zeros,
+          out_shardings=([cache_sharding] * count, glue, glue),
+      )
+      programs[key] = program
+    caches, flat_logps, flat_entropies = program()
+    return tuple(caches), flat_logps, flat_entropies
+
   def _fresh_caches(self):
     """Zero KV caches for one chunk pass, produced by one cached program.
 
@@ -7389,6 +8077,42 @@ class Qwen3EngineForwardAdapter:
     return transposed.reshape(
         (transposed.shape[0] * transposed.shape[1],) + value.shape[2:]
     )
+
+  def _p32_split_groups_fn(self, local_trajectories, stack_count):
+    """One program: rank-major regrouping of the update's token/mask stacks
+    and their split into one (data_size, T) array per group.
+
+    Eagerly that was one reshape and one swapaxes per stack plus one slice
+    and one squeeze per array per group (268 launches per update on the
+    one-host census).  Pure reshapes and slices, so every value is
+    unchanged; the outputs are committed to the spec row sharding so the
+    per-group pack program and everything after it compile once for it.
+    """
+    programs = self.__dict__.setdefault("_p32_split_groups_programs", {})
+    key = (int(local_trajectories), int(stack_count))
+    fn = programs.get(key)
+    if fn is None:
+      group_batch_rows = self._group_batch_rows
+
+      def split_groups(stacks):
+        grouped = tuple(group_batch_rows(value) for value in stacks)
+        return tuple(
+            tuple(value[index] for value in grouped)
+            for index in range(key[0])
+        )
+
+      rows = self._p32_spec_sharding(2)
+      if rows is None:
+        fn = jax.jit(split_groups)
+      else:
+        fn = jax.jit(
+            split_groups,
+            out_shardings=tuple(
+                tuple(rows for _ in range(key[1])) for _ in range(key[0])
+            ),
+        )
+      programs[key] = fn
+    return fn
 
   def map_engine_cotangents_to_trainer_state(
       self, trainer_state, engine_cotangents
@@ -7766,12 +8490,19 @@ class Qwen3EngineForwardAdapter:
         key_mappings=self._key_mappings,
         data_axis=data_axis,
     )
+    # The first optimizer commit hands the trainer state back with its
+    # replicated leaves spelled P() instead of P(None,); the layouts are
+    # the same.  Canonicalize the spelling before it reaches the signature
+    # and the fused program, so update 2 neither recompiles nor trips the
+    # guard (run v2disp_p1_dp2_20260906_r3: trainer_state[1] P(None,) ->
+    # P()).  Real shape, dtype, structure or layout changes still raise.
+    trainer_state = _p59_respell_replicated(trainer_state)
     signature = (
         self._p70_grad_tree_signature(
             (trainer_state, staged_engine_cotangents, staged_accumulator)
         ),
         tuple(
-            getattr(leaf, "sharding", None)
+            _p59_canonical_sharding(getattr(leaf, "sharding", None))
             for leaf in jax.tree.leaves(
                 (trainer_state, staged_engine_cotangents, staged_accumulator)
             )
@@ -7992,7 +8723,19 @@ class Qwen3EngineForwardAdapter:
     cached_signature, fused = cached
     if cached_signature != signature:
       raise FunctionalMappingError(
-          "P59 bucketed report accumulation signature changed"
+          "P59 bucketed report accumulation signature changed: "
+          + _p59_signature_difference(
+              cached_signature,
+              signature,
+              (
+                  ("trainer_state", len(jax.tree.leaves(trainer_state))),
+                  (
+                      "engine_gradients",
+                      len(jax.tree.leaves(staged_engine_cotangents)),
+                  ),
+                  ("staged_accumulator", len(accumulator_leaves)),
+              ),
+          )
       )
     accumulated, receipts = fused(
         trainer_state, staged_engine_cotangents, staged_accumulator
@@ -9048,6 +9791,146 @@ class Qwen3EngineForwardAdapter:
         "replay_entropy": replay["entropy"],
     }
 
+  def _p32_stream_loss_fn(self, algo_config):
+    """One program: the batch loss output and its scale from the stream tensors.
+
+    The eager construction issued about 300 tiny launches per update on the
+    one-host census (once for the scale at the first group, once for the
+    loss output at the end).  ``LossOutput`` is a pytree, so the program
+    returns it whole; the scale is exact either way (a count of mask tokens
+    and one division), the loss value is reporting only.  Cached on the
+    algo config's identity like the stream cotangent program (a fresh jit
+    per update would recompile inside the captured update).
+    """
+    cached = getattr(self, "_p32_stream_loss", None)
+    if cached is None or cached[0] is not algo_config:
+      from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
+      ungroup = self._ungroup_batch_rows
+
+      def stream_loss_output(stream_logps, stream_entropy, example):
+        output = algo_core.grpo_loss_from_precomputed_logps(
+            ungroup(stream_logps), ungroup(stream_entropy), example,
+            algo_config,
+        )
+        return output, output.primary_loss.compute_scale()
+
+      cached = (algo_config, jax.jit(stream_loss_output))
+      self._p32_stream_loss = cached
+    return cached[1]
+
+  def _p32_group_pairs_equal_fn(self):
+    """One program: per-group equality of two stacked cotangent pairs."""
+    fn = getattr(self, "_p32_group_pairs_equal_program", None)
+    if fn is None:
+
+      def pairs_equal(left_a, right_a, left_b, right_b):
+        axes = tuple(range(1, left_a.ndim))
+        return jnp.all(left_a == right_a, axis=axes) & jnp.all(
+            left_b == right_b, axis=axes
+        )
+
+      fn = jax.jit(pairs_equal)
+      self._p32_group_pairs_equal_program = fn
+    return fn
+
+  def _p32_group_lengths_fn(self):
+    """One program: per-rank real/prompt/completion lengths of a group."""
+    fn = getattr(self, "_p32_group_lengths_program", None)
+    if fn is None:
+
+      def group_lengths(prompt_valid, completion_valid):
+        valid = jnp.concatenate((prompt_valid, completion_valid), axis=1)
+        return (
+            jnp.sum(valid, axis=1, dtype=jnp.int32),
+            jnp.sum(prompt_valid, axis=1, dtype=jnp.int32),
+            jnp.sum(completion_valid, axis=1, dtype=jnp.int32),
+        )
+
+      fn = jax.jit(group_lengths)
+      self._p32_group_lengths_program = fn
+    return fn
+
+  def _p32_group_pack_fn(self):
+    """One program per group: packed rows, targets, source rows, lengths.
+
+    Eagerly the schedule cost ~40 tiny programs per group (concatenates,
+    sums, the vmapped pack, cumsum, clip, the host-length comparison).
+    The integer math is unchanged; ``source_bound`` (the last column of
+    the last real chunk) travels as an operand so every group shares one
+    compiled program per input shape.
+    """
+    fn = getattr(self, "_p32_group_pack_program", None)
+    if fn is None:
+      data_size = int(self._data_size)
+      padded_width = int(self._p32_glue_width())
+
+      def pack_row(full_row, valid_row, count):
+        order = jnp.nonzero(valid_row, size=padded_width, fill_value=0)[0]
+        active = jnp.arange(padded_width, dtype=jnp.int32) < count
+        return jnp.where(
+            active, full_row[order], jnp.asarray(0, full_row.dtype)
+        )
+
+      def group_pack(
+          prompt,
+          completion,
+          prompt_valid,
+          completion_valid,
+          temperature,
+          source_bound,
+          host_prompt_length,
+          host_completion_length,
+      ):
+        full = jnp.concatenate((prompt, completion), axis=1)
+        valid = jnp.concatenate((prompt_valid, completion_valid), axis=1)
+        n_real = jnp.sum(valid, axis=1, dtype=jnp.int32)
+        prompt_length = jnp.sum(prompt_valid, axis=1, dtype=jnp.int32)
+        completion_length = jnp.sum(
+            completion_valid, axis=1, dtype=jnp.int32
+        )
+        packed_ids = jax.vmap(pack_row)(full, valid, n_real)
+        next_ids = jnp.concatenate(
+            (packed_ids[:, 1:], jnp.zeros((data_size, 1), packed_ids.dtype)),
+            axis=1,
+        )
+        completion_ordinal = (
+            jnp.cumsum(completion_valid, axis=1, dtype=jnp.int32) - 1
+        )
+        source_rows = jnp.clip(
+            prompt_length[:, None] + completion_ordinal - 1,
+            0,
+            jnp.asarray(source_bound, jnp.int32),
+        )
+        lengths_match = jnp.all(
+            (prompt_length == host_prompt_length)
+            & (completion_length == host_completion_length)
+        )
+        return (
+            packed_ids,
+            next_ids,
+            source_rows,
+            n_real,
+            prompt_length,
+            completion_length,
+            jnp.asarray(temperature, jnp.float32),
+            lengths_match,
+            completion_valid,
+        )
+
+      rows = self._p32_spec_sharding(2)
+      if rows is None:
+        fn = jax.jit(group_pack)
+      else:
+        scalar = self._p32_spec_sharding(0)
+        fn = jax.jit(
+            group_pack,
+            out_shardings=(
+                rows, rows, rows, rows, rows, rows, scalar, scalar, rows
+            ),
+        )
+      self._p32_group_pack_program = fn
+    return fn
+
   def _p32_group_spec(
       self,
       prompt,
@@ -9143,13 +10026,6 @@ class Qwen3EngineForwardAdapter:
     if completion.shape != completion_valid.shape:
       raise FunctionalMappingError("P32 grouped completion mask shape changed")
 
-    full = jnp.concatenate((prompt, completion), axis=1)
-    valid = jnp.concatenate((prompt_valid, completion_valid), axis=1)
-    n_real = jnp.sum(valid, axis=1, dtype=jnp.int32)
-    prompt_length = jnp.sum(prompt_valid, axis=1, dtype=jnp.int32)
-    completion_length = jnp.sum(
-        completion_valid, axis=1, dtype=jnp.int32
-    )
     host_lengths_supplied = (
         host_prompt_length is not None or host_completion_length is not None
     )
@@ -9174,13 +10050,12 @@ class Qwen3EngineForwardAdapter:
         )
       host_n_real = host_prompt_length + host_completion_length
     else:
-      host_n_real = np.asarray(jax.device_get(n_real), dtype=np.int32)
-      host_prompt_length = np.asarray(
-          jax.device_get(prompt_length), dtype=np.int32
+      n_real, prompt_length, completion_length = jax.device_get(
+          self._p32_group_lengths_fn()(prompt_valid, completion_valid)
       )
-      host_completion_length = np.asarray(
-          jax.device_get(completion_length), dtype=np.int32
-      )
+      host_n_real = np.asarray(n_real, dtype=np.int32)
+      host_prompt_length = np.asarray(prompt_length, dtype=np.int32)
+      host_completion_length = np.asarray(completion_length, dtype=np.int32)
     if np.any(host_n_real < 2) or np.any(host_prompt_length < 1):
       raise FunctionalMappingError(
           "P32 grouped reverse requires a nonempty prompt and at least two "
@@ -9217,32 +10092,32 @@ class Qwen3EngineForwardAdapter:
     # once per distinct chunk count.  Entries past n_real are masked and
     # never reach a model program; the chunk loop still runs num_chunks
     # passes.
-    padded_width = self._p32_glue_width()
-
-    def pack_row(full_row, valid_row, count):
-      order = jnp.nonzero(valid_row, size=padded_width, fill_value=0)[0]
-      active = jnp.arange(padded_width, dtype=jnp.int32) < count
-      return jnp.where(
-          active, full_row[order], jnp.asarray(0, full_row.dtype)
-      )
-
-    packed_ids = jax.vmap(pack_row)(full, valid, n_real)
-    next_ids = jnp.concatenate(
-        (
-            packed_ids[:, 1:],
-            jnp.zeros((self._data_size, 1), packed_ids.dtype),
-        ),
-        axis=1,
-    )
-    completion_ordinal = (
-        jnp.cumsum(completion_valid, axis=1, dtype=jnp.int32) - 1
-    )
     # Masked completion slots clip to the last column of the last real chunk
     # exactly as before (the bound is a value, not a shape).
-    source_rows = jnp.clip(
-        prompt_length[:, None] + completion_ordinal - 1,
-        0,
-        jnp.asarray(num_chunks * self._sequence_bucket - 1, jnp.int32),
+    (
+        packed_ids,
+        next_ids,
+        source_rows,
+        n_real,
+        _,
+        _,
+        temperature_array,
+        lengths_match,
+        # The mask comes back through the program so that, like every other
+        # spec array, it is committed to the row sharding its consumers
+        # were compiled for instead of being re-sliced on each call.
+        completion_valid,
+    ) = self._p32_group_pack_fn()(
+        prompt,
+        completion,
+        prompt_valid,
+        completion_valid,
+        # Python scalars enter the program as operands (a transfer, not a
+        # program): values do not retrace, only shapes and dtypes do.
+        temperature,
+        int(num_chunks * self._sequence_bucket - 1),
+        np.asarray(host_prompt_length, np.int32),
+        np.asarray(host_completion_length, np.int32),
     )
     result = {
         "packed_ids": packed_ids,
@@ -9255,94 +10130,39 @@ class Qwen3EngineForwardAdapter:
             int(value) for value in host_completion_length
         ),
         "num_chunks": num_chunks,
-        "temperature": jnp.asarray(temperature, jnp.float32),
+        "temperature": temperature_array,
     }
     if host_lengths_supplied:
-      result["host_lengths_match"] = jnp.all(
-          (prompt_length == jnp.asarray(host_prompt_length))
-          & (completion_length == jnp.asarray(host_completion_length))
-      )
+      result["host_lengths_match"] = lengths_match
     return result
 
-  def _p32_group_chunk_inputs(self, spec, chunk_index):
-    """Constructs one global-M engine call from data-rank-local sequences."""
-    chunk_index = int(chunk_index)
-    chunk_start = chunk_index * self._sequence_bucket
-    if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
-      # Same guards the eager helper enforces per call; config is pinned
-      # but a fused path must not be the one that skips the checks.
-      if self._data_size < 1 or self._max_num_reqs % self._data_size:
-        raise FunctionalMappingError(
-            "RPA metadata requires max_num_reqs divisible by data size"
-        )
-      if spec["n_real"].shape != (self._data_size,):
-        raise FunctionalMappingError(
-            "RPA metadata lengths must contain one scalar per data rank"
-        )
-      (
-          ids_flat,
-          targets_flat,
-          positions_flat,
-          block_tables,
-          seq_lens,
-          query_start,
-          request_distribution,
-      ) = self._p32_chunk_metadata_fn()(
-          spec["n_real"],
-          spec["packed_ids"],
-          spec["next_ids"],
-          jnp.asarray(chunk_start, jnp.int32),
-          self._sequence_bucket,
-          int(self._data_size),
-          int(self._max_num_reqs),
-          int(self._blocks_per_req),
-      )
-      metadata = self._metadata_cls(
-          input_positions=self._engine_array(positions_flat),
-          block_tables=self._engine_array(block_tables),
-          seq_lens=self._engine_array(seq_lens),
-          query_start_loc=self._engine_array(query_start),
-          request_distribution=self._engine_array(request_distribution),
-      )
-      metadata.padded_num_reqs = self._max_num_reqs
-      return (
-          self._engine_array(ids_flat),
-          self._engine_array(targets_flat),
-          metadata,
-      )
-    rows = jnp.arange(self._sequence_bucket, dtype=jnp.int32)
-    # chunk_start is an operand, not a Python constant: every chunk of every
-    # group then shares one compiled program per helper below.
-    start = jnp.asarray(chunk_start, jnp.int32)
-    q_len = jnp.clip(spec["n_real"] - start, 0, self._sequence_bucket)
-    kv_len = jnp.where(
-        q_len > 0,
-        jnp.minimum(spec["n_real"], start + self._sequence_bucket),
-        0,
-    )
-    chunk_ids_group = jax.lax.dynamic_slice_in_dim(
-        spec["packed_ids"], start, self._sequence_bucket, axis=1
-    )
-    chunk_targets_group = jax.lax.dynamic_slice_in_dim(
-        spec["next_ids"], start, self._sequence_bucket, axis=1
-    )
-    positions_group = jnp.where(
-        rows[None, :] < q_len[:, None], start + rows[None, :], 0
-    )
+  def _p32_chunk_inputs_traced(self, spec, start):
+    """One chunk's engine inputs from a traced ``start`` (batched forward).
+
+    The same integer math as ``_p32_group_chunk_inputs``, callable inside
+    a program: ``_fused_chunk_metadata`` with ``start`` as an operand and
+    the metadata dataclass (a registered pytree) built around its outputs.
+    """
     (
+        ids_flat,
+        targets_flat,
+        positions_flat,
         block_tables,
         seq_lens,
         query_start,
         request_distribution,
-    ) = _canonical_dp_attention_metadata_arrays(
-        data_size=self._data_size,
-        max_num_reqs=self._max_num_reqs,
-        blocks_per_req=self._blocks_per_req,
-        q_len=q_len,
-        kv_len=kv_len,
+    ) = _fused_chunk_metadata(
+        spec["n_real"],
+        spec["packed_ids"],
+        spec["next_ids"],
+        start,
+        self._sequence_bucket,
+        int(self._data_size),
+        int(self._max_num_reqs),
+        int(self._blocks_per_req),
     )
     metadata = self._metadata_cls(
-        input_positions=self._engine_array(positions_group.reshape(-1)),
+        input_positions=self._engine_array(positions_flat),
         block_tables=self._engine_array(block_tables),
         seq_lens=self._engine_array(seq_lens),
         query_start_loc=self._engine_array(query_start),
@@ -9350,8 +10170,270 @@ class Qwen3EngineForwardAdapter:
     )
     metadata.padded_num_reqs = self._max_num_reqs
     return (
-        self._engine_array(chunk_ids_group.reshape(-1)),
-        self._engine_array(chunk_targets_group.reshape(-1)),
+        self._engine_array(ids_flat),
+        self._engine_array(targets_flat),
+        metadata,
+    )
+
+  def _p32_forward_chunks_fn(self, segmented, engine_leaves, k, *, use_block):
+    """One program for k consecutive chunks of a group's forward.
+
+    A Python loop over the same per-chunk programs (chunk inputs, embed,
+    the layers -- the fwd_block program or the per-layer programs --,
+    norm, head, rows glue) traced into one straight-line graph; the
+    caches and the glue buffers are carried in-graph and the per-chunk
+    tape (layer inputs, final hidden) comes back as outputs.  The chunk
+    width stays 256; ``start0`` travels as an operand so every batch of
+    every group shares one compiled program per k.
+    """
+    programs = segmented.__dict__.setdefault("_p32_forward_chunk_programs", {})
+    key = (int(k), bool(use_block))
+    (embed_fn, embed_leaves), per_layer, (norm_fn, norm_leaves), (
+        head_fn, head_leaves
+    ) = segmented.forward_chunk_callables(engine_leaves)
+    per_layer_leaves = tuple(leaves for _, leaves in per_layer)
+    operand_leaves = (embed_leaves, per_layer_leaves, norm_leaves, head_leaves)
+    program = programs.get(key)
+    if program is None:
+      layer_fns = tuple(fn for fn, _ in per_layer)
+      bucket = int(self._sequence_bucket)
+      rows_glue = self._p32_rows_glue_fn()
+      chunk_inputs = self._p32_chunk_inputs_traced
+      block_program = None
+      if use_block:
+        block_program = segmented._p71_fwd_block_fn  # pylint: disable=protected-access
+        if block_program is None:
+          raise FunctionalMappingError(
+              "P32 chunk batch with fwd_block requires the block program "
+              "to be built by one per-chunk pass first"
+          )
+
+      def forward_chunks(caches, flat_logps, flat_entropies, start0,
+                         spec_arrays, temperature, leaves):
+        embed_leaves, layer_leaves, norm_leaves, head_leaves = leaves
+        hidden_inputs = []
+        final_hiddens = []
+        for offset in range(int(k)):
+          start = start0 + offset * bucket
+          input_ids, target_ids, metadata = chunk_inputs(spec_arrays, start)
+          hidden = embed_fn(embed_leaves, input_ids)
+          if block_program is not None:
+            caches, chunk_hidden_ins, hidden = block_program(
+                layer_leaves, caches, hidden, metadata
+            )
+          else:
+            next_caches = []
+            chunk_hidden_ins = []
+            for layer_index, cache in enumerate(caches):
+              chunk_hidden_ins.append(hidden)
+              cache, hidden = layer_fns[layer_index](
+                  layer_leaves[layer_index], cache, hidden, metadata
+              )
+              next_caches.append(cache)
+            caches = tuple(next_caches)
+          hidden_inputs.append(tuple(chunk_hidden_ins))
+          final_hiddens.append(hidden)
+          raw_logits = head_fn(head_leaves, norm_fn(norm_leaves, hidden))
+          flat_logps, flat_entropies = rows_glue(
+              raw_logits, target_ids, temperature, flat_logps,
+              flat_entropies, start,
+          )
+        return (
+            caches, flat_logps, flat_entropies, tuple(hidden_inputs),
+            tuple(final_hiddens),
+        )
+
+      program = _xprof_jit(
+          forward_chunks,
+          module_name="zt_tr_fwd_chunks",
+          scope_name="zt/tr/chunks/fwd",
+      )
+      programs[key] = program
+    return program, operand_leaves
+
+  def _p32_reverse_chunk_fn(self, segmented, engine_leaves, prepared, *,
+                            first_chunk):
+    """One program for one chunk of a group's rank-parallel reverse.
+
+    The per-chunk reverse body -- chunk inputs, entry-cache rebuild, the
+    norm/head recompute, the rows pullback, the head-cotangent partition,
+    then the head, norm, per-layer and embed mapped pullbacks -- traced
+    as one straight-line graph that CALLS the already-built mapped
+    pullback programs (their shard_maps nest unchanged; no multi-layer
+    block body is rebuilt).  Every leaf, tape entry, cache and cotangent
+    is an operand; the outputs are the chunk's gradient pack and the next
+    cache cotangents, pinned to the shardings the per-program path
+    produced on its bootstrap chunk so everything downstream (the
+    whole-pack accumulate, the assembled gradient, the fused report
+    accumulate's signature) sees identical operands.  ``first_chunk``
+    (the group's first reversed chunk) starts from zero cache cotangents
+    made in-graph, as ``_p32_entry_caches(zero_carry=True)`` makes them
+    for the per-program loop; the two variants are two compiled programs.
+    """
+    programs = segmented.__dict__.setdefault("_p32_reverse_chunk_programs", {})
+    (embed_bwd, embed_leaves), layer_bwd, (norm_fn, norm_bwd, norm_leaves), (
+        head_fn, head_bwd, head_leaves
+    ) = segmented.reverse_chunk_callables(engine_leaves)
+    if len(prepared) != len(layer_bwd):
+      raise FunctionalMappingError(
+          "P32 reverse chunk program: prepared layer pack has "
+          f"{len(prepared)} layers, mapped pullbacks {len(layer_bwd)}"
+      )
+    operand_leaves = (embed_leaves, tuple(prepared), norm_leaves, head_leaves)
+    key = (bool(first_chunk),)
+    program = programs.get(key)
+    if program is None:
+      out_shardings = segmented.__dict__.get(
+          "_p32_reverse_chunk_out_shardings"
+      )
+      if out_shardings is None:
+        raise FunctionalMappingError(
+            "P32 reverse chunk program requires the output shardings "
+            "recorded by one per-program chunk pass first"
+        )
+      trainer_mesh, _ = _p59_replicated_data_mesh(
+          head_leaves, "P32 reverse chunk head cotangent"
+      )
+      data_axis, model_axis = _p59_mesh_roles(
+          trainer_mesh, "P32 reverse chunk head cotangent"
+      )
+      head_cotangent_sharding = jax.sharding.NamedSharding(
+          trainer_mesh, jax.sharding.PartitionSpec(data_axis, model_axis)
+      )
+      rows_pullback = self._p32_rows_glue_pullback_fn()
+      chunk_inputs = self._p32_chunk_inputs_traced
+      data_size = int(self._data_size)
+      layer_count = len(layer_bwd)
+
+      # Every value that crossed a program boundary in the per-program
+      # loop crosses an optimization barrier here.  Without it XLA fuses
+      # a stage's tail into the next stage's head and the boundary value
+      # itself is computed differently; the barrier materialises each
+      # stage's outputs in their storage dtype exactly as a program output
+      # was, so every stage keeps the arithmetic of its standalone program.
+      # The integer chunk-input and select-only entry-cache stages need
+      # none.
+      staged = jax.lax.optimization_barrier
+
+      def mapped(fn, *args):
+        # The tracing context the eager invoke uses, so a retrace under
+        # this program builds the identical nested engine maps.
+        with _p59_localize_engine_shard_maps(
+            fn._p59_mesh, fn._p59_module_name  # pylint: disable=protected-access
+        ):
+          return staged(fn._p59_compiled(*args))  # pylint: disable=protected-access
+
+      def bwd_chunk(final_caches, start, spec_arrays, temperature,
+                    flat_dlogps, flat_dentropy, hidden_ins, final_hidden,
+                    dcache_carry, leaves):
+        embed_leaves, layer_leaves, norm_leaves, head_leaves = leaves
+        input_ids, target_ids, metadata = chunk_inputs(spec_arrays, start)
+        caches = _p32_entry_cache_rebuild(final_caches, start, data_size)
+        if first_chunk:
+          dcache_carry = jax.tree.map(jnp.zeros_like, caches)
+        normalized = staged(norm_fn(norm_leaves, final_hidden))
+        raw_logits = staged(head_fn(head_leaves, normalized))
+        dlogits = staged(rows_pullback(
+            raw_logits, target_ids, temperature, flat_dlogps, flat_dentropy,
+            start,
+        ))
+        # The P59/P74 head-cotangent partition: the same TP-local vocabulary
+        # boundary, as an in-graph constraint instead of a device_put.
+        dlogits = jax.lax.with_sharding_constraint(
+            dlogits, head_cotangent_sharding
+        )
+        local_head_grad, dnormalized = mapped(
+            head_bwd, head_leaves, normalized, dlogits
+        )
+        local_norm_grad, dhidden = mapped(
+            norm_bwd, norm_leaves, final_hidden, dnormalized
+        )
+        layer_grads = [None] * layer_count
+        next_dcache = [None] * layer_count
+        for layer_index in reversed(range(layer_count)):
+          local_grad, dcache, dhidden = mapped(
+              layer_bwd[layer_index],
+              layer_leaves[layer_index],
+              caches[layer_index],
+              hidden_ins[layer_index],
+              metadata,
+              dcache_carry[layer_index],
+              dhidden,
+          )
+          layer_grads[layer_index] = local_grad
+          next_dcache[layer_index] = dcache
+        local_embed_grad = mapped(embed_bwd, embed_leaves, input_ids, dhidden)
+        return (
+            (
+                local_embed_grad,
+                tuple(layer_grads),
+                local_norm_grad,
+                local_head_grad,
+            ),
+            tuple(next_dcache),
+        )
+
+      program = _xprof_jit(
+          bwd_chunk,
+          module_name="zt_tr_bwd_chunk",
+          scope_name="zt/tr/chunks/bwd",
+          out_shardings=out_shardings,
+      )
+      programs[key] = program
+    return program, operand_leaves
+
+  def _p32_group_chunk_inputs(self, spec, chunk_index):
+    """Constructs one global-M engine call from data-rank-local sequences.
+
+    One program per call: ``_fused_chunk_metadata`` computes the chunk's
+    ids, targets and RPA metadata with ``chunk_start`` as an operand (every
+    chunk of every group shares one compiled program) and emits them on the
+    engine input sharding, so every ``_engine_array`` below is a no-op.
+    The eager arm this replaced issued ~61 tiny programs per call, 122 per
+    chunk pass, a third of all dispatches in the one-host xplanes;
+    ``tests/rl/test_p32_chunk_inputs.py`` pins byte identity against it.
+    """
+    chunk_index = int(chunk_index)
+    chunk_start = chunk_index * self._sequence_bucket
+    # Same guards the eager helper enforced per call; config is pinned
+    # but the fused path must not be the one that skips the checks.
+    if self._data_size < 1 or self._max_num_reqs % self._data_size:
+      raise FunctionalMappingError(
+          "RPA metadata requires max_num_reqs divisible by data size"
+      )
+    if spec["n_real"].shape != (self._data_size,):
+      raise FunctionalMappingError(
+          "RPA metadata lengths must contain one scalar per data rank"
+      )
+    (
+        ids_flat,
+        targets_flat,
+        positions_flat,
+        block_tables,
+        seq_lens,
+        query_start,
+        request_distribution,
+    ) = self._p32_chunk_metadata_fn()(
+        spec["n_real"],
+        spec["packed_ids"],
+        spec["next_ids"],
+        self._p32_start_scalar(chunk_start),
+        self._sequence_bucket,
+        int(self._data_size),
+        int(self._max_num_reqs),
+        int(self._blocks_per_req),
+    )
+    metadata = self._metadata_cls(
+        input_positions=self._engine_array(positions_flat),
+        block_tables=self._engine_array(block_tables),
+        seq_lens=self._engine_array(seq_lens),
+        query_start_loc=self._engine_array(query_start),
+        request_distribution=self._engine_array(request_distribution),
+    )
+    metadata.padded_num_reqs = self._max_num_reqs
+    return (
+        self._engine_array(ids_flat),
+        self._engine_array(targets_flat),
         metadata,
     )
 
@@ -9365,12 +10447,13 @@ class Qwen3EngineForwardAdapter:
           "keep_tape requires keep_cache_inputs: the tape is consumed "
           "together with the per-chunk cache inputs"
       )
-    caches = tuple(self._fresh_caches())
+    # The fresh caches and the zero glue buffers come from one program
+    # (tasks/v2_dispatch Phase 11); the ``flat_logps is None`` branches
+    # below stay as the fallback they always were.
+    caches, flat_logps, flat_entropies = self._p32_forward_zeros()
     cache_inputs = []
     hidden_inputs = []
     final_hiddens = []
-    chunk_logps = []
-    chunk_entropies = []
     counts = {
         "embed_forward": 0,
         "layer_forward": 0,
@@ -9378,8 +10461,63 @@ class Qwen3EngineForwardAdapter:
         "head_forward": 0,
         "processed_forward": 0,
     }
+    layer_scan_mode = segmented.layer_scan_mode()
+    forward_block = _p71_scan_mode() == "fwd_block"
+    if forward_block and layer_scan_mode:
+      raise FunctionalMappingError(
+          "CANON_P71_SCAN=fwd_block requires CANON_P28_LAYER_SCAN unset"
+      )
+    chunk_batch = _p32_chunk_batch()
+    if chunk_batch > 1 and layer_scan_mode:
+      raise FunctionalMappingError(
+          "CANON_P32_CHUNK_BATCH>1 requires CANON_P28_LAYER_SCAN unset"
+      )
+    num_chunks = int(spec["num_chunks"])
     with self._set_forward_context(None, self._runner.vllm_config):
-      for chunk_index in range(spec["num_chunks"]):
+      chunk_index = 0
+      while chunk_index < num_chunks:
+        batched = (
+            chunk_batch > 1
+            and num_chunks - chunk_index >= chunk_batch
+            # The fwd_block program is built by a per-chunk pass; the
+            # first chunk of a process bootstraps it.
+            and (not forward_block or segmented._p71_fwd_block_fn is not None)  # pylint: disable=protected-access
+        )
+        if batched:
+          program, operand_leaves = self._p32_forward_chunks_fn(
+              segmented, engine_leaves, chunk_batch, use_block=forward_block
+          )
+          if flat_logps is None:
+            flat_logps, flat_entropies = self._p32_glue_zeros(None)
+          spec_arrays = {
+              "n_real": spec["n_real"],
+              "packed_ids": spec["packed_ids"],
+              "next_ids": spec["next_ids"],
+          }
+          (
+              caches,
+              flat_logps,
+              flat_entropies,
+              batch_hidden_inputs,
+              batch_final_hiddens,
+          ) = program(
+              caches,
+              flat_logps,
+              flat_entropies,
+              self._p32_start_scalar(chunk_index * self._sequence_bucket),
+              spec_arrays,
+              spec["temperature"],
+              operand_leaves,
+          )
+          if keep_tape:
+            hidden_inputs.extend(batch_hidden_inputs)
+            final_hiddens.extend(batch_final_hiddens)
+          for name in ("embed_forward", "norm_forward", "head_forward",
+                       "processed_forward"):
+            counts[name] += chunk_batch
+          counts["layer_forward"] += chunk_batch * len(caches)
+          chunk_index += chunk_batch
+          continue
         input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
             spec, chunk_index
         )
@@ -9387,7 +10525,6 @@ class Qwen3EngineForwardAdapter:
             input_ids, state_leaves=engine_leaves
         )
         counts["embed_forward"] += 1
-        layer_scan_mode = segmented.layer_scan_mode()
         if keep_tape and layer_scan_mode == "1":
           raise FunctionalMappingError(
               "CANON_P32_KEEP_TAPE=1 requires the per-layer forward; the "
@@ -9403,6 +10540,21 @@ class Qwen3EngineForwardAdapter:
           caches = scan_caches
           hidden = scan_hidden
           counts["layer_forward"] += len(caches)
+        elif forward_block:
+          # One unrolled program per chunk in place of one program per
+          # layer; same per-layer composition, same tape and cache outputs.
+          caches, chunk_hidden_ins, hidden = segmented.run_layers_fwd_block(
+              engine_leaves, caches, hidden, metadata
+          )
+          chunk_hidden_ins = list(chunk_hidden_ins) if keep_tape else []
+          counts["layer_forward"] += len(caches)
+          if layer_scan_mode in ("verify", "verify_rev"):
+            self._p50_scan_verify(
+                hidden, scan_hidden, caches, scan_caches, chunk_index
+            )
+          if keep_tape:
+            hidden_inputs.append(tuple(chunk_hidden_ins))
+            final_hiddens.append(hidden)
         else:
           next_caches = []
           chunk_hidden_ins = []
@@ -9435,43 +10587,26 @@ class Qwen3EngineForwardAdapter:
         raw_logits = segmented.run_head_forward(
             normalized, state_leaves=engine_leaves
         )
-        logits = raw_logits.astype(jnp.float32)
         counts["head_forward"] += 1
-        target_logps, entropy = self._p28_processed_rows_fn(
-            logits, target_ids, spec["temperature"]
+        if flat_logps is None:
+          flat_logps, flat_entropies = self._p32_glue_zeros(raw_logits)
+        start = self._p32_start_scalar(chunk_index * self._sequence_bucket)
+        flat_logps, flat_entropies = self._p32_rows_glue_fn()(
+            raw_logits,
+            target_ids,
+            spec["temperature"],
+            flat_logps,
+            flat_entropies,
+            start,
         )
         counts["processed_forward"] += 1
-        chunk_logps.append(
-            target_logps.reshape(self._data_size, self._sequence_bucket)
-        )
-        chunk_entropies.append(
-            entropy.reshape(self._data_size, self._sequence_bucket)
-        )
+        chunk_index += 1
 
-    flat_logps = jnp.zeros(
-        (self._data_size, self._p32_glue_width()), jnp.float32
-    )
-    flat_entropies = jnp.zeros_like(flat_logps)
-    for chunk_index, (chunk_lp, chunk_ent) in enumerate(
-        zip(chunk_logps, chunk_entropies)
-    ):
-      start = jnp.asarray(chunk_index * self._sequence_bucket, jnp.int32)
-      flat_logps = jax.lax.dynamic_update_slice_in_dim(
-          flat_logps, chunk_lp, start, axis=1
-      )
-      flat_entropies = jax.lax.dynamic_update_slice_in_dim(
-          flat_entropies, chunk_ent, start, axis=1
-      )
-    completion_valid = spec["completion_valid"]
-    logps = jnp.where(
-        completion_valid,
-        jnp.take_along_axis(flat_logps, spec["source_rows"], axis=1),
-        jnp.zeros(completion_valid.shape, jnp.float32),
-    )
-    entropy = jnp.where(
-        completion_valid,
-        jnp.take_along_axis(flat_entropies, spec["source_rows"], axis=1),
-        jnp.zeros(completion_valid.shape, jnp.float32),
+    if flat_logps is None:
+      flat_logps, flat_entropies = self._p32_glue_zeros(None)
+    logps, entropy = self._p32_group_rows_fn()(
+        flat_logps, flat_entropies, spec["completion_valid"],
+        spec["source_rows"],
     )
     return {
         "logps": logps,
@@ -9807,6 +10942,7 @@ class Qwen3EngineForwardAdapter:
       dentropy,
       replay=None,
       hbm_chunk_stage_sink=None,
+      chunk_program=True,
   ):
     """Reverses one group of rank-local sequences by layer and chunk."""
     parallel_value = os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
@@ -9833,6 +10969,22 @@ class Qwen3EngineForwardAdapter:
           "P76 device ticket and P77 host backpressure are mutually "
           "exclusive"
       )
+    p77_flag_backpressure = chunk_backpressure
+    if (
+        rank_parallel
+        and not chunk_dependency_ticket
+        and not _p32_workload_is_frozenlake()
+    ):
+      # tasks/v2_dispatch Phase 14: on the GSM8K carrier the rank-parallel
+      # reverse always bounds the host's dispatch lead at chunk boundaries
+      # with the two P77 readiness waits.  Phase 8/9 removed the per-call
+      # host relabels (tens of thousands of device_puts per update), and
+      # the faster host then queues whole chunks of layer pullbacks ahead
+      # of the device, whose model-sized outputs are allocated at dispatch:
+      # +3.6 GiB of purely transient peak HBM on dp2-tp2-long (43.08 vs
+      # 39.39 GiB) with the resident profile unchanged.  Readiness only:
+      # no value reaches the host, arithmetic and dispatch count unchanged.
+      chunk_backpressure = True
     p66_arm = _p66_tp4_arm()
     p66_oracle = p66_arm == "tp4-vma-oracle"
     unit_data_admitted = _p59_unit_data_admitted(
@@ -9886,18 +11038,9 @@ class Qwen3EngineForwardAdapter:
       replay = self._p32_forward_group(
           segmented, engine_leaves, spec, keep_cache_inputs=True
       )
-    padded_width = self._p32_glue_width()
     completion_valid = spec["completion_valid"]
-    rank_rows = jnp.arange(self._data_size, dtype=jnp.int32)[:, None]
-    flat_dlogps = jnp.zeros(
-        (self._data_size, padded_width), jnp.float32
-    ).at[rank_rows, spec["source_rows"]].add(
-        jnp.where(completion_valid, dlogps, 0.0)
-    )
-    flat_dentropy = jnp.zeros(
-        (self._data_size, padded_width), jnp.float32
-    ).at[rank_rows, spec["source_rows"]].add(
-        jnp.where(completion_valid, dentropy, 0.0)
+    flat_dlogps, flat_dentropy = self._p32_flat_cotangents_fn(dlogps)(
+        dlogps, dentropy, completion_valid, spec["source_rows"]
     )
 
     def tree_zeros(tree):
@@ -9928,11 +11071,10 @@ class Qwen3EngineForwardAdapter:
           tree_zeros(segmented._norm_local_leaves),  # pylint: disable=protected-access
           tree_zeros(segmented._head_local_leaves),  # pylint: disable=protected-access
       )
-    # One program for every layer's zero cache cotangent instead of one
-    # per layer: the values are zeros either way.
-    dcache_carry = tuple(
-        _p32_zero_trees(tuple(replay["final_caches"]))
-    )
+    # The zero cache cotangents the reverse starts from are emitted by the
+    # first reversed chunk's entry-cache rebuild program (Phase 11) instead
+    # of a zeros program per group: the values are zeros either way.
+    dcache_carry = None
     counts = dict(replay["counts"])
     counts.update({
         "embed_pullback": 0,
@@ -9973,11 +11115,134 @@ class Qwen3EngineForwardAdapter:
     prefetched_chunk_inputs = None
     chunk_backpressure_pullback_waits = 0
     chunk_backpressure_accumulation_waits = 0
+    # tasks/v2_dispatch Phase 15: under the certified configuration --
+    # rank-parallel pullbacks consuming the kept tape, no diagnostic arm,
+    # no host-side chunk scheduling hook -- every chunk after the
+    # per-program (bootstrap) chunk of the process runs its whole reverse
+    # body as ONE program (_p32_reverse_chunk_fn).  Every other branch of
+    # the loop below is byte-identical; ``chunk_program=False`` is the
+    # test oracle that keeps the per-program loop for every chunk.  The
+    # chunk-boundary readiness waits (Phase 14) apply to both paths.
+    chunk_program_admitted = bool(
+        chunk_program
+        and rank_parallel
+        and kept_hidden_ins
+        and not p71_block_bwd
+        and not p66_arm
+        and hbm_chunk_stage_sink is None
+        and not chunk_dependency_ticket
+    )
+
+    def finish_chunk(chunk_index, chunk_pack):
+      """Accumulates one chunk's gradient pack and runs the post-chunk hooks
+      (the readiness waits, the consumed-pack release, the P76 prefetch and
+      the stage sink), for the per-program and the chunk-program paths."""
+      nonlocal grad_pack, prefetched_chunk_inputs
+      nonlocal chunk_backpressure_pullback_waits
+      nonlocal chunk_backpressure_accumulation_waits
+      if chunk_backpressure:
+        # PJRT allocates the tree-add outputs when host dispatches that
+        # program.  Complete the already-dispatched pullbacks first so
+        # their model-sized outputs and temporaries cannot overlap those
+        # allocations.  This is readiness only: no value reaches host.
+        _p77_wait_for_chunk_completion(chunk_pack)
+        chunk_backpressure_pullback_waits += 1
+      if hbm_chunk_stage_sink is not None:
+        hbm_chunk_stage_sink(
+            "after_pullbacks", chunk_index, (grad_pack, chunk_pack)
+        )
+      grad_pack = (
+          self._p70_grad_tree_start(chunk_pack, donate_pack=True)
+          if grad_pack is None
+          else self._p70_grad_tree_add(grad_pack, chunk_pack)
+      )
+      if rank_parallel:
+        # The whole-tree start/add dispatch above is the last consumer of
+        # this rank-parallel chunk's gradient leaves.  End their explicit
+        # array lifetime here so the next chunk's pullback temporaries do not
+        # overlap a dead, model-sized input pack.  The legacy serial path is
+        # untouched; the old accumulator remains governed by the existing
+        # tree-add donation contract.
+        self._p70_release_consumed_grad_pack(chunk_pack)
+      if chunk_backpressure:
+        # Complete the add before dispatching either the next chunk or the
+        # report adjoint.  Together with the pre-add boundary above this
+        # reproduces the two causal value completions in R22 without its
+        # allocator queries.
+        _p77_wait_for_chunk_completion(grad_pack)
+        chunk_backpressure_accumulation_waits += 1
+      if chunk_dependency_ticket and chunk_index > 0:
+        next_chunk_index = chunk_index - 1
+        next_input_ids, next_target_ids, next_metadata = (
+            self._p32_group_chunk_inputs(spec, next_chunk_index)
+        )
+        if kept_hidden_ins:
+          next_hidden = self._p76_order_next_chunk_start(
+              grad_pack, replay["final_hiddens"][next_chunk_index]
+          )
+          prefetched_chunk_inputs = (
+              next_input_ids,
+              next_target_ids,
+              next_metadata,
+              next_hidden,
+          )
+        else:
+          next_input_ids = self._p76_order_next_chunk_start(
+              grad_pack, next_input_ids
+          )
+          prefetched_chunk_inputs = (
+              next_input_ids,
+              next_target_ids,
+              next_metadata,
+              None,
+          )
+      if hbm_chunk_stage_sink is not None:
+        hbm_chunk_stage_sink("after_accumulate", chunk_index, grad_pack)
 
     with self._set_forward_context(None, self._runner.vllm_config):
       for chunk_index in reversed(range(spec["num_chunks"])):
         if hbm_chunk_stage_sink is not None:
           hbm_chunk_stage_sink("before", chunk_index, grad_pack)
+        if (
+            chunk_program_admitted
+            and segmented.__dict__.get("_p32_reverse_chunk_out_shardings")
+            is not None
+        ):
+          hidden_ins = tuple(kept_hidden_ins[chunk_index])
+          first_chunk = dcache_carry is None
+          if first_chunk:
+            segmented.check_pullback_group_boundary(hidden_ins, flat_dlogps)
+          else:
+            segmented.check_pullback_group_boundary(
+                hidden_ins, dcache_carry, flat_dlogps
+            )
+          program, operand_leaves = self._p32_reverse_chunk_fn(
+              segmented, engine_leaves, pullback_prepared,
+              first_chunk=first_chunk,
+          )
+          chunk_pack, next_dcache = program(
+              tuple(replay["final_caches"]),
+              self._p32_start_scalar(chunk_index * self._sequence_bucket),
+              {
+                  "n_real": spec["n_real"],
+                  "packed_ids": spec["packed_ids"],
+                  "next_ids": spec["next_ids"],
+              },
+              spec["temperature"],
+              flat_dlogps,
+              flat_dentropy,
+              hidden_ins,
+              replay["final_hiddens"][chunk_index],
+              dcache_carry,
+              operand_leaves,
+          )
+          dcache_carry = tuple(next_dcache)
+          for name in ("norm_forward", "head_forward", "processed_pullback",
+                       "head_pullback", "norm_pullback", "embed_pullback"):
+            counts[name] += 1
+          counts["layer_pullback"] += len(dcache_carry)
+          finish_chunk(chunk_index, chunk_pack)
+          continue
         ordered_hidden = None
         if chunk_dependency_ticket and prefetched_chunk_inputs is not None:
           (
@@ -9991,11 +11256,17 @@ class Qwen3EngineForwardAdapter:
           input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
               spec, chunk_index
           )
-        caches = _p32_entry_caches(
-            replay["final_caches"],
-            chunk_index * self._sequence_bucket,
-            data_size=self._data_size,
-        )
+        start = self._p32_start_scalar(chunk_index * self._sequence_bucket)
+        if dcache_carry is None:
+          caches, zero_carry = _p32_entry_caches(
+              replay["final_caches"], start, data_size=self._data_size,
+              zero_carry=True,
+          )
+          dcache_carry = tuple(zero_carry)
+        else:
+          caches = _p32_entry_caches(
+              replay["final_caches"], start, data_size=self._data_size
+          )
         stacked_cache_ins = stacked_hidden_ins = None
         if kept_hidden_ins:
           # The forward phase kept this chunk's per-layer inputs and its
@@ -10067,22 +11338,15 @@ class Qwen3EngineForwardAdapter:
         raw_logits = segmented.run_head_forward(
             normalized, state_leaves=engine_leaves
         )
-        logits = raw_logits.astype(jnp.float32)
         counts["head_forward"] += 1
-        start = jnp.asarray(chunk_index * self._sequence_bucket, jnp.int32)
-        dchunk_logps = jax.lax.dynamic_slice_in_dim(
-            flat_dlogps, start, self._sequence_bucket, axis=1
-        ).reshape(-1)
-        dchunk_entropy = jax.lax.dynamic_slice_in_dim(
-            flat_dentropy, start, self._sequence_bucket, axis=1
-        ).reshape(-1)
-        dlogits = self._p28_processed_rows_pullback_fn(
-            logits,
+        dlogits = self._p32_rows_glue_pullback_fn()(
+            raw_logits,
             target_ids,
             spec["temperature"],
-            dchunk_logps,
-            dchunk_entropy,
-        ).astype(raw_logits.dtype)
+            flat_dlogps,
+            flat_dentropy,
+            start,
+        )
         counts["processed_pullback"] += 1
         if rank_parallel:
           local_head_grad, dnormalized = (
@@ -10293,68 +11557,21 @@ class Qwen3EngineForwardAdapter:
             local_norm_grad,
             local_head_grad,
         )
-        if chunk_backpressure:
-          # PJRT allocates the tree-add outputs when host dispatches that
-          # program.  Complete the already-dispatched pullbacks first so
-          # their model-sized outputs and temporaries cannot overlap those
-          # allocations.  This is readiness only: no value reaches host.
-          _p77_wait_for_chunk_completion(chunk_pack)
-          chunk_backpressure_pullback_waits += 1
-        if hbm_chunk_stage_sink is not None:
-          hbm_chunk_stage_sink(
-              "after_pullbacks", chunk_index, (grad_pack, chunk_pack)
+        if (
+            chunk_program_admitted
+            and segmented.__dict__.get("_p32_reverse_chunk_out_shardings")
+            is None
+        ):
+          # Bootstrap: this per-program chunk built every mapped pullback;
+          # its outputs' shardings pin the chunk program's outputs.
+          segmented._p32_reverse_chunk_out_shardings = jax.tree.map(  # pylint: disable=protected-access
+              lambda leaf: leaf.sharding, (chunk_pack, dcache_carry)
           )
-        grad_pack = (
-            self._p70_grad_tree_start(chunk_pack, donate_pack=True)
-            if grad_pack is None
-            else self._p70_grad_tree_add(grad_pack, chunk_pack)
-        )
-        if rank_parallel:
-          # The whole-tree start/add dispatch above is the last consumer of
-          # this rank-parallel chunk's gradient leaves.  End their explicit
-          # array lifetime here so the next chunk's pullback temporaries do not
-          # overlap a dead, model-sized input pack.  The legacy serial path is
-          # untouched; the old accumulator remains governed by the existing
-          # tree-add donation contract.
-          self._p70_release_consumed_grad_pack(chunk_pack)
-        if chunk_backpressure:
-          # Complete the add before dispatching either the next chunk or the
-          # report adjoint.  Together with the pre-add boundary above this
-          # reproduces the two causal value completions in R22 without its
-          # allocator queries.
-          _p77_wait_for_chunk_completion(grad_pack)
-          chunk_backpressure_accumulation_waits += 1
-        if chunk_dependency_ticket and chunk_index > 0:
-          next_chunk_index = chunk_index - 1
-          next_input_ids, next_target_ids, next_metadata = (
-              self._p32_group_chunk_inputs(spec, next_chunk_index)
-          )
-          if kept_hidden_ins:
-            next_hidden = self._p76_order_next_chunk_start(
-                grad_pack, replay["final_hiddens"][next_chunk_index]
-            )
-            prefetched_chunk_inputs = (
-                next_input_ids,
-                next_target_ids,
-                next_metadata,
-                next_hidden,
-            )
-          else:
-            next_input_ids = self._p76_order_next_chunk_start(
-                grad_pack, next_input_ids
-            )
-            prefetched_chunk_inputs = (
-                next_input_ids,
-                next_target_ids,
-                next_metadata,
-                None,
-            )
-        if hbm_chunk_stage_sink is not None:
-          hbm_chunk_stage_sink("after_accumulate", chunk_index, grad_pack)
+        finish_chunk(chunk_index, chunk_pack)
 
     if grad_pack is None:
       raise FunctionalMappingError("P59 reverse emitted an empty gradient pack")
-    if chunk_backpressure:
+    if p77_flag_backpressure:
       print(
           "[P77.CHUNK_BACKPRESSURE] enabled=1 "
           f"pullback_waits={chunk_backpressure_pullback_waits} "
@@ -10587,6 +11804,10 @@ class Qwen3EngineForwardAdapter:
       print(_p32_length_sort_receipt(perm, self._data_size), flush=True)
       train_example = _p32_gather_rows(train_example, perm)
       self._p32_row_permutation = perm
+    # tasks/v2_dispatch Phase 11: every program below that takes the
+    # example (the split, the stream step, the stream loss, the oracle)
+    # takes it committed to the engine mesh.
+    train_example = self._p32_commit_example(train_example)
     prompts = jnp.asarray(train_example.prompt_ids)
     completions = jnp.asarray(train_example.completion_ids)
     prompt_masks = jnp.asarray(train_example.prompt_mask, dtype=jnp.bool_)
@@ -10615,6 +11836,19 @@ class Qwen3EngineForwardAdapter:
       raise FunctionalMappingError(
           "P32 D3b0 action mask is not a subset of completion validity"
       )
+    # tasks/v2_dispatch Phase 11: the per-rank row lengths every group's
+    # spec needs come from the masks on the host -- one device-to-host copy
+    # per mask per update, right after the sync above -- so no group runs
+    # the lengths program and waits on its device_get.  The pack program
+    # still checks them against the device masks (lengths_match); the
+    # update verifies every group's flag once at its end, before anything
+    # is committed.
+    host_prompt_lengths = (
+        np.asarray(prompt_masks).sum(axis=1).astype(np.int32)
+    )
+    host_completion_lengths = (
+        np.asarray(completion_valid_masks).sum(axis=1).astype(np.int32)
+    )
     if prompts.shape[0] != completions.shape[0]:
       raise FunctionalMappingError("P32 D3b0 prompt/completion batch mismatch")
     if int(prompts.shape[0]) != contract.global_trajectories:
@@ -10633,24 +11867,27 @@ class Qwen3EngineForwardAdapter:
           f"{expected_widths[0]}/{expected_widths[1]}"
       )
 
-    grouped_inputs = jax.tree.map(
-        self._group_batch_rows,
-        (
-            prompts,
-            completions,
-            prompt_masks,
-            completion_valid_masks,
-        ),
-    )
     expected_group_shape = (
         contract.local_trajectories,
         contract.dp_size,
     )
-    if grouped_inputs[0].shape[:2] != expected_group_shape:
+    group_shape = (
+        int(prompts.shape[0]) // int(self._data_size),
+        int(self._data_size),
+    )
+    if (
+        int(prompts.shape[0]) % int(self._data_size)
+        or group_shape != expected_group_shape
+    ):
       raise FunctionalMappingError(
           "P32 rank-major grouping changed: "
-          f"{grouped_inputs[0].shape[:2]} != {expected_group_shape}"
+          f"{group_shape} != {expected_group_shape}"
       )
+    # One program regroups the stacks rank-major and splits them into one
+    # committed array per group (see _p32_split_groups_fn).
+    grouped_inputs = self._p32_split_groups_fn(
+        contract.local_trajectories, 4
+    )((prompts, completions, prompt_masks, completion_valid_masks))
 
     model_config = self._runner.model_config
     mapped = map_trainer_state_to_engine_leaves(
@@ -10681,18 +11918,25 @@ class Qwen3EngineForwardAdapter:
           flush=True,
       )
 
+    # The same rank-major regrouping _p32_split_groups_fn applies to the
+    # token stacks, on the host lengths.
+    grouped_prompt_lengths = host_prompt_lengths.reshape(
+        int(self._data_size), -1
+    ).swapaxes(0, 1)
+    grouped_completion_lengths = host_completion_lengths.reshape(
+        int(self._data_size), -1
+    ).swapaxes(0, 1)
     specs = tuple(
         self._p32_group_spec(
-            grouped_inputs[0][index],
-            grouped_inputs[1][index],
-            grouped_inputs[2][index],
-            grouped_inputs[3][index],
+            *grouped_inputs[index],
             algo_config.temperature,
             # D3b0 proved completion_mask is a subset of
             # completion_valid_masks above.  A prompt-only row therefore has
             # no policy-action token and contributes exactly zero loss and
             # cotangent, independent of the registered workload identity.
             allow_empty_completion=True,
+            host_prompt_length=grouped_prompt_lengths[index],
+            host_completion_length=grouped_completion_lengths[index],
         )
         for index in range(contract.local_trajectories)
     )
@@ -11017,10 +12261,44 @@ class Qwen3EngineForwardAdapter:
           )
           return loss_pullback(jnp.ones_like(unreduced_value))
 
+        def stream_step(
+            stream_logps, stream_entropy, logps, entropy, index, example
+        ):
+          """One program per group: place the group's rows, take the
+          batch loss cotangent, and slice this group's cotangents and
+          logprobs back out (the eager version issued ~18 programs)."""
+          stream_logps = jax.lax.dynamic_update_index_in_dim(
+              stream_logps, logps.astype(jnp.float32), index, axis=0
+          )
+          stream_entropy = jax.lax.dynamic_update_index_in_dim(
+              stream_entropy, entropy.astype(jnp.float32), index, axis=0
+          )
+          dlogps, dentropy = batch_loss_cotangent(
+              stream_logps, stream_entropy, example
+          )
+          return (
+              stream_logps,
+              stream_entropy,
+              jax.lax.dynamic_index_in_dim(
+                  self._group_batch_rows(dlogps), index, axis=0, keepdims=False
+              ),
+              jax.lax.dynamic_index_in_dim(
+                  self._group_batch_rows(dentropy), index, axis=0, keepdims=False
+              ),
+              jax.lax.dynamic_index_in_dim(
+                  stream_logps, index, axis=0, keepdims=False
+              ),
+          )
+
         self._p32_stream_cotangent_traces = 0
-        cached = (algo_config, jax.jit(batch_loss_cotangent))
+        cached = (
+            algo_config,
+            jax.jit(batch_loss_cotangent),
+            jax.jit(stream_step),
+        )
         self._p32_stream_cotangent = cached
       stream_cotangent_fn = cached[1]
+      stream_step_fn = cached[2]
       # Group g's loss cotangent is the group-g slice of the batch loss
       # pullback evaluated on the logprobs known so far (later groups' rows
       # still hold zeros): the per-token loss and its cotangent never mix rows,
@@ -11051,29 +12329,32 @@ class Qwen3EngineForwardAdapter:
         with gsm8k_xprof.trace_annotation(
             "group_loss_pullback", group_index=index
         ):
-          stream_logps = stream_logps.at[index].set(
-              forwards[index]["logps"].astype(jnp.float32)
+          (
+              stream_logps,
+              stream_entropy,
+              grouped_dlogps[index],
+              grouped_dentropy[index],
+              grouped_logps[index],
+          ) = stream_step_fn(
+              stream_logps,
+              stream_entropy,
+              forwards[index]["logps"],
+              forwards[index]["entropy"],
+              self._p32_group_index_scalar(index),
+              train_example,
           )
-          stream_entropy = stream_entropy.at[index].set(
-              forwards[index]["entropy"].astype(jnp.float32)
-          )
-          stream_dlogps, stream_dentropy = stream_cotangent_fn(
-              stream_logps, stream_entropy, train_example
-          )
-          grouped_dlogps[index] = self._group_batch_rows(stream_dlogps)[index]
-          grouped_dentropy[index] = self._group_batch_rows(
-              stream_dentropy
-          )[index]
-          grouped_logps[index] = stream_logps[index]
           if scale is None:
             # The loss scale is a function of the masks alone; the batch
             # loss at the end of the update re-derives it and must agree.
-            scale = algo_core.grpo_loss_from_precomputed_logps(
-                self._ungroup_batch_rows(stream_logps),
-                self._ungroup_batch_rows(stream_entropy),
-                train_example,
-                algo_config,
-            ).primary_loss.compute_scale()
+            _, scale = stream_loss_fn(
+                stream_logps, stream_entropy, train_example
+            )
+
+      # The batch loss value and its scale as ONE program; the eager
+      # batch-loss pullback at the end of the update stays eager on
+      # purpose: it is the op-by-op oracle every streamed cotangent slice
+      # is checked against.
+      stream_loss_fn = self._p32_stream_loss_fn(algo_config)
     else:
       forwards = []
       with gsm8k_xprof.trace_annotation("forward_groups"):
@@ -11289,12 +12570,10 @@ class Qwen3EngineForwardAdapter:
           for key in ("cache_inputs", "final_caches", "hidden_inputs",
                       "final_hiddens"):
             forwards[index][key] = ()
-        if not bool(np.asarray(jnp.array_equal(
-            reverse["replay_logps"], grouped_logps[index]
-        ))):
-          raise FunctionalMappingError(
-              f"P59 group {index} parallel replay logprobs changed"
-          )
+        replay_alignment.append((
+            index,
+            self._p32_pair_equal(reverse["replay_logps"], grouped_logps[index]),
+        ))
         if numeric_debug:
           _p62_emit_tree_receipt(
               stage="engine_vjp",
@@ -11783,6 +13062,7 @@ class Qwen3EngineForwardAdapter:
         else gsm8k_xprof.trace_annotation("reverse_groups")
     )
     with reverse_parent:
+      replay_alignment = []
       for index, spec in enumerate(reverse_specs):
         if p32_stream_tape and index == 0:
           # Group 0 has no earlier reverse to hide behind: issue its forward
@@ -11938,6 +13218,24 @@ class Qwen3EngineForwardAdapter:
                 if not value.is_deleted():
                   value.delete()
           hbm_stage_boundary("after_sink_delete", index)
+      if replay_alignment:
+        # One host sync for the whole update instead of one per group: the
+        # replay/forward alignment is checked before anything is committed.
+        aligned = jax.device_get(
+            jnp.stack([flag for _, flag in replay_alignment])
+        )
+        for (group_index, _), flag in zip(replay_alignment, aligned):
+          if not bool(flag):
+            raise FunctionalMappingError(
+                f"P59 group {group_index} parallel replay logprobs changed"
+            )
+      host_length_flags = [spec.get("host_lengths_match") for spec in specs]
+      if all(flag is not None for flag in host_length_flags):
+        # One host sync for every group's host-vs-device length check.
+        if not bool(jax.device_get(jnp.all(jnp.stack(host_length_flags)))):
+          raise FunctionalMappingError(
+              "P32 host row lengths disagree with the device masks"
+          )
     if p32_stream_tape:
       print_forward_stage()
       with gsm8k_xprof.trace_annotation("loss_pullback"):
@@ -11946,25 +13244,26 @@ class Qwen3EngineForwardAdapter:
         )
         batch_dlogps = self._group_batch_rows(dlogps)
         batch_dentropy = self._group_batch_rows(dentropy)
-        for index in range(len(specs)):
-          if not (
-              bool(np.asarray(jnp.array_equal(
-                  batch_dlogps[index], grouped_dlogps[index]
-              )))
-              and bool(np.asarray(jnp.array_equal(
-                  batch_dentropy[index], grouped_dentropy[index]
-              )))
-          ):
+        # One program and one host sync for every group's pair instead of
+        # two array_equal programs and two syncs per group.
+        cotangents_agree = jax.device_get(
+            self._p32_group_pairs_equal_fn()(
+                batch_dlogps,
+                jnp.stack(list(grouped_dlogps)),
+                batch_dentropy,
+                jnp.stack(list(grouped_dentropy)),
+            )
+        )
+        for index, agree in enumerate(cotangents_agree):
+          if not bool(agree):
             raise FunctionalMappingError(
                 f"P32 stream loss cotangent of group {index} differs from "
                 "the batch loss pullback"
             )
-        loss_output = algo_core.grpo_loss_from_precomputed_logps(
-            per_token_logps, token_entropy, train_example, algo_config
+        loss_output, batch_scale = stream_loss_fn(
+            stream_logps, stream_entropy, train_example
         )
-        if not bool(np.asarray(jnp.array_equal(
-            scale, loss_output.primary_loss.compute_scale()
-        ))):
+        if not bool(np.asarray(jnp.array_equal(scale, batch_scale))):
           raise FunctionalMappingError(
               "P32 stream loss scale differs from the batch loss scale"
           )
@@ -14283,6 +15582,44 @@ def _mapping_pairs(*, trainer_state, engine_state_contract, key_mappings):
   return target_flat, unrolled
 
 
+_P32_CAST_PROGRAMS = {}
+
+
+def _p32_cast_leaves(values, dtypes):
+  """Casts device leaves to their target dtypes in ONE program.
+
+  The trainer-to-engine mapping cast one leaf at a time (one eager
+  convert per leaf, 310 launches per update on the one-host census).  A
+  convert is a single elementwise op, so casting every leaf in one
+  program changes no value; each output is pinned to its input's sharding
+  exactly as the eager cast preserved it.  One compiled program per
+  signature (shapes, dtypes, shardings), cached at module level like the
+  entry-cache and zero-tree programs.
+  """
+  values = tuple(values)
+  dtypes = tuple(jnp.dtype(dtype) for dtype in dtypes)
+  shardings = tuple(getattr(value, "sharding", None) for value in values)
+  key = (
+      tuple((tuple(value.shape), str(value.dtype)) for value in values),
+      tuple(str(dtype) for dtype in dtypes),
+      tuple(str(sharding) for sharding in shardings),
+  )
+  program = _P32_CAST_PROGRAMS.get(key)
+  if program is None:
+    def cast_engine_leaves(leaves):
+      return tuple(
+          leaf.astype(dtype) for leaf, dtype in zip(leaves, dtypes)
+      )
+    program = jax.jit(
+        cast_engine_leaves,
+        out_shardings=shardings
+        if all(sharding is not None for sharding in shardings)
+        else None,
+    )
+    _P32_CAST_PROGRAMS[key] = program
+  return program(values)
+
+
 def _transform_value(
     value,
     *,
@@ -14292,6 +15629,7 @@ def _transform_value(
     key_mapping_hook_fns,
     rollout_engine,
     shape_kwargs,
+    dtype_cast=True,
 ):
   target_value = getattr(target_param, "value", target_param)
   value = generate_utils._apply_transpose(  # pylint: disable=protected-access
@@ -14306,6 +15644,8 @@ def _transform_value(
       rollout_engine,
       **shape_kwargs,
   )
+  if not dtype_cast:
+    return value
   return generate_utils._apply_dtype_cast(  # pylint: disable=protected-access
       value, target_value.dtype, source_path
   )
@@ -15019,6 +16359,10 @@ def map_trainer_state_to_engine_leaves(
   )
   mapped: dict[str, jax.Array] = {}
   provenance: list[tuple[str, str]] = []
+  # Device leaves whose dtype changes are cast together after the loop by
+  # one program (_p32_cast_leaves); host arrays and dtype-equal leaves keep
+  # the per-leaf helper.
+  pending_cast: dict[str, tuple[jax.Array, Any, str]] = {}
   for (source_path, target_path), (value, target_param) in unrolled.items():
     if target_path in mapped:
       raise FunctionalMappingError(
@@ -15032,9 +16376,36 @@ def map_trainer_state_to_engine_leaves(
         key_mapping_hook_fns=key_mapping_hook_fns,
         rollout_engine=rollout_engine,
         shape_kwargs=shape_kwargs,
+        dtype_cast=False,
     )
+    target_dtype = getattr(target_param, "value", target_param).dtype
+    if isinstance(value, jax.Array) and value.dtype != target_dtype:
+      pending_cast[target_path] = (value, target_dtype, source_path)
+    else:
+      value = generate_utils._apply_dtype_cast(  # pylint: disable=protected-access
+          value, target_dtype, source_path
+      )
     mapped[target_path] = value
     provenance.append((source_path, target_path))
+  if pending_cast:
+    first_path, (first_value, first_dtype, first_source) = next(
+        iter(pending_cast.items())
+    )
+    del first_path
+    generate_utils.logging.log_first_n(  # the per-leaf helper's notice
+        generate_utils.logging.WARNING,
+        "Type mismatch on %s: %s -> %s",
+        1,
+        first_source,
+        first_value.dtype,
+        first_dtype,
+    )
+    cast = _p32_cast_leaves(
+        tuple(value for value, _, _ in pending_cast.values()),
+        tuple(dtype for _, dtype, _ in pending_cast.values()),
+    )
+    for target_path, value in zip(pending_cast, cast):
+      mapped[target_path] = value
 
   target_paths = tuple(_flat_path(path) for path, _ in target_flat)
   missing_target = sorted(path for path in target_paths if path not in mapped)

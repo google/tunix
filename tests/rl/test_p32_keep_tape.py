@@ -68,7 +68,8 @@ def _forwards(rank_parallel):
   adapter, runner = harness._group_adapter(rank_parallel)  # pylint: disable=protected-access
   spec = harness._two_chunk_spec(adapter)  # pylint: disable=protected-access
   with mock.patch.dict(os.environ, _env(rank_parallel), clear=False):
-    os.environ.pop("CANON_P71_SCAN", None)
+    os.environ["CANON_P71_SCAN"] = "off"  # per-layer forward (default is fwd_block)
+    os.environ["CANON_P32_CHUNK_BATCH"] = "1"  # per-chunk loop (default is 2)
     os.environ.pop("CANON_P28_LAYER_SCAN", None)
     engine = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
         runner
@@ -131,14 +132,18 @@ def test_reverse_from_kept_tape_is_bitwise_and_skips_the_rebuild(scan):
     env["CANON_P71_SCAN"] = scan
   with mock.patch.dict(os.environ, env, clear=False):
     if not scan:
-      os.environ.pop("CANON_P71_SCAN", None)
+      os.environ["CANON_P71_SCAN"] = "off"  # the per-layer oracle (default is fwd_block)
     # Reference: the reverse regenerates its own replay and tape.
     rebuilt = adapter._p32_reverse_group(  # pylint: disable=protected-access
         engine, leaves, spec, dlogps, dentropy
     )
-    # Treatment: the reverse consumes the tape the forward kept.
+    # Treatment: the reverse consumes the tape the forward kept.  Both
+    # sides run the per-program loop: the reverse chunk program (the
+    # default over a kept tape) is gated by test_p32_reverse_chunk.py,
+    # which needs an FMA-free CPU ISA to compare against this loop.
     consumed = adapter._p32_reverse_group(  # pylint: disable=protected-access
-        engine, leaves, spec, dlogps, dentropy, replay=kept
+        engine, leaves, spec, dlogps, dentropy, replay=kept,
+        chunk_program=False,
     )
   assert tree_bytes(consumed["engine_gradients"]) == tree_bytes(
       rebuilt["engine_gradients"]

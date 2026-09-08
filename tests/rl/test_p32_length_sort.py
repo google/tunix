@@ -217,7 +217,8 @@ def test_row_forward_does_not_depend_on_its_group_mates():
   prompt = prompt.at[probe].set(jnp.asarray([2, 1, 3]))
   completion = completion.at[probe].set(jnp.asarray([1, 2, 1]))
   with mock.patch.dict(os.environ, dict(harness._SEGMENTED_ENV), clear=False):  # pylint: disable=protected-access
-    os.environ.pop("CANON_P71_SCAN", None)
+    os.environ["CANON_P71_SCAN"] = "off"  # per-layer forward (default is fwd_block)
+    os.environ["CANON_P32_CHUNK_BATCH"] = "1"  # per-chunk loop (default is 2)
     os.environ.pop("CANON_P28_LAYER_SCAN", None)
     engine = adapter_module.build_p28_segmented_engine_forward(runner)
     leaves = tuple(runner.state_leaves)

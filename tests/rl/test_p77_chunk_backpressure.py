@@ -84,7 +84,8 @@ def test_wait_helper_uses_only_device_ready_api():
       for node in ast.walk(tree)
       if isinstance(node, ast.Call)
   ]
-  assert calls == ["jax.block_until_ready"]
+  # One device-readiness call on the first leaf of the tree (K14c).
+  assert sorted(calls) == ["jax.block_until_ready", "jax.tree.leaves"]
   for forbidden in ("device_get", "np.asarray", "np.array", ".item("):
     assert forbidden not in source
 

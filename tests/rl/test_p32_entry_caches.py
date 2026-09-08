@@ -104,3 +104,35 @@ def test_entry_caches_refuse_a_non_paged_cache():
     adapter_module._p32_entry_caches(  # pylint: disable=protected-access
         (jnp.zeros((5, 4, 2), jnp.float32),), 4, data_size=2
     )
+
+
+def test_entry_caches_zero_carry_emits_zero_cotangents_with_the_cache_shardings():
+  """tasks/v2_dispatch Phase 11: the first reversed chunk's rebuild also
+  returns the zero cache cotangents the reverse starts from, shaped,
+  typed and sharded like the caches, from one program cached apart from
+  the plain rebuild."""
+  data_size = 2
+  caches = _paged_caches(data_size, 4, 4, 2, jnp.bfloat16, layers=3)
+  sharding = jax.sharding.NamedSharding(
+      jax.sharding.Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "model")),
+      jax.sharding.PartitionSpec("data"),
+  )
+  caches = tuple(jax.device_put(c, sharding) for c in caches)
+  plain = adapter_module._p32_entry_caches(caches, 8, data_size=data_size)  # pylint: disable=protected-access
+  before = len(adapter_module._P32_ENTRY_CACHE_PROGRAMS)  # pylint: disable=protected-access
+  rebuilt, zeros = adapter_module._p32_entry_caches(  # pylint: disable=protected-access
+      caches, 8, data_size=data_size, zero_carry=True
+  )
+  again, zeros_again = adapter_module._p32_entry_caches(  # pylint: disable=protected-access
+      caches, 4, data_size=data_size, zero_carry=True
+  )
+  after = len(adapter_module._P32_ENTRY_CACHE_PROGRAMS)  # pylint: disable=protected-access
+  assert after == before + 1, "the zero-carry variant is one more cached program"
+  assert len(rebuilt) == len(zeros) == len(caches)
+  for got, want in zip(rebuilt, plain):
+    assert np.asarray(got).tobytes() == np.asarray(want).tobytes()
+  for zero, cache in zip(zeros + zeros_again, caches + caches):
+    assert zero.shape == cache.shape and zero.dtype == cache.dtype
+    assert zero.sharding.is_equivalent_to(cache.sharding, zero.ndim)
+    assert np.asarray(zero).tobytes() == np.asarray(jnp.zeros_like(cache)).tobytes()
+  del again

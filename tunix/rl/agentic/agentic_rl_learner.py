@@ -95,7 +95,10 @@ def _p61_capture_tree(
     raise alignment.AlignmentGateError(
         "P61 numerical capture directory must be an absolute path"
     )
-  if capture_name not in ("gradient", "model_before", "model_after"):
+  if capture_name not in (
+      "gradient", "model_before", "model_after", "example", "logps",
+      "stock_gradient", "stock_logps",
+  ):
     raise alignment.AlignmentGateError(
         f"unsupported P61 numerical capture name: {capture_name!r}"
     )
@@ -2010,6 +2013,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     records = []
     activity = []
+    # The batch check hashes host bytes: slice the microbatch rows on the
+    # host after one copy per leaf (see _host_microbatch_views).
+    host_sidecar, host_logps = _host_microbatch_views(
+        sidecar, result["per_token_logps"], num_trajectories
+    )
     for index in range(expected_microbatches):
       rows = (
           tuple(result["reports"][index]["trajectory_rows"])
@@ -2019,15 +2027,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               (index + 1) * trajectory_micro,
           ))
       )
+      row_index = np.asarray(rows, dtype=np.int32)
       pair_sidecar = jax.tree.map(
           lambda value: (
-              value[np.asarray(rows, dtype=np.int32)]
+              value[row_index]
               if hasattr(value, "shape")
               and value.shape
               and value.shape[0] == num_trajectories
               else value
           ),
-          sidecar,
+          host_sidecar,
       )
       active = (
           result["reports"][index]["gradient_nonzero"] > 0
@@ -2056,9 +2065,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       activity.append(active)
       record = alignment.check_batch(
           pair_sidecar,
-          t_current=result["per_token_logps"][
-              np.asarray(rows, dtype=np.int32)
-          ],
+          t_current=host_logps[row_index],
           gradient_norm=micro_norms[index],
           optimizer_skipped=jnp.asarray(
               1 if segmented_no_commit else 0, jnp.int32
@@ -5685,6 +5692,29 @@ def _canon_v2_frozenlake_profile_report(
           "state_fingerprints_after"
       ),
   }
+
+
+def _host_microbatch_views(sidecar, per_token_logps, num_trajectories):
+  """Host copies of the per-trajectory sidecar leaves and the current logps.
+
+  The alignment batch check consumes host arrays (it hashes bytes), so the
+  microbatch rows can be sliced on the host after ONE device-to-host copy
+  per leaf per update instead of one device gather (eight launches) and
+  one copy per leaf per microbatch -- 1,760 launches per update on the
+  one-host census.  Leaves without a leading trajectory axis come back
+  untouched, exactly the leaves the per-microbatch gather skipped.
+  """
+
+  def to_host(value):
+    if (
+        hasattr(value, "shape")
+        and value.shape
+        and value.shape[0] == num_trajectories
+    ):
+      return np.asarray(value)
+    return value
+
+  return jax.tree.map(to_host, sidecar), np.asarray(per_token_logps)
 
 
 def _canon_xprof_profile_options(
