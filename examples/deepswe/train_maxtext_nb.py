@@ -890,13 +890,41 @@ trainer_devices = devices[
 # ==========================================
 # 7. Model Initialization via MaxText
 # ==========================================
+from etils import epath
 from orbax.checkpoint._src.serialization import jax_array_handlers
 from orbax.checkpoint._src.serialization import type_handler_registry
 
-# Ensure standard ArrayHandler is used for OCDBT base model restore
-type_handler_registry.register_type_handler(
-    jax.Array, jax_array_handlers.ArrayHandler(), override=True
-)
+# pathwaysutils registers CloudPathwaysArrayHandler on init, which reads
+# checkpoint shards on the Pathways workers. It does not support OCDBT yet
+# (b/365549911), so an OCDBT checkpoint has to fall back to the standard
+# ArrayHandler -- but that one reads on the client and materializes whole arrays
+# in the head container's host RAM.
+#
+# So only pay that cost when the checkpoint really is OCDBT. The client-side
+# restore scales with the largest single array rather than with model size,
+# which is why it goes unnoticed at 35B ([256, 10, 2048, 512] = 5.4 GiB, ~18 GB
+# peak) and is fatal at 397B: the scan axis makes every MoE tensor
+# [512, 15, 4096, 1024] = 64 GiB with ~12 in flight, so the head needs ~690 GB
+# and is OOMKilled. Keeping the reads on the workers peaks at 22 GB instead.
+# Note that checkpoint_storage_concurrent_gb does not bound this path.
+#
+# Outside Pathways this is a no-op either way: ArrayHandler is already the
+# default handler for jax.Array.
+if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
+  print(
+      "Base checkpoint is OCDBT, using the standard ArrayHandler:"
+      f" {MODEL_PATH}",
+      flush=True,
+  )
+  type_handler_registry.register_type_handler(
+      jax.Array, jax_array_handlers.ArrayHandler(), override=True
+  )
+else:
+  print(
+      "Base checkpoint is not OCDBT, keeping the registered handler so reads"
+      f" stay on the Pathways workers: {MODEL_PATH}",
+      flush=True,
+  )
 
 (
     qwen_reference,
