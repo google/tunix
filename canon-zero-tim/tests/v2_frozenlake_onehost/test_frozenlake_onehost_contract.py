@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import pathlib
 from pathlib import Path
 import shlex
 import subprocess
@@ -377,6 +378,40 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertEqual(learner.count("if requires_reference_model("), 2)
     self.assertIn("def requires_reference_model(", learner)
     self.assertIn("return force_compute_kl or beta != 0.0", learner)
+
+  def test_p61_full_tree_capture_is_a_measure_only_selector(self):
+    """V2_FL_CAPTURE_FULL_TREE=1 hands the learner the P61 capture root.
+
+    The Qwen3-8B fp64 re-pin (tasks/v2_integrate Phase B) captures the
+    no-commit proxy's model_before/example/gradient/logps trees; the learner
+    admits the FrozenLake proxy and captures before the no-commit discard.
+    """
+    root = pathlib.Path(__file__).resolve().parents[3]
+    onehost = (
+        root / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts"
+        / "run_frozenlake_dp2tp2_onehost.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn('capture_full_tree="${V2_FL_CAPTURE_FULL_TREE:-0}"', onehost)
+    self.assertIn(
+        'if [ "$capture_full_tree" = 1 ] && [ "$mode" != measure ]; then',
+        onehost,
+    )
+    self.assertIn(
+        '-e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$capture_full_tree" = 1 ]'
+        ' && echo "$root/p61_numerical")"',
+        onehost,
+    )
+    learner = (
+        root / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn("p61_frozenlake_no_commit_admission = (", learner)
+    self.assertIn(
+        'and run_stage == "backward-no-commit"\n          and p33_no_commit',
+        learner,
+    )
+    capture = learner.index("if p61_capture_dir and p33_no_commit:")
+    discard = learner.index("if p33_no_commit and reduce_once_accumulator_adopted:")
+    self.assertLess(capture, discard)
 
   def test_hbm_stage_diagnostic_is_measure_r0_and_r0b_only(self):
     learner = (

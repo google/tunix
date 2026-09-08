@@ -38,6 +38,8 @@ if [ "$segmented_actor_logps" = 1 ] && { [ "$workload" != p45 ] || [ "$geometry"
   exit 2
 fi
 case "$arm" in r0|r0b|r0c|r0d|r1|r2|r3) ;; *) echo "invalid arm: $arm" >&2; exit 2;; esac
+capture_full_tree="${V2_FL_CAPTURE_FULL_TREE:-0}"
+case "$capture_full_tree" in 0|1) ;; *) echo "invalid V2_FL_CAPTURE_FULL_TREE selector (0|1)" >&2; exit 2;; esac
 if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && \
    { [ "$workload" != p45 ] || [ "$geometry" != dp2-tp2 ]; }; then
   echo "$arm P75/P76/P77 capacity arm admits only workload p45 DP2xTP2" >&2
@@ -48,6 +50,10 @@ if [ "$geometry" = dp1-tp4 ] && [ "$arm" = r2 ]; then
   exit 2
 fi
 case "$mode" in measure|certify|profile) ;; *) echo "invalid mode: $mode" >&2; exit 2;; esac
+if [ "$capture_full_tree" = 1 ] && [ "$mode" != measure ]; then
+  echo "P61 full-tree capture admits only measure mode" >&2
+  exit 2
+fi
 case "$capsule_mode:$mode" in
   none:measure|none:certify) ;;
   capture:measure) ;;
@@ -241,7 +247,7 @@ fi
   echo "[V2.FL.ONEHOST] source=$source_sha diff_sha256=$diff_sha"
   echo "[V2.FL.ONEHOST] image_id=$image_id model_revision=$model_revision"
   echo "[V2.FL.ONEHOST] workload=$workload arm=$arm mode=$mode capsule_mode=$capsule_mode topology=DP${dp_size}xTP${tp_size} stage=backward-no-commit"
-  echo "[V2.FL.ONEHOST] timeout_seconds=$timeout_seconds idle_120s=PASS root=$root"
+  echo "[V2.FL.ONEHOST] timeout_seconds=$timeout_seconds idle_120s=PASS root=$root capture_full_tree=$capture_full_tree"
 } >"$driver"
 bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model "$model_dir" \
   >>"$driver" 2>&1
@@ -296,6 +302,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_dependency_ticket" \
   -e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure" \
   -e CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps" \
+  -e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$capture_full_tree" = 1 ] && echo "$root/p61_numerical")" \
   -e V2_FL_MODE="$mode" \
   -e CANON_XPROF_DIR="$xprof_dir" \
   -e CANON_PERF_TRACE_DIR="$perf_trace_dir" \

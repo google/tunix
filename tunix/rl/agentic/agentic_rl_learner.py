@@ -1505,15 +1505,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           == "1"
           and os.environ.get("CANON_P66_P59_CHECK_VMA", "") == "1"
       )
+      # tasks/v2_integrate Phase B: the FrozenLake one-host no-commit
+      # proxies capture the same trees for the Qwen3-8B fp64 re-pin.  The
+      # gradient is taken before the no-commit path discards its
+      # accumulator; model_after is never written (nothing commits).
+      p61_frozenlake_no_commit_admission = (
+          workload is not None
+          and bool(getattr(workload, "frozenlake_four_chip_proxy", False))
+          and run_stage == "backward-no-commit"
+          and p33_no_commit
+          and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") == "1"
+      )
       if (
-          not (p61_dp4_oracle or p61_dp2_reduce_once_admission)
+          not (
+              p61_dp4_oracle
+              or p61_dp2_reduce_once_admission
+              or p61_frozenlake_no_commit_admission
+          )
           or not os.path.isabs(p61_capture_dir)
       ):
         raise alignment.AlignmentGateError(
             "CANON_P61_BACKWARD_NUMERICAL_DIR requires exact committed "
-            "gsm8k-p59-dp4-tp1 one-update deterministic DP4xTP1 geometry "
-            "or exact committed gsm8k-p59-dp2-tp2 three-update "
-            "deterministic rank-parallel checked-VMA geometry"
+            "gsm8k-p59-dp4-tp1 one-update deterministic DP4xTP1 geometry, "
+            "exact committed gsm8k-p59-dp2-tp2 three-update "
+            "deterministic rank-parallel checked-VMA geometry, or the exact "
+            "rank-parallel FrozenLake one-host backward-no-commit proxy"
         )
       # The three-update carrier profiles its warm third update, but its
       # numerical A/B compares the frozen first update.  Preserve the P61
@@ -2002,6 +2018,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     micro_norms, reduce_once_update_norm = _gradient_quality_norms(
         result, micro_norms
     )
+    if p61_capture_dir and p33_no_commit:
+      # The no-commit path discards its accumulator below and returns before
+      # the commit path's capture point: take the update's gradient and the
+      # engine's per-token logps here (the commit path captures the same
+      # two trees after its precommit gate).
+      _p61_capture_tree(
+          p61_capture_dir, "gradient", actor_trainer.grad_accumulator.get()
+      )
+      _p61_capture_tree(p61_capture_dir, "logps", result["per_token_logps"])
     if perf_log.enabled():
       value_and_grad_done = time.perf_counter()
       print(
