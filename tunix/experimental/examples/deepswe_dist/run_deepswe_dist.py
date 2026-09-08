@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import functools
 import logging
 import os
@@ -26,6 +27,7 @@ from typing import Any
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax  # pylint: disable=g-import-not-at-top
+import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -44,6 +46,7 @@ from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
+from tunix.rl import function_registry
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 # pylint: enable=g-import-not-at-top
@@ -52,15 +55,67 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 ProcessContext = runtime_context.ProcessContext
 
 
+def _optional_float(value: str) -> float | None:
+  return None if value.lower() in ("none", "null") else float(value)
+
+
+def _optional_int(value: str) -> int | None:
+  return None if value.lower() in ("none", "null") else int(value)
+
+
+class DeepSWEGRPOAdapter(algorithm_adapter.GRPOAdapter):
+  """GRPO adapter configured with the reference DeepSWE recipe semantics."""
+
+  def __init__(
+      self,
+      *,
+      advantage_estimator: str = "rloo",
+      epsilon_high: float | None = 0.28,
+      **kwargs: Any,
+  ):
+    super().__init__(**kwargs)
+    self.advantage_estimator = advantage_estimator
+    self.epsilon_high = (
+        self.clip_epsilon if epsilon_high is None else epsilon_high
+    )
+
+  def compute_advantages(
+      self,
+      rewards: Sequence[float] | jax.Array,
+      num_generations: int | None = None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    del kwargs
+    group_size = num_generations or self.group_size
+    estimator = function_registry.get_advantage_estimator(
+        self.advantage_estimator
+    )
+    return estimator(
+        jnp.asarray(rewards, dtype=jnp.float32),
+        num_generations=group_size,
+    )
+
+  def build_gen_model_input_fn(self, pad_id: int, eos_id: int):
+    model_input_fn = super().build_gen_model_input_fn(pad_id, eos_id)
+    model_input_fn.keywords["algo_config"].epsilon_high = self.epsilon_high
+    return model_input_fn
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description="Orchestrator V2 DeepSWE distributed GRPO demo."
   )
-  parser.add_argument("--batch_size", type=int, default=1)
-  parser.add_argument("--num_generations", type=int, default=2)
-  parser.add_argument("--max_steps", type=int, default=1)
-  parser.add_argument("--max_prompt_length", type=int, default=1024)
-  parser.add_argument("--max_response_length", type=int, default=1024)
+  parser.add_argument("--batch_size", type=int, default=8)
+  parser.add_argument(
+      "--mini_batch_size",
+      type=int,
+      default=8,
+      help="Number of prompt groups per optimizer update.",
+  )
+  parser.add_argument("--num_generations", type=int, default=8)
+  parser.add_argument("--max_steps", type=int, default=50)
+  parser.add_argument("--max_prompt_length", type=int, default=4096)
+  parser.add_argument("--max_response_length", type=int, default=8192)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument(
       "--max_seq_token_per_tpu",
@@ -97,13 +152,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " computation."
       ),
   )
-  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
+  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-32B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
-  parser.add_argument("--top_p", type=float, default=1.0)
-  parser.add_argument("--top_k", type=int, default=-1)
+  parser.add_argument("--top_p", type=_optional_float, default=None)
+  parser.add_argument("--top_k", type=_optional_int, default=None)
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
+  parser.add_argument("--epsilon_high", type=float, default=0.28)
+  parser.add_argument(
+      "--advantage_estimator",
+      choices=("grpo", "rloo", "drgrpo"),
+      default="rloo",
+  )
+  parser.add_argument(
+      "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
+  )
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
@@ -125,7 +189,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
-      default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
+      default=weight_sync.WeightSyncMode(
+          os.getenv("WEIGHT_SYNC_MODE", "none")
+      ),
       choices=list(weight_sync.WeightSyncMode),
   )
   parser.add_argument("--dataset_path", type=str, default="")
@@ -143,13 +209,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--shuffle", action=argparse.BooleanOptionalAction, default=True
   )
   parser.add_argument("--max_turns", type=int, default=50)
+  parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
   parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
   parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
+  parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+  )
   parser.add_argument("--env_backend", type=str, default="kubernetes")
   parser.add_argument(
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      "--max_warmpool_size",
+      dest="max_warmpool_replicas",
+      type=int,
+      default=None,
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -182,10 +261,55 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  return algorithm_adapter.GRPOAdapter(
+def _validate_args(args: argparse.Namespace) -> None:
+  if args.num_generations <= 1:
+    raise ValueError("num_generations must be greater than 1 for GRPO.")
+  if args.batch_size <= 0:
+    raise ValueError("batch_size must be positive.")
+  if args.mini_batch_size <= 0:
+    raise ValueError("mini_batch_size must be positive.")
+  if args.batch_size % args.mini_batch_size != 0:
+    raise ValueError(
+        "batch_size must be divisible by mini_batch_size; got "
+        f"batch_size={args.batch_size}, "
+        f"mini_batch_size={args.mini_batch_size}."
+    )
+  if args.train_micro_batch_size <= 0:
+    raise ValueError("train_micro_batch_size must be positive.")
+  update_trajectories = args.mini_batch_size * args.num_generations
+  if update_trajectories % args.train_micro_batch_size != 0:
+    raise ValueError(
+        "mini_batch_size * num_generations must be divisible by "
+        "train_micro_batch_size; got "
+        f"mini_batch_size={args.mini_batch_size}, "
+        f"num_generations={args.num_generations}, "
+        f"train_micro_batch_size={args.train_micro_batch_size}."
+    )
+  if args.max_staleness < 0:
+    raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if args.epsilon_high < args.epsilon:
+    raise ValueError("epsilon_high must be greater than or equal to epsilon.")
+  if args.episode_timeout_secs <= 0:
+    raise ValueError("episode_timeout_secs must be positive.")
+  if args.max_warmpool_replicas is not None and args.max_warmpool_replicas <= 0:
+    raise ValueError("max_warmpool_replicas must be positive when specified.")
+  if args.use_agent_sandbox and args.scaffold != "r2egym":
+    raise ValueError(
+        "Agent Sandbox currently supports only scaffold=r2egym; its adapter "
+        "does not expose the SWE-agent command set."
+    )
+  if args.weight_sync_mode == weight_sync.WeightSyncMode.FALLBACK:
+    raise ValueError(
+        "weight_sync_mode=fallback is protocol-only and does not transfer "
+        "weights. Use 'none' for a smoke test or 'raiden' for multi-step "
+        "training."
+    )
+
+
+def _build_algo(args: argparse.Namespace) -> DeepSWEGRPOAdapter:
+  return DeepSWEGRPOAdapter(
       group_size=args.num_generations,
-      mini_batch_size=args.batch_size,
+      mini_batch_size=args.mini_batch_size,
       train_micro_batch_size=args.train_micro_batch_size,
       max_turns=args.max_turns,
       max_packed_len=(
@@ -193,10 +317,14 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           if args.max_seq_token_per_tpu is not None
           else args.max_prompt_length + args.max_response_length
       ),
+      max_response_length=args.max_response_length,
       clip_epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta_kl=args.beta,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
+      loss_agg_mode=args.loss_agg_mode,
+      advantage_estimator=args.advantage_estimator,
   )
 
 
@@ -226,33 +354,30 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
+  _validate_args(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
       force=True,
   )
 
-  if args.num_generations <= 1:
-    raise ValueError("num_generations must be greater than 1 for GRPO.")
-  if args.batch_size <= 0:
-    raise ValueError("batch_size must be positive.")
-  if args.train_micro_batch_size <= 0:
-    raise ValueError("train_micro_batch_size must be positive.")
-  if args.max_staleness < 0:
-    raise ValueError("offpolicy/max_staleness must be non-negative.")
-
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
-      "Configuration: model_id=%s, batch_size=%d prompt group(s), "
-      "num_generations=%d, max_steps=%d, max_turns=%d, train_micro=%d, "
-      "beta=%.4f, env_backend=%s, use_agent_sandbox=%s, weight_sync_mode=%s.",
+      "Configuration: model_id=%s, batch_size=%d prompt groups/full step, "
+      "mini_batch_size=%d prompt groups/update, num_generations=%d, "
+      "max_steps=%d, max_turns=%d, train_micro=%d, "
+      "beta=%.4f, advantage_estimator=%s, loss_agg_mode=%s, "
+      "env_backend=%s, use_agent_sandbox=%s, weight_sync_mode=%s.",
       args.model_id,
       args.batch_size,
+      args.mini_batch_size,
       args.num_generations,
       args.max_steps,
       args.max_turns,
       args.train_micro_batch_size,
       args.beta,
+      args.advantage_estimator,
+      args.loss_agg_mode,
       args.env_backend,
       args.use_agent_sandbox,
       args.weight_sync_mode,
@@ -342,18 +467,23 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           batch_size=args.batch_size,
           max_turns=args.max_turns,
           max_response_length=args.max_response_length,
+          episode_timeout_secs=args.episode_timeout_secs,
           temperature=args.temperature,
           top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
+          top_k=args.top_k,
           step_timeout_secs=args.step_timeout_secs,
           reward_timeout_secs=args.reward_timeout_secs,
+          overlong_filter=args.overlong_filter,
           env_backend=args.env_backend,
           use_agent_sandbox=args.use_agent_sandbox,
+          num_generations=args.num_generations,
+          max_warmpool_replicas=args.max_warmpool_replicas,
           scaffold=args.scaffold,
           env_verbose=args.env_verbose,
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
           max_prompt_length=args.max_prompt_length,

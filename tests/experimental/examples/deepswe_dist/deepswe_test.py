@@ -19,6 +19,7 @@ from absl.testing import absltest
 from examples.deepswe import deepswe_data
 from examples.deepswe import swe_env
 from tunix.experimental.examples.deepswe_dist import deepswe
+from tunix.experimental.examples.deepswe_dist import run_deepswe_dist
 from tunix.experimental.rl.agentic import registry
 
 
@@ -212,6 +213,96 @@ class DeepSWEDistTest(absltest.TestCase):
 
     self.assertEqual(fleet, "existing")
     mock_load.assert_not_called()
+
+  def test_reference_recipe_defaults(self):
+    args = run_deepswe_dist._parse_args([])  # pylint: disable=protected-access
+
+    self.assertEqual(args.model_id, "Qwen/Qwen3-32B")
+    self.assertEqual(args.batch_size, 8)
+    self.assertEqual(args.mini_batch_size, 8)
+    self.assertEqual(args.num_generations, 8)
+    self.assertEqual(args.max_prompt_length, 4096)
+    self.assertEqual(args.max_response_length, 8192)
+    self.assertIsNone(args.top_p)
+    self.assertIsNone(args.top_k)
+    self.assertEqual(args.advantage_estimator, "rloo")
+    self.assertEqual(args.loss_agg_mode, "sequence-mean-token-scale")
+    self.assertFalse(args.use_agent_sandbox)
+    self.assertEqual(args.env_backend, "kubernetes")
+    self.assertEqual(args.episode_timeout_secs, 3 * 60 * 60)
+    self.assertTrue(args.overlong_filter)
+    self.assertEqual(args.weight_sync_mode.value, "none")
+
+  def test_algorithm_uses_prompt_group_mini_batch_size(self):
+    args = run_deepswe_dist._parse_args(  # pylint: disable=protected-access
+        [
+            "--batch_size=3",
+            "--mini_batch_size=3",
+            "--num_generations=2",
+        ]
+    )
+    algo = run_deepswe_dist._build_algo(  # pylint: disable=protected-access
+        args
+    )
+
+    self.assertEqual(algo.mini_batch_size, 3)
+    self.assertEqual(algo.group_size, 2)
+
+  def test_rejects_nonfunctional_or_unsupported_modes(self):
+    # pylint: disable=protected-access
+    fallback_args = run_deepswe_dist._parse_args(
+        ["--weight_sync_mode=fallback"]
+    )
+    with self.assertRaisesRegex(ValueError, "protocol-only"):
+      run_deepswe_dist._validate_args(  # pylint: disable=protected-access
+          fallback_args
+      )
+
+    sandbox_args = run_deepswe_dist._parse_args(
+        ["--use_agent_sandbox", "--scaffold=sweagent"]
+    )
+    with self.assertRaisesRegex(ValueError, "supports only scaffold=r2egym"):
+      run_deepswe_dist._validate_args(  # pylint: disable=protected-access
+          sandbox_args
+      )
+    # pylint: enable=protected-access
+
+  def test_validates_full_and_mini_batch_geometry(self):
+    # pylint: disable=protected-access
+    indivisible_full_batch = run_deepswe_dist._parse_args(
+        ["--batch_size=3", "--mini_batch_size=2"]
+    )
+    with self.assertRaisesRegex(ValueError, "batch_size must be divisible"):
+      run_deepswe_dist._validate_args(indivisible_full_batch)
+
+    indivisible_micro_batch = run_deepswe_dist._parse_args(
+        [
+            "--batch_size=4",
+            "--mini_batch_size=2",
+            "--num_generations=3",
+            "--train_micro_batch_size=4",
+        ]
+    )
+    with self.assertRaisesRegex(
+        ValueError, "num_generations must be divisible"
+    ):
+      run_deepswe_dist._validate_args(indivisible_micro_batch)
+    # pylint: enable=protected-access
+
+  def test_rloo_advantages_match_reference_recipe(self):
+    args = run_deepswe_dist._parse_args(  # pylint: disable=protected-access
+        ["--num_generations=2"]
+    )
+    algo = run_deepswe_dist._build_algo(args)  # pylint: disable=protected-access
+
+    advantages = algo.compute_advantages([1.0, 3.0, 2.0, 5.0])
+
+    self.assertSequenceAlmostEqual(
+        list(map(float, advantages)), [-2.0, 2.0, -3.0, 3.0]
+    )
+    model_input_fn = algo.build_gen_model_input_fn(pad_id=0, eos_id=1)
+    self.assertEqual(model_input_fn.keywords["algo_config"].epsilon_high, 0.28)
+
 
 if __name__ == "__main__":
   absltest.main()
