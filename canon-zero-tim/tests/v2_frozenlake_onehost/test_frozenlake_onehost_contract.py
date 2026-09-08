@@ -379,6 +379,24 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertIn("def requires_reference_model(", learner)
     self.assertIn("return force_compute_kl or beta != 0.0", learner)
 
+  def test_p61_capture_directory_is_admitted_on_the_no_commit_proxy(self):
+    """The workload validator mirrors the learner's P61 gate: the exact
+    rank-parallel FrozenLake proxy in backward-no-commit stage may carry an
+    absolute CANON_P61_BACKWARD_NUMERICAL_DIR (tasks/v2_integrate B.1c)."""
+    workload = dp_workloads.get_workload("frozenlake-p45-onehost-dp2-tp2")
+    environ = _environment(workload.name)
+    environ["CANON_P61_BACKWARD_NUMERICAL_DIR"] = "/tmp/p61-frozenlake-capture"
+    dp_workloads.requested_max_steps(workload, environ)
+    with self.assertRaisesRegex(ValueError, "P61"):
+      dp_workloads.requested_max_steps(
+          workload,
+          {**environ, "CANON_P61_BACKWARD_NUMERICAL_DIR": "relative"},
+      )
+    with self.assertRaisesRegex(ValueError, "P61"):
+      dp_workloads.requested_max_steps(
+          workload, {**environ, "CANON_P59_RANK_PARALLEL_BACKWARD": "0"}
+      )
+
   def test_p61_full_tree_capture_is_a_measure_only_selector(self):
     """V2_FL_CAPTURE_FULL_TREE=1 hands the learner the P61 capture root.
 

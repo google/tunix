@@ -1108,15 +1108,29 @@ def requested_max_steps(
       and values.get("CANON_P59_RANK_PARALLEL_BACKWARD", "0") == "1"
       and values.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
   )
+  # tasks/v2_integrate Phase B: the FrozenLake one-host no-commit proxies
+  # capture the same trees for the Qwen3-8B fp64 re-pin (the learner admits
+  # them in its own P61 gate; this mirror must agree).
+  p61_frozenlake_no_commit_admission = (
+      bool(getattr(workload, "frozenlake_four_chip_proxy", False))
+      and stage == "backward-no-commit"
+      and values.get("CANON_P33_NO_COMMIT", "0") == "1"
+      and values.get("CANON_P59_RANK_PARALLEL_BACKWARD", "0") == "1"
+  )
   if p61_capture_dir and (
       not os.path.isabs(p61_capture_dir)
-      or not (p61_dp4_oracle or p61_dp2_reduce_once_admission)
+      or not (
+          p61_dp4_oracle
+          or p61_dp2_reduce_once_admission
+          or p61_frozenlake_no_commit_admission
+      )
   ):
     raise ValueError(
         "CANON_P61_BACKWARD_NUMERICAL_DIR requires an absolute path and "
-        "either exact gsm8k-p59-dp4-tp1 one-update deterministic geometry "
-        "or exact gsm8k-p59-dp2-tp2 three-update deterministic "
-        "rank-parallel checked-VMA full-train geometry"
+        "either exact gsm8k-p59-dp4-tp1 one-update deterministic geometry, "
+        "exact gsm8k-p59-dp2-tp2 three-update deterministic "
+        "rank-parallel checked-VMA full-train geometry, or the exact "
+        "rank-parallel FrozenLake one-host backward-no-commit proxy"
     )
   p62_numeric_debug = values.get(
       "CANON_P62_BACKWARD_NUMERIC_DEBUG", "0"
