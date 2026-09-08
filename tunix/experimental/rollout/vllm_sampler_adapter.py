@@ -24,6 +24,7 @@ from typing import Any, List, Mapping, Sequence
 
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
+from tunix.experimental.weight_sync import safetensors_checkpoint
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.weight_sync import weight_sync_coordinator
 
@@ -283,11 +284,17 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Returns transport metadata with Raiden endpoints and TensorMetadata."""
     del kwargs
     if not self.enable_raiden:
-      raise NotImplementedError(
-          f"VllmSamplerAdapter [{self.server_id}] does not support"
-          " get_weight_sync_metadata when Raiden is disabled"
-          f" (weight_sync_mode={self.weight_sync_mode.value})."
-      )
+      target_state = self.get_target_state()
+      if target_state is None:
+        raise RuntimeError(
+            f"VllmSamplerAdapter [{self.server_id}] cannot build fallback"
+            " weight sync metadata without a target state."
+        )
+      return [
+          safetensors_checkpoint.build_work_unit_metadata(
+              target_state, self.server_id
+          )
+      ]
     await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
     return [weight_sync.WorkUnitMetadata.from_dict(m) for m in meta or []]
@@ -315,12 +322,22 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
     """Flushes/awaits H2D transfers and refreshes state_leaves."""
     if not self.enable_raiden:
-      # RLVllmSampler owns its weight buffers, so there is no host-side
-      # update_params fallback equivalent to the in-process adapter's.
+      sampler = self._require_sampler()
+      artifact_path = safetensors_checkpoint.source_artifact_path(sync_request)
+      if artifact_path:
+        result = sampler.load_checkpoint(artifact_path)
+        if asyncio.iscoroutine(result):
+          await result
+        return True
+      weights = None if sync_request is None else getattr(sync_request, "weights", None)
+      if weights is not None and hasattr(sampler, "update_params"):
+        result = sampler.update_params(weights)
+        if asyncio.iscoroutine(result):
+          await result
+        return True
       raise RuntimeError(
-          f"VllmSamplerAdapter [{self.server_id}] supports Raiden weight sync"
-          " only; no fallback path exists"
-          f" (weight_sync_mode={self.weight_sync_mode.value})."
+          f"VllmSamplerAdapter [{self.server_id}] fallback weight sync needs"
+          " either source_metadata.artifact_path or sync_request.weights."
       )
     sampler = self._require_sampler()
     async with self._sync_lock:

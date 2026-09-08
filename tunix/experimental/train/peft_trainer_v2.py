@@ -19,6 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import os
+import tempfile
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
@@ -37,6 +38,8 @@ import orbax.checkpoint as ocp
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.train import abstract_trainer
+from tunix.experimental.weight_sync import safetensors_checkpoint
+from tunix.experimental.weight_sync import weight_sync
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -70,9 +73,6 @@ class TrainingConfig:
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
   checkpointing_options: ocp.CheckpointManagerOptions | None = None
-  # Whether the `__init__` restores from the latest checkpoint on its own.
-  # True to preserves the historical behavior.
-  resume_from_checkpoint_on_init: bool = True
 
   # Configs for the metrics logger.
   metrics_logging_options: MetricsLoggerOptions | None = None
@@ -395,6 +395,101 @@ def _default_weight_sync_worker() -> Any:
   return raiden_synchronizer.RaidenSynchronizer("trainer")
 
 
+def _weight_sync_backend(trainer: Any) -> str:
+  sampler_type = getattr(trainer, "_sampler_type", "")
+  return "vllm_jax" if "vllm" in sampler_type else sampler_type
+
+
+def _staged_weight_sync_state(trainer: Any) -> Any:
+  """Returns the state tree that rollout workers consume during sync."""
+  backend = _weight_sync_backend(trainer)
+  mapping_config = getattr(getattr(trainer, "config", None), "mapping_config", None)
+  model = trainer.model
+  if (
+      mapping_config is None
+      and hasattr(model, "to_hf_mappings")
+      and backend != "vanilla"
+  ):
+    try:
+      from tunix.generate import mappings as mappings_lib  # pylint: disable=g-import-not-at-top
+
+      mapping_config = mappings_lib.MappingConfig.build(
+          model=model, backend=backend
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      mapping_config = None
+
+  target_state = getattr(trainer, "_target_state", None)
+  if (
+      target_state is not None
+      and mapping_config is not None
+      and mapping_config.to_hf_mappings
+  ):
+    from tunix.generate import utils as gen_utils  # pylint: disable=g-import-not-at-top
+
+    return gen_utils.transfer_state_with_mappings(
+        src_state=nnx.state(model),
+        dst_state=target_state,
+        key_mappings=mapping_config.to_hf_mappings,
+        key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
+        transpose_keys=mapping_config.to_hf_transpose_keys,
+        reshard_fn=None,
+        rollout_engine=backend,
+    )
+  return nnx.state(model)
+
+
+def _weight_sync_artifact_root(trainer: Any) -> str:
+  config = getattr(trainer, "config", None)
+  root = getattr(config, "checkpoint_root_directory", None)
+  if not root:
+    root = os.path.join(tempfile.gettempdir(), "tunix_weight_sync")
+  return os.path.join(root, "weight_sync_artifacts")
+
+
+def _save_weight_sync_artifact(
+    trainer: Any,
+    staged_state: Any,
+    *,
+    policy_version: int,
+) -> weight_sync.WorkUnitMetadata:
+  artifact_dir = os.path.join(
+      _weight_sync_artifact_root(trainer), f"policy_{policy_version}"
+  )
+  artifact_path = safetensors_checkpoint.save_state_to_safetensors(
+      staged_state, artifact_dir
+  )
+  metadata = safetensors_checkpoint.build_work_unit_metadata(
+      staged_state,
+      "trainer",
+      artifact_path=artifact_path,
+  )
+  trainer._latest_weight_sync_metadata = metadata
+  trainer._latest_weight_sync_policy_version = policy_version
+  return metadata
+
+
+def _ensure_weight_sync_artifact(
+    trainer: Any,
+    *,
+    policy_version: int,
+    staged_state: Any | None = None,
+) -> weight_sync.WorkUnitMetadata:
+  if (
+      getattr(trainer, "_latest_weight_sync_metadata", None) is not None
+      and getattr(trainer, "_latest_weight_sync_policy_version", None)
+      == policy_version
+  ):
+    return trainer._latest_weight_sync_metadata
+  if staged_state is None:
+    staged_state = _staged_weight_sync_state(trainer)
+  return _save_weight_sync_artifact(
+      trainer,
+      staged_state,
+      policy_version=policy_version,
+  )
+
+
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -429,7 +524,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       metrics_logger: MetricsLogger | None = None,
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
-      weight_sync_worker_factory: Callable[[], Any] | None = None,
+        weight_sync_worker_factory: Callable[[], Any] | None = None,
       sampler_type: str = "inprocess_vllm",
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
@@ -482,22 +577,32 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._has_aux = False
     self._pbar = None
     self._last_update_grad_norm: ArrayLike | None = None
-    self._restored_custom_metadata: Mapping[str, Any] = {}
-    if self.config.get_with_default("resume_from_checkpoint_on_init", True):
-      self._train_steps, self._restored_custom_metadata = (
-          self.checkpoint_manager.maybe_restore(
-              self.model,
-              self.optimizer,
-              restore_only_lora_params=self._lora_enabled,
-          )
-      )
+
+    self._train_steps, self._restored_custom_metadata = (
+        self.checkpoint_manager.maybe_restore(
+            self.model,
+            self.optimizer,
+            restore_only_lora_params=self._lora_enabled,
+        )
+    )
+    self._iter_steps = self._train_steps * self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
 
     self._jitted_fwd_bwd_step_fn = None
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
-    self._prof: profiler.Profiler | None = None
-    self._sync_step_derived_state()
+    max_step = None
+    if self.config.max_steps is not None:
+      max_step = self.config.max_steps * self.config.get_with_default(
+          "gradient_accumulation_steps", 1
+      )
+    self._prof = profiler.Profiler(
+        initial_step=self._iter_steps,
+        max_step=max_step,
+        profiler_options=self.config.profiler_options,
+    )
     self._buffered_train_metrics: MetricsBuffer | None = None
     self._prev_buffered_train_metrics: MetricsBuffer | None = None
     self._buffered_eval_metrics: MetricsBuffer | None = None
@@ -514,22 +619,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._target_state = None
     self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
-
-  def _sync_step_derived_state(self) -> None:
-    """Recomputes everything derived from `_train_steps`"""
-    self._iter_steps = self._train_steps * self.config.get_with_default(
-        "gradient_accumulation_steps", 1
-    )
-    max_step = None
-    if self.config.max_steps is not None:
-      max_step = self.config.max_steps * self.config.get_with_default(
-          "gradient_accumulation_steps", 1
-      )
-    self._prof = profiler.Profiler(
-        initial_step=self._iter_steps,
-        max_step=max_step,
-        profiler_options=self.config.profiler_options,
-    )
+    self._weight_sync_worker_factory = weight_sync_worker_factory
+    self._latest_weight_sync_metadata: weight_sync.WorkUnitMetadata | None = None
+    self._latest_weight_sync_policy_version: int | None = None
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -539,6 +631,39 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def set_target_state(self, target_state: Any) -> None:
     self._target_state = target_state
+
+  def _weight_sync_backend(self) -> str:
+    return _weight_sync_backend(self)
+
+  def _staged_weight_sync_state(self) -> Any:
+    return _staged_weight_sync_state(self)
+
+  def _weight_sync_artifact_root(self) -> str:
+    return _weight_sync_artifact_root(self)
+
+  def _save_weight_sync_artifact(
+      self,
+      staged_state: Any,
+      *,
+      policy_version: int,
+  ) -> weight_sync.WorkUnitMetadata:
+    return _save_weight_sync_artifact(
+      self,
+      staged_state,
+      policy_version=policy_version,
+    )
+
+  def _ensure_weight_sync_artifact(
+      self,
+      *,
+      policy_version: int,
+      staged_state: Any | None = None,
+  ) -> weight_sync.WorkUnitMetadata:
+    return _ensure_weight_sync_artifact(
+        self,
+        policy_version=policy_version,
+        staged_state=staged_state,
+    )
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.
@@ -1156,11 +1281,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
-    step = None
-    if isinstance(metadata, (dict, Mapping)):
-      step = metadata.get("step", self._train_steps)
-    elif hasattr(metadata, "step"):
-      step = getattr(metadata, "step")
+    step = kwargs.pop("step", None)
+    if step is None:
+      if isinstance(metadata, (dict, Mapping)):
+        step = metadata.get("step", self._train_steps)
+      elif hasattr(metadata, "step"):
+        step = getattr(metadata, "step")
     if step is None:
       step = self._train_steps
     save_only_lora_params = kwargs.pop(
@@ -1174,79 +1300,53 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         custom_metadata=metadata,
         **kwargs,
     )
+    policy_version = step
+    if isinstance(metadata, Mapping):
+      policy_version = int(metadata.get("policy_version", step) or step)
+    elif hasattr(metadata, "policy_version"):
+      policy_version = int(getattr(metadata, "policy_version") or step)
+    self._ensure_weight_sync_artifact(policy_version=policy_version)
 
   @override
-  def restore_checkpoint(self, step: int | None = None, **kwargs) -> Any:
-    """Restores model, optimizer and step count from a checkpoint."""
-    del kwargs
-    self._train_steps, self._restored_custom_metadata = (
-        self.checkpoint_manager.maybe_restore(
-            self.model,
-            self.optimizer,
-            step=step,
-            restore_only_lora_params=self._lora_enabled,
-        )
-    )
-    self._sync_step_derived_state()
-    metadata = dict(self._restored_custom_metadata or {})
-    metadata["step"] = self._train_steps
-    logging.info(
-        "restore_checkpoint restored step=%d (requested step=%s).",
-        self._train_steps,
-        "latest" if step is None else step,
-    )
-    return metadata
+  def restore_checkpoint(self, **kwargs) -> Any:
+    return {}
 
   @override
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
-    del sync_request, kwargs
-    worker = self._weight_sync_worker
-    if worker is None:
-      worker = _default_weight_sync_worker()
-      self._weight_sync_worker = worker
-
-    backend = (
-        "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
+    del kwargs
+    policy_version = 0 if sync_request is None else sync_request.policy_version
+    staged_state = _staged_weight_sync_state(self)
+    artifact_metadata = _ensure_weight_sync_artifact(
+      self,
+        policy_version=policy_version,
+        staged_state=staged_state,
     )
-    mapping_config = getattr(self.config, "mapping_config", None)
-    if (
-        mapping_config is None
-        and hasattr(self.model, "to_hf_mappings")
-        and backend != "vanilla"
-    ):
-      try:
-        from tunix.generate import mappings as mappings_lib  # pylint: disable=g-import-not-at-top
-        mapping_config = mappings_lib.MappingConfig.build(
-            model=self.model, backend=backend
-        )
-      except Exception:  # pylint: disable=broad-exception-caught
-        mapping_config = None
 
-    if (
-        self._target_state is not None
-        and mapping_config is not None
-        and mapping_config.to_hf_mappings
-    ):
-      from tunix.generate import utils as gen_utils  # pylint: disable=g-import-not-at-top
-      converted_state = gen_utils.transfer_state_with_mappings(
-          src_state=nnx.state(self.model),
-          dst_state=self._target_state,
-          key_mappings=mapping_config.to_hf_mappings,
-          key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
-          transpose_keys=mapping_config.to_hf_transpose_keys,
-          reshard_fn=None,
-          rollout_engine=backend,
-      )
-      worker.bind(converted_state)
-    else:
-      # TODO(lancewang): Handle LoRA parameter synchronization.
-      worker.bind(nnx.state(self.model))
+    if os.environ.get("WEIGHT_SYNC_MODE", "raiden").lower() == "fallback":
+      return [artifact_metadata]
 
+    if self._weight_sync_worker is None:
+      factory = getattr(self, "_weight_sync_worker_factory", None)
+      factory = factory or _default_weight_sync_worker
+      self._weight_sync_worker = factory()
+    worker = self._weight_sync_worker
+
+    worker.bind(staged_state)
     worker.d2h()
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
       logging.info("source checksums: %s", worker.checksums())
-    return [worker.work_unit_metadata()]
+    worker_metadata = worker.work_unit_metadata()
+    if isinstance(worker_metadata, dict):
+      worker_metadata = dict(worker_metadata)
+      worker_metadata["artifact_path"] = artifact_metadata.artifact_path
+      return [worker_metadata]
+    return [
+        dataclasses.replace(
+            worker_metadata,
+            artifact_path=artifact_metadata.artifact_path,
+        )
+    ]
 
   def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Ends this round's staging hold."""
@@ -1313,8 +1413,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     index = 0
     last_step_completion_time = time.perf_counter()
     while True:
-      if self._prof is not None:
-        self._prof.maybe_activate(self._iter_steps)
+      self._prof.maybe_activate(self._iter_steps)
       with jax.profiler.StepTraceAnnotation("train", step_num=self._iter_steps):
         train_example = None
         if self.data_hooks:
@@ -1430,8 +1529,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           ):
             self._run_eval(eval_ds)
 
-      if self._prof is not None:
-        self._prof.maybe_deactivate(self._iter_steps)
+      self._prof.maybe_deactivate(self._iter_steps)
 
     self._throttler.wait_for_all()
     logging.info(

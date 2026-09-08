@@ -156,6 +156,7 @@ class WorkUnitMetadata:
 
   Attributes:
     unit: Stable identity, e.g. WorkUnitId(job_name="trainer").
+    artifact_path: Optional safetensors artifact prepared for file-backed sync.
     shards: Data-plane addresses, one "ip:port" per participating shard.
       Repeats are expected: a process serving several local devices shares one
       transfer port, so the list may carry repeated addresses while preserving
@@ -178,6 +179,7 @@ class WorkUnitMetadata:
   """
 
   unit: WorkUnitId
+  artifact_path: str = ""
   shards: tuple[str, ...] = ()
   control_plane_rpc_address: str = ""
   global_shape: Optional[tuple[int, ...]] = None
@@ -235,6 +237,7 @@ class WorkUnitMetadata:
 
     return cls(
         unit=unit,
+      artifact_path=str(d.get("artifact_path", "")),
         shards=tuple(d.get("shards", ())),
         control_plane_rpc_address=str(d.get("control_plane_rpc_address", "")),
         global_shape=(

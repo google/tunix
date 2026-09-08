@@ -17,9 +17,12 @@
 import asyncio
 from unittest import mock
 from absl.testing import absltest
+from flax import nnx
+import jax
 import numpy as np
 from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
 from tunix.experimental.rollout import sampler as base_sampler_lib
+from tunix.experimental.weight_sync import safetensors_checkpoint
 from tunix.experimental.weight_sync import raiden_weight_sync_delegate
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import base_sampler
@@ -38,6 +41,18 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         logprobs=None,
     )
     self.mock_vllm_sampler.mesh = "mock_mesh"
+    self.mock_vllm_sampler.transformer_state = {
+      "model": {
+        "embed_tokens": {
+          "embedding": nnx.Param(
+            jax.ShapeDtypeStruct((2, 2), np.float32)
+          )
+        }
+      }
+    }
+    self.mock_vllm_sampler.get_target_state.side_effect = AttributeError(
+      "mock does not implement get_target_state"
+    )
     self.mock_vllm_lib = mock.MagicMock()
     self.mock_vllm_lib.VllmSampler.return_value = self.mock_vllm_sampler
 
@@ -158,8 +173,25 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     self.assertIsNone(asyncio.run(self.sampler_adapter.bind_weight_sync()))
     self.assertTrue(asyncio.run(self.sampler_adapter.pre_weight_sync()))
     self.assertTrue(asyncio.run(self.sampler_adapter.post_weight_sync()))
-    with self.assertRaises(NotImplementedError):
-      asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+    metadata = asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+    self.assertLen(metadata, 1)
+    self.assertEqual(metadata[0].unit.job_name, "vllm_slice_01")
+
+  def test_weight_sync_prefers_safetensors_artifact(self):
+    metadata = safetensors_checkpoint.build_work_unit_metadata(
+        self.sampler_adapter.get_target_state(),
+        "trainer",
+        artifact_path="/tmp/model.safetensors",
+    )
+    req = base_sampler_lib.WeightSyncRequest(source_metadata=(metadata,))
+
+    res = asyncio.run(self.sampler_adapter.weight_sync(sync_request=req))
+
+    self.assertTrue(res)
+    self.mock_vllm_sampler.load_checkpoint.assert_called_once_with(
+        "/tmp/model.safetensors"
+    )
+    self.mock_vllm_sampler.update_params.assert_not_called()
 
   def test_weight_sync_with_raiden_delegate(self):
     mock_delegate = mock.MagicMock(

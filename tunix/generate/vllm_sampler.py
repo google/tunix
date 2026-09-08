@@ -26,6 +26,7 @@ from flax import nnx
 import jax
 import jaxtyping
 import numpy as np
+from tunix.experimental.weight_sync import safetensors_checkpoint
 from tunix.generate import base_sampler
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
@@ -314,11 +315,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
-    # TODO(b/434741253): Consider support orbax checkpoint loading
     if isinstance(path_or_weights, jaxtyping.PyTree):
       self.update_params(updated_weights=path_or_weights, filter_types=None)
     else:
-      raise NotImplementedError("Only support in memory weight sync as of now.")
+      restored = safetensors_checkpoint.load_state_from_safetensors(
+          path_or_weights,
+          self.transformer_state,
+      )
+      self.update_params(updated_weights=restored, filter_types=None)
 
   def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""

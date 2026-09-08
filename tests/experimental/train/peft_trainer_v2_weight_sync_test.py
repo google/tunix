@@ -15,6 +15,7 @@
 """Tests for PeftTrainer V2 weight sync staging."""
 
 import os
+import tempfile
 import types
 from unittest import mock
 
@@ -73,16 +74,23 @@ class WeightSyncStagingTest(absltest.TestCase):
 
   def test_prepare_stages_and_returns_metadata(self):
     fake = self._fake_trainer()
-    with mock.patch.object(raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer):
+    fake.config.checkpoint_root_directory = tempfile.mkdtemp()
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
       md = peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
     worker = fake._weight_sync_worker
-    self.assertEqual(md, [{"unit": "trainer"}])
+    self.assertLen(md, 1)
+    self.assertEqual(md[0]["unit"], "trainer")
+    self.assertTrue(md[0]["artifact_path"].endswith("model.safetensors"))
     self.assertEqual(worker.d2h_calls, 1)
     self.assertIsNotNone(worker.bound_state)
 
   def test_prepare_reuses_the_worker(self):
     fake = self._fake_trainer()
-    with mock.patch.object(raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer):
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
       peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
       first = fake._weight_sync_worker
       peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
@@ -90,10 +98,25 @@ class WeightSyncStagingTest(absltest.TestCase):
 
   def test_prepare_uses_ffi_under_proxy(self):
     fake = self._fake_trainer()
-    with mock.patch.object(raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer):
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
       with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy,cpu"}):
         peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
     self.assertTrue(fake._weight_sync_worker.is_proxy)
+
+  def test_prepare_returns_artifact_only_in_fallback_mode(self):
+    fake = self._fake_trainer()
+    fake.config.checkpoint_root_directory = tempfile.mkdtemp()
+
+    with mock.patch.dict(os.environ, {"WEIGHT_SYNC_MODE": "fallback"}):
+      md = peft_trainer_v2.PeftTrainer.prepare_weight_sync(
+          fake, sync_request=types.SimpleNamespace(policy_version=3)
+      )
+
+    self.assertLen(md, 1)
+    self.assertTrue(md[0].artifact_path.endswith("policy_3/model.safetensors"))
+    self.assertIsNone(fake._weight_sync_worker)
 
   def test_release_without_prepare_is_a_no_op(self):
     fake = self._fake_trainer()

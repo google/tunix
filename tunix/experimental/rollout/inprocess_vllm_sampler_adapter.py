@@ -22,6 +22,7 @@ from flax import nnx
 import jax
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
+from tunix.experimental.weight_sync import safetensors_checkpoint
 from tunix.experimental.weight_sync import weight_sync
 
 Sampler = base_sampler_lib.Sampler
@@ -345,10 +346,11 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
 
     if self.enable_raiden:
       return await self.raiden_sync_delegate.get_weight_sync_metadata(**kwargs)
-    raise NotImplementedError(
-        f"InprocessVllmSamplerAdapter [{self.server_id}] does not support"
-        " get_weight_sync_metadata when Raiden is disabled."
-    )
+    return [
+      safetensors_checkpoint.build_work_unit_metadata(
+        self.get_target_state(), self.server_id
+      )
+    ]
 
   async def bind_weight_sync(
       self,
@@ -380,7 +382,10 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
           " initialized."
       )
     if hasattr(self.vllm_sampler, "get_target_state"):
-      return self.vllm_sampler.get_target_state()
+      try:
+        return self.vllm_sampler.get_target_state()
+      except AttributeError:
+        pass
     if hasattr(self.vllm_sampler, "transformer_state"):
       state = self.vllm_sampler.transformer_state
       return jax.tree.map(
@@ -420,6 +425,16 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
           sync_request=sync_request, **kwargs
       )
     else:
+      artifact_path = safetensors_checkpoint.source_artifact_path(sync_request)
+      if artifact_path:
+        if self.vllm_sampler and hasattr(self.vllm_sampler, "load_checkpoint"):
+          self.vllm_sampler.load_checkpoint(artifact_path)
+          return True
+        raise RuntimeError(
+            f"InprocessVllmSamplerAdapter [{self.server_id}] weight_sync:"
+            " sampler does not support load_checkpoint for safetensors"
+            " artifacts."
+        )
       if sync_request is None:
         raise ValueError(
             f"InprocessVllmSamplerAdapter Fallback mode [{self.server_id}]"

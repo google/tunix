@@ -22,6 +22,7 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout import vllm_sampler_adapter
+from tunix.experimental.weight_sync import weight_sync
 
 
 class VllmSamplerAdapterTest(absltest.TestCase):
@@ -264,6 +265,43 @@ class VllmSamplerAdapterTest(absltest.TestCase):
         weight_sync_mode="none",
     )
     self.assertFalse(adapter.enable_raiden)
+
+  def test_fallback_metadata_uses_target_state_manifest(self):
+    fallback_sampler = mock.Mock()
+    fallback_sampler.get_target_state.return_value = {
+        "weights": np.zeros((2, 2), dtype=np.float32)
+    }
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_01",
+        sampler_instance=fallback_sampler,
+        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+    )
+
+    metadata = asyncio.run(adapter.get_weight_sync_metadata())
+
+    self.assertLen(metadata, 1)
+    self.assertEqual(metadata[0].unit.job_name, "vllm_slice_01")
+
+  def test_fallback_weight_sync_loads_safetensors_artifact(self):
+    fallback_sampler = mock.Mock()
+    fallback_sampler.load_checkpoint.return_value = True
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_01",
+        sampler_instance=fallback_sampler,
+        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+    )
+    req = base_sampler_lib.WeightSyncRequest(
+        source_metadata=(
+            {"artifact_path": "/tmp/model.safetensors", "unit": "trainer"},
+        )
+    )
+
+    result = asyncio.run(adapter.weight_sync(req))
+
+    self.assertTrue(result)
+    fallback_sampler.load_checkpoint.assert_called_once_with(
+      "/tmp/model.safetensors"
+    )
 
   def test_weight_sync_starts_an_idle_engine(self):
     """RLVllmSampler builds its AsyncLLM lazily and only `sample()` starts it.

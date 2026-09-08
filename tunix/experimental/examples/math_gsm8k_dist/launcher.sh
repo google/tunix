@@ -83,6 +83,7 @@ FORCE_KILL=0
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
+TRAINER_JAX_PLATFORMS=${TRAINER_JAX_PLATFORMS:-tpu,cpu}
 
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
@@ -102,7 +103,9 @@ fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+ROLLOUT_JAX_PLATFORMS=${ROLLOUT_JAX_PLATFORMS:-tpu,cpu}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
+INFERENCE_JAX_PLATFORMS=${INFERENCE_JAX_PLATFORMS:-tpu,cpu}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 # If OOM, try the following settings (assume 8 chips per host):
@@ -147,10 +150,36 @@ print_file_debug() {
   fi
 }
 
+
+  ensure_discovery_proto() {
+    local proto_rel="tunix/experimental/distributed/runtime/discovery/discovery_service.proto"
+    local pb2_path="${REPO_ROOT}/tunix/experimental/distributed/runtime/discovery/discovery_service_pb2.py"
+    local pb2_grpc_path="${REPO_ROOT}/tunix/experimental/distributed/runtime/discovery/discovery_service_pb2_grpc.py"
+    if [[ -f "$pb2_path" && -f "$pb2_grpc_path" ]]; then
+      return
+    fi
+
+    echo "Generating discovery protobuf Python stubs..."
+    if ! "$PYTHON_BIN" -c 'import grpc_tools.protoc' >/dev/null 2>&1; then
+      echo "Error: missing grpcio-tools in the active Python environment."
+      echo "Install it first, for example: pip install grpcio-tools"
+      exit 1
+    fi
+
+    (
+      cd "$REPO_ROOT"
+      "$PYTHON_BIN" -m grpc_tools.protoc -I"$REPO_ROOT" \
+        --python_out="$REPO_ROOT" \
+        --grpc_python_out="$REPO_ROOT" \
+        "$proto_rel"
+    )
+  }
 print_process_debug() {
   local label="$1"
   local pid="$2"
   echo "$label pid=$pid"
+
+  ensure_discovery_proto
   ps -fp "$pid" 2>/dev/null || true
   ps -o pid,ppid,stat,etime,pcpu,pmem,rss,args -p "$pid" 2>/dev/null || true
 }
@@ -461,12 +490,16 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export TRAINER_PATHWAYS_LOCAL_INIT=1
     unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
   else
-    export JAX_PLATFORMS=tpu,cpu
-    export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
-    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
-    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
-    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export JAX_PLATFORMS=${TRAINER_JAX_PLATFORMS}
+    if [[ ",${JAX_PLATFORMS}," == *",tpu,"* ]]; then
+      export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
+      export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+      export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+      export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+      export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    else
+      unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
+    fi
   fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
@@ -508,13 +541,17 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     ROLLOUT_CMD+=(--use_lora)
   fi
 
-  export JAX_PLATFORMS=tpu,cpu
+  export JAX_PLATFORMS=${ROLLOUT_JAX_PLATFORMS}
   export SKIP_JAX_PRECOMPILE=1
-  export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
-  export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
-  export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
-  export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  if [[ ",${JAX_PLATFORMS}," == *",tpu,"* ]]; then
+    export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  else
+    unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
+  fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
@@ -638,12 +675,16 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
       --max_response_length="$MAX_RESPONSE_LENGTH"
     )
 
-    export JAX_PLATFORMS=tpu,cpu
-    export TPU_VISIBLE_DEVICES=${INFERENCE_TPU_CHIPS}
-    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
-    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
-    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export JAX_PLATFORMS=${INFERENCE_JAX_PLATFORMS}
+    if [[ ",${JAX_PLATFORMS}," == *",tpu,"* ]]; then
+      export TPU_VISIBLE_DEVICES=${INFERENCE_TPU_CHIPS}
+      export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+      export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+      export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+      export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    else
+      unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
+    fi
     export PYTHONUNBUFFERED=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
