@@ -26,9 +26,11 @@ import inspect
 import json
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
+import uuid
 
 from absl import logging
 import numpy as np
+from tunix.experimental.trajectory import store as store_lib
 from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
@@ -36,6 +38,7 @@ from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
+from tunix.rl.agentic.trajectory import token_dict
 from tunix.rl.rollout import base_rollout
 
 BaseTaskEnv = base_environment.BaseTaskEnv
@@ -71,6 +74,7 @@ class TrajectoryCollectEngine:
       overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
       exact_token_continuity: bool = False,
+      trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -99,10 +103,14 @@ class TrajectoryCollectEngine:
           to use for performance measurements. Defaults to a no-op tracer.
         exact_token_continuity: Preserve recorded token history on later turns.
           Requires a token-aware model_call, tokenizer, and parser.
+        trajectory_store: Optional Trajectory Store. In "Token" mode every
+          finished trajectory is written to it under a fresh id, which the
+          returned dict reports under `token_dict.TRAJECTORY_ID_KEY`.
     """
     self.agent = agent
     self.env = env
     self.model_call = model_call
+    self.trajectory_store = trajectory_store
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
@@ -322,160 +330,27 @@ class TrajectoryCollectEngine:
           for step in self.agent.trajectory.steps
       ]
     elif mode == "Token":
-      # flatten all steps into single batch dict
-      conversation_tokens, conversation_masks, logprobs = [], [], []
-      routed_experts = []
-      prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
-      has_routed_experts = getattr(
-          self.agent.trajectory, "prompt_routed_experts", None
-      ) is not None or any(
-          getattr(step, "assistant_routed_experts", None) is not None
-          or getattr(step, "env_routed_experts", None) is not None
-          for step in self.agent.trajectory.steps
+      self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
+      self.agent.trajectory.reward_time = self.reward_time
+      context = token_dict.TokenDictContext(
+          chat_completions=self.agent.chat_completions,
+          policy_version=self.env.task.get("policy_version"),
+          group_id=self.env.extra_kwargs.get("group_id"),
+          masked_out=masked_out,
+          exact_token_continuity=self.exact_token_continuity,
       )
-
-      for idx, step in enumerate(self.agent.trajectory.steps):
-        # Keep tokens/masks/logprobs/routed_experts appended in lockstep.
-        assistant_tokens = getattr(step, "assistant_tokens", None)
-        env_tokens = getattr(step, "env_tokens", None)
-        step_logprobs = getattr(step, "logprobs", None)
-        step_routed = getattr(step, "assistant_routed_experts", None)
-        step_env_routed = getattr(step, "env_routed_experts", None)
-        if assistant_tokens is not None:
-          conversation_tokens.append(assistant_tokens)
-          conversation_masks.append(step.assistant_masks)
-          if step_logprobs is not None:
-            assert len(step_logprobs) == len(assistant_tokens), (
-                f"Logprobs length {len(step_logprobs)} does not match assistant"
-                f" tokens length {len(assistant_tokens)}"
-            )
-            logprobs.append(step_logprobs)
-          else:
-            logprobs.append(np.zeros(len(assistant_tokens)))
-          if has_routed_experts:
-            if step_routed is None:
-              raise ValueError(
-                  f"Step {idx} has assistant_tokens (len"
-                  f" {len(assistant_tokens)}) but missing"
-                  " assistant_routed_experts while routed_experts is active."
-              )
-            if len(step_routed) != len(assistant_tokens):
-              raise ValueError(
-                  f"Step {idx} assistant_routed_experts length"
-                  f" {len(step_routed)} does not match assistant_tokens length"
-                  f" {len(assistant_tokens)}."
-              )
-            routed_experts.append(np.asarray(step_routed, dtype=np.int16))
-        if env_tokens is not None:
-          conversation_tokens.append(env_tokens)
-          conversation_masks.append(step.env_masks)
-          logprobs.append(np.zeros(len(env_tokens)))
-          if has_routed_experts:
-            if step_env_routed is None:
-              raise ValueError(
-                  f"Step {idx} has env_tokens (len {len(env_tokens)}) but"
-                  " missing env_routed_experts while routed_experts is active."
-              )
-            if len(step_env_routed) != len(env_tokens):
-              raise ValueError(
-                  f"Step {idx} env_routed_experts length"
-                  f" {len(step_env_routed)} does not match env_tokens length"
-                  f" {len(env_tokens)}."
-              )
-            routed_experts.append(np.asarray(step_env_routed, dtype=np.int16))
-
-      conversation_tokens = [
-          np.asarray(tokens)
-          for tokens in conversation_tokens
-          if len(tokens) > 0
-      ]
-      conversation_masks = [
-          np.asarray(masks) for masks in conversation_masks if len(masks) > 0
-      ]
-      logprobs = [
-          np.asarray(step_logprobs)
-          for step_logprobs in logprobs
-          if len(step_logprobs) > 0
-      ]
-      conversation_masks = (
-          np.concatenate(conversation_masks, axis=0)
-          if conversation_masks
-          else np.array([], dtype=np.int32)
+      trajectory_id = None
+      if self.trajectory_store is not None:
+        trajectory_id = uuid.uuid4().hex
+        token_dict.write_trajectory(
+            self.trajectory_store,
+            self.agent.trajectory,
+            context,
+            trajectory_id=trajectory_id,
+        )
+      return token_dict.build_token_dict(
+          self.agent.trajectory, context, trajectory_id=trajectory_id
       )
-      conversation_tokens = (
-          np.concatenate(conversation_tokens, axis=0)
-          if conversation_tokens
-          else np.array([], dtype=np.int32)
-      )
-      final_masks = (
-          np.zeros_like(conversation_masks)
-          if masked_out
-          else conversation_masks
-      )
-
-      final_routed_experts = None
-      if has_routed_experts:
-        prompt_routed = getattr(
-            self.agent.trajectory, "prompt_routed_experts", None
-        )
-        sample_arr = next(
-            iter(routed_experts),
-            prompt_routed,
-        )
-        sample_shape = (
-            sample_arr.shape[1:] if sample_arr is not None else (0, 0)
-        )
-        conv_routed = (
-            np.concatenate(routed_experts, axis=0)
-            if routed_experts
-            else np.zeros((0,) + sample_shape, dtype=np.int16)
-        )
-        prompt_len = (
-            (self.agent.trajectory.prompt_length or 0)
-            if self.exact_token_continuity
-            else (len(prompt_tokens) if prompt_tokens is not None else 0)
-        )
-        if prompt_len > 0:
-          if prompt_routed is None:
-            raise ValueError(
-                f"Trajectory has prompt_tokens (len {prompt_len}) but missing"
-                " prompt_routed_experts while routed_experts is active."
-            )
-          if getattr(prompt_routed, "shape", (0,))[0] != prompt_len:
-            raise ValueError(
-                "prompt_routed_experts shape"
-                f" {getattr(prompt_routed, 'shape', None)} does not match"
-                f" prompt_tokens length {prompt_len}."
-            )
-          prompt_routed_arr = np.asarray(prompt_routed, dtype=np.int16)
-        else:
-          prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=np.int16)
-
-        final_routed_experts = np.concatenate(
-            [prompt_routed_arr, conv_routed], axis=0
-        )
-
-      result = {
-          "conversation_text": self.agent.chat_completions,
-          "prompt_tokens": prompt_tokens,
-          "conversation_tokens": conversation_tokens,
-          "conversation_masks": final_masks,
-          "status": self.agent.trajectory.status.name,
-          "trajectory_reward": self.agent.trajectory.reward,
-          "env_time": self.env_time,
-          "reward_time": self.reward_time,
-          "old_logprobs": (
-              np.concatenate(logprobs, axis=0) if logprobs else None
-          ),
-          "routed_experts": final_routed_experts,
-          "policy_version": self.env.task.get("policy_version"),
-          "original_input": self.agent.trajectory.task,
-          "group_id": self.env.extra_kwargs.get("group_id"),
-      }
-      if self.agent.trajectory.prompt_length is not None:
-        # Set only by exact token continuity; lets training unpad by length.
-        result["prompt_length"] = self.agent.trajectory.prompt_length
-      return result
     elif mode == "Conversation":
       # return raw conversation history
       return self.agent.chat_completions
@@ -800,9 +675,7 @@ class TrajectoryCollectEngine:
               else 0
           )
       )
-      self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
-          init_routed[:prompt_len]
-      )
+      self.agent.trajectory.prompt_routed_experts = init_routed[:prompt_len]
       self._cumulative_prompt_tokens = init_routed.shape[0]
       self._current_step_initial_routed_experts = init_routed[prompt_len:]
     elif (

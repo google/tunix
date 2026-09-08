@@ -116,6 +116,7 @@ TUNIX_ENV_STEP_0: Final[trajectory_lib.TunixEnvStep] = (
         done=False,
         env_tokens=np.array([1, 2]),
         env_masks=np.array([1, 1]),
+        env_routed_experts=np.array([[[5], [6]], [[7], [8]]], np.int16),
     )
 )
 
@@ -170,6 +171,7 @@ TUNIX_AGENT_STEP_1: Final[trajectory_lib.TunixAgentStep] = (
         assistant_masks=np.array([1, 1]),
         logprobs=np.array([-0.5, -0.2]),
         policy_version=3,
+        assistant_routed_experts=np.array([[[1], [2]], [[3], [4]]], np.int16),
     )
 )
 
@@ -210,6 +212,11 @@ TUNIX_METADATA_1: Final[trajectory_lib.TunixTrajectoryMetadata] = (
         hyperparams={"temperature": 0.7},
         env_time={"step_0": 0.05},
         reward_time={"step_1": 0.02},
+        prompt_tokens=[7, 8, 9],
+        prompt_length=3,
+        policy_version=3,
+        task={"prompts": ["User prompt"], "answer": "42"},
+        chat_completions=[{"role": "user", "content": "User prompt"}],
     )
 )
 

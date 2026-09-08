@@ -279,6 +279,19 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
           factory.call_args.kwargs["engine_kwargs"]["exact_token_continuity"],
           enabled,
       )
+      self.assertIsNone(
+          factory.call_args.kwargs["engine_kwargs"]["trajectory_store"]
+      )
+      store = object()
+      with mock.patch.object(
+          agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
+      ) as factory:
+        agentic_rl_learner.AgenticRLLearner._build_orchestrator(
+            obj, trajectory_store=store
+        )
+      self.assertIs(
+          factory.call_args.kwargs["engine_kwargs"]["trajectory_store"], store
+      )
 
   def test_exact_mode_rejects_rollout_configs_it_cannot_honor(
       self,
@@ -296,6 +309,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
       setattr(config, option, value)
       engine = types.SimpleNamespace(
           rollout=types.SimpleNamespace(),
+          get_rollout_config=lambda **_: config,
           tokenizer=object(),
           cluster_config=types.SimpleNamespace(
               rollout_config=config,

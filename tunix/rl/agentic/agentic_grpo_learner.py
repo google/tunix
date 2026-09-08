@@ -191,6 +191,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       env_class: The class of the environment to be used.
       env_kwargs: Keyword arguments to pass to the environment class.
     """  # fmt: skip
+    # The base initializer restores sub-batch state and validates geometry.
+    # Compare the effective rollout temperature, not the config's placeholder.
+    algo_config.temperature = rl_engine.get_rollout_config(
+        mode=rl_engine_lib.Mode.TRAIN
+    ).temperature
     super().__init__(
         rl_engine=rl_engine,
         reward_fns=reward_fns,

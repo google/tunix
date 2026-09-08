@@ -1171,7 +1171,17 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
         trajectory_testing.PAIRED_ATIF_TRAJECTORY
     )
 
-    self.assertEqual(rl_trajectory.task, {"prompts": [prompt_step.message]})
+    self.assertEqual(
+        rl_trajectory.task, trajectory_testing.PAIRED_TUNIX_TRAJECTORY.task
+    )
+    self.assertEqual(
+        rl_trajectory.prompt_tokens,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.prompt_tokens,
+    )
+    self.assertEqual(
+        rl_trajectory.prompt_length,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.prompt_length,
+    )
     (paired_step,) = rl_trajectory.steps
     self.assertEqual(paired_step.mc_return, agent_step.mc_return)
     self.assertEqual(paired_step.reward, trailing_env_step.reward)
@@ -1182,6 +1192,24 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     np.testing.assert_array_equal(
         paired_step.env_tokens, trailing_env_step.env_tokens
     )
+    np.testing.assert_array_equal(
+        paired_step.assistant_routed_experts,
+        agent_step.assistant_routed_experts,
+    )
+    self.assertEqual(paired_step.assistant_routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(
+        paired_step.env_routed_experts, trailing_env_step.env_routed_experts
+    )
+
+  def test_to_tunix_trajectory_without_recorded_task_uses_prompt_step(self):
+    prompt_step = trajectory_testing.PAIRED_TUNIX_TRAJECTORY.steps[0]
+    rl_trajectory = converter.to_tunix_trajectory(
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.model_copy(
+            update={"task": None}
+        )
+    )
+
+    self.assertEqual(rl_trajectory.task, {"prompts": [prompt_step.message]})
 
 
 class CreateTrajectoryMetadataTest(parameterized.TestCase):

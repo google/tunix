@@ -160,6 +160,11 @@ class Trajectory:
     status: Status of the trajectory (e.g., "success", "truncated").
     env_time: Dictionary of environment latency metrics (reset_latency: float,
       step_latency: list[float] ordered by step index, close_latency: float).
+    reward_time: Dictionary of reward latency metrics.
+    prompt_tokens: Token IDs of the initial prompt.
+    prompt_length: Unpadded prompt length; set only by exact token continuity.
+    prompt_routed_experts: Per-token routed expert IDs for the prompt tokens
+      [length, num_layers, top_k], or None.
   """
 
   task: Any = None
@@ -175,6 +180,7 @@ class Trajectory:
       default_factory=list
   )
   prompt_length: int | None = None
+  prompt_routed_experts: np.ndarray | None = None
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
