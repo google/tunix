@@ -327,11 +327,12 @@ docker_args=(
   -e CANON_DP_REDUCE_ONCE="${CANON_DP_REDUCE_ONCE:-}"
   -e CANON_FUSED_TREE_OPS="${CANON_FUSED_TREE_OPS:-}"
   -e CANON_P32_LENGTH_SORT="${CANON_P32_LENGTH_SORT:-}"
+  -e CANON_P32_CHUNK_BATCH="${CANON_P32_CHUNK_BATCH:-}"
   -e CANON_EXPECT_TRAIN_MESH_IDS="$expected_train_mesh_ids"
   -e CANON_XPROF_DIR="$xprof_dir"
   -e CANON_XPROF_SKIP_STEPS=2 -e CANON_XPROF_STEPS=1
   -e CANON_XPROF_PHASE="${CANON_XPROF_PHASE:-update}" -e CANON_XPROF_HOST_TRACER=1
-  -e CANON_XPROF_PYTHON_TRACER=0 -e CANON_XPROF_TPU_TRACE_MODE="${CANON_XPROF_TPU_TRACE_MODE-TRACE_ONLY_XLA}"
+  -e CANON_XPROF_PYTHON_TRACER="${CANON_XPROF_PYTHON_TRACER:-0}" -e CANON_XPROF_TPU_TRACE_MODE="${CANON_XPROF_TPU_TRACE_MODE-TRACE_ONLY_XLA}"
   -e CANON_XPROF_LABELS=1
   -e CANON_PERF_TRACE_DIR="$perf_dir" -e CANON_PERF_TRACE_EXPORT_STEP=2
   -w "$repo"
@@ -379,6 +380,7 @@ if [ "$arm" = zero-hp ]; then
   if [ "$v2_p0_capture_full_tree" = 1 ]; then
     docker_args+=(
       -e CANON_P61_BACKWARD_NUMERICAL_DIR="$state/p61_numerical"
+      -e CANON_P61_STOCK_GRADIENT="${CANON_P61_STOCK_GRADIENT:-}"
     )
   fi
   if [ -n "$v2_p0_negative_control" ]; then
@@ -453,6 +455,12 @@ python3 "$script_dir/census_gsm8k_xprof_size.py" \
   >"$size_census" 2>&1
 size_census_rc=$?
 set -e
+# tasks/v2_dispatch Phase 7 is flagless: the census learns from the adapter
+# source whether each reverse chunk runs as one zt_tr_bwd_chunk program.
+p32_reverse_chunk=0
+if grep -q 'module_name="zt_tr_bwd_chunk"' "$repo/tunix/rl/canonical_qwen3_adapter.py"; then
+  p32_reverse_chunk=1
+fi
 if [ "$docker_rc" -eq 0 ]; then
   set +e
   python3 "$script_dir/census_gsm8k_xprof_modules.py" \
@@ -460,6 +468,8 @@ if [ "$docker_rc" -eq 0 ]; then
     --p71-scan "${CANON_P71_SCAN:-}" \
     --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
     --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
+    --p32-chunk-batch "${CANON_P32_CHUNK_BATCH:-}" \
+    --p32-reverse-chunk "$p32_reverse_chunk" \
     >"$xprof_census" 2>&1
   xprof_census_rc=$?
   sudo docker run --rm --ipc=host \
@@ -485,6 +495,7 @@ if [ "$docker_rc" -eq 0 ]; then
     if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ] || [ "$geometry" = dp2-tp2-p45 ]; then
       python3 "$script_dir/census_gsm8k_p74_gap.py" \
         --run-root "$root" --output "$p74_gap_receipt" --geometry "$geometry" \
+        --p32-reverse-chunk "$p32_reverse_chunk" \
         >"$p74_gap_census" 2>&1
       p74_gap_census_rc=$?
     fi

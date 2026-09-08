@@ -22,6 +22,7 @@ _P74_EXPECTED_WINDOWS = 64
 _P74_MAX_MEAN_GAP_MS = 70.0
 _P74_MARKER = "V1_GSM8K_P74_GAP_CENSUS_GREEN"
 _P74_PARTITION_MODULE = "jit__p74_identity_head_cotangent_partition"
+_P74_REVERSE_CHUNK_PARTITION = "in-graph (zt_tr_bwd_chunk)"
 _P74_VICTIM_KINDS = {
     "slow_np.asarray(jax.Array)",
     "slow_shard_args",
@@ -253,6 +254,20 @@ def _p74_receipt(
   for key, value in expected.items():
     if receipt.get(key) != value:
       reasons.append(f"p74_gap_receipt.{key}={receipt.get(key)!r}")
+  # tasks/v2_dispatch Phase 15: with the reverse chunk program the seed,
+  # the partition and the head pullback are ops of one zt_tr_bwd_chunk
+  # program per chunk pass, so the census emits the receipt's reverse_chunk
+  # variant (no seed-to-head windows, no standalone partition module, an
+  # in-graph partition, zero gap by construction); the acceptance block
+  # and the intervening inventory are read accordingly.
+  reverse_chunk = receipt.get("reverse_chunk") is True
+  expected_max_gap = 0.0 if reverse_chunk else _P74_MAX_MEAN_GAP_MS
+  expected_partition = (
+      _P74_REVERSE_CHUNK_PARTITION if reverse_chunk else _P74_PARTITION_MODULE
+  )
+  expected_intervening = (
+      {} if reverse_chunk else {_P74_PARTITION_MODULE: expected_windows}
+  )
   acceptance = receipt.get("acceptance")
   if not isinstance(acceptance, dict):
     reasons.append("p74_gap_receipt.acceptance:not_object")
@@ -262,7 +277,7 @@ def _p74_receipt(
           "p74_gap_receipt.acceptance.expected_windows="
           f"{acceptance.get('expected_windows')!r}"
       )
-    if acceptance.get("max_mean_gap_ms") != _P74_MAX_MEAN_GAP_MS:
+    if acceptance.get("max_mean_gap_ms") != expected_max_gap:
       reasons.append(
           "p74_gap_receipt.acceptance.max_mean_gap_ms="
           f"{acceptance.get('max_mean_gap_ms')!r}"
@@ -272,7 +287,7 @@ def _p74_receipt(
           "p74_gap_receipt.acceptance.exact_victim_overlap_events="
           f"{acceptance.get('exact_victim_overlap_events')!r}"
       )
-    if acceptance.get("partition_module_per_window") != _P74_PARTITION_MODULE:
+    if acceptance.get("partition_module_per_window") != expected_partition:
       reasons.append(
           "p74_gap_receipt.acceptance.partition_module_per_window="
           f"{acceptance.get('partition_module_per_window')!r}"
@@ -301,7 +316,6 @@ def _p74_receipt(
   ):
     reasons.append(f"p74_gap_receipt.victim_overlap={victim!r}")
   intervening = receipt.get("intervening_modules")
-  expected_intervening = {_P74_PARTITION_MODULE: expected_windows}
   if intervening != expected_intervening:
     reasons.append(f"p74_gap_receipt.intervening_modules={intervening!r}")
   return receipt

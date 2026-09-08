@@ -91,10 +91,82 @@ def backward_exec_bounds(geometry: str) -> tuple[int, int]:
 # That constant has a documented fallback ladder 7 -> 4 -> 2, so the
 # census exposes it as a flag rather than welding 4 blocks into the code.
 P71_BWD_BLOCK_LAYERS = 7
-P71_SCAN_MODES = ("off", "fwd", "bwd")
+P71_SCAN_MODES = ("off", "fwd", "bwd", "fwd_block")
+# CANON_P71_SCAN=fwd_block: the grouped forward runs every layer of a chunk
+# as one unrolled program (zt_tr_fwd_block, once per chunk pass) and the
+# per-layer zt_tr_fwd_layer program never launches; the reverse inventory is
+# the per-layer one.
+FWD_BLOCK = "jit_zt_tr_fwd_block"
+FWD_LAYER = "jit_zt_tr_fwd_layer"
+# CANON_P32_CHUNK_BATCH=k (k >= 2): k consecutive chunks of a group's forward
+# run as one zt_tr_fwd_chunks program; groups shorter than k chunks, the
+# remainder of a group and the fwd_block bootstrap chunk keep the per-chunk
+# programs, so those may still appear.  The batch program must be absent
+# when the selector is off.
+FWD_CHUNKS = "jit_zt_tr_fwd_chunks"
+# tasks/v2_dispatch Phase 7 (flagless; the launcher reports it from the
+# adapter source): over a kept tape the rank-parallel reverse runs each
+# chunk's whole reverse body -- entry-cache rebuild, norm/head recompute,
+# rows pullback, P74 partition, head/norm/per-layer/embed pullbacks -- as
+# one zt_tr_bwd_chunk program per chunk pass, so none of those programs
+# launches on its own any more (the bootstrap chunk of the first group of
+# the process is the only exception and precedes the captured update).
+BWD_CHUNK = "jit_zt_tr_bwd_chunk"
+REVERSE_CHUNK_INSIDE = (
+    "jit_zt_tr_dp_parallel_bwd_head",
+    "jit_zt_tr_dp_parallel_bwd_norm",
+    "jit_zt_tr_dp_parallel_bwd_embed",
+    "jit_zt_tr_bwd_logprob",
+    "jit__p74_identity_head_cotangent_partition",
+)
+
+
+def reverse_chunk_value(value: str | None) -> bool:
+  if value is None or value in ("", "0"):
+    return False
+  if value == "1":
+    return True
+  raise ValueError(
+      f"--p32-reverse-chunk must be empty, 0 or 1: {value!r}"
+  )
+
+
+def chunk_batch_value(value: str | None) -> int:
+  if value is None or value == "":
+    # tasks/v2_dispatch Phase 16: the adapter's default is the certified
+    # two-chunk batch (the GSM8K launcher never selects the layer-scan rung).
+    return 2
+  if value in ("0", "1"):
+    return 1
+  if not value.isdigit() or not 2 <= int(value) <= 64:
+    raise ValueError(
+        "--p32-chunk-batch must be empty, 0, 1 or an integer 2..64: "
+        f"{value!r}"
+    )
+  return int(value)
 EXPECTED_TPU_PLANES = {
     f"/device:TPU:{index}" for index in range(8)
 }
+
+
+# The reduce-once commit path renamed the scaled optimizer step: the loaned
+# accumulator's tail launches jit__precomputed_gradient_adopt_scaled_step
+# where the earlier path launched jit__precomputed_gradient_scaled_step.
+# Both are the one scaled step per update the census counts.
+SCALED_STEP_MODULES = (
+    "jit__precomputed_gradient_scaled_step",
+    "jit__precomputed_gradient_adopt_scaled_step",
+)
+
+
+def scaled_step_count(names: Mapping[str, int]) -> int:
+  return sum(names.get(name, 0) for name in SCALED_STEP_MODULES)
+
+
+def _tail_count(names: Mapping[str, int], name: str) -> int:
+  if name == "jit__precomputed_gradient_scaled_step":
+    return scaled_step_count(names)
+  return names.get(name, 0)
 
 
 def _base(name: str) -> str:
@@ -108,14 +180,18 @@ def p71_scan_mode(value: str | None) -> str:
   adapter returns '' for the historical per-layer rung; the census spells
   it 'off' so every census line names the inventory it asserted.
   """
-  if value is None or value in ("", "0", "off"):
+  if value is None or value == "":
+    # tasks/v2_dispatch Phase 16: the adapter's default is the certified
+    # forward rung (the GSM8K launcher never selects the layer-scan rung).
+    return "fwd_block"
+  if value in ("0", "off"):
     return "off"
-  if value in ("fwd", "bwd"):
+  if value in ("fwd", "bwd", "fwd_block"):
     return value
   if value == "full":
     raise ValueError(
         "CANON_P71_SCAN='full' is reserved for the unimplemented E3 "
-        "segment; only off/fwd/bwd exist in E2'"
+        "segment; only off/fwd/bwd/fwd_block exist"
     )
   raise ValueError(
       "CANON_P71_SCAN must be unset/0/off/fwd/bwd (full reserved), "
@@ -158,6 +234,8 @@ def validate_backward_family(
     block_layers: int = P71_BWD_BLOCK_LAYERS,
     geometry: str = DEFAULT_GEOMETRY,
     keep_tape: bool = False,
+    chunk_batch: int = 1,
+    reverse_chunk: bool = False,
 ) -> list[str]:
   """Returns fail-closed reasons for one mode's backward program inventory.
 
@@ -188,7 +266,32 @@ def validate_backward_family(
   blocks = _family(names, BWD_BLOCK)
   reasons = []
   observed_execs = None
-  if p71_scan == "bwd":
+  if reverse_chunk:
+    # The per-chunk reverse body is one program: the layer-depth families
+    # must be absent (seeing one is a silent fallback) and the chunk
+    # program must run once per chunk pass.
+    if layers:
+      reasons.append(f"reverse_chunk_unexpected_bwd_layer={_indices(layers)}")
+    if blocks:
+      reasons.append(f"reverse_chunk_unexpected_bwd_block={_indices(blocks)}")
+    if BWD_CHUNK not in names:
+      reasons.append(f"missing_backward={BWD_CHUNK}")
+    elif pinned_execs is not None:
+      if names[BWD_CHUNK] != pinned_execs:
+        reasons.append(f"bwd_chunk_execs={names[BWD_CHUNK]}!={pinned_execs}")
+    else:
+      observed_execs = names[BWD_CHUNK]
+      if not low <= observed_execs <= high:
+        reasons.append(
+            f"bwd_chunk_execs={observed_execs} outside={low}..{high}"
+        )
+  elif BWD_CHUNK in names:
+    reasons.append(
+        f"reverse_chunk=0_unexpected_backward_chunk={names[BWD_CHUNK]}"
+    )
+  if reverse_chunk:
+    pass
+  elif p71_scan == "bwd":
     expected = expected_block_indices(layer_count, block_layers)
     if layers:
       reasons.append(f"p71=bwd_unexpected_bwd_layer={_indices(layers)}")
@@ -251,6 +354,21 @@ def validate_backward_family(
   # CANON_P32_KEEP_TAPE=1 makes the forward phase keep the tape, so the
   # reverse never rebuilds it: the scanned tape program must be ABSENT, and
   # seeing it means the kept tape was not consumed (a silent fallback).
+  # fwd_block: the forward's per-layer programs collapse into one block
+  # program per chunk pass; the block must be absent on every other rung.
+  if p71_scan == "fwd_block":
+    # Under CANON_P32_CHUNK_BATCH=k the block runs inside the batched
+    # zt_tr_fwd_chunks program; only the bootstrap chunk of the first
+    # group ever launches it standalone, which the captured update may
+    # not contain.
+    if FWD_BLOCK not in names and chunk_batch <= 1:
+      reasons.append(f"missing_forward_block={FWD_BLOCK}")
+    if names.get(FWD_LAYER, 0):
+      reasons.append(
+          f"p71=fwd_block_unexpected_fwd_layer={names[FWD_LAYER]}"
+      )
+  elif FWD_BLOCK in names:
+    reasons.append(f"p71={p71_scan}_unexpected_forward_block={names[FWD_BLOCK]}")
   if keep_tape:
     if FWD_TAPE_SCAN in names:
       reasons.append(
@@ -285,6 +403,8 @@ def backward_family_text(names: Mapping[str, int]) -> str:
   layers = _family(names, BWD_LAYER)
   blocks = _family(names, BWD_BLOCK)
   parts = []
+  if BWD_CHUNK in names:
+    parts.append(f"chunk x{names[BWD_CHUNK]}")
   if layers:
     parts.append(f"layer[{_indices(layers)}]x{sum(layers.values())}")
   if blocks:
@@ -305,12 +425,19 @@ def validate_module_counts(
     geometry: str = DEFAULT_GEOMETRY,
     keep_tape: bool = False,
     reduce_once: bool = False,
+    chunk_batch: int = 1,
+    reverse_chunk: bool = False,
 ) -> list[str]:
   """Returns fail-closed reasons for one TensorCore TPU plane."""
   if geometry not in GEOMETRIES:
     raise ValueError(f"unknown geometry: {geometry!r}")
   groups = GEOMETRIES[geometry]["groups"]
   reasons = []
+  if chunk_batch > 1:
+    if FWD_CHUNKS not in names:
+      reasons.append(f"missing_forward_chunks={FWD_CHUNKS}")
+  elif FWD_CHUNKS in names:
+    reasons.append(f"chunk_batch=1_unexpected_forward_chunks={names[FWD_CHUNKS]}")
   if any(DECODE.search(name) for name in names):
     reasons.append("decode=present")
   if arm == "native":
@@ -322,9 +449,24 @@ def validate_module_counts(
     return reasons
   if arm != "zero-hp":
     raise ValueError(f"unknown arm: {arm}")
+  if reverse_chunk:
+    # The boundary pullbacks run inside zt_tr_bwd_chunk; only the report
+    # adjoint still launches on its own, and a standalone launch of any
+    # folded program means a chunk fell back to the per-program loop.
+    required = tuple(
+        pattern for pattern in ZERO_REQUIRED
+        if "adjoint" in pattern.pattern
+    )
+    reasons.extend(
+        f"reverse_chunk_unexpected_{name}={names[name]}"
+        for name in REVERSE_CHUNK_INSIDE
+        if names.get(name, 0)
+    )
+  else:
+    required = ZERO_REQUIRED
   reasons.extend(
       f"missing_backward={pattern.pattern}"
-      for pattern in ZERO_REQUIRED
+      for pattern in required
       if not any(pattern.search(name) for name in names)
   )
   reasons.extend(
@@ -335,6 +477,8 @@ def validate_module_counts(
           block_layers=block_layers,
           geometry=geometry,
           keep_tape=keep_tape,
+          chunk_batch=chunk_batch,
+          reverse_chunk=reverse_chunk,
       )
   )
   # CANON_DP_REDUCE_ONCE=1 streams one reduced contribution per update, so
@@ -344,9 +488,9 @@ def validate_module_counts(
       "jit__precomputed_gradient_commit": 1,
   }
   reasons.extend(
-      f"{name}={names.get(name, 0)}!={expected}"
+      f"{name}={_tail_count(names, name)}!={expected}"
       for name, expected in tail_exact.items()
-      if names.get(name, 0) != expected
+      if _tail_count(names, name) != expected
   )
   return reasons
 
@@ -400,6 +544,20 @@ def main() -> None:
           "group"
       ),
   )
+  parser.add_argument(
+      "--p32-chunk-batch",
+      default="",
+      help="the CANON_P32_CHUNK_BATCH value the run was launched with",
+  )
+  parser.add_argument(
+      "--p32-reverse-chunk",
+      default="",
+      help=(
+          "1 when the adapter source under test runs each reverse chunk as "
+          "one zt_tr_bwd_chunk program (the launcher reads it from the "
+          "source); the folded programs must then be absent"
+      ),
+  )
   parser.add_argument("--p71-layers", type=int, default=ZERO_LAYER_COUNT)
   parser.add_argument(
       "--p71-block-layers", type=int, default=P71_BWD_BLOCK_LAYERS
@@ -417,6 +575,8 @@ def main() -> None:
         f"--dp-reduce-once must be empty, 0 or 1: {args.dp_reduce_once!r}"
     )
   reduce_once = args.dp_reduce_once == "1"
+  chunk_batch = chunk_batch_value(args.p32_chunk_batch)
+  reverse_chunk = reverse_chunk_value(args.p32_reverse_chunk)
   # Reject an impossible geometry before reading a 1 GB xplane.
   expected_block_indices(args.p71_layers, args.p71_block_layers)
 
@@ -460,6 +620,8 @@ def main() -> None:
         geometry=args.geometry,
         keep_tape=keep_tape,
         reduce_once=reduce_once,
+        chunk_batch=chunk_batch,
+        reverse_chunk=reverse_chunk,
     )
     if args.arm == "native":
       # The stock learner runs one monolithic forward/backward train_step
@@ -482,7 +644,7 @@ def main() -> None:
           + " optimizer_tail="
           + ",".join(
               f"{name.removeprefix('jit__precomputed_gradient_')}="
-              f"{names.get(name, 0)}/{expected}"
+              f"{_tail_count(names, name)}/{expected}"
               for name, expected in tail_exact.items()
           )
       )

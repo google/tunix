@@ -117,6 +117,8 @@ def _zero_module_counts(p71_scan: str) -> dict[str, int]:
     )
   if p71_scan in ("fwd", "bwd"):
     counts[MODULE_CENSUS.FWD_TAPE_SCAN] = MODULE_CENSUS.ZERO_BACKWARD_EXECS
+  if p71_scan == "fwd_block":
+    counts[MODULE_CENSUS.FWD_BLOCK] = MODULE_CENSUS.ZERO_BACKWARD_EXECS
   return counts
 
 
@@ -250,6 +252,204 @@ def _p74_fixture(root: Path) -> None:
 
 class ContractTest(unittest.TestCase):
 
+  def test_module_census_reverse_chunk_inventory(self):
+    """Phase 7 (tasks/v2_dispatch): with the reverse chunk program the
+    per-layer family and the folded boundary pullbacks must be absent and
+    zt_tr_bwd_chunk must run once per chunk pass; without it the chunk
+    program must be absent."""
+    self.assertFalse(MODULE_CENSUS.reverse_chunk_value(""))
+    self.assertTrue(MODULE_CENSUS.reverse_chunk_value("1"))
+    with self.assertRaises(ValueError):
+      MODULE_CENSUS.reverse_chunk_value("yes")
+    per_layer = _zero_module_counts("off")
+    chunked = {
+        name: count for name, count in per_layer.items()
+        if name not in MODULE_CENSUS.REVERSE_CHUNK_INSIDE
+        and not name.startswith("jit_zt_tr_dp_parallel_bwd_layer")
+    }
+    chunked[MODULE_CENSUS.BWD_CHUNK] = MODULE_CENSUS.ZERO_BACKWARD_EXECS
+    self.assertEqual(
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", chunked, p71_scan="off", reverse_chunk=True
+        ),
+        [],
+    )
+    self.assertIn("chunk x32", MODULE_CENSUS.backward_family_text(chunked))
+    # A chunk that fell back to the per-program loop shows up as both
+    # inventories: red.
+    fallback = dict(chunked)
+    fallback["jit_zt_tr_dp_parallel_bwd_layer_27"] = 28
+    fallback["jit_zt_tr_dp_parallel_bwd_head"] = 1
+    reasons = MODULE_CENSUS.validate_module_counts(
+        "zero-hp", fallback, p71_scan="off", reverse_chunk=True
+    )
+    self.assertIn("reverse_chunk_unexpected_bwd_layer=27", reasons)
+    self.assertIn(
+        "reverse_chunk_unexpected_jit_zt_tr_dp_parallel_bwd_head=1", reasons
+    )
+    # The chunk program count is pinned on dp4 and bounded elsewhere.
+    wrong = dict(chunked, **{MODULE_CENSUS.BWD_CHUNK: 31})
+    self.assertIn(
+        "bwd_chunk_execs=31!=32",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", wrong, p71_scan="off", reverse_chunk=True
+        ),
+    )
+    self.assertNotIn(
+        "bwd_chunk_execs=64 outside=32..160",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", dict(chunked, **{MODULE_CENSUS.BWD_CHUNK: 64}),
+            p71_scan="off", geometry="dp2-tp2", reverse_chunk=True,
+        ),
+    )
+    # Without the program in the source the chunk module must be absent.
+    self.assertIn(
+        "reverse_chunk=0_unexpected_backward_chunk=32",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", dict(per_layer, **{MODULE_CENSUS.BWD_CHUNK: 32}),
+            p71_scan="off",
+        ),
+    )
+    self.assertIn(
+        f"missing_backward={MODULE_CENSUS.BWD_CHUNK}",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", per_layer, p71_scan="off", reverse_chunk=True
+        ),
+    )
+
+  def test_p74_gap_census_counts_reverse_chunk_programs(self):
+    """With the reverse chunk program the partition is in-graph: the census
+    counts one chunk program per expected window and reds a standalone head."""
+    modules = [
+        P74_GAP_CENSUS.Event(f"{P74_GAP_CENSUS.CHUNK_MODULE}(0)", i * 1_000_000, 500_000, {})
+        for i in range(64)
+    ]
+    receipt = P74_GAP_CENSUS.analyze(modules, [], reverse_chunk=True)
+    self.assertEqual(receipt["status"], "PASS", receipt["reasons"])
+    self.assertEqual(receipt["identity_windows"], 64)
+    self.assertTrue(receipt["reverse_chunk"])
+    short = P74_GAP_CENSUS.analyze(modules[:63], [], reverse_chunk=True)
+    self.assertIn("reverse_chunk_programs=63 expected=64", short["reasons"])
+    with_head = modules + [
+        P74_GAP_CENSUS.Event(P74_GAP_CENSUS.HEAD_MODULE, 99_000_000, 1_000, {})
+    ]
+    self.assertIn(
+        "reverse_chunk_unexpected_head_module=1",
+        P74_GAP_CENSUS.analyze(with_head, [], reverse_chunk=True)["reasons"],
+    )
+    # The old window census cannot see any head: fail-closed, not silent.
+    self.assertEqual(P74_GAP_CENSUS.analyze(modules, [])["status"], "FAIL")
+
+  def test_module_census_fwd_block_may_be_inside_the_batch_program(self):
+    counts = _zero_module_counts("fwd_block")
+    counts.pop(MODULE_CENSUS.FWD_BLOCK, None)
+    counts[MODULE_CENSUS.FWD_CHUNKS] = 32
+    self.assertNotIn(
+        f"missing_forward_block={MODULE_CENSUS.FWD_BLOCK}",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", counts, p71_scan="fwd_block", chunk_batch=2
+        ),
+    )
+    self.assertIn(
+        f"missing_forward_block={MODULE_CENSUS.FWD_BLOCK}",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", dict(counts, **{MODULE_CENSUS.FWD_CHUNKS: 0}), p71_scan="fwd_block"
+        ),
+    )
+
+  def test_module_census_chunk_batch_inventory(self):
+    """CANON_P32_CHUNK_BATCH=k: the batched forward program must be present,
+    and it must be absent when the selector is off."""
+    self.assertEqual(MODULE_CENSUS.chunk_batch_value(""), 2)
+    self.assertEqual(MODULE_CENSUS.chunk_batch_value("1"), 1)
+    self.assertEqual(MODULE_CENSUS.chunk_batch_value("0"), 1)
+    self.assertEqual(MODULE_CENSUS.chunk_batch_value("8"), 8)
+    with self.assertRaises(ValueError):
+      MODULE_CENSUS.chunk_batch_value("65")
+    counts = _zero_module_counts("off")
+    self.assertIn(
+        f"missing_forward_chunks={MODULE_CENSUS.FWD_CHUNKS}",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", counts, p71_scan="off", chunk_batch=2
+        ),
+    )
+    batched = dict(counts)
+    batched[MODULE_CENSUS.FWD_CHUNKS] = 32
+    self.assertNotIn(
+        f"missing_forward_chunks={MODULE_CENSUS.FWD_CHUNKS}",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", batched, p71_scan="off", chunk_batch=2
+        ),
+    )
+    self.assertIn(
+        "chunk_batch=1_unexpected_forward_chunks=32",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", batched, p71_scan="off"
+        ),
+    )
+
+  def test_module_census_fwd_block_inventory(self):
+    """fwd_block: one zt_tr_fwd_block per chunk pass, no zt_tr_fwd_layer;
+    the block is unexpected on every other rung."""
+    self.assertEqual(MODULE_CENSUS.p71_scan_mode("fwd_block"), "fwd_block")
+    layers = MODULE_CENSUS.ZERO_LAYER_COUNT
+    groups = MODULE_CENSUS.GEOMETRIES["dp2-tp2"]["groups"]
+    counts = {
+        f"jit_zt_tr_dp_parallel_bwd_layer_{layers - 1}": layers * groups * 2,
+        "jit_zt_tr_dp_parallel_bwd_head": groups * 2,
+        "jit_zt_tr_dp_parallel_bwd_norm": groups * 2,
+        "jit_zt_tr_dp_parallel_bwd_embed": groups * 2,
+        "jit_zt_tr_dp_parallel_bwd_adjoint_accum_buckets": groups,
+        "jit__precomputed_gradient_adopt_scaled_step": 1,
+        "jit__precomputed_gradient_commit": 1,
+        MODULE_CENSUS.FWD_BLOCK: groups * 2,
+    }
+    reasons = MODULE_CENSUS.validate_module_counts(
+        "zero-hp", counts, p71_scan="fwd_block", geometry="dp2-tp2",
+        reduce_once=True, keep_tape=True,
+    )
+    self.assertFalse([r for r in reasons if "forward" in r or "fwd" in r], reasons)
+    with_layer = dict(counts)
+    with_layer[MODULE_CENSUS.FWD_LAYER] = 3
+    self.assertIn(
+        "p71=fwd_block_unexpected_fwd_layer=3",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", with_layer, p71_scan="fwd_block", geometry="dp2-tp2",
+            reduce_once=True, keep_tape=True,
+        ),
+    )
+    self.assertIn(
+        f"p71=off_unexpected_forward_block={groups * 2}",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", counts, p71_scan="off", geometry="dp2-tp2",
+            reduce_once=True, keep_tape=True,
+        ),
+    )
+
+  def test_p74_gap_census_opens_the_window_at_the_folded_rows_pullback(self):
+    """After the rows glue fold, zt_tr_bwd_logprob emits dlogits itself and
+    is the seed; the identity contract (only the partition program between
+    seed and head) is unchanged."""
+    modules = []
+    for group in range(64):
+      base = group * 1_000_000
+      modules.append(P74_GAP_CENSUS.Event(
+          "jit_zt_tr_fwd_head(0)", base - 40_000, 1_000, {}
+      ))
+      modules.append(P74_GAP_CENSUS.Event(
+          "jit_zt_tr_bwd_logprob(0)", base, 1_000, {}
+      ))
+      modules.append(P74_GAP_CENSUS.Event(
+          P74_GAP_CENSUS.PARTITION_MODULE, base + 20_000, 20_000, {}
+      ))
+      modules.append(P74_GAP_CENSUS.Event(
+          P74_GAP_CENSUS.HEAD_MODULE, base + 64_000, 1_000, {}
+      ))
+    receipt = P74_GAP_CENSUS.analyze(modules, [])
+    self.assertEqual(receipt["identity_windows"], 64, receipt["reasons"])
+    self.assertEqual(receipt["status"], "PASS", receipt["reasons"])
+    self.assertIn("jit_zt_tr_bwd_logprob", P74_GAP_CENSUS.SEED_MODULES)
+
   def test_p74_gap_census_accepts_device_bridge_and_rejects_old_roundtrip(self):
     fast_modules = []
     slow_modules = []
@@ -300,6 +500,52 @@ class ContractTest(unittest.TestCase):
         any(reason.startswith("mean_gap_ms=") for reason in red["reasons"]),
         red,
     )
+
+  def test_p74_gap_receipt_reverse_chunk_variant_is_read_by_the_classifier(self):
+    """Phase 15 (tasks/v2_dispatch): the census's reverse_chunk receipt
+    (zero gap by construction, in-graph partition, no intervening modules)
+    passes the classifier only with its flag; the same fields without the
+    flag are the old contract's reds, and a reverse_chunk receipt that
+    still names the standalone partition module is red."""
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory) / "zero-dp2"
+      _fixture(root, "zero-hp", geometry="dp2-tp2")
+      _p74_fixture(root)
+      receipt_path = root / "train/p74_gap_receipt.json"
+      receipt = json.loads(receipt_path.read_text())
+      receipt["reverse_chunk"] = True
+      receipt["acceptance"]["max_mean_gap_ms"] = 0.0
+      receipt["acceptance"]["partition_module_per_window"] = (
+          "in-graph (zt_tr_bwd_chunk)"
+      )
+      receipt["gap"] = {
+          "windows": 64, "total_ms": 0.0, "mean_ms": 0.0, "max_ms": 0.0,
+          "min_ms": 0.0,
+      }
+      receipt["intervening_modules"] = {}
+      receipt_path.write_text(json.dumps(receipt) + "\n")
+      reasons = []
+      ARM_CLASSIFIER._p74_receipt(receipt_path, reasons)  # pylint: disable=protected-access
+      self.assertEqual(reasons, [])
+      without_flag = dict(receipt)
+      without_flag.pop("reverse_chunk")
+      receipt_path.write_text(json.dumps(without_flag) + "\n")
+      reasons = []
+      ARM_CLASSIFIER._p74_receipt(receipt_path, reasons)  # pylint: disable=protected-access
+      self.assertIn("p74_gap_receipt.acceptance.max_mean_gap_ms=0.0", reasons)
+      self.assertIn("p74_gap_receipt.intervening_modules={}", reasons)
+      stale = dict(receipt)
+      stale["acceptance"] = dict(
+          receipt["acceptance"],
+          partition_module_per_window=P74_GAP_CENSUS.PARTITION_MODULE,
+      )
+      receipt_path.write_text(json.dumps(stale) + "\n")
+      reasons = []
+      ARM_CLASSIFIER._p74_receipt(receipt_path, reasons)  # pylint: disable=protected-access
+      self.assertTrue(
+          any("partition_module_per_window" in reason for reason in reasons),
+          reasons,
+      )
 
   def test_p74_gap_receipt_is_required_only_for_zero_dp2(self):
     keys = dict(
@@ -558,6 +804,19 @@ fi
             "zero-hp", reduce_once, p71_scan="off", reduce_once=True
         ),
     )
+    # The loaned-accumulator commit path spells the same one scaled step
+    # jit__precomputed_gradient_adopt_scaled_step; the census counts both
+    # spellings as the one scaled step per update.
+    adopted = dict(counts)
+    adopted.pop("jit__precomputed_gradient_scaled_step", None)
+    adopted["jit__precomputed_gradient_adopt_scaled_step"] = 1
+    self.assertNotIn(
+        "jit__precomputed_gradient_scaled_step=0!=1",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", adopted, p71_scan="off", reduce_once=True
+        ),
+    )
+    self.assertEqual(MODULE_CENSUS.scaled_step_count(adopted), 1)
     self.assertIn(
         "jit__precomputed_gradient_scaled_step=1!=16",
         MODULE_CENSUS.validate_module_counts(
@@ -592,8 +851,9 @@ fi
 
   def test_module_census_backward_inventory_is_p71_mode_aware(self):
     """The census must red on the wrong program family in BOTH directions."""
-    self.assertEqual(MODULE_CENSUS.p71_scan_mode(None), "off")
-    for spelling in ("", "0", "off"):
+    self.assertEqual(MODULE_CENSUS.p71_scan_mode(None), "fwd_block")
+    self.assertEqual(MODULE_CENSUS.p71_scan_mode(""), "fwd_block")
+    for spelling in ("0", "off"):
       self.assertEqual(MODULE_CENSUS.p71_scan_mode(spelling), "off")
     self.assertEqual(MODULE_CENSUS.p71_scan_mode("fwd"), "fwd")
     self.assertEqual(MODULE_CENSUS.p71_scan_mode("bwd"), "bwd")
@@ -712,6 +972,23 @@ fi
       GSM8K_XPROF.arm(
           {**_common_env("zero-hp"), "CANON_GSM8K_VANILLA": "1"}
       )
+    # The Python tracer admits exactly 0 (certification) and 1 (an
+    # attribution capture of the host's eager launches); anything else
+    # refuses.
+    self.assertEqual(
+        GSM8K_XPROF.arm(
+            {**_common_env("zero-hp"), "CANON_XPROF_PYTHON_TRACER": "1"}
+        ),
+        "zero-hp",
+    )
+    for value in ("2", "", None):
+      values = {**_common_env("zero-hp")}
+      if value is None:
+        values.pop("CANON_XPROF_PYTHON_TRACER")
+      else:
+        values["CANON_XPROF_PYTHON_TRACER"] = value
+      with self.assertRaises(ValueError):
+        GSM8K_XPROF.arm(values)
 
   def test_arm_contract_is_a_signed_two_geometry_contract(self):
     """dp4 binds the dp4 workload, dp2 the dp2 workload; the rest refuses."""
@@ -1199,6 +1476,8 @@ fi
         )
       if p71_scan in ("fwd", "bwd"):
         counts[MODULE_CENSUS.FWD_TAPE_SCAN] = execs
+      if p71_scan == "fwd_block":
+        counts[MODULE_CENSUS.FWD_BLOCK] = execs
       return counts
 
     # The dp2 execution count is calibration-pending: any internally

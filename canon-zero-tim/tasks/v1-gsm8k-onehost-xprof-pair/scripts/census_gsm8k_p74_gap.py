@@ -45,7 +45,20 @@ def expected_windows_from_raw_log(raw_log, *, groups, sequence_bucket):
   )
 MAX_MEAN_GAP_MS = 70.0
 SEED_MODULE = "jit_convert_element_type"
+# The window opens when the head cotangent is ready.  Before the rows glue
+# was folded into the rows programs that was the eager cast of dlogits
+# (jit_convert_element_type); since then the zt_tr_bwd_logprob program
+# emits dlogits in the head dtype itself.  The nearest preceding seed of
+# either spelling opens the window; the identity contract (only the P74
+# partition program between seed and head) is unchanged.
+SEED_MODULES = ("jit_zt_tr_bwd_logprob", SEED_MODULE)
 HEAD_MODULE = "jit_zt_tr_dp_parallel_bwd_head"
+# tasks/v2_dispatch Phase 7: with the reverse chunk program the seed, the
+# partition and the head pullback are ops of one zt_tr_bwd_chunk program
+# per chunk pass -- no host boundary exists between them, so the identity
+# contract holds by construction and the census counts chunk programs
+# instead of seed-to-head windows (and reds a standalone head launch).
+CHUNK_MODULE = "jit_zt_tr_bwd_chunk"
 PARTITION_MODULE = "jit__p74_identity_head_cotangent_partition"
 VICTIM_KINDS = (
     "slow_np.asarray(jax.Array)",
@@ -101,7 +114,7 @@ def find_windows(modules: Sequence[Event]) -> list[Window]:
     seed_index = None
     for candidate in range(head_index - 1, max(-1, head_index - 13), -1):
       candidate_name = _base(ordered[candidate].name)
-      if candidate_name == SEED_MODULE:
+      if candidate_name in SEED_MODULES:
         seed_index = candidate
         break
       if "dp_parallel_bwd" in candidate_name:
@@ -147,8 +160,13 @@ def analyze(
     *,
     expected_windows: int = EXPECTED_WINDOWS,
     max_mean_gap_ms: float = MAX_MEAN_GAP_MS,
+    reverse_chunk: bool = False,
 ) -> dict:
   """Builds the quantitative P74 receipt from synthetic or real events."""
+  if reverse_chunk:
+    return _analyze_reverse_chunk(
+        modules, host_events, expected_windows=expected_windows
+    )
   windows = find_windows(modules)
   gaps = [window.gap_ms for window in windows]
   reasons = []
@@ -210,6 +228,46 @@ def analyze(
       "victim_overlap": {kind: overlap[kind] for kind in VICTIM_KINDS},
       "victim_global": {kind: global_victim[kind] for kind in VICTIM_KINDS},
       "windows_with_any_victim": len(victim_windows),
+      "reasons": reasons,
+  }
+
+
+def _analyze_reverse_chunk(modules, host_events, *, expected_windows):
+  chunks = sum(_base(event.name) == CHUNK_MODULE for event in modules)
+  heads = sum(HEAD_MODULE in _base(event.name) for event in modules)
+  reasons = []
+  if chunks != expected_windows:
+    reasons.append(f"reverse_chunk_programs={chunks} expected={expected_windows}")
+  if heads:
+    reasons.append(f"reverse_chunk_unexpected_head_module={heads}")
+  global_victim = Counter()
+  for event in host_events:
+    kind = victim_kind(event)
+    if kind is not None:
+      global_victim[kind] += 1
+  return {
+      "schema": SCHEMA,
+      "status": "PASS" if not reasons else "FAIL",
+      "geometry": GEOMETRY,
+      "acceptance": {
+          "expected_windows": expected_windows,
+          "max_mean_gap_ms": 0.0,
+          "exact_victim_overlap_events": 0,
+          "partition_module_per_window": "in-graph (zt_tr_bwd_chunk)",
+      },
+      "gap": {
+          "windows": chunks,
+          "total_ms": 0.0,
+          "mean_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0,
+      },
+      "identity_windows": chunks,
+      "intervening_modules": {},
+      "victim_overlap": {kind: 0 for kind in VICTIM_KINDS},
+      "victim_global": {kind: global_victim[kind] for kind in VICTIM_KINDS},
+      "windows_with_any_victim": 0,
+      "reverse_chunk": True,
       "reasons": reasons,
   }
 
@@ -295,6 +353,10 @@ def main() -> int:
       "--geometry", default=GEOMETRY,
       choices=(GEOMETRY,) + tuple(sorted(LONG_GEOMETRIES)),
   )
+  parser.add_argument(
+      "--p32-reverse-chunk", default="", choices=("", "0", "1"),
+      help="1 when the adapter under test runs each reverse chunk as one program",
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(args.output)
@@ -308,7 +370,10 @@ def main() -> int:
       )
     xplane = _resolve_xplane(args.run_root)
     modules, host_events = _read_xplane(xplane)
-    receipt = analyze(modules, host_events, expected_windows=expected_windows)
+    receipt = analyze(
+        modules, host_events, expected_windows=expected_windows,
+        reverse_chunk=args.p32_reverse_chunk == "1",
+    )
     receipt["xplane"] = str(xplane.relative_to(args.run_root))
     receipt["reverse_wall"] = parse_reverse_wall(
         args.run_root / "train/raw.log"
