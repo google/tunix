@@ -897,6 +897,27 @@ No re-pin or performance promotion. This is a scoped frozen-capsule control,
 not fresh-rollout, full-gradient-leaf, optimizer, other-geometry or target proof.
 Evidence paths and hashes are in EVIDENCE.md, entry `v2int-e1-recovery-r2`.
 
+## P57 stock-fast P78 off contract (v2_integrate F.1 baseline repair)
+
+The P57 stock-fast calibration/train/eval profile explicitly pins
+`CANON_P78_SEGMENTED_ACTOR_LOGPS=0`, matching the existing runtime validator.
+The actor selector is numerical: missing/empty/0 uses the historical scorer
+and1 selects the experimental scorer. The stock contract deliberately requires
+literal0 as an explicit off receipt; this does not promote or retire P78.
+The profile owns the off value,00_env.sh validates it before env.sh is saved,
+and the reloaded runtime and calibration classifier attest the same switch.
+The calibration off inventory is26, not25. Historical receipts lacking P78
+are insufficient for the current contract and are not silently upgraded.
+
+Scope is P57 stock-fast only; GSM8K Native, P58 Native/Zero, canonical P45/M15
+and one-host P78 opt-in policy are unchanged. Lifecycle/sunset remain in the
+P78 registry row. Validation requires real profile/env reload/runtime equality,
+post-profile missing/empty/on/invalid negatives, old-attestation rejection
+and neighboring-arm regressions. Arithmetic/fp64 re-pin = exempt (no actor
+implementation changed; restore the already-required off delivery);
+Zero-TIM certification = not claimed for stock Native; performance = exempt,
+no speedup claim. Target runtime remains NOT RUN.
+
 ## Core training selector owner (v2_integrate F.1a, 2026-09-08)
 
 `tunix/rl/canonical_training_config.py` owns lazy parsing for

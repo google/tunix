@@ -52,6 +52,18 @@ and fixed at 300 updates. It does not change the Native/no-IS or Native/IS
 comparison arms described below. Target performance and full-horizon results
 remain `TARGET NOT RUN` for this rollout.
 
+## Stock-fast P78 off-contract repair (local, not pushed)
+
+For calibration and Native train/eval, the TIM profile now explicitly sets
+`CANON_P78_SEGMENTED_ACTOR_LOGPS=0`. Check the resolved env.sh and runtime
+attestation, not raw YAML alone. Calibration's shell receipt is
+`[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=26`; the classifier now
+requires the same26-switch list as the runtime validator. A legacy receipt
+without the P78 check cannot establish the current contract; keep its original
+verdict and artifacts. This is off-contract delivery repair, not target
+training certification or P78 optimization admission. One-host/canonical
+arms retain their existing selection. No target launch or push is implied.
+
 ## START HERE — P57.1c Perf v2 step-boundary repair passed one-host G4
 
 This section supersedes the Wave 15 incident queue below.

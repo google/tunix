@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -224,6 +225,7 @@ class P57RendererTest(unittest.TestCase):
               **{k: v for k, v in env.items() if v is not None},
               "CANON_PKG": str(ROOT / "canon-zero-tim"),
               "CANON_STATE": str(state),
+              "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1",
               "INJECTED_HF_TOKEN": "test-token",
               "INJECTED_WANDB_API_KEY": "test-key",
           },
@@ -233,7 +235,7 @@ class P57RendererTest(unittest.TestCase):
       )
       self.assertEqual(result.returncode, 0, result.stderr)
       self.assertIn(
-          "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25",
+          "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=26",
           result.stdout,
       )
       resolved = (state / "env.sh").read_text(encoding="utf-8")
@@ -241,6 +243,74 @@ class P57RendererTest(unittest.TestCase):
       self.assertNotIn("CANON_PALLAS_ALL_PROJ=", resolved)
       self.assertIn("export CANON_ENGINE_MODULE_C=0", resolved)
       self.assertIn("export CANON_P38_FIXED_LM_HEAD=0", resolved)
+      self.assertIn("export CANON_P78_SEGMENTED_ACTOR_LOGPS=0", resolved)
+      # The child profile must also override a stale parent after env.sh
+      # reload, and satisfy the real Python validator, not only shell text.
+      reader = (
+          "import json,os; from tunix.rl import dp_workloads as d; "
+          "w=d.get_workload(os.environ['CANON_P32_WORKLOAD']); "
+          "a=d.validate_p57_stock_fast_environment(w); "
+          "print(json.dumps({'p78':os.environ['CANON_P78_SEGMENTED_ACTOR_LOGPS'],"
+          "'zero_count':len(a['zero_switches'])}))"
+      )
+      reloaded = subprocess.run(
+          ["bash", "-euc", 'source "$1"; exec "$2" -c "$3"',
+           "reload", str(state / "env.sh"), sys.executable, reader],
+          cwd=ROOT,
+          env={
+              "PATH": os.defpath,
+              "PYTHONPATH": str(ROOT),
+              "JAX_PLATFORMS": "cpu",
+              "PYTHONDONTWRITEBYTECODE": "1",
+              "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1",
+          },
+          text=True, capture_output=True, check=False,
+      )
+      self.assertEqual(reloaded.returncode, 0, reloaded.stderr)
+      self.assertEqual(
+          json.loads(reloaded.stdout), {"p78": "0", "zero_count": 26}
+      )
+
+  def test_stock_p78_post_profile_tampering_is_rejected(self):
+    step = (CLUSTER / "steps/00_env.sh").read_text(encoding="utf-8")
+    boundary = 'source "$PROFILE_ABS"'
+    self.assertEqual(step.count(boundary), 1)
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      path = calibration.render_all(
+          base_path=BASE, output_dir=root / "rendered",
+          source_commit="a" * 40, run_id="p57p78negative",
+          campaign_tag="p57-calibration",
+      )[0]
+      env = _env(yaml.safe_load(path.read_text()))
+      for index, mutation in enumerate((
+          "unset CANON_P78_SEGMENTED_ACTOR_LOGPS",
+          "export CANON_P78_SEGMENTED_ACTOR_LOGPS=''",
+          "export CANON_P78_SEGMENTED_ACTOR_LOGPS=1",
+          "export CANON_P78_SEGMENTED_ACTOR_LOGPS=invalid",
+      )):
+        with self.subTest(mutation=mutation):
+          state = root / f"state{index}"
+          state.mkdir()
+          result = subprocess.run(
+              ["bash", "-s"],
+              input=step.replace(boundary, boundary + "\n" + mutation, 1),
+              cwd=ROOT / "canon-zero-tim",
+              env={
+                  "PATH": os.defpath,
+                  **{k: v for k, v in env.items() if v is not None},
+                  "CANON_PKG": str(ROOT / "canon-zero-tim"),
+                  "CANON_STATE": str(state),
+                  "INJECTED_HF_TOKEN": "test-token",
+                  "INJECTED_WANDB_API_KEY": "test-key",
+              },
+              text=True, capture_output=True, check=False,
+          )
+          self.assertNotEqual(result.returncode, 0)
+          self.assertIn(
+              "P57 stock-fast requires CANON_P78_SEGMENTED_ACTOR_LOGPS=0",
+              result.stderr,
+          )
 
   def test_calibration_refuses_overwrite_and_bad_tag(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -598,6 +668,9 @@ class P57RendererTest(unittest.TestCase):
               ):
                 self.assertIn(receipt, resolved)
             if regime == "stock-fast":
+              self.assertIn(
+                  "export CANON_P78_SEGMENTED_ACTOR_LOGPS=0", resolved
+              )
               self.assertIn(
                   "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train",
                   preflight.stdout,

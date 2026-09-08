@@ -118,6 +118,9 @@ class P57StockFastContractTest(unittest.TestCase):
     for name, value in (
         ("CANON_FIXED_AR", "1"),
         ("CANON_ENGINE_MODULE_C", "1"),
+        ("CANON_P78_SEGMENTED_ACTOR_LOGPS", "1"),
+        ("CANON_P78_SEGMENTED_ACTOR_LOGPS", ""),
+        ("CANON_P78_SEGMENTED_ACTOR_LOGPS", "invalid"),
         ("XLA_FLAGS", "--xla_allow_excess_precision=false"),
     ):
       with self.subTest(name=name):
@@ -125,6 +128,12 @@ class P57StockFastContractTest(unittest.TestCase):
           dp_workloads.validate_p57_stock_fast_environment(
               workload, {**values, name: value}
           )
+
+  def test_calibration_requires_an_explicit_p78_off_receipt(self):
+    workload, values = self._environment()
+    values.pop("CANON_P78_SEGMENTED_ACTOR_LOGPS")
+    with self.assertRaisesRegex(ValueError, "CANON_P78_SEGMENTED_ACTOR_LOGPS"):
+      dp_workloads.validate_p57_stock_fast_environment(workload, values)
 
   def test_stock_train_and_eval_bundles_are_accepted(self):
     workload, base = self._environment()
@@ -158,6 +167,20 @@ class P57StockFastContractTest(unittest.TestCase):
     )
     self.assertEqual(train_attestation["arm"], "mismatch")
     self.assertEqual(eval_attestation["arm"], "mismatch")
+    for validator, values in (
+        (dp_workloads.validate_p57_stock_train_environment, train),
+        (dp_workloads.validate_p57_stock_eval_environment, eval_values),
+    ):
+      for value in (None, "", "1", "invalid"):
+        with self.subTest(validator=validator.__name__, p78=value):
+          bad = dict(values)
+          bad.pop("CANON_P78_SEGMENTED_ACTOR_LOGPS")
+          if value is not None:
+            bad["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = value
+          with self.assertRaisesRegex(
+              ValueError, "CANON_P78_SEGMENTED_ACTOR_LOGPS"
+          ):
+            validator(workload, bad)
     self.assertIn(
         "CANON_PROMPT_PROCESSED_LOGPROBS", train_attestation["one_switches"]
     )

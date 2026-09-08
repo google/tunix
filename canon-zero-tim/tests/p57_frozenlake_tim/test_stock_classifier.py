@@ -178,6 +178,21 @@ class P57StockClassifierTest(unittest.TestCase):
         classifier.classify(self._write(receipt))["verdict"], "FAIL"
     )
 
+  def test_legacy_receipt_without_p78_check_is_not_upgraded(self):
+    receipt = _receipt()
+    receipt["zero_tim_off_attestation"] = {
+        **classifier._ZERO_TIM_OFF_ATTESTATION,
+        "zero_switches": [
+            name for name in classifier._ZERO_SWITCHES
+            if name != "CANON_P78_SEGMENTED_ACTOR_LOGPS"
+        ],
+    }
+    result = classifier.classify(self._write(receipt))
+    self.assertEqual(result["verdict"], "FAIL")
+    self.assertTrue(any(
+        "zero_tim_off_attestation" in reason for reason in result["reasons"]
+    ))
+
   def test_context_cap_excess_makes_recipe_ineligible(self):
     receipt = _receipt()
     receipt["results"]["m15"]["records"][0]["context_tokens"] = 13000

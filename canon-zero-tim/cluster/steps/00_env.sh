@@ -1176,6 +1176,13 @@ if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ] || \
     echo "[env] P58 native requires its independent stock prompt observer" >&2
     fail=1
   fi
+  # P57 runtime attests this switch independently of the shared Native set.
+  # Do not widen P58/GSM8K's resolved-environment contract here.
+  if [ "$P57_STOCK_FAST" = "1" ] && \
+     [ "${CANON_P78_SEGMENTED_ACTOR_LOGPS:-}" != "0" ]; then
+    echo "[env] P57 stock-fast requires CANON_P78_SEGMENTED_ACTOR_LOGPS=0" >&2
+    fail=1
+  fi
   if [ "$P57_STOCK_FAST" = "1" ] && \
      [ "${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-0}" != "0" ]; then
     echo "[env] P57 stock-fast forbids the P58 stock prompt observer" >&2
@@ -3582,7 +3589,7 @@ if [ "$P57_STOCK_FAST" = "1" ]; then
   elif [ "$P57_STOCK_EVAL" = "1" ]; then
     echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off"
   else
-    echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25"
+  echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=26"
   fi
 fi
 if [ "$GSM8K_NATIVE" = "1" ]; then
