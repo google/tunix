@@ -25,6 +25,7 @@ EXPECTED_COUNTS = {
     "forward_group": 16,
     "loss_pullback": 1,
     "group_loss_pullback": 0,
+    "staged_accumulate": 0,
     "reverse_group": 16,
     "replay_forward": 16,
     "model_backward": 16,
@@ -41,6 +42,7 @@ COMPILER_EVENTS = (
 GROUP_NAMES = (
     "forward_group",
     "group_loss_pullback",
+    "staged_accumulate",
     "reverse_group",
     "replay_forward",
     "model_backward",
@@ -121,6 +123,7 @@ def validate_hierarchy(
     require_step_marker: bool = True,
     keep_tape: bool = False,
     stream_tape: bool = False,
+    reduce_once: bool = False,
 ) -> list[str]:
   """Pure interval/count validator used by real and synthetic censuses.
 
@@ -139,6 +142,13 @@ def validate_hierarchy(
   before ``report_adjoint[g]`` opens (the pipelined two-tape window); and
   the single batch ``loss_pullback`` (the end-of-update bitwise self-check)
   runs after the last reverse and before the optimizer commit.
+
+  With ``reduce_once`` (CANON_DP_REDUCE_ONCE=1) every group owns one
+  ``staged_accumulate`` inside its ``reverse_group`` instead of a
+  ``fixed_dp_reduce`` and a ``gradient_accumulate``; exactly one
+  ``fixed_dp_reduce`` and one ``gradient_accumulate`` (the last group's
+  index, ``is_last_accumulate=1``) run after the last reverse and before the
+  optimizer commit.
   """
   keep_tape = keep_tape or stream_tape
   reasons = []
@@ -156,6 +166,10 @@ def validate_hierarchy(
     if stream_tape and name == "forward_groups":
       adjusted_expected = 0
     if stream_tape and name == "group_loss_pullback":
+      adjusted_expected = expected_groups
+    if reduce_once and name in ("fixed_dp_reduce", "gradient_accumulate"):
+      adjusted_expected = 1
+    if reduce_once and name == "staged_accumulate":
       adjusted_expected = expected_groups
     if actual != adjusted_expected:
       reasons.append(f"{name}:count={actual} expected={adjusted_expected}")
@@ -238,6 +252,11 @@ def validate_hierarchy(
           {}
           if (keep_tape and name == "replay_forward")
           or (not stream_tape and name == "group_loss_pullback")
+          or (not reduce_once and name == "staged_accumulate")
+          or (
+              reduce_once
+              and name in ("fixed_dp_reduce", "gradient_accumulate")
+          )
           else _grouped(
               by_name,
               name,
@@ -247,7 +266,9 @@ def validate_hierarchy(
       )
       for name in GROUP_NAMES
   }
-  for index, accumulator in grouped["gradient_accumulate"].items():
+  for index, accumulator in (
+      {} if reduce_once else grouped["gradient_accumulate"]
+  ).items():
     try:
       micro_step = int(accumulator.stats.get("micro_step", ""))
     except ValueError:
@@ -332,14 +353,73 @@ def validate_hierarchy(
         and loss.end_ns > optimizer.start_ns
     ):
       reasons.append("loss_pullback:after_optimizer_commit")
+  if reduce_once:
+    # The update-level reduce and accumulate carry the last group's index.
+    single = {}
+    for name in ("fixed_dp_reduce", "gradient_accumulate"):
+      spans_of = by_name.get(name, [])
+      span = spans_of[0] if len(spans_of) == 1 else None
+      single[name] = span
+      if span is not None:
+        raw_index = span.stats.get("group_index")
+        if raw_index is None or int(raw_index) != expected_groups - 1:
+          reasons.append(
+              f"{name}:group_index={raw_index} expected={expected_groups - 1}"
+          )
+    grouped["fixed_dp_reduce"] = (
+        {expected_groups - 1: single["fixed_dp_reduce"]}
+        if single["fixed_dp_reduce"] is not None
+        else {}
+    )
+    grouped["gradient_accumulate"] = (
+        {expected_groups - 1: single["gradient_accumulate"]}
+        if single["gradient_accumulate"] is not None
+        else {}
+    )
+    last_reverse = grouped["reverse_group"].get(expected_groups - 1)
+    reduce = single["fixed_dp_reduce"]
+    accumulate = single["gradient_accumulate"]
+    if (
+        reduce is not None
+        and last_reverse is not None
+        and reduce.start_ns < last_reverse.end_ns
+    ):
+      reasons.append("fixed_dp_reduce:before_last_reverse_group")
+    if (
+        reduce is not None
+        and accumulate is not None
+        and reduce.end_ns > accumulate.start_ns
+    ):
+      reasons.append("update:order=fixed_dp_reduce>gradient_accumulate")
+    if (
+        accumulate is not None
+        and optimizer is not None
+        and accumulate.end_ns > optimizer.start_ns
+    ):
+      reasons.append("gradient_accumulate:after_optimizer_commit")
   for index, reverse in grouped["reverse_group"].items():
     train = trains.get(index)
     if train is not None and not _contains(train, reverse):
       reasons.append(f"reverse_group[{index}]:outside_train")
     if update is not None and not _contains(update, reverse):
       reasons.append(f"reverse_group[{index}]:outside_zero_tim_update")
+    if reduce_once:
+      accumulated = grouped["staged_accumulate"].get(index)
+      backward = grouped["model_backward"].get(index)
+      if accumulated is not None and not _contains(reverse, accumulated):
+        reasons.append(f"staged_accumulate[{index}]:outside_reverse_group")
+      if (
+          accumulated is not None
+          and backward is not None
+          and accumulated.start_ns < backward.end_ns
+      ):
+        reasons.append(
+            f"staged_accumulate[{index}]:before_model_backward[{index}]_closed"
+        )
     stage_spans = []
     for stage in REVERSE_STAGES:
+      if reduce_once and stage in ("fixed_dp_reduce", "gradient_accumulate"):
+        continue
       child = grouped[stage].get(index)
       if child is None:
         continue
@@ -491,7 +571,20 @@ def main() -> int:
           "no forward_groups parent and the two-tape window order"
       ),
   )
+  parser.add_argument(
+      "--dp-reduce-once",
+      default="",
+      help=(
+          "the CANON_DP_REDUCE_ONCE value the run was launched with; 1 "
+          "requires one staged_accumulate per group and exactly one "
+          "fixed_dp_reduce and gradient_accumulate after the last reverse"
+      ),
+  )
   args = parser.parse_args()
+  if args.dp_reduce_once not in ("", "0", "1"):
+    raise ValueError(
+        f"--dp-reduce-once must be empty, 0 or 1: {args.dp_reduce_once!r}"
+    )
   if args.p32_keep_tape not in ("", "0", "1", "stream"):
     raise ValueError(
         "--p32-keep-tape must be empty, 0, 1 or stream: "
@@ -508,6 +601,7 @@ def main() -> int:
       expected_groups=expected_groups,
       keep_tape=args.p32_keep_tape in ("1", "stream"),
       stream_tape=args.p32_keep_tape == "stream",
+      reduce_once=args.dp_reduce_once == "1",
   )
   counts = {
       name: sum(span.name == name for span in spans)

@@ -698,12 +698,19 @@ class PeftTrainer:
       grad_accumulator: GradientAccumulator,
       grads: Any,
       multiplier: ArrayLike,
+      denom: ArrayLike,
   ) -> ArrayLike:
-    """Adds one materialization-free scaled gradient contribution."""
+    """Adds one materialization-free scaled gradient contribution.
+
+    ``denom`` is the number of microbatches this contribution stands for:
+    1 for the per-group stream, the group count for the single reduce-once
+    contribution (CANON_DP_REDUCE_ONCE=1), so the accumulator's average is
+    the same in both cadences.
+    """
     scaled = jax.tree.map(
         lambda value: value * multiplier.astype(value.dtype), grads
     )
-    grad_accumulator.add(scaled, denom=jnp.asarray(1.0, jnp.float32))
+    grad_accumulator.add(scaled, denom=denom.astype(jnp.float32))
     return _precomputed_gradient_norm(scaled)
 
   def _precomputed_gradient_commit(
@@ -803,6 +810,65 @@ class PeftTrainer:
           f"requested={memory_kind!r} actual={actual!r}"
       )
 
+  def _align_accumulator_sharding_spelling(self) -> dict[str, int]:
+    """Spells the fresh accumulator the way the jitted accumulate returns it.
+
+    XLA hands the accumulate program's outputs back with every fully
+    replicated leaf spelled ``P()`` (the registered spelling is ``P(None,)``
+    or ``P(None, None)``) and the denominator on the mesh instead of on a
+    single device.  ``reset`` keeps that spelling and the post-commit reshard
+    skips equivalent layouts, so from update 2 on the program was traced
+    against avals spelled differently from update 1's: a second full compile
+    (6.9 s on the dp2-tp2 carrier, one per training run).  Aligning the
+    initial spelling once, before the first trace, makes every update trace
+    against the same avals.  Only spellings change; the layouts are the same
+    and the values are untouched.
+    """
+    mesh = None
+    for leaf in jax.tree.leaves(self.grad_accumulator.grads):
+      if isinstance(leaf, jax.Array) and isinstance(
+          leaf.sharding, shd.NamedSharding
+      ):
+        mesh = leaf.sharding.mesh
+        break
+    summary = {"replicated": 0, "scalars": 0}
+    if mesh is None:
+      return summary
+
+    def align(value):
+      if not isinstance(value, jax.Array):
+        return value
+      sharding = value.sharding
+      if isinstance(sharding, shd.NamedSharding):
+        spec = tuple(sharding.spec)
+        if spec and all(axis is None for axis in spec):
+          summary["replicated"] += 1
+          with jax.transfer_guard("allow"):
+            return jax.device_put(
+                value,
+                shd.NamedSharding(
+                    sharding.mesh,
+                    shd.PartitionSpec(),
+                    memory_kind=sharding.memory_kind,
+                ),
+            )
+        return value
+      if isinstance(sharding, shd.SingleDeviceSharding):
+        summary["scalars"] += 1
+        with jax.transfer_guard("allow"):
+          return jax.device_put(
+              value, shd.NamedSharding(mesh, shd.PartitionSpec())
+          )
+      return value
+
+    self.grad_accumulator.grads = jax.tree.map(
+        align, self.grad_accumulator.grads
+    )
+    self.grad_accumulator.denom.set_value(
+        align(self.grad_accumulator.denom[...])
+    )
+    return summary
+
   def _reshard_grad_accumulator(self, mesh: shd.Mesh) -> dict[str, int]:
     """Restores zeroed accumulator values to their registered shardings."""
     if mesh.empty:
@@ -814,7 +880,15 @@ class PeftTrainer:
       if pspec is None:
         pspec = shd.PartitionSpec()
       target = sharding_utils.get_sharding(value, mesh, pspec)
-      if hasattr(value, "sharding") and value.sharding == target:
+      # Equivalence, not spelling: a jitted accumulate returns leaves whose
+      # PartitionSpec drops trailing Nones (P('tp',) for P('tp', None)),
+      # which partitions the same axes over the same mesh.  Comparing the
+      # objects re-put 254 of 311 accumulator leaves (about 0.8 s of host
+      # time per update on the DP2xTP2 carrier) to a layout they already
+      # had; only a genuinely different partitioning needs the transfer.
+      if hasattr(value, "sharding") and value.sharding.is_equivalent_to(
+          target, value.ndim
+      ):
         return value
       with jax.transfer_guard("allow"):
         return jax.device_put(value, target)
@@ -848,7 +922,8 @@ class PeftTrainer:
             jax.tree.leaves(expected),
             strict=True,
         )
-        if isinstance(value, jax.Array) and value.sharding != target
+        if isinstance(value, jax.Array)
+        and not value.sharding.is_equivalent_to(target, value.ndim)
     ]
     if mismatches:
       raise RuntimeError(
@@ -1049,9 +1124,21 @@ class PeftTrainer:
       multiplier: ArrayLike,
       *,
       microbatch_index: int,
+      microbatches: int = 1,
   ) -> ArrayLike:
-    """Streams one scaled P33 rank-reduced gradient contribution."""
+    """Streams one scaled P33 rank-reduced gradient contribution.
+
+    ``microbatches`` is how many microbatches this contribution stands for
+    (the per-group stream passes 1; CANON_DP_REDUCE_ONCE=1 passes the group
+    count with the update's single reduced gradient).  The cadence counter
+    and the accumulator denominator both advance by it, so the commit-time
+    cadence contract and the averaged value are unchanged.
+    """
     self._validate_precomputed_gradient_contract()
+    if not isinstance(microbatches, int) or microbatches < 1:
+      raise ValueError(
+          f"microbatches must be a positive int, got {microbatches!r}"
+      )
     if os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1":
       raise ValueError(
           "scaled gradient accumulation is reserved for an admitted P33 "
@@ -1059,6 +1146,12 @@ class PeftTrainer:
       )
     if self._jitted_precomputed_gradient_scaled_step_fn is None:
       if self._jitted_precomputed_gradient_scaled_step_impl is None:
+        summary = self._align_accumulator_sharding_spelling()
+        print(
+            "[P30.G2] ACCUMULATOR_SPELLING aligned "
+            f"replicated={summary['replicated']} scalars={summary['scalars']}",
+            flush=True,
+        )
         self._jitted_precomputed_gradient_scaled_step_impl = nnx.jit(
             self._precomputed_gradient_scaled_step,
             donate_argnames=("grad_accumulator",),
@@ -1076,7 +1169,9 @@ class PeftTrainer:
       )
     accumulate_start = time.perf_counter()
     norm = self._jitted_precomputed_gradient_scaled_step_fn(
-        gradients, jnp.asarray(multiplier, jnp.float32)
+        gradients,
+        jnp.asarray(multiplier, jnp.float32),
+        jnp.asarray(float(microbatches), jnp.float32),
     )
     accumulate_call_done = time.perf_counter()
     norm.block_until_ready()
@@ -1084,17 +1179,18 @@ class PeftTrainer:
       accumulate_done = time.perf_counter()
       print(
           "[PERF] stage=grad_accumulate seconds=%.3f microbatch=%d"
-          " variant=scaled call=%.3f block=%.3f"
+          " variant=scaled call=%.3f block=%.3f span=%d"
           % (
               accumulate_done - accumulate_start,
               microbatch_index,
               accumulate_call_done - accumulate_start,
               accumulate_done - accumulate_call_done,
+              microbatches,
           ),
           flush=True,
       )
-    self._iter_steps += 1
-    self._p28_precomputed_microstep += 1
+    self._iter_steps += microbatches
+    self._p28_precomputed_microstep += microbatches
     return norm
 
   def commit_precomputed_gradients(self) -> ArrayLike:

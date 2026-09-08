@@ -1590,7 +1590,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             flush=True,
         )
 
-    def consume_scaled(index, gradients, multiplier):
+    def consume_scaled(index, gradients, multiplier, microbatches=1):
       if p33_no_commit:
         multiplier = jnp.asarray(multiplier, jnp.float32)
         if numeric_debug:
@@ -1633,6 +1633,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               gradients,
               multiplier,
               microbatch_index=index,
+              microbatches=microbatches,
           )
           norm = jnp.asarray(
               numeric_receipt["stable_norm"], dtype=jnp.float32
@@ -1650,13 +1651,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             gradients,
             multiplier,
             microbatch_index=index,
+            microbatches=microbatches,
         )
       micro_norms.append(norm)
-      if index < expected_microbatches - 1:
+      if index + microbatches < expected_microbatches:
         print(
             f"{marker_prefix} update_accumulation_pending "
             f"train_steps={actor_trainer.train_steps} "
-            f"microstep={index + 1}/{expected_microbatches}",
+            f"microstep={index + microbatches}/{expected_microbatches}",
             flush=True,
         )
 
@@ -1705,6 +1707,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       value_and_grad_call_done = time.perf_counter()
     result["loss"].block_until_ready()
+    if (
+        result.get("dp_reduction_visibility")
+        == "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+    ):
+      # CANON_DP_REDUCE_ONCE=1: the update reduced once, so the one streamed
+      # norm is the update total; the per-group activity evidence is the
+      # rank-local staged contribution norm the adapter resolved per group.
+      if len(micro_norms) != 1:
+        raise alignment.AlignmentGateError(
+            "reduce-once update streamed "
+            f"{len(micro_norms)} contributions, expected 1"
+        )
+      micro_norms = [
+          jnp.asarray(value, jnp.float32)
+          for value in result["staged_group_norms"]
+      ]
     if perf_log.enabled():
       value_and_grad_done = time.perf_counter()
       print(

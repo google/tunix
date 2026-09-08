@@ -125,6 +125,11 @@ class _FakeReducer:
     self.dp_axis = dp_axis
     self.values = []
 
+  def stage_diagnostics(self, staged):
+    signatures, finite = jax.vmap(dp_training._gradient_diagnostics)(staged)  # pylint: disable=protected-access
+    nonzero = jax.vmap(dp_training._gradient_nonzero_counts)(staged)  # pylint: disable=protected-access
+    return signatures, finite, nonzero
+
   def finalize_staged(self, staged):
     self.values = [
         jax.tree.map(lambda value: value[rank], staged)
@@ -184,7 +189,15 @@ _ALGO = types.SimpleNamespace(
 )
 
 
-def _run(keep_tape, *, deterministic_repeat=False, loss_fn=None, adapter=None):
+def _run(
+    keep_tape,
+    *,
+    deterministic_repeat=False,
+    loss_fn=None,
+    adapter=None,
+    reduce_once="",
+    sink=None,
+):
   """Runs one stubbed DP16 update; returns (result, events, live, received)."""
   case = harness.CanonicalQwen3AdapterTest(
       "test_p32_dp16_rejects_the_legacy_data1_segmented_reverse"
@@ -237,12 +250,18 @@ def _run(keep_tape, *, deterministic_repeat=False, loss_fn=None, adapter=None):
 
   adapter._p32_forward_group = types.MethodType(forward_group, adapter)  # pylint: disable=protected-access
   adapter._p32_reverse_group = types.MethodType(reverse_group, adapter)  # pylint: disable=protected-access
+  staged_tables = []
+
+  def report_adjoint(self, state, cotangents):
+    del self, state
+    staged = tuple(value + jnp.asarray(0, value.dtype) for value in cotangents)
+    staged_tables.append(tuple(np.asarray(value).copy() for value in staged))
+    return staged
+
   adapter._p59_rank_parallel_report_adjoint = types.MethodType(  # pylint: disable=protected-access
-      lambda self, state, cotangents: tuple(
-          value + jnp.asarray(0, value.dtype) for value in cotangents
-      ),
-      adapter,
+      report_adjoint, adapter
   )
+  adapter._staged_tables_seen = staged_tables
   adapter._p59_reducer_template = types.MethodType(  # pylint: disable=protected-access
       lambda self, state, staged: state, adapter
   )
@@ -263,6 +282,7 @@ def _run(keep_tape, *, deterministic_repeat=False, loss_fn=None, adapter=None):
   )
   env = dict(_ENV)
   env["CANON_P32_KEEP_TAPE"] = keep_tape
+  env["CANON_DP_REDUCE_ONCE"] = reduce_once
   env["XLA_FLAGS"] = (
       os.environ.get("XLA_FLAGS", "") + " --xla_allow_excess_precision=false"
   ).strip()
@@ -296,7 +316,7 @@ def _run(keep_tape, *, deterministic_repeat=False, loss_fn=None, adapter=None):
         algo_config=_ALGO,
         pad_id=0,
         eos_id=2,
-        gradient_microbatch_sink=None,
+        gradient_microbatch_sink=sink,
         deterministic_repeat=deterministic_repeat,
     )
   result["_adapter"] = adapter
@@ -376,3 +396,172 @@ def test_keep_tape_refuses_deterministic_repeat():
     _run("stream", deterministic_repeat=True)
   with pytest.raises(FME, match="cannot reverse a group twice"):
     _run("1", deterministic_repeat=True)
+
+
+def _reference_reduce_once(staged_tables, scale):
+  """fixed_dp_sum over ranks of the group-summed staged table, times scale."""
+  total = None
+  for table in staged_tables:
+    table = tuple(jnp.asarray(value) for value in table)
+    total = table if total is None else tuple(
+        a + b for a, b in zip(total, table, strict=True)
+    )
+  rows = [
+      tuple(value[rank] for value in total) for rank in range(total[0].shape[0])
+  ]
+  reduced = dp_training.fixed_dp_sum(rows)
+  return tuple(value * scale for value in reduced)
+
+
+def test_reduce_once_reduces_once_and_matches_the_fixed_tree_of_the_group_sum():
+  os.environ.pop("CANON_DP_REDUCE_ONCE", None)
+  per_group, *_ = _run("stream")
+  once, *_ = _run("stream", reduce_once="1")
+  adapter = once["_adapter"]
+  assert once["dp_reduction_visibility"] == "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+  assert once["dp_reduction_transactions"] == 1
+  assert once["dp_staged_accumulations"] == GROUPS
+  assert len(once["staged_group_norms"]) == GROUPS
+  assert all(norm > 0.0 for norm in once["staged_group_norms"])
+  assert all(
+      report["gradient_finite"] is True and report["gradient_nonzero"] > 0
+      for report in once["reports"]
+  )
+  # The committed gradient is exactly the fixed DP tree applied to the
+  # group-summed staged table (times the loss scale): the same reduce program
+  # on a deliberately reassociated sum.
+  scale = per_group["loss_output"].primary_loss.compute_scale()
+  expected = _reference_reduce_once(adapter._staged_tables_seen, scale)  # pylint: disable=protected-access
+  assert _leaf_bytes(once["gradients"]) == _leaf_bytes(expected)
+  # Deterministic: a second update produces the same bits.
+  again, *_ = _run("stream", reduce_once="1")
+  assert _leaf_bytes(again["gradients"]) == _leaf_bytes(once["gradients"])
+  # And it is a reassociation of the per-group stream, not a different
+  # gradient: the two agree to float32 rounding.
+  for left, right in zip(
+      jax.tree.leaves(once["gradients"]),
+      jax.tree.leaves(per_group["gradients"]),
+      strict=True,
+  ):
+    np.testing.assert_allclose(
+        np.asarray(left), np.asarray(right), rtol=1e-5, atol=1e-6
+    )
+
+
+def test_reduce_once_streams_one_contribution_standing_for_every_group():
+  calls = []
+
+  def sink(index, gradient, multiplier, microbatches=1):
+    calls.append((
+        index,
+        tuple(np.asarray(value).copy() for value in jax.tree.leaves(gradient)),
+        float(np.asarray(multiplier)),
+        microbatches,
+    ))
+
+  result, *_ = _run("stream", reduce_once="1", sink=sink)
+  scale = float(np.asarray(result["loss_output"].primary_loss.compute_scale()))
+  assert [(call[0], call[3]) for call in calls] == [(0, GROUPS)]
+  assert calls[0][2] == scale * GROUPS
+  assert result["gradient_microbatches"] == GROUPS
+  assert result["gradients"] is None
+
+
+def test_reduce_once_refuses_diagnostic_modes():
+  # Flag-off tape so the reduce-once admission is the first refusal reached.
+  with pytest.raises(FME, match="deterministic_repeat are not admitted"):
+    _run("", reduce_once="1", deterministic_repeat=True)
+  with mock.patch.dict(os.environ, {"CANON_DP_REDUCE_ONCE": "yes"}, clear=False):
+    with pytest.raises(ValueError, match="CANON_DP_REDUCE_ONCE must be"):
+      dp_training.dp_reduce_once_mode()
+
+
+def test_staged_accumulator_keeps_the_reducer_exact_layout():
+  """The jitted staged add must hand the real reducer its exact shardings.
+
+  The one-host r1 run of CANON_DP_REDUCE_ONCE=1 died here: jit canonicalized
+  P('dp', None) to P('dp',) and finalize_staged refused the accumulated table.
+  """
+  from jax.sharding import Mesh, NamedSharding, PartitionSpec as P  # pylint: disable=g-import-not-at-top
+
+  mesh = Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2), ("data", "model"))
+  template = (
+      jax.device_put(jnp.zeros((8,), jnp.float32), NamedSharding(mesh, P("model"))),
+      jax.device_put(jnp.zeros((4, 8), jnp.float32), NamedSharding(mesh, P(None, "model"))),
+  )
+  staged_shardings = (
+      NamedSharding(mesh, P("data", "model")),
+      NamedSharding(mesh, P("data", None, "model")),
+  )
+
+  def table(offset):
+    return (
+        jax.device_put(
+            jnp.stack((jnp.arange(8.0) + offset, jnp.arange(8.0) + 10 + offset)),
+            staged_shardings[0],
+        ),
+        jax.device_put(
+            jnp.stack((
+                jnp.arange(32.0).reshape(4, 8) + offset,
+                jnp.arange(32.0).reshape(4, 8) + 100 + offset,
+            )),
+            staged_shardings[1],
+        ),
+    )
+
+  adapter = object.__new__(canonical_qwen3_adapter.Qwen3EngineForwardAdapter)
+  reducer = dp_training.FixedDPRankGradientReducer(
+      template, dp_size=2, dp_axis="data", require_distinct_fingerprints=False
+  )
+  # Two updates: the second starts from fresh tables after the first
+  # finalize consumed the accumulator (the one-host r2 run died on the
+  # second update's first add).
+  for update in range(2):
+    total = adapter._p59_staged_tree_add(table(1.0), table(2.0))  # pylint: disable=protected-access
+    total = adapter._p59_staged_tree_add(total, table(3.0))  # pylint: disable=protected-access
+    for leaf, sharding in zip(total, staged_shardings, strict=True):
+      assert leaf.sharding == sharding, (update, leaf.sharding, sharding)
+    reduced, report = reducer.finalize_staged(total)
+    expected = jax.tree.map(
+        lambda a, b, c: a + b + c, table(1.0), table(2.0), table(3.0)
+    )
+    expected_reduced = dp_training.fixed_dp_sum(
+        [tuple(value[rank] for value in expected) for rank in range(2)]
+    )
+    assert _leaf_bytes(reduced) == _leaf_bytes(expected_reduced)
+    assert report["reduction_transactions"] == 1
+    assert report["post_reduction_replicas_exact"] is True
+  # An operand whose sharding is equivalent but spelled differently (the
+  # canonical `P('data', 'model')` for the 1-D leaf's `P('data', 'model')`
+  # staged spec is already canonical; use a freshly device_put table with
+  # the spec re-created) is accepted and re-emitted in the pinned layout.
+  respelled = (
+      jax.device_put(table(4.0)[0], NamedSharding(mesh, P("data", "model"))),
+      jax.device_put(table(4.0)[1], NamedSharding(mesh, P("data", None, "model"))),
+  )
+  total = adapter._p59_staged_tree_add(table(1.0), respelled)  # pylint: disable=protected-access
+  for leaf, sharding in zip(total, staged_shardings, strict=True):
+    assert leaf.sharding == sharding
+  # The reducer, too, accepts a re-spelled equivalent table (the second
+  # update of the one-host r3 run built its reducer from a `P('dp',)`
+  # spelling and received the pinned `P('dp', None)` accumulator).
+  respelled_reducer = dp_training.FixedDPRankGradientReducer(
+      (
+          jax.device_put(jnp.zeros((8,), jnp.float32), NamedSharding(mesh, P("model"))),
+          jax.device_put(jnp.zeros((4, 8), jnp.float32), NamedSharding(mesh, P(None, "model"))),
+      ),
+      dp_size=2,
+      dp_axis="data",
+      require_distinct_fingerprints=False,
+  )
+  respelled_reducer.finalize_staged((
+      jax.device_put(total[0], NamedSharding(mesh, P("data", "model"))),
+      jax.device_put(total[1], NamedSharding(mesh, P("data", None, "model"))),
+  ))
+  # A genuinely different layout is refused.
+  wrong = (
+      jax.device_put(table(5.0)[0], NamedSharding(mesh, P("model", "data"))),
+      table(5.0)[1],
+  )
+  with pytest.raises(FME, match="not equivalent to the pinned layout"):
+    adapter._p59_staged_tree_add(table(1.0), wrong)  # pylint: disable=protected-access

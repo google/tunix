@@ -79,13 +79,16 @@ _FIXTURES_NAME = "p70_adapter_test_fixtures"
 # sha256 over the flag-off serial reverse group's engine gradients and
 # replay logps on the fixed fixture below, frozen from the landed HEAD
 # (de48b9b4) inside the pinned CPU image
-# (tunix_frozenlake_image:vllm-tpu0.25.0, JAX_PLATFORMS=cpu). Any bitwise
+# (tunix_frozenlake_image:vllm-tpu0.25.0, JAX_PLATFORMS=cpu); re-pinned on
+# 2026-09-02 when the group fixture's fake layers and cache were changed to
+# follow the paged-attention contract (the grouped reverse now rebuilds each
+# chunk's entry cache from the final cache).  Any bitwise
 # drift of the default (legacy, pristine) reverse path trips this before
 # a parity pair could mask it. Regenerate — only after a deliberately
 # admitted numerical change — by running this file with
 # P71_PRINT_DIGEST=1 and copying the printed value.
 FLAG_OFF_DIGEST = (
-    "25bcd0c9db3eafb8137f4e05545a6c357a930945f46172720972e26b8c55ee54"
+    "c2312db1f77809510467e6a4e9cfde273177ed231b8093b74f889da05a12beb0"
 )
 
 
@@ -394,10 +397,14 @@ def _group_adapter(rank_parallel):
   cache_sharding = jax.sharding.NamedSharding(
       mesh, jax.sharding.PartitionSpec("data")
   )
+  positions = fixtures._PAGED_POSITIONS  # pylint: disable=protected-access
   adapter._fresh_caches = types.MethodType(  # pylint: disable=protected-access
       lambda self: [
-          jax.device_put(jnp.zeros((64, 1), jnp.float32), cache_sharding),
-          jax.device_put(jnp.zeros((64, 1), jnp.float32), cache_sharding),
+          jax.device_put(
+              jnp.zeros((self._data_size * positions, 1), jnp.float32),
+              cache_sharding,
+          )
+          for _ in range(2)
       ],
       adapter,
   )
@@ -414,7 +421,7 @@ def _group_adapter(rank_parallel):
             group_spec["next_ids"][:, start:end].reshape(-1),
             cache_sharding,
         ),
-        jnp.asarray(0.125, jnp.float32),
+        jnp.asarray(start, jnp.int32),
     )
 
   adapter._p32_group_chunk_inputs = types.MethodType(  # pylint: disable=protected-access

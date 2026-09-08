@@ -185,16 +185,28 @@ class HierarchyTest(unittest.TestCase):
     adapter_calls = annotation_calls(
         ROOT / "tunix/rl/canonical_qwen3_adapter.py"
     )
-    accumulator = adapter_calls["gradient_accumulate"][0]
-    accumulator_metadata = {
-        keyword.arg: ast.unparse(keyword.value)
-        for keyword in accumulator.keywords
-    }
-    self.assertEqual(accumulator_metadata, {
-        "group_index": "index",
-        "micro_step": "index",
-        "is_last_accumulate": "int(index == len(specs) - 1)",
-    })
+    accumulator_metadata = [
+        {
+            keyword.arg: ast.unparse(keyword.value)
+            for keyword in accumulator.keywords
+        }
+        for accumulator in adapter_calls["gradient_accumulate"]
+    ]
+    # The per-group accumulate of the streamed reduction, and the single
+    # update-level accumulate of CANON_DP_REDUCE_ONCE=1 carrying the last
+    # group's index.
+    self.assertCountEqual(accumulator_metadata, [
+        {
+            "group_index": "index",
+            "micro_step": "index",
+            "is_last_accumulate": "int(index == len(specs) - 1)",
+        },
+        {
+            "group_index": "last_index",
+            "micro_step": "last_index",
+            "is_last_accumulate": "1",
+        },
+    ])
     learner_calls = annotation_calls(
         ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
     )
@@ -651,3 +663,118 @@ class StreamTapeHierarchyTest(unittest.TestCase):
         stream_tape=True,
     )
     self.assertIn("loss_pullback:before_last_reverse_group", reasons)
+
+
+def _reduce_once_fixture(groups: int = 16):
+  """The stream fixture with CANON_DP_REDUCE_ONCE=1 on top.
+
+  Every reverse_group[g] owns one staged_accumulate (after model_backward[g])
+  instead of a fixed_dp_reduce and a gradient_accumulate; one fixed_dp_reduce
+  and one gradient_accumulate, both carrying the last group's index, run after
+  the last reverse and before the optimizer commit, inside the last train.
+  """
+  spans, device_steps, compiler_counts = _stream_fixture(groups=groups)
+  kept = []
+  for span in spans:
+    if span.name in ("fixed_dp_reduce", "gradient_accumulate"):
+      continue
+    kept.append(span)
+    if span.name == "model_backward":
+      index = span.stats["group_index"]
+      kept.append(
+          _span("staged_accumulate", span.end_ns + 1, 2, group_index=index)
+      )
+  optimizer = next(span for span in spans if span.name == "optimizer_commit")
+  last_reverse = next(
+      span for span in spans
+      if span.name == "reverse_group" and span.stats["group_index"] == groups - 1
+  )
+  kept.extend((
+      _span(
+          "fixed_dp_reduce",
+          last_reverse.end_ns + 2,
+          4,
+          group_index=groups - 1,
+      ),
+      _span(
+          "gradient_accumulate",
+          last_reverse.end_ns + 7,
+          3,
+          group_index=groups - 1,
+          micro_step=groups - 1,
+          is_last_accumulate=1,
+      ),
+  ))
+  assert last_reverse.end_ns + 10 <= optimizer.start_ns
+  return kept, device_steps, compiler_counts
+
+
+class ReduceOnceHierarchyTest(unittest.TestCase):
+
+  def _validate(self, fixture, groups, **kwargs):
+    spans, device_steps, compiler_counts = fixture
+    return HIERARCHY.validate_hierarchy(
+        spans,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=groups,
+        **kwargs,
+    )
+
+  def test_reduce_once_fixture_is_green_only_under_the_reduce_once_mode(self):
+    for groups in (16, 32):
+      fixture = _reduce_once_fixture(groups=groups)
+      self.assertEqual(
+          self._validate(fixture, groups, stream_tape=True, reduce_once=True),
+          [],
+      )
+      # Judged without the mode it rings on the missing per-group reduces.
+      plain = self._validate(fixture, groups, stream_tape=True)
+      self.assertIn(f"fixed_dp_reduce:count=1 expected={groups}", plain)
+      self.assertIn(f"staged_accumulate:count={groups} expected=0", plain)
+
+  def test_stream_fixture_rings_under_the_reduce_once_mode(self):
+    fixture = _stream_fixture(groups=16)
+    rung = self._validate(fixture, 16, stream_tape=True, reduce_once=True)
+    self.assertIn("fixed_dp_reduce:count=16 expected=1", rung)
+    self.assertIn("staged_accumulate:count=0 expected=16", rung)
+
+  def test_reduce_once_order_is_enforced(self):
+    spans, device_steps, compiler_counts = _reduce_once_fixture(groups=16)
+    last_reverse = next(
+        span for span in spans
+        if span.name == "reverse_group" and span.stats["group_index"] == 15
+    )
+    early_reduce = [
+        _span("fixed_dp_reduce", last_reverse.start_ns + 1, 4, group_index=15)
+        if span.name == "fixed_dp_reduce"
+        else span
+        for span in spans
+    ]
+    reasons = HIERARCHY.validate_hierarchy(
+        early_reduce,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+        stream_tape=True,
+        reduce_once=True,
+    )
+    self.assertIn("fixed_dp_reduce:before_last_reverse_group", reasons)
+    wrong_index = [
+        _span("fixed_dp_reduce", span.start_ns, span.duration_ns, group_index=3)
+        if span.name == "fixed_dp_reduce"
+        else span
+        for span in spans
+    ]
+    reasons = HIERARCHY.validate_hierarchy(
+        wrong_index,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+        stream_tape=True,
+        reduce_once=True,
+    )
+    self.assertIn("fixed_dp_reduce:group_index=3 expected=15", reasons)

@@ -237,6 +237,8 @@ docker_args=(
   -e CANON_DP_FINITE_FETCH="${CANON_DP_FINITE_FETCH:-}"
   -e CANON_P71_SCAN="${CANON_P71_SCAN:-}"
   -e CANON_P32_KEEP_TAPE="${CANON_P32_KEEP_TAPE:-}"
+  -e CANON_DP_REDUCE_ONCE="${CANON_DP_REDUCE_ONCE:-}"
+  -e CANON_FUSED_TREE_OPS="${CANON_FUSED_TREE_OPS:-}"
   -e CANON_EXPECT_TRAIN_MESH_IDS="$expected_train_mesh_ids"
   -e CANON_XPROF_DIR="$xprof_dir"
   -e CANON_XPROF_SKIP_STEPS=2 -e CANON_XPROF_STEPS=1
@@ -349,6 +351,7 @@ if [ "$docker_rc" -eq 0 ]; then
     --arm "$arm" --run-root "$root" --geometry "$geometry" \
     --p71-scan "${CANON_P71_SCAN:-}" \
     --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
+    --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
     >"$xprof_census" 2>&1
   xprof_census_rc=$?
   sudo docker run --rm --ipc=host \
@@ -363,6 +366,7 @@ if [ "$docker_rc" -eq 0 ]; then
       --run-root "$root" --expected-update-step 2 \
       --geometry "$geometry" \
       --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
+      --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
       >"$hierarchy_census" 2>&1
     hierarchy_census_rc=$?
     python3 "$script_dir/census_gsm8k_xprof_trace.py" \

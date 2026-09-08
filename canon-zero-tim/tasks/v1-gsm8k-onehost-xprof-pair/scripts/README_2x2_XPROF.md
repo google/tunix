@@ -42,6 +42,8 @@ are auto-prefixed `dp2tp2-` so runs can never be confused.
 |---|---|---|---|---|
 | `dp4-tp1` (default) | data4 | fastest backward; the only geometry where `CANON_P71_SCAN=bwd` runs | ~15.7-16.0 s | 1.4907878637313843 / 2.2041752338409424 / 2.6263937950134277 |
 | `dp2-tp2` | data2 x model2 | representative (TP collectives present, like the DP16xTP4 target); 32 groups of one row per rank | ~26.7-30.2 s | 1.6838101148605347 / 3.3025829792022705 / 1.8203867673873901 |
+| `dp2-tp2` + `CANON_DP_REDUCE_ONCE=1` (`CANON_P32_KEEP_TAPE=stream`) | data2 x model2 | K2: one fixed-order DP reduction per update; the sum over groups precedes the sum over ranks, so this is a deliberately re-pinned anchor | ~16.4 s (run k2_reduce_once_20260902_r4) | 1.6838101148605347 / 3.3025834560394287 / 1.8203867673873901 |
+| `dp4-tp1` + `CANON_DP_REDUCE_ONCE=1` (`CANON_P32_KEEP_TAPE=stream`) | data4 | K2 on dp4-tp1: the reassociated sum came out bitwise equal to the per-group anchor (run `v1_zero-hp_k3host_dp4_20260902_r1`, 2026-09-02; warm 7.68 s vs 11.55 s stream-only, peak HBM 65.6 GiB vs 59.5) | ~7.7 s | 1.4907878637313843 / 2.2041752338409424 / 2.6263937950134277 |
 
 The anchors are geometry-scoped: never compare one geometry's norms (or
 walls) to the other's. At dp2-tp2 the profile force-enables

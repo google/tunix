@@ -93,8 +93,12 @@ def test_keep_tape_retains_the_forward_it_already_did():
   # One tape entry per chunk; one hidden per layer, aligned with the caches.
   assert len(kept["hidden_inputs"]) == spec["num_chunks"]
   assert len(kept["final_hiddens"]) == spec["num_chunks"]
-  for caches, hidden_ins in zip(kept["cache_inputs"], kept["hidden_inputs"]):
-    assert len(hidden_ins) == len(caches)
+  # The tape holds one final cache set per group (the reverse rebuilds each
+  # chunk's entry caches from it), never a snapshot per chunk.
+  assert kept["cache_inputs"] == ()
+  assert len(kept["final_caches"]) == 2  # the harness has two fake layers
+  for hidden_ins in kept["hidden_inputs"]:
+    assert len(hidden_ins) == len(kept["final_caches"])
   # Nothing is kept when not asked.
   assert plain["hidden_inputs"] == ()
   assert plain["final_hiddens"] == ()

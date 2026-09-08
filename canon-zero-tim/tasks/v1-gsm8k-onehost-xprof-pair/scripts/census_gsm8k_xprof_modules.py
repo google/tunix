@@ -291,6 +291,7 @@ def validate_module_counts(
     block_layers: int = P71_BWD_BLOCK_LAYERS,
     geometry: str = DEFAULT_GEOMETRY,
     keep_tape: bool = False,
+    reduce_once: bool = False,
 ) -> list[str]:
   """Returns fail-closed reasons for one TensorCore TPU plane."""
   if geometry not in GEOMETRIES:
@@ -323,8 +324,10 @@ def validate_module_counts(
           keep_tape=keep_tape,
       )
   )
+  # CANON_DP_REDUCE_ONCE=1 streams one reduced contribution per update, so
+  # the scaled optimizer step runs once instead of once per group.
   tail_exact = {
-      "jit__precomputed_gradient_scaled_step": groups,
+      "jit__precomputed_gradient_scaled_step": 1 if reduce_once else groups,
       "jit__precomputed_gradient_commit": 1,
   }
   reasons.extend(
@@ -375,6 +378,15 @@ def main() -> None:
           "stream requires the forward tape scan program to be absent"
       ),
   )
+  parser.add_argument(
+      "--dp-reduce-once",
+      default="",
+      help=(
+          "the CANON_DP_REDUCE_ONCE value the run was launched with; 1 "
+          "expects one scaled optimizer step per update instead of one per "
+          "group"
+      ),
+  )
   parser.add_argument("--p71-layers", type=int, default=ZERO_LAYER_COUNT)
   parser.add_argument(
       "--p71-block-layers", type=int, default=P71_BWD_BLOCK_LAYERS
@@ -387,6 +399,11 @@ def main() -> None:
         f"{args.p32_keep_tape!r}"
     )
   keep_tape = args.p32_keep_tape in ("1", "stream")
+  if args.dp_reduce_once not in ("", "0", "1"):
+    raise ValueError(
+        f"--dp-reduce-once must be empty, 0 or 1: {args.dp_reduce_once!r}"
+    )
+  reduce_once = args.dp_reduce_once == "1"
   # Reject an impossible geometry before reading a 1 GB xplane.
   expected_block_indices(args.p71_layers, args.p71_block_layers)
 
@@ -429,6 +446,7 @@ def main() -> None:
         block_layers=args.p71_block_layers,
         geometry=args.geometry,
         keep_tape=keep_tape,
+        reduce_once=reduce_once,
     )
     if args.arm == "native":
       # The stock learner runs one monolithic forward/backward train_step
@@ -441,7 +459,7 @@ def main() -> None:
           reason.startswith("missing_backward=") for reason in reasons
       )
       tail_exact = {
-          "jit__precomputed_gradient_scaled_step": groups,
+          "jit__precomputed_gradient_scaled_step": 1 if reduce_once else groups,
           "jit__precomputed_gradient_commit": 1,
       }
       summary = (
@@ -480,7 +498,8 @@ def main() -> None:
     raise SystemExit(1)
   tail = (
       f" p71_scan={p71_scan}"
-      f" optimizer_tail=scaled_step:{GEOMETRIES[args.geometry]['groups']}"
+      " optimizer_tail=scaled_step:"
+      f"{1 if reduce_once else GEOMETRIES[args.geometry]['groups']}"
       ",commit:1"
       if args.arm == "zero-hp" else ""
   )

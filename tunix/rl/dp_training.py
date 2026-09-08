@@ -617,6 +617,71 @@ def dp_distinct_schedule_mode() -> str:
   return 'first-group-warmup' if value == 'first-group-warmup' else 'every-group'
 
 
+def dp_reduce_once_mode() -> bool:
+  """Returns whether one update reduces its DP gradient once (K2).
+
+  '' / '0' (off): every rank-major group is reduced and broadcast on its
+  own, exactly as before.  '1': each group's rank-local staged gradient is
+  accumulated on its own DP shard (a plain per-leaf add, no collective) and
+  the fixed-order reduce-and-broadcast runs once at the end of the update.
+  The summation order changes -- sum over groups then over ranks instead of
+  over ranks then over groups -- so the committed gradient bits change on
+  purpose; the reduction itself, its fixed tree and its receipts are the
+  same programs.  Any other value is fatal.
+  """
+  value = os.environ.get('CANON_DP_REDUCE_ONCE', '')
+  if value in ('', '0'):
+    return False
+  if value == '1':
+    return True
+  raise ValueError(
+      f'CANON_DP_REDUCE_ONCE must be unset, 0, or 1, got {value!r}'
+  )
+
+
+def _gradient_nonzero_counts(tree: Any) -> jax.Array:
+  """Returns one exact int32 nonzero count per leaf."""
+  return jnp.stack(
+      tuple(
+          jnp.count_nonzero(leaf).astype(jnp.int32)
+          for leaf in jax.tree.leaves(tree)
+      )
+  )
+
+
+class StagedReceiptProgram:
+  """One compiled per-rank receipt program for a staged DP gradient table.
+
+  Returns device arrays ``(signatures (dp, 5), finite (dp, leaves),
+  nonzero_counts (dp, leaves) int32)`` on the reducer's per-rank row
+  layout.  The program is meant to live as long as the adapter (not the
+  per-update reducer) so it is traced and compiled once per process;
+  ``traces`` counts the tracings for the receipts.
+  """
+
+  def __init__(self, row_sharding):
+    self.traces = 0
+
+    def receipts(tree):
+      self.traces += 1
+      return (
+          _gradient_signature(tree),
+          _gradient_finite_flags(tree),
+          _gradient_nonzero_counts(tree),
+      )
+
+    self._fn = jax.jit(
+        jax.vmap(receipts),
+        out_shardings=(
+            None if row_sharding is None
+            else (row_sharding, row_sharding, row_sharding)
+        ),
+    )
+
+  def __call__(self, staged):
+    return self._fn(staged)
+
+
 def dp_finite_fetch_mode() -> str:
   """Returns the validated CANON_DP_FINITE_FETCH selector value."""
   value = os.environ.get('CANON_DP_FINITE_FETCH', '')
@@ -1432,13 +1497,12 @@ class FixedDPRankGradientReducer:
     self._fingerprints = []
     return reduced, report
 
-  def finalize_staged(self, staged: Any) -> tuple[Any, dict[str, Any]]:
-    """Consumes an already DP-sharded table of rank-local gradients."""
-    if self._staged is not None:
-      raise ValueError(
-          'cannot consume a staged DP gradient table during an active '
-          'serial transaction'
-      )
+  def validate_staged(self, staged: Any) -> None:
+    """Checks one staged table against the template's layout (public)."""
+    self._validate_staged(staged)
+
+  def _validate_staged(self, staged: Any) -> None:
+    """Checks one staged table against the template's exact layout."""
     if jax.tree.structure(staged) != self._template_structure:
       raise ValueError('staged DP gradient tree does not match the template')
     leaves = jax.tree.leaves(staged)
@@ -1456,11 +1520,49 @@ class FixedDPRankGradientReducer:
             f'{leaf.shape}/{leaf.dtype} != '
             f'{expected_shape}/{expected_dtype}'
         )
-      if leaf.sharding != expected_sharding:
+      # Equivalence, not spelling: a jit output may canonicalize
+      # ``P('dp', None)`` to ``P('dp',)`` between updates while partitioning
+      # the same axes over the same mesh; only a different partitioning is a
+      # changed layout.
+      if not leaf.sharding.is_equivalent_to(
+          expected_sharding, len(expected_shape)
+      ):
         raise ValueError(
             f'staged DP gradient leaf {index} sharding changed: '
             f'{leaf.sharding} != {expected_sharding}'
         )
+
+  def stage_diagnostics(
+      self, staged: Any
+  ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Per-rank receipts of one staged table, without reducing it.
+
+    Returns device arrays ``(signatures (dp, 5), finite (dp, leaves),
+    nonzero_counts (dp, leaves) int32)`` on the reducer's per-rank layout;
+    nothing is fetched here, so CANON_DP_REDUCE_ONCE=1 can collect one
+    receipt per group and resolve them all in one transfer after the
+    update's single reduction.
+    """
+    self._validate_staged(staged)
+    if getattr(self, '_staged_receipt_fn', None) is None:
+      self._staged_receipt_fn = StagedReceiptProgram(self.staged_row_sharding())
+    return self._staged_receipt_fn(staged)
+
+  def staged_row_sharding(self):
+    """The per-rank row layout of this reducer's receipts."""
+    mesh = self._staged_metadata[0][2].mesh
+    return jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(self._dp_axis, None)
+    )
+
+  def finalize_staged(self, staged: Any) -> tuple[Any, dict[str, Any]]:
+    """Consumes an already DP-sharded table of rank-local gradients."""
+    if self._staged is not None:
+      raise ValueError(
+          'cannot consume a staged DP gradient table during an active '
+          'serial transaction'
+      )
+    self._validate_staged(staged)
     distinct_scheduled = self._distinct_fingerprint_scheduled()
     deferred_finite = self._finite_fetch == 'batched-commit'
     signatures = None

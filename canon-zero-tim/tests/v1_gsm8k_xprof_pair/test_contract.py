@@ -542,6 +542,28 @@ fi
             "zero-hp", short_scaled_step, p71_scan="off"
         ),
     )
+    # CANON_DP_REDUCE_ONCE=1: one scaled optimizer step per update, and the
+    # per-group count is then the drift.
+    reduce_once = dict(counts)
+    reduce_once["jit__precomputed_gradient_scaled_step"] = 1
+    self.assertNotIn(
+        "jit__precomputed_gradient_scaled_step=1!=16",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", reduce_once, p71_scan="off", reduce_once=True
+        ),
+    )
+    self.assertIn(
+        "jit__precomputed_gradient_scaled_step=1!=16",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", reduce_once, p71_scan="off"
+        ),
+    )
+    self.assertIn(
+        "jit__precomputed_gradient_scaled_step=16!=1",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", counts, p71_scan="off", reduce_once=True
+        ),
+    )
     missing_boundary = dict(counts)
     del missing_boundary["zt_tr_dp_parallel_bwd_adjoint"]
     self.assertIn(

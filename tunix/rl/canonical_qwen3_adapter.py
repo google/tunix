@@ -2197,6 +2197,92 @@ def _fused_p28_chunk_inputs(
   )
 
 
+_P32_ZERO_TREE_PROGRAMS = {}
+_P32_ENTRY_CACHE_PROGRAMS = {}
+
+
+def _p32_entry_caches(final_caches, chunk_start, *, data_size):
+  """Rebuilds the KV caches a chunk pass started from, out of the final ones.
+
+  Chunk ``c`` writes exactly its own positions ``[c*bucket, c*bucket+q_len)``
+  of every row and the ragged paged attention forward never reads a slot at
+  or beyond ``chunk_start`` (it takes those keys and values from the fresh
+  operands instead), so the cache the chunk started from is the final cache
+  with every slot at row position ``>= chunk_start`` at its zero initial
+  value.  Rebuilding it here replaces one full-length snapshot per chunk on
+  the tape with one final cache per group.
+
+  The cache layout is ``(data_size * blocks_per_req, block_size, ...)`` with
+  the leading axis row-major per data rank (rank ``r`` owns pages
+  ``[r*blocks_per_req, (r+1)*blocks_per_req)``), so page ``i`` covers row
+  positions ``[(i % blocks_per_req)*block_size, ...)``.  ``chunk_start`` is a
+  runtime operand so every chunk of every group shares one compiled program;
+  ``out_shardings`` are pinned to the caches' own shardings.
+  """
+  leaves, treedef = jax.tree_util.tree_flatten(tuple(final_caches))
+  shardings = tuple(leaf.sharding for leaf in leaves)
+  key = (
+      treedef,
+      tuple((tuple(leaf.shape), str(leaf.dtype)) for leaf in leaves),
+      tuple(str(sharding) for sharding in shardings),
+      int(data_size),
+  )
+  program = _P32_ENTRY_CACHE_PROGRAMS.get(key)
+  if program is None:
+    def rebuild(caches, start):
+      def one(cache):
+        if cache.ndim < 2 or cache.shape[0] % int(data_size):
+          raise FunctionalMappingError(
+              "entry cache rebuild expects a paged cache of shape "
+              f"(data_size * blocks_per_req, block_size, ...); got {cache.shape} "
+              f"for data_size={data_size}"
+          )
+        blocks_per_req = cache.shape[0] // int(data_size)
+        block_size = cache.shape[1]
+        pages = jnp.arange(cache.shape[0], dtype=jnp.int32) % blocks_per_req
+        offsets = jnp.arange(block_size, dtype=jnp.int32)
+        position = pages[:, None] * block_size + offsets[None, :]
+        keep = position < start
+        keep = keep.reshape(keep.shape + (1,) * (cache.ndim - 2))
+        return jnp.where(keep, cache, jnp.zeros((), cache.dtype))
+      return jax.tree.map(one, caches)
+    program = jax.jit(
+        rebuild,
+        out_shardings=jax.tree_util.tree_unflatten(treedef, list(shardings)),
+    )
+    _P32_ENTRY_CACHE_PROGRAMS[key] = program
+  start = jnp.asarray(int(chunk_start), dtype=jnp.int32)
+  return program(tuple(final_caches), start)
+
+
+def _p32_zero_trees(trees):
+  """Zeros shaped and sharded like ``trees``, in one program.
+
+  The eager per-leaf ``jnp.zeros_like`` kept each leaf's sharding; a plain
+  jit lets XLA choose the output layout and replicated the cache zeros over
+  the model axis, which the TP>1 layer VJP then refused (k3host r1/r2).  The
+  program pins ``out_shardings`` to the input leaves' shardings and is cached
+  on that signature.
+  """
+  leaves, treedef = jax.tree_util.tree_flatten(trees)
+  shardings = tuple(getattr(leaf, "sharding", None) for leaf in leaves)
+  key = (
+      treedef,
+      tuple((tuple(leaf.shape), str(leaf.dtype)) for leaf in leaves),
+      tuple(str(sharding) for sharding in shardings),
+  )
+  program = _P32_ZERO_TREE_PROGRAMS.get(key)
+  if program is None:
+    program = jax.jit(
+        lambda tree: jax.tree.map(jnp.zeros_like, tree),
+        out_shardings=jax.tree_util.tree_unflatten(treedef, list(shardings))
+        if all(sharding is not None for sharding in shardings)
+        else None,
+    )
+    _P32_ZERO_TREE_PROGRAMS[key] = program
+  return program(trees)
+
+
 @functools.partial(jax.jit, static_argnums=(4, 5, 6, 7))
 def _fused_chunk_metadata(
     n_real,
@@ -4220,6 +4306,13 @@ class _P28SegmentedEngineForward:
       with _p59_localize_engine_shard_maps(mesh, module_name):
         result = compiled(*aligned_runtime_args)
       if mesh != trainer_mesh:
+        # The whole result is relabeled to the trainer mesh, cotangents
+        # included.  This round trip is load-bearing at TP>1: the mapped
+        # pullback derives its input specs from the operand shardings on
+        # its first build, and the relabeled spelling is the one those
+        # specs were built from (run k3host_20260902_r1 fed a cotangent
+        # straight from the map and the layer VJP refused it as
+        # {V:data} against {V:(data,model)}).
         result = _p59_align_to_mesh(
             result, trainer_mesh, f"{module_name} output"
         )
@@ -6538,14 +6631,51 @@ class Qwen3EngineForwardAdapter:
   def _engine_array(self, value):
     return _safe_sharding_constraint(value, self._input_sharding)
 
+  def _p32_chunk_metadata_fn(self):
+    """The fused chunk-metadata program emitting the engine input sharding.
+
+    Emitting the seven arrays already on ``_input_sharding`` makes every
+    following ``_engine_array`` a no-op instead of seven identity reshard
+    programs per chunk (per forward chunk and again per reverse chunk).
+    The values are the same integers.
+    """
+    fn = getattr(self, "_p32_chunk_metadata_program", None)
+    if fn is None:
+      fn = jax.jit(
+          _fused_chunk_metadata.__wrapped__,
+          static_argnums=(4, 5, 6, 7),
+          out_shardings=self._input_sharding,
+      )
+      self._p32_chunk_metadata_program = fn
+    return fn
+
+  def _p32_glue_width(self):
+    """Fixed width of the grouped update's packed rows and flat cotangents."""
+    bucket = int(self._sequence_bucket)
+    return ((int(self._max_model_len) + bucket - 1) // bucket) * bucket
+
   def _fresh_caches(self):
-    return [
-        _safe_sharding_constraint(
-            jnp.zeros(self._cache_shape, self._cache_dtype),
-            self._cache_sharding,
-        )
-        for _ in self._runner.kv_caches
-    ]
+    """Zero KV caches for one chunk pass, produced by one cached program.
+
+    The eager form (``jnp.zeros`` + ``_safe_sharding_constraint`` per layer)
+    dispatched one ``broadcast_in_dim`` and one ``_identity_fn`` per KV layer
+    per call (k3host r3 histogram: 28 + 28 per call).  The program pins
+    ``out_shardings`` to ``_cache_sharding`` so every leaf lands with exactly
+    the sharding the eager reshard produced; the values are zeros either way.
+    """
+    count = len(self._runner.kv_caches)
+    key = (count, tuple(self._cache_shape), str(self._cache_dtype),
+           str(self._cache_sharding))
+    program = getattr(self, "_p32_fresh_caches_program", None)
+    if program is None or self._p32_fresh_caches_key != key:
+      shape, dtype = tuple(self._cache_shape), self._cache_dtype
+      program = jax.jit(
+          lambda: [jnp.zeros(shape, dtype) for _ in range(count)],
+          out_shardings=[self._cache_sharding] * count,
+      )
+      self._p32_fresh_caches_program = program
+      self._p32_fresh_caches_key = key
+    return program()
 
   def _group_batch_rows(self, value):
     """Groups a global batch into one independent row per data rank."""
@@ -7676,7 +7806,14 @@ class Qwen3EngineForwardAdapter:
         (int(host_n_real.max()) + self._sequence_bucket - 1)
         // self._sequence_bucket
     )
-    padded_width = num_chunks * self._sequence_bucket
+    # The packed rows, the flattened logps and the flattened cotangents
+    # are laid out at one fixed width for every group (the model limit
+    # rounded up to whole chunks) rather than at num_chunks * bucket, so
+    # the glue programs that carry them compile once per run instead of
+    # once per distinct chunk count.  Entries past n_real are masked and
+    # never reach a model program; the chunk loop still runs num_chunks
+    # passes.
+    padded_width = self._p32_glue_width()
 
     def pack_row(full_row, valid_row, count):
       order = jnp.nonzero(valid_row, size=padded_width, fill_value=0)[0]
@@ -7696,10 +7833,12 @@ class Qwen3EngineForwardAdapter:
     completion_ordinal = (
         jnp.cumsum(completion_valid, axis=1, dtype=jnp.int32) - 1
     )
+    # Masked completion slots clip to the last column of the last real chunk
+    # exactly as before (the bound is a value, not a shape).
     source_rows = jnp.clip(
         prompt_length[:, None] + completion_ordinal - 1,
         0,
-        padded_width - 1,
+        jnp.asarray(num_chunks * self._sequence_bucket - 1, jnp.int32),
     )
     return {
         "packed_ids": packed_ids,
@@ -7738,7 +7877,7 @@ class Qwen3EngineForwardAdapter:
           seq_lens,
           query_start,
           request_distribution,
-      ) = _fused_chunk_metadata(
+      ) = self._p32_chunk_metadata_fn()(
           spec["n_real"],
           spec["packed_ids"],
           spec["next_ids"],
@@ -7762,22 +7901,23 @@ class Qwen3EngineForwardAdapter:
           metadata,
       )
     rows = jnp.arange(self._sequence_bucket, dtype=jnp.int32)
-    q_len = jnp.clip(
-        spec["n_real"] - chunk_start, 0, self._sequence_bucket
-    )
+    # chunk_start is an operand, not a Python constant: every chunk of every
+    # group then shares one compiled program per helper below.
+    start = jnp.asarray(chunk_start, jnp.int32)
+    q_len = jnp.clip(spec["n_real"] - start, 0, self._sequence_bucket)
     kv_len = jnp.where(
         q_len > 0,
-        jnp.minimum(spec["n_real"], chunk_start + self._sequence_bucket),
+        jnp.minimum(spec["n_real"], start + self._sequence_bucket),
         0,
     )
-    chunk_ids_group = spec["packed_ids"][
-        :, chunk_start : chunk_start + self._sequence_bucket
-    ]
-    chunk_targets_group = spec["next_ids"][
-        :, chunk_start : chunk_start + self._sequence_bucket
-    ]
+    chunk_ids_group = jax.lax.dynamic_slice_in_dim(
+        spec["packed_ids"], start, self._sequence_bucket, axis=1
+    )
+    chunk_targets_group = jax.lax.dynamic_slice_in_dim(
+        spec["next_ids"], start, self._sequence_bucket, axis=1
+    )
     positions_group = jnp.where(
-        rows[None, :] < q_len[:, None], chunk_start + rows[None, :], 0
+        rows[None, :] < q_len[:, None], start + rows[None, :], 0
     )
     (
         block_tables,
@@ -7833,8 +7973,6 @@ class Qwen3EngineForwardAdapter:
         input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
             spec, chunk_index
         )
-        if keep_cache_inputs:
-          cache_inputs.append(caches)
         hidden = segmented.run_embed_forward(
             input_ids, state_leaves=engine_leaves
         )
@@ -7900,8 +8038,20 @@ class Qwen3EngineForwardAdapter:
             entropy.reshape(self._data_size, self._sequence_bucket)
         )
 
-    flat_logps = jnp.concatenate(chunk_logps, axis=1)
-    flat_entropies = jnp.concatenate(chunk_entropies, axis=1)
+    flat_logps = jnp.zeros(
+        (self._data_size, self._p32_glue_width()), jnp.float32
+    )
+    flat_entropies = jnp.zeros_like(flat_logps)
+    for chunk_index, (chunk_lp, chunk_ent) in enumerate(
+        zip(chunk_logps, chunk_entropies)
+    ):
+      start = jnp.asarray(chunk_index * self._sequence_bucket, jnp.int32)
+      flat_logps = jax.lax.dynamic_update_slice_in_dim(
+          flat_logps, chunk_lp, start, axis=1
+      )
+      flat_entropies = jax.lax.dynamic_update_slice_in_dim(
+          flat_entropies, chunk_ent, start, axis=1
+      )
     completion_valid = spec["completion_valid"]
     logps = jnp.where(
         completion_valid,
@@ -7916,13 +8066,11 @@ class Qwen3EngineForwardAdapter:
     return {
         "logps": logps,
         "entropy": entropy,
-        "cache_inputs": tuple(cache_inputs),
-        # With the tape kept the reverse pass only needs the final caches'
-        # shapes, which the last chunk's input caches share, so do not hold a
-        # second full cache set per group.
-        "final_caches": (
-            caches if keep_cache_inputs and not keep_tape else ()
-        ),
+        # The reverse rebuilds every chunk's entry caches from the final
+        # ones (see _p32_entry_caches), so the tape holds one cache set per
+        # group instead of one full-length snapshot per chunk.
+        "cache_inputs": (),
+        "final_caches": caches if keep_cache_inputs else (),
         "hidden_inputs": tuple(hidden_inputs),
         "final_hiddens": tuple(final_hiddens),
         "counts": counts,
@@ -7982,6 +8130,58 @@ class Qwen3EngineForwardAdapter:
           "jitted program was built"
       )
     return self._p70_tree_start_fn(self._p70_tree_start_zeros, pack)
+
+  def _p59_staged_tree_add(self, accumulator, staged):
+    """One jitted, donating `a + b` over a staged DP gradient table.
+
+    CANON_DP_REDUCE_ONCE=1 accumulates every group's rank-local staged
+    gradient on its own DP shard: each leaf add is elementwise on the
+    ``(dp, ...)`` layout partitioned over the DP axis, so no collective
+    runs and no cross-leaf math exists to reassociate.  The consumed
+    accumulator is donated; the only call site rebinds it to the result.
+    """
+    signature = self._p70_grad_tree_signature((accumulator, staged))
+    if getattr(self, "_p59_staged_add_fn", None) is None:
+
+      def add(left, right):
+        return jax.tree.map(lambda a, b: a + b, left, right)
+
+      # The reducer validates the staged layout by exact NamedSharding
+      # equality; a jit output would canonicalize `P('dp', None)` to
+      # `P('dp',)`, so the first accumulator's own shardings (the layout the
+      # reducer was built from) are pinned as the program's output
+      # shardings.  Later operands only need an equivalent sharding.
+      self._p59_staged_add_signature = signature
+      self._p59_staged_add_shardings = tuple(
+          leaf.sharding for leaf in jax.tree.leaves(accumulator)
+      )
+      self._p59_staged_add_fn = _xprof_jit(
+          add,
+          module_name="zt_tr_dp_staged_accum",
+          scope_name="zt/tr/dp_parallel/staged_accum",
+          donate_argnums=(0,),
+          out_shardings=jax.tree.unflatten(
+              jax.tree.structure(accumulator),
+              list(self._p59_staged_add_shardings),
+          ),
+      )
+    elif self._p59_staged_add_signature != signature:
+      raise FunctionalMappingError(
+          "P59 staged accumulator tree signature changed after the jitted "
+          f"program was built: {signature[1][:3]}... != "
+          f"{self._p59_staged_add_signature[1][:3]}..."
+      )
+    for name, tree in (("accumulator", accumulator), ("staged", staged)):
+      for index, (leaf, pinned) in enumerate(zip(
+          jax.tree.leaves(tree), self._p59_staged_add_shardings, strict=True
+      )):
+        if not leaf.sharding.is_equivalent_to(pinned, leaf.ndim):
+          raise FunctionalMappingError(
+              f"P59 staged accumulator {name} leaf {index} sharding "
+              f"{leaf.sharding} is not equivalent to the pinned layout "
+              f"{pinned}"
+          )
+    return self._p59_staged_add_fn(accumulator, staged)
 
   def _p70_grad_tree_add(self, accumulator, pack):
     """One jitted `a + b` accumulate over the whole gradient pack.
@@ -8085,7 +8285,7 @@ class Qwen3EngineForwardAdapter:
       replay = self._p32_forward_group(
           segmented, engine_leaves, spec, keep_cache_inputs=True
       )
-    padded_width = spec["num_chunks"] * self._sequence_bucket
+    padded_width = self._p32_glue_width()
     completion_valid = spec["completion_valid"]
     rank_rows = jnp.arange(self._data_size, dtype=jnp.int32)[:, None]
     flat_dlogps = jnp.zeros(
@@ -8127,8 +8327,10 @@ class Qwen3EngineForwardAdapter:
           tree_zeros(segmented._norm_local_leaves),  # pylint: disable=protected-access
           tree_zeros(segmented._head_local_leaves),  # pylint: disable=protected-access
       )
+    # One program for every layer's zero cache cotangent instead of one
+    # per layer: the values are zeros either way.
     dcache_carry = tuple(
-        tree_zeros(cache) for cache in (replay["final_caches"] or replay["cache_inputs"][-1])
+        _p32_zero_trees(tuple(replay["final_caches"]))
     )
     counts = dict(replay["counts"])
     counts.update({
@@ -8172,7 +8374,11 @@ class Qwen3EngineForwardAdapter:
         input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
             spec, chunk_index
         )
-        caches = replay["cache_inputs"][chunk_index]
+        caches = _p32_entry_caches(
+            replay["final_caches"],
+            chunk_index * self._sequence_bucket,
+            data_size=self._data_size,
+        )
         kept_hidden_ins = replay.get("hidden_inputs") or ()
         stacked_cache_ins = stacked_hidden_ins = None
         if kept_hidden_ins:
@@ -8186,11 +8392,16 @@ class Qwen3EngineForwardAdapter:
                 f"{len(hidden_ins)} != {len(caches)}"
             )
           hidden = replay["final_hiddens"][chunk_index]
-          stacked_cache_ins = jax.tree.map(lambda *xs: jnp.stack(xs), *caches)
-          stacked_hidden_ins = jnp.stack(hidden_ins)
           if rank_parallel and not p71_block_bwd:
+            # The per-layer pullbacks consume the kept per-layer arrays as
+            # they are; stacking them would only copy the whole tape once
+            # more per chunk for a consumer that does not exist here.
             layer_tape = list(zip(caches, hidden_ins))
           else:
+            stacked_cache_ins = jax.tree.map(
+                lambda *xs: jnp.stack(xs), *caches
+            )
+            stacked_hidden_ins = jnp.stack(hidden_ins)
             layer_tape = None
           tape_depth = len(caches)
         else:
@@ -8238,13 +8449,13 @@ class Qwen3EngineForwardAdapter:
         )
         logits = raw_logits.astype(jnp.float32)
         counts["head_forward"] += 1
-        start = chunk_index * self._sequence_bucket
-        dchunk_logps = flat_dlogps[
-            :, start : start + self._sequence_bucket
-        ].reshape(-1)
-        dchunk_entropy = flat_dentropy[
-            :, start : start + self._sequence_bucket
-        ].reshape(-1)
+        start = jnp.asarray(chunk_index * self._sequence_bucket, jnp.int32)
+        dchunk_logps = jax.lax.dynamic_slice_in_dim(
+            flat_dlogps, start, self._sequence_bucket, axis=1
+        ).reshape(-1)
+        dchunk_entropy = jax.lax.dynamic_slice_in_dim(
+            flat_dentropy, start, self._sequence_bucket, axis=1
+        ).reshape(-1)
         dlogits = self._p28_processed_rows_pullback_fn(
             logits,
             target_ids,
@@ -8807,6 +9018,18 @@ class Qwen3EngineForwardAdapter:
           "CANON_P32_KEEP_TAPE=stream is not admitted under backward numeric "
           "debug: its loss cotangents exist per group, not per batch"
       )
+    dp_reduce_once = dp_training.dp_reduce_once_mode()
+    if dp_reduce_once and (not rank_parallel_backward or p66_tp4_arm):
+      raise FunctionalMappingError(
+          "CANON_DP_REDUCE_ONCE=1 requires CANON_P59_RANK_PARALLEL_BACKWARD=1 "
+          "and is not admitted under the P66 TP4 arm"
+      )
+    if dp_reduce_once and (numeric_debug or deterministic_repeat):
+      raise FunctionalMappingError(
+          "CANON_DP_REDUCE_ONCE=1 keeps no per-group reduced gradient: "
+          "backward numeric debug and deterministic_repeat are not admitted "
+          "with it"
+      )
     p64_capsule_mode = (
         p64_training_capsule.mode()
         if numeric_debug_mode == "p64"
@@ -9215,9 +9438,11 @@ class Qwen3EngineForwardAdapter:
         )
 
     reducer = None
+    staged_total = None
+    staged_receipts = []
 
     def reverse_reduce_group(index, spec):
-      nonlocal reducer
+      nonlocal reducer, staged_total
       if rank_parallel_backward:
         if p32_keep_tape:
           # The forward phase kept this group's tape: the replay that used to
@@ -9320,6 +9545,60 @@ class Qwen3EngineForwardAdapter:
             jax.tree.leaves(reverse["initial_cache_cotangents"]),
             batched_evidence=batched_evidence,
         )
+        if dp_reduce_once:
+          # K2: no reduction here.  The rank-local staged table is added to
+          # the update's staged accumulator on its own DP shard, and only its
+          # per-rank receipts (signature, finite bits, exact nonzero counts)
+          # are produced now, on device; they are resolved in one transfer
+          # after the update's single reduction.
+          with gsm8k_xprof.trace_annotation(
+              "staged_accumulate", group_index=index
+          ):
+            # The receipt program is cached on the adapter, not on the
+            # per-update reducer: the r4 trace showed a per-update rebuild
+            # retracing 310 leaves x 5 ops on every group (44 ms of host
+            # time per group).
+            receipt_program = getattr(self, "_p59_staged_receipt_program", None)
+            if receipt_program is None:
+              row_sharding = (
+                  reducer.staged_row_sharding()
+                  if callable(getattr(reducer, "staged_row_sharding", None))
+                  else None
+              )
+              receipt_program = dp_training.StagedReceiptProgram(row_sharding)
+              self._p59_staged_receipt_program = receipt_program
+            reducer.validate_staged(staged_gradient) if callable(
+                getattr(reducer, "validate_staged", None)
+            ) else None
+            staged_receipts.append(receipt_program(staged_gradient))
+            staged_total = (
+                staged_gradient
+                if staged_total is None
+                else self._p59_staged_tree_add(staged_total, staged_gradient)
+            )
+          report = {
+              "group": index,
+              "trajectory_rows": reverse_groups[index],
+              "n_real": spec["host_n_real"],
+              "rank_counts": (reverse["counts"],),
+              "pullback_invocations": 1,
+              "gradient_finite": "deferred-update",
+              "gradient_nonzero": "deferred-update",
+              "initial_cache_cotangent_nonzero": cache_nonzero,
+              "dp_reduction": {
+                  "staged_only": True,
+                  "rank_contributions": contract.dp_size,
+                  "reduction_transactions": 0,
+                  "reduction_rounds": 0,
+              },
+          }
+          seen = set()
+          for value in jax.tree.leaves(reverse):
+            if isinstance(value, jax.Array) and id(value) not in seen:
+              seen.add(id(value))
+              if not value.is_deleted():
+                value.delete()
+          return None, report
         with gsm8k_xprof.trace_annotation(
             "fixed_dp_reduce", group_index=index
         ):
@@ -9570,7 +9849,9 @@ class Qwen3EngineForwardAdapter:
           one_gradient, report = reverse_reduce_group(index, spec)
           p32_reverse_durations.append(time.perf_counter() - p32_group_start)
           if p59_xprof_capture and index == 0:
-            jax.block_until_ready(one_gradient)
+            jax.block_until_ready(
+                staged_total if one_gradient is None else one_gradient
+            )
             jax.profiler.stop_trace()
             print(
                 "[P59.XPROF] phase=backward_group stopped update=1 groups=1 "
@@ -9625,32 +9906,51 @@ class Qwen3EngineForwardAdapter:
                 ),
                 flush=True,
             )
-          print(
-              f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] "
-              "reverse_group_done "
-              f"group={index + 1}/{contract.local_trajectories} "
-              f"rows={reverse_groups[index]} "
-              "rank_contributions="
-              f"{report['dp_reduction']['rank_contributions']} "
-              f"pullback_invocations={report['pullback_invocations']} "
-              "unique_rank_fingerprints="
-              f"{report['dp_reduction']['rank_local_fingerprint_unique_count']}/"
-              f"{contract.dp_size} "
-              f"reduction_rounds={report['dp_reduction']['reduction_rounds']} "
-              "replicas_exact="
-              f"{int(report['dp_reduction']['post_reduction_replicas_exact'])} "
-              f"gradient_nonzero={report['gradient_nonzero']} "
-              "repeat_exact="
-              f"{int(report.get('deterministic_repeat_exact', False))}",
-              flush=True,
-          )
-          with gsm8k_xprof.trace_annotation(
-              "gradient_accumulate",
-              group_index=index,
-              micro_step=index,
-              is_last_accumulate=int(index == len(specs) - 1),
+          if dp_reduce_once:
+            print(
+                f"[P33.DP{contract.dp_size}] staged_accumulate_done "
+                f"group={index + 1}/{contract.local_trajectories} "
+                f"rows={reverse_groups[index]} "
+                "rank_contributions="
+                f"{report['dp_reduction']['rank_contributions']} "
+                f"pullback_invocations={report['pullback_invocations']} "
+                "initial_cache_cotangent_nonzero="
+                f"{report['initial_cache_cotangent_nonzero']}",
+                flush=True,
+            )
+          else:
+            print(
+                f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] "
+                "reverse_group_done "
+                f"group={index + 1}/{contract.local_trajectories} "
+                f"rows={reverse_groups[index]} "
+                "rank_contributions="
+                f"{report['dp_reduction']['rank_contributions']} "
+                f"pullback_invocations={report['pullback_invocations']} "
+                "unique_rank_fingerprints="
+                f"{report['dp_reduction']['rank_local_fingerprint_unique_count']}/"
+                f"{contract.dp_size} "
+                f"reduction_rounds={report['dp_reduction']['reduction_rounds']} "
+                "replicas_exact="
+                f"{int(report['dp_reduction']['post_reduction_replicas_exact'])} "
+                f"gradient_nonzero={report['gradient_nonzero']} "
+                "repeat_exact="
+                f"{int(report.get('deterministic_repeat_exact', False))}",
+                flush=True,
+            )
+          with (
+              contextlib.nullcontext()
+              if dp_reduce_once
+              else gsm8k_xprof.trace_annotation(
+                  "gradient_accumulate",
+                  group_index=index,
+                  micro_step=index,
+                  is_last_accumulate=int(index == len(specs) - 1),
+              )
           ):
-            if gradient_microbatch_sink is None:
+            if dp_reduce_once:
+              pass
+            elif gradient_microbatch_sink is None:
               trainer_gradients = (
                   one_gradient
                   if trainer_gradients is None
@@ -9671,7 +9971,7 @@ class Qwen3EngineForwardAdapter:
                   scale
                   * jnp.asarray(contract.local_trajectories, scale.dtype),
               )
-          if gradient_microbatch_sink is not None:
+          if gradient_microbatch_sink is not None and not dp_reduce_once:
             # The sink blocks after donating the persistent accumulator. The
             # reduced per-group gradient is now dead; explicit deletion
             # prevents Python reference lifetime from retaining a second
@@ -9713,6 +10013,67 @@ class Qwen3EngineForwardAdapter:
               "P32 stream loss scale differs from the batch loss scale"
           )
         grouped_logps = stream_logps
+    update_reduction_report = None
+    staged_group_norms = ()
+    if dp_reduce_once:
+      if staged_total is None or reducer is None:
+        raise FunctionalMappingError(
+            "CANON_DP_REDUCE_ONCE=1 accumulated no staged gradient"
+        )
+      last_index = len(reverse_specs) - 1
+      # The update's one fixed-order reduce-and-broadcast: the same program,
+      # tree, replica check and receipts as the per-group reduction, applied
+      # to the staged sum of every group.
+      with gsm8k_xprof.trace_annotation(
+          "fixed_dp_reduce", group_index=last_index
+      ):
+        total_gradient, update_reduction_report = reducer.finalize_staged(
+            staged_total
+        )
+      staged_total = None
+      signatures, finite, nonzero = jax.device_get((
+          jnp.stack([item[0] for item in staged_receipts]),
+          jnp.stack([item[1] for item in staged_receipts]),
+          jnp.stack([item[2] for item in staged_receipts]),
+      ))
+      signatures = np.asarray(signatures, dtype=np.float64)
+      finite = np.asarray(finite, dtype=np.bool_)
+      nonzero = np.asarray(nonzero, dtype=np.int64)
+      norms = []
+      for group_index, report in enumerate(reports):
+        report["gradient_finite"] = bool(np.all(finite[group_index]))
+        report["gradient_nonzero"] = int(np.sum(nonzero[group_index]))
+        # The rank-local contribution norm of this group: sqrt of the summed
+        # per-rank squared sums (signature column 2).
+        norms.append(float(np.sqrt(np.sum(signatures[group_index, :, 2]))))
+      staged_group_norms = tuple(norms)
+      with gsm8k_xprof.trace_annotation(
+          "gradient_accumulate",
+          group_index=last_index,
+          micro_step=last_index,
+          is_last_accumulate=1,
+      ):
+        if gradient_microbatch_sink is None:
+          trainer_gradients = total_gradient
+        else:
+          # One streamed contribution standing for every group: the trainer
+          # advances its microbatch cadence by the group count and the
+          # accumulator's denominator with it, so the committed value is the
+          # same ``scale * sum(all trajectory gradients)`` as the per-group
+          # stream produced.
+          gradient_microbatch_sink(
+              0,
+              total_gradient,
+              scale * jnp.asarray(contract.local_trajectories, scale.dtype),
+              microbatches=contract.local_trajectories,
+          )
+      if gradient_microbatch_sink is not None:
+        seen = set()
+        for value in jax.tree.leaves(total_gradient):
+          if isinstance(value, jax.Array) and id(value) not in seen:
+            seen.add(id(value))
+            if not value.is_deleted():
+              value.delete()
     deferred_finite_receipts = None
     if reducer is not None and getattr(
         reducer, "pending_finite_receipt_count", 0
@@ -9751,24 +10112,47 @@ class Qwen3EngineForwardAdapter:
         ),
         "reports": tuple(reports),
         "forward_counts": tuple(result["counts"] for result in forwards),
-        "dp_reduction_visibility": "EXPLICIT_FIXED_TREE",
+        "dp_reduction_visibility": (
+            "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+            if dp_reduce_once
+            else "EXPLICIT_FIXED_TREE"
+        ),
         "dp_axis": trainer_dp_axis,
-        "rank_local_gradient_fingerprints": tuple(
-            report["dp_reduction"]["rank_local_fingerprints"]
-            for report in reports
+        "rank_local_gradient_fingerprints": (
+            (update_reduction_report["rank_local_fingerprints"],)
+            if dp_reduce_once
+            else tuple(
+                report["dp_reduction"]["rank_local_fingerprints"]
+                for report in reports
+            )
         ),
-        "rank_local_gradient_fingerprint_unique_counts": tuple(
-            report["dp_reduction"]["rank_local_fingerprint_unique_count"]
-            for report in reports
+        "rank_local_gradient_fingerprint_unique_counts": (
+            (update_reduction_report["rank_local_fingerprint_unique_count"],)
+            if dp_reduce_once
+            else tuple(
+                report["dp_reduction"]["rank_local_fingerprint_unique_count"]
+                for report in reports
+            )
         ),
-        "replica_equality": all(
-            report["dp_reduction"]["post_reduction_replicas_exact"]
-            for report in reports
+        "replica_equality": (
+            bool(update_reduction_report["post_reduction_replicas_exact"])
+            if dp_reduce_once
+            else all(
+                report["dp_reduction"]["post_reduction_replicas_exact"]
+                for report in reports
+            )
         ),
-        "dp_reduction_transactions": sum(
-            report["dp_reduction"]["reduction_transactions"]
-            for report in reports
+        "dp_reduction_transactions": (
+            int(update_reduction_report["reduction_transactions"])
+            if dp_reduce_once
+            else sum(
+                report["dp_reduction"]["reduction_transactions"]
+                for report in reports
+            )
         ),
+        "dp_staged_accumulations": len(reports) if dp_reduce_once else 0,
+        "staged_group_norms": staged_group_norms,
+        "dp_reduction_update": update_reduction_report,
         "dp_reduction_rounds_per_transaction": (
             dp_training.fixed_dp_collective_count(contract.dp_size)
         ),

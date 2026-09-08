@@ -373,6 +373,48 @@ class _SegmentedLayer(nnx.Module):
     return cache + jnp.sum(output), output
 
 
+_PAGED_POSITIONS = 8  # two chunks of the group fixture's bucket (4) per rank
+
+
+class _PagedSegmentedLayer(nnx.Module):
+  """Fake layer that follows the paged-attention cache contract.
+
+  The KV cache is a per-rank store of ``_PAGED_POSITIONS`` slots laid out
+  rank-major on the leading axis.  Chunk ``c`` (``metadata`` carries its
+  ``chunk_start``) reads only slots at positions below ``chunk_start`` and
+  writes exactly its own ``[chunk_start, chunk_start + bucket)`` slots, like
+  the ragged paged attention kernel does.  The grouped reverse rebuilds every
+  chunk's entry cache from the group's final cache under that contract, so
+  the group fixture has to honour it.
+  """
+
+  def __init__(self, scale):
+    self.scale = nnx.Param(jnp.asarray(scale, jnp.float32))
+
+  def __call__(self, cache, hidden, metadata):
+    rows = max(cache.shape[0] // _PAGED_POSITIONS, 1)
+    bucket = hidden.shape[0] // rows
+    positions = cache.shape[0] // rows
+    h = hidden.reshape(rows, bucket, hidden.shape[1])
+    c = cache.reshape(rows, positions, cache.shape[1])
+    start = jnp.asarray(metadata, jnp.int32)
+    pos = jnp.arange(positions, dtype=jnp.int32)
+    context = jnp.sum(
+        jnp.where((pos < start)[None, :, None], c, jnp.float32(0.0)),
+        axis=1,
+        keepdims=True,
+    )
+    output = (
+        h * self.scale[...]
+        + context * jnp.float32(0.1)
+        + jnp.float32(0.001) * start.astype(jnp.float32)
+    )
+    written = jax.lax.dynamic_update_slice(
+        c, h * jnp.float32(0.5), (0, start, 0)
+    )
+    return written.reshape(cache.shape), output.reshape(hidden.shape)
+
+
 class _SegmentedBackbone(nnx.Module):
 
   def __init__(self):
@@ -892,6 +934,13 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
 
   def _make_p32_group_adapter(self, *, sequence_bucket=4):
     runner = _CompleteSegmentedRunner()
+    # The grouped paths rebuild chunk entry caches from the final cache, so
+    # the fixture's layers and cache follow the paged-attention contract.
+    runner.model.model.layers = nnx.List(
+        [_PagedSegmentedLayer(1.5), _PagedSegmentedLayer(2.0)]
+    )
+    _, runner.state = nnx.split(runner.model)
+    runner.state_leaves = tuple(jax.tree.leaves(runner.state))
     adapter = object.__new__(
         canonical_qwen3_adapter.Qwen3EngineForwardAdapter
     )
@@ -912,7 +961,11 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         lambda *_: contextlib.nullcontext()
     )
     adapter._fresh_caches = types.MethodType(  # pylint: disable=protected-access
-        lambda self: [jnp.asarray(0.0), jnp.asarray(0.0)], adapter
+        lambda self: [
+            jnp.zeros((self._data_size * _PAGED_POSITIONS, 1), jnp.float32)
+            for _ in range(2)
+        ],
+        adapter,
     )
 
     def group_chunk_inputs(self, spec, chunk_index):
@@ -921,7 +974,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
       return (
           spec["packed_ids"][:, start:end].reshape(-1),
           spec["next_ids"][:, start:end].reshape(-1),
-          jnp.asarray(0.125, jnp.float32),
+          jnp.asarray(start, jnp.int32),
       )
 
     adapter._p32_group_chunk_inputs = types.MethodType(  # pylint: disable=protected-access

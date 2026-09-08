@@ -2102,6 +2102,137 @@ class PeftTrainerTest(parameterized.TestCase):
           )
           self.assertEqual(value.sharding, target)
 
+  def test_p30_accumulator_reshard_skips_equivalent_shardings(self):
+    """A leaf whose sharding is equivalent to the registered one is not re-put.
+
+    The jitted accumulate returns leaves spelled P('tp',) for a registered
+    P('tp', None); comparing the objects re-put 254 of 311 leaves per update
+    on the DP2xTP2 carrier.  Equivalence keeps the no-op a no-op and still
+    catches a different partitioning.
+    """
+    with compat.set_mesh(self.mesh):
+      model, _ = create_sharded_model(
+          tc.ToyTransformer, nnx.Rngs(0), self.mesh
+      )
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=2,
+          gradient_accumulation_steps=4,
+          checkpoint_root_directory=None,
+          optimizer_state_dtype=jnp.float32,
+      )
+      trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+      puts = []
+      original_put = jax.device_put
+
+      def counting_put(value, *args, **kwargs):
+        puts.append(value)
+        return original_put(value, *args, **kwargs)
+
+      with mock.patch.object(jax, "device_put", counting_put):
+        summary = trainer._reshard_grad_accumulator(self.mesh)  # pylint: disable=protected-access
+      self.assertGreater(summary["arrays"], 0)
+      # Every accumulator leaf already carries its registered sharding (or
+      # an equivalent spelling of it): nothing is transferred.
+      self.assertEqual(len(puts), 0)
+      # A genuinely different partitioning is still transferred.
+      leaves = jax.tree.leaves(trainer.grad_accumulator.grads)
+      first = next(
+          value for value in leaves if isinstance(value, jax.Array)
+          and value.ndim >= 1
+      )
+      moved = jax.device_put(
+          first,
+          jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec()),
+      )
+      self.assertFalse(
+          moved.sharding.is_equivalent_to(first.sharding, first.ndim)
+          and first.sharding.spec != jax.sharding.PartitionSpec()
+      )
+
+  def test_p30_accumulator_spelling_matches_the_jitted_accumulate_output(self):
+    """The fresh accumulator is spelled the way the accumulate program spells it.
+
+    Fully replicated leaves come back from the jitted accumulate as P() and
+    the denominator on the mesh; the registered spellings are P(None, ...)
+    and a single-device scalar.  Aligning them once before the first trace
+    keeps every update's avals identical (no second compile in update 2).
+    """
+    with compat.set_mesh(self.mesh):
+      model, _ = create_sharded_model(
+          tc.ToyTransformer, nnx.Rngs(0), self.mesh
+      )
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=2,
+          gradient_accumulation_steps=4,
+          checkpoint_root_directory=None,
+          optimizer_state_dtype=jnp.float32,
+      )
+      trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+      # Register the carrier's spelling on one replicated leaf: the model's
+      # metadata spells fully replicated leaves P(None, ...) there.
+      leaves = jax.tree.leaves(trainer.grad_accumulator.grads)
+      target = next(
+          v for v in leaves
+          if v.ndim >= 1 and all(axis is None for axis in v.sharding.spec)
+      )
+      respelled = jax.device_put(
+          target,
+          jax.sharding.NamedSharding(
+              self.mesh, jax.sharding.PartitionSpec(*([None] * target.ndim))
+          ),
+      )
+      trainer.grad_accumulator.grads = jax.tree.map(
+          lambda v: respelled if v is target else v,
+          trainer.grad_accumulator.grads,
+      )
+      before = jax.tree.leaves(trainer.grad_accumulator.grads)
+      before_specs = [tuple(v.sharding.spec) for v in before]
+      self.assertTrue(
+          any(spec and all(axis is None for axis in spec) for spec in before_specs),
+          "fixture needs at least one leaf spelled P(None, ...)",
+      )
+      # On the carrier the denominator starts on a single device (it is
+      # created outside the mesh context); model that too.
+      trainer.grad_accumulator.denom.set_value(
+          jax.device_put(jnp.zeros((), jnp.float32), jax.devices()[0])
+      )
+      self.assertIsInstance(
+          trainer.grad_accumulator.denom[...].sharding,
+          jax.sharding.SingleDeviceSharding,
+      )
+      summary = trainer._align_accumulator_sharding_spelling()  # pylint: disable=protected-access
+      self.assertGreater(summary["replicated"], 0)
+      self.assertEqual(summary["scalars"], 1)
+      after = jax.tree.leaves(trainer.grad_accumulator.grads)
+      for old, new, old_spec in zip(before, after, before_specs):
+        self.assertEqual(np.asarray(new).tobytes(), np.asarray(old).tobytes())
+        self.assertTrue(new.sharding.is_equivalent_to(old.sharding, old.ndim))
+        if old_spec and all(axis is None for axis in old_spec):
+          self.assertEqual(tuple(new.sharding.spec), ())
+        else:
+          self.assertIs(new, old)  # partially sharded leaves are untouched
+      denom = trainer.grad_accumulator.denom[...]
+      self.assertEqual(
+          denom.sharding,
+          jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec()),
+      )
+      # Idempotent: a second alignment transfers nothing.
+      again = trainer._align_accumulator_sharding_spelling()  # pylint: disable=protected-access
+      self.assertEqual(again, {"replicated": 0, "scalars": 0})
+      # And the post-commit reshard still leaves every leaf alone.
+      puts = []
+      original_put = jax.device_put
+
+      def counting_put(value, *args, **kwargs):
+        puts.append(value)
+        return original_put(value, *args, **kwargs)
+
+      with mock.patch.object(jax, "device_put", counting_put):
+        trainer._reshard_grad_accumulator(self.mesh)  # pylint: disable=protected-access
+      self.assertEqual(len(puts), 0)
+
   def test_p30_optimizer_offload_transfer_failure_is_loud(self):
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=100,
