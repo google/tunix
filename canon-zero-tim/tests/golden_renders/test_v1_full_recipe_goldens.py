@@ -65,9 +65,9 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_three_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "8b4fd423073bc1b8fc39a3a4bac60d418411392018c2e1bf7df37d0062ccc341",
-        "3c45bec9589dc7ec15b6c09e8453c49a5c2c398b6f90198ab66454f5669822be",
-        "ed474832d17ec87d07c1f307c528f39b58e04972443a98e3033482d0b9b623c1",
+        "c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d",
+        "f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0",
+        "7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_three(Path(tmp) / "first")
@@ -75,12 +75,13 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
       self.assertEqual(tuple(map(_sha256, first)), expected)
       self.assertEqual(tuple(map(_sha256, second)), expected)
       for path in (*first, *second):
-        self.assertEqual(_env(path)["CANON_DP_REDUCE_ONCE"], "1")
+        self.assertNotIn("CANON_DP_REDUCE_ONCE", _env(path))
+        self.assertNotIn("CANON_P32_KEEP_TAPE", _env(path))
 
   def test_frozenlake_two_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "7a492a35cca91f524f4e1533a2421277803dc55e3fcb26e37429eb2dd8006186",
-        "5a4610c1d3572926a371b594e570e519adc815659aa373fc739acda7faa24f87",
+        "1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680",
+        "727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_two(Path(tmp) / "first")
@@ -88,12 +89,14 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
       self.assertEqual(tuple(map(_sha256, first)), expected)
       self.assertEqual(tuple(map(_sha256, second)), expected)
       for path in (*first, *second):
-        self.assertEqual(_env(path)["CANON_DP_REDUCE_ONCE"], "1")
+        self.assertNotIn("CANON_DP_REDUCE_ONCE", _env(path))
+        self.assertNotIn("CANON_P32_KEEP_TAPE", _env(path))
 
-  def test_frozenlake_image_receipt_is_the_only_legacy_golden_delta(self):
+  def test_image_receipt_and_profile_defaults_are_the_only_legacy_deltas(self):
     # The TiTO provenance change added CANON_CLIENT_IMAGE to FrozenLake.
     # Retain all old goldens as a reconstruction oracle: removing precisely
-    # that independently checked receipt must recover every old byte hash.
+    # that independently checked receipt, then restoring only the stream/1
+    # entries now owned by the profile, must recover every old byte hash.
     legacy = {
         "three": (
             "8b4fd423073bc1b8fc39a3a4bac60d418411392018c2e1bf7df37d0062ccc341",
@@ -117,6 +120,17 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
           self.assertEqual(receipts, [{"name": "CANON_CLIENT_IMAGE", "value": main["image"]}]
                            if is_frozenlake else [])
           main["env"] = [item for item in main["env"] if item["name"] != "CANON_CLIENT_IMAGE"]
+          entries = main["env"]
+          for name in ("CANON_P32_KEEP_TAPE", "CANON_DP_REDUCE_ONCE"):
+            self.assertTrue(all(item["name"] != name for item in entries), name)
+          position = 1 + max(
+              index for index, item in enumerate(entries)
+              if item["name"] in ("CANON_P71_SCAN", "CANON_P67_P66_VMA_P59_ONLY")
+          )
+          entries[position:position] = [
+              {"name": "CANON_P32_KEEP_TAPE", "value": "stream"},
+              {"name": "CANON_DP_REDUCE_ONCE", "value": "1"},
+          ]
           header = "\n".join(raw.splitlines()[:2]) + "\n"
           reconstructed = header + THREE.yaml.safe_dump(document, sort_keys=False)
           self.assertEqual(hashlib.sha256(reconstructed.encode()).hexdigest(), expected)

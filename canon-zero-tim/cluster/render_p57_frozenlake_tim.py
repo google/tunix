@@ -20,7 +20,10 @@ if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
 import render_p33_jobsets as p33
-from v1_full_system_optimization import full_system_optimization_additions
+from v1_full_system_optimization import (
+    FULL_PROFILE_DEFAULT_NAMES,
+    full_system_optimization_render_additions,
+)
 from examples.frozenlake import p57_workloads
 from examples.frozenlake import training_geometry as fl_geometry
 
@@ -661,7 +664,7 @@ def render_all(
     if high_performance:
       _replace_env(
           document,
-          full_system_optimization_additions(
+          full_system_optimization_render_additions(
               f"frozenlake-{workload_candidate or 'p45'}"
           ),
       )
@@ -686,6 +689,10 @@ def render_all(
         alignment_warning_only=alignment_warning_only,
     )
     env = _env(document)
+    if high_performance:
+      for name in FULL_PROFILE_DEFAULT_NAMES:
+        if name in env:
+          raise ValueError(f"full profile must own default {name}, not raw recipe")
     expected = {
         "CANON_PROFILE_FILE": (
             _TITO_DIAGNOSTIC_PROFILE

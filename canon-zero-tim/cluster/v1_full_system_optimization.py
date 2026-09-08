@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
+from collections.abc import Mapping
+import os
+import shlex
 from types import MappingProxyType
 
 
@@ -52,6 +56,10 @@ FULL_SYSTEM_OPTIMIZATION_ENV_NAMES = tuple(_BASE_ADDITIONS) + (
     "CANON_DP_REDUCE_ONCE",
 )
 
+# These values are resolved by the exact full profile, not duplicated in each
+# rendered recipe. Explicit controls retain their old presence semantics.
+FULL_PROFILE_DEFAULT_NAMES = ("CANON_P32_KEEP_TAPE", "CANON_DP_REDUCE_ONCE")
+
 
 def full_system_optimization_base_additions(workload: str) -> dict[str, str]:
   """Returns the common exact tuple without workload-specific admitted knives."""
@@ -73,3 +81,84 @@ def full_system_optimization_additions(workload: str) -> dict[str, str]:
   if workload in _REDUCE_ONCE_WORKLOADS:
     additions["CANON_DP_REDUCE_ONCE"] = "1"
   return additions
+
+
+def full_system_optimization_render_additions(workload: str) -> dict[str, str]:
+  """Returns raw recipe additions; the exact full profile derives defaults."""
+  return {
+      name: value
+      for name, value in full_system_optimization_additions(workload).items()
+      if name not in FULL_PROFILE_DEFAULT_NAMES
+  }
+
+
+def full_profile_defaults(values: Mapping[str, str]) -> dict[str, str]:
+  """Derives the registered pair only for an exact full-profile identity.
+
+  If either option is present, preserve both raw values, including missing,
+  empty or explicit0. This avoids silently constructing a different partial
+  override. Existing runtime and full-run checks still judge manual controls.
+  No model, geometry, Native or diagnostic inherits a default by prefix.
+  """
+  expected = {
+      "CANON_V1_HP_FULL": "1",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+  }
+  profile = values.get("CANON_PROFILE_FILE", "")
+  gsm8k = "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp"
+  frozen_profiles = {
+      "qwen3-8b-dp8-tp8-frozenlake-v1-hp": ("8", "64"),
+      "qwen3-8b-dp4-tp8-frozenlake-v1-hp": ("4", "32"),
+  }
+  if profile == f"cluster/profiles/{gsm8k}.env":
+    workload = "gsm8k"
+    expected.update({
+        "CANON_PROFILE": gsm8k,
+        "CANON_P32_WORKLOAD": "gsm8k",
+        "CANON_MODEL_DIR_NAME": "qwen1p7b",
+        "CANON_DP_SIZE": "16", "CANON_TP_SIZE": "4",
+        "CANON_TOTAL_DEVICES": "64", "CANON_GSM8K_TRAIN": "1",
+    })
+    if values.get("CANON_GSM8K_VANILLA", "") not in ("", "0"):
+      raise ValueError("full-profile defaults refuse Native GSM8K")
+  else:
+    match = next((name for name in frozen_profiles
+                  if profile == f"cluster/profiles/{name}.env"), None)
+    if match is None:
+      raise ValueError("full-profile defaults require an exact registered profile")
+    dp, devices = frozen_profiles[match]
+    candidate = (values.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
+                 values.get("CANON_P57_DATA_SPLIT", ""))
+    if candidate not in (("", ""), ("m15", "main")):
+      raise ValueError("full-profile defaults require P45 or M15/main identity")
+    workload = "frozenlake-m15" if candidate[0] else "frozenlake-p45"
+    expected.update({
+        "CANON_PROFILE": match,
+        "CANON_P32_WORKLOAD": f"frozenlake-dp{dp}-tp8",
+        "CANON_MODEL_DIR_NAME": "qwen8b_tp8",
+        "CANON_DP_SIZE": dp, "CANON_TP_SIZE": "8",
+        "CANON_TOTAL_DEVICES": devices,
+        "CANON_P57_TIM_ARM": "zero", "CANON_P57_RUN_KIND": "train",
+    })
+  wrong = [name for name, value in expected.items() if values.get(name) != value]
+  if wrong:
+    raise ValueError("full-profile defaults identity mismatch: " + ",".join(wrong))
+  if any(name in values for name in FULL_PROFILE_DEFAULT_NAMES):
+    return {}
+  bundle = full_system_optimization_additions(workload)
+  return {name: bundle[name] for name in FULL_PROFILE_DEFAULT_NAMES}
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--profile-defaults", action="store_true", required=True)
+  parser.parse_args()
+  for name, value in full_profile_defaults(os.environ).items():
+    # Only fixed, allowlisted names and registered constant values reach stdout.
+    print(f"export {name}={shlex.quote(value)}")
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

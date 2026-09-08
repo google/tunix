@@ -17,6 +17,15 @@ backpressure with its budget set to 0, the FrozenLake launcher's second
 physical worktree, ledgers). The whole tree is on `local/v2-integrate`;
 `git log --oneline cd955f99..HEAD` lists the 19 commits.
 
+**F.1b local delivery note (not pushed).** The full renderers now omit the
+raw `CANON_P32_KEEP_TAPE` / `CANON_DP_REDUCE_ONCE` pair. The exact full profile
+derives the same stream/1 values from `cluster/v1_full_system_optimization.py`
+when both names are absent; verify the resolved `env.sh`, not raw YAML presence.
+An explicit value (including empty or0) preserves the legacy control pair.
+Native and one-host diagnostic arms are unchanged. This is configuration
+delivery evidence, not new 8B optimizer or target certification; the launch
+route and requirement for separately approved publication/target work remain.
+
 **What the M15 recipe resolves to on this tree.** The full-system bundle
 (`cluster/v1_full_system_optimization.py`) still pins `CANON_P71_SCAN=fwd`,
 `CANON_P32_KEEP_TAPE=stream`, `CANON_DP_REDUCE_ONCE=1`. Two selectors are

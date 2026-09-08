@@ -28,6 +28,11 @@ render-only and may be used only after the implementation source is committed,
 published with explicit approval, read back, and checked out clean. See
 `../v1-phase4-three-full-recipes/HANDOFF.md` for the active contract.
 
+F.1b local delivery note (not pushed): raw YAML now omits the keep-tape /
+reduce-once pair; the exact full profile derives stream/1 from the shared
+bundle only when both names are absent. Verify resolved `env.sh`. Explicit
+controls retain old behavior; no new optimizer or target claim is made.
+
 The legacy commands below remain valid only for reproducing or continuing the
 separate historical resident/checkpoint study. Do not translate their
 warning-only alignment, 450-step horizon, checkpoint tag, or old renderer into

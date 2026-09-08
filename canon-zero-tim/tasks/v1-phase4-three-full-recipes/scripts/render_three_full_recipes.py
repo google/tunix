@@ -23,7 +23,10 @@ for path in (_REPO_ROOT, _CLUSTER_DIR):
 
 import render_p33_jobsets as p33
 import render_p57_frozenlake_tim as p57
-from v1_full_system_optimization import full_system_optimization_additions
+from v1_full_system_optimization import (
+    FULL_PROFILE_DEFAULT_NAMES,
+    full_system_optimization_render_additions,
+)
 
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -49,7 +52,7 @@ def _optimization_additions(label: str) -> dict[str, str]:
   }.get(label)
   if workload is None:
     raise ValueError(f"unknown full-recipe label: {label!r}")
-  return full_system_optimization_additions(workload)
+  return full_system_optimization_render_additions(workload)
 
 
 def _gsm8k_spec() -> p33.JobSpec:
@@ -226,6 +229,9 @@ def render_three(
   for label, path in zip(("gsm8k", "p45", "m15"), outputs, strict=True):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     env = _env(document)
+    for name in FULL_PROFILE_DEFAULT_NAMES:
+      if name in env:
+        raise ValueError(f"full profile must own default {name}, not raw recipe")
     required = {
         "CANON_PROFILE_FILE": expected_profiles[label],
         "CANON_V1_HP_FULL": "1",
@@ -234,7 +240,6 @@ def render_three(
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
-        "CANON_DP_REDUCE_ONCE": "1",
         **_JAX_CACHE_ENV,
     }
     if label == "gsm8k":
@@ -335,6 +340,9 @@ def render_gsm8k_full(
   _write_yaml(path, document)
 
   env = _env(document)
+  for name in FULL_PROFILE_DEFAULT_NAMES:
+    if name in env:
+      raise ValueError(f"full profile must own default {name}, not raw recipe")
   required = {
       "CANON_PROFILE_FILE": _GSM8K_PROFILE,
       "CANON_V1_HP_FULL": "1",
@@ -350,8 +358,6 @@ def render_gsm8k_full(
       "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
       "CANON_DP_FINITE_FETCH": "batched-commit",
       "CANON_P71_SCAN": "fwd",
-      "CANON_P32_KEEP_TAPE": "stream",
-      "CANON_DP_REDUCE_ONCE": "1",
       **_JAX_CACHE_ENV,
   }
   wrong = {

@@ -44,6 +44,11 @@ Both manifests must resolve checked-VMA/P67/first-update protection plus
 `CANON_DP_FINITE_FETCH=batched-commit`, `CANON_P71_SCAN=fwd`, and
 `CANON_P32_KEEP_TAPE=stream` (streamed kept tape, certified 2026-09-02) and
 `CANON_DP_REDUCE_ONCE=1` (one checked fixed-order DP reduction per update).
+F.1b local delivery change (not pushed): these two values are derived by the
+exact full profile from the shared bundle when both names are absent, rather
+than duplicated in raw YAML. Check resolved `env.sh`. Explicit presence keeps
+the old control pair; Native/one-host arms and numerical checks are unchanged.
+This does not certify new optimizer or target behavior.
 `CANON_DP_COLLECTIVE_REDUCE` remains absent. P74 itself has no flag: it is the
 checked-VMA source path selected by `CANON_P59_CHECKED_VMA=1`.
 

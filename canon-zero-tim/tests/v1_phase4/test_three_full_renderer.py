@@ -141,7 +141,8 @@ class ThreeFullRendererTest(unittest.TestCase):
       )
       self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
       self.assertEqual(values["CANON_P71_SCAN"], "fwd")
-      self.assertEqual(values["CANON_DP_REDUCE_ONCE"], "1")
+      self.assertNotIn("CANON_DP_REDUCE_ONCE", values)
+      self.assertNotIn("CANON_P32_KEEP_TAPE", values)
       self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
       self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
       self.assertIn("--max_steps=200", values["CANON_RUN_CMD"])
@@ -221,7 +222,8 @@ class ThreeFullRendererTest(unittest.TestCase):
             values["CANON_DP_DISTINCT_SCHEDULE"], "first-group-warmup"
         )
         self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
-        self.assertEqual(values["CANON_DP_REDUCE_ONCE"], "1")
+        self.assertNotIn("CANON_DP_REDUCE_ONCE", values)
+        self.assertNotIn("CANON_P32_KEEP_TAPE", values)
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
         self.assertEqual(values["CANON_P71_SCAN"], "fwd")
         self.assertEqual(
