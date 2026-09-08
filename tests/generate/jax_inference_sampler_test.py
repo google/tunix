@@ -134,6 +134,57 @@ class JaxInferenceSamplerTest(absltest.TestCase):
     state = nnx.state(tunix_model)
     sampler.update_params(state)
 
+  def test_jax_inference_sampler_temperature(self):
+    """Tests JaxInferenceSampler with temperature > 0, top_k, top_p, PRNGKey seed, and multi_sampling."""
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path, trust_remote_code=True
+    )
+
+    config = jax_inference_sampler.JaxInferenceConfig(
+        model_name=self.model_path,
+        mesh=self.mesh,
+        tensor_parallel_size=len(jax.devices()),
+        num_blocks=128,
+        block_size=256,
+        kv_cache_dtype="bf16",
+        unroll_steps=16,
+    )
+
+    sampler = jax_inference_sampler.JaxInferenceSampler(
+        tokenizer=tokenizer,
+        config=config,
+    )
+
+    prompts = ["What is the color of the sky?"]
+
+    # 1. Test with temperature > 0, top_k, top_p and JAX PRNGKey
+    key = jax.random.PRNGKey(42)
+    output1 = sampler(
+        input_strings=prompts,
+        max_generation_steps=16,
+        temperature=0.7,
+        top_k=50,
+        top_p=0.95,
+        seed=key,
+    )
+    self.assertLen(output1.text, 1)
+    self.assertTrue(len(output1.text[0]) > 0)
+
+    # 2. Test multi_sampling > 1 with temperature > 0
+    output_multi = sampler(
+        input_strings=prompts,
+        max_generation_steps=16,
+        temperature=0.7,
+        top_k=50,
+        top_p=0.95,
+        multi_sampling=3,
+    )
+    self.assertLen(output_multi.text, 3)
+    self.assertEqual(output_multi.padded_prompt_tokens.shape[0], 3)
+    self.assertLen(output_multi.tokens, 3)
+    print("Multi-sample results with temperature=0.7:", output_multi.text)
+
 
 if __name__ == "__main__":
   absltest.main()
+

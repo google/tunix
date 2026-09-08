@@ -300,7 +300,7 @@ class JaxInferenceSampler(base_sampler.BaseSampler):
           p + g for p, g in zip(prompts_to_run, generated_texts)
       ]
 
-    prompt_ids = [self.tokenize(x) for x in input_strings]
+    prompt_ids = [self.tokenize(x) for x in prompts_to_run]
     max_tokens_length = max(len(x) for x in prompt_ids) if prompt_ids else 0
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
