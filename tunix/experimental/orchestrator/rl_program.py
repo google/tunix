@@ -105,6 +105,7 @@ class StandardRLProgram(RLProgram):
       batch_config: batch_assembly.BatchConfig | None = None,
       generation_args: datatypes.GenerationArgs | None = None,
       group_size: int = 8,
+      batch_size: int | None = None,
       mini_batch_size: int = 4,
       max_staleness: int = 0,
       sync_weights: bool = True,
@@ -138,6 +139,19 @@ class StandardRLProgram(RLProgram):
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
+    if batch_size is None:
+      raise ValueError("batch_size must be specified.")
+    self.full_batch_size = batch_size
+    # Keep batch_size as a public alias for callers that use recipe naming.
+    self.batch_size = self.full_batch_size
+    if self.full_batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+    if self.full_batch_size % self.mini_batch_size != 0:
+      raise ValueError(
+          "batch_size must be divisible by mini_batch_size; got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
     self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
@@ -212,7 +226,7 @@ class StandardRLProgram(RLProgram):
         " already-trained dataset items).",
         restored_step,
         self.policy_version,
-        self._step * self.mini_batch_size,
+        self._step * self.full_batch_size,
     )
 
   async def rollout_dispatch_stage(self) -> None:
@@ -227,10 +241,7 @@ class StandardRLProgram(RLProgram):
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
-    # TODO(tunix-dev): current skip logic assumes mini_batch_size is the same as
-    # global batch size. We should support the case that one global batch
-    # contains multiple mini-batches.
-    already_consumed = self._step * self.mini_batch_size
+    already_consumed = self._step * self.full_batch_size
 
     try:
       for prompt_idx, prompt_item in enumerate(self.dataset):
@@ -698,7 +709,7 @@ class StandardRLProgram(RLProgram):
       scored_items = []
       groups_consumed = 0
 
-      while groups_consumed < self.mini_batch_size:
+      while groups_consumed < self.full_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
           assembled_batches = self.assembler.flush()
@@ -757,31 +768,34 @@ class StandardRLProgram(RLProgram):
               apply_optimizer=mb.is_final_batch,
           )
           if mb.is_final_batch:
-            # TODO(tunix-dev): Current checkpoint and metrics logic only works
-            # for fully on-policy. We need to come up with a solution for
-            # semi-off-policy where a single full batch has multiple mini
-            # batches.
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
             )
-            # TODO(tunix-dev): Configurable checkpointing frequency. Today we
-            # checkpoint at the same frequency as the weight update.
+            # Save only at a resumable full-batch boundary. An optimizer step
+            # can occur earlier when a full batch contains multiple mini
+            # batches, but the dataset resume cursor advances in full batches.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
             # abort the entire program. Make it configurable on whether to fail
             # or continue.
-            await self.engine.save_checkpoint(
-                role=datatypes.Role.ACTOR,
-                metadata={
-                    "step": self.step + 1,
-                    # TODO(tunix-dev): Current implementation assumes that
-                    # policy_version is the same as the step. We need to
-                    # decouple them once the global batch and mini batch
-                    # alignment is fixed.
-                    "policy_version": self.policy_version + 1,
-                    "num_rollouts": num_rollouts,
-                    "num_microbatches": num_microbatches,
-                },
+            full_batch_complete = (
+                groups_consumed >= self.full_batch_size or not scored_items
             )
+            if full_batch_complete:
+              optimizer_step = self.step + 1
+              if isinstance(step_result, dict):
+                optimizer_step = int(
+                    step_result.get("train_step", optimizer_step)
+                )
+              await self.engine.save_checkpoint(
+                  role=datatypes.Role.ACTOR,
+                  metadata={
+                      "step": optimizer_step,
+                      "global_step": self.step + 1,
+                      "policy_version": self.policy_version + 1,
+                      "num_rollouts": num_rollouts,
+                      "num_microbatches": num_microbatches,
+                  },
+              )
 
         if not scored_items:
           break
@@ -878,7 +892,7 @@ class StandardRLProgram(RLProgram):
           policy_version=self.policy_version,
       )
 
-    max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
+    max_groups_ahead = self.full_batch_size * (self.max_staleness + 1)
     self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
     train_task = asyncio.create_task(self.train_stage())

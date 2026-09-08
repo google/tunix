@@ -147,6 +147,7 @@ def main():
   print("Executing Run via ClusterOrchestrator...")
   program = rl_program.StandardRLProgram(
       algo=algo,
+      batch_size=1,
       dataset=train_dataset,
       reward_fns=[lambda x: 1.0],
       assembler=assembler,

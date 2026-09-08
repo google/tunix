@@ -244,9 +244,15 @@ class RLProgramTest(absltest.TestCase):
       max_steps: int | None = 1,
       reward_fns: Any = None,
       assembler: Any = None,
+      batch_size: int | None = None,
       **kwargs: Any,
   ) -> rl_program.StandardRLProgram:
     program = rl_program.StandardRLProgram(
+        batch_size=(
+            self.mock_algo.mini_batch_size
+            if batch_size is None
+            else batch_size
+        ),
         dataset=dataset,
         max_steps=max_steps,
         algo=self.mock_algo,
@@ -288,6 +294,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_initialization(self):
     program = rl_program.StandardRLProgram(
+        batch_size=1,
         dataset=["prompt_1"],
         algo=self.mock_algo,
         reward_fns=[lambda x: 1.0],
@@ -296,12 +303,23 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.step, 0)
     self.assertEqual(program.group_size, 2)
     self.assertEqual(program.mini_batch_size, 1)
+    self.assertEqual(program.full_batch_size, 1)
     self.assertIsNotNone(program.raw_q)
     self.assertIsNotNone(program.scored_q)
+
+  def test_batch_size_is_required(self):
+    with self.assertRaisesRegex(ValueError, "batch_size must be specified"):
+      rl_program.StandardRLProgram(
+          dataset=["prompt_1"],
+          algo=self.mock_algo,
+          reward_fns=[lambda x: 1.0],
+          assembler=self.assembler,
+      )
 
   def test_default_assembler_inherits_algo_train_micro_batch_size(self):
     self.mock_algo.train_micro_batch_size = 2
     program = rl_program.StandardRLProgram(
+        batch_size=1,
         dataset=["prompt_1"],
         algo=self.mock_algo,
         reward_fns=[lambda x: 1.0],
@@ -526,6 +544,30 @@ class RLProgramTest(absltest.TestCase):
     ]
     self.assertEqual(dispatched, ["prompt_3", "prompt_4",],)
 
+  def test_resume_skip_uses_full_batch_size(self):
+    self.mock_algo.mini_batch_size = 2
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=1)
+    dataset = [f"p{i}" for i in range(8)]
+    program = self._create_program(
+        dataset=dataset,
+        max_steps=2,
+        batch_size=4,
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+      await program.rollout_dispatch_stage()
+
+    asyncio.run(_run())
+    dispatched = [
+        call.args[0][0]["prompt_id"]
+        for call in self.mock_engine.dispatch_rollouts.call_args_list
+    ]
+    self.assertEqual(
+        dispatched, ["prompt_4", "prompt_5", "prompt_6", "prompt_7"]
+    )
+
   def test_fresh_run_does_not_skip_dataset(self):
     self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
         return_value=0
@@ -588,6 +630,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
 
       program = rl_program.StandardRLProgram(
+          batch_size=1,
           dataset=["prompt_0", "prompt_1"],
           algo=self.mock_algo,
           reward_fns=[lambda x: 1.0],
@@ -656,6 +699,7 @@ class RLProgramTest(absltest.TestCase):
 
     async def _run():
       program = rl_program.StandardRLProgram(
+          batch_size=1,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -704,6 +748,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=4,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=4,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -753,6 +798,83 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_full_batch_contains_multiple_optimizer_updates_and_one_sync(self):
+    async def _run():
+      self.mock_algo.group_size = 2
+      self.mock_algo.mini_batch_size = 2
+      self.mock_engine.train_step.side_effect = [
+          "queued",
+          {"train_step": 1},
+          "queued",
+          {"train_step": 2},
+      ]
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          group_size=2,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=4,
+          reward_fns=[lambda x: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+      )
+      program.engine = self.mock_engine
+
+      for group_idx in range(4):
+        for item_idx in range(2):
+          payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+          )
+          item = datatypes.TrajectoryItem(
+              group_index=item_idx,
+              prompt_id=f"prompt_{group_idx}",
+              start_step=0,
+              traj=datatypes.Trajectory(reward=1.0),
+          )
+          item.payload = payload
+          await program.scored_q.put(item)
+
+      program._dispatch_capacity = asyncio.Semaphore(4)
+      await program.train_stage()
+
+      self.assertEqual(
+          [
+              call.kwargs["apply_optimizer"]
+              for call in self.mock_engine.train_step.call_args_list
+          ],
+          [False, True, False, True],
+      )
+      self.mock_engine.sync_weights.assert_called_once_with(
+          role=datatypes.Role.ACTOR
+      )
+      self.mock_engine.save_checkpoint.assert_called_once()
+      checkpoint_metadata = (
+          self.mock_engine.save_checkpoint.call_args.kwargs["metadata"]
+      )
+      self.assertEqual(checkpoint_metadata["step"], 2)
+      self.assertEqual(checkpoint_metadata["global_step"], 1)
+      self.assertEqual(checkpoint_metadata["policy_version"], 1)
+      self.assertEqual(program.last_step_result.num_rollouts, 8)
+      self.assertEqual(program.last_step_result.num_microbatches, 4)
+
+    asyncio.run(_run())
+
+  def test_full_batch_size_must_be_divisible_by_mini_batch_size(self):
+    self.mock_algo.mini_batch_size = 2
+    with self.assertRaisesRegex(ValueError, "batch_size must be divisible"):
+      self._create_program(batch_size=3)
+
   def test_train_stage_mid_step_dataset_exhaustion_flushes_and_saves_checkpoint(
       self,
   ):
@@ -768,6 +890,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=4,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=4,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -834,6 +957,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=1,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=1,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -897,6 +1021,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=2,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -958,6 +1083,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=2,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -1030,6 +1156,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=1,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=1,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -1122,6 +1249,7 @@ class RLProgramTest(absltest.TestCase):
 
     async def _run():
       program = rl_program.StandardRLProgram(
+          batch_size=1,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -1175,6 +1303,7 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
+          batch_size=2,
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
@@ -1272,6 +1401,7 @@ class RLProgramTest(absltest.TestCase):
   def test_missing_dataset_raises_value_error(self):
     async def _run():
       program = rl_program.StandardRLProgram(
+          batch_size=1,
           algo=self.mock_algo,
           assembler=self.assembler,
       )
@@ -2705,6 +2835,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_creates_sequence_packed_assembler(self):
     program = rl_program.StandardRLProgram(
+        batch_size=1,
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
@@ -2726,6 +2857,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_creates_padded_assembler(self):
     program = rl_program.StandardRLProgram(
+        batch_size=1,
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
@@ -2745,6 +2877,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.assembler.pad_id, 5)
 
     program_override = rl_program.StandardRLProgram(
+        batch_size=1,
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
@@ -2761,6 +2894,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_creates_default_assembler(self):
     program = rl_program.StandardRLProgram(
+        batch_size=1,
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,

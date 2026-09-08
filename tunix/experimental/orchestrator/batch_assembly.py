@@ -41,7 +41,7 @@ _BATCH_ID_PREFIX: str = "batch"
 
 
 class AssembledBatch(NamedTuple):
-  """Microbatch payload paired with global step completion status."""
+  """Microbatch payload paired with optimizer-update completion status."""
 
   payload: datatypes.RLTrainerPayload
   is_final_batch: bool
@@ -94,7 +94,7 @@ class BatchAssembler(Generic[T], Protocol):
 
   @property
   def total_step_rollouts(self) -> int:
-    """Total number of rollouts expected per global training step."""
+    """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.group_size
 
   def feed(
@@ -465,7 +465,7 @@ class SequencePackedBatchAssembler:
 
   @property
   def total_step_rollouts(self) -> int:
-    """Total number of rollouts expected per global training step."""
+    """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.group_size
 
   def _emit_one_chunk(
@@ -613,7 +613,7 @@ class PaddedBatchAssembler:
       max_response_length: Maximum padded response sequence length.
       pad_id: Token ID used for padding prompts and completions.
       group_size: Number of rollout generations per prompt group (G).
-      mini_batch_size: Number of prompt groups per global training step.
+      mini_batch_size: Number of prompt groups per optimizer update.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -647,7 +647,7 @@ class PaddedBatchAssembler:
 
   @property
   def total_step_rollouts(self) -> int:
-    """Total number of rollouts expected per global training step."""
+    """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.group_size
 
   @property

@@ -398,6 +398,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   program = rl_program.StandardRLProgram(
       algo=algo,
+      batch_size=args.batch_size,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,

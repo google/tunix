@@ -397,6 +397,24 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_resume_uses_global_step_when_optimizer_step_is_different(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 12,
+          "global_step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
   def test_resume_from_checkpoint_uses_step_boundary_policy_version(self):
     async def _run():
       # Recorded mid-step policy_version is ignored in favor of the step.
