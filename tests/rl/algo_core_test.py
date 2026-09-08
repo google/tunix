@@ -174,6 +174,15 @@ class GrpoLooAdvantagesTest(absltest.TestCase):
     return out
 
   def test_matches_the_definition_across_group_sizes(self):
+    # Tolerance is set for float32, not for the formula. The leave-one-out
+    # variance is E[x^2] - E[x]^2, which cancels: on a low-variance group those
+    # two terms agree to ~3 significant figures, so float32 keeps only ~4 of its
+    # 7 digits, and dividing by the resulting small std amplifies that into
+    # ~1e-5 relative error on the advantage. The reference below is float64, so
+    # the gap is expected. Every bug this guards against is orders larger --
+    # a self-inclusive baseline is 1/G (6.7% at G=16), a missing std divisor is
+    # O(1) -- and the exact semantics are pinned by the assertions below, which
+    # do not depend on tolerance at all.
     rng = np.random.default_rng(0)
     for g in (2, 3, 4, 8, 16):
       rewards = rng.random(g * 3)
@@ -181,7 +190,7 @@ class GrpoLooAdvantagesTest(absltest.TestCase):
         np.testing.assert_allclose(
             algo_core.compute_grpo_loo_advantages(jnp.asarray(rewards), g),
             self._reference(rewards, g),
-            rtol=1e-5,
+            rtol=1e-3,
             atol=1e-6,
         )
 
@@ -645,11 +654,19 @@ class SamplerIsLengthScalingTest(absltest.TestCase):
           float(split[f'{name}/truncated/count']), self._N_PER_LENGTH / 2
       )
       for metric in algo_core.SAMPLER_IS_LENGTH_BUCKET_METRICS:
+        # `atol` carries this, not `rtol`. `logmean_sum` adds ~400 signed
+        # per-sequence means that largely cancel, leaving a total some two
+        # orders smaller than the mass summed, so a relative tolerance on it
+        # measures float32 accumulation order rather than additivity. The
+        # absolute bound sits ~100x above that noise and ~1000x below the
+        # smallest real violation, which would be a whole sequence counted
+        # twice or not at all.
         np.testing.assert_allclose(
             float(split[f'{name}/complete/{metric}'])
             + float(split[f'{name}/truncated/{metric}']),
             float(unsplit[f'{name}/complete/{metric}']),
             rtol=1e-5,
+            atol=1e-6,
             err_msg=f'{name}/{metric} is not additive across the split',
         )
 
