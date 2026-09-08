@@ -27,6 +27,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tunix.rl import canonical_training_config
+
 
 def contiguous_rank_major_reverse_groups(
     *, global_trajectories: int, dp_size: int
@@ -738,14 +740,7 @@ def dp_reduce_once_mode() -> bool:
   purpose; the reduction itself, its fixed tree and its receipts are the
   same programs.  Any other value is fatal.
   """
-  value = os.environ.get('CANON_DP_REDUCE_ONCE', '')
-  if value in ('', '0'):
-    return False
-  if value == '1':
-    return True
-  raise ValueError(
-      f'CANON_DP_REDUCE_ONCE must be unset, 0, or 1, got {value!r}'
-  )
+  return canonical_training_config.reduce_once_enabled()
 
 
 def _gradient_nonzero_counts(tree: Any) -> jax.Array:

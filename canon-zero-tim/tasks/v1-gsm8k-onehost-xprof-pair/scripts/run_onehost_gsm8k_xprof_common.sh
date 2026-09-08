@@ -192,6 +192,7 @@ container="v1_gsm8k_xprof_${arm//-/_}_${label}"
 runtime_files=(
   "$repo/tunix/rl/agentic/agentic_rl_learner.py"
   "$repo/tunix/rl/canonical_qwen3_adapter.py"
+  "$repo/tunix/rl/canonical_training_config.py"
   "$repo/tunix/rl/dp_training.py"
   "$repo/tunix/rl/gsm8k_xprof.py"
   "$repo/examples/math_gsm8k/qwen3_grpo_demo.py"
@@ -288,6 +289,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
   sha256sum \
     "$repo/tunix/rl/agentic/agentic_rl_learner.py" \
     "$repo/tunix/rl/canonical_qwen3_adapter.py" \
+    "$repo/tunix/rl/canonical_training_config.py" \
     "$repo/tunix/rl/dp_training.py" \
     "$repo/tunix/rl/gsm8k_xprof.py" \
     "$repo/examples/math_gsm8k/qwen3_grpo_demo.py" \

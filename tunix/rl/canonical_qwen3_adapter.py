@@ -45,6 +45,7 @@ import numpy as np
 
 from tunix.generate import utils as generate_utils
 from tunix.rl import canonical_logsoftmax
+from tunix.rl import canonical_training_config
 from tunix.rl import deepswe_debug
 from tunix.rl import dp_training
 from tunix.rl import dp_workloads
@@ -381,15 +382,8 @@ def _p32_keep_tape_mode() -> str:
   and the per-layer forward (CANON_P28_LAYER_SCAN unset); other combinations
   fail closed.  Any other value is fatal.
   """
-  value = os.environ.get("CANON_P32_KEEP_TAPE", "")
-  if value in ("", "0"):
-    return ""
-  if value == "1":
-    return "batch"
-  if value == "stream":
-    return "stream"
-  raise FunctionalMappingError(
-      f"CANON_P32_KEEP_TAPE must be unset, 0, 1, or stream, got {value!r}"
+  return canonical_training_config.keep_tape_mode(
+      error_type=FunctionalMappingError
   )
 
 
@@ -11013,13 +11007,9 @@ class Qwen3EngineForwardAdapter:
       chunk_program=True,
   ):
     """Reverses one group of rank-local sequences by layer and chunk."""
-    parallel_value = os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
-    if parallel_value not in ("", "0", "1"):
-      raise FunctionalMappingError(
-          "CANON_P59_RANK_PARALLEL_BACKWARD must be unset/0/1, "
-          f"got {parallel_value!r}"
-      )
-    rank_parallel = parallel_value == "1"
+    rank_parallel = canonical_training_config.rank_parallel_backward(
+        error_type=FunctionalMappingError
+    )
     chunk_dependency_ticket = _p76_chunk_dependency_ticket_enabled()
     chunk_backpressure = _p77_chunk_backpressure_enabled()
     if chunk_dependency_ticket and not rank_parallel:
@@ -12065,15 +12055,9 @@ class Qwen3EngineForwardAdapter:
     batched_evidence = (
         os.environ.get("CANON_BATCHED_EVIDENCE", "") == "1"
     )
-    rank_parallel_value = os.environ.get(
-        "CANON_P59_RANK_PARALLEL_BACKWARD", ""
+    rank_parallel_backward = canonical_training_config.rank_parallel_backward(
+        error_type=FunctionalMappingError
     )
-    if rank_parallel_value not in ("", "0", "1"):
-      raise FunctionalMappingError(
-          "CANON_P59_RANK_PARALLEL_BACKWARD must be unset/0/1, "
-          f"got {rank_parallel_value!r}"
-      )
-    rank_parallel_backward = rank_parallel_value == "1"
     p66_tp4_arm = _p66_tp4_arm()
     p32_keep_tape_mode = _p32_keep_tape_mode()
     p32_keep_tape = bool(p32_keep_tape_mode)

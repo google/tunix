@@ -335,6 +335,7 @@ fi
     "$pkg/cluster/profiles/_qwen3-8b-frozenlake-four-chip-onehost.env" \
     "$repo/tunix/rl/dp_workloads.py" \
     "$repo/tunix/rl/canonical_qwen3_adapter.py" \
+    "$repo/tunix/rl/canonical_training_config.py" \
     "$repo/examples/frozenlake/train_frozenlake_qwen3.py"
 } >"$raw"
 
