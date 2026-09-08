@@ -155,6 +155,7 @@ class NullHandler(weight_sync.WeightSyncHandler):
 
 def create_default_handler(
     mode: str | weight_sync.WeightSyncMode | None = None,
+    name_resolver: Any = None,
 ) -> weight_sync.WeightSyncHandler:
   """Creates the default weight sync handler based on options or env vars."""
   mode_name = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
@@ -165,7 +166,8 @@ def create_default_handler(
     from tunix.experimental.weight_sync import raiden_handler
 
     handler = raiden_handler.RaidenHandler(
-        transfer_options=raiden_handler.make_host_staged_transfer_options()
+        name_resolver=name_resolver,
+        transfer_options=raiden_handler.make_host_staged_transfer_options(),
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler

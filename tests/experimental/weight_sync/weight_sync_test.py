@@ -246,6 +246,7 @@ def _trainer_process_fn(
       optimizer=optax.sgd(1e-3),
       training_config=trainer_config,
       sampler_type=sampler_type,
+      target_state=target_state,
   )
   while True:
     try:

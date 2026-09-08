@@ -1210,13 +1210,16 @@ def _align_per_axis(
   return _jit_repeat_axes(arr, tuple(repeats))
 
 
+TPU_V5P_SUBCORE_LANE_SIZE: int = 128
+
+
 def _interleave_moe_weights(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
-    lane_size: int = 128,
+    lane_size: int = TPU_V5P_SUBCORE_LANE_SIZE,
 ) -> jax.Array | np.ndarray:
   """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 

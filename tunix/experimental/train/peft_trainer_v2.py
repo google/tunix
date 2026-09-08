@@ -1229,6 +1229,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     worker = self._weight_sync_worker
     if worker is not None and worker.bound:
       logging.vlog(1, "raiden metrics: %s", worker.metrics())
+      worker.release_host_arrays()
     return True
 
   @override

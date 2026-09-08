@@ -21,6 +21,8 @@ import os
 from typing import Any, List, Mapping, Optional
 
 from absl import logging
+from flax import nnx
+import jax
 from tunix.experimental.weight_sync import raiden_synchronizer
 from tunix.experimental.weight_sync import weight_sync_coordinator
 
@@ -44,17 +46,17 @@ class RaidenWeightSyncDelegate:
       job_name: Optional[str] = None,
       server_id: Optional[str] = None,
       worker_index: int = 0,
+      sampler: Optional[Any] = None,
       **kwargs,
   ):
-    super().__init__(*args, **kwargs)
+    del args, kwargs
     # Raiden partitions the weights across every unit sharing a job_name, so
     # replicas that all call themselves "rollout" get a slice each instead of a
     # copy each. server_id is already unique per replica and shared across the
     # hosts within one, which is exactly the grouping job_name needs.
-    self.job_name = (
-        job_name or server_id or getattr(self, "server_id", None) or "rollout"
-    )
-    self.server_id = server_id or getattr(self, "server_id", None)
+    self.server_id = server_id
+    self.job_name = job_name or server_id or "rollout"
+    self._sampler = sampler
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
             self.job_name,
@@ -73,10 +75,12 @@ class RaidenWeightSyncDelegate:
     return all(s.bound for s in self._synchronizers)
 
   async def bind_weight_sync(
-      self, sync_request: Any = None, state: Any = None, **kwargs
+      self, sync_request: Any = None, state: Any = None, sampler: Any = None, **kwargs
   ) -> Any:
     """Binds destination-side transport resources for weight sync."""
     del sync_request, kwargs
+    if sampler is not None:
+      self._sampler = sampler
 
     for sync in self._synchronizers:
       # The state arrays never change, so one bind covers every round.
@@ -102,6 +106,19 @@ class RaidenWeightSyncDelegate:
         if not self._tracker.admit(sync_request, "prepared"):
           return True
         self._tracker.complete(sync_request, "prepared")
+
+      sampler = getattr(self, "_sampler", None)
+      if sampler is not None:
+        llm = getattr(sampler, "llm", None)
+        driver = getattr(sampler, "_driver", None)
+        if llm is not None:
+          llm.reset_prefix_cache()
+          llm.collective_rpc("delete_kv_cache")
+        elif driver is not None:
+          driver.llm_engine.reset_prefix_cache()
+          driver.llm_engine.collective_rpc("delete_kv_cache")
+        jax.effects_barrier()
+
       return True
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
@@ -139,6 +156,25 @@ class RaidenWeightSyncDelegate:
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         for sync in self._synchronizers:
           logging.info("raiden metrics: %s", sync.metrics())
+
+      sampler = getattr(self, "_sampler", None)
+      if sampler is not None:
+        model_runner = getattr(sampler, "_model_runner", None)
+        if model_runner is not None and hasattr(model_runner, "state_leaves"):
+          state = getattr(model_runner, "state", None)
+          if isinstance(state, nnx.State):
+            model_runner.state_leaves = tuple(
+                jax.tree_util.tree_leaves(state)
+            )
+          elif state is not None:
+            model_runner.state_leaves = state
+
+        llm = getattr(sampler, "llm", None)
+        driver = getattr(sampler, "_driver", None)
+        if llm is not None:
+          llm.collective_rpc("reinitialize_kv_cache")
+        elif driver is not None:
+          driver.llm_engine.collective_rpc("reinitialize_kv_cache")
 
       if self._has_round(sync_request):
         self._tracker.complete(sync_request, "committed")

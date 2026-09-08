@@ -141,11 +141,9 @@ class _RaidenTransport:
           "set transfer parallelism either through transfer_options or"
           " transfer_parallelism, not both"
       )
-    worker_rpc_client = None
-    if name_resolver is not None:
-      worker_rpc_client = raiden_controller.WeightSyncWorkerRpcClient(
-          name_resolver=name_resolver
-      )
+    worker_rpc_client = raiden_controller.WeightSyncWorkerRpcClient(
+        name_resolver=name_resolver
+    )
     self._controller = raiden_controller.RaidenController(
         port=port, worker_rpc_client=worker_rpc_client
     )
@@ -233,16 +231,12 @@ class _RaidenTransport:
         ),
     )
     if control_addr and "," in control_addr:
-      rpc_client = getattr(self._controller, "worker_rpc_client", None)
-      if rpc_client is not None and hasattr(
-          rpc_client, "register_worker_endpoint"
-      ):
-        for addr in control_addr.split(",")[1:]:
-          addr = addr.strip()
-          if addr:
-            rpc_client.register_worker_endpoint(
-                self._to_raiden_id(metadata.unit), addr
-            )
+      for addr in control_addr.split(",")[1:]:
+        addr = addr.strip()
+        if addr:
+          self._controller.worker_rpc_client.register_worker_endpoint(
+              self._to_raiden_id(metadata.unit), addr
+          )
     with self._registered_lock:
       self._registered.add(metadata.unit)
 
@@ -332,44 +326,24 @@ class _RaidenTransport:
     options = self._transfer_options
     if expected_block_count is None:
       expected_block_count = options.expected_block_count
-    if expected_block_count is not None and expected_block_count < 0:
-      raise ValueError(
-          "expected_block_count must be None (auto) or >= 0, got"
-          f" {expected_block_count}"
-      )
     resolved_uuid = self._transfer_uuid if generation is None else generation
     if resolved_uuid <= 0:
       raise ValueError(f"uuid must be positive, got {resolved_uuid}")
-    resolved_parallelism = (
-        options.parallelism if parallelism is None else parallelism
+    resolved_options = RaidenTransferOptions(
+        parallelism=options.parallelism if parallelism is None else parallelism,
+        expected_block_count=(
+            options.expected_block_count
+            if expected_block_count is None
+            else expected_block_count
+        ),
+        skip_d2h=options.skip_d2h if skip_d2h is None else skip_d2h,
+        skip_tiling=(
+            dict(options.skip_tiling)
+            if skip_tiling is None and options.skip_tiling is not None
+            else skip_tiling
+        ),
+        group_size=options.group_size if group_size is None else group_size,
     )
-    resolved_skip_d2h = options.skip_d2h if skip_d2h is None else skip_d2h
-    resolved_skip_tiling = (
-        dict(options.skip_tiling)
-        if skip_tiling is None and options.skip_tiling is not None
-        else skip_tiling
-    )
-    resolved_group_size = (
-        options.group_size if group_size is None else group_size
-    )
-    if resolved_parallelism is not None and resolved_parallelism <= 0:
-      raise ValueError(
-          f"parallelism must be positive when specified, got"
-          f" {resolved_parallelism}"
-      )
-    if resolved_group_size <= 0:
-      raise ValueError(
-          f"group_size must be positive, got {resolved_group_size}"
-      )
-    if resolved_skip_tiling is not None and any(
-        layer < 0 for layer in resolved_skip_tiling
-    ):
-      raise ValueError("skip_tiling layer indices must be non-negative")
-    if resolved_skip_d2h and resolved_skip_tiling is None:
-      raise ValueError(
-          "skip_d2h=True requires an explicit skip_tiling map describing"
-          " the source staging format"
-      )
 
     try:
       asyncio.get_running_loop()
@@ -427,10 +401,10 @@ class _RaidenTransport:
               dst_units=[self._to_raiden_id(unit) for unit in dst_units],
               req_id=req_id,
               expected_block_count=resolved_block_count,
-              parallelism=resolved_parallelism,
-              skip_d2h=resolved_skip_d2h,
-              skip_tiling=resolved_skip_tiling,
-              group_size=resolved_group_size,
+              parallelism=resolved_options.parallelism,
+              skip_d2h=resolved_options.skip_d2h,
+              skip_tiling=resolved_options.skip_tiling,
+              group_size=resolved_options.group_size,
               uuid=resolved_uuid,
               **kwargs,
           )

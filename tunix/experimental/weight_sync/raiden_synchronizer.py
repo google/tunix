@@ -88,10 +88,6 @@ def __getattr__(name: str) -> Any:
 
 def _ensure_ffi_compute_on_compat() -> None:
   """Bridges TPU-sync wheels that call the newer compute_on decorator API."""
-  try:
-    from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
-  except ImportError:
-    pass
   compute_on_mod = getattr(jax, "_src", None)
   if compute_on_mod is None:
     return
@@ -532,19 +528,6 @@ class RaidenSynchronizer:
           devices_per_host,
       )
 
-      # TODO(b/557061810): Re-enable this once the bug is fixed and the FFI
-      # call is verified to work.
-      # ws_info = _raiden_ffi.init_weight_synchronizer(
-      #     device_array=self.arrays[0],
-      #     shard_idx=shard_idx,
-      #     mesh=mesh,
-      #     slice_byte_sizes=slice_byte_sizes_sharded,
-      #     parallelism=self._parallelism,
-      #     num_layers=len(self.arrays),
-      #     listener_port=0,
-      #     num_shards=devices_per_host,
-      # )
-
       @compute_on.compute_on(
           compute_type="device_host",
           out_memory_spaces=jax.memory.Space.Device,
@@ -816,8 +799,7 @@ class RaidenSynchronizer:
   def release_host_arrays(self) -> None:
     """Drops the staged host copy between rounds.
 
-    Called by the pinned MaxText (maxtext_engine.py:1129), not by anything in
-    this repo -- grep site-packages before deleting. Host-staged path only; a
+    Called by MaxTextEngine and PeftTrainer. Host-staged path only; a
     no-op under FFI, which binds device arrays in place. Clears `names`
     alongside `arrays` so `bound`/`active` and every zip(names, arrays)
     consumer stay consistent; the next round rebinds.
@@ -907,6 +889,8 @@ class RaidenSynchronizer:
 
 def patch_raiden_worker_sync() -> None:
   """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync to delegate apply_to_runner."""
+  if os.environ.get("JAX_PLATFORMS") == "cpu":
+    return
   try:
     import tpu_inference.rl.raiden_worker_sync as rws
     if getattr(rws.RaidenWorkerSync, "_patched_by_tunix", False):

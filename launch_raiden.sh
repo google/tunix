@@ -1,1 +1,0 @@
-/usr/local/google/home/yixuannwang/projects/tunix/tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh

@@ -259,6 +259,7 @@ class RaidenHandlerTest(absltest.TestCase):
     # outbound calls to worker control-plane addresses through its
     # WeightSyncWorkerRpcClient, and that client needs the resolver too.
     resolver = object()
+    self.rpc_client_cls.reset_mock()
     raiden_handler.RaidenHandler(port=0, name_resolver=resolver)
 
     self.rpc_client_cls.assert_called_once_with(name_resolver=resolver)
@@ -267,10 +268,12 @@ class RaidenHandlerTest(absltest.TestCase):
         self.rpc_client_cls.return_value,
     )
 
-  def test_no_resolver_means_no_worker_rpc_client_override(self):
-    self.assertIsNone(
-        self.controller_cls.call_args.kwargs["worker_rpc_client"]
+  def test_no_resolver_initializes_default_worker_rpc_client(self):
+    self.assertIs(
+        self.controller_cls.call_args.kwargs["worker_rpc_client"],
+        self.rpc_client_cls.return_value,
     )
+    self.rpc_client_cls.assert_called_with(name_resolver=None)
 
   # ---------------------------------------------------------- registration
 
