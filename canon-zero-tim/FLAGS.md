@@ -826,6 +826,33 @@ classifier 四发只余惯例 `trace_census_rc=1`。**全链(dp2-tp2 同 base,�
 - **C.2 补认证(发布 SHA 06a0fdb9,预算 0)**:`…dp2tp2long-v2int_c_long_20260908_r3` 派发 526、锚逐位、HBM 40.22、warm reverse 6.845 s;`…dp2tp2long8k-v2int_c_long8k_20260908_r1` 锚逐位 [5.4485979080200195, 4.931449890136719, 3.995054006576538]、HBM 46.83、reverse 12.495 s(xprof/P74 截断如常)⇒ 发布树在 dp2-tp2 / long / long8k 三几何全部认证。
 - **已知未收口**(第二段):FL 分类器在 chunk 模式下三条期望要更新(`landed_*` 容量要求为输入相关;`[P59.LAYER_PROGRAM_REUSE] enabled=0 static_keys=36`——integrate tip 上 36 层 GraphDef key 分裂,层间 pullback 程序共享失效,冷编译 36 个层程序,运行时不受影响;锚按 chunk 模式新 key 登记);8B fp64 重钉未做。
 
+## P59 structural-key candidate withdrawal (v2_integrate E.1, 2026-09-08)
+
+No flag/default, checked-VMA setting, chunk program, reduction order or anchor
+value changes. The unadmitted normalization from `523ec0f9` is removed from
+the delivery candidate by an additive change; its commit and failed runs remain.
+The adapter is restored byte-for-byte to `769d321b` for this recovery.
+
+Evidence: P45 DP2xTP2 r2 capsule replay runs
+`p45_r2_v2int_e1_attr_base_20260908` (`12a4f4ef`) and
+`p45_r2_v2int_e1_attr_rpa_20260908` (`60cd8fe3`) match all eight registered
+micro-norm receipts and update norm `23.361648559570312`; adding the key
+candidate yields `23.342042922973633` in
+`p45_r2_v2int_e1_p45_r2_20260908_replay`. These are norm receipts, not a
+full-gradient or target-scale equality claim. Run roots are under
+`/mnt/disks/tunix-data/frozenlake-onehost-v2/`.
+
+The generic key also merged different slot-held configuration values in a
+real-NNX CPU negative control. Tests preserve unknown object identity,
+slot-held state and type identity; shared identical objects can still reuse
+programs, and key construction is checked under `jax.transfer_guard('disallow')`.
+
+Admission ledger: zero-TIM = final-tree TPU not run; correctness = conservative
+identity restored, CPU regression required, no self re-pin; performance = not
+admitted, possible 8B compile/residency benefit deferred. Existing classifier
+failures remain failures; the 36-program control does not satisfy the current
+one-program reuse gate. No P59 reuse gate or numerical threshold is removed.
+
 ## 无 flag 的行为变更(tasks/v2_dispatch Phase 15,2026-09-07;dp2-tp2 三发 + long 一发,锚按 fp64 规则重钉)
 反向 chunk 程序(Phase 7 的类在认证 lane 上重做,CL c61a7497):kept tape 上的 rank-parallel 反向每个 chunk 的整段反向体——chunk inputs、entry-cache 重建、norm/head 重算、rows pullback、头余切分区、head/norm/28 层/embed 的映射 pullback——trace 成**一个**程序 `zt_tr_bwd_chunk`,在图内按原样调用已建好的映射程序(shard_map 原样嵌套、不重做块体),叶/tape/cache/余切全作操作数,输出 sharding 钉到 bootstrap chunk 记录的拼写,每个原程序边界一个 `optimization_barrier`;组内首个反向 chunk 是第二个编译变体(dcache 零在图内造);进程第一组的第一个 chunk 走逐程序路径建映射程序并记录 sharding(bootstrap),之后每 chunk 一个程序。无 flag:准入 = rank-parallel ∧ kept tape ∧ 非 P71 block ∧ 非 P66 arm ∧ 无 HBM sink ∧ 无 P76 ticket(Phase 14 的两次 chunk 边界等待照常,两条路径共用 `finish_chunk`);`chunk_program=False` 为测试 oracle。普查等效门:模块普查 `--p32-reverse-chunk`(launcher 从源码 grep)按 `bwd_chunk` 家族计数、折入的程序不得单独出现;P74 gap 普查改计 chunk 程序;classifier 读 receipt 的 `reverse_chunk` 变体(CL 2df3b398)。CPU 门:`tests/rl/test_p32_reverse_chunk.py` 独立进程 `--xla_cpu_max_isa=AVX`(XLA:CPU 的 FMA 收缩在独立程序与 chunk 程序里不同)逐字节 = 逐程序 oracle,每 chunk 1 次 `bwd_chunk`;邻居门 54 + 17。
 收据(dp2-tp2,配方 `stream` + `CANON_DP_REDUCE_ONCE=1 CANON_P32_CHUNK_BATCH=2 CANON_P71_SCAN=fwd_block`,control = K14c 认证发 3,040 / 38.27 GiB / warm reverse 5.327 s):

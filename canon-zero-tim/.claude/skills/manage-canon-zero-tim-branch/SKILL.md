@@ -104,6 +104,14 @@ Stop at the first hard failure; downstream numbers are VOID. Every classifier ch
 re-runs its negative controls; a gate that cannot fire is not a gate (a bf16 +0 low-bit
 negative stayed green because the device flushes subnormals — flip a normal value).
 
+For P59 program-key changes, exercise the real NNX GraphDef key, not just a
+dictionary surrogate. Distinct execution-bearing slot state and distinct types
+with the same name must not collide; unknown identity-compared configurations
+stay distinct unless an explicit supported equivalence contract is established.
+Also check intentional sharing and device-transfer neutrality. The regression
+cases live in `tests/rl/test_p59_static_key_identity.py` (outer repository).
+Equal norm receipts alone do not prove full-gradient equality or key soundness.
+
 ## 7. Flag lifecycle
 
 For changes that span renderers, profiles, process delivery, or paired treatment
