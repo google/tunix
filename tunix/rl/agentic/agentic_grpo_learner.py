@@ -275,6 +275,54 @@ def _p58_native_sampler_recipe(env: Mapping[str, str]) -> str | None:
   )
 
 
+def _p57_tim_standard_enabled(env: Mapping[str, str]) -> bool:
+  """Admit only the opt-in Native64 trainer-old/no-TIS full identity."""
+  return (
+      env.get("CANON_P57_TIM_ARM") == "standard"
+      and env.get("CANON_P57_RUN_KIND") in ("train", "eval")
+      and env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+      and env.get("CANON_P57_INFERENCE_REGIME") == "stock-fast"
+      and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
+      and env.get("CANON_DP_SIZE") == "8"
+      and env.get("CANON_TP_SIZE") == "8"
+      and env.get("CANON_P57_EXPECTED_UPDATES") == "300"
+      and (
+          env.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
+          env.get("CANON_P57_DATA_SPLIT", ""),
+      ) in (("", ""), ("m15", "main"))
+  )
+
+
+def _validate_p57_tim_standard(
+    *, old_logps_source: str, sampler_is: str | None,
+    use_rollout_logps: bool, rollout_logps_present: bool,
+    trainer_logps_present: bool, old_logps_are_trainer: bool,
+    sampler_is_weights_present: bool,
+) -> None:
+  """Validate the actual batch, not only its launch configuration."""
+  if not (
+      old_logps_source == "trainer" and sampler_is is None
+      and use_rollout_logps and rollout_logps_present
+      and trainer_logps_present and old_logps_are_trainer
+      and not sampler_is_weights_present
+  ):
+    raise alignment.AlignmentGateError(
+        "P57 Standard requires frozen trainer-old, retained rollout, and no TIS"
+    )
+
+
+def _validate_p57_old_logps_source_request(
+    env: Mapping[str, str], source: str, sampler: str,
+) -> None:
+  """Reject an unadmitted source override before model initialization."""
+  if env.get("CANON_P57_TIM_ARM") == "standard":
+    if not _p57_tim_standard_enabled(env) or source != "trainer" or sampler != "none":
+      raise ValueError("P57 Standard requires Native64 trainer-old/no-TIS identity")
+  elif source != "auto":
+    raise ValueError("old_logps_source override is reserved for P57 Standard")
+
+
 def _validate_p58_native_sampler_recipe(
     *,
     recipe: str,
@@ -492,8 +540,17 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   # tokens, producing large-variance gradient updates.
   sampler_is: str | None = None  # None | "token"
   sampler_is_threshold: float = 2.0
+  # "auto" preserves every existing recipe. "trainer" is the explicit
+  # no-TIS control; rollout probabilities remain available to the observer.
+  old_logps_source: str = "auto"
 
   def __post_init__(self):
+    if self.old_logps_source not in ("auto", "trainer"):
+      raise ValueError("old_logps_source must be auto or trainer")
+    if self.old_logps_source == "trainer" and (
+        self.sampler_is is not None or not self.use_rollout_logps
+    ):
+      raise ValueError("explicit trainer-old requires retained rollout and no TIS")
     if self.num_generations <= 1:
       raise ValueError(
           "num_generations must be greater than 1. Received: "
@@ -709,6 +766,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "Processing results to compute advantage for %d items.",
         len(trajectories),
     )
+    trainer_old_no_tis = (
+        getattr(self.algo_config, "old_logps_source", "auto") == "trainer"
+    )
+    if trainer_old_no_tis:
+      if not _p57_tim_standard_enabled(os.environ):
+        raise alignment.AlignmentGateError("trainer-old/no-TIS requires P57 Standard")
+      if expected_step is None or (
+          int(self.rl_cluster.actor_trainer.train_steps) != int(expected_step)
+      ):
+        raise alignment.AlignmentGateError("P57 Standard trainer policy step drifted")
     # With a full group, sorting by pair_index is not necessary as they all
     # originate from the same initial prompt.
     pad_value = self.rl_cluster.rollout.pad_id()
@@ -759,6 +826,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
+      if trainer_old_no_tis and int(policy_version) != int(expected_step):
+        raise alignment.AlignmentGateError("P57 Standard rollout policy step drifted")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
       if record_full:
@@ -888,6 +957,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           )[:max_response_length]
       )
       if self.algo_config.use_rollout_logps:
+        if trainer_old_no_tis and old_logprobs is None:
+          raise alignment.AlignmentGateError("P57 Standard rollout logprobs missing")
         if old_logprobs is not None:
           padded_old_logprobs.append(
               agentic_utils.right_pad(
@@ -964,6 +1035,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       need_trainer_logps = (
           (have_actor_mesh and not deepswe_debug.rollout_only())
           or self.algo_config.sampler_is == "token"
+          or trainer_old_no_tis
       )
       if need_trainer_logps:
         trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
@@ -1001,6 +1073,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           host_prompt_lengths=host_prompt_lengths,
           host_completion_lengths=host_completion_lengths,
       )
+      old_per_token_logps = trainer_per_token_logps
+
+    if trainer_old_no_tis:
+      if (
+          trainer_per_token_logps is None or rollout_per_token_logps is None
+          or trainer_per_token_logps.shape != completion_mask.shape
+          or rollout_per_token_logps.shape != completion_mask.shape
+          or int(self.rl_cluster.actor_trainer.train_steps) != int(expected_step)
+      ):
+        raise alignment.AlignmentGateError("P57 Standard old-logprob capture failed")
+      trainer_per_token_logps = jax.lax.stop_gradient(trainer_per_token_logps)
       old_per_token_logps = trainer_per_token_logps
 
     if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
@@ -1580,7 +1663,29 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_weights=sampler_is_weights,
         completion_valid_mask=completion_valid_mask,
     )
-    if _p57_tim_purity_enabled(os.environ):
+    if _p57_tim_standard_enabled(os.environ):
+      _validate_p57_tim_standard(
+          old_logps_source=getattr(self.algo_config, "old_logps_source", "auto"),
+          sampler_is=self.algo_config.sampler_is,
+          use_rollout_logps=self.algo_config.use_rollout_logps,
+          rollout_logps_present=rollout_per_token_logps is not None,
+          trainer_logps_present=trainer_per_token_logps is not None,
+          old_logps_are_trainer=old_per_token_logps is trainer_per_token_logps,
+          sampler_is_weights_present=sampler_is_weights is not None,
+      )
+      if mode == rl_cluster_lib.Mode.TRAIN:
+        standard_groups = ",".join(str(group) for group in sorted({
+            int(item.group_id) for item in trajectories
+        }))
+        print(
+            f"[P57.TIM_STANDARD] PASS step={int(expected_step)} "
+            f"rows={len(trajectories)} groups={standard_groups} "
+            "old_logps=trainer tis_weights=absent "
+            "rollout_logps=present trainer_rescore=training-input "
+            "policy_version=matched",
+            flush=True,
+        )
+    elif _p57_tim_purity_enabled(os.environ):
       _validate_p57_tim_purity(
           sampler_is=self.algo_config.sampler_is,
           use_rollout_logps=self.algo_config.use_rollout_logps,
@@ -1668,7 +1773,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if not _canonical_alignment_sampler_is_valid(
           self.algo_config.sampler_is,
           os.environ.get("CANON_P32_WORKLOAD", ""),
-          p57_tim_study=_p57_tim_purity_enabled(os.environ),
+          p57_tim_study=(
+              _p57_tim_purity_enabled(os.environ)
+              or _p57_tim_standard_enabled(os.environ)
+          ),
           p34_deepswe=(
               os.environ.get("CANON_P34_DEEPSWE", "") == "1"
           ),

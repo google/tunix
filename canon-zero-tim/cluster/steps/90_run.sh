@@ -991,7 +991,7 @@ else
   n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 fi
 n_p57_stock_sync=$(grep -aEc '^\[P57.STOCK_FAST\] ROLLOUT_SYNC_PASS step=[0-9]+ transport=update_params exact_weight_attestation=unavailable-by-design$' "$LOG" || true)
-n_p57_stock_train_runtime=$(grep -aEc '^\[P57.STOCK\] TRAIN_RUNTIME_PASS regime=stock-fast arm=(mismatch|is) canonical_bundle=off observer=warning-only processed_b=observer-only$' "$LOG" || true)
+n_p57_stock_train_runtime=$(grep -aEc '^\[P57.STOCK\] TRAIN_RUNTIME_PASS regime=stock-fast arm=(mismatch|is|standard) canonical_bundle=off observer=warning-only processed_b=observer-only$' "$LOG" || true)
 n_p57_stock_observer=$(grep -ac '^\[P57.STOCK_OBSERVER\] PROCESSED_PROMPT_LOGPROBS_PASS .*targets=absolute-request-history treatment=observer-only$' "$LOG" || true)
 n_p58_stock_observer=$(grep -ac '^\[P58.STOCK_OBSERVER\] PROCESSED_PROMPT_LOGPROBS_PASS .*targets=absolute-request-history treatment=observer-only$' "$LOG" || true)
 n_p58_seed=$(grep -ac '^\[P58.SEED\] PASS dataset_seed=42 rollout_seed=42 scope=engine-global async_completion_order=not-claimed$' "$LOG" || true)
@@ -1010,6 +1010,12 @@ echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$
 
 if [ "${CANON_P57_RUN_KIND:-}" = "train" ]; then
   case "${CANON_P57_TIM_ARM:-}" in
+    standard)
+      PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" python3 \
+        "$CANON_PKG/tasks/p57-frozenlake-tim-causal-study/scripts/classify_standard_receipts.py" \
+        --run-log "$LOG" --expected-updates "$CANON_P57_EXPECTED_UPDATES" \
+        --output "$CANON_STATE/p57_standard_source.classification.json" || exit 1
+      ;;
     mismatch|zero)
       if [ "$n_p57_tim_purity_none" -ne 1 ] || \
          [ "$n_p57_tim_purity_is" -ne 0 ]; then

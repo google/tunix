@@ -9,6 +9,25 @@
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
 
+### P57 Standard opt-in (2026-09-08)
+
+Existing enum `CANON_P57_TIM_ARM` adds `standard`: Native stock-fast Qwen3-8B
+FrozenLake DP8xTP8, P45/M15-main 300-update train/eval only. The renderer passes
+`--old_logps_source=trainer --sampler_is=none`; the learner retains rollout A,
+freezes recomputed trainer-old as the loss denominator, and supplies no TIS
+weights. Numerical selector, experimental, default unreachable; absent/empty
+preserve existing behavior and `0` is invalid. No new CANON key. Legacy
+`mismatch/is/zero` keep their original semantics and default render selection.
+Writer/reader chain: P57 renderer/profile -> 00_env reload -> FrozenLake entry
+-> GRPOConfig/learner -> per-batch Standard receipt/postflight. Other workloads,
+32-chip geometry, Zero-HP, missing trainer-old or contradictory CLI are rejected.
+Status: host 263/263, V1 108/108, 439/439 audit, complete CPU pinned-image plus
+11/11 final focused image checks PASS; publication approved, TARGET NOT RUN. Evidence:
+`tasks/p57-frozenlake-tim-causal-study/evidence/standard64_local_0908/manifest.json`.
+Sunset: archive the isolated
+no-TIS comparison before promoting or retiring this arm; never rename historical
+Bypass runs. This entry extends the P57 family row below.
+
 | Flag | 语义 | 默认 | 生命周期 | 日落条件 |
 |---|---|---|---|---|
 | CANON_P57_TITO_ONEHOST_NEUTRALITY | T9d-3 observer-neutrality selector。`off|on` 两臂都复用既有 Qwen3-8B FrozenLake Perf-v2 DP1×TP4、三次真实 backward/AdamW、strict A=B=C 载具并开启 generic exact TiTO；`on` 唯一增量是 `record-full` host 证据，`off` 禁止该 debug selector。配对判决要求两臂逐 update gradient norm、alignment hashes、抽样模型/optimizer/accumulator fingerprints 与 12 条 strict alignment 数值完全相同，并同时命中 r7 三个 gradient-norm 与 forward implementation 锚点 | 默认 absent；只准 P45、DP1×TP4、3 updates、APC-off、no-eval/no-checkpoint、strict alignment 的本地 one-host gate；production profile、M15、DP8×TP8、其他 horizon、空值均 fatal。它不开放 actor snapshot 或 GCS 写入 | host/CPU construction in progress；one-host target 未跑，不得据此声明 observer neutrality | matched off/on target 绿且证据登记后退役该 selector；若旧锚点不符先判 RED/INCONCLUSIVE，不得静默重钉 |
@@ -807,4 +826,3 @@ Phase 9 归因捕获剩下的 3,200 次/update 里可折的 host 胶水、零值
 - **host 行长度进每组 spec(CL e0d7b1ba)**:update 开头对两条 mask 各 D2H 一次(紧跟已有的 action-mask 子集同步)求行和,按 split 程序同一 rank-major 分组后作 `host_prompt_length/host_completion_length` 传入,每组的 `group_lengths` 程序与 `device_get` 同步消失;pack 程序仍产 `lengths_match`,update 末一次同步校验(不匹配 fatal)。−32 次、−32 次同步。
 - **train example 一次 commit 到引擎 mesh(CL 7ac9338b)**:`_p32_commit_example` 把 loss 读的 9 个叶 replicated 放到引擎 mesh(新对象,调用者的 example 不动),`_p32_group_index_scalar` 给 stream_step 一个按值缓存的 committed 组索引;stream/oracle/split 每组的 `jit__multi_slice` 与 host 拷贝消失。
   收据:`…dp2tp2-v2disp_p11_dp2_20260907_r1`(lane 7ac9338b)vs control `…v2disp_p9_dp2_20260907_r1`:派发 **3,200 → 3,040**(`jit__multi_slice` 67 → 2、`jit__lambda` 96 → 32、`jit_group_lengths` 32 → 0、`jit_fwd_glue_zeros` 32 → 0、`jit_forward_zeros` 32),锚三值逐位,A=B=C 96/96,普查全 GREEN(classifier 只余惯例 trace 红),HBM 39.48 → 39.51 GiB(+0.1%),warm 5.48 → 5.44 s。反向侧嵌套两类(Phase 7、Phase 10)封存后,dp2-tp2 每 pass 47.5 次里 28 次是必要的 mapped pullback,剩余为每 chunk 一次的命名程序与每组的累加/检查。
-

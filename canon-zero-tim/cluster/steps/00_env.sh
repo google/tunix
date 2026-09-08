@@ -286,14 +286,14 @@ P57_STOCK_TRAIN=0
 if [ "$P57_STOCK_FAST" = "1" ] && \
    [ "${CANON_P57_RUN_KIND:-}" = "train" ]; then
   case "${CANON_P57_TIM_ARM:-}" in
-    mismatch|is) P57_STOCK_TRAIN=1 ;;
+    mismatch|is|standard) P57_STOCK_TRAIN=1 ;;
   esac
 fi
 P57_STOCK_EVAL=0
 if [ "$P57_STOCK_FAST" = "1" ] && \
    [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
   case "${CANON_P57_TIM_ARM:-}" in
-    mismatch|is) P57_STOCK_EVAL=1 ;;
+    mismatch|is|standard) P57_STOCK_EVAL=1 ;;
   esac
 fi
 P58_NATIVE=0
@@ -1807,7 +1807,7 @@ elif [ "${CANON_PROFILE_FILE:-}" = \
         fail=1
       }
       ;;
-    train:mismatch|train:is)
+    train:mismatch|train:is|train:standard)
       [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "0" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] && \
@@ -1824,7 +1824,7 @@ elif [ "${CANON_PROFILE_FILE:-}" = \
         fail=1
       }
       ;;
-    eval:zero|eval:mismatch|eval:is)
+    eval:zero|eval:mismatch|eval:is|eval:standard)
       if [ "${CANON_P57_TIM_ARM}" != "zero" ]; then
         [ "$P57_STOCK_EVAL" = "1" ] && \
         [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] || {

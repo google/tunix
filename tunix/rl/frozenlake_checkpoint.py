@@ -64,7 +64,7 @@ def registered_checkpoint_interval(env: Mapping[str, str]) -> int:
   )
   if (
       env.get("CANON_P57_RUN_KIND", "") in ("train", "eval")
-      and env.get("CANON_P57_TIM_ARM", "") in ("zero", "mismatch", "is")
+      and env.get("CANON_P57_TIM_ARM", "") in ("zero", "mismatch", "is", "standard")
       and env.get("CANON_P57_EXPECTED_UPDATES", "") == "300"
       and primary_workload
   ):

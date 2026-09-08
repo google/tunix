@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 6 ]; then
-  echo "usage: $0 <native|is|zero> <source-sha> <output-dir> <p45-run-id> <m15-run-id> <campaign-root>" >&2
+  echo "usage: $0 <native|is|standard|zero> <source-sha> <output-dir> <p45-run-id> <m15-run-id> <campaign-root>" >&2
   exit 2
 fi
 
@@ -16,8 +16,9 @@ campaign_root="$6"
 case "$wave" in
   native) arm=mismatch ;;
   is) arm=is ;;
+  standard) arm=standard ;;
   zero) arm=zero ;;
-  *) echo "wave must be native, is, or zero" >&2; exit 2 ;;
+  *) echo "wave must be native, is, standard, or zero" >&2; exit 2 ;;
 esac
 renderer_mode=()
 checkpoint_mode=new

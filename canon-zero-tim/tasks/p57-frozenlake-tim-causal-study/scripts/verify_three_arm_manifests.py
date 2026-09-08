@@ -20,6 +20,7 @@ WANDB_PROJECT = "zero-tim-p57-frozenlake-tim"
 ARMS = {
     "native": ("mismatch", "none", "stock-fast", "0", "1"),
     "is": ("is", "token", "stock-fast", "0", "1"),
+    "standard": ("standard", "none", "stock-fast", "0", "1"),
     "zero": ("zero", "none", "", "1", "0"),
 }
 WORKLOADS = {
@@ -95,6 +96,34 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
   if wrong:
     raise ValueError(f"{path}: environment drifted: {wrong}")
   command = env["CANON_RUN_CMD"].split()
+  sources = [value for value in command if value.startswith("--old_logps_source")]
+  if sources != (["--old_logps_source=trainer"] if wave == "standard" else []):
+    raise ValueError(f"{path}: old-logprob source drifted")
+  if wave == "standard":
+    for key, value in {
+        "CANON_DP_SIZE": "8", "CANON_TP_SIZE": "8",
+        "CANON_TOTAL_DEVICES": "64", "CANON_GLOBAL_TRAJECTORIES": "256",
+    }.items():
+      if key in env and env[key] != value:
+        raise ValueError(f"{path}: Standard geometry drifted at {key}")
+    for arg in ("--mesh_dp=8", "--mesh_tp=8", "--batch_size=32", "--num_generations=8"):
+      if command.count(arg) != 1:
+        raise ValueError(f"{path}: Standard command geometry drifted at {arg}")
+    worker = next(job for job in document["spec"]["replicatedJobs"] if job["name"] == "pathways-worker")
+    job_spec = worker["template"]["spec"]
+    pod = job_spec["template"]["spec"]
+    tpu = next(c for c in pod["containers"] if c["name"] == "pathways-worker")
+    if (
+        worker["replicas"] != 1 or job_spec["parallelism"] != 16
+        or job_spec["completions"] != 16
+        or str(tpu["resources"]["limits"]["google.com/tpu"]) != "4"
+        or str(tpu["resources"]["requests"]["google.com/tpu"]) != "4"
+        or pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] != "4x4x4"
+        or job_spec["template"]["metadata"]["annotations"].get(
+            "alpha.jobset.sigs.k8s.io/exclusive-topology"
+        ) != "cloud.google.com/gke-nodepool"
+    ):
+      raise ValueError(f"{path}: Standard 64-chip worker topology drifted")
   required = {
       f"--max_steps={updates}",
       "--seed=42",
@@ -151,12 +180,19 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       )
     snapshot = (state / "env.sh").read_text(encoding="utf-8")
   stock_marker = "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train"
-  if wave in ("native", "is") and stock_marker not in result.stdout:
+  if wave in ("native", "is", "standard") and stock_marker not in result.stdout:
     raise ValueError(f"{path}: native zero-TIM-off receipt is absent")
   if wave == "zero" and stock_marker in result.stdout:
     raise ValueError(f"{path}: zero arm incorrectly selected stock-fast")
   if f"export CANON_WANDB_PROJECT={WANDB_PROJECT}" not in snapshot:
     raise ValueError(f"{path}: P57 W&B project drifted")
+  if wave == "standard":
+    for key, value in {
+        "CANON_DP_SIZE": "8", "CANON_TP_SIZE": "8",
+        "CANON_TOTAL_DEVICES": "64", "CANON_GLOBAL_TRAJECTORIES": "256",
+    }.items():
+      if f"export {key}={value}" not in snapshot.splitlines():
+        raise ValueError(f"{path}: resolved Standard geometry drifted at {key}")
   expected_group = f"p57-{arm}"
   if not evaluation_enabled:
     expected_group += "-noeval"

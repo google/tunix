@@ -107,7 +107,8 @@ _ARMS = (
     Arm("mismatch", fixed_lm_head=False, warning_only=True, sampler_is="none"),
 )
 _IS_ARM = Arm("is", fixed_lm_head=False, warning_only=True, sampler_is="token")
-_ARM_BY_NAME = {arm.name: arm for arm in (*_ARMS, _IS_ARM)}
+_STANDARD_ARM = Arm("standard", fixed_lm_head=False, warning_only=True, sampler_is="none")
+_ARM_BY_NAME = {arm.name: arm for arm in (*_ARMS, _IS_ARM, _STANDARD_ARM)}
 
 
 def _container(document):
@@ -152,6 +153,9 @@ def _use_module_entrypoint(command: list[str]) -> None:
 
 
 def _validate_sampler_command(command: list[str], arm: Arm) -> None:
+  sources = [value for value in command if value.startswith("--old_logps_source")]
+  if sources != (["--old_logps_source=trainer"] if arm.name == "standard" else []):
+    raise ValueError(f"P57 {arm.name} old-logprob source drifted")
   expected = f"--sampler_is={arm.sampler_is}"
   if command.count(expected) != 1:
     raise ValueError(
@@ -192,6 +196,8 @@ def _spec(
   )
   _use_module_entrypoint(command)
   command.append(f"--sampler_is={arm.sampler_is}")
+  if arm.name == "standard":
+    command.append("--old_logps_source=trainer")
   command.append("--seed=42")
   if workload_candidate:
     candidate = p57_workloads.candidate(workload_candidate)
@@ -350,6 +356,13 @@ def render_all(
     train_geometry: str = fl_geometry.LEGACY,
 ) -> tuple[Path, ...]:
   geom = fl_geometry.geometry(train_geometry)
+  if arm == "standard" and (
+      train_geometry != fl_geometry.LEGACY
+      or run_kind not in ("train", "eval")
+      or expected_updates != 300 or high_performance or disable_eval or stock_only
+      or (workload_candidate, data_split) not in (("", ""), ("m15", "main"))
+  ):
+    raise ValueError("P57 Standard is restricted to Native64 P45/M15 300-update train/eval")
   if train_geometry != fl_geometry.LEGACY and not (
       high_performance and arm == "zero" and run_kind == "train"
       and expected_updates == 300 and checkpoint_mode == "disabled"
@@ -598,7 +611,7 @@ def render_all(
             "CANON_V1_HP_FULL": "1" if high_performance else "0",
             "CANON_P57_RUN_KIND": run_kind,
             "CANON_P57_INFERENCE_REGIME": (
-                "stock-fast" if arm.name in ("mismatch", "is") else ""
+                "stock-fast" if arm.name in ("mismatch", "is", "standard") else ""
             ),
             "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
             "CANON_P57_STOP_AFTER_STEP": (
@@ -685,7 +698,7 @@ def render_all(
         "CANON_P57_TIM_ARM": arm.name,
         "CANON_P57_RUN_KIND": run_kind,
         "CANON_P57_INFERENCE_REGIME": (
-            "stock-fast" if arm.name in ("mismatch", "is") else ""
+            "stock-fast" if arm.name in ("mismatch", "is", "standard") else ""
         ),
         "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
         "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,

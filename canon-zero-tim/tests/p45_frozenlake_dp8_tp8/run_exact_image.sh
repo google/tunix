@@ -53,6 +53,12 @@ $DOCKER run --rm \
     echo "P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed"
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p57_frozenlake_tim/test_stock_fast_contract.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p57_frozenlake_tim/test_standard.py
+    PYTHONPATH=/workspace python3 \
+      tests/rl/agentic/agentic_grpo_learner_test.py \
+      AgenticGrpoLearnerTest.test_p57_standard_captures_frozen_trainer_old_without_tis \
+      AgenticGrpoLearnerTest.test_process_results_zero_advantage_group
     stock_state="$(mktemp -d /tmp/p57-stock-state.XXXXXX)"
     printf "%s\n" /usr/local/lib/python3.12/site-packages/tpu_inference \
       > "$stock_state/tpu_inference_path"
@@ -69,17 +75,19 @@ EOF
         bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
       echo "P57_STOCK_RUNTIME_MODE_PASS run_kind=$stock_kind"
     done
+    for extra_stock_arm in is standard; do
     cat > "$stock_state/env.sh" <<EOF
 export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
 export CANON_P57_RUN_KIND=train
-export CANON_P57_TIM_ARM=is
+export CANON_P57_TIM_ARM=$extra_stock_arm
 export CANON_P57_INFERENCE_REGIME=stock-fast
 EOF
     CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
       bash canon-zero-tim/cluster/steps/37_install_stock_runtime.sh
     CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
       bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
-    echo "P57_STOCK_RUNTIME_MODE_PASS run_kind=train arm=is"
+    echo "P57_STOCK_RUNTIME_MODE_PASS run_kind=train arm=$extra_stock_arm"
+    done
     cat > "$stock_state/env.sh" <<EOF
 export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
 export CANON_P57_RUN_KIND=train

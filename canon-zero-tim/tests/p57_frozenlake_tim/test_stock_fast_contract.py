@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 
 from tunix.rl import dp_workloads
@@ -25,6 +28,45 @@ SPEC.loader.exec_module(classifier)
 
 
 class P57StockFastContractTest(unittest.TestCase):
+
+  def test_standard_resolved_env_reload_reaches_python_admission(self):
+    sys.path.insert(0, str(ROOT / "canon-zero-tim/cluster"))
+    import render_p57_frozenlake_tim as renderer
+    import yaml
+
+    for candidate, split in (("", ""), ("m15", "main")):
+      with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as tmp:
+        paths = renderer.render_all(
+            base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+            output_dir=Path(tmp) / "rendered", source_commit="a" * 40,
+            run_id="stdreload", campaign_tag="standard-env-gate",
+            checkpoint_mode="new", expected_updates=300, arm="standard",
+            workload_candidate=candidate, data_split=split)
+        document = yaml.safe_load(paths[0].read_text())
+        containers = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]
+        container = next(c for c in containers if c["name"] == "jax-tpu")
+        values = {e["name"]: e["value"] for e in container["env"] if "value" in e}
+        state = Path(tmp) / "state"
+        state.mkdir()
+        result = subprocess.run(["bash", "cluster/steps/00_env.sh"],
+            cwd=ROOT / "canon-zero-tim", capture_output=True, text=True,
+            env={**os.environ, **values, "CANON_PKG": str(ROOT / "canon-zero-tim"),
+                 "CANON_STATE": str(state), "INJECTED_HF_TOKEN": "test-only",
+                 "INJECTED_WANDB_API_KEY": "test-only"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Reload the shell snapshot in a separate process, as entrypoint does.
+        code = (
+            "import os; from tunix.rl import dp_workloads as d; "
+            "from tunix.rl.agentic.agentic_grpo_learner import _validate_p57_old_logps_source_request as v; "
+            "v(os.environ, 'trainer', 'none'); "
+            "a=d.validate_p57_stock_train_environment(d.get_workload('frozenlake-dp8-tp8')); "
+            "assert a['arm']=='standard'; print('P57_STANDARD_ENV_RELOAD_PASS')")
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; exec python3 -c "$2"', "standard-reload", str(state / "env.sh"), code],
+            cwd=ROOT, capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": str(ROOT), "JAX_PLATFORMS": "cpu"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("P57_STANDARD_ENV_RELOAD_PASS", result.stdout)
 
   def _environment(self):
     workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
@@ -152,6 +194,8 @@ class P57StockFastContractTest(unittest.TestCase):
         ("is", "", "", "300", "p45-is"),
         ("mismatch", "m15", "main", "300", "m15-main-mismatch"),
         ("is", "m15", "main", "300", "m15-main-is"),
+        ("standard", "", "", "300", "p45-standard"),
+        ("standard", "m15", "main", "300", "m15-main-standard"),
     )
     for run_kind in ("train", "eval"):
       zero_switches = (
@@ -196,7 +240,7 @@ class P57StockFastContractTest(unittest.TestCase):
           self.assertEqual(attestation["data_split"], split)
           self.assertEqual(attestation["variant"], expected_variant)
     print(
-        "P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval",
+        "P57_STOCK_RUNTIME_MATRIX_PASS variants=7 stages=train,eval",
         flush=True,
     )
 

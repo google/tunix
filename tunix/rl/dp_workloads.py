@@ -170,6 +170,8 @@ _P57_STOCK_RUNTIME_VARIANTS = {
     ("is", "", ""): "p45-is",
     ("mismatch", "m15", "main"): "m15-main-mismatch",
     ("is", "m15", "main"): "m15-main-is",
+    ("standard", "", ""): "p45-standard",
+    ("standard", "m15", "main"): "m15-main-standard",
 }
 _P57_STOCK_RUNTIME_UPDATES = {
     "m15-selection-mismatch": "200",
@@ -177,6 +179,8 @@ _P57_STOCK_RUNTIME_UPDATES = {
     "p45-is": "300",
     "m15-main-mismatch": "300",
     "m15-main-is": "300",
+    "p45-standard": "300",
+    "m15-main-standard": "300",
 }
 
 # P57 materializes M15 with a wider physical response buffer than the original

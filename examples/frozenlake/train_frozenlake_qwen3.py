@@ -47,6 +47,7 @@ from tunix.rl.agentic.agentic_grpo_learner import (
     GRPOConfig,
     GRPOLearner,
     requires_reference_model,
+    _validate_p57_old_logps_source_request,
 )
 from tunix.rl.agentic import token_continuity as token_continuity_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -319,10 +320,16 @@ arg_parser.add_argument(
     default="token",
     help=(
         "Sampler/trainer importance-sampling correction. 'none' keeps "
-        "rollout logprobs as the old-policy denominator without TIS weights."
+        "rollout logprobs as the old-policy denominator without TIS weights "
+        "unless the signed Standard arm explicitly selects trainer-old."
     ),
 )
+arg_parser.add_argument(
+    "--old_logps_source", choices=("auto", "trainer"), default="auto",
+    help="Old-policy source; trainer is reserved for the P57 Standard no-TIS arm.",
+)
 args, _ = arg_parser.parse_known_args()
+_validate_p57_old_logps_source_request(os.environ, args.old_logps_source, args.sampler_is)
 
 CANON_P57_RUN_KIND = os.getenv("CANON_P57_RUN_KIND", "")
 CANON_P57_INFERENCE_REGIME = os.getenv("CANON_P57_INFERENCE_REGIME", "")
@@ -346,12 +353,12 @@ _P57_TITO_RECORD_FULL = (
 )
 CANON_P57_STOCK_TRAIN = (
     CANON_P57_RUN_KIND == "train"
-    and CANON_P57_TIM_ARM in ("mismatch", "is")
+    and CANON_P57_TIM_ARM in ("mismatch", "is", "standard")
     and CANON_P57_INFERENCE_REGIME == "stock-fast"
 )
 CANON_P57_STOCK_EVAL = (
     CANON_P57_RUN_KIND == "eval"
-    and CANON_P57_TIM_ARM in ("mismatch", "is")
+    and CANON_P57_TIM_ARM in ("mismatch", "is", "standard")
     and CANON_P57_INFERENCE_REGIME == "stock-fast"
 )
 _P57_NO_UPDATE = (
@@ -1767,8 +1774,10 @@ grpo_config = GRPOConfig(
     # The default preserves the existing FrozenLake token-TIS recipe. P57
     # explicitly passes ``none`` to both arms so rollout S_decode remains the
     # old-policy denominator and no TIM-aware correction weights enter loss.
+    # Standard separately selects a frozen trainer-old denominator below.
     sampler_is=None if args.sampler_is == "none" else args.sampler_is,
     sampler_is_threshold=2.0,
+    old_logps_source=args.old_logps_source,
     use_rollout_logps=True,
     advantage_estimator=args.advantage_estimator,
 )

@@ -1743,6 +1743,68 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     self.assertEqual(extracted_completions, ["msg 0", "" if record_timeout else "msg 1"])
 
+  def test_p57_standard_captures_frozen_trainer_old_without_tis(self):
+    """Exercise the complete learner method; stub only model logp evaluation."""
+    vocab = _mock_vocab()
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster = rl_cluster_lib.RLCluster(
+        actor=model, reference=model,
+        tokenizer=tokenizer_adapter.TokenizerAdapter(vocab),
+        cluster_config=rl_cluster_lib.ClusterConfig(
+            role_to_mesh={role: mesh for role in (
+                rl_cluster_lib.Role.ACTOR, rl_cluster_lib.Role.REFERENCE,
+                rl_cluster_lib.Role.ROLLOUT)},
+            rollout_engine="vanilla", offload_to_cpu=False,
+            training_config=rl_cluster_lib.RLTrainingConfig(
+                actor_optimizer=optax.sgd(1e-3), eval_every_n_steps=50),
+            rollout_config=base_rollout.RolloutConfig(
+                max_prompt_length=32, max_tokens_to_generate=10, return_logprobs=True),
+        ),
+    )
+    config = agentic_grpo_learner.GRPOConfig(
+        beta=0., num_generations=8, max_response_length=10,
+        loss_algo="gspo-token", advantage_estimator="rloo",
+        old_logps_source="trainer", sampler_is=None,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=cluster, reward_fns=None, algo_config=config,
+        chat_parser=MockChatParser(),
+    )
+    trajectories = [mock.Mock(
+        group_id=0, pair_index=i,
+        traj={"conversation_text": [{"role": "assistant", "content": "move"}],
+              "conversation_tokens": np.array([1, 2, 3]),
+              "conversation_masks": np.array([1, 1, 1]),
+              "old_logprobs": np.array([-.5, -.6, -.7]),
+              "policy_version": 0, "trajectory_reward": float(i % 2),
+              "prompt_tokens": np.array([4, 5]),
+              "original_input": {"prompts": "hello"}, "group_id": 0})
+        for i in range(8)]
+    env = dict(CANON_P57_TIM_ARM="standard", CANON_P57_RUN_KIND="train",
+        CANON_PROFILE_FILE="cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+        CANON_P57_INFERENCE_REGIME="stock-fast", CANON_P32_WORKLOAD="frozenlake-dp8-tp8",
+        CANON_DP_SIZE="8", CANON_TP_SIZE="8", CANON_P57_EXPECTED_UPDATES="300")
+    captured = jnp.full((8, 10), -.2)
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+        cluster, "get_actor_per_token_logps", return_value=captured) as rescore:
+      [example] = learner._process_results(trajectories, expected_step=0)
+      rescore.assert_called_once()
+      np.testing.assert_array_equal(example.old_per_token_logps, captured)
+      self.assertIsNone(example.sampler_is_weights)
+      # Existing TrainExample remains frozen when the trainer's later output changes.
+      rescore.return_value = jnp.full((8, 10), -.9)
+      np.testing.assert_array_equal(example.old_per_token_logps, captured)
+      trajectories[0].traj["old_logprobs"] = None
+      with self.assertRaisesRegex(alignment.AlignmentGateError, "rollout"):
+        learner._process_results(trajectories, expected_step=0)
+      trajectories[0].traj["policy_version"] = 1
+      with self.assertRaisesRegex(alignment.AlignmentGateError, "policy step"):
+        learner._process_results(trajectories, expected_step=0)
+
   def test_process_results_zero_advantage_group(self):
     class MockTraj:
 
