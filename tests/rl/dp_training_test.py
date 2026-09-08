@@ -40,6 +40,44 @@ class DPTrainingTest(absltest.TestCase):
         local_trajectories=16,
     )
 
+  def test_bucket_leaf_statistics_rebuild_staged_receipts_bitwise(self):
+    staged = (
+        jnp.asarray(
+            [[[1.0, -2.0], [3.0, 0.0]], [[-4.0, 5.0], [0.0, 6.0]]],
+            jnp.float32,
+        ),
+        jnp.asarray([[7.0, -8.0, 0.0], [9.0, 0.0, -10.0]], jnp.float32),
+        jnp.asarray([[11.0], [-12.0]], jnp.float32),
+    )
+    @jax.jit
+    def rebuild_receipts(values):
+      expected = dp_training.staged_gradient_receipts(values)
+      first = dp_training.staged_gradient_leaf_statistics(values[:2])
+      second = dp_training.staged_gradient_leaf_statistics(values[2:])
+      merged = tuple(
+          jnp.concatenate((left, right), axis=1)
+          for left, right in zip(first, second, strict=True)
+      )
+      actual = dp_training.staged_gradient_receipts_from_leaf_statistics(
+          *merged
+      )
+      return expected, actual, merged
+
+    with jax.transfer_guard('disallow'):
+      expected, actual, merged = rebuild_receipts(staged)
+      jax.block_until_ready((expected, actual))
+    for expected_leaf, actual_leaf in zip(
+        jax.tree.leaves(expected), jax.tree.leaves(actual), strict=True
+    ):
+      np.testing.assert_array_equal(
+          np.asarray(actual_leaf), np.asarray(expected_leaf)
+      )
+
+    with self.assertRaisesRegex(ValueError, 'leaf-statistic shape changed'):
+      dp_training.staged_gradient_receipts_from_leaf_statistics(
+          merged[0], merged[1][:, :-1], *merged[2:]
+      )
+
   def test_production_contract_uses_fixed_prompt_major_placement(self):
     self.contract.validate()
     self.assertEqual(self.contract.total_devices, 64)

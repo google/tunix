@@ -32,6 +32,7 @@ import functools
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import threading
@@ -310,7 +311,80 @@ def _p32_keep_tape() -> bool:
   return bool(_p32_keep_tape_mode())
 
 
+def _p75_report_adjoint_buckets_enabled() -> bool:
+  """Returns the exact default-off P59 report-output capacity selector."""
+  value = os.environ.get("CANON_P75_REPORT_ADJOINT_BUCKETS", "")
+  if value in ("", "0"):
+    return False
+  if value == "1":
+    workload = os.environ.get("CANON_P32_WORKLOAD", "")
+    if workload != "frozenlake-p45-onehost-dp2-tp2":
+      raise FunctionalMappingError(
+          "CANON_P75_REPORT_ADJOINT_BUCKETS=1 is admitted only for "
+          "frozenlake-p45-onehost-dp2-tp2, got "
+          f"{workload!r}"
+      )
+    return True
+  raise FunctionalMappingError(
+      "CANON_P75_REPORT_ADJOINT_BUCKETS must be unset, 0, or 1, "
+      f"got {value!r}"
+  )
+
+
+def _p76_chunk_dependency_ticket_enabled() -> bool:
+  """Returns the exact default-off P45 chunk-backpressure selector."""
+  value = os.environ.get("CANON_P76_CHUNK_DEPENDENCY_TICKET", "")
+  if value in ("", "0"):
+    return False
+  if value == "1":
+    workload = os.environ.get("CANON_P32_WORKLOAD", "")
+    if workload != "frozenlake-p45-onehost-dp2-tp2":
+      raise FunctionalMappingError(
+          "CANON_P76_CHUNK_DEPENDENCY_TICKET=1 is admitted only for "
+          "frozenlake-p45-onehost-dp2-tp2, got "
+          f"{workload!r}"
+      )
+    return True
+  raise FunctionalMappingError(
+      "CANON_P76_CHUNK_DEPENDENCY_TICKET must be unset, 0, or 1, "
+      f"got {value!r}"
+  )
+
+
+def _p77_chunk_backpressure_enabled() -> bool:
+  """Returns the exact default-off P45 device-ready capacity selector."""
+  value = os.environ.get("CANON_P77_CHUNK_BACKPRESSURE", "")
+  if value in ("", "0"):
+    return False
+  if value == "1":
+    workload = os.environ.get("CANON_P32_WORKLOAD", "")
+    if workload != "frozenlake-p45-onehost-dp2-tp2":
+      raise FunctionalMappingError(
+          "CANON_P77_CHUNK_BACKPRESSURE=1 is admitted only for "
+          "frozenlake-p45-onehost-dp2-tp2, got "
+          f"{workload!r}"
+      )
+    return True
+  raise FunctionalMappingError(
+      "CANON_P77_CHUNK_BACKPRESSURE must be unset, 0, or 1, "
+      f"got {value!r}"
+  )
+
+
+def _p77_wait_for_chunk_completion(completed) -> None:
+  """Bounds PJRT allocation by waiting for an existing device result.
+
+  ``block_until_ready`` waits for device completion but does not materialize
+  an array value on the host.  The caller invokes this only after the current
+  gradient pack's last consumer was dispatched and before any next-chunk
+  pullback can be dispatched.  Arithmetic, array identity, sharding and VMA
+  types are unchanged.
+  """
+  jax.block_until_ready(completed)
+
+
 _P71_BWD_BLOCK_LAYERS = 7
+_P75_REPORT_ADJOINT_MAX_LOCAL_BYTES = 2 * 1024**3
 
 
 def _p71_bwd_block_spans(layer_count):
@@ -6956,7 +7030,12 @@ class Qwen3EngineForwardAdapter:
     return self._p50_adjoint_fn(trainer_state, engine_cotangents)
 
   def _p59_rank_parallel_report_adjoint(
-      self, trainer_state, staged_engine_cotangents
+      self,
+      trainer_state,
+      staged_engine_cotangents,
+      *,
+      emit_memory_analysis=False,
+      hbm_bucket_stage_sink=None,
   ):
     """Maps every DP-local engine-gradient row to trainer state in parallel."""
     _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
@@ -7027,6 +7106,7 @@ class Qwen3EngineForwardAdapter:
       )
       self._p59_report_adjoint_shapes = expected
       self._p59_report_dp_axis = data_axis
+      self._p59_report_adjoint_mapped = mapped
       self._p59_report_adjoint_fn = _xprof_jit(
           mapped,
           module_name="zt_tr_dp_parallel_bwd_adjoint",
@@ -7043,8 +7123,672 @@ class Qwen3EngineForwardAdapter:
             "P59 mapping-adjoint staged cotangent shape changed at leaf "
             f"{index}: {cotangent.shape} != {staged_shape}"
         )
-    staged_trainer_gradient = self._p59_report_adjoint_fn(
-        trainer_state, staged_engine_cotangents
+    if _p75_report_adjoint_buckets_enabled():
+      return self._p75_rank_parallel_report_adjoint_buckets(
+          trainer_state,
+          staged_engine_cotangents,
+          emit_memory_analysis=emit_memory_analysis,
+          hbm_bucket_stage_sink=hbm_bucket_stage_sink,
+      )
+    if hbm_bucket_stage_sink is not None:
+      raise FunctionalMappingError(
+          "P75 bucket HBM observer requires report-adjoint buckets"
+      )
+    report_adjoint_fn = self._p59_report_adjoint_fn
+    if emit_memory_analysis:
+      signature = self._p70_grad_tree_signature(
+          (trainer_state, staged_engine_cotangents)
+      )
+      signature = (
+          signature,
+          tuple(
+              getattr(leaf, "sharding", None)
+              for leaf in jax.tree.leaves(
+                  (trainer_state, staged_engine_cotangents)
+              )
+          ),
+      )
+      cached = getattr(self, "_p59_report_memory_analysis", None)
+      if cached is None:
+        compiled = report_adjoint_fn.lower(
+            trainer_state, staged_engine_cotangents
+        ).compile()
+        stats = compiled.memory_analysis()
+        if stats is None:
+          raise FunctionalMappingError(
+              "P59 report-adjoint compiled memory analysis is unavailable"
+          )
+        fields = (
+            "argument_size_in_bytes",
+            "output_size_in_bytes",
+            "alias_size_in_bytes",
+            "temp_size_in_bytes",
+            "host_argument_size_in_bytes",
+            "host_output_size_in_bytes",
+            "host_alias_size_in_bytes",
+            "host_temp_size_in_bytes",
+        )
+        values = {name: int(getattr(stats, name)) for name in fields}
+        receipt = {
+            "schema": "canon-v2-p59-report-adjoint-memory-v1",
+            "staged_engine_leaves": len(staged_engine_cotangents),
+            "trainer_leaves": len(jax.tree.leaves(trainer_state)),
+            **values,
+        }
+        if (
+            values["argument_size_in_bytes"] <= 0
+            or values["output_size_in_bytes"] <= 0
+            or values["alias_size_in_bytes"] < 0
+            or values["temp_size_in_bytes"] < 0
+            or values["alias_size_in_bytes"]
+            > min(
+                values["argument_size_in_bytes"],
+                values["output_size_in_bytes"],
+            )
+        ):
+          raise FunctionalMappingError(
+              f"P59 report-adjoint invalid compiled memory analysis: {receipt}"
+          )
+        self._p59_report_memory_analysis = (signature, receipt)
+        staged_trainer_gradient = compiled(
+            trainer_state, staged_engine_cotangents
+        )
+      else:
+        cached_signature, receipt = cached
+        if cached_signature != signature:
+          raise FunctionalMappingError(
+              "P59 report-adjoint memory-analysis signature changed"
+          )
+        staged_trainer_gradient = report_adjoint_fn(
+            trainer_state, staged_engine_cotangents
+        )
+      print(
+          "[V2.FL.REPORT_ADJOINT_MEMORY] "
+          + json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+          flush=True,
+      )
+    else:
+      staged_trainer_gradient = report_adjoint_fn(
+          trainer_state, staged_engine_cotangents
+      )
+    return _p59_restore_physically_equal_staged_specs(
+        trainer_state, staged_trainer_gradient, data_axis
+    )
+
+  def _p59_rank_parallel_report_adjoint_accumulate(
+      self,
+      trainer_state,
+      staged_engine_cotangents,
+      staged_accumulator,
+  ):
+    """Maps and adds one rank-local gradient in bounded device buckets."""
+    validated_mapped = getattr(self, "_p59_report_adjoint_mapped", None)
+    data_axis = getattr(self, "_p59_report_dp_axis", None)
+    expected = getattr(self, "_p59_report_adjoint_shapes", None)
+    if (
+        validated_mapped is None
+        or expected is None
+        or data_axis not in ("data", "dp")
+    ):
+      raise FunctionalMappingError(
+          "P59 fused report accumulation requires one validated report "
+          "adjoint first"
+      )
+    if _p75_report_adjoint_buckets_enabled():
+      raise FunctionalMappingError(
+          "P59 fused report accumulation and P75 diagnostic buckets are "
+          "mutually exclusive"
+      )
+    staged_engine_cotangents = tuple(staged_engine_cotangents)
+    for index, (shape, cotangent) in enumerate(
+        zip(expected, staged_engine_cotangents, strict=True)
+    ):
+      staged_shape = (self._data_size,) + tuple(shape)
+      if cotangent.shape != staged_shape:
+        raise FunctionalMappingError(
+            "P59 fused report accumulation cotangent shape changed at leaf "
+            f"{index}: {cotangent.shape} != {staged_shape}"
+        )
+    if jax.tree.structure(staged_accumulator) != jax.tree.structure(
+        trainer_state
+    ):
+      raise FunctionalMappingError(
+          "P59 fused report accumulator tree differs from trainer state"
+      )
+    mesh, live_data_axis = _p59_replicated_data_mesh(
+        (trainer_state, staged_engine_cotangents, staged_accumulator),
+        "P59 fused report accumulation",
+    )
+    if live_data_axis != data_axis:
+      raise FunctionalMappingError(
+          "P59 fused report accumulator data axis changed: "
+          f"{live_data_axis!r} != {data_axis!r}"
+      )
+    accumulator_structure = jax.tree.structure(staged_accumulator)
+    accumulator_leaves = tuple(jax.tree.leaves(staged_accumulator))
+    pinned_shardings = tuple(leaf.sharding for leaf in accumulator_leaves)
+    state_leaves = tuple(jax.tree.leaves(trainer_state))
+    for index, (leaf, pinned, state_leaf) in enumerate(
+        zip(
+            accumulator_leaves,
+            pinned_shardings,
+            state_leaves,
+            strict=True,
+        )
+    ):
+      if not isinstance(pinned, jax.sharding.NamedSharding):
+        raise FunctionalMappingError(
+            f"P59 fused report accumulator leaf {index} lacks NamedSharding"
+        )
+      state_sharding = getattr(state_leaf, "sharding", None)
+      if not isinstance(state_sharding, jax.sharding.NamedSharding):
+        raise FunctionalMappingError(
+            f"P59 fused report trainer leaf {index} lacks NamedSharding"
+        )
+      expected_sharding = jax.sharding.NamedSharding(
+          mesh,
+          jax.sharding.PartitionSpec(
+              data_axis, *tuple(state_sharding.spec)
+          ),
+      )
+      if not leaf.sharding.is_equivalent_to(expected_sharding, leaf.ndim):
+        raise FunctionalMappingError(
+            "P59 fused report accumulator layout changed at leaf "
+            f"{index}: {leaf.sharding} != {expected_sharding}"
+        )
+    plan = _p75_report_adjoint_plan(
+        trainer_state=trainer_state,
+        engine_state_contract=self._engine_state_contract,
+        key_mappings=self._key_mappings,
+        data_axis=data_axis,
+    )
+    signature = (
+        self._p70_grad_tree_signature(
+            (trainer_state, staged_engine_cotangents, staged_accumulator)
+        ),
+        tuple(
+            getattr(leaf, "sharding", None)
+            for leaf in jax.tree.leaves(
+                (trainer_state, staged_engine_cotangents, staged_accumulator)
+            )
+        ),
+        plan,
+    )
+    cached = getattr(self, "_p59_report_accumulate_bucket_program", None)
+    if cached is None:
+      model_config = self._runner.model_config
+
+      def mapping(state):
+        return map_trainer_state_to_engine_leaves(
+            trainer_state=state,
+            engine_state_contract=self._engine_state_contract,
+            key_mappings=self._key_mappings,
+            transpose_keys=self._transpose_keys,
+            key_mapping_hook_fns=self._hook_fns,
+            num_kv_heads=model_config.get_total_num_kv_heads(),
+            head_dim=model_config.get_head_size(),
+            tp_size=self._tp_size,
+        ).leaves
+
+      manual_axes = frozenset(_p59_manual_rank_axes(
+          mesh, data_axis, "P59 bucketed report accumulation"
+      ))
+      state_specs = _manual_axis_specs(
+          trainer_state, data_axis, manual_axes
+      )
+      staged_specs = tuple(
+          _manual_axis_partition_spec(value, data_axis, manual_axes)
+          for value in staged_engine_cotangents
+      )
+      output_specs = tuple(jax.tree.leaves(
+          _rank_staged_specs(trainer_state, data_axis, manual_axes)
+      ))
+      row_spec = jax.sharding.PartitionSpec(data_axis, None)
+      row_sharding = jax.sharding.NamedSharding(mesh, row_spec)
+      programs = []
+      previous_source_indices = ()
+      for source_indices, target_indices in zip(
+          plan.source_buckets, plan.target_buckets, strict=True
+      ):
+        dependency_specs = tuple(
+            output_specs[index] for index in previous_source_indices
+        )
+
+        def local_adjoint(
+            state,
+            staged_cotangents,
+            dependency,
+            source_indices=source_indices,
+            target_indices=target_indices,
+        ):
+          def mark_data_varying(leaf):
+            return jax.lax.pcast(leaf, data_axis, to="varying")
+
+          def mapping_subset(source_state):
+            leaves = mapping(source_state)
+            return tuple(leaves[index] for index in target_indices)
+
+          varying_state = jax.tree.map(mark_data_varying, state)
+          if dependency:
+            ticket = jnp.asarray(0, jnp.uint32)
+            for leaf in dependency:
+              scalar = jnp.ravel(leaf)[0]
+              if scalar.dtype in (jnp.bfloat16, jnp.float16):
+                unsigned_dtype = jnp.uint16
+              elif scalar.dtype == jnp.float32:
+                unsigned_dtype = jnp.uint32
+              else:
+                raise FunctionalMappingError(
+                    "P59 bucket dependency requires float16, bfloat16, "
+                    f"or float32 leaves, got {scalar.dtype}"
+                )
+              bits = jax.lax.bitcast_convert_type(scalar, unsigned_dtype)
+              guarded = jax.lax.optimization_barrier(bits)
+              ticket = jax.lax.bitwise_or(
+                  ticket,
+                  jax.lax.convert_element_type(
+                      jax.lax.bitwise_xor(bits, guarded), jnp.uint32
+                  ),
+              )
+            first = staged_cotangents[0]
+            if first.dtype in (jnp.bfloat16, jnp.float16):
+              first_unsigned_dtype = jnp.uint16
+            elif first.dtype == jnp.float32:
+              first_unsigned_dtype = jnp.uint32
+            else:
+              raise FunctionalMappingError(
+                  "P59 bucket dependency requires a floating cotangent, "
+                  f"got {first.dtype}"
+              )
+            first_bits = jax.lax.bitcast_convert_type(
+                first, first_unsigned_dtype
+            )
+            flat_bits = jnp.ravel(first_bits)
+            flat_bits = flat_bits.at[0].set(jax.lax.bitwise_xor(
+                flat_bits[0],
+                jax.lax.convert_element_type(ticket, first_unsigned_dtype),
+            ))
+            staged_cotangents = (
+                jax.lax.bitcast_convert_type(
+                    jnp.reshape(flat_bits, first.shape), first.dtype
+                ),
+                *staged_cotangents[1:],
+            )
+          cotangents = tuple(
+              jnp.squeeze(value, axis=0) for value in staged_cotangents
+          )
+          _, pullback = jax.vjp(mapping_subset, varying_state)
+          gradient = tuple(jax.tree.leaves(pullback(cotangents)[0]))
+          current = tuple(
+              jnp.expand_dims(
+                  gradient[index].astype(jnp.float32), axis=0
+              )
+              for index in source_indices
+          )
+          return current
+
+        def accumulate_bucket(current, accumulator):
+          statistics = dp_training.staged_gradient_leaf_statistics(current)
+          accumulated = tuple(
+              total + value
+              for total, value in zip(accumulator, current, strict=True)
+          )
+          return accumulated, statistics
+
+        shard_map_kwargs = {
+            "mesh": mesh,
+            "in_specs": (
+                state_specs,
+                tuple(staged_specs[index] for index in target_indices),
+                dependency_specs,
+            ),
+            "out_specs": tuple(
+                output_specs[index] for index in source_indices
+            ),
+            "axis_names": manual_axes,
+        }
+        try:
+          mapped = jax.shard_map(
+              local_adjoint,
+              check_vma=True,
+              **shard_map_kwargs,
+          )
+        except TypeError:
+          mapped = jax.shard_map(
+              local_adjoint,
+              check_rep=True,
+              **shard_map_kwargs,
+          )
+        programs.append((mapped, accumulate_bucket))
+        previous_source_indices = source_indices
+
+      def merge_statistics(bucket_statistics):
+        merged = tuple(
+            jnp.concatenate(
+                tuple(statistics[index] for statistics in bucket_statistics),
+                axis=1,
+            )
+            for index in range(5)
+        )
+        return dp_training.staged_gradient_receipts_from_leaf_statistics(
+            *merged
+        )
+
+      programs = tuple(programs)
+
+      def run_bucketed_report_accumulate(state, cotangents, accumulator):
+        live_accumulator_leaves = list(jax.tree.leaves(accumulator))
+        bucket_statistics = []
+        dependency_bucket = ()
+        for source_indices, target_indices, program_pair in zip(
+            plan.source_buckets,
+            plan.target_buckets,
+            programs,
+            strict=True,
+        ):
+          inputs = tuple(cotangents[index] for index in target_indices)
+          accumulator_bucket = tuple(
+              live_accumulator_leaves[index] for index in source_indices
+          )
+          report_program, accumulate_program = program_pair
+          current_bucket = report_program(
+              state, inputs, dependency_bucket
+          )
+          accumulated_bucket, statistics = accumulate_program(
+              current_bucket, accumulator_bucket
+          )
+          for index, value in zip(
+              source_indices, accumulated_bucket, strict=True
+          ):
+            live_accumulator_leaves[index] = value
+          dependency_bucket = accumulated_bucket
+          bucket_statistics.append(statistics)
+        return (
+            jax.tree.unflatten(
+                accumulator_structure, live_accumulator_leaves
+            ),
+            merge_statistics(tuple(bucket_statistics)),
+        )
+
+      accumulated_shardings = jax.tree.unflatten(
+          accumulator_structure, list(pinned_shardings)
+      )
+      fused = _xprof_jit(
+          run_bucketed_report_accumulate,
+          module_name="zt_tr_dp_parallel_bwd_adjoint_accum_buckets",
+          scope_name="zt/tr/dp_parallel/report/adjoint_accum_buckets",
+          donate_argnums=(1, 2),
+          out_shardings=(
+              accumulated_shardings,
+              (row_sharding, row_sharding, row_sharding),
+          ),
+      )
+      cached = (signature, fused)
+      self._p59_report_accumulate_bucket_program = cached
+    cached_signature, fused = cached
+    if cached_signature != signature:
+      raise FunctionalMappingError(
+          "P59 bucketed report accumulation signature changed"
+      )
+    accumulated, receipts = fused(
+        trainer_state, staged_engine_cotangents, staged_accumulator
+    )
+    for value in (
+        *staged_engine_cotangents,
+        *accumulator_leaves,
+    ):
+      if isinstance(value, jax.Array) and not value.is_deleted():
+        value.delete()
+    self._p59_report_accumulate_bucket_receipt = (
+        len(plan.source_buckets),
+        1,
+        max(plan.local_output_bytes),
+        max(0, len(plan.source_buckets) - 1),
+    )
+    for index, (leaf, pinned) in enumerate(zip(
+        jax.tree.leaves(accumulated), pinned_shardings, strict=True
+    )):
+      if not leaf.sharding.is_equivalent_to(pinned, leaf.ndim):
+        raise FunctionalMappingError(
+            "P59 fused report accumulation output sharding changed at leaf "
+            f"{index}: {leaf.sharding} != {pinned}"
+        )
+    return accumulated, receipts
+
+  def _p75_rank_parallel_report_adjoint_buckets(
+      self,
+      trainer_state,
+      staged_engine_cotangents,
+      *,
+      emit_memory_analysis=False,
+      hbm_bucket_stage_sink=None,
+  ):
+    """Materializes and retires checked report-adjoint leaf buckets."""
+    if self._data_size != 2 or self._tp_size != 2:
+      raise FunctionalMappingError(
+          "P75 report-adjoint buckets require the admitted DP2xTP2 geometry"
+      )
+    mesh, data_axis = _p59_replicated_data_mesh(
+        (trainer_state, staged_engine_cotangents),
+        "P75 bucketed report adjoint",
+    )
+    plan = _p75_report_adjoint_plan(
+        trainer_state=trainer_state,
+        engine_state_contract=self._engine_state_contract,
+        key_mappings=self._key_mappings,
+        data_axis=data_axis,
+    )
+    signature = (
+        self._p70_grad_tree_signature(
+            (trainer_state, staged_engine_cotangents)
+        ),
+        tuple(
+            getattr(leaf, "sharding", None)
+            for leaf in jax.tree.leaves(
+                (trainer_state, staged_engine_cotangents)
+            )
+        ),
+        plan,
+    )
+    cached = getattr(self, "_p75_report_adjoint_bucket_programs", None)
+    if cached is None:
+      model_config = self._runner.model_config
+
+      def mapping(state):
+        return map_trainer_state_to_engine_leaves(
+            trainer_state=state,
+            engine_state_contract=self._engine_state_contract,
+            key_mappings=self._key_mappings,
+            transpose_keys=self._transpose_keys,
+            key_mapping_hook_fns=self._hook_fns,
+            num_kv_heads=model_config.get_total_num_kv_heads(),
+            head_dim=model_config.get_head_size(),
+            tp_size=self._tp_size,
+        ).leaves
+
+      manual_axes = frozenset(_p59_manual_rank_axes(
+          mesh, data_axis, "P75 bucketed report adjoint"
+      ))
+      state_specs = _manual_axis_specs(
+          trainer_state, data_axis, manual_axes
+      )
+      staged_leaves = tuple(staged_engine_cotangents)
+      staged_specs = tuple(
+          _manual_axis_partition_spec(value, data_axis, manual_axes)
+          for value in staged_leaves
+      )
+      output_specs = tuple(jax.tree.leaves(
+          _rank_staged_specs(trainer_state, data_axis, manual_axes)
+      ))
+      programs = []
+      for source_indices, target_indices in zip(
+          plan.source_buckets, plan.target_buckets, strict=True
+      ):
+
+        def local_adjoint(
+            state,
+            staged_cotangents,
+            source_indices=source_indices,
+            target_indices=target_indices,
+        ):
+          # The parameter values are physically replicated across DP, but the
+          # report adjoint intentionally emits one local cotangent per manual
+          # DP rank.  Preserve that P66 meaning under checked VMA: the VJP's
+          # primal and output types must admit data-varying rank-local
+          # cotangents.  pcast changes only the manual-axis type, not bits or
+          # sharding, and mirrors the checked wrapper in _p59_parallel_map.
+          def mark_data_varying(leaf):
+            return jax.lax.pcast(leaf, data_axis, to="varying")
+
+          def mapping_subset(source_state):
+            leaves = mapping(source_state)
+            return tuple(leaves[index] for index in target_indices)
+
+          varying_state = jax.tree.map(mark_data_varying, state)
+          cotangents = tuple(
+              jnp.squeeze(value, axis=0) for value in staged_cotangents
+          )
+          _, pullback = jax.vjp(mapping_subset, varying_state)
+          gradient = tuple(jax.tree.leaves(pullback(cotangents)[0]))
+          return tuple(
+              jnp.expand_dims(
+                  gradient[index].astype(jnp.float32), axis=0
+              )
+              for index in source_indices
+          )
+
+        shard_map_kwargs = {
+            "mesh": mesh,
+            "in_specs": (
+                state_specs,
+                tuple(staged_specs[index] for index in target_indices),
+            ),
+            "out_specs": tuple(
+                output_specs[index] for index in source_indices
+            ),
+            "axis_names": manual_axes,
+        }
+        try:
+          mapped = jax.shard_map(
+              local_adjoint, check_vma=True, **shard_map_kwargs
+          )
+        except TypeError:
+          mapped = jax.shard_map(
+              local_adjoint, check_rep=True, **shard_map_kwargs
+          )
+        programs.append(_xprof_jit(
+            mapped,
+            module_name="zt_tr_dp_parallel_bwd_adjoint_bucket",
+            scope_name="zt/tr/dp_parallel/report/adjoint_bucket",
+            donate_argnums=(1,),
+        ))
+      if len(jax.tree.leaves(trainer_state)) != sum(
+          map(len, plan.source_buckets)
+      ):
+        raise FunctionalMappingError(
+            "P75 report-adjoint source bucket coverage changed"
+        )
+      programs = tuple(programs)
+      self._p75_report_adjoint_bucket_programs = (signature, programs)
+    else:
+      cached_signature, programs = cached
+      if cached_signature != signature:
+        raise FunctionalMappingError(
+            "P75 report-adjoint bucket signature changed"
+        )
+
+    output_leaves = [None] * len(jax.tree.leaves(trainer_state))
+    memory_buckets = []
+    for bucket_index, (source_indices, target_indices, program) in enumerate(
+        zip(
+            plan.source_buckets,
+            plan.target_buckets,
+            programs,
+            strict=True,
+        )
+    ):
+      inputs = tuple(
+          staged_engine_cotangents[index] for index in target_indices
+      )
+      executable = program
+      if emit_memory_analysis:
+        executable = program.lower(trainer_state, inputs).compile()
+        stats = executable.memory_analysis()
+        if stats is None:
+          raise FunctionalMappingError(
+              f"P75 report-adjoint bucket {bucket_index} memory analysis "
+              "is unavailable"
+          )
+        memory_buckets.append({
+            "bucket": bucket_index,
+            "source_leaves": len(source_indices),
+            "target_leaves": len(target_indices),
+            "local_output_bytes": plan.local_output_bytes[bucket_index],
+            **{
+                name: int(getattr(stats, name))
+                for name in (
+                    "argument_size_in_bytes",
+                    "output_size_in_bytes",
+                    "alias_size_in_bytes",
+                    "temp_size_in_bytes",
+                    "host_argument_size_in_bytes",
+                    "host_output_size_in_bytes",
+                    "host_alias_size_in_bytes",
+                    "host_temp_size_in_bytes",
+                )
+            },
+        })
+      if hbm_bucket_stage_sink is not None:
+        hbm_bucket_stage_sink("before_execute", bucket_index)
+      bucket_gradient = executable(trainer_state, inputs)
+      bucket_gradient = jax.block_until_ready(bucket_gradient)
+      if hbm_bucket_stage_sink is not None:
+        hbm_bucket_stage_sink("after_execute", bucket_index)
+      if len(bucket_gradient) != len(source_indices):
+        raise FunctionalMappingError(
+            f"P75 report-adjoint bucket {bucket_index} output count changed"
+        )
+      for source_index, value in zip(
+          source_indices, bucket_gradient, strict=True
+      ):
+        output_leaves[source_index] = value
+      for value in inputs:
+        if isinstance(value, jax.Array) and not value.is_deleted():
+          value.delete()
+      if hbm_bucket_stage_sink is not None:
+        hbm_bucket_stage_sink("after_delete", bucket_index)
+    if any(value is None for value in output_leaves):
+      raise FunctionalMappingError(
+          "P75 report-adjoint output leaf coverage is incomplete"
+      )
+    print(
+        "[P75.REPORT_ADJOINT_BUCKETS] enabled=1 "
+        f"programs={len(programs)} "
+        f"max_local_bytes={_P75_REPORT_ADJOINT_MAX_LOCAL_BYTES} "
+        f"peak_local_bytes={max(plan.local_output_bytes)} "
+        f"total_local_bytes={sum(plan.local_output_bytes)} "
+        f"host_blocks={len(programs)}",
+        flush=True,
+    )
+    if emit_memory_analysis:
+      receipt = {
+          "schema": "canon-v2-p75-report-adjoint-buckets-memory-v1",
+          "source_leaves": len(plan.source_paths),
+          "target_leaves": len(plan.target_paths),
+          "bucket_count": len(memory_buckets),
+          "max_local_bytes": _P75_REPORT_ADJOINT_MAX_LOCAL_BYTES,
+          "peak_local_output_bytes": max(plan.local_output_bytes),
+          "total_local_output_bytes": sum(plan.local_output_bytes),
+          "host_blocks": len(programs),
+          "buckets": memory_buckets,
+      }
+      print(
+          "[V2.FL.REPORT_ADJOINT_MEMORY] "
+          + json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+          flush=True,
+      )
+    staged_trainer_gradient = jax.tree.unflatten(
+        jax.tree.structure(trainer_state), output_leaves
     )
     return _p59_restore_physically_equal_staged_specs(
         trainer_state, staged_trainer_gradient, data_axis
@@ -8380,8 +9124,165 @@ class Qwen3EngineForwardAdapter:
       )
     return self._p70_tree_add_fn(accumulator, pack)
 
+  @staticmethod
+  def _p70_release_consumed_grad_pack(pack):
+    """Ends the device lifetime of a gradient pack after its last dispatch.
+
+    ``_p70_grad_tree_start`` and ``_p70_grad_tree_add`` have already enqueued
+    their reads before this helper is called.  ``jax.Array.delete`` therefore
+    releases each input buffer after those asynchronous consumers finish; it
+    neither materializes a value on the host nor changes the executable's
+    operand, donation, sharding, or arithmetic contracts.  Identity
+    de-duplication keeps an aliased leaf from being deleted twice.
+    """
+    seen = set()
+    for value in jax.tree.leaves(pack):
+      if isinstance(value, jax.Array) and id(value) not in seen:
+        seen.add(id(value))
+        if not value.is_deleted():
+          value.delete()
+
+  def _p76_order_next_chunk_start(self, completed, starter):
+    """Makes a next-chunk model operand depend on every accumulator leaf.
+
+    JAX dispatch is asynchronous.  The preceding whole-tree start/add may
+    still be reading a consumed current-chunk pack when the following chunk's
+    independent replay begins.  This checked manual map reads one shard-local
+    scalar bit pattern from every completed accumulator leaf, turns each into
+    exact integer zero with ``x XOR optimization_barrier(x)``, and XORs their
+    OR into the next model operand.  One scalar TP psum proves that zero is
+    replicated where the model operand is TP-replicated.  The returned operand
+    is bitwise identical, but its device readiness now depends on every prior
+    accumulator buffer; no value is transferred to the host.
+    """
+    label = "P76 chunk dependency ticket"
+    mesh = _named_sharding_mesh(completed, None, label)
+    data_axis, model_axis = _p59_mesh_roles(mesh, label)
+    aligned_starter = _p59_align_to_mesh(starter, mesh, label)
+    starter_sharding = getattr(aligned_starter, "sharding", None)
+    if not isinstance(starter_sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          f"{label} starter requires NamedSharding"
+      )
+    starter_spec = starter_sharding.spec
+    if model_axis in _p59_partition_axes(starter_spec):
+      raise FunctionalMappingError(
+          f"{label} starter must be replicated over {model_axis!r}: "
+          f"{starter_spec}"
+      )
+
+    tree_leaves, tree_def = jax.tree.flatten(completed)
+    tree_specs = []
+    tree_signature = []
+    for index, leaf in enumerate(tree_leaves):
+      sharding = getattr(leaf, "sharding", None)
+      if not isinstance(sharding, jax.sharding.NamedSharding):
+        raise FunctionalMappingError(
+            f"{label} accumulator leaf {index} requires NamedSharding"
+        )
+      if sharding.mesh != mesh:
+        raise FunctionalMappingError(
+            f"{label} accumulator leaf {index} changed mesh"
+        )
+      tree_specs.append(sharding.spec)
+      tree_signature.append(
+          (tuple(leaf.shape), str(leaf.dtype), tuple(sharding.spec))
+      )
+    tree_signature = (tree_def, tuple(tree_signature))
+    starter_signature = (
+        tuple(aligned_starter.shape),
+        str(aligned_starter.dtype),
+        tuple(starter_spec),
+    )
+    if getattr(self, "_p76_ticket_tree_signature", None) is None:
+      self._p76_ticket_tree_signature = tree_signature
+      self._p76_ticket_programs = {}
+    elif self._p76_ticket_tree_signature != tree_signature:
+      raise FunctionalMappingError(
+          f"{label} accumulator signature changed after first build"
+      )
+
+    program = self._p76_ticket_programs.get(starter_signature)
+    if program is None:
+
+      def unsigned_dtype(dtype):
+        if dtype in (jnp.bfloat16, jnp.float16, jnp.int16, jnp.uint16):
+          return jnp.uint16
+        if dtype in (jnp.float32, jnp.int32, jnp.uint32):
+          return jnp.uint32
+        raise FunctionalMappingError(
+            f"{label} unsupported dependency dtype {dtype}"
+        )
+
+      def zero_from_leaf(leaf):
+        scalar = jnp.ravel(leaf)[0]
+        bits = jax.lax.bitcast_convert_type(
+            scalar, unsigned_dtype(scalar.dtype)
+        )
+        guarded = jax.lax.optimization_barrier(bits)
+        return jax.lax.convert_element_type(
+            jax.lax.bitwise_xor(bits, guarded), jnp.uint32
+        )
+
+      def local_order(tree, next_starter):
+        ticket = jnp.asarray(0, jnp.uint32)
+        for leaf in jax.tree.leaves(tree):
+          ticket = jax.lax.bitwise_or(ticket, zero_from_leaf(leaf))
+        ticket = jax.lax.pcast(ticket, model_axis, to="unreduced")
+        ticket = jax.lax.psum(ticket, model_axis)
+        starter_bits = jax.lax.bitcast_convert_type(
+            next_starter, unsigned_dtype(next_starter.dtype)
+        )
+        ordered_bits = jax.lax.bitwise_xor(
+            starter_bits,
+            jax.lax.convert_element_type(ticket, starter_bits.dtype),
+        )
+        return jax.lax.bitcast_convert_type(
+            ordered_bits, next_starter.dtype
+        )
+
+      mapped = jax.shard_map(
+          local_order,
+          mesh=mesh,
+          in_specs=(
+              jax.tree.unflatten(tree_def, tree_specs),
+              starter_spec,
+          ),
+          out_specs=starter_spec,
+          axis_names=frozenset(mesh.axis_names),
+          check_vma=True,
+      )
+      program = _xprof_jit(
+          mapped,
+          module_name="zt_tr_grad_chunk_ticket",
+          scope_name="zt/tr/grad/chunk_ticket",
+          out_shardings=starter_sharding,
+      )
+      self._p76_ticket_programs[starter_signature] = program
+      print(
+          "[P76.CHUNK_DEPENDENCY] enabled=1 "
+          f"leaves={len(tree_leaves)} checked_vma=1 "
+          "scalar_collectives=1 host_transfers=0",
+          flush=True,
+      )
+
+    ordered = program(completed, aligned_starter)
+    starter_mesh = getattr(getattr(starter, "sharding", None), "mesh", None)
+    return (
+        _p59_align_to_mesh(ordered, starter_mesh, label)
+        if starter_mesh is not None and starter_mesh != mesh
+        else ordered
+    )
+
   def _p32_reverse_group(
-      self, segmented, engine_leaves, spec, dlogps, dentropy, replay=None
+      self,
+      segmented,
+      engine_leaves,
+      spec,
+      dlogps,
+      dentropy,
+      replay=None,
+      hbm_chunk_stage_sink=None,
   ):
     """Reverses one group of rank-local sequences by layer and chunk."""
     parallel_value = os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
@@ -8391,6 +9292,23 @@ class Qwen3EngineForwardAdapter:
           f"got {parallel_value!r}"
       )
     rank_parallel = parallel_value == "1"
+    chunk_dependency_ticket = _p76_chunk_dependency_ticket_enabled()
+    chunk_backpressure = _p77_chunk_backpressure_enabled()
+    if chunk_dependency_ticket and not rank_parallel:
+      raise FunctionalMappingError(
+          "CANON_P76_CHUNK_DEPENDENCY_TICKET=1 requires P59 "
+          "rank-parallel backward"
+      )
+    if chunk_backpressure and not rank_parallel:
+      raise FunctionalMappingError(
+          "CANON_P77_CHUNK_BACKPRESSURE=1 requires P59 rank-parallel "
+          "backward"
+      )
+    if chunk_dependency_ticket and chunk_backpressure:
+      raise FunctionalMappingError(
+          "P76 device ticket and P77 host backpressure are mutually "
+          "exclusive"
+      )
     p66_arm = _p66_tp4_arm()
     p66_oracle = p66_arm == "tp4-vma-oracle"
     p66_unit_data = (
@@ -8534,18 +9452,33 @@ class Qwen3EngineForwardAdapter:
     pullback_prepared = segmented.prepare_block_pullback_group(
         engine_leaves, label="P59" if rank_parallel else "P28"
     )
+    kept_hidden_ins = replay.get("hidden_inputs") or ()
+    prefetched_chunk_inputs = None
+    chunk_backpressure_pullback_waits = 0
+    chunk_backpressure_accumulation_waits = 0
 
     with self._set_forward_context(None, self._runner.vllm_config):
       for chunk_index in reversed(range(spec["num_chunks"])):
-        input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
-            spec, chunk_index
-        )
+        if hbm_chunk_stage_sink is not None:
+          hbm_chunk_stage_sink("before", chunk_index, grad_pack)
+        ordered_hidden = None
+        if chunk_dependency_ticket and prefetched_chunk_inputs is not None:
+          (
+              input_ids,
+              target_ids,
+              metadata,
+              ordered_hidden,
+          ) = prefetched_chunk_inputs
+          prefetched_chunk_inputs = None
+        else:
+          input_ids, target_ids, metadata = self._p32_group_chunk_inputs(
+              spec, chunk_index
+          )
         caches = _p32_entry_caches(
             replay["final_caches"],
             chunk_index * self._sequence_bucket,
             data_size=self._data_size,
         )
-        kept_hidden_ins = replay.get("hidden_inputs") or ()
         stacked_cache_ins = stacked_hidden_ins = None
         if kept_hidden_ins:
           # The forward phase kept this chunk's per-layer inputs and its
@@ -8557,7 +9490,11 @@ class Qwen3EngineForwardAdapter:
                 "kept tape depth does not match the cache depth: "
                 f"{len(hidden_ins)} != {len(caches)}"
             )
-          hidden = replay["final_hiddens"][chunk_index]
+          hidden = (
+              ordered_hidden
+              if ordered_hidden is not None
+              else replay["final_hiddens"][chunk_index]
+          )
           if rank_parallel and not p71_block_bwd:
             # The per-layer pullbacks consume the kept per-layer arrays as
             # they are; stacking them would only copy the whole tape once
@@ -8839,14 +9776,76 @@ class Qwen3EngineForwardAdapter:
             local_norm_grad,
             local_head_grad,
         )
+        if chunk_backpressure:
+          # PJRT allocates the tree-add outputs when host dispatches that
+          # program.  Complete the already-dispatched pullbacks first so
+          # their model-sized outputs and temporaries cannot overlap those
+          # allocations.  This is readiness only: no value reaches host.
+          _p77_wait_for_chunk_completion(chunk_pack)
+          chunk_backpressure_pullback_waits += 1
+        if hbm_chunk_stage_sink is not None:
+          hbm_chunk_stage_sink(
+              "after_pullbacks", chunk_index, (grad_pack, chunk_pack)
+          )
         grad_pack = (
             self._p70_grad_tree_start(chunk_pack)
             if grad_pack is None
             else self._p70_grad_tree_add(grad_pack, chunk_pack)
         )
+        if rank_parallel:
+          # The whole-tree start/add dispatch above is the last consumer of
+          # this rank-parallel chunk's gradient leaves.  End their explicit
+          # array lifetime here so the next chunk's pullback temporaries do not
+          # overlap a dead, model-sized input pack.  The legacy serial path is
+          # untouched; the old accumulator remains governed by the existing
+          # tree-add donation contract.
+          self._p70_release_consumed_grad_pack(chunk_pack)
+        if chunk_backpressure:
+          # Complete the add before dispatching either the next chunk or the
+          # report adjoint.  Together with the pre-add boundary above this
+          # reproduces the two causal value completions in R22 without its
+          # allocator queries.
+          _p77_wait_for_chunk_completion(grad_pack)
+          chunk_backpressure_accumulation_waits += 1
+        if chunk_dependency_ticket and chunk_index > 0:
+          next_chunk_index = chunk_index - 1
+          next_input_ids, next_target_ids, next_metadata = (
+              self._p32_group_chunk_inputs(spec, next_chunk_index)
+          )
+          if kept_hidden_ins:
+            next_hidden = self._p76_order_next_chunk_start(
+                grad_pack, replay["final_hiddens"][next_chunk_index]
+            )
+            prefetched_chunk_inputs = (
+                next_input_ids,
+                next_target_ids,
+                next_metadata,
+                next_hidden,
+            )
+          else:
+            next_input_ids = self._p76_order_next_chunk_start(
+                grad_pack, next_input_ids
+            )
+            prefetched_chunk_inputs = (
+                next_input_ids,
+                next_target_ids,
+                next_metadata,
+                None,
+            )
+        if hbm_chunk_stage_sink is not None:
+          hbm_chunk_stage_sink("after_accumulate", chunk_index, grad_pack)
 
     if grad_pack is None:
       raise FunctionalMappingError("P59 reverse emitted an empty gradient pack")
+    if chunk_backpressure:
+      print(
+          "[P77.CHUNK_BACKPRESSURE] enabled=1 "
+          f"pullback_waits={chunk_backpressure_pullback_waits} "
+          f"accumulation_waits={chunk_backpressure_accumulation_waits} "
+          f"leaves={len(jax.tree.leaves(grad_pack))} "
+          "wait_api=block_until_ready host_transfers=0",
+          flush=True,
+      )
     embed_grad, layer_grads, norm_grad, head_grad = grad_pack
     p66_row_summary = None
     if p66_arm:
@@ -8925,8 +9924,10 @@ class Qwen3EngineForwardAdapter:
       pad_id,
       eos_id,
       gradient_microbatch_sink=None,
+      gradient_accumulator_loan=None,
       deterministic_repeat=False,
       xprof_train_schedule=None,
+      hbm_stage_sink=None,
   ):
     """Runs rank-local DP reverse and one fixed reduction per group.
 
@@ -9248,6 +10249,12 @@ class Qwen3EngineForwardAdapter:
           "debug: its loss cotangents exist per group, not per batch"
       )
     dp_reduce_once = dp_training.dp_reduce_once_mode()
+    if gradient_accumulator_loan is not None and (
+        not dp_reduce_once or gradient_microbatch_sink is None
+    ):
+      raise FunctionalMappingError(
+          "gradient accumulator loan requires reduce-once with a sink"
+      )
     if dp_reduce_once and (not rank_parallel_backward or p66_tp4_arm):
       raise FunctionalMappingError(
           "CANON_DP_REDUCE_ONCE=1 requires CANON_P59_RANK_PARALLEL_BACKWARD=1 "
@@ -9670,10 +10677,39 @@ class Qwen3EngineForwardAdapter:
     staged_total = None
     staged_fault_odd = None
     staged_receipts = []
+    hbm_stage_group = None
+    p75_bucket_hbm_diagnostic = False
+    if hbm_stage_sink is not None:
+      p75_bucket_hbm_diagnostic = _p75_report_adjoint_buckets_enabled()
+      if p75_bucket_hbm_diagnostic:
+        # r21's all-group checkpoints locate P75's residual cumulative peak
+        # in the first warm group. Observe that exact group at chunk
+        # boundaries; group 0 remains the cold/compile-paced control.
+        hbm_stage_group = 1
+      else:
+        # The monolithic capacity diagnostic observes the landed worst-case
+        # chunk geometry. ``max`` keeps the first group on ties, matching the
+        # classifier's independent derivation from landed lengths.
+        hbm_stage_group = max(
+            range(len(specs)),
+            key=lambda index: int(specs[index]["num_chunks"]),
+        )
+
+    def hbm_stage_boundary(stage, index, value=None):
+      """Completes one diagnostic stage before a host memory-stat snapshot."""
+      if hbm_stage_sink is None or index != hbm_stage_group:
+        return
+      if value is not None:
+        for leaf in jax.tree.leaves(value):
+          if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
+      hbm_stage_sink(stage, index)
 
     def reverse_reduce_group(index, spec):
+      nonlocal gradient_accumulator_loan
       nonlocal reducer, staged_fault_odd, staged_total
       if rank_parallel_backward:
+        hbm_stage_boundary("before_replay", index)
         if p32_keep_tape:
           # The forward phase kept this group's tape: the replay that used to
           # regenerate it is exactly the computation it already did.
@@ -9685,17 +10721,34 @@ class Qwen3EngineForwardAdapter:
             replay = self._p32_forward_group(
                 segmented, engine_leaves, spec, keep_cache_inputs=True
             )
+        hbm_stage_boundary("after_replay", index, replay)
         with gsm8k_xprof.trace_annotation(
             "model_backward", group_index=index
         ):
-          reverse = self._p32_reverse_group(
-              segmented,
-              engine_leaves,
-              spec,
-              grouped_dlogps[index],
-              grouped_dentropy[index],
-              replay=replay,
-          )
+          if hbm_stage_sink is not None and index == hbm_stage_group:
+            reverse = self._p32_reverse_group(
+                segmented,
+                engine_leaves,
+                spec,
+                grouped_dlogps[index],
+                grouped_dentropy[index],
+                replay=replay,
+                hbm_chunk_stage_sink=(
+                    lambda stage, chunk, value=None: hbm_stage_boundary(
+                        f"model_{stage}_chunk_{chunk}", index, value
+                    )
+                ),
+            )
+          else:
+            reverse = self._p32_reverse_group(
+                segmented,
+                engine_leaves,
+                spec,
+                grouped_dlogps[index],
+                grouped_dentropy[index],
+                replay=replay,
+            )
+        hbm_stage_boundary("after_model_backward", index, reverse)
         if p32_stream_tape and index + 1 < len(specs):
           # Two-tape window, pipelined: the device is busy with this group's
           # reverse, so issue the next group's forward and build its
@@ -9727,10 +10780,57 @@ class Qwen3EngineForwardAdapter:
             "report_adjoint", group_index=index
         ):
           adjoint_start = time.perf_counter()
-          staged_gradient = self._p59_rank_parallel_report_adjoint(
-              trainer_state, reverse["engine_gradients"]
-          )
+          fused_staged_receipt = None
+          if (
+              dp_reduce_once
+              and staged_total is not None
+              and not v2_p0_negative_control
+          ):
+            staged_total, fused_staged_receipt = (
+                self._p59_rank_parallel_report_adjoint_accumulate(
+                    trainer_state,
+                    reverse["engine_gradients"],
+                    staged_total,
+                )
+            )
+            staged_gradient = None
+          elif p75_bucket_hbm_diagnostic:
+            def p75_hbm_bucket_stage(stage, bucket):
+              if index in {0, hbm_stage_group}:
+                hbm_stage_sink(
+                    f"report_bucket_{bucket}_{stage}", index
+                )
+              # Every P75 bucket already completes before this callback. One
+              # allocator-only checkpoint after bucket zero therefore locates
+              # the first cumulative-peak jump without another completion.
+              if bucket == 0 and stage == "after_execute":
+                hbm_stage_sink("report_group_after_bucket_0", index)
+
+            staged_gradient = self._p59_rank_parallel_report_adjoint(
+                trainer_state,
+                reverse["engine_gradients"],
+                emit_memory_analysis=index == hbm_stage_group,
+                hbm_bucket_stage_sink=p75_hbm_bucket_stage,
+            )
+          elif hbm_stage_sink is not None and index == hbm_stage_group:
+            staged_gradient = self._p59_rank_parallel_report_adjoint(
+                trainer_state,
+                reverse["engine_gradients"],
+                emit_memory_analysis=True,
+            )
+          else:
+            # Preserve the production and flag-off call surface exactly;
+            # test doubles and alternate adapters need not know about the
+            # measure-only compiled-memory diagnostic.
+            staged_gradient = self._p59_rank_parallel_report_adjoint(
+                trainer_state, reverse["engine_gradients"]
+            )
           adjoint_seconds[0] += time.perf_counter() - adjoint_start
+        hbm_stage_boundary(
+            "after_report_adjoint",
+            index,
+            staged_total if staged_gradient is None else staged_gradient,
+        )
         if numeric_debug:
           _p62_emit_tree_receipt(
               stage="trainer_rank_local",
@@ -9771,6 +10871,16 @@ class Qwen3EngineForwardAdapter:
               "staging=parallel_table",
               flush=True,
           )
+          if getattr(reducer, "reduction_bucket_count", 1) > 1:
+            bucket_bytes = reducer.reduction_bucket_local_bytes
+            print(
+                f"[P59.DP{contract.dp_size}] reducer_bucket_schedule "
+                f"programs={len(bucket_bytes)} "
+                f"max_local_bytes={reducer.reduction_bucket_max_local_bytes} "
+                f"peak_local_bytes={max(bucket_bytes)} "
+                f"total_local_bytes={sum(bucket_bytes)}",
+                flush=True,
+            )
         cache_nonzero = _p68_receipt_nonzero(
             jax.tree.leaves(reverse["initial_cache_cotangents"]),
             batched_evidence=batched_evidence,
@@ -9788,20 +10898,82 @@ class Qwen3EngineForwardAdapter:
             # per-update reducer: the r4 trace showed a per-update rebuild
             # retracing 310 leaves x 5 ops on every group (44 ms of host
             # time per group).
-            receipt_program = getattr(self, "_p59_staged_receipt_program", None)
-            if receipt_program is None:
-              row_sharding = (
-                  reducer.staged_row_sharding()
-                  if callable(getattr(reducer, "staged_row_sharding", None))
-                  else None
+            if fused_staged_receipt is None:
+              receipt_program = getattr(
+                  self, "_p59_staged_receipt_program", None
               )
-              receipt_program = dp_training.StagedReceiptProgram(row_sharding)
-              self._p59_staged_receipt_program = receipt_program
-            reducer.validate_staged(staged_gradient) if callable(
-                getattr(reducer, "validate_staged", None)
-            ) else None
-            staged_receipts.append(receipt_program(staged_gradient))
-            if v2_p0_negative_control == "reduce-once-reassociate-tail":
+              if receipt_program is None:
+                row_sharding = (
+                    reducer.staged_row_sharding()
+                    if callable(getattr(reducer, "staged_row_sharding", None))
+                    else None
+                )
+                receipt_program = dp_training.StagedReceiptProgram(
+                    row_sharding
+                )
+                self._p59_staged_receipt_program = receipt_program
+              reducer.validate_staged(staged_gradient) if callable(
+                  getattr(reducer, "validate_staged", None)
+              ) else None
+              staged_receipts.append(receipt_program(staged_gradient))
+            else:
+              staged_receipts.append(fused_staged_receipt)
+            if (
+                staged_total is None
+                and gradient_accumulator_loan is not None
+            ):
+              borrow = getattr(reducer, "borrow_staged_accumulator", None)
+              if not callable(borrow):
+                raise FunctionalMappingError(
+                    "reduce-once reducer cannot borrow accumulator storage"
+                )
+              staged_total, loan_report = borrow(
+                  gradient_accumulator_loan, staged_gradient
+              )
+              gradient_accumulator_loan = None
+              staged_gradient = None
+              negative_injected = False
+              print(
+                  "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN] enabled=1 "
+                  f"leaves={loan_report['leaves']} "
+                  f"local_bytes={loan_report['local_bytes']} "
+                  "transition=base-to-staged "
+                  f"base_handles_retired="
+                  f"{loan_report['base_handles_retired']} "
+                  f"staged_handles_retired="
+                  f"{loan_report['staged_handles_retired']} "
+                  f"check_vma={loan_report['shard_map_check_vma']} "
+                  f"host_transfers={loan_report['host_transfers']}",
+                  flush=True,
+              )
+            elif fused_staged_receipt is not None:
+              negative_injected = False
+              bucket_receipt = getattr(
+                  self, "_p59_report_accumulate_bucket_receipt", None
+              )
+              if bucket_receipt is None:
+                raise FunctionalMappingError(
+                    "P59 bucketed report accumulation emitted no capacity "
+                    "receipt"
+                )
+              (
+                  bucket_count,
+                  executable_count,
+                  bucket_peak_local_bytes,
+                  bucket_dependencies,
+              ) = bucket_receipt
+              print(
+                  "[V2.REDUCE_ONCE.REPORT_ACCUMULATE] enabled=1 "
+                  f"group={index + 1}/{contract.local_trajectories} "
+                  f"leaves={len(jax.tree.leaves(staged_total))} "
+                  f"buckets={bucket_count} "
+                  f"executables={executable_count} "
+                  f"peak_local_bytes={bucket_peak_local_bytes} "
+                  f"device_dependencies={bucket_dependencies} "
+                  "host_transfers=0",
+                  flush=True,
+              )
+            elif v2_p0_negative_control == "reduce-once-reassociate-tail":
               (
                   staged_total,
                   staged_fault_odd,
@@ -9859,6 +11031,7 @@ class Qwen3EngineForwardAdapter:
           one_gradient, reduction_report = reducer.finalize_staged(
               staged_gradient
           )
+        hbm_stage_boundary("after_reduce_compare", index, one_gradient)
         if numeric_debug:
           _p62_emit_tree_receipt(
               stage="fixed_dp_reduced",
@@ -10236,6 +11409,7 @@ class Qwen3EngineForwardAdapter:
                 seen.add(id(value))
                 if not value.is_deleted():
                   value.delete()
+          hbm_stage_boundary("after_sink_delete", index)
     if p32_stream_tape:
       print_forward_stage()
       with gsm8k_xprof.trace_annotation("loss_pullback"):
@@ -10273,6 +11447,10 @@ class Qwen3EngineForwardAdapter:
       if staged_total is None or reducer is None:
         raise FunctionalMappingError(
             "CANON_DP_REDUCE_ONCE=1 accumulated no staged gradient"
+        )
+      if gradient_accumulator_loan is not None:
+        raise FunctionalMappingError(
+            "CANON_DP_REDUCE_ONCE=1 did not consume accumulator loan"
         )
       last_index = len(reverse_specs) - 1
       # The update's one fixed-order reduce-and-broadcast: the same program,
@@ -12363,6 +13541,161 @@ def _transform_value(
   )
   return generate_utils._apply_dtype_cast(  # pylint: disable=protected-access
       value, target_value.dtype, source_path
+  )
+
+
+@dataclasses.dataclass(frozen=True)
+class _P75ReportAdjointPlan:
+  """Static source/target partition for a bounded report-adjoint launch."""
+
+  source_paths: tuple[str, ...]
+  target_paths: tuple[str, ...]
+  source_buckets: tuple[tuple[int, ...], ...]
+  target_buckets: tuple[tuple[int, ...], ...]
+  local_output_bytes: tuple[int, ...]
+
+
+def _p75_report_adjoint_plan(
+    *,
+    trainer_state,
+    engine_state_contract,
+    key_mappings,
+    data_axis: str,
+    max_local_bytes: int | None = None,
+) -> _P75ReportAdjointPlan:
+  """Partitions complete source dependencies without mapping device values."""
+  if max_local_bytes is None:
+    max_local_bytes = _P75_REPORT_ADJOINT_MAX_LOCAL_BYTES
+  if max_local_bytes <= 0:
+    raise FunctionalMappingError(
+        "P75 report-adjoint bucket cap must be positive"
+    )
+  if not callable(getattr(trainer_state, "flat_state", None)):
+    raise FunctionalMappingError(
+        "P75 report-adjoint buckets require a path-addressable trainer state"
+    )
+  source_flat = tuple(
+      (path, variable)
+      for path, variable in trainer_state.flat_state()
+      if "rng" not in _flat_path(path)
+  )
+  source_paths = tuple(_flat_path(path) for path, _ in source_flat)
+  source_leaves = tuple(jax.tree.leaves(trainer_state))
+  if len(source_flat) != len(source_leaves):
+    raise FunctionalMappingError(
+        "P75 trainer path/leaf counts differ: "
+        f"{len(source_flat)} != {len(source_leaves)}"
+    )
+  for index, ((_, variable), leaf) in enumerate(
+      zip(source_flat, source_leaves, strict=True)
+  ):
+    value = getattr(variable, "value", variable)
+    if value is not leaf:
+      raise FunctionalMappingError(
+          "P75 trainer flat-state order differs from JAX leaf order at "
+          f"leaf {index}"
+      )
+
+  target_flat = tuple(engine_state_contract.flat_state())
+  target_paths = tuple(_flat_path(path) for path, _ in target_flat)
+  target_index = {path: index for index, path in enumerate(target_paths)}
+  if len(target_index) != len(target_paths):
+    raise FunctionalMappingError(
+        "P75 engine target paths are not unique"
+    )
+  source_contract = generate_utils.build_flat_dict(
+      target_flat, dict(key_mappings)
+  )
+  source_targets = []
+  seen_targets = set()
+  for source_path in source_paths:
+    if source_path not in source_contract:
+      raise FunctionalMappingError(
+          f"P75 trainer source has no engine mapping: {source_path}"
+      )
+    _, mapped_paths, sharding_spec = source_contract[source_path]
+    layer_axis = generate_utils._get_layer_axis_from_sharding_spec(  # pylint: disable=protected-access
+        sharding_spec
+    )
+    paths = tuple(mapped_paths) if layer_axis is not None else (mapped_paths,)
+    indices = []
+    for path in paths:
+      if path not in target_index:
+        raise FunctionalMappingError(
+            f"P75 mapping names an unknown engine target: {path}"
+        )
+      index = target_index[path]
+      if index in seen_targets:
+        raise FunctionalMappingError(
+            f"P75 engine target is mapped more than once: {path}"
+        )
+      seen_targets.add(index)
+      indices.append(index)
+    if not indices:
+      raise FunctionalMappingError(
+          f"P75 trainer source maps no engine targets: {source_path}"
+      )
+    source_targets.append(tuple(indices))
+  if seen_targets != set(range(len(target_paths))):
+    missing = tuple(
+        target_paths[index]
+        for index in sorted(set(range(len(target_paths))) - seen_targets)
+    )
+    raise FunctionalMappingError(
+        f"P75 engine target coverage is incomplete: {missing}"
+    )
+
+  source_buckets = []
+  target_buckets = []
+  bucket_bytes = []
+  current_sources = []
+  current_bytes = 0
+  for source_index, leaf in enumerate(source_leaves):
+    sharding = getattr(leaf, "sharding", None)
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          f"P75 trainer leaf {source_index} requires NamedSharding"
+      )
+    expected_sharding = jax.sharding.NamedSharding(
+        sharding.mesh,
+        jax.sharding.PartitionSpec(data_axis, *tuple(sharding.spec)),
+    )
+    output_shape = (int(sharding.mesh.shape[data_axis]),) + tuple(leaf.shape)
+    local_shape = expected_sharding.shard_shape(output_shape)
+    local_bytes = int(math.prod(local_shape) * jnp.dtype(jnp.float32).itemsize)
+    if local_bytes > max_local_bytes:
+      raise FunctionalMappingError(
+          "P75 one report-adjoint leaf exceeds the local bucket cap: "
+          f"leaf={source_index} bytes={local_bytes} cap={max_local_bytes}"
+      )
+    if current_sources and current_bytes + local_bytes > max_local_bytes:
+      source_buckets.append(tuple(current_sources))
+      target_buckets.append(tuple(sorted(
+          target
+          for index in current_sources
+          for target in source_targets[index]
+      )))
+      bucket_bytes.append(current_bytes)
+      current_sources = []
+      current_bytes = 0
+    current_sources.append(source_index)
+    current_bytes += local_bytes
+  if current_sources:
+    source_buckets.append(tuple(current_sources))
+    target_buckets.append(tuple(sorted(
+        target
+        for index in current_sources
+        for target in source_targets[index]
+    )))
+    bucket_bytes.append(current_bytes)
+  if not source_buckets:
+    raise FunctionalMappingError("P75 report-adjoint plan is empty")
+  return _P75ReportAdjointPlan(
+      source_paths=source_paths,
+      target_paths=target_paths,
+      source_buckets=tuple(source_buckets),
+      target_buckets=tuple(target_buckets),
+      local_output_bytes=tuple(bucket_bytes),
   )
 
 

@@ -771,16 +771,12 @@ class StagedReceiptProgram:
   def __init__(self, row_sharding):
     self.traces = 0
 
-    def receipts(tree):
+    def receipts(staged):
       self.traces += 1
-      return (
-          _gradient_signature(tree),
-          _gradient_finite_flags(tree),
-          _gradient_nonzero_counts(tree),
-      )
+      return staged_gradient_receipts(staged)
 
     self._fn = jax.jit(
-        jax.vmap(receipts),
+        receipts,
         out_shardings=(
             None if row_sharding is None
             else (row_sharding, row_sharding, row_sharding)
@@ -789,6 +785,97 @@ class StagedReceiptProgram:
 
   def __call__(self, staged):
     return self._fn(staged)
+
+
+def staged_gradient_receipts(staged: Any):
+  """Returns the established per-rank receipts for one staged gradient.
+
+  This is the unjitted body used by ``StagedReceiptProgram``.  Keeping the
+  body public also lets a producer fuse the receipts with a donating staged
+  accumulation without changing their expressions or materializing another
+  full gradient tree between executables.
+  """
+
+  def receipts(tree):
+    return (
+        _gradient_signature(tree),
+        _gradient_finite_flags(tree),
+        _gradient_nonzero_counts(tree),
+    )
+
+  return jax.vmap(receipts)(staged)
+
+
+def staged_gradient_leaf_statistics(staged: Any):
+  """Returns mergeable per-rank, per-leaf staged-gradient statistics.
+
+  The five arrays preserve the leaf-local reductions used by
+  ``staged_gradient_receipts`` while allowing a producer to retire full-sized
+  gradient buckets before the final compact receipt is assembled.
+  """
+
+  def statistics(tree):
+    leaves = tuple(jax.tree.leaves(tree))
+    return (
+        jnp.stack(tuple(jnp.sum(leaf.astype(jnp.float32)) for leaf in leaves)),
+        jnp.stack(tuple(
+            jnp.sum(jnp.abs(leaf.astype(jnp.float32))) for leaf in leaves
+        )),
+        jnp.stack(tuple(
+            jnp.sum(jnp.square(leaf.astype(jnp.float32))) for leaf in leaves
+        )),
+        jnp.stack(tuple(jnp.all(jnp.isfinite(leaf)) for leaf in leaves)),
+        jnp.stack(tuple(
+            jnp.count_nonzero(leaf).astype(jnp.int32) for leaf in leaves
+        )),
+    )
+
+  return jax.vmap(statistics)(staged)
+
+
+def staged_gradient_receipts_from_leaf_statistics(
+    total_by_leaf: jax.Array,
+    absolute_by_leaf: jax.Array,
+    squared_by_leaf: jax.Array,
+    finite_by_leaf: jax.Array,
+    nonzero_by_leaf: jax.Array,
+):
+  """Reassembles established receipts in the original global leaf order."""
+  leaf_count = total_by_leaf.shape[1]
+  expected_shape = total_by_leaf.shape
+  for name, value in (
+      ("absolute", absolute_by_leaf),
+      ("squared", squared_by_leaf),
+      ("finite", finite_by_leaf),
+      ("nonzero", nonzero_by_leaf),
+  ):
+    if value.shape != expected_shape:
+      raise ValueError(
+          "staged gradient leaf-statistic shape changed: "
+          f"{name}={value.shape} total={expected_shape}"
+      )
+
+  def signature(totals, absolutes, squares, nonzeros):
+    total = jnp.asarray(0.0, jnp.float32)
+    absolute = jnp.asarray(0.0, jnp.float32)
+    squared = jnp.asarray(0.0, jnp.float32)
+    weighted = jnp.asarray(0.0, jnp.float32)
+    nonzero = jnp.asarray(0.0, jnp.float32)
+    for index in range(leaf_count):
+      total = total + totals[index]
+      absolute = absolute + absolutes[index]
+      squared = squared + squares[index]
+      weighted = weighted + jnp.asarray(index + 1, jnp.float32) * totals[index]
+      nonzero = nonzero + nonzeros[index].astype(jnp.float32)
+    return jnp.stack((total, absolute, squared, weighted, nonzero))
+
+  signatures = jax.vmap(signature)(
+      total_by_leaf,
+      absolute_by_leaf,
+      squared_by_leaf,
+      nonzero_by_leaf,
+  )
+  return signatures, finite_by_leaf, nonzero_by_leaf
 
 
 def dp_finite_fetch_mode() -> str:
@@ -906,13 +993,23 @@ def _tree_dual_checksums(tree: Any) -> jax.Array:
 # returns byte-for-byte the same traced programs a fresh build would
 # produce: zero numerical change, host re-trace cost removed.
 _REDUCER_PROGRAM_CACHE_LIMIT = 4
+# A Qwen3-8B TP2 fp32 gradient is about 16 GiB per device.  Compiling every
+# unrelated leaf into one collective program makes the peer/combined
+# temporaries live together and can require another gradient-sized contiguous
+# allocation.  Keep the exact per-leaf collective and addition graph, but cap
+# one executable's local payload so those unrelated temporaries have bounded
+# lifetime.  This is deliberately shape-derived and flagless: it changes only
+# dispatch packaging, not a numerical selector.
+_REDUCER_MAX_LOCAL_BYTES_PER_PROGRAM = 2 * 1024**3
 _reducer_program_cache: collections.OrderedDict = collections.OrderedDict()
 _reducer_program_cache_stats = {'hits': 0, 'misses': 0, 'uncacheable': 0}
+_borrow_base_storage_program_cache = {}
 
 
 def reset_reducer_program_cache_for_tests() -> None:
   """Clears the process-level reducer program cache; test isolation only."""
   _reducer_program_cache.clear()
+  _borrow_base_storage_program_cache.clear()
   for key in _reducer_program_cache_stats:
     _reducer_program_cache_stats[key] = 0
 
@@ -926,6 +1023,7 @@ class _ReducerPrograms:
   closure captures only static configuration — never a device array.
   """
 
+  base_shardings: Any
   staged_shardings: Any
   initialize: Any
   write: Any
@@ -936,6 +1034,46 @@ class _ReducerPrograms:
   batched_diagnostics: Any
   compare_fingerprint: Any
   batched_finite: Any
+  reduction_bucket_max_local_bytes: int
+  reduction_bucket_local_bytes: tuple[int, ...]
+
+
+def _reducer_leaf_buckets(
+    spec_template: Any,
+    *,
+    max_local_bytes: int = _REDUCER_MAX_LOCAL_BYTES_PER_PROGRAM,
+) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...]]:
+  """Partitions leaves into stable contiguous local-byte-bounded buckets."""
+  if max_local_bytes <= 0:
+    raise ValueError('reducer max local bytes must be positive')
+  leaves = jax.tree.leaves(spec_template)
+  if not leaves:
+    raise ValueError('reducer bucket schedule requires a nonempty tree')
+  buckets = []
+  bucket_bytes = []
+  current = []
+  current_bytes = 0
+  for index, leaf in enumerate(leaves):
+    local_shape = leaf.sharding.shard_shape(tuple(leaf.shape))
+    local_bytes = int(
+        math.prod(local_shape) * jnp.dtype(leaf.dtype).itemsize
+    )
+    if local_bytes > max_local_bytes:
+      raise ValueError(
+          'one reducer leaf exceeds the fixed local-byte bucket cap: '
+          f'leaf={index} bytes={local_bytes} cap={max_local_bytes}'
+      )
+    if current and current_bytes + local_bytes > max_local_bytes:
+      buckets.append(tuple(current))
+      bucket_bytes.append(current_bytes)
+      current = []
+      current_bytes = 0
+    current.append(index)
+    current_bytes += local_bytes
+  if current:
+    buckets.append(tuple(current))
+    bucket_bytes.append(current_bytes)
+  return tuple(buckets), tuple(bucket_bytes)
 
 
 def _reducer_program_cache_key(
@@ -1009,6 +1147,7 @@ def _build_reducer_programs(
     check_vma: bool,
     compare_mode: str,
     distinct_schedule: str,
+    max_local_bytes: int = _REDUCER_MAX_LOCAL_BYTES_PER_PROGRAM,
 ) -> _ReducerPrograms:
   """Traces one program bundle from a metadata-only template.
 
@@ -1027,6 +1166,9 @@ def _build_reducer_programs(
   )
   staged_shardings = jax.tree.map(
       lambda spec: jax.sharding.NamedSharding(mesh, spec), staged_specs
+  )
+  base_shardings = jax.tree.map(
+      lambda spec: jax.sharding.NamedSharding(mesh, spec), base_specs
   )
 
   def initialize():
@@ -1051,6 +1193,13 @@ def _build_reducer_programs(
   else:
     reduce_collective = select_dp_collective(reduce_mode)
 
+  bucket_indices, bucket_local_bytes = _reducer_leaf_buckets(
+      spec_template, max_local_bytes=max_local_bytes
+  )
+  template_leaves, template_treedef = jax.tree.flatten(spec_template)
+  base_spec_leaves = jax.tree.leaves(base_specs)
+  staged_spec_leaves = jax.tree.leaves(staged_specs)
+
   def reduce_local(local_staged):
     local_value = jax.tree.map(
         lambda value: jnp.squeeze(value, axis=0), local_staged
@@ -1072,6 +1221,68 @@ def _build_reducer_programs(
     reduce_mapped = jax.shard_map(
         reduce_local, check_rep=check_vma, **shard_map_kwargs
     )
+
+  if len(bucket_indices) == 1:
+    reduce_program = jax.jit(reduce_mapped, donate_argnums=(0,))
+  else:
+    bucket_reduce_programs = []
+    for indices in bucket_indices:
+      bucket_base_specs = tuple(base_spec_leaves[index] for index in indices)
+      bucket_staged_specs = tuple(
+          staged_spec_leaves[index] for index in indices
+      )
+
+      def reduce_bucket_local(local_staged):
+        local_value = jax.tree.map(
+            lambda value: jnp.squeeze(value, axis=0), local_staged
+        )
+        return reduce_collective(
+            local_value, dp_size=dp_size, axis_name=dp_axis
+        )
+
+      bucket_kwargs = {
+          'mesh': mesh,
+          'in_specs': (bucket_staged_specs,),
+          'out_specs': bucket_base_specs,
+      }
+      try:
+        bucket_mapped = jax.shard_map(
+            reduce_bucket_local,
+            check_vma=check_vma,
+            **bucket_kwargs,
+        )
+      except TypeError:
+        bucket_mapped = jax.shard_map(
+            reduce_bucket_local,
+            check_rep=check_vma,
+            **bucket_kwargs,
+        )
+      bucket_reduce_programs.append(
+          jax.jit(bucket_mapped, donate_argnums=(0,))
+      )
+    bucket_reduce_programs = tuple(bucket_reduce_programs)
+
+    def reduce_program(staged):
+      leaves, treedef = jax.tree.flatten(staged)
+      if treedef != template_treedef:
+        raise ValueError('bucketed reducer input tree structure changed')
+      reduced_leaves = [None] * len(template_leaves)
+      for indices, program in zip(
+          bucket_indices, bucket_reduce_programs, strict=True
+      ):
+        reduced_bucket = program(tuple(leaves[index] for index in indices))
+        # A dependency-free launch of every bucket can make several
+        # collective scratch allocations overlap.  Waiting for device
+        # completion does not materialize a value on host (transfer_guard
+        # tests pin that property) and bounds the live scratch to one bucket.
+        if all(
+            isinstance(value, jax.Array)
+            for value in jax.tree.leaves(reduced_bucket)
+        ):
+          reduced_bucket = jax.block_until_ready(reduced_bucket)
+        for index, value in zip(indices, reduced_bucket, strict=True):
+          reduced_leaves[index] = value
+      return jax.tree.unflatten(template_treedef, reduced_leaves)
 
   permutation = tuple(
       (rank, (rank + 1) % dp_size) for rank in range(dp_size)
@@ -1115,6 +1326,50 @@ def _build_reducer_programs(
     compare_mapped = jax.shard_map(
         compare_local, check_rep=check_vma, **compare_kwargs
     )
+
+  if len(bucket_indices) == 1:
+    compare_program = jax.jit(compare_mapped)
+  else:
+    bucket_compare_programs = []
+    for indices in bucket_indices:
+      bucket_base_specs = tuple(base_spec_leaves[index] for index in indices)
+      bucket_compare_kwargs = {
+          'mesh': mesh,
+          'in_specs': (bucket_base_specs,),
+          'out_specs': jax.sharding.PartitionSpec(dp_axis),
+      }
+      try:
+        bucket_compare_mapped = jax.shard_map(
+            compare_local,
+            check_vma=check_vma,
+            **bucket_compare_kwargs,
+        )
+      except TypeError:
+        bucket_compare_mapped = jax.shard_map(
+            compare_local,
+            check_rep=check_vma,
+            **bucket_compare_kwargs,
+        )
+      bucket_compare_programs.append(jax.jit(bucket_compare_mapped))
+    bucket_compare_programs = tuple(bucket_compare_programs)
+
+    def compare_program(reduced):
+      leaves, treedef = jax.tree.flatten(reduced)
+      if treedef != template_treedef:
+        raise ValueError('bucketed replica-compare tree structure changed')
+      exact = None
+      for indices, program in zip(
+          bucket_indices, bucket_compare_programs, strict=True
+      ):
+        bucket_exact = program(tuple(leaves[index] for index in indices))
+        if isinstance(bucket_exact, jax.Array):
+          bucket_exact.block_until_ready()
+        exact = (
+            bucket_exact
+            if exact is None
+            else jnp.logical_and(exact, bucket_exact)
+        )
+      return exact
 
   signature_sharding = jax.sharding.NamedSharding(
       mesh, jax.sharding.PartitionSpec(dp_axis, None)
@@ -1161,11 +1416,12 @@ def _build_reducer_programs(
         out_shardings=signature_sharding,
     )
   return _ReducerPrograms(
+      base_shardings=base_shardings,
       staged_shardings=staged_shardings,
       initialize=jax.jit(initialize, out_shardings=staged_shardings),
       write=jax.jit(write, donate_argnums=(0,)),
-      reduce=jax.jit(reduce_mapped, donate_argnums=(0,)),
-      compare=jax.jit(compare_mapped),
+      reduce=reduce_program,
+      compare=compare_program,
       signature=jax.jit(_gradient_signature),
       finite_flags=jax.jit(_gradient_finite_flags),
       batched_diagnostics=jax.jit(
@@ -1174,6 +1430,8 @@ def _build_reducer_programs(
       ),
       compare_fingerprint=compare_fingerprint,
       batched_finite=batched_finite,
+      reduction_bucket_max_local_bytes=max_local_bytes,
+      reduction_bucket_local_bytes=bucket_local_bytes,
   )
 
 
@@ -1321,6 +1579,21 @@ class FixedDPRankGradientReducer:
         require_distinct_fingerprints=require_distinct_fingerprints,
     )
     self._programs = programs
+    self._borrow_base_storage = None
+    try:
+      self._borrow_program_cache_key = _reducer_program_cache_key(
+          template,
+          dp_size=dp_size,
+          dp_axis=dp_axis,
+          reduce_mode=reduce_mode,
+          check_vma=self._check_vma,
+          compare_mode=self._compare_mode,
+          distinct_schedule=self._distinct_schedule,
+          finite_fetch=self._finite_fetch,
+          require_distinct_fingerprints=require_distinct_fingerprints,
+      )
+    except (TypeError, ValueError, AttributeError):
+      self._borrow_program_cache_key = None
     self._initialize = programs.initialize
     self._write = programs.write
     self._reduce = programs.reduce
@@ -1334,6 +1607,16 @@ class FixedDPRankGradientReducer:
     self._leaf_paths = tuple(
         jax.tree_util.keystr(path)
         for path, _ in jax.tree_util.tree_flatten_with_path(template)[0]
+    )
+    self._base_metadata = tuple(
+        (
+            tuple(leaf.shape),
+            leaf.dtype,
+            sharding,
+        )
+        for leaf, sharding in zip(
+            leaves, jax.tree.leaves(programs.base_shardings), strict=True
+        )
     )
     self._staged_metadata = tuple(
         (
@@ -1369,6 +1652,21 @@ class FixedDPRankGradientReducer:
   def pending_finite_receipt_count(self) -> int:
     """Deferred finite receipts that a commit-gate drain must validate."""
     return len(self._pending_finite_receipts)
+
+  @property
+  def reduction_bucket_local_bytes(self) -> tuple[int, ...]:
+    """Static local payload bytes for each collective executable."""
+    return self._programs.reduction_bucket_local_bytes
+
+  @property
+  def reduction_bucket_max_local_bytes(self) -> int:
+    """Maximum local payload bytes admitted to one collective executable."""
+    return self._programs.reduction_bucket_max_local_bytes
+
+  @property
+  def reduction_bucket_count(self) -> int:
+    """Number of fixed contiguous leaf buckets in one tree reduction."""
+    return len(self.reduction_bucket_local_bytes)
 
   def drain_deferred_finite_receipts(self) -> dict[str, Any]:
     """Validates every deferred isfinite receipt in one batched fetch.
@@ -1628,6 +1926,14 @@ class FixedDPRankGradientReducer:
           if self._reduce_mode == ''
           else 2
       )
+    if self.reduction_bucket_count > 1:
+      report['reduction_bucket_count'] = self.reduction_bucket_count
+      report['reduction_bucket_total_local_bytes'] = sum(
+          self.reduction_bucket_local_bytes
+      )
+      report['reduction_bucket_peak_local_bytes'] = max(
+          self.reduction_bucket_local_bytes
+      )
     self._group_index += 1
     return reduced, report
 
@@ -1654,6 +1960,131 @@ class FixedDPRankGradientReducer:
   def validate_staged(self, staged: Any) -> None:
     """Checks one staged table against the template's layout (public)."""
     self._validate_staged(staged)
+
+  def borrow_staged_accumulator(
+      self, base_storage: Any, staged: Any
+  ) -> tuple[Any, dict[str, int]]:
+    """Consumes base-layout storage as the first staged reduce-once sum.
+
+    The integer-bit expression copies every staged payload bit unchanged;
+    base values contribute only an optimization-barrier-protected exact zero.
+    Donation therefore changes ownership and logical shape, never arithmetic.
+    """
+    if not self._check_vma:
+      raise ValueError(
+          'DP accumulator storage loan requires checked-VMA reduce-once'
+      )
+    self._validate_base_storage(base_storage)
+    self._validate_staged(staged)
+    if self._borrow_base_storage is None:
+      cache_key = self._borrow_program_cache_key
+      if cache_key is not None:
+        self._borrow_base_storage = (
+            _borrow_base_storage_program_cache.get(cache_key)
+        )
+      if self._borrow_base_storage is None:
+        self._borrow_base_storage = self._build_borrow_base_storage()
+        if cache_key is not None:
+          _borrow_base_storage_program_cache[cache_key] = (
+              self._borrow_base_storage
+          )
+    base_leaves = jax.tree.leaves(base_storage)
+    staged_leaves = jax.tree.leaves(staged)
+    local_bytes = sum(
+        math.prod(sharding.shard_shape(shape)) * jnp.dtype(dtype).itemsize
+        for shape, dtype, sharding in self._base_metadata
+    )
+    borrowed = self._borrow_base_storage(base_storage, staged)
+    self._validate_staged(borrowed)
+    for leaf in base_leaves:
+      if not leaf.is_deleted():
+        leaf.delete()
+    for leaf in staged_leaves:
+      if not leaf.is_deleted():
+        leaf.delete()
+    return borrowed, {
+        'leaves': len(base_leaves),
+        'local_bytes': int(local_bytes),
+        'base_handles_retired': len(base_leaves),
+        'staged_handles_retired': len(staged_leaves),
+        'shard_map_check_vma': 1,
+        'host_transfers': 0,
+    }
+
+  def _build_borrow_base_storage(self):
+    """Builds the checked base-to-staged ownership transform lazily."""
+    mesh = self._base_metadata[0][2].mesh
+    base_specs = jax.tree.unflatten(
+        self._template_structure,
+        [metadata[2].spec for metadata in self._base_metadata],
+    )
+    staged_specs = jax.tree.unflatten(
+        self._template_structure,
+        [metadata[2].spec for metadata in self._staged_metadata],
+    )
+    staged_shardings = jax.tree.unflatten(
+        self._template_structure,
+        [metadata[2] for metadata in self._staged_metadata],
+    )
+
+    def borrow_leaf(storage, staged):
+      if storage.dtype != jnp.float32 or staged.dtype != jnp.float32:
+        raise TypeError(
+            'checked DP accumulator loan requires float32 leaves, got '
+            f'{storage.dtype}/{staged.dtype}'
+        )
+      storage_bits = jax.lax.bitcast_convert_type(storage, jnp.uint32)
+      exact_zero = jax.lax.bitwise_xor(
+          storage_bits, jax.lax.optimization_barrier(storage_bits)
+      )
+      staged_bits = jax.lax.bitcast_convert_type(staged, jnp.uint32)
+      copied_bits = jax.lax.bitwise_xor(
+          staged_bits, jnp.expand_dims(exact_zero, axis=0)
+      )
+      return jax.lax.bitcast_convert_type(copied_bits, jnp.float32)
+
+    def borrow_local(storage, staged):
+      return jax.tree.map(borrow_leaf, storage, staged)
+
+    kwargs = {
+        'mesh': mesh,
+        'in_specs': (base_specs, staged_specs),
+        'out_specs': staged_specs,
+    }
+    try:
+      mapped = jax.shard_map(borrow_local, check_vma=True, **kwargs)
+    except TypeError:
+      mapped = jax.shard_map(borrow_local, check_rep=True, **kwargs)
+    return jax.jit(
+        mapped,
+        donate_argnums=(0,),
+        out_shardings=staged_shardings,
+    )
+
+  def _validate_base_storage(self, base_storage: Any) -> None:
+    """Checks loaned accumulator storage against the base gradient layout."""
+    if jax.tree.structure(base_storage) != self._template_structure:
+      raise ValueError('loaned accumulator tree does not match the template')
+    leaves = jax.tree.leaves(base_storage)
+    for index, (leaf, metadata) in enumerate(
+        zip(leaves, self._base_metadata, strict=True)
+    ):
+      expected_shape, expected_dtype, expected_sharding = metadata
+      if not isinstance(leaf, jax.Array):
+        raise ValueError(f'loaned accumulator leaf {index} is not a JAX array')
+      if tuple(leaf.shape) != expected_shape or leaf.dtype != expected_dtype:
+        raise ValueError(
+            f'loaned accumulator leaf {index} shape/dtype changed: '
+            f'{leaf.shape}/{leaf.dtype} != '
+            f'{expected_shape}/{expected_dtype}'
+        )
+      if not leaf.sharding.is_equivalent_to(
+          expected_sharding, len(expected_shape)
+      ):
+        raise ValueError(
+            f'loaned accumulator leaf {index} sharding changed: '
+            f'{leaf.sharding} != {expected_sharding}'
+        )
 
   def _validate_staged(self, staged: Any) -> None:
     """Checks one staged table against the template's exact layout."""

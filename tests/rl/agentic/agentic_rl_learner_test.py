@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+import jax.numpy as jnp
 import numpy as np
 
 from absl import logging
@@ -41,6 +42,40 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 
 class AgenticRLLearnerTest(parameterized.TestCase):
+
+  def test_reduce_once_gradient_quality_keeps_true_update_norm(self):
+    update_norm = jnp.asarray(3.25, jnp.float32)
+    quality_norms = getattr(agentic_rl_learner, "_gradient_quality_norms")
+    display, quality = quality_norms(
+        {
+            "dp_reduction_visibility": "EXPLICIT_FIXED_TREE_REDUCE_ONCE",
+            "staged_group_norms": (1.0, 2.0, 3.0),
+        },
+        [update_norm],
+    )
+    np.testing.assert_array_equal(np.asarray(display), [1.0, 2.0, 3.0])
+    self.assertIs(quality, update_norm)
+
+    with self.assertRaisesRegex(
+        alignment.AlignmentGateError, "streamed 2 contributions, expected 1"
+    ):
+      quality_norms(
+          {
+              "dp_reduction_visibility": "EXPLICIT_FIXED_TREE_REDUCE_ONCE",
+              "staged_group_norms": (1.0, 2.0, 3.0),
+          },
+          [update_norm, update_norm],
+      )
+
+  def test_ordinary_gradient_quality_has_no_update_norm(self):
+    streamed = [jnp.asarray(1.0), jnp.asarray(2.0)]
+    quality_norms = getattr(agentic_rl_learner, "_gradient_quality_norms")
+    display, quality = quality_norms(
+        {"dp_reduction_visibility": "EXPLICIT_FIXED_TREE_REDUCE"},
+        streamed,
+    )
+    self.assertEqual(display, streamed)
+    self.assertIsNone(quality)
 
   def test_p57_evaluate_only_covers_dataset_without_train_update(self):
     learner = object.__new__(DummyLearner)

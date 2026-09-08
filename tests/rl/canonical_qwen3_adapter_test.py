@@ -1277,19 +1277,46 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           paths=(), leaves=tuple(trainer_state), source_to_target=()
       )
 
-    with mock.patch.object(
-        canonical_qwen3_adapter,
-        "map_trainer_state_to_engine_leaves",
-        side_effect=identity_mapping,
+    memory_stdout = io.StringIO()
+    with (
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "map_trainer_state_to_engine_leaves",
+            side_effect=identity_mapping,
+        ),
+        contextlib.redirect_stdout(memory_stdout),
+        jax.transfer_guard("disallow"),
     ):
       staged_trainer = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
-          trainer_state, staged_engine
+          trainer_state, staged_engine, emit_memory_analysis=True
       )
     np.testing.assert_array_equal(
         np.asarray(staged_trainer[0]), staged_engine_host
     )
     self.assertEqual(staged_trainer[0].sharding, staged_sharding)
     self.assertEqual(adapter._p59_report_dp_axis, "dp")  # pylint: disable=protected-access
+    memory_lines = [
+        line
+        for line in memory_stdout.getvalue().splitlines()
+        if line.startswith("[V2.FL.REPORT_ADJOINT_MEMORY] ")
+    ]
+    self.assertLen(memory_lines, 1)
+    memory = json.loads(memory_lines[0].split("] ", 1)[1])
+    self.assertEqual(
+        memory["schema"], "canon-v2-p59-report-adjoint-memory-v1"
+    )
+    self.assertEqual(memory["staged_engine_leaves"], 1)
+    self.assertEqual(memory["trainer_leaves"], 1)
+    self.assertGreater(memory["argument_size_in_bytes"], 0)
+    self.assertGreater(memory["output_size_in_bytes"], 0)
+    self.assertGreaterEqual(memory["temp_size_in_bytes"], 0)
+    self.assertLessEqual(
+        memory["alias_size_in_bytes"],
+        min(
+            memory["argument_size_in_bytes"],
+            memory["output_size_in_bytes"],
+        ),
+    )
 
     template = adapter._p59_reducer_template(  # pylint: disable=protected-access
         trainer_state, staged_trainer
@@ -1303,6 +1330,422 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         np.asarray(reduced[0]), np.sum(staged_engine_host, axis=0)
     )
     self.assertEqual(report["rank_gradient_staging_mode"], "parallel_table")
+
+  def test_p75_bucketed_report_adjoint_is_bitwise_and_releases_inputs(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ("dp", "tp")
+    )
+    trainer_weight_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("tp", None)
+    )
+    engine_weight_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, "tp")
+    )
+    vector_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None)
+    )
+    staged_weight_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", None, "tp")
+    )
+    staged_vector_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", None)
+    )
+    trainer_state = _state({"trainer": {
+          "a": jax.device_put(
+              jnp.arange(24, dtype=jnp.float32).reshape(6, 4),
+              trainer_weight_sharding,
+        ),
+        "b": jax.device_put(
+            jnp.arange(4, dtype=jnp.float32), vector_sharding
+        ),
+    }})
+    engine_state = _state({"engine": {
+          "a": jax.device_put(
+              jnp.zeros((4, 6), jnp.float32), engine_weight_sharding
+          ),
+        "b": jax.device_put(jnp.zeros((4,), jnp.float32), vector_sharding),
+    }})
+    mapping = {
+        "trainer.a": ("engine.a", (None, None)),
+        "trainer.b": ("engine.b", (None,)),
+    }
+
+    def staged_inputs():
+      return (
+          jax.device_put(
+              jnp.arange(48, dtype=jnp.float32).reshape(2, 4, 6) / 7.0,
+              staged_weight_sharding,
+          ),
+          jax.device_put(
+              jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 5.0,
+              staged_vector_sharding,
+          ),
+      )
+
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._runner = types.SimpleNamespace(  # pylint: disable=protected-access
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 1,
+        )
+    )
+    adapter._engine_state_contract = engine_state  # pylint: disable=protected-access
+    adapter._key_mappings = mapping  # pylint: disable=protected-access
+    adapter._transpose_keys = {  # pylint: disable=protected-access
+        "trainer.a": (1, 0)
+    }
+    adapter._hook_fns = None  # pylint: disable=protected-access
+    adapter._tp_size = 2  # pylint: disable=protected-access
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
+    adapter._data_size = 2  # pylint: disable=protected-access
+
+    baseline_inputs = staged_inputs()
+    with mock.patch.dict(
+        os.environ,
+        {"CANON_P75_REPORT_ADJOINT_BUCKETS": "0"},
+        clear=False,
+    ):
+      baseline = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
+          trainer_state, baseline_inputs
+      )
+    candidate_inputs = staged_inputs()
+    output = io.StringIO()
+    original_shard_map = jax.shard_map
+    checked_vma_calls = []
+    hbm_bucket_stages = []
+
+    def checked_shard_map(*args, **kwargs):
+      checked_vma_calls.append(kwargs.get("check_vma"))
+      return original_shard_map(*args, **kwargs)
+
+    with (
+        mock.patch.dict(
+            os.environ,
+            {
+                "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp2-tp2",
+                "CANON_P75_REPORT_ADJOINT_BUCKETS": "1",
+            },
+            clear=False,
+        ),
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "_P75_REPORT_ADJOINT_MAX_LOCAL_BYTES",
+            48,
+        ),
+        contextlib.redirect_stdout(output),
+        mock.patch.object(jax, "shard_map", side_effect=checked_shard_map),
+        jax.transfer_guard("disallow"),
+    ):
+      candidate = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
+          trainer_state,
+          candidate_inputs,
+          emit_memory_analysis=True,
+          hbm_bucket_stage_sink=(
+              lambda stage, bucket: hbm_bucket_stages.append((bucket, stage))
+          ),
+      )
+    for actual, expected in zip(
+        jax.tree.leaves(candidate), jax.tree.leaves(baseline), strict=True
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+      self.assertEqual(actual.sharding, expected.sharding)
+    self.assertTrue(all(value.is_deleted() for value in candidate_inputs))
+    self.assertEqual(checked_vma_calls, [True, True])
+    self.assertEqual(
+        hbm_bucket_stages,
+        [
+            (bucket, stage)
+            for bucket in range(2)
+            for stage in ("before_execute", "after_execute", "after_delete")
+        ],
+    )
+    marker = [
+        line
+        for line in output.getvalue().splitlines()
+        if line.startswith("[P75.REPORT_ADJOINT_BUCKETS] ")
+    ]
+    self.assertLen(marker, 1)
+    self.assertIn("programs=2", marker[0])
+    self.assertIn("host_blocks=2", marker[0])
+    receipts = [
+        json.loads(line.split("] ", 1)[1])
+        for line in output.getvalue().splitlines()
+        if line.startswith("[V2.FL.REPORT_ADJOINT_MEMORY] ")
+    ]
+    self.assertLen(receipts, 1)
+    self.assertEqual(
+        receipts[0]["schema"],
+        "canon-v2-p75-report-adjoint-buckets-memory-v1",
+    )
+    self.assertEqual(receipts[0]["bucket_count"], 2)
+    self.assertEqual(receipts[0]["source_leaves"], 2)
+    self.assertEqual(receipts[0]["target_leaves"], 2)
+    self.assertEqual(receipts[0]["host_blocks"], 2)
+
+  def test_report_adjoint_accumulate_is_bitwise_and_has_no_host_round_trip(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ("dp", "tp")
+    )
+    trainer_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("tp", None)
+    )
+    engine_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, "tp")
+    )
+    staged_trainer_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", "tp", None)
+    )
+    staged_engine_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", None, "tp")
+    )
+    vector_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None)
+    )
+    staged_vector_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", None)
+    )
+    trainer_state = _state({"trainer": {
+        "a": jax.device_put(
+            jnp.arange(24, dtype=jnp.float32).reshape(6, 4),
+            trainer_sharding,
+        ),
+        "b": jax.device_put(jnp.arange(4, dtype=jnp.float32), vector_sharding),
+    }})
+    engine_state = _state({"engine": {
+        "a": jax.device_put(
+            jnp.zeros((4, 6), jnp.float32), engine_sharding
+        ),
+        "b": jax.device_put(jnp.zeros((4,), jnp.float32), vector_sharding),
+    }})
+    adapter = object.__new__(
+        canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+    )
+    adapter._runner = types.SimpleNamespace(  # pylint: disable=protected-access
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 1,
+        )
+    )
+    adapter._engine_state_contract = engine_state  # pylint: disable=protected-access
+    adapter._key_mappings = {  # pylint: disable=protected-access
+        "trainer.a": ("engine.a", (None, None)),
+        "trainer.b": ("engine.b", (None,)),
+    }
+    adapter._transpose_keys = {  # pylint: disable=protected-access
+        "trainer.a": (1, 0),
+    }
+    adapter._hook_fns = None  # pylint: disable=protected-access
+    adapter._tp_size = 2  # pylint: disable=protected-access
+    adapter._dp_axis = "data"  # pylint: disable=protected-access
+    adapter._data_size = 2  # pylint: disable=protected-access
+
+    def staged_engine(offset):
+      return (
+          jax.device_put(
+              jnp.arange(48, dtype=jnp.float32).reshape(2, 4, 6)
+              / 7.0
+              + offset,
+              staged_engine_sharding,
+          ),
+          jax.device_put(
+              jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 5.0 + offset,
+              staged_vector_sharding,
+          ),
+      )
+
+    def staged_accumulator(offset):
+      return _state({"trainer": {
+          "a": jax.device_put(
+              jnp.arange(48, dtype=jnp.float32).reshape(2, 6, 4)
+              / 11.0
+              + offset,
+              staged_trainer_sharding,
+          ),
+          "b": jax.device_put(
+              jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 13.0 + offset,
+              staged_vector_sharding,
+          ),
+      }})
+
+    wrong_staged_trainer_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", None, "tp")
+    )
+
+    def wrong_staged_accumulator():
+      return _state({"trainer": {
+          "a": jax.device_put(
+              jnp.arange(48, dtype=jnp.float32).reshape(2, 6, 4),
+              wrong_staged_trainer_sharding,
+          ),
+          "b": jax.device_put(
+              jnp.arange(8, dtype=jnp.float32).reshape(2, 4),
+              staged_vector_sharding,
+          ),
+      }})
+
+    original_shard_map = jax.shard_map
+    checked_vma_calls = []
+
+    def checked_shard_map(*args, **kwargs):
+      checked_vma_calls.append(kwargs.get("check_vma"))
+      return original_shard_map(*args, **kwargs)
+
+    with (
+        mock.patch.dict(
+            os.environ, {"CANON_P75_REPORT_ADJOINT_BUCKETS": "0"}, clear=False
+        ),
+        mock.patch.object(
+            canonical_qwen3_adapter,
+            "_P75_REPORT_ADJOINT_MAX_LOCAL_BYTES",
+            48,
+        ),
+    ):
+      expected_gradient = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
+          trainer_state, staged_engine(3.0)
+      )
+      expected_accumulator = staged_accumulator(5.0)
+      expected = jax.tree.map(
+          lambda total, value: total + value,
+          expected_accumulator,
+          expected_gradient,
+      )
+      receipt_program = dp_training.StagedReceiptProgram(
+          jax.sharding.NamedSharding(
+              mesh, jax.sharding.PartitionSpec("dp", None)
+          )
+      )
+      expected_receipts = receipt_program(expected_gradient)
+      jax.block_until_ready(expected_receipts)
+
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "accumulator layout changed",
+      ):
+        adapter._p59_rank_parallel_report_adjoint_accumulate(  # pylint: disable=protected-access
+            trainer_state,
+            staged_engine(3.0),
+            wrong_staged_accumulator(),
+        )
+
+      candidate_inputs = staged_engine(3.0)
+      candidate_accumulator = staged_accumulator(5.0)
+      with (
+          mock.patch.object(jax, "shard_map", side_effect=checked_shard_map),
+          jax.transfer_guard("disallow"),
+      ):
+        actual, actual_receipts = (
+            adapter._p59_rank_parallel_report_adjoint_accumulate(  # pylint: disable=protected-access
+                trainer_state,
+                candidate_inputs,
+                candidate_accumulator,
+            )
+        )
+        jax.block_until_ready((actual, actual_receipts))
+      isolated_inputs = staged_engine(3.0)
+      isolated_accumulator = jax.tree.map(
+          jnp.zeros_like, staged_accumulator(5.0)
+      )
+      with jax.transfer_guard("disallow"):
+        isolated, _ = (
+            adapter._p59_rank_parallel_report_adjoint_accumulate(  # pylint: disable=protected-access
+                trainer_state,
+                isolated_inputs,
+                isolated_accumulator,
+            )
+        )
+        jax.block_until_ready(isolated)
+
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+      np.testing.assert_array_equal(
+          np.asarray(actual_leaf).view(np.uint32),
+          np.asarray(expected_leaf).view(np.uint32),
+      )
+      self.assertTrue(
+          actual_leaf.sharding.is_equivalent_to(
+              expected_leaf.sharding, actual_leaf.ndim
+          )
+      )
+    for isolated_leaf, expected_leaf in zip(
+        jax.tree.leaves(isolated),
+        jax.tree.leaves(expected_gradient),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(
+          np.asarray(isolated_leaf).view(np.uint32),
+          np.asarray(expected_leaf).view(np.uint32),
+      )
+    actual_signatures, actual_finite, actual_nonzero = actual_receipts
+    expected_signatures, expected_finite, expected_nonzero = expected_receipts
+    np.testing.assert_array_equal(actual_finite, expected_finite)
+    np.testing.assert_array_equal(actual_nonzero, expected_nonzero)
+    np.testing.assert_array_equal(
+        np.asarray(actual_signatures)[:, (0, 1, 3, 4)],
+        np.asarray(expected_signatures)[:, (0, 1, 3, 4)],
+    )
+    self.assertTrue(np.all(np.isfinite(np.asarray(actual_signatures)[:, 2])))
+    self.assertTrue(np.all(np.asarray(actual_signatures)[:, 2] > 0.0))
+    accumulator_deleted = [
+        value.is_deleted()
+        for value in jax.tree.leaves(candidate_accumulator)
+    ]
+    self.assertTrue(accumulator_deleted[0], accumulator_deleted)
+    self.assertTrue(all(value.is_deleted() for value in candidate_inputs))
+    self.assertEqual(checked_vma_calls, [True, True])
+    bucket_receipt = (  # pylint: disable=protected-access
+        adapter._p59_report_accumulate_bucket_receipt
+    )
+    self.assertEqual(bucket_receipt, (2, 1, 48, 1))
+    _, bucket_program = (  # pylint: disable=protected-access
+        adapter._p59_report_accumulate_bucket_program
+    )
+    hlo_inputs = staged_engine(1.0)
+    hlo_accumulator = staged_accumulator(2.0)
+    lowered = bucket_program.lower(
+        trainer_state,
+        hlo_inputs,
+        hlo_accumulator,
+    )
+    hlo = lowered.compiler_ir(dialect="hlo").as_hlo_text()
+    self.assertIn("opt-barrier", hlo)
+    self.assertIn("xor(", hlo)
+    compiled = lowered.compile()
+    self.assertIn("xor(", compiled.as_text())
+    memory = compiled.memory_analysis()
+    self.assertIsNotNone(memory)
+    self.assertGreaterEqual(memory.alias_size_in_bytes, 48)
+
+  def test_p75_report_adjoint_selector_rejects_neighbor_and_malformed(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P32_WORKLOAD": "frozenlake-m15-onehost-dp2-tp2",
+            "CANON_P75_REPORT_ADJOINT_BUCKETS": "1",
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "admitted only",
+      ):
+        canonical_qwen3_adapter._p75_report_adjoint_buckets_enabled()  # pylint: disable=protected-access
+    with mock.patch.dict(
+        os.environ,
+        {"CANON_P75_REPORT_ADJOINT_BUCKETS": "yes"},
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "must be unset, 0, or 1",
+      ):
+        canonical_qwen3_adapter._p75_report_adjoint_buckets_enabled()  # pylint: disable=protected-access
 
   def test_p32_grouped_trainer_axis_uses_dp_tp_state_identity(self):
     if len(jax.devices()) < 4:

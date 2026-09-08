@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 415 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 418 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -48,6 +48,10 @@
 | CANON_DP_DISTINCT_SCHEDULE | P70.4 刀2:per-rank distinct-fingerprint 签名的计算降频。缺省/空/0/every-group=历史每组每 rank 全量 `_gradient_signature`+sha256(receipt 逐字节不变);first-group-warmup=每 update 首组 + 进程前 `DISTINCT_FINGERPRINT_WARMUP_UPDATES`(=3)个 update 的所有组照旧计算,其余组跳过签名(receipt 指纹置 `skipped:receipt-schedule` 并加 `rank_local_fingerprint_mode=skipped`,distinctness 检查在 skipped 组不判);接线正确性属程序级性质:调度/staging/归约程序不随组变,首组+暖机组的检出对 wiring 类故障延迟有界(≤1 update);其他值 fatal。与 deterministic_repeat 互斥(adapter 显式红停) | off | 试验;scratch host 门:调度正确性 kill-test(首组/暖机/skip 序列断言)、flag-off 逐字节同、p69 回归绿;one-host/target 未跑 | 同 CANON_DP_COMPARE_MODE 的 P70.4 GATE;任一红退役,判决记录保留 |
 | CANON_DP_FINITE_FETCH | P70.4 刀3:isfinite 位取回的同步点。缺省/空/0/sync=历史逐组同步 device_get+立即 raise(程序与 receipt 逐字节不变);batched-commit=有限位仍逐组在设备端计算(staged+reduced 两段),host 取回合并为 commit 点前单次 int32 向量 `jax.device_get`(P68 批量收据通道),`drain_deferred_finite_receipts()` 在任何梯度进 optimizer commit 前校验全部收据,violation 在 commit 门 raise(带 group/stage/rank/leaf/path);fail-closed 语义不变,只移动 host 同步点(检出延迟 ≤1 update,仍先于 commit);receipt `post_reduction_all_finite=deferred-commit` 字符串逐 receipt 传播,严禁在 drain 前宣称 finite;其他值 fatal。与 deterministic_repeat 互斥 | off | 试验;scratch host 门:非有限注入 kill-test(commit 前必拦、commit callback 零调用)、flag-off 逐字节同、p68/p69 回归绿;one-host/target 未跑 | 同 CANON_DP_COMPARE_MODE 的 P70.4 GATE;任一红退役,判决记录保留 |
 | CANON_DP_REDUCE_ONCE | K2(tasks/v1_perf_arch phase2):每个 update 只做一次固定序 DP 归约。缺省/空/`0`=off(每组一次 reduce-and-broadcast,照旧);`1`=每组把 rank-local staged 梯度表在自己的 DP 分片上逐叶累加(`zt_tr_dp_staged_accum`,无集合通信),update 末尾对累加表做一次 `finalize_staged`(同一归约程序、同一固定树、同一 replica/有限性收据);每组收据改为 staged 表的逐 rank 签名/有限位/精确非零计数(单程序,末尾一次取回);sink 一次调用代表全部组(trainer 节拍与累加分母同步前进 G)。求和顺序有意改变(先跨组后跨 rank)⇒ 梯度比特变、锚重钉;logprob 契约不变。要求 RANK_PARALLEL=1、无 P66 diagnostic arm / numeric debug / deterministic_repeat,否则 fail-closed;其他值 fatal。v2 Phase 0 起 treatment reducer 自身的 shard_map 强制 `check_vma=True`；fixed-tree 仍按原顺序 reduce 到 rank 0，再把 FP32 位解释为 int32，以非源 rank `int32.min` sentinel 做一次 `pmax` 精确发布，VMA 因而证明 DP invariant 且不增加浮点算术；flag-off 仍选择历史 unchecked reducer。census `--dp-reduce-once 1` 要求每组 staged_accumulate、update 级 fixed_dp_reduce/gradient_accumulate 各 1 | off;CPU 门:reduce-once 梯度逐字节 == fixed_dp_sum(Σ_g staged)·scale,两次跑逐字节同,与逐组流 rtol 1e-5,sink 一次(index 0, microbatches=G),诊断模式拒;真归约器 2×2 CPU 网格两 update 通过;r5 捕获负控响。v2 Phase 0 host 门另证 DP2×TP2/DP4×TP1 checked reducer 与 legacy 输出(含 `-0.0`)逐位同、`jax.transfer_guard('disallow')` 下执行、旧 reducer 开 VMA 必红；D4 census 为 DP2 `ppermute[data]=1+pmax[data]=1`、DP4 `2+1`，flag-off 仍为旧 DP2 `ppermute[data]=2`。**一主机 dp2-tp2(2026-09-02 r4,commit 3090f17c + census 补丁)**:三 update 全 commit、transactions=1、replicas exact、strict 绿、hierarchy(stream+reduce-once)绿、P74 gap 绿;新锚 `1.6838101148605347 / 3.3025834560394287 / 1.8203867673873901`(update 1 第 7 位有效数字变,系有意重结合);warm **19.07→16.38s(−14.1%)**,HBM 39.79→42.84 GiB(staged 累加器 3.44 GB 常驻);raw /mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-k2_reduce_once_20260902_r4。**Phase 0 checked-reducer full-tree pair(b4d9fde,r4)**:control/candidate 同一 update-0 WORK 与 310 个真实叶；G4 全叶为 `REASSOC_NOISE`，最差 cosine `0.9999999999999968`、rel-L2 `7.7658e-08`；G5 为 control 96 组 distinct + candidate 3 次 staged 2/2；G6 为两臂各 31 行 outer VMA + candidate 3 次 checked reducer。XProf trace 恰在百万事件上限截断，comparator 仅在 `trace_event_count>=1,000,000` 且 classification 唯一原因为 `trace_census_rc=1` 时放行；semantic/hierarchy census 与 99/99 alignment 均绿。P61 捕获会把 update-0 warmup LR 从 0 换成常数 `2e-7`，故这对 run 只证明 G4/G5/G6，**不作锚或性能接收发**。raw `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-v2p0g4{ctl,cand}_20260903_r4`，receipt `/tmp/v2_default_phase0/dp2_reduce_once_admission_r4.json` | 可与 stream 一同进入 target 优化包(需用户批);DP16×TP4 上每 update 省 15 次 8 轮归约,收益应更大;r1-r3 三次 CODE_REJECT 均为 PartitionSpec 拼法相等性(已改为等价校验) |
+| CANON_P75_REPORT_ADJOINT_BUCKETS | P75 P45容量候选：只在精确`frozenlake-p45-onehost-dp2-tp2` rank-parallel report-adjoint中，把399-leaf trainer映射按source依赖与每芯片输出字节静态分桶；同一source的所有engine target留在同一桶并继续通过原JAX VJP，桶自身`shard_map check_vma=True`。每桶完成后释放其cotangent输入，避免8.19 GB engine梯度与16.38 GB trainer输出整棵并存。缺省/空/0走原monolithic函数与调用面逐字节不变；1为实验；其他值或邻近workload/geometry fatal。首版每桶host block以证明容量上界，故性能列预先不合格，后续若容量绿须另刀改成device dependency | off；r18 compiler/HBM diagnosis已证明monolithic输出16,382,088,768 B、alias 1,232,896 B、temp 0 B；实现与CPU数值准入进行中，one-host treatment未跑 | r0b通过bitwise full-tree、G4/D4/G5/G6、strict A=B=C、P66行数、HBM<=90%后才可继续无host-block版本；任一数值/VMA红立即否决并保留证据；仅在P45及后续每个workload/geometry独立性能认证后扩大范围 |
+| CANON_P76_CHUNK_DEPENDENCY_TICKET | P76 P45容量候选：精确`frozenlake-p45-onehost-dp2-tp2` rank-parallel reverse在每个非末尾chunk的whole-tree start/add之后，以`shard_map(check_vma=True)`逐设备读取每个已完成accumulator leaf的一个标量位型；`x XOR optimization_barrier(x)`逐项产精确0，OR后只做一次标量TP psum证明TP复制，再把0 XOR进下一chunk首个模型操作数。由此建立真实device依赖，阻止已消费8.19GB chunk pack与下一chunk VJP异步重叠；无host wait/D2H，starter逐位不变。缺省/空/0不构建、不调用、旧路径逐字节不变；1为实验；其他值或邻近workload fatal | off；`r23@c088d6db` correctness全绿但HBM `90.8175%`，与shape-matched r19只差1.8MB allocator噪声；device执行依赖不能推迟PJRT dispatch-time output allocation，容量列REJECT | 保留default-off失败证据，不进入任何默认包；不得强化或重复P76，后续仅在同一CL清理失败实验时退役 |
+| CANON_P77_CHUNK_BACKPRESSURE | P77 P45容量候选：精确`frozenlake-p45-onehost-dp2-tp2` rank-parallel reverse在每chunk原有pullback全部派发后、whole-tree start/add之前等待`chunk_pack` device-ready；add与consumed-pack delete后再等待`grad_pack` device-ready，随后才允许下一chunk或report adjoint派发。它不读取/物化数组、无D2H/H2D、不改算术、sharding、VMA或对象；缺省/空/0不等待，1为实验，其他值/邻近workload/与P76并开均fatal。每group打印两类各`num_chunks`等待数，classifier按landed chunk向量精确核对 | off；`r24@d51a35b8`的仅post-add版本correctness全绿但HBM `90.8162%`，容量REJECT。`r25@47f72ee4`两边界版本strict/DP/finite/P66/state全绿且HBM `85.2835%`，容量PASS；新rollout尚无梯度锚，timing因P75/P77 host block不合格。zero_tim=pass@r25；correctness=免测@numerics-admission-dispatch；perf=ineligible@capacity-first | R26 judge把r25只读重判为`MEASUREMENT_ONLY`，不是certify PASS。下一步先建立可重复输入与geometry-specific anchor，再用同一P75/P77容量机制做matched性能；每个新geometry/recipe独立准入 |
+| CANON_V2_TRAINING_CAPSULE_MODE / CANON_V2_TRAINING_CAPSULE / CANON_V2_TRAINING_CAPSULE_SHA256 / CANON_V2_MODEL_BINDING_SHA256 | V2 one-host exact-input载具：`capture`只在strict pre-alignment PASS后原子保存完整tensorized `TrainExample`与A/B/T观测；`replay`必须逐文件/逐数组SHA、capture identity及live model fingerprint全命中，且明确绕过environment/rollout/rescore。当前只准精确FrozenLake Qwen3-8B DP2×TP2 no-commit P45/M15；与P64 namespace及P62/P64 numeric debug互斥 | 全部默认unset；capture/replay均为认证载具，不进production profile。capture保留fresh Zero-TIM收据但性能不合格；replay只作同输入gradient/perf，不单独声称fresh Zero-TIM | R27须先过P64 legacy不变、V2全部字段round-trip、one-byte/hash/model/identity/producer-bypass负控与exact-image；真机capture→fresh replay后才可登记anchor。每个新geometry/recipe另行扩identity并准入 |
 | CANON_P32_LENGTH_SORT | tasks/v1_long_context phase3:分组 update 在分组前按行的真实长度(prompt_mask + completion_valid)降序稳定排序并按组轮发到各 DP rank,使同组各行长度接近(组的 chunk 数由最长行决定;P45/M15 日志估计可省 35–45% 的 chunk pass)。整棵 TrainExample 一个 gather 程序取同一排列(out_shardings 钉原 sharding),流式余切、末尾 eager 自检、收据行号一致;每行 logprob 不依赖同组邻居(paged 夹具测试钉住),只有组间梯度求和顺序改变 ⇒ **锚重钉**,非零比特。缺省/空/`0`=到达顺序、逐位不变;`1`=开;其他值拒绝。CPU 门 97 passed;一台机 dp2-tp2 / dp4-tp1 / dp2-tp2-long 三几何上**锚均逐位不变**(无需重钉);长几何(0.8k–2.1k 行)实测 chunk pass 69→59、update 12.31→10.62 s(−13.7%),收益与省掉的 chunk pass 同比例(tasks/v1_long_context_onehost/phase3.md)。 | off(候选,建议进 P45/M15 bundle) |
 | CANON_ONEHOST_JAX_CACHE_DIR | 一台机 xprof-pair 载具的可选持久编译缓存目录(宿主机路径,须在 /mnt/disks/tunix-data 挂载下);设了就把它作为容器内 `JAX_COMPILATION_CACHE_DIR` 并带上集群 JobSet 相同的 `JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0` / `JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=all`。只影响发射时的冷编译(step 1 ~300 s),普查只看被捕获的 update(compile 事件本就为 0)。缺省=不开,配方不变。 | off(载具工具) |
 | CANON_P32_LONG_PROMPT_EXAMPLES | 一台机长上下文载具的确定性数据构造器；值必须为 `lo-hi`，只在 GSM8K synthetic worked-example 前缀中控制每行追加的长度，不进入 production renderer/profile，也不改变模型或优化器定义 | off；仅 `dp2-tp2-long` / `dp2-tp2-long8k` 载具设置 | 长上下文几何锚与性能矩阵归档后保留在载具层；若删除载具则同 CL 退役 |
@@ -517,6 +521,9 @@ CANON_P66_BACKWARD_CAPTURE_DIR
 CANON_P66_P59_CHECK_VMA
 CANON_P67_P66_VMA_P59_ONLY
 CANON_P71_SCAN
+CANON_P75_REPORT_ADJOINT_BUCKETS
+CANON_P76_CHUNK_DEPENDENCY_TICKET
+CANON_P77_CHUNK_BACKPRESSURE
 CANON_V1_HP_FIRST_UPDATE_GATE
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
@@ -576,6 +583,10 @@ CANON_TP_SIZE
 CANON_TP_WIDTHS
 CANON_TRAIN_DP_SHARDING
 CANON_UPDATE_REPORT
+CANON_V2_MODEL_BINDING_SHA256
+CANON_V2_TRAINING_CAPSULE
+CANON_V2_TRAINING_CAPSULE_MODE
+CANON_V2_TRAINING_CAPSULE_SHA256
 CANON_V1_GSM8K_XPROF_ARM
 CANON_V1_FL_TP8_AB_ARM
 CANON_V1_HP_FULL
@@ -597,7 +608,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 415 settable names (appendix inventory above; exclusions: none).
+Count: 422 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

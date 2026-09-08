@@ -335,3 +335,113 @@ def test_checked_bundle_covers_existing_collective_selectors(
   assert _collective_census(
       reducer._reduce, census_staged  # pylint: disable=protected-access
   ) == expected_census
+
+
+def _addressable_pointers(tree):
+  return tuple(
+      tuple(
+          shard.data.unsafe_buffer_pointer()
+          for shard in leaf.addressable_shards
+      )
+      for leaf in jax.tree.leaves(tree)
+  )
+
+
+def test_checked_reducer_borrows_base_storage_without_copy_or_host_transfer():
+  mesh = _mesh(2, 2)
+  base_sharding = NamedSharding(mesh, P("model"))
+  staged_sharding = NamedSharding(mesh, P("data", "model"))
+  template = jax.device_put(jnp.zeros((8,), jnp.float32), base_sharding)
+  base = jax.device_put(
+      jnp.arange(8, dtype=jnp.float32) + 19, base_sharding
+  )
+  staged = jax.device_put(_staged_values(2), staged_sharding)
+  expected = np.asarray(staged).view(np.uint32)
+  base_pointers = _addressable_pointers(base)
+
+  with mock.patch.dict(
+      os.environ,
+      {"CANON_DP_REDUCE_ONCE": "1", "CANON_DP_COLLECTIVE_REDUCE": "0"},
+      clear=False,
+  ):
+    dp_training.reset_reducer_program_cache_for_tests()
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=2, dp_axis="data"
+    )
+    with jax.transfer_guard("disallow"):
+      borrowed, report = reducer.borrow_staged_accumulator(base, staged)
+      jax.block_until_ready(borrowed)
+
+  assert _addressable_pointers(borrowed) == base_pointers
+  assert base.is_deleted()
+  assert staged.is_deleted()
+  np.testing.assert_array_equal(np.asarray(borrowed).view(np.uint32), expected)
+  assert report == {
+      "leaves": 1,
+      "local_bytes": 16,
+      "base_handles_retired": 1,
+      "staged_handles_retired": 1,
+      "shard_map_check_vma": 1,
+      "host_transfers": 0,
+  }
+
+  fresh_base = jax.device_put(
+      jnp.arange(8, dtype=jnp.float32) + 31, base_sharding
+  )
+  fresh_staged = jax.device_put(_staged_values(2), staged_sharding)
+  compiled = reducer._borrow_base_storage.lower(  # pylint: disable=protected-access
+      fresh_base, fresh_staged
+  ).compile()
+  memory = compiled.memory_analysis()
+  assert memory.alias_size_in_bytes >= report["local_bytes"]
+  stablehlo = str(
+      reducer._borrow_base_storage.lower(  # pylint: disable=protected-access
+          fresh_base, fresh_staged
+      ).compiler_ir(dialect="stablehlo")
+  )
+  assert "stablehlo.optimization_barrier" in stablehlo
+  assert stablehlo.count("stablehlo.xor") >= 2
+  assert "stablehlo.all_reduce" not in stablehlo
+  assert "stablehlo.collective_permute" not in stablehlo
+
+
+def test_accumulator_loan_rejects_unchecked_and_wrong_layouts():
+  mesh = _mesh(2, 2)
+  base_sharding = NamedSharding(mesh, P("model"))
+  staged_sharding = NamedSharding(mesh, P("data", "model"))
+  template = jax.device_put(jnp.zeros((8,), jnp.float32), base_sharding)
+  with mock.patch.dict(
+      os.environ,
+      {"CANON_DP_REDUCE_ONCE": "0", "CANON_DP_COLLECTIVE_REDUCE": "0"},
+      clear=False,
+  ):
+    dp_training.reset_reducer_program_cache_for_tests()
+    unchecked = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=2, dp_axis="data"
+    )
+  base = jax.device_put(jnp.zeros((8,), jnp.float32), base_sharding)
+  staged = jax.device_put(_staged_values(2), staged_sharding)
+  with pytest.raises(ValueError, match="checked-VMA reduce-once"):
+    unchecked.borrow_staged_accumulator(base, staged)
+  assert not base.is_deleted()
+  assert not staged.is_deleted()
+  assert unchecked._borrow_base_storage is None  # pylint: disable=protected-access
+
+  with mock.patch.dict(
+      os.environ,
+      {"CANON_DP_REDUCE_ONCE": "1", "CANON_DP_COLLECTIVE_REDUCE": "0"},
+      clear=False,
+  ):
+    checked = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=2, dp_axis="data"
+    )
+  wrong_dtype = jax.device_put(jnp.zeros((8,), jnp.bfloat16), base_sharding)
+  with pytest.raises(ValueError, match="shape/dtype changed"):
+    checked.borrow_staged_accumulator(wrong_dtype, staged)
+  wrong_layout = jax.device_put(
+      jnp.zeros((8,), jnp.float32), NamedSharding(mesh, P("data"))
+  )
+  with pytest.raises(ValueError, match="sharding changed"):
+    checked.borrow_staged_accumulator(wrong_layout, staged)
+  with pytest.raises(ValueError, match="does not match the template"):
+    checked.borrow_staged_accumulator({"extra": base}, staged)

@@ -2,13 +2,33 @@
 # One-host-only Qwen3-8B FrozenLake DP2xTP2 no-commit capacity carrier.
 set -euo pipefail
 
-workload="${1:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r1|r2|r3> <fresh-label> <measure|certify>}"
-arm="${2:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r1|r2|r3> <fresh-label> <measure|certify>}"
-label="${3:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r1|r2|r3> <fresh-label> <measure|certify>}"
-mode="${4:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r1|r2|r3> <fresh-label> <measure|certify>}"
+workload="${1:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify>}"
+arm="${2:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify>}"
+label="${3:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify>}"
+mode="${4:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify> [none|capture|replay] [capsule.npz]}"
+capsule_mode="${5:-none}"
+capsule_source="${6:-}"
 case "$workload" in p45|m15) ;; *) echo "invalid workload: $workload" >&2; exit 2;; esac
-case "$arm" in r0|r1|r2|r3) ;; *) echo "invalid arm: $arm" >&2; exit 2;; esac
+case "$arm" in r0|r0b|r0c|r0d|r1|r2|r3) ;; *) echo "invalid arm: $arm" >&2; exit 2;; esac
+if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && [ "$workload" != p45 ]; then
+  echo "$arm P75/P76/P77 capacity arm admits only workload p45" >&2
+  exit 2
+fi
 case "$mode" in measure|certify) ;; *) echo "invalid mode: $mode" >&2; exit 2;; esac
+case "$capsule_mode:$mode" in
+  none:measure|none:certify) ;;
+  capture:measure) ;;
+  replay:certify) ;;
+  *) echo "invalid capsule/classification mode: $capsule_mode/$mode" >&2; exit 2;;
+esac
+if [ "$capsule_mode" = replay ] && [ -z "$capsule_source" ]; then
+  echo "replay requires an absolute captured capsule path" >&2
+  exit 2
+fi
+if [ "$capsule_mode" != replay ] && [ -n "$capsule_source" ]; then
+  echo "capsule source is valid only for replay" >&2
+  exit 2
+fi
 case "$label" in *[!a-z0-9_-]*|'') echo "invalid fresh label: $label" >&2; exit 2;; esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -39,6 +59,52 @@ driver="$root/driver.log"
 container="v2_fl_${workload}_${arm}_${label}"
 timeout_seconds="${V2_FL_TIMEOUT_SECONDS:-14400}"
 sp=/usr/local/lib/python3.12/site-packages/tpu_inference
+seal_evidence() {
+  find "$root" -type f ! -name SHA256SUMS -print0 \
+    | sort -z | xargs -0 sha256sum >"$root/SHA256SUMS"
+  sha256sum -c "$root/SHA256SUMS" >/dev/null
+}
+capsule_path=
+capsule_sha256=
+capsule_binding_sha256=
+capsule_capture_run=
+case "$capsule_mode" in
+  none) ;;
+  capture)
+    capsule_path="$root/training_capsule.npz"
+    ;;
+  replay)
+    if [ "${capsule_source#/}" = "$capsule_source" ]; then
+      echo "replay capsule path must be absolute: $capsule_source" >&2
+      exit 2
+    fi
+    capsule_path="$(realpath "$capsule_source")"
+    case "$capsule_path" in
+      "$evidence_root"/*/training_capsule.npz) ;;
+      *) echo "replay capsule is outside the one-host evidence root: $capsule_path" >&2; exit 2;;
+    esac
+    test -s "$capsule_path"
+    test -s "$capsule_path.model.json"
+    capsule_sha256="$(sha256sum "$capsule_path" | awk '{print $1}')"
+    capsule_binding_sha256="$(sha256sum "$capsule_path.model.json" | awk '{print $1}')"
+    capsule_dir_name="$(basename "$(dirname "$capsule_path")")"
+    capsule_dir_tail="${capsule_dir_name#${workload}_}"
+    case "$capsule_dir_tail" in
+      r0_*|r0b_*|r0c_*|r0d_*|r1_*|r2_*|r3_*) ;;
+      *) echo "replay capsule run identity is invalid: $capsule_dir_name" >&2; exit 2;;
+    esac
+    capsule_capture_run="${capsule_dir_tail#*_}"
+    case "$capsule_capture_run" in
+      *[!a-z0-9_-]*|'') echo "replay capsule label is invalid: $capsule_capture_run" >&2; exit 2;;
+    esac
+    ;;
+esac
+case "$arm" in
+  r0b) report_adjoint_buckets=1; chunk_dependency_ticket=0; chunk_backpressure=0 ;;
+  r0c) report_adjoint_buckets=1; chunk_dependency_ticket=1; chunk_backpressure=0 ;;
+  r0d) report_adjoint_buckets=1; chunk_dependency_ticket=0; chunk_backpressure=1 ;;
+  *) report_adjoint_buckets=0; chunk_dependency_ticket=0; chunk_backpressure=0 ;;
+esac
 
 # shellcheck disable=SC1090
 source "$canon_env"
@@ -98,7 +164,7 @@ mkdir -p "$root" "$root/wandb" "$root/logs"
 {
   echo "[V2.FL.ONEHOST] source=$source_sha diff_sha256=$diff_sha"
   echo "[V2.FL.ONEHOST] image_id=$image_id model_revision=$model_revision"
-  echo "[V2.FL.ONEHOST] workload=$workload arm=$arm mode=$mode topology=DP2xTP2 stage=backward-no-commit"
+  echo "[V2.FL.ONEHOST] workload=$workload arm=$arm mode=$mode capsule_mode=$capsule_mode topology=DP2xTP2 stage=backward-no-commit"
   echo "[V2.FL.ONEHOST] timeout_seconds=$timeout_seconds idle_120s=PASS root=$root"
 } >"$driver"
 bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen8b_tp2 \
@@ -143,7 +209,16 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e V2_FL_REPO="$repo" -e V2_FL_ROOT="$root" \
   -e V2_FL_WORKLOAD="$workload" -e V2_FL_ARM="$arm" -e V2_FL_LABEL="$label" \
+  -e CANON_P75_REPORT_ADJOINT_BUCKETS="$report_adjoint_buckets" \
+  -e CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_dependency_ticket" \
+  -e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure" \
   -e V2_FL_MODE="$mode" \
+  -e V2_FL_CAPSULE_MODE="$capsule_mode" \
+  -e V2_FL_CAPSULE_CAPTURE_RUN="$capsule_capture_run" \
+  -e CANON_V2_TRAINING_CAPSULE_MODE="${capsule_mode#none}" \
+  -e CANON_V2_TRAINING_CAPSULE="$capsule_path" \
+  -e CANON_V2_TRAINING_CAPSULE_SHA256="$capsule_sha256" \
+  -e CANON_V2_MODEL_BINDING_SHA256="$capsule_binding_sha256" \
   -e V2_FL_DEPS="$deps" -e V2_FL_SOURCE_SHA="$source_sha" \
   -e V2_FL_DIFF_SHA="$diff_sha" -e V2_FL_IMAGE_SHA="$image_sha" \
   -e V2_FL_MODEL_SHA256="$model_sha256" \
@@ -195,11 +270,12 @@ set +e
   >>"$driver" 2>&1
 classifier_rc=$?
 set -e
-find "$root" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >"$root/SHA256SUMS"
 if [ "$classifier_rc" -ne 0 ] || [ "$contention" -ne 0 ] || [ "$timed_out" -ne 0 ]; then
   echo "[V2.FL.ONEHOST] RED docker=$docker_rc classifier=$classifier_rc evidence=$root" >>"$driver"
+  seal_evidence
   exit 1
 fi
 verdict="$(/mnt/disks/tunix-data/venvs/train/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$root/classification.json")"
 echo "[V2.FL.ONEHOST] $verdict evidence=$root" >>"$driver"
+seal_evidence
 echo "V2_FROZENLAKE_ONEHOST_${verdict} workload=$workload arm=$arm evidence=$root"

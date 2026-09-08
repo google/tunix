@@ -124,6 +124,19 @@ class _FakeReducer:
     self.dp_size = dp_size
     self.dp_axis = dp_axis
     self.values = []
+    self.loan_calls = 0
+
+  def borrow_staged_accumulator(self, base_storage, staged):
+    del base_storage
+    self.loan_calls += 1
+    return staged, {
+        "leaves": len(jax.tree.leaves(staged)),
+        "local_bytes": 4,
+        "base_handles_retired": len(jax.tree.leaves(staged)),
+        "staged_handles_retired": len(jax.tree.leaves(staged)),
+        "shard_map_check_vma": 1,
+        "host_transfers": 0,
+    }
 
   def stage_diagnostics(self, staged):
     signatures, finite = jax.vmap(dp_training._gradient_diagnostics)(staged)  # pylint: disable=protected-access
@@ -199,6 +212,7 @@ def _run(
     adapter=None,
     reduce_once="",
     sink=None,
+    accumulator_loan=None,
 ):
   """Runs one stubbed DP16 update; returns (result, events, live, received)."""
   case = harness.CanonicalQwen3AdapterTest(
@@ -263,6 +277,27 @@ def _run(
   adapter._p59_rank_parallel_report_adjoint = types.MethodType(  # pylint: disable=protected-access
       report_adjoint, adapter
   )
+
+  fused_report_calls = []
+
+  def report_adjoint_accumulate(self, state, cotangents, accumulator):
+    staged = report_adjoint(self, state, cotangents)
+    fused_report_calls.append(len(staged_tables) - 1)
+    self._p59_report_accumulate_bucket_receipt = (  # pylint: disable=protected-access
+        8,
+        1,
+        2130875392,
+        7,
+    )
+    return (
+        self._p59_staged_tree_add(accumulator, staged),  # pylint: disable=protected-access
+        dp_training.staged_gradient_receipts(staged),
+    )
+
+  adapter._p59_rank_parallel_report_adjoint_accumulate = types.MethodType(  # pylint: disable=protected-access
+      report_adjoint_accumulate, adapter
+  )
+  adapter._fused_report_calls = fused_report_calls  # pylint: disable=protected-access
   adapter._staged_tables_seen = staged_tables
   adapter._p59_reducer_template = types.MethodType(  # pylint: disable=protected-access
       lambda self, state, staged: state, adapter
@@ -312,14 +347,19 @@ def _run(
       stack.enter_context(patch)
     os.environ.pop("CANON_P71_SCAN", None)
     os.environ.pop("CANON_P28_LAYER_SCAN", None)
+    call_kwargs = {
+        "trainer_state": trainer_state,
+        "train_example": _train_example(),
+        "algo_config": _ALGO,
+        "pad_id": 0,
+        "eos_id": 2,
+        "gradient_microbatch_sink": sink,
+        "deterministic_repeat": deterministic_repeat,
+    }
+    if accumulator_loan is not None:
+      call_kwargs["gradient_accumulator_loan"] = accumulator_loan
     result = adapter.segmented_dp_grpo_value_and_grad(
-        trainer_state=trainer_state,
-        train_example=_train_example(),
-        algo_config=_ALGO,
-        pad_id=0,
-        eos_id=2,
-        gradient_microbatch_sink=sink,
-        deterministic_repeat=deterministic_repeat,
+        **call_kwargs
     )
   result["_adapter"] = adapter
   return result, events, live, received, stdout.getvalue()
@@ -420,6 +460,7 @@ def test_reduce_once_reduces_once_and_matches_the_fixed_tree_of_the_group_sum():
   per_group, *_ = _run("stream")
   once, *_ = _run("stream", reduce_once="1")
   adapter = once["_adapter"]
+  assert adapter._fused_report_calls == list(range(1, GROUPS))  # pylint: disable=protected-access
   assert once["dp_reduction_visibility"] == "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
   assert once["dp_reduction_transactions"] == 1
   assert once["dp_staged_accumulations"] == GROUPS
@@ -448,6 +489,13 @@ def test_reduce_once_reduces_once_and_matches_the_fixed_tree_of_the_group_sum():
     np.testing.assert_allclose(
         np.asarray(left), np.asarray(right), rtol=1e-5, atol=1e-6
     )
+
+
+def test_report_accumulate_fusion_is_reduce_once_only():
+  ordinary, *_ = _run("stream")
+  assert ordinary["_adapter"]._fused_report_calls == []  # pylint: disable=protected-access
+  fused, *_ = _run("stream", reduce_once="1")
+  assert fused["_adapter"]._fused_report_calls == list(range(1, GROUPS))  # pylint: disable=protected-access
 
 
 def test_reduce_once_g5_capture_rejects_duplicate_rank_signatures():
@@ -483,6 +531,36 @@ def test_reduce_once_streams_one_contribution_standing_for_every_group():
   assert calls[0][2] == scale * GROUPS
   assert result["gradient_microbatches"] == GROUPS
   assert result["gradients"] is None
+
+
+def test_reduce_once_consumes_exactly_one_accumulator_loan():
+  calls = []
+
+  def sink(index, gradient, multiplier, microbatches=1):
+    calls.append((index, gradient, multiplier, microbatches))
+
+  loan = (jnp.zeros((1,), jnp.float32),)
+  result, _, _, _, stdout = _run(
+      "stream",
+      reduce_once="1",
+      sink=sink,
+      accumulator_loan=loan,
+  )
+  assert result["_adapter"]._fused_report_calls == list(range(1, GROUPS))  # pylint: disable=protected-access
+  assert len(calls) == 1
+  assert stdout.count("[V2.REDUCE_ONCE.ACCUMULATOR_LOAN]") == 1
+  assert "leaves=1 local_bytes=4 transition=base-to-staged" in stdout
+  assert "check_vma=1 host_transfers=0" in stdout
+
+
+def test_accumulator_loan_is_rejected_without_reduce_once():
+  with pytest.raises(FME, match="requires reduce-once with a sink"):
+    _run(
+        "stream",
+        reduce_once="0",
+        sink=lambda *args, **kwargs: None,
+        accumulator_loan=(jnp.zeros((1,), jnp.float32),),
+    )
 
 
 def test_reduce_once_refuses_diagnostic_modes():

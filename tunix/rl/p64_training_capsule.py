@@ -37,6 +37,10 @@ PATH_ENV = "CANON_P64_TRAINING_CAPSULE"
 GCS_URI_ENV = "CANON_P64_TRAINING_CAPSULE_GCS_URI"
 SHA256_ENV = "CANON_P64_TRAINING_CAPSULE_SHA256"
 MODEL_BINDING_SHA256_ENV = "CANON_P64_MODEL_BINDING_SHA256"
+V2_MODE_ENV = "CANON_V2_TRAINING_CAPSULE_MODE"
+V2_PATH_ENV = "CANON_V2_TRAINING_CAPSULE"
+V2_SHA256_ENV = "CANON_V2_TRAINING_CAPSULE_SHA256"
+V2_MODEL_BINDING_SHA256_ENV = "CANON_V2_MODEL_BINDING_SHA256"
 
 SCHEMA = "canon-p64-training-capsule-v1"
 MODEL_BINDING_SCHEMA = "canon-p64-model-binding-v1"
@@ -74,14 +78,45 @@ class P64TrainingCapsuleError(RuntimeError):
   """Raised when a P64 capsule cannot satisfy its fail-closed contract."""
 
 
+def _namespace_and_mode(
+    environ: Mapping[str, str],
+) -> tuple[str, str]:
+  p64_value = environ.get(MODE_ENV, "")
+  v2_value = environ.get(V2_MODE_ENV, "")
+  for name, value in ((MODE_ENV, p64_value), (V2_MODE_ENV, v2_value)):
+    if value not in ("", "capture", "replay"):
+      raise P64TrainingCapsuleError(
+          f"{name} must be unset/capture/replay, got {value!r}"
+      )
+  if p64_value and v2_value:
+    raise P64TrainingCapsuleError(
+        "P64 and V2 training-capsule namespaces are mutually exclusive"
+    )
+  dangling_v2 = {
+      name: environ.get(name)
+      for name in (
+          V2_PATH_ENV,
+          V2_SHA256_ENV,
+          V2_MODEL_BINDING_SHA256_ENV,
+      )
+      if environ.get(name) and not v2_value
+  }
+  if dangling_v2:
+    raise P64TrainingCapsuleError(
+        f"V2 training-capsule fields require {V2_MODE_ENV}: {dangling_v2}"
+    )
+  return ("v2", v2_value) if v2_value else ("p64", p64_value)
+
+
 def mode(environ: Mapping[str, str] | None = None) -> str:
   values = os.environ if environ is None else environ
-  value = values.get(MODE_ENV, "")
-  if value not in ("", "capture", "replay"):
-    raise P64TrainingCapsuleError(
-        f"{MODE_ENV} must be unset/capture/replay, got {value!r}"
-    )
-  return value
+  return _namespace_and_mode(values)[1]
+
+
+def v2_enabled(environ: Mapping[str, str] | None = None) -> bool:
+  values = os.environ if environ is None else environ
+  namespace, active_mode = _namespace_and_mode(values)
+  return namespace == "v2" and bool(active_mode)
 
 
 def enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -98,6 +133,12 @@ def reverse_group_limit(
   """Returns the admitted P64 reverse scope without changing forward scope."""
   active_mode = mode(environ)
   if active_mode == "replay":
+    if v2_enabled(environ):
+      if group_count != 8:
+        raise P64TrainingCapsuleError(
+            f"V2 replay requires 8 registered groups, got {group_count}"
+        )
+      return group_count
     if group_count != 32:
       raise P64TrainingCapsuleError(
           f"P64 replay requires 32 registered groups, got {group_count}"
@@ -127,10 +168,12 @@ def model_binding_path(path: str | Path) -> Path:
 
 
 def _require_path(environ: Mapping[str, str]) -> Path:
-  raw = environ.get(PATH_ENV, "")
+  namespace, _ = _namespace_and_mode(environ)
+  path_env = V2_PATH_ENV if namespace == "v2" else PATH_ENV
+  raw = environ.get(path_env, "")
   if not raw or not os.path.isabs(raw) or not raw.endswith(".npz"):
     raise P64TrainingCapsuleError(
-        f"{PATH_ENV} must be an absolute .npz path"
+        f"{path_env} must be an absolute .npz path"
     )
   return Path(raw)
 
@@ -177,11 +220,92 @@ def _require_p64_identity(environ: Mapping[str, str]) -> None:
     )
 
 
+def _require_v2_identity(environ: Mapping[str, str]) -> None:
+  workload = environ.get("V2_FL_WORKLOAD", "")
+  workload_name = {
+      "p45": "frozenlake-p45-onehost-dp2-tp2",
+      "m15": "frozenlake-m15-onehost-dp2-tp2",
+  }.get(workload)
+  if workload_name is None:
+    raise P64TrainingCapsuleError(
+        f"V2 capsule workload must be p45 or m15, got {workload!r}"
+    )
+  active_mode = mode(environ)
+  exact = {
+      "CANON_PROFILE_FILE": (
+          "cluster/profiles/qwen3-8b-dp2-tp2-frozenlake-onehost.env"
+      ),
+      "CANON_P32_WORKLOAD": workload_name,
+      "CANON_DP_SIZE": "2",
+      "CANON_TP_SIZE": "2",
+      "CANON_GLOBAL_TRAJECTORIES": "16",
+      "CANON_LOCAL_TRAJECTORIES": "8",
+      "CANON_LOGPROB_M": "256",
+      "FL_SHARED_MESH": "2,2",
+      "CANON_P33_RUN_STAGE": "backward-no-commit",
+      "CANON_P33_NO_COMMIT": "1",
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P66_P59_CHECK_VMA": "1",
+      "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_V1_HP_FULL": "0",
+      "CANON_MODEL_DIR_NAME": "qwen8b_tp2",
+      "V2_FL_MODE": "measure" if active_mode == "capture" else "certify",
+  }
+  changed = {
+      name: environ.get(name)
+      for name, expected in exact.items()
+      if environ.get(name) != expected
+  }
+  if changed:
+    raise P64TrainingCapsuleError(
+        f"V2 training-capsule identity drifted: {changed}"
+    )
+  if environ.get("CANON_P64_P45_NUMERIC_DEBUG", "") not in ("", "0"):
+    raise P64TrainingCapsuleError(
+        "V2 training capsule cannot impersonate P64 numerical debug"
+    )
+
+
+def _require_training_capsule_identity(environ: Mapping[str, str]) -> None:
+  if v2_enabled(environ):
+    _require_v2_identity(environ)
+  else:
+    _require_p64_identity(environ)
+
+
+def validate_identity(
+    environ: Mapping[str, str] | None = None,
+) -> None:
+  values = os.environ if environ is None else environ
+  if mode(values):
+    _require_training_capsule_identity(values)
+
+
 def _as_array(value: Any) -> np.ndarray:
   return np.ascontiguousarray(np.asarray(value))
 
 
 def _identity(environ: Mapping[str, str]) -> dict[str, Any]:
+  if v2_enabled(environ):
+    workload = environ["V2_FL_WORKLOAD"]
+    completion_width = 2048 if workload == "p45" else 8192
+    return {
+        "capsule_namespace": "v2-frozenlake-onehost",
+        "capture_source_commit": environ.get("V2_FL_SOURCE_SHA", ""),
+        "capture_run_id": environ.get("V2_FL_LABEL", ""),
+        "profile": environ.get("CANON_PROFILE_FILE", ""),
+        "workload": environ.get("CANON_P32_WORKLOAD", ""),
+        "model_dir_name": environ.get("CANON_MODEL_DIR_NAME", ""),
+        "mesh": environ.get("FL_SHARED_MESH", ""),
+        "dp": 2,
+        "tp": 2,
+        "global_trajectories": 16,
+        "local_trajectories": 8,
+        "global_M": 512,
+        "local_M": 256,
+        "prompt_width": 4096,
+        "completion_width": completion_width,
+    }
   return {
       "capture_source_commit": environ.get("CANON_EXPECT_COMMIT", ""),
       "capture_run_id": environ.get("CANON_RUN_ID", ""),
@@ -250,11 +374,11 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def persist(observed: Any, environ: Mapping[str, str] | None = None) -> dict:
-  """Atomically freezes one exact 256-row pre-backward P45 train batch."""
+  """Atomically freezes one exact pre-backward training batch."""
   values = os.environ if environ is None else environ
   if mode(values) != "capture":
     raise P64TrainingCapsuleError("P64 capsule persist requires capture mode")
-  _require_p64_identity(values)
+  _require_training_capsule_identity(values)
   path = _require_path(values)
   train_example = observed.train_example
   arrays: dict[str, np.ndarray] = {}
@@ -296,10 +420,20 @@ def persist(observed: Any, environ: Mapping[str, str] | None = None) -> dict:
     )
   prompt_shape = arrays["train__prompt_ids"].shape
   completion_shape = arrays["train__completion_ids"].shape
-  if prompt_shape != (256, 4096) or completion_shape != (256, 2048):
+  identity = _identity(values)
+  expected_prompt_shape = (
+      identity["global_trajectories"], identity.get("prompt_width", 4096)
+  )
+  expected_completion_shape = (
+      identity["global_trajectories"], identity.get("completion_width", 2048)
+  )
+  if (
+      prompt_shape != expected_prompt_shape
+      or completion_shape != expected_completion_shape
+  ):
     raise P64TrainingCapsuleError(
-        "P64 training capsule requires physical P45 tensors "
-        f"prompt=(256,4096) completion=(256,2048), got "
+        "training capsule physical tensor shape changed: expected "
+        f"prompt={expected_prompt_shape} completion={expected_completion_shape}, got "
         f"{prompt_shape}/{completion_shape}"
     )
   for name in (
@@ -346,8 +480,8 @@ def persist(observed: Any, environ: Mapping[str, str] | None = None) -> dict:
           "Replay is backward localization only and is not a fresh "
           "Zero-TIM certification."
       ),
-      **_identity(values),
-      "rows": 256,
+      **identity,
+      "rows": identity["global_trajectories"],
       "source_name": observed.source_name,
       "all_compact_filtered": bool(observed.all_compact_filtered),
       "presence": presence,
@@ -372,13 +506,14 @@ def persist(observed: Any, environ: Mapping[str, str] | None = None) -> dict:
   result = {
       "path": str(path),
       "sha256": file_sha256(path),
-      "rows": 256,
+      "rows": identity["global_trajectories"],
       "arrays": len(arrays),
       "logical_bytes": sum(value.nbytes for value in arrays.values()),
   }
+  marker = "V2.CAPSULE" if v2_enabled(values) else "P64.CAPSULE"
   print(
-      "[P64.CAPSULE] capture_ready "
-      f"path={path} sha256={result['sha256']} rows=256 "
+      f"[{marker}] capture_ready "
+      f"path={path} sha256={result['sha256']} rows={result['rows']} "
       f"arrays={result['arrays']} logical_bytes={result['logical_bytes']} "
       "certification=strict-prealignment-source",
       flush=True,
@@ -421,12 +556,13 @@ def load_verified(
   values = os.environ if environ is None else environ
   if mode(values) != "replay":
     raise P64TrainingCapsuleError("P64 capsule load requires replay mode")
-  _require_p64_identity(values)
+  _require_training_capsule_identity(values)
   path = _require_path(values)
-  expected_file_sha = values.get(SHA256_ENV, "")
+  sha_env = V2_SHA256_ENV if v2_enabled(values) else SHA256_ENV
+  expected_file_sha = values.get(sha_env, "")
   if not _SHA_RE.fullmatch(expected_file_sha):
     raise P64TrainingCapsuleError(
-        f"{SHA256_ENV} must be exactly 64 lowercase hex in replay mode"
+        f"{sha_env} must be exactly 64 lowercase hex in replay mode"
     )
   observed_file_sha = file_sha256(path)
   if observed_file_sha != expected_file_sha:
@@ -455,7 +591,7 @@ def load_verified(
         f"unexpected P64 capsule schema: {metadata.get('schema')!r}"
     )
   identity = _identity(values)
-  for name in (
+  identity_names = [
       "profile",
       "workload",
       "model_dir_name",
@@ -466,7 +602,12 @@ def load_verified(
       "local_trajectories",
       "global_M",
       "local_M",
-  ):
+  ]
+  if v2_enabled(values):
+    identity_names.extend(
+        ("capsule_namespace", "prompt_width", "completion_width")
+    )
+  for name in identity_names:
     if metadata.get(name) != identity[name]:
       raise P64TrainingCapsuleError(
           f"P64 replay identity mismatch for {name}: "
@@ -495,12 +636,18 @@ def load_verified(
       raise P64TrainingCapsuleError(
           f"P64 capsule array receipt mismatch: {name}"
       )
+  marker = "V2.CAPSULE" if v2_enabled(values) else "P64.CAPSULE"
+  replay_source = (
+      values.get("V2_FL_SOURCE_SHA", "")
+      if v2_enabled(values)
+      else values.get("CANON_EXPECT_COMMIT", "")
+  )
   print(
-      "[P64.CAPSULE] diagnostic_replay_ready "
+      f"[{marker}] diagnostic_replay_ready "
       f"path={path} sha256={observed_file_sha} rows={metadata.get('rows')} "
       f"capture_run={metadata.get('capture_run_id')} "
       f"capture_source={metadata.get('capture_source_commit')} "
-      f"replay_source={values.get('CANON_EXPECT_COMMIT', '')} "
+      f"replay_source={replay_source} "
       "rollout=skipped rescore_b=skipped certification=0",
       flush=True,
   )
@@ -523,7 +670,7 @@ def bind_or_verify_model(
     raise P64TrainingCapsuleError(
         "P64 model binding requires capture or replay mode"
     )
-  _require_p64_identity(values)
+  _require_training_capsule_identity(values)
   capsule = _require_path(values)
   capsule_sha = file_sha256(capsule)
   canonical_fingerprint = json.dumps(
@@ -532,11 +679,21 @@ def bind_or_verify_model(
   fingerprint_sha = _sha256_bytes(canonical_fingerprint.encode())
   binding = model_binding_path(capsule)
   if active_mode == "capture":
+    capture_source_commit = (
+        values.get("V2_FL_SOURCE_SHA", "")
+        if v2_enabled(values)
+        else values.get("CANON_EXPECT_COMMIT", "")
+    )
+    capture_run_id = (
+        values.get("V2_FL_LABEL", "")
+        if v2_enabled(values)
+        else values.get("CANON_RUN_ID", "")
+    )
     payload = {
         "schema": MODEL_BINDING_SCHEMA,
         "capsule_sha256": capsule_sha,
-        "capture_source_commit": values.get("CANON_EXPECT_COMMIT", ""),
-        "capture_run_id": values.get("CANON_RUN_ID", ""),
+        "capture_source_commit": capture_source_commit,
+        "capture_run_id": capture_run_id,
         "model_dir_name": values.get("CANON_MODEL_DIR_NAME", ""),
         "model_fingerprint_sha256": fingerprint_sha,
         "model_fingerprint": fingerprint,
@@ -544,10 +701,15 @@ def bind_or_verify_model(
     _atomic_write_json(binding, payload)
     binding_sha = file_sha256(binding)
   else:
-    expected_binding_sha = values.get(MODEL_BINDING_SHA256_ENV, "")
+    binding_sha_env = (
+        V2_MODEL_BINDING_SHA256_ENV
+        if v2_enabled(values)
+        else MODEL_BINDING_SHA256_ENV
+    )
+    expected_binding_sha = values.get(binding_sha_env, "")
     if not _SHA_RE.fullmatch(expected_binding_sha):
       raise P64TrainingCapsuleError(
-          f"{MODEL_BINDING_SHA256_ENV} must be 64 lowercase hex in replay"
+          f"{binding_sha_env} must be 64 lowercase hex in replay"
       )
     observed_binding_sha = file_sha256(binding)
     if observed_binding_sha != expected_binding_sha:
@@ -580,8 +742,9 @@ def bind_or_verify_model(
       "binding_sha256": binding_sha,
       "model_fingerprint_sha256": fingerprint_sha,
   }
+  marker = "V2.CAPSULE" if v2_enabled(values) else "P64.CAPSULE"
   print(
-      f"[P64.CAPSULE] model_{'bound' if active_mode == 'capture' else 'verified'} "
+      f"[{marker}] model_{'bound' if active_mode == 'capture' else 'verified'} "
       f"mode={active_mode} capsule_sha256={capsule_sha} "
       f"binding_sha256={binding_sha} "
       f"model_fingerprint_sha256={fingerprint_sha} sampled_model=1",

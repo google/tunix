@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -107,6 +109,9 @@ def _environment(workload_name: str) -> dict[str, str]:
       "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
       "CANON_DP_FINITE_FETCH": "batched-commit",
       "CANON_P71_SCAN": "fwd",
+      "CANON_P75_REPORT_ADJOINT_BUCKETS": "0",
+      "CANON_P76_CHUNK_DEPENDENCY_TICKET": "0",
+      "CANON_P77_CHUNK_BACKPRESSURE": "0",
       "CANON_WANDB_ONLINE_REQUIRED": "0",
       "CANON_P31_MONOTONIC_METRICS": "1",
       "CANON_WANDB_PROJECT": workload.wandb_project,
@@ -213,6 +218,157 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
     self.assertIn("[V2.FL.SAMPLER] CONTRACT_PASS", learner)
     self.assertIn('env.get("CANON_P66_P59_CHECK_VMA") == "1"', learner)
 
+  def test_hbm_stage_diagnostic_is_measure_r0_and_r0b_only(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text(encoding="utf-8")
+    adapter = (
+        ROOT / "tunix/rl/canonical_qwen3_adapter.py"
+    ).read_text(encoding="utf-8")
+    inner = (
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "run_frozenlake_dp2tp2_inner.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn("workload.frozenlake_four_chip_2x2_proxy", learner)
+    self.assertIn('os.environ.get("V2_FL_MODE", "") == "measure"', learner)
+    self.assertIn(
+        'os.environ.get("V2_FL_ARM", "") in ("r0", "r0b")', learner
+    )
+    self.assertIn('segmented_kwargs["hbm_stage_sink"]', learner)
+    self.assertIn('hbm_stage_boundary("after_model_backward"', adapter)
+    self.assertIn('hbm_stage_boundary("after_reduce_compare"', adapter)
+    self.assertIn('hbm_stage_boundary("after_sink_delete"', adapter)
+    self.assertIn("emit_memory_analysis=True", adapter)
+    self.assertIn("[V2.FL.REPORT_ADJOINT_MEMORY]", adapter)
+    self.assertIn('hbm_chunk_stage_sink("before"', adapter)
+    self.assertIn('"after_pullbacks", chunk_index', adapter)
+    self.assertIn('hbm_chunk_stage_sink("after_accumulate"', adapter)
+    self.assertIn('hbm_stage_sink("report_group_after_bucket_0"', adapter)
+    self.assertIn('bucket == 0 and stage == "after_execute"', adapter)
+    self.assertIn("hbm_stage_group = 1", adapter)
+    self.assertIn('key=lambda index: int(specs[index]["num_chunks"])', adapter)
+    tree = ast.parse(adapter)
+    callback_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_p32_reverse_group"
+    ]
+    callback_keywords = [
+        keyword.value
+        for node in callback_calls
+        for keyword in node.keywords
+        if keyword.arg == "hbm_chunk_stage_sink"
+    ]
+    self.assertEqual(len(callback_keywords), 1)
+    self.assertIsInstance(callback_keywords[0], ast.Lambda)
+    self.assertTrue(any(
+        not any(
+            keyword.arg == "hbm_chunk_stage_sink" for keyword in node.keywords
+        )
+        for node in callback_calls
+    ))
+    self.assertIn('os.environ["V2_FL_MODE"] == "measure"', inner)
+    self.assertIn(
+        'os.environ["V2_FL_ARM"] in ("r0", "r0b")', inner
+    )
+
+  def test_reduce_once_accumulator_loan_is_fail_closed_in_the_learner(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(learner)
+    called_attributes = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    }
+    update_functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_run_p28_g6_update"
+    ]
+    self.assertEqual(len(update_functions), 1)
+    segmented_calls = [
+        node
+        for node in ast.walk(update_functions[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "segmented_dp_grpo_value_and_grad"
+    ]
+
+    self.assertIn("loan_precomputed_gradient_accumulator", called_attributes)
+    self.assertIn("adopt_precomputed_scaled_gradient", called_attributes)
+    self.assertIn(
+        "discard_adopted_precomputed_gradients", called_attributes
+    )
+    self.assertIn("dp_reduce_once_mode", called_attributes)
+    self.assertEqual(len(segmented_calls), 1)
+    self.assertIn(
+        'segmented_kwargs["gradient_accumulator_loan"]', learner
+    )
+    self.assertIn('os.environ.get("V2_P0_NEGATIVE_CONTROL", "")', learner)
+    self.assertIn(
+        "reduce-once returned without adopting its accumulator loan", learner
+    )
+    self.assertIn("[V2.REDUCE_ONCE.ACCUMULATOR_RESET]", learner)
+    self.assertNotIn("not p33_no_commit or numeric_debug", learner)
+
+  def test_reduce_once_adoption_keeps_the_established_scaled_norm_graph(self):
+    source = (
+        ROOT / "tunix/sft/peft_trainer.py"
+    ).read_text(encoding="utf-8")
+    methods = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_precomputed_gradient_adopt_scaled_step"
+    ]
+    self.assertEqual(len(methods), 1)
+    norm_calls = [
+        node
+        for node in ast.walk(methods[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_precomputed_gradient_norm"
+    ]
+    self.assertEqual(len(norm_calls), 1)
+    self.assertEqual(len(norm_calls[0].args), 1)
+    self.assertIsInstance(norm_calls[0].args[0], ast.Name)
+    self.assertEqual(norm_calls[0].args[0].id, "scaled")
+
+  def test_p45_r2_anchor_pins_the_deliberate_repin_receipt(self):
+    registry = json.loads((
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "gradient_anchors.json"
+    ).read_text(encoding="utf-8"))
+    self.assertEqual(
+        registry["anchors"].get("p45:r2"),
+        {
+            "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+            "training_capsule_sha256": (
+                "99b6dcaba5b816644a02037ef8f4e8ae"
+                "0199eb1106a4142e3d076b3f48d8539c"
+            ),
+            "micro_gradient_norms": [
+                37.869327545166016,
+                6.235235691070557,
+                6.509113311767578,
+                7.796840667724609,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            "update_gradient_norm": 23.40300178527832,
+        },
+    )
+
   def test_onehost_proxy_preserves_the_three_epoch_dataset_capacity(self):
     source = TRAIN_ENTRYPOINT.read_text(encoding="utf-8")
     self.assertIn("NUM_EPOCHS = 3", source)
@@ -312,7 +468,7 @@ class FrozenLakeOneHostContractTest(unittest.TestCase):
           },
       )
 
-  def test_profile_accepts_only_four_registered_optimization_arms(self):
+  def test_profile_accepts_registered_optimization_arms(self):
     script = f"""
 set -euo pipefail
 export CANON_PROFILE_FILE={PROFILE_REL}
@@ -323,6 +479,9 @@ export CANON_P57_TIM_ARM=
 export CANON_P32_KEEP_TAPE=stream
 export CANON_DP_REDUCE_ONCE=1
 export CANON_P32_LENGTH_SORT=1
+export CANON_P75_REPORT_ADJOINT_BUCKETS=0
+export CANON_P76_CHUNK_DEPENDENCY_TICKET=0
+export CANON_P77_CHUNK_BACKPRESSURE=0
 source {PROFILE}
 printf '%s\n' "$CANON_P32_WORKLOAD|$CANON_MODEL_DIR_NAME|$CANON_P66_P59_CHECK_VMA|$CANON_P33_RUN_STAGE|$CANON_P33_NO_COMMIT|${{CANON_DP_COLLECTIVE_REDUCE+x}}|$FL_VLLM_HBM_UTIL"
 """
@@ -368,6 +527,174 @@ printf '%s\n' "$CANON_P32_WORKLOAD|$CANON_MODEL_DIR_NAME|$CANON_P66_P59_CHECK_VM
     )
     self.assertNotEqual(rejected.returncode, 0)
     self.assertIn("optimization arm is not registered", rejected.stderr)
+
+  def test_profile_admits_p76_only_with_p75_on_p45(self):
+    script = f"""
+set -euo pipefail
+export CANON_PROFILE_FILE={PROFILE_REL}
+export CANON_P57_WORKLOAD_CANDIDATE=
+export CANON_P57_DATA_SPLIT=
+export CANON_P57_RUN_KIND=
+export CANON_P57_TIM_ARM=
+export CANON_P32_KEEP_TAPE=0
+export CANON_DP_REDUCE_ONCE=0
+export CANON_P32_LENGTH_SORT=0
+export CANON_P75_REPORT_ADJOINT_BUCKETS=1
+export CANON_P76_CHUNK_DEPENDENCY_TICKET=1
+export CANON_P77_CHUNK_BACKPRESSURE=0
+source {PROFILE}
+printf '%s\n' "$CANON_P32_WORKLOAD|$CANON_P75_REPORT_ADJOINT_BUCKETS|$CANON_P76_CHUNK_DEPENDENCY_TICKET|$CANON_P77_CHUNK_BACKPRESSURE"
+"""
+    accepted = subprocess.run(
+        ["bash", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={},
+    )
+    self.assertEqual(
+        accepted.stdout.strip(),
+        "frozenlake-p45-onehost-dp2-tp2|1|1|0",
+    )
+    for mutation in (
+        script.replace(
+            "export CANON_P75_REPORT_ADJOINT_BUCKETS=1",
+            "export CANON_P75_REPORT_ADJOINT_BUCKETS=0",
+        ),
+        script.replace(
+            "export CANON_P57_WORKLOAD_CANDIDATE=",
+            "export CANON_P57_WORKLOAD_CANDIDATE=m15",
+        ).replace(
+            "export CANON_P57_DATA_SPLIT=",
+            "export CANON_P57_DATA_SPLIT=main",
+        ),
+    ):
+      rejected = subprocess.run(
+          ["bash", "-c", mutation],
+          check=False,
+          capture_output=True,
+          text=True,
+          env={},
+      )
+      self.assertNotEqual(rejected.returncode, 0)
+
+  def test_p75_p76_p77_delivery_is_exactly_p45_capacity_arms(self):
+    runner = (
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "run_frozenlake_dp2tp2_onehost.sh"
+    ).read_text(encoding="utf-8")
+    inner = (
+        ROOT
+        / "canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/"
+        "run_frozenlake_dp2tp2_inner.sh"
+    ).read_text(encoding="utf-8")
+    profile = PROFILE.read_text(encoding="utf-8")
+    self.assertIn(
+        '-e CANON_P75_REPORT_ADJOINT_BUCKETS="$report_adjoint_buckets"',
+        runner,
+    )
+    self.assertIn(
+        '-e CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_dependency_ticket"',
+        runner,
+    )
+    self.assertIn(
+        '-e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure"', runner
+    )
+    self.assertIn(
+        'if [ "${CANON_P75_REPORT_ADJOINT_BUCKETS:-}" != "$report_buckets" ]',
+        inner,
+    )
+    self.assertIn(
+        'if [ "${CANON_P76_CHUNK_DEPENDENCY_TICKET:-}" != "$chunk_ticket" ]',
+        inner,
+    )
+    self.assertIn(
+        'if [ "${CANON_P77_CHUNK_BACKPRESSURE:-}" != '
+        '"$chunk_backpressure" ]',
+        inner,
+    )
+    self.assertIn(
+        "0:0:0:1:0:0|0:0:0:1:1:0|0:0:0:1:0:1)",
+        profile,
+    )
+    self.assertIn(
+        '"$CANON_P32_WORKLOAD" != "frozenlake-p45-onehost-dp2-tp2"',
+        profile,
+    )
+    self.assertIn(
+        'r0c) report_adjoint_buckets=1; chunk_dependency_ticket=1',
+        runner,
+    )
+    self.assertIn(
+        'r0c) keep_tape=0; reduce_once=0; length_sort=0; '
+        'report_buckets=1; chunk_ticket=1',
+        inner,
+    )
+    self.assertIn(
+        'r0d) report_adjoint_buckets=1; chunk_dependency_ticket=0; '
+        'chunk_backpressure=1',
+        runner,
+    )
+    self.assertIn(
+        'r0d) keep_tape=0; reduce_once=0; length_sort=0; '
+        'report_buckets=1; chunk_ticket=0; chunk_backpressure=1',
+        inner,
+    )
+
+  def test_profile_admits_p77_only_with_p75_on_p45(self):
+    script = f"""
+set -euo pipefail
+export CANON_PROFILE_FILE={PROFILE_REL}
+export CANON_P57_WORKLOAD_CANDIDATE=
+export CANON_P57_DATA_SPLIT=
+export CANON_P57_RUN_KIND=
+export CANON_P57_TIM_ARM=
+export CANON_P32_KEEP_TAPE=0
+export CANON_DP_REDUCE_ONCE=0
+export CANON_P32_LENGTH_SORT=0
+export CANON_P75_REPORT_ADJOINT_BUCKETS=1
+export CANON_P76_CHUNK_DEPENDENCY_TICKET=0
+export CANON_P77_CHUNK_BACKPRESSURE=1
+source {PROFILE}
+printf '%s\n' "$CANON_P32_WORKLOAD|$CANON_P75_REPORT_ADJOINT_BUCKETS|$CANON_P76_CHUNK_DEPENDENCY_TICKET|$CANON_P77_CHUNK_BACKPRESSURE"
+"""
+    accepted = subprocess.run(
+        ["bash", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={},
+    )
+    self.assertEqual(
+        accepted.stdout.strip(),
+        "frozenlake-p45-onehost-dp2-tp2|1|0|1",
+    )
+    for mutation in (
+        script.replace(
+            "export CANON_P75_REPORT_ADJOINT_BUCKETS=1",
+            "export CANON_P75_REPORT_ADJOINT_BUCKETS=0",
+        ),
+        script.replace(
+            "export CANON_P76_CHUNK_DEPENDENCY_TICKET=0",
+            "export CANON_P76_CHUNK_DEPENDENCY_TICKET=1",
+        ),
+        script.replace(
+            "export CANON_P57_WORKLOAD_CANDIDATE=",
+            "export CANON_P57_WORKLOAD_CANDIDATE=m15",
+        ).replace(
+            "export CANON_P57_DATA_SPLIT=",
+            "export CANON_P57_DATA_SPLIT=main",
+        ),
+    ):
+      rejected = subprocess.run(
+          ["bash", "-c", mutation],
+          check=False,
+          capture_output=True,
+          text=True,
+          env={},
+      )
+      self.assertNotEqual(rejected.returncode, 0)
 
 
 if __name__ == "__main__":

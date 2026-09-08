@@ -1606,6 +1606,240 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIsNone(scaled._jitted_precomputed_gradient_scaled_step_fn)
     self.assertIsNotNone(scaled._jitted_precomputed_gradient_scaled_step_impl)
 
+  def test_reduce_once_adopt_matches_scaled_add_and_reuses_donated_buffers(self):
+    def make_trainer():
+      config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=100,
+          max_steps=1,
+          gradient_accumulation_steps=16,
+          checkpoint_root_directory=None,
+      )
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      return peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    baseline = make_trainer()
+    adopted = make_trainer()
+
+    def gradient_for(trainer):
+      def fill(value):
+        data = jnp.arange(value[...].size, dtype=jnp.float32).reshape(
+            value[...].shape
+        )
+        if data.size:
+          data = data.at[0].set(jnp.asarray(-0.0, jnp.float32))
+        return type(value)(data)
+
+      return jax.tree.map(
+          fill,
+          nnx.state(trainer.model, nnx.Param),
+          is_leaf=lambda value: isinstance(value, nnx.VariableState),
+      )
+
+    baseline_gradient = gradient_for(baseline)
+    adopted_gradient = gradient_for(adopted)
+    multiplier = jnp.asarray(0.25, jnp.float32)
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      expected_norm = baseline.accumulate_precomputed_scaled_gradient_microbatch(
+          baseline_gradient,
+          multiplier,
+          microbatch_index=0,
+          microbatches=16,
+      )
+      loan = adopted.loan_precomputed_gradient_accumulator()
+      for leaf in jax.tree.leaves(loan):
+        leaf.delete()
+      gradient_pointers = tuple(
+          leaf.addressable_data(0).unsafe_buffer_pointer()
+          for leaf in jax.tree.leaves(adopted_gradient)
+      )
+      actual_norm = adopted.adopt_precomputed_scaled_gradient(
+          adopted_gradient,
+          multiplier,
+          microbatch_index=0,
+          microbatches=16,
+      )
+
+      np.testing.assert_array_equal(
+          np.asarray(actual_norm).view(np.uint32),
+          np.asarray(expected_norm).view(np.uint32),
+      )
+      actual_pointers = tuple(
+          leaf.addressable_data(0).unsafe_buffer_pointer()
+          for leaf in jax.tree.leaves(adopted.grad_accumulator.grads)
+      )
+      self.assertEqual(actual_pointers, gradient_pointers)
+      self.assertTrue(
+          all(leaf.is_deleted() for leaf in jax.tree.leaves(adopted_gradient))
+      )
+      for actual, expected in zip(
+          jax.tree.leaves(adopted.grad_accumulator.grads),
+          jax.tree.leaves(baseline.grad_accumulator.grads),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(
+            np.asarray(actual).view(np.uint32),
+            np.asarray(expected).view(np.uint32),
+        )
+      self.assertEqual(float(adopted.grad_accumulator.denom[...]), 16.0)
+      self.assertEqual(adopted.iter_steps, baseline.iter_steps)
+      self.assertEqual(
+          adopted._p28_precomputed_microstep,
+          baseline._p28_precomputed_microstep,
+      )
+
+      actual_commit = adopted.commit_precomputed_gradients()
+      expected_commit = baseline.commit_precomputed_gradients()
+      np.testing.assert_array_equal(
+          np.asarray(actual_commit).view(np.uint32),
+          np.asarray(expected_commit).view(np.uint32),
+      )
+      for actual, expected in zip(
+          jax.tree.leaves(nnx.state(adopted.model, nnx.Param)),
+          jax.tree.leaves(nnx.state(baseline.model, nnx.Param)),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(
+            np.asarray(actual).view(np.uint32),
+            np.asarray(expected).view(np.uint32),
+        )
+      next_loan = adopted.loan_precomputed_gradient_accumulator()
+      self.assertTrue(
+          all(not leaf.is_deleted() for leaf in jax.tree.leaves(next_loan))
+      )
+
+  def test_reduce_once_adopt_rejects_unretired_or_nonidle_loan(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=2,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    gradient = jax.tree.map(
+        lambda value: type(value)(jnp.ones_like(value[...], jnp.float32)),
+        nnx.state(trainer.model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.VariableState),
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_LOCAL_TRAJECTORIES": "2",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      trainer.loan_precomputed_gradient_accumulator()
+      with self.assertRaisesRegex(ValueError, "handle retired"):
+        trainer.adopt_precomputed_scaled_gradient(
+            gradient, 1.0, microbatch_index=0, microbatches=2
+        )
+      trainer._p28_precomputed_microstep = 1
+      with self.assertRaisesRegex(ValueError, "idle transaction"):
+        trainer.loan_precomputed_gradient_accumulator()
+
+  def test_reduce_once_adopted_no_commit_discards_in_place(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=16,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    model_before = jax.tree.map(
+        lambda value: np.asarray(value).view(np.uint32).copy(),
+        nnx.state(trainer.model, nnx.Param),
+    )
+    gradients = jax.tree.map(
+        lambda value: type(value)(
+            jnp.arange(value[...].size, dtype=jnp.float32).reshape(
+                value[...].shape
+            )
+        ),
+        nnx.state(trainer.model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.VariableState),
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_DP_REDUCE_ONCE": "1",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+        "V2_P0_NEGATIVE_CONTROL": "",
+    }
+    multiplier = jnp.asarray(0.25, jnp.float32)
+    with mock.patch.dict(os.environ, env, clear=False):
+      with jax.transfer_guard("disallow"):
+        loan = trainer.loan_precomputed_gradient_accumulator()
+        for leaf in jax.tree.leaves(loan):
+          leaf.delete()
+        trainer.adopt_precomputed_scaled_gradient(
+            gradients, multiplier, microbatch_index=0, microbatches=16
+        )
+        adopted_pointers = tuple(
+            leaf.addressable_data(0).unsafe_buffer_pointer()
+            for leaf in jax.tree.leaves(trainer.grad_accumulator.grads)
+        )
+        denominator = trainer.discard_adopted_precomputed_gradients()
+        reset_pointers = tuple(
+            leaf.addressable_data(0).unsafe_buffer_pointer()
+            for leaf in jax.tree.leaves(trainer.grad_accumulator.grads)
+        )
+
+      self.assertEqual(float(denominator), 16.0)
+      self.assertEqual(reset_pointers, adopted_pointers)
+      self.assertEqual(trainer._p28_precomputed_microstep, 0)
+      self.assertEqual(trainer.train_steps, 0)
+      for leaf in jax.tree.leaves(trainer.grad_accumulator.grads):
+        np.testing.assert_array_equal(
+            np.asarray(leaf).view(np.uint32),
+            np.zeros(leaf.shape, dtype=np.uint32),
+        )
+      self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)
+      for actual, expected in zip(
+          jax.tree.leaves(nnx.state(trainer.model, nnx.Param)),
+          jax.tree.leaves(model_before),
+          strict=True,
+      ):
+        np.testing.assert_array_equal(
+            np.asarray(actual).view(np.uint32), expected
+        )
+      next_loan = trainer.loan_precomputed_gradient_accumulator()
+      self.assertTrue(
+          all(not leaf.is_deleted() for leaf in jax.tree.leaves(next_loan))
+      )
+
+    with mock.patch.dict(
+        os.environ,
+        {**env, "V2_P0_NEGATIVE_CONTROL": "1"},
+        clear=False,
+    ):
+      with self.assertRaisesRegex(ValueError, "adopted discard is reserved"):
+        trainer.discard_adopted_precomputed_gradients()
+
   def test_p63_finite_overflow_commits_nonzero_clipped_update(self):
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=100,

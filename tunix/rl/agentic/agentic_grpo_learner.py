@@ -2019,12 +2019,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         if capsule_mode == "capture":
           if precheck_record.get("verdict") != "PASS":
             raise alignment.AlignmentGateError(
-                "P64 training capsule requires strict pre-alignment PASS"
+                "training capsule requires strict pre-alignment PASS"
             )
           p64_training_capsule.persist(combined_batch)
         elif capsule_mode == "replay":
           raise alignment.AlignmentGateError(
-              "P64 replay must bypass rollout and rescore production"
+              "training-capsule replay must bypass rollout and rescore production"
           )
         if diagnostic_only:
           alignment.stop_after_diagnostic_precheck(precheck_record)

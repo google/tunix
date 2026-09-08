@@ -22,21 +22,57 @@ case "$workload" in
   *) echo "[V2.FL.ONEHOST] unknown workload: $workload" >&2; exit 2 ;;
 esac
 case "$arm" in
-  r0) keep_tape=0; reduce_once=0; length_sort=0 ;;
-  r1) keep_tape=stream; reduce_once=0; length_sort=0 ;;
-  r2) keep_tape=stream; reduce_once=1; length_sort=0 ;;
-  r3) keep_tape=stream; reduce_once=1; length_sort=1 ;;
+  r0) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=0 ;;
+  r0b) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=0; chunk_backpressure=0 ;;
+  r0c) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=1; chunk_backpressure=0 ;;
+  r0d) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=0; chunk_backpressure=1 ;;
+  r1) keep_tape=stream; reduce_once=0; length_sort=0; report_buckets=0 ;;
+  r2) keep_tape=stream; reduce_once=1; length_sort=0; report_buckets=0 ;;
+  r3) keep_tape=stream; reduce_once=1; length_sort=1; report_buckets=0 ;;
   *) echo "[V2.FL.ONEHOST] unknown arm: $arm" >&2; exit 2 ;;
 esac
+chunk_ticket="${chunk_ticket:-0}"
+chunk_backpressure="${chunk_backpressure:-0}"
+if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && [ "$workload" != p45 ]; then
+  echo "[V2.FL.ONEHOST] $arm P75/P76/P77 capacity arm admits only P45" >&2
+  exit 2
+fi
 export CANON_PROFILE_FILE="$profile_rel"
 export CANON_P32_KEEP_TAPE="$keep_tape"
 export CANON_DP_REDUCE_ONCE="$reduce_once"
 export CANON_P32_LENGTH_SORT="$length_sort"
+if [ "${CANON_P75_REPORT_ADJOINT_BUCKETS:-}" != "$report_buckets" ]; then
+  echo "[V2.FL.ONEHOST] outer/inner report-bucket selector mismatch" >&2
+  exit 2
+fi
+export CANON_P75_REPORT_ADJOINT_BUCKETS="$report_buckets"
+if [ "${CANON_P76_CHUNK_DEPENDENCY_TICKET:-}" != "$chunk_ticket" ]; then
+  echo "[V2.FL.ONEHOST] outer/inner chunk-ticket selector mismatch" >&2
+  exit 2
+fi
+export CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_ticket"
+if [ "${CANON_P77_CHUNK_BACKPRESSURE:-}" != "$chunk_backpressure" ]; then
+  echo "[V2.FL.ONEHOST] outer/inner chunk-backpressure selector mismatch" >&2
+  exit 2
+fi
+export CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure"
 export CANON_WANDB_RUN_NAME="v2-fl-${workload}-${arm}-${V2_FL_LABEL:?}"
 export CANON_P57_RUN_KIND=
 export CANON_P57_TIM_ARM=
 # shellcheck disable=SC1090
 source "$pkg/$profile_rel"
+if [ "${CANON_P75_REPORT_ADJOINT_BUCKETS:-}" != "$report_buckets" ]; then
+  echo "[V2.FL.ONEHOST] profile changed report-bucket selector" >&2
+  exit 2
+fi
+if [ "${CANON_P76_CHUNK_DEPENDENCY_TICKET:-}" != "$chunk_ticket" ]; then
+  echo "[V2.FL.ONEHOST] profile changed chunk-ticket selector" >&2
+  exit 2
+fi
+if [ "${CANON_P77_CHUNK_BACKPRESSURE:-}" != "$chunk_backpressure" ]; then
+  echo "[V2.FL.ONEHOST] profile changed chunk-backpressure selector" >&2
+  exit 2
+fi
 
 python3 "$pkg/tasks/p41-optimizer-residency/scripts/admit_frozenlake_runtime.py" \
   --gymnasium-wheel "${V2_FL_DEPS:?}/gymnasium-1.3.0-py3-none-any.whl" \
@@ -96,10 +132,35 @@ manifest = {
         "keep_tape": os.environ["CANON_P32_KEEP_TAPE"],
         "reduce_once": os.environ["CANON_DP_REDUCE_ONCE"],
         "length_sort": os.environ["CANON_P32_LENGTH_SORT"],
+        "report_adjoint_buckets": os.environ[
+            "CANON_P75_REPORT_ADJOINT_BUCKETS"
+        ],
+        "chunk_dependency_ticket": os.environ[
+            "CANON_P76_CHUNK_DEPENDENCY_TICKET"
+        ],
+        "chunk_backpressure": os.environ["CANON_P77_CHUNK_BACKPRESSURE"],
+    },
+    "reducer_schedule": {
+        "kind": "fixed-local-byte-buckets",
+        "max_local_bytes": 2 * 1024**3,
     },
     "checked_vma": os.environ["CANON_P66_P59_CHECK_VMA"] == "1",
     "wandb_mode": os.environ["WANDB_MODE"],
     "classification_mode": os.environ["V2_FL_MODE"],
+    "training_capsule": {
+        "mode": os.environ["V2_FL_CAPSULE_MODE"],
+        "capture_run": os.environ.get("V2_FL_CAPSULE_CAPTURE_RUN") or None,
+        "sha256": (
+            os.environ.get("CANON_V2_TRAINING_CAPSULE_SHA256") or None
+        ),
+        "model_binding_sha256": (
+            os.environ.get("CANON_V2_MODEL_BINDING_SHA256") or None
+        ),
+    },
+    "hbm_stage_diagnostic": (
+        os.environ["V2_FL_MODE"] == "measure"
+        and os.environ["V2_FL_ARM"] in ("r0", "r0b")
+    ),
 }
 path = Path(os.environ["V2_FL_ROOT"]) / "run_manifest.json"
 with path.open("x", encoding="utf-8") as output:

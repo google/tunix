@@ -58,6 +58,7 @@ from tunix.rl import common
 from tunix.rl import deepswe_contract
 from tunix.rl import deepswe_debug
 from tunix.rl import dp_workloads
+from tunix.rl import dp_training
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import gsm8k_xprof
@@ -681,6 +682,29 @@ def _validate_p58_full_batch_groups(
     raise alignment.AlignmentGateError(
         f"P58 consumer prompt group ids are duplicated: {group_ids}"
     )
+
+
+def _gradient_quality_norms(
+    result: Mapping[str, Any], streamed_norms: Sequence[jax.Array]
+) -> tuple[list[jax.Array], jax.Array | None]:
+  """Separates per-group activity from the reduced update-quality anchor."""
+  if (
+      result.get("dp_reduction_visibility")
+      != "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+  ):
+    return list(streamed_norms), None
+  if len(streamed_norms) != 1:
+    raise alignment.AlignmentGateError(
+        "reduce-once update streamed "
+        f"{len(streamed_norms)} contributions, expected 1"
+    )
+  return (
+      [
+          jnp.asarray(value, jnp.float32)
+          for value in result["staged_group_norms"]
+      ],
+      streamed_norms[0],
+  )
 
 
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -1392,11 +1416,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "P62 and P64 numerical observers are mutually exclusive"
       )
     p64_capsule_mode = p64_training_capsule.mode()
-    if p64_numeric_debug != bool(p64_capsule_mode):
+    v2_capsule = p64_training_capsule.v2_enabled()
+    if p64_numeric_debug != bool(p64_capsule_mode and not v2_capsule):
       raise alignment.AlignmentGateError(
           "P64 numerical debug and training-capsule mode must be enabled "
           "together"
       )
+    if v2_capsule and (p62_numeric_debug or p64_numeric_debug):
+      raise alignment.AlignmentGateError(
+          "V2 training capsule cannot coexist with P62/P64 numerical debug"
+      )
+    p64_training_capsule.validate_identity()
     if p62_numeric_debug and not (
         p33_workload
         and workload.name == "gsm8k"
@@ -1484,6 +1514,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     sharding_profile_enabled = (
         os.environ.get("CANON_P30_SHARDING_PROFILE", "") == "1"
     )
+    hbm_stage_diagnostic = (
+        p33_workload
+        and p33_no_commit
+        and workload.frozenlake_four_chip_2x2_proxy
+        and run_stage == "backward-no-commit"
+        and os.environ.get("V2_FL_MODE", "") == "measure"
+        and os.environ.get("V2_FL_ARM", "") in ("r0", "r0b")
+    )
+    hbm_stage_receipts = []
 
     def memory_snapshot():
       snapshots = []
@@ -1500,6 +1539,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "bytes_limit": stats.get("bytes_limit"),
         })
       return tuple(snapshots)
+
+    def capture_hbm_stage(stage, group_index):
+      snapshots = memory_snapshot()
+      record = {
+          "stage": stage,
+          "group": int(group_index),
+          "devices": snapshots,
+      }
+      hbm_stage_receipts.append(record)
+      print(
+          "[V2.FL.HBM_STAGE] "
+          + json.dumps(record, sort_keys=True, separators=(",", ":")),
+          flush=True,
+      )
 
     def fingerprint(value, *, min_elements=128):
       return actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
@@ -1541,7 +1594,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         ),
         "train_steps": actor_trainer.train_steps,
     }
-    if p64_numeric_debug:
+    if p64_capsule_mode:
       p64_training_capsule.bind_or_verify_model(before["model"])
     hbm_before = memory_snapshot()
     emit_sharding_inventory("before_reverse")
@@ -1566,6 +1619,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           flush=True,
       )
     micro_norms = []
+    reduce_once_update_norm = None
     fused_pair_accumulation = (
         os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") == "1"
     )
@@ -1578,6 +1632,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "[P30.G2] FUSED_PAIR_ACCUMULATION on order=(left+right)*scale",
           flush=True,
       )
+
+    reduce_once_accumulator_loan = None
+    reduce_once_accumulator_loan_active = False
+    reduce_once_accumulator_loan_adopted = False
+    if (
+        p33_workload
+        and dp_training.dp_reduce_once_mode()
+        and not os.environ.get("V2_P0_NEGATIVE_CONTROL", "")
+    ):
+      reduce_once_accumulator_loan = (
+          actor_trainer.loan_precomputed_gradient_accumulator()
+      )
+      reduce_once_accumulator_loan_active = True
 
     def consume_microbatch(index, gradients):
       if segmented_no_commit:
@@ -1616,6 +1683,29 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
     def consume_scaled(index, gradients, multiplier, microbatches=1):
+      nonlocal reduce_once_accumulator_loan_active
+      nonlocal reduce_once_accumulator_loan_adopted
+
+      def accumulate_or_adopt():
+        nonlocal reduce_once_accumulator_loan_active
+        nonlocal reduce_once_accumulator_loan_adopted
+        if reduce_once_accumulator_loan_active:
+          norm = actor_trainer.adopt_precomputed_scaled_gradient(
+              gradients,
+              multiplier,
+              microbatch_index=index,
+              microbatches=microbatches,
+          )
+          reduce_once_accumulator_loan_active = False
+          reduce_once_accumulator_loan_adopted = True
+          return norm
+        return actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
+            gradients,
+            multiplier,
+            microbatch_index=index,
+            microbatches=microbatches,
+        )
+
       if p33_no_commit:
         multiplier = jnp.asarray(multiplier, jnp.float32)
         if numeric_debug:
@@ -1654,15 +1744,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 f"stage=scaled_microgradient group={index} "
                 f"first={numeric_receipt['first_nonfinite']}"
             )
-          actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
-              gradients,
-              multiplier,
-              microbatch_index=index,
-              microbatches=microbatches,
-          )
+          accumulate_or_adopt()
           norm = jnp.asarray(
               numeric_receipt["stable_norm"], dtype=jnp.float32
           )
+        elif reduce_once_accumulator_loan_active:
+          norm = accumulate_or_adopt()
         else:
           norm = jnp.sqrt(sum(
               jnp.sum(jnp.square(
@@ -1672,12 +1759,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           ))
           norm.block_until_ready()
       else:
-        norm = actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
-            gradients,
-            multiplier,
-            microbatch_index=index,
-            microbatches=microbatches,
-        )
+        norm = accumulate_or_adopt()
       micro_norms.append(norm)
       if index + microbatches < expected_microbatches:
         print(
@@ -1686,6 +1768,30 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"microstep={index + microbatches}/{expected_microbatches}",
             flush=True,
         )
+
+    def discard_adopted_accumulator():
+      nonlocal reduce_once_accumulator_loan_adopted
+      if not reduce_once_accumulator_loan_adopted:
+        raise alignment.AlignmentGateError(
+            "adopted accumulator reset requested without ownership"
+        )
+      reset_leaves = len(jax.tree.leaves(
+          actor_trainer.grad_accumulator.grads
+      ))
+      with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+          rl_cluster_lib.Role.ACTOR
+      ):
+        denominator = (
+            actor_trainer.discard_adopted_precomputed_gradients()
+        )
+      reduce_once_accumulator_loan_adopted = False
+      print(
+          "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
+          f"leaves={reset_leaves} transition=adopted-to-idle "
+          "alias_mode=bitwise-zero host_transfers=0",
+          flush=True,
+      )
+      return denominator
 
     if p61_capture_dir:
       if before["train_steps"] != 0:
@@ -1714,6 +1820,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "gradient_microbatch_sink": consume_scaled,
             "deterministic_repeat": (p34_workload and p33_no_commit),
         }
+        if reduce_once_accumulator_loan is not None:
+          segmented_kwargs["gradient_accumulator_loan"] = (
+              reduce_once_accumulator_loan
+          )
+        if hbm_stage_diagnostic:
+          segmented_kwargs["hbm_stage_sink"] = capture_hbm_stage
         if xprof_train_schedule is not None:
           segmented_kwargs["xprof_train_schedule"] = xprof_train_schedule
         result = adapter.segmented_dp_grpo_value_and_grad(
@@ -1732,22 +1844,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       value_and_grad_call_done = time.perf_counter()
     result["loss"].block_until_ready()
-    if (
-        result.get("dp_reduction_visibility")
-        == "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
-    ):
-      # CANON_DP_REDUCE_ONCE=1: the update reduced once, so the one streamed
-      # norm is the update total; the per-group activity evidence is the
-      # rank-local staged contribution norm the adapter resolved per group.
-      if len(micro_norms) != 1:
-        raise alignment.AlignmentGateError(
-            "reduce-once update streamed "
-            f"{len(micro_norms)} contributions, expected 1"
-        )
-      micro_norms = [
-          jnp.asarray(value, jnp.float32)
-          for value in result["staged_group_norms"]
-      ]
+    if reduce_once_accumulator_loan_active:
+      raise alignment.AlignmentGateError(
+          "reduce-once returned without adopting its accumulator loan"
+      )
+    # CANON_DP_REDUCE_ONCE=1 streams one reduced, scaled gradient. Preserve
+    # its norm as the update-quality anchor while displaying rank-local
+    # staged norms as the eight per-group activity receipts.
+    micro_norms, reduce_once_update_norm = _gradient_quality_norms(
+        result, micro_norms
+    )
     if perf_log.enabled():
       value_and_grad_done = time.perf_counter()
       print(
@@ -2018,10 +2124,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"{numeric_marker} final accumulator contract failed: "
             f"{accumulator_record}"
         )
-      with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
-          rl_cluster_lib.Role.ACTOR
-      ):
-        discarded_denominator = actor_trainer.discard_precomputed_gradients()
+      if reduce_once_accumulator_loan_adopted:
+        discarded_denominator = discard_adopted_accumulator()
+      else:
+        with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+            rl_cluster_lib.Role.ACTOR
+        ):
+          discarded_denominator = (
+              actor_trainer.discard_precomputed_gradients()
+          )
       if float(np.asarray(discarded_denominator)) != float(
           expected_microbatches
       ):
@@ -2037,6 +2148,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           f"diagnostic_replay={int(p64_capsule_mode == 'replay')}",
           flush=True,
       )
+
+    if p33_no_commit and reduce_once_accumulator_loan_adopted:
+      discard_adopted_accumulator()
 
     p58_all_filtered = (
         p34_workload
@@ -2228,6 +2342,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "state_fingerprints_before": before,
             "state_fingerprints_after": after_no_commit,
         }
+      if hbm_stage_diagnostic:
+        no_commit_record["hbm_stage_receipts"] = hbm_stage_receipts
+      if reduce_once_update_norm is not None:
+        no_commit_record["update_gradient_norm"] = float(
+            np.asarray(reduce_once_update_norm)
+        )
       report_path = os.environ.get("CANON_UPDATE_REPORT", "")
       if not report_path:
         raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")
@@ -3784,10 +3904,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # diagnostic replays.  Replays must never regenerate environment or
     # serving decode work.
     p64_replay = p64_training_capsule.is_replay()
+    v2_capsule = p64_training_capsule.v2_enabled()
     p58_trajectory_replay = deepswe_debug.q4_tp4_trajectory_replay(os.environ)
     if p64_replay and p58_trajectory_replay:
       raise alignment.AlignmentGateError(
-          "P64 and P58 diagnostic replays are mutually exclusive"
+          "training-capsule and P58 diagnostic replays are mutually exclusive"
       )
     diagnostic_replay = p64_replay or p58_trajectory_replay
     prompt_queue = queue.Queue()
@@ -3795,7 +3916,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if p64_replay:
       if eval_dataset is not None or all_eval_prompts:
         raise alignment.AlignmentGateError(
-            "P64 diagnostic replay forbids evaluation inputs"
+            "training-capsule diagnostic replay forbids evaluation inputs"
         )
       verified_capsule = p64_training_capsule.load_verified()
       replay_train_example = verified_capsule.build(
@@ -3808,12 +3929,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       if replay_precheck.get("verdict") != "PASS":
         raise alignment.AlignmentGateError(
-            "P64 diagnostic replay capsule failed strict pre-alignment"
+            "training-capsule replay failed strict pre-alignment"
         )
       producer_future = Future()
       producer_future.set_result(None)
+      capsule_marker = "V2.CAPSULE" if v2_capsule else "P64.CAPSULE"
       print(
-          "[P64.CAPSULE] producer_bypass verdict=PASS "
+          f"[{capsule_marker}] producer_bypass verdict=PASS "
           "environment=0 rollout=0 rescore_b=0",
           flush=True,
       )

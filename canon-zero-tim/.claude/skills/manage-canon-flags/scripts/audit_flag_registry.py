@@ -25,6 +25,15 @@ CHANGED_FLAG_PATHS = (
     ":(exclude,glob)**/debug_logs/**",
 )
 
+# These are module-local booleans derived from registered P57 environment
+# flags.  Their CANON_* spelling denotes canonical mode state, not another
+# settable name.  Keep the exception exact so a new identifier still fails
+# closed until it is registered or deliberately classified here.
+NON_SETTABLE_CANON_IDENTIFIERS = frozenset({
+    "CANON_P57_CALIBRATION",
+    "CANON_P57_NO_UPDATE",
+})
+
 
 def _package_root() -> Path:
   return Path(__file__).resolve().parents[4]
@@ -66,7 +75,12 @@ def _added_flags(repo: Path, base: str) -> set[str]:
       for line in completed.stdout.splitlines()
       if line.startswith("+") and not line.startswith("+++")
   )
-  return {name for line in added for name in FLAG_RE.findall(line)}
+  return {
+      name
+      for line in added
+      for name in FLAG_RE.findall(line)
+      if name not in NON_SETTABLE_CANON_IDENTIFIERS
+  }
 
 
 def _prefix(name: str) -> str:

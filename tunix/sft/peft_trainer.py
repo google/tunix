@@ -586,14 +586,17 @@ class PeftTrainer:
     self._jitted_eval_step_fn = None
     self._jitted_precomputed_gradient_step_impl = None
     self._jitted_precomputed_gradient_scaled_step_impl = None
+    self._jitted_precomputed_gradient_adopt_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
     self._jitted_precomputed_gradient_discard_impl = None
+    self._jitted_precomputed_gradient_adopted_discard_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
+    self._jitted_precomputed_gradient_adopted_discard_fn = None
     self._registered_learning_rate_schedule = None
     self._last_precomputed_commit_evidence = None
     self._p28_precomputed_microstep = 0
@@ -661,14 +664,17 @@ class PeftTrainer:
     self._jitted_eval_step_fn = None
     self._jitted_precomputed_gradient_step_impl = None
     self._jitted_precomputed_gradient_scaled_step_impl = None
+    self._jitted_precomputed_gradient_adopt_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
     self._jitted_precomputed_gradient_discard_impl = None
+    self._jitted_precomputed_gradient_adopted_discard_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
+    self._jitted_precomputed_gradient_adopted_discard_fn = None
 
   def _precomputed_gradient_step(
       self,
@@ -712,6 +718,40 @@ class PeftTrainer:
     )
     grad_accumulator.add(scaled, denom=denom.astype(jnp.float32))
     return _precomputed_gradient_norm(scaled)
+
+  def _precomputed_gradient_adopt_scaled_step(
+      self,
+      gradients: Any,
+      multiplier: ArrayLike,
+      microbatches: int,
+  ) -> tuple[Any, ArrayLike, ArrayLike]:
+    """Scales a reduce-once gradient directly into its donated storage."""
+    scaled = jax.tree.map(
+        lambda value: value * multiplier.astype(value.dtype), gradients
+    )
+
+    def canonicalize_zero(value):
+      # The existing accumulator expression is ``+0.0 + scaled``. XLA drops
+      # that add in this pure donating program, which would preserve ``-0``
+      # where the old expression returns ``+0``. Canonicalize only zero bit
+      # patterns; every nonzero finite payload remains exactly ``scaled``.
+      bits = jax.lax.bitcast_convert_type(value, jnp.uint32)
+      magnitude = jax.lax.bitwise_and(bits, jnp.uint32(0x7FFFFFFF))
+      adopted_bits = jnp.where(
+          magnitude == jnp.uint32(0), jnp.uint32(0), bits
+      )
+      return jax.lax.bitcast_convert_type(adopted_bits, jnp.float32)
+
+    adopted = jax.tree.map(canonicalize_zero, scaled)
+    return (
+        adopted,
+        jnp.asarray(float(microbatches), jnp.float32),
+        # Preserve the established scaled-step reduction graph.  Computing
+        # this derived receipt from ``adopted`` can reassociate the TPU sum
+        # with the zero-bit canonicalization even though every stored
+        # nonzero gradient value is unchanged.
+        _precomputed_gradient_norm(scaled),
+    )
 
   def _precomputed_gradient_commit(
       self,
@@ -794,6 +834,38 @@ class PeftTrainer:
     """Clears one complete streamed transaction without optimizer mutation."""
     denominator = grad_accumulator.denom[...]
     grad_accumulator.reset()
+    return denominator
+
+  def _precomputed_gradient_adopted_discard(
+      self, grad_accumulator: GradientAccumulator
+  ) -> ArrayLike:
+    """Consumes adopted gradient storage while restoring exact positive zero."""
+    denominator = grad_accumulator.denom[...]
+
+    def zero_from_payload(variable):
+      value = variable[...]
+      bits = jax.lax.bitcast_convert_type(value, jnp.uint32)
+      zero_bits = jax.lax.bitwise_xor(
+          bits, jax.lax.optimization_barrier(bits)
+      )
+      variable.set_value(
+          jax.lax.bitcast_convert_type(zero_bits, jnp.float32)
+      )
+
+    jax.tree.map(
+        zero_from_payload,
+        grad_accumulator.grads,
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+    denom_bits = jax.lax.bitcast_convert_type(
+        grad_accumulator.denom[...], jnp.uint32
+    )
+    grad_accumulator.denom.set_value(jax.lax.bitcast_convert_type(
+        jax.lax.bitwise_xor(
+            denom_bits, jax.lax.optimization_barrier(denom_bits)
+        ),
+        jnp.float32,
+    ))
     return denominator
 
   def _put_optimizer_state_on_memory_kind(self, memory_kind: str) -> None:
@@ -1193,6 +1265,91 @@ class PeftTrainer:
     self._p28_precomputed_microstep += microbatches
     return norm
 
+  def loan_precomputed_gradient_accumulator(self) -> Any:
+    """Returns the idle FP32 accumulator tree for reduce-once donation."""
+    self._validate_precomputed_gradient_contract()
+    if self._p28_precomputed_microstep != 0:
+      raise ValueError(
+          "gradient accumulator loan requires an idle transaction: "
+          f"microstep={self._p28_precomputed_microstep}"
+      )
+    leaves = jax.tree.leaves(self.grad_accumulator.grads)
+    if not leaves or any(
+        not isinstance(leaf, jax.Array) or leaf.dtype != jnp.float32
+        for leaf in leaves
+    ):
+      raise ValueError(
+          "gradient accumulator loan requires a nonempty float32 JAX tree"
+      )
+    return self.grad_accumulator.grads
+
+  def adopt_precomputed_scaled_gradient(
+      self,
+      gradients: Any,
+      multiplier: ArrayLike,
+      *,
+      microbatch_index: int,
+      microbatches: int,
+  ) -> ArrayLike:
+    """Adopts the reduced gradient returned in loaned accumulator buffers."""
+    self._validate_precomputed_gradient_contract()
+    if not isinstance(microbatches, int) or microbatches < 1:
+      raise ValueError(
+          f"microbatches must be a positive int, got {microbatches!r}"
+      )
+    if os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1":
+      raise ValueError(
+          "scaled gradient adoption is reserved for an admitted P33 workload"
+      )
+    if microbatch_index != self._p28_precomputed_microstep:
+      raise ValueError(
+          "P33 adopted gradient cadence mismatch: "
+          f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
+      )
+    old_leaves = jax.tree.leaves(self.grad_accumulator.grads)
+    if not old_leaves or any(
+        not isinstance(leaf, jax.Array) or not leaf.is_deleted()
+        for leaf in old_leaves
+    ):
+      raise ValueError(
+          "gradient adoption requires every loaned accumulator handle retired"
+      )
+    if self._jitted_precomputed_gradient_adopt_scaled_step_fn is None:
+      self._jitted_precomputed_gradient_adopt_scaled_step_fn = jax.jit(
+          self._precomputed_gradient_adopt_scaled_step,
+          donate_argnums=(0,),
+          static_argnums=(2,),
+      )
+    accumulate_start = time.perf_counter()
+    adopted, denominator, norm = (
+        self._jitted_precomputed_gradient_adopt_scaled_step_fn(
+            gradients,
+            jnp.asarray(multiplier, jnp.float32),
+            microbatches,
+        )
+    )
+    self.grad_accumulator.grads = adopted
+    self.grad_accumulator.denom.set_value(denominator)
+    accumulate_call_done = time.perf_counter()
+    norm.block_until_ready()
+    if os.environ.get("CANON_PERF_LOG", "1") != "0":
+      accumulate_done = time.perf_counter()
+      print(
+          "[PERF] stage=grad_accumulate seconds=%.3f microbatch=%d"
+          " variant=adopt-scaled call=%.3f block=%.3f span=%d"
+          % (
+              accumulate_done - accumulate_start,
+              microbatch_index,
+              accumulate_call_done - accumulate_start,
+              accumulate_done - accumulate_call_done,
+              microbatches,
+          ),
+          flush=True,
+      )
+    self._iter_steps += microbatches
+    self._p28_precomputed_microstep += microbatches
+    return norm
+
   def commit_precomputed_gradients(self) -> ArrayLike:
     """Commits after all streamed microbatches and resets the accumulator."""
     # A failed transaction must never leave evidence from an earlier commit.
@@ -1448,6 +1605,49 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
+    self._p28_precomputed_microstep = 0
+    return denominator
+
+  def discard_adopted_precomputed_gradients(self) -> ArrayLike:
+    """Restores a P33 no-commit accumulator without a model-sized copy."""
+    admitted = (
+        os.environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") == "1"
+        and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+        and os.environ.get("CANON_DP_REDUCE_ONCE", "") == "1"
+        and not os.environ.get("V2_P0_NEGATIVE_CONTROL", "")
+    )
+    if not admitted:
+      raise ValueError(
+          "adopted discard is reserved for admitted P33 reduce-once "
+          "no-commit"
+      )
+    self._last_precomputed_commit_evidence = None
+    self._validate_precomputed_gradient_contract()
+    expected_microsteps = _precomputed_expected_microbatches(os.environ)
+    if self._p28_precomputed_microstep != expected_microsteps:
+      raise ValueError(
+          "adopted discard cadence mismatch: "
+          f"{self._p28_precomputed_microstep} != {expected_microsteps}"
+      )
+    if self._jitted_precomputed_gradient_adopted_discard_impl is None:
+      self._jitted_precomputed_gradient_adopted_discard_impl = nnx.jit(
+          self._precomputed_gradient_adopted_discard,
+          donate_argnames=("grad_accumulator",),
+      )
+    if self._jitted_precomputed_gradient_adopted_discard_fn is None:
+      self._jitted_precomputed_gradient_adopted_discard_fn = (
+          functools.partial(nnx.cached_partial(
+              self._jitted_precomputed_gradient_adopted_discard_impl,
+              self.grad_accumulator,
+          ))
+      )
+    denominator = self._jitted_precomputed_gradient_adopted_discard_fn()
+    self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_scaled_step_fn = None
+    self._jitted_precomputed_gradient_pair_step_fn = None
+    self._jitted_precomputed_gradient_commit_fn = None
+    self._jitted_precomputed_gradient_discard_fn = None
+    self._jitted_precomputed_gradient_adopted_discard_fn = None
     self._p28_precomputed_microstep = 0
     return denominator
 

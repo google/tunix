@@ -91,16 +91,27 @@ def _manifest(
       "vllm_global_seed": 0,
       "vllm_hbm_utilization": spec["vllm_hbm_utilization"],
       "selectors": classifier._ARMS[arm],  # pylint: disable=protected-access
+      "reducer_schedule": {
+          "kind": "fixed-local-byte-buckets",
+          "max_local_bytes": 2 * 1024**3,
+      },
       "checked_vma": True,
       "wandb_mode": "disabled",
       "classification_mode": mode,
+      "training_capsule": {
+          "mode": "none",
+          "capture_run": None,
+          "sha256": None,
+          "model_binding_sha256": None,
+      },
+      "hbm_stage_diagnostic": mode == "measure" and arm in ("r0", "r0b"),
   }
 
 
-def _update(arm: str = "r3") -> dict:
+def _update(arm: str = "r3", workload: str = "m15") -> dict:
   norms = [float(index + 1) for index in range(8)]
-  return {
-      "contract_name": "frozenlake-m15-onehost-dp2-tp2",
+  update = {
+      "contract_name": f"frozenlake-{workload}-onehost-dp2-tp2",
       "dp_size": 2,
       "tp_size": 2,
       "global_m": 512,
@@ -132,15 +143,24 @@ def _update(arm: str = "r3") -> dict:
           {"peak_bytes_in_use": 80, "bytes_limit": 100} for _ in range(4)
       ],
   }
+  if arm in ("r2", "r3"):
+    update["update_gradient_norm"] = 12.5
+  return update
 
 
 class FrozenLakeOneHostClassifierTest(unittest.TestCase):
 
   def _fixture(
-      self, root: Path, *, arm: str = "r3", mode: str = "measure"
+      self,
+      root: Path,
+      *,
+      arm: str = "r3",
+      mode: str = "measure",
+      workload: str = "m15",
   ) -> Path:
     (root / "run_manifest.json").write_text(
-        json.dumps(_manifest(arm=arm, mode=mode)), encoding="utf-8"
+        json.dumps(_manifest(workload=workload, arm=arm, mode=mode)),
+        encoding="utf-8",
     )
     (root / "runtime.json").write_text(
         json.dumps({"verdict": "PASS"}), encoding="utf-8"
@@ -152,9 +172,93 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         "".join(json.dumps(_alignment(pre=False)) + "\n" for _ in range(8)),
         encoding="utf-8",
     )
-    update = _update(arm)
+    update = _update(arm, workload)
+    diagnostic = mode == "measure" and arm in ("r0", "r0b")
+    hbm_stages = []
+    if diagnostic:
+      # The landed fixture below first crosses into 17 chunks in zero-based
+      # group 3; later ties must not move R0's diagnostic group. R0b instead
+      # observes r21's independently proven first warm peak group 1.
+      hbm_group = 1 if arm == "r0b" else 3
+      hbm_chunks = 16 if arm == "r0b" else 17
+      for stage_index, stage in enumerate(  # pylint: disable=protected-access
+          classifier._expected_hbm_stages(hbm_chunks)
+      ):
+        hbm_stages.append({
+            "stage": stage,
+            "group": hbm_group,
+            "devices": [
+                {
+                    "device": device,
+                    "bytes_in_use": 60 + stage_index,
+                    "peak_bytes_in_use": 70 + stage_index,
+                    "bytes_limit": 1000,
+                }
+                for device in range(4)
+            ],
+        })
+      if arm == "r0b":
+        def group_checkpoint(group):
+          return {
+              "stage": "report_group_after_bucket_0",
+              "group": group,
+              "devices": [
+                  {
+                      "device": device,
+                      "bytes_in_use": 500 + group,
+                      "peak_bytes_in_use": 900 + group,
+                      "bytes_limit": 2000,
+                  }
+                  for device in range(4)
+              ],
+          }
+
+        def bucket_stages(group, start):
+          records = []
+          for bucket in range(8):
+            for stage_index, stage in enumerate(
+                ("before_execute", "after_execute", "after_delete")
+            ):
+              current = start + bucket * 3 + stage_index
+              if stage == "after_delete":
+                current -= 1
+              records.append({
+                  "stage": f"report_bucket_{bucket}_{stage}",
+                  "group": group,
+                  "devices": [
+                      {
+                          "device": device,
+                          "bytes_in_use": current,
+                          "peak_bytes_in_use": 700 + start + bucket * 3
+                          + stage_index,
+                          "bytes_limit": 2000,
+                      }
+                      for device in range(4)
+                  ],
+              })
+              if bucket == 0 and stage == "after_execute":
+                records.append(group_checkpoint(group))
+          return records
+
+        after_model = next(
+            index
+            for index, item in enumerate(hbm_stages)
+            if item["stage"] == "after_model_backward"
+        )
+        hbm_stages = (
+            bucket_stages(0, 100)
+            + hbm_stages[: after_model + 1]
+            + bucket_stages(1, 300)
+            + hbm_stages[after_model + 1 :]
+            + [group_checkpoint(group) for group in range(2, 8)]
+        )
+      update["hbm_stage_receipts"] = hbm_stages
     (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
-    marker = "forward_group_done" if arm == "r0" else "forward_group_issued"
+    marker = (
+        "forward_group_done"
+        if arm in ("r0", "r0b", "r0c", "r0d")
+        else "forward_group_issued"
+    )
     lines = [
         f"[P32.DP2] {marker} group={index}/8 rows=(0, 8) "
         f"n_real=({3900 + index * 30}, {4000 + index * 30})"
@@ -170,6 +274,119 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         "[V2.FL.SAMPLER] CONTRACT_PASS sampler_is=none "
         "use_rollout_logps=1 tis_weights=absent"
     )
+    lines.append(
+        "[P59.DP2] reducer_bucket_schedule programs=8 "
+        "max_local_bytes=2147483648 peak_local_bytes=2130875392 "
+        "total_local_bytes=16382087168"
+    )
+    if arm in ("r2", "r3"):
+      lines.append(
+          "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN] enabled=1 "
+          "leaves=399 local_bytes=16382087168 "
+          "transition=base-to-staged base_handles_retired=399 "
+          "staged_handles_retired=399 check_vma=1 host_transfers=0"
+      )
+      lines.append(
+          "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
+          "leaves=399 transition=adopted-to-idle "
+          "alias_mode=bitwise-zero host_transfers=0"
+      )
+      lines.extend(
+          "[V2.REDUCE_ONCE.REPORT_ACCUMULATE] enabled=1 "
+          f"group={group}/8 leaves=399 buckets=8 executables=1 "
+          "peak_local_bytes=2130875392 device_dependencies=7 "
+          "host_transfers=0"
+          for group in range(2, 9)
+      )
+    lines.extend(
+        "[V2.FL.HBM_STAGE] "
+        + json.dumps(record, sort_keys=True, separators=(",", ":"))
+        for record in hbm_stages
+    )
+    if diagnostic and arm == "r0":
+      lines.append(
+          "[V2.FL.REPORT_ADJOINT_MEMORY] "
+          + json.dumps(
+              {
+                  "schema": "canon-v2-p59-report-adjoint-memory-v1",
+                  "staged_engine_leaves": 399,
+                  "trainer_leaves": 399,
+                  "argument_size_in_bytes": 25_000_000_000,
+                  "output_size_in_bytes": 16_382_087_168,
+                  "alias_size_in_bytes": 0,
+                  "temp_size_in_bytes": 1_900_000_000,
+                  "host_argument_size_in_bytes": 0,
+                  "host_output_size_in_bytes": 0,
+                  "host_alias_size_in_bytes": 0,
+                  "host_temp_size_in_bytes": 0,
+              },
+              sort_keys=True,
+              separators=(",", ":"),
+          )
+      )
+    elif arm in ("r0b", "r0c", "r0d"):
+      bucket_template = {
+          "source_leaves": 50,
+          "target_leaves": 50,
+          "local_output_bytes": 2_047_760_896,
+          "argument_size_in_bytes": 1_100_000_000,
+          "output_size_in_bytes": 2_047_760_896,
+          "alias_size_in_bytes": 0,
+          "temp_size_in_bytes": 0,
+          "host_argument_size_in_bytes": 0,
+          "host_output_size_in_bytes": 0,
+          "host_alias_size_in_bytes": 0,
+          "host_temp_size_in_bytes": 0,
+      }
+      buckets = [
+          {**bucket_template, "bucket": index}
+          for index in range(8)
+      ]
+      buckets[-1]["source_leaves"] = 49
+      buckets[-1]["target_leaves"] = 49
+      buckets[-1]["local_output_bytes"] = 2_047_760_896
+      lines.extend(
+          "[P75.REPORT_ADJOINT_BUCKETS] enabled=1 programs=8 "
+          "max_local_bytes=2147483648 peak_local_bytes=2047760896 "
+          "total_local_bytes=16382087168 host_blocks=8"
+          for _ in range(8)
+      )
+      if diagnostic:
+        lines.append(
+            "[V2.FL.REPORT_ADJOINT_MEMORY] "
+            + json.dumps(
+                {
+                    "schema": "canon-v2-p75-report-adjoint-buckets-memory-v1",
+                    "source_leaves": 399,
+                    "target_leaves": 399,
+                    "bucket_count": 8,
+                    "max_local_bytes": 2 * 1024**3,
+                    "peak_local_output_bytes": max(
+                        item["local_output_bytes"] for item in buckets
+                    ),
+                    "total_local_output_bytes": sum(
+                        item["local_output_bytes"] for item in buckets
+                    ),
+                    "host_blocks": 8,
+                    "buckets": buckets,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    if arm == "r0c":
+      lines.append(
+          "[P76.CHUNK_DEPENDENCY] enabled=1 leaves=310 "
+          "checked_vma=1 scalar_collectives=1 host_transfers=0"
+      )
+    if arm == "r0d":
+      for chunks in (16, 16, 16, 17, 17, 17, 17, 17):
+        lines.append(
+            "[P77.CHUNK_BACKPRESSURE] enabled=1 "
+            f"pullback_waits={chunks} accumulation_waits={chunks} "
+            "leaves=310 "
+            "wait_api=block_until_ready host_transfers=0"
+        )
     (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
     anchor = root / "anchors.json"
     anchor.write_text(
@@ -182,26 +399,51 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     return anchor
 
   def _classify(
-      self, mutate=None, *, anchor=False, arm="r3", require_anchor=False
+      self,
+      mutate=None,
+      *,
+      anchor=False,
+      anchor_run_id=None,
+      arm="r3",
+      workload="m15",
+      require_anchor=False,
   ) -> dict:
     with tempfile.TemporaryDirectory() as temporary:
       root = Path(temporary)
       anchor_path = self._fixture(
-          root, arm=arm, mode="certify" if require_anchor else "measure"
+          root,
+          arm=arm,
+          mode="certify" if require_anchor else "measure",
+          workload=workload,
       )
       if mutate is not None:
         mutate(root)
       if anchor:
         registry = json.loads(anchor_path.read_text(encoding="utf-8"))
         update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
-        registry["anchors"][f"m15:{arm}"] = {
-            "run_id": "measurement-run-r1",
+        manifest = json.loads(
+            (root / "run_manifest.json").read_text(encoding="utf-8")
+        )
+        registry["anchors"][f"{workload}:{arm}"] = {
+            "run_id": anchor_run_id or (
+                manifest.get("training_capsule", {}).get("capture_run")
+                if require_anchor
+                else "measurement-run-r1"
+            ),
             "micro_gradient_norms": update["micro_gradient_norms"],
         }
+        if arm in ("r2", "r3"):
+          registry["anchors"][f"{workload}:{arm}"][
+              "update_gradient_norm"
+          ] = update["update_gradient_norm"]
+        if require_anchor:
+          registry["anchors"][f"{workload}:{arm}"][
+              "training_capsule_sha256"
+          ] = manifest.get("training_capsule", {}).get("sha256")
         anchor_path.write_text(json.dumps(registry), encoding="utf-8")
       return classifier.classify(
           root,
-          workload="m15",
+          workload=workload,
           arm=arm,
           docker_exit=0,
           anchor_registry=anchor_path,
@@ -214,16 +456,996 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertEqual(result["landed_shape"]["max_n_real"], 4240)
     self.assertFalse(result["landed_shape"]["cap_coverage"])
     self.assertEqual(result["receipts"]["p66_outer_check_enabled"], 1)
+    self.assertEqual(
+        result["receipts"]["reducer_bucket_schedule"]["programs"], 8
+    )
+    self.assertEqual(
+        result["receipts"]["reduce_once_report_accumulate"],
+        [
+            (group, 8, 399, 8, 1, 2130875392, 7, 0)
+            for group in range(2, 9)
+        ],
+    )
+    self.assertEqual(
+        result["receipts"]["reduce_once_accumulator_loan"],
+        [(399, 16382087168, "base-to-staged", 399, 399, 1, 0)],
+    )
+    self.assertEqual(
+        result["receipts"]["reduce_once_accumulator_reset"],
+        [(399, "adopted-to-idle", "bitwise-zero", 0)],
+    )
+    self.assertEqual(result["gradient"]["update_gradient_norm"], 12.5)
 
-  def test_registered_bitwise_anchor_promotes_run(self):
+  def test_reduce_once_report_accumulate_receipt_is_fail_closed(self):
+    def missing(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      lines = raw.splitlines()
+      lines.remove(
+          "[V2.REDUCE_ONCE.REPORT_ACCUMULATE] enabled=1 "
+          "group=4/8 leaves=399 buckets=8 executables=1 "
+          "peak_local_bytes=2130875392 device_dependencies=7 "
+          "host_transfers=0"
+      )
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(missing, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("reduce_once_report_accumulate=")
+        for reason in rejected["reasons"]
+    ))
+
+    def host_transfer(root: Path) -> None:
+      path = root / "raw.log"
+      raw = path.read_text(encoding="utf-8")
+      path.write_text(
+          raw.replace(
+              "group=4/8 leaves=399 buckets=8 executables=1 "
+              "peak_local_bytes=2130875392 device_dependencies=7 "
+              "host_transfers=0",
+              "group=4/8 leaves=399 buckets=8 executables=1 "
+              "peak_local_bytes=2130875392 device_dependencies=7 "
+              "host_transfers=1",
+          ),
+          encoding="utf-8",
+      )
+
+    rejected = self._classify(host_transfer, arm="r3")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("reduce_once_report_accumulate=")
+        for reason in rejected["reasons"]
+    ))
+
+    ordinary = self._classify(arm="r1")
+    self.assertEqual(ordinary["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        ordinary["receipts"]["reduce_once_report_accumulate"], []
+    )
+
+  def test_reduce_once_accumulator_loan_receipt_is_fail_closed(self):
+    marker = (
+        "[V2.REDUCE_ONCE.ACCUMULATOR_LOAN] enabled=1 "
+        "leaves=399 local_bytes=16382087168 "
+        "transition=base-to-staged base_handles_retired=399 "
+        "staged_handles_retired=399 check_vma=1 host_transfers=0"
+    )
+
+    def missing(root: Path) -> None:
+      path = root / "raw.log"
+      lines = path.read_text(encoding="utf-8").splitlines()
+      lines.remove(marker)
+      path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(missing, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("reduce_once_accumulator_loan=")
+        for reason in rejected["reasons"]
+    ))
+
+    def host_transfer(root: Path) -> None:
+      path = root / "raw.log"
+      raw = path.read_text(encoding="utf-8")
+      path.write_text(
+          raw.replace(marker, marker.replace("host_transfers=0", "host_transfers=1")),
+          encoding="utf-8",
+      )
+
+    rejected = self._classify(host_transfer, arm="r3")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("reduce_once_accumulator_loan=")
+        for reason in rejected["reasons"]
+    ))
+
+    ordinary = self._classify(arm="r1")
+    self.assertEqual(ordinary["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        ordinary["receipts"]["reduce_once_accumulator_loan"], []
+    )
+
+  def test_reduce_once_accumulator_reset_receipt_is_fail_closed(self):
+    marker = (
+        "[V2.REDUCE_ONCE.ACCUMULATOR_RESET] enabled=1 "
+        "leaves=399 transition=adopted-to-idle "
+        "alias_mode=bitwise-zero host_transfers=0"
+    )
+
+    def missing(root: Path) -> None:
+      path = root / "raw.log"
+      lines = path.read_text(encoding="utf-8").splitlines()
+      lines.remove(marker)
+      path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(missing, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("reduce_once_accumulator_reset=")
+        for reason in rejected["reasons"]
+    ))
+
+    def host_transfer(root: Path) -> None:
+      path = root / "raw.log"
+      raw = path.read_text(encoding="utf-8")
+      path.write_text(
+          raw.replace(
+              marker,
+              marker.replace("host_transfers=0", "host_transfers=1"),
+          ),
+          encoding="utf-8",
+      )
+
+    rejected = self._classify(host_transfer, arm="r3")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("reduce_once_accumulator_reset=")
+        for reason in rejected["reasons"]
+    ))
+
+    ordinary = self._classify(arm="r1")
+    self.assertEqual(ordinary["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        ordinary["receipts"]["reduce_once_accumulator_reset"], []
+    )
+
+  def test_reduce_once_update_gradient_norm_is_fail_closed(self):
+    def missing(root: Path) -> None:
+      path = root / "updates.json"
+      update = json.loads(path.read_text(encoding="utf-8"))
+      update.pop("update_gradient_norm")
+      path.write_text(json.dumps(update), encoding="utf-8")
+
+    rejected = self._classify(missing, arm="r2")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("update_gradient_norm=None", rejected["reasons"])
+
+    def unexpected(root: Path) -> None:
+      path = root / "updates.json"
+      update = json.loads(path.read_text(encoding="utf-8"))
+      update["update_gradient_norm"] = 12.5
+      path.write_text(json.dumps(update), encoding="utf-8")
+
+    rejected = self._classify(unexpected, arm="r1")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("unexpected_update_gradient_norm", rejected["reasons"])
+
+  def test_r2_repin_rejects_old_and_one_ulp_update_norms(self):
+    candidate = 23.40300178527832
+    for bad_norm in (23.403005599975586, 23.403003692626953):
+      with self.subTest(bad_norm=bad_norm), tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        anchor_path = self._fixture(
+            root, arm="r2", mode="measure", workload="p45"
+        )
+        update_path = root / "updates.json"
+        update = json.loads(update_path.read_text(encoding="utf-8"))
+        registry = json.loads(anchor_path.read_text(encoding="utf-8"))
+        registry["anchors"]["p45:r2"] = {
+            "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+            "training_capsule_sha256": (
+                "99b6dcaba5b816644a02037ef8f4e8ae"
+                "0199eb1106a4142e3d076b3f48d8539c"
+            ),
+            "micro_gradient_norms": update["micro_gradient_norms"],
+            "update_gradient_norm": candidate,
+        }
+        anchor_path.write_text(json.dumps(registry), encoding="utf-8")
+        update["update_gradient_norm"] = bad_norm
+        update_path.write_text(json.dumps(update), encoding="utf-8")
+        rejected = classifier.classify(
+            root,
+            workload="p45",
+            arm="r2",
+            docker_exit=0,
+            anchor_registry=anchor_path,
+            require_anchor=False,
+        )
+      self.assertEqual(rejected["verdict"], "FAIL")
+      self.assertIn("gradient_anchor_bitwise", rejected["reasons"])
+
+  def test_p45_landed_work_uses_fixed_program_count(self):
+    def eight_chunks(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      raw = "\n".join(
+          line if "n_real=" not in line else (
+              line.split("n_real=")[0] + "n_real=(1792, 1793)"
+          )
+          for line in raw.splitlines()
+      ) + "\n"
+      (root / "raw.log").write_text(raw, encoding="utf-8")
+
+    result = self._classify(eight_chunks, workload="p45")
+    self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(result["landed_shape"]["max_n_real"], 1793)
+    self.assertEqual(result["landed_shape"]["max_group_chunks"], 8)
+
+    def seven_chunks(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      raw = "\n".join(
+          line if "n_real=" not in line else (
+              line.split("n_real=")[0] + "n_real=(1792, 1792)"
+          )
+          for line in raw.splitlines()
+      ) + "\n"
+      (root / "raw.log").write_text(raw, encoding="utf-8")
+
+    rejected = self._classify(seven_chunks, workload="p45")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("landed_group_chunks_max=7", rejected["reasons"])
+
+  def test_exact_post_training_vllm_finalizer_is_the_only_allowed_traceback(self):
+    finalizer = "".join((
+        "Exception ignored in: <finalize object at 0x7f140c3678c0; dead>\n"
+        "Traceback (most recent call last):\n"
+        "  File \"/usr/local/lib/python3.12/weakref.py\", line 590, in __call__\n"
+        "    return info.func(*info.args, **(info.kwargs or {}))\n",
+        " " * 11 + "^" * 44 + "\n",
+        "  File \"/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py\", line 441, in _cleanup_instance_caches\n"
+        "    for module in model.modules():\n",
+        " " * 18 + "^" * 13 + "\n",
+        "AttributeError: 'Qwen3ForCausalLM' object has no attribute 'modules'\n",
+    ))
+
+    def append_exact(root: Path) -> None:
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "[CANON_FROZENLAKE_P27] TRAINING_DONE max_steps=1\n" + finalizer
+        )
+
+    accepted = self._classify(append_exact)
+    self.assertEqual(accepted["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        accepted["receipts"]["ignored_post_training_finalizers"], 1
+    )
+
+    def append_before_success(root: Path) -> None:
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(finalizer)
+
+    before = self._classify(append_before_success)
+    self.assertEqual(before["verdict"], "FAIL")
+    self.assertIn("traceback", before["reasons"])
+
+    def append_changed_exception(root: Path) -> None:
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "[CANON_FROZENLAKE_P27] TRAINING_DONE max_steps=1\n"
+            + finalizer.replace("AttributeError:", "RuntimeError:")
+        )
+
+    changed = self._classify(append_changed_exception)
+    self.assertEqual(changed["verdict"], "FAIL")
+    self.assertIn("traceback", changed["reasons"])
+
+    def append_extra(root: Path) -> None:
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "[CANON_FROZENLAKE_P27] TRAINING_DONE max_steps=1\n"
+            + finalizer
+            + "Traceback (most recent call last):\nextra failure\n"
+        )
+
+    extra = self._classify(append_extra)
+    self.assertEqual(extra["verdict"], "FAIL")
+    self.assertIn("traceback", extra["reasons"])
+
+  def test_training_capsule_capture_and_replay_receipts_are_fail_closed(self):
+    def invalid_manifest(root: Path) -> None:
+      manifest = json.loads((root / "run_manifest.json").read_text())
+      manifest["training_capsule"] = []
+      (root / "run_manifest.json").write_text(json.dumps(manifest))
+
+    invalid = self._classify(invalid_manifest)
+    self.assertEqual(invalid["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("training_capsule=")
+        for reason in invalid["reasons"]
+    ))
+
+    def capture(root: Path) -> None:
+      capsule_path = root / "training_capsule.npz"
+      binding_path = root / "training_capsule.npz.model.json"
+      capsule_path.write_bytes(b"exact capsule")
+      binding_path.write_text('{"schema":"binding"}\n', encoding="utf-8")
+      capsule_sha = classifier._sha256(capsule_path)  # pylint: disable=protected-access
+      binding_sha = classifier._sha256(binding_path)  # pylint: disable=protected-access
+      manifest = json.loads((root / "run_manifest.json").read_text())
+      manifest["training_capsule"] = {
+          "mode": "capture",
+          "capture_run": None,
+          "sha256": None,
+          "model_binding_sha256": None,
+      }
+      (root / "run_manifest.json").write_text(json.dumps(manifest))
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "[V2.CAPSULE] capture_ready "
+            f"path={capsule_path} sha256={capsule_sha} rows=16 arrays=23 "
+            "logical_bytes=1234 certification=strict-prealignment-source\n"
+            "[V2.CAPSULE] model_bound mode=capture "
+            f"capsule_sha256={capsule_sha} binding_sha256={binding_sha} "
+            f"model_fingerprint_sha256={'c' * 64} sampled_model=1\n"
+        )
+
+    captured = self._classify(capture)
+    self.assertEqual(captured["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        captured["receipts"]["training_capsule"]["mode"], "capture"
+    )
+
+    def corrupt_capture(root: Path) -> None:
+      capture(root)
+      with (root / "training_capsule.npz").open("ab") as output:
+        output.write(b"corrupt")
+
+    rejected_capture = self._classify(corrupt_capture)
+    self.assertEqual(rejected_capture["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("training_capsule_capture_receipts=")
+        for reason in rejected_capture["reasons"]
+    ))
+
+    def replay(root: Path) -> None:
+      manifest = json.loads((root / "run_manifest.json").read_text())
+      manifest["training_capsule"] = {
+          "mode": "replay",
+          "capture_run": "v2-capture-r1",
+          "sha256": "d" * 64,
+          "model_binding_sha256": "e" * 64,
+      }
+      (root / "run_manifest.json").write_text(json.dumps(manifest))
+      raw_path = root / "raw.log"
+      raw_path.write_text(
+          raw_path.read_text(encoding="utf-8").replace(
+              "[V2.FL.SAMPLER] CONTRACT_PASS sampler_is=none "
+              "use_rollout_logps=1 tis_weights=absent\n",
+              "",
+          ),
+          encoding="utf-8",
+      )
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "[V2.CAPSULE] diagnostic_replay_ready "
+            f"path=/evidence/training_capsule.npz sha256={'d' * 64} "
+            "rows=16 capture_run=v2-capture-r1 "
+            f"capture_source={'b' * 40} replay_source={'a' * 40} "
+            "rollout=skipped rescore_b=skipped certification=0\n"
+            "[V2.CAPSULE] producer_bypass verdict=PASS "
+            "environment=0 rollout=0 rescore_b=0\n"
+            "[V2.CAPSULE] model_verified mode=replay "
+            f"capsule_sha256={'d' * 64} binding_sha256={'e' * 64} "
+            f"model_fingerprint_sha256={'c' * 64} sampled_model=1\n"
+        )
+
+    replayed = self._classify(
+        replay, anchor=True, require_anchor=True
+    )
+    self.assertEqual(replayed["verdict"], "PASS")
+    self.assertEqual(
+        replayed["receipts"]["training_capsule"]["sha256"], "d" * 64
+    )
+    self.assertEqual(replayed["receipts"]["sampler_contract"], 0)
+
+    wrong_capture = self._classify(
+        replay,
+        anchor=True,
+        anchor_run_id="different-capture-r1",
+        require_anchor=True,
+    )
+    self.assertEqual(wrong_capture["verdict"], "FAIL")
+    self.assertIn("gradient_anchor_capture_run", wrong_capture["reasons"])
+
+    def missing_bypass(root: Path) -> None:
+      replay(root)
+      raw = (root / "raw.log").read_text()
+      (root / "raw.log").write_text(
+          raw.replace(
+              "[V2.CAPSULE] producer_bypass verdict=PASS "
+              "environment=0 rollout=0 rescore_b=0\n",
+              "",
+          )
+      )
+
+    rejected_replay = self._classify(
+        missing_bypass, anchor=True, require_anchor=True
+    )
+    self.assertEqual(rejected_replay["verdict"], "FAIL")
+    self.assertIn(
+        "training_capsule_producer_bypass", rejected_replay["reasons"]
+    )
+
+    def unexpected_sampler(root: Path) -> None:
+      replay(root)
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "[V2.FL.SAMPLER] CONTRACT_PASS sampler_is=none "
+            "use_rollout_logps=1 tis_weights=absent\n"
+        )
+
+    rejected_sampler = self._classify(
+        unexpected_sampler, anchor=True, require_anchor=True
+    )
+    self.assertEqual(rejected_sampler["verdict"], "FAIL")
+    self.assertIn(
+        "sampler_receipts=1;expected=0", rejected_sampler["reasons"]
+    )
+
+  def test_r0_measure_requires_exact_hbm_stage_receipts(self):
+    result = self._classify(arm="r0")
+    self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        [item["stage"] for item in result["receipts"]["hbm_stage_receipts"]],
+        list(classifier._expected_hbm_stages(17)),  # pylint: disable=protected-access
+    )
+    self.assertTrue(all(
+        item["group"] == 3
+        for item in result["receipts"]["hbm_stage_receipts"]
+    ))
+    self.assertEqual(
+        result["receipts"]["report_adjoint_memory"][
+            "output_size_in_bytes"
+        ],
+        16_382_087_168,
+    )
+
+    def remove_one_stage(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      removed = update["hbm_stage_receipts"].pop(2)
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      marker = (
+          "[V2.FL.HBM_STAGE] "
+          + json.dumps(removed, sort_keys=True, separators=(",", ":"))
+          + "\n"
+      )
+      (root / "raw.log").write_text(raw.replace(marker, ""), encoding="utf-8")
+
+    rejected = self._classify(remove_one_stage, arm="r0")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("hbm_stage_receipts", rejected["reasons"])
+
+    def remove_report_memory(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      lines = [
+          line
+          for line in raw.splitlines()
+          if not line.startswith("[V2.FL.REPORT_ADJOINT_MEMORY] ")
+      ]
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(remove_report_memory, arm="r0")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("report_adjoint_memory_receipts=0", rejected["reasons"])
+
+  def test_p45_r0b_measure_requires_checked_bucket_receipts(self):
+    result = self._classify(arm="r0b", workload="p45")
+    self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
+    receipt = result["receipts"]["report_adjoint_memory"]
+    self.assertEqual(
+        receipt["schema"],
+        "canon-v2-p75-report-adjoint-buckets-memory-v1",
+    )
+    self.assertEqual(receipt["bucket_count"], 8)
+    self.assertEqual(receipt["host_blocks"], 8)
+    bucket_hbm = [
+        item
+        for item in result["receipts"]["hbm_stage_receipts"]
+        if item["stage"].startswith("report_bucket_")
+    ]
+    self.assertEqual(len(bucket_hbm), 48)
+    group_hbm = [
+        item
+        for item in result["receipts"]["hbm_stage_receipts"]
+        if item["stage"] == "report_group_after_bucket_0"
+    ]
+    self.assertEqual([item["group"] for item in group_hbm], list(range(8)))
+    outer_hbm = [
+        item
+        for item in result["receipts"]["hbm_stage_receipts"]
+        if not item["stage"].startswith("report_bucket_")
+        and item["stage"] != "report_group_after_bucket_0"
+    ]
+    self.assertEqual(
+        [item["stage"] for item in outer_hbm],
+        list(classifier._expected_hbm_stages(16)),  # pylint: disable=protected-access
+    )
+    self.assertTrue(all(item["group"] == 1 for item in outer_hbm))
+
+    def remove_bucket_markers(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      lines = [
+          line
+          for line in raw.splitlines()
+          if not line.startswith("[P75.REPORT_ADJOINT_BUCKETS] ")
+      ]
+      (root / "raw.log").write_text(
+          "\n".join(lines) + "\n", encoding="utf-8"
+      )
+
+    rejected = self._classify(
+        remove_bucket_markers, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p75_report_adjoint_bucket_receipts=0", rejected["reasons"]
+    )
+
+    def replace_bucket_memory_with_monolithic(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      replacement = (
+          "[V2.FL.REPORT_ADJOINT_MEMORY] "
+          + json.dumps(
+              {
+                  "schema": "canon-v2-p59-report-adjoint-memory-v1",
+                  "staged_engine_leaves": 399,
+                  "trainer_leaves": 399,
+                  "argument_size_in_bytes": 1,
+                  "output_size_in_bytes": 1,
+                  "alias_size_in_bytes": 0,
+                  "temp_size_in_bytes": 0,
+                  "host_argument_size_in_bytes": 0,
+                  "host_output_size_in_bytes": 0,
+                  "host_alias_size_in_bytes": 0,
+                  "host_temp_size_in_bytes": 0,
+              },
+              sort_keys=True,
+              separators=(",", ":"),
+          )
+      )
+      lines = [
+          replacement
+          if line.startswith("[V2.FL.REPORT_ADJOINT_MEMORY] ")
+          else line
+          for line in raw.splitlines()
+      ]
+      (root / "raw.log").write_text(
+          "\n".join(lines) + "\n", encoding="utf-8"
+      )
+
+    rejected = self._classify(
+        replace_bucket_memory_with_monolithic,
+        arm="r0b",
+        workload="p45",
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "bucketed_report_memory_receipts=1", rejected["reasons"]
+    )
+
+    def remove_bucket_hbm_stage(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      removed = next(
+          item
+          for item in update["hbm_stage_receipts"]
+          if item["stage"] == "report_bucket_3_after_execute"
+      )
+      update["hbm_stage_receipts"].remove(removed)
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      marker = (
+          "[V2.FL.HBM_STAGE] "
+          + json.dumps(removed, sort_keys=True, separators=(",", ":"))
+          + "\n"
+      )
+      (root / "raw.log").write_text(raw.replace(marker, ""), encoding="utf-8")
+
+    rejected = self._classify(
+        remove_bucket_hbm_stage, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_bucket_hbm_receipts", rejected["reasons"])
+
+    def corrupt_bucket_hbm_device(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      record = next(
+          item
+          for item in update["hbm_stage_receipts"]
+          if item["stage"] == "report_bucket_4_after_delete"
+      )
+      record["devices"][3]["device"] = 2
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      lines = []
+      replaced = False
+      for line in (root / "raw.log").read_text(encoding="utf-8").splitlines():
+        if (
+            not replaced
+            and line.startswith("[V2.FL.HBM_STAGE] ")
+            and '"stage":"report_bucket_4_after_delete"' in line
+        ):
+          line = (
+              "[V2.FL.HBM_STAGE] "
+              + json.dumps(record, sort_keys=True, separators=(",", ":"))
+          )
+          replaced = True
+        lines.append(line)
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(
+        corrupt_bucket_hbm_device, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_bucket_hbm_receipts", rejected["reasons"])
+
+    def reorder_bucket_hbm_stages(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      indices = [
+          index
+          for index, item in enumerate(update["hbm_stage_receipts"])
+          if item["stage"] in (
+              "report_bucket_2_before_execute",
+              "report_bucket_2_after_execute",
+          )
+          and item["group"] == 1
+      ]
+      update["hbm_stage_receipts"][indices[0]], update["hbm_stage_receipts"][
+          indices[1]
+      ] = (
+          update["hbm_stage_receipts"][indices[1]],
+          update["hbm_stage_receipts"][indices[0]],
+      )
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      lines = (root / "raw.log").read_text(encoding="utf-8").splitlines()
+      raw_indices = [
+          index
+          for index, line in enumerate(lines)
+          if '"group":1' in line
+          and (
+              '"stage":"report_bucket_2_before_execute"' in line
+              or '"stage":"report_bucket_2_after_execute"' in line
+          )
+      ]
+      lines[raw_indices[0]], lines[raw_indices[1]] = (
+          lines[raw_indices[1]], lines[raw_indices[0]]
+      )
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(
+        reorder_bucket_hbm_stages, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_bucket_hbm_receipts", rejected["reasons"])
+
+    def corrupt_bucket_hbm_bytes(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      record = next(
+          item
+          for item in update["hbm_stage_receipts"]
+          if item["stage"] == "report_bucket_6_after_execute"
+          and item["group"] == 1
+      )
+      record["devices"][0]["bytes_in_use"] = (
+          record["devices"][0]["peak_bytes_in_use"] + 1
+      )
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      lines = []
+      replaced = False
+      for line in (root / "raw.log").read_text(encoding="utf-8").splitlines():
+        if (
+            not replaced
+            and line.startswith("[V2.FL.HBM_STAGE] ")
+            and '"group":1' in line
+            and '"stage":"report_bucket_6_after_execute"' in line
+        ):
+          line = (
+              "[V2.FL.HBM_STAGE] "
+              + json.dumps(record, sort_keys=True, separators=(",", ":"))
+          )
+          replaced = True
+        lines.append(line)
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(
+        corrupt_bucket_hbm_bytes, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_bucket_hbm_receipts", rejected["reasons"])
+
+  def test_p45_r0b_requires_all_group_hbm_checkpoints(self):
+    result = self._classify(arm="r0b", workload="p45")
+    checkpoints = [
+        item
+        for item in result["receipts"]["hbm_stage_receipts"]
+        if item["stage"] == "report_group_after_bucket_0"
+    ]
+    self.assertEqual([item["group"] for item in checkpoints], list(range(8)))
+
+    def rewrite_hbm_receipts(root: Path, records: list[dict]) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      update["hbm_stage_receipts"] = records
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      lines = [
+          line
+          for line in (root / "raw.log").read_text(encoding="utf-8").splitlines()
+          if not line.startswith("[V2.FL.HBM_STAGE] ")
+      ]
+      lines.extend(
+          "[V2.FL.HBM_STAGE] "
+          + json.dumps(item, sort_keys=True, separators=(",", ":"))
+          for item in records
+      )
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def remove_checkpoint(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      records = update["hbm_stage_receipts"]
+      record = next(
+          item
+          for item in records
+          if item["stage"] == "report_group_after_bucket_0"
+          and item["group"] == 4
+      )
+      records.remove(record)
+      rewrite_hbm_receipts(root, records)
+
+    rejected = self._classify(
+        remove_checkpoint, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_group_hbm_receipts", rejected["reasons"])
+
+    def duplicate_group(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      records = update["hbm_stage_receipts"]
+      record = next(
+          item
+          for item in records
+          if item["stage"] == "report_group_after_bucket_0"
+          and item["group"] == 5
+      )
+      record["group"] = 4
+      rewrite_hbm_receipts(root, records)
+
+    rejected = self._classify(
+        duplicate_group, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_group_hbm_receipts", rejected["reasons"])
+
+    def reorder_groups(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      records = update["hbm_stage_receipts"]
+      indices = [
+          index
+          for index, item in enumerate(records)
+          if item["stage"] == "report_group_after_bucket_0"
+          and item["group"] in (5, 6)
+      ]
+      records[indices[0]], records[indices[1]] = (
+          records[indices[1]], records[indices[0]]
+      )
+      rewrite_hbm_receipts(root, records)
+
+    rejected = self._classify(
+        reorder_groups, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_group_hbm_receipts", rejected["reasons"])
+
+    def corrupt_bytes(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      records = update["hbm_stage_receipts"]
+      record = next(
+          item
+          for item in records
+          if item["stage"] == "report_group_after_bucket_0"
+          and item["group"] == 6
+      )
+      record["devices"][0]["bytes_in_use"] = (
+          record["devices"][0]["peak_bytes_in_use"] + 1
+      )
+      rewrite_hbm_receipts(root, records)
+
+    rejected = self._classify(
+        corrupt_bytes, arm="r0b", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("p75_group_hbm_receipts", rejected["reasons"])
+
+  def test_p45_r0c_requires_exact_ticket_without_host_observer(self):
+    result = self._classify(arm="r0c", workload="p45")
+    self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(
+        result["receipts"]["p76_chunk_dependency"], (310, 1, 1, 0)
+    )
+    self.assertEqual(result["receipts"]["hbm_stage_receipts"], [])
+    self.assertIsNone(result["receipts"]["report_adjoint_memory"])
+
+    def remove_ticket(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      lines = [
+          line
+          for line in raw.splitlines()
+          if not line.startswith("[P76.CHUNK_DEPENDENCY] ")
+      ]
+      (root / "raw.log").write_text(
+          "\n".join(lines) + "\n", encoding="utf-8"
+      )
+
+    rejected = self._classify(
+        remove_ticket, arm="r0c", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p76_chunk_dependency_receipts=[]", rejected["reasons"]
+    )
+
+    def claim_host_transfer(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      raw = raw.replace("host_transfers=0", "host_transfers=1")
+      (root / "raw.log").write_text(raw, encoding="utf-8")
+
+    rejected = self._classify(
+        claim_host_transfer, arm="r0c", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn(
+        "p76_chunk_dependency_receipts=[(310, 1, 1, 1)]",
+        rejected["reasons"],
+    )
+
+  def test_r0b_rejects_the_m15_neighbor(self):
+    result = self._classify(arm="r0b", workload="m15")
+    self.assertEqual(result["verdict"], "FAIL")
+    self.assertIn("p75_p76_p77_workload=m15", result["reasons"])
+
+  def test_r0c_rejects_the_m15_neighbor(self):
+    result = self._classify(arm="r0c", workload="m15")
+    self.assertEqual(result["verdict"], "FAIL")
+    self.assertIn("p75_p76_p77_workload=m15", result["reasons"])
+
+  def test_p45_r0d_requires_exact_device_ready_backpressure(self):
+    result = self._classify(arm="r0d", workload="p45")
+    self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
+    self.assertEqual(len(result["receipts"]["p77_chunk_backpressure"]), 8)
+    self.assertEqual(
+        [item[0] for item in result["receipts"]["p77_chunk_backpressure"]],
+        [16, 16, 16, 17, 17, 17, 17, 17],
+    )
+    self.assertEqual(
+        [item[1] for item in result["receipts"]["p77_chunk_backpressure"]],
+        [16, 16, 16, 17, 17, 17, 17, 17],
+    )
+    self.assertEqual(result["receipts"]["hbm_stage_receipts"], [])
+
+    def remove_wait(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      marker = "[P77.CHUNK_BACKPRESSURE] enabled=1 "
+      removed = False
+      lines = []
+      for line in raw.splitlines():
+        if line.startswith(marker) and not removed:
+          removed = True
+          continue
+        lines.append(line)
+      (root / "raw.log").write_text(
+          "\n".join(lines) + "\n", encoding="utf-8"
+      )
+
+    rejected = self._classify(remove_wait, arm="r0d", workload="p45")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("p77_chunk_backpressure_receipts=")
+        for reason in rejected["reasons"]
+    ))
+
+    def corrupt_wait_count(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      raw = raw.replace(
+          "pullback_waits=16 accumulation_waits=16",
+          "pullback_waits=15 accumulation_waits=16",
+          1,
+      )
+      (root / "raw.log").write_text(raw, encoding="utf-8")
+
+    rejected = self._classify(
+        corrupt_wait_count, arm="r0d", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("p77_chunk_backpressure_receipts=")
+        for reason in rejected["reasons"]
+    ))
+
+    def claim_host_transfer(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      raw = raw.replace(
+          "wait_api=block_until_ready host_transfers=0",
+          "wait_api=block_until_ready host_transfers=1",
+      )
+      (root / "raw.log").write_text(raw, encoding="utf-8")
+
+    rejected = self._classify(
+        claim_host_transfer, arm="r0d", workload="p45"
+    )
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertTrue(any(
+        reason.startswith("p77_chunk_backpressure_receipts=")
+        for reason in rejected["reasons"]
+    ))
+
+  def test_r0d_rejects_the_m15_neighbor(self):
+    result = self._classify(arm="r0d", workload="m15")
+    self.assertEqual(result["verdict"], "FAIL")
+    self.assertIn("p75_p76_p77_workload=m15", result["reasons"])
+
+  def test_r0_measure_rejects_a_missing_chunk_boundary(self):
+    def remove_chunk_boundary(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      removed = next(
+          item
+          for item in update["hbm_stage_receipts"]
+          if item["stage"].startswith("model_after_pullbacks_chunk_")
+      )
+      update["hbm_stage_receipts"].remove(removed)
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      marker = (
+          "[V2.FL.HBM_STAGE] "
+          + json.dumps(removed, sort_keys=True, separators=(",", ":"))
+          + "\n"
+      )
+      (root / "raw.log").write_text(raw.replace(marker, ""), encoding="utf-8")
+
+    rejected = self._classify(remove_chunk_boundary, arm="r0")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("hbm_stage_receipts", rejected["reasons"])
+
+  def test_r0_measure_rejects_group0_receipts_when_a_later_group_is_longer(self):
+    def change_group(root: Path) -> None:
+      update = json.loads((root / "updates.json").read_text(encoding="utf-8"))
+      for item in update["hbm_stage_receipts"]:
+        item["group"] = 0
+      (root / "updates.json").write_text(json.dumps(update), encoding="utf-8")
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      lines = [
+          line
+          for line in raw.splitlines()
+          if not line.startswith("[V2.FL.HBM_STAGE] ")
+      ]
+      lines.extend(
+          "[V2.FL.HBM_STAGE] "
+          + json.dumps(item, sort_keys=True, separators=(",", ":"))
+          for item in update["hbm_stage_receipts"]
+      )
+      (root / "raw.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rejected = self._classify(change_group, arm="r0")
+    self.assertEqual(rejected["verdict"], "FAIL")
+    self.assertIn("hbm_stage_receipts", rejected["reasons"])
+
+  def test_registered_anchor_does_not_promote_a_live_measurement(self):
     result = self._classify(anchor=True)
-    self.assertEqual(result["verdict"], "PASS")
+    self.assertEqual(result["verdict"], "MEASUREMENT_ONLY")
     self.assertTrue(result["gradient"]["anchor_exact"])
 
   def test_certification_refuses_an_unregistered_anchor(self):
     result = self._classify(require_anchor=True)
     self.assertEqual(result["verdict"], "FAIL")
     self.assertIn("gradient_anchor_unregistered", result["reasons"])
+    self.assertIn(
+        "certify_requires_training_capsule_replay", result["reasons"]
+    )
 
   def test_one_ulp_anchor_drift_rejects(self):
     def mutate(root: Path) -> None:
@@ -240,6 +1462,7 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
       registry["anchors"]["m15:r3"] = {
           "run_id": "measurement-run-r1",
           "micro_gradient_norms": original,
+          "update_gradient_norm": _update()["update_gradient_norm"],
       }
       anchor_path.write_text(json.dumps(registry), encoding="utf-8")
       mutate(root)
@@ -319,6 +1542,18 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
           encoding="utf-8",
       )
 
+    def no_reducer_bucket_receipt(root: Path) -> None:
+      raw = (root / "raw.log").read_text(encoding="utf-8")
+      (root / "raw.log").write_text(
+          "\n".join(
+              line
+              for line in raw.splitlines()
+              if "reducer_bucket_schedule" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+
     def too_short(root: Path) -> None:
       raw = (root / "raw.log").read_text(encoding="utf-8")
       raw = "\n".join(
@@ -340,6 +1575,7 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         ("seed", no_seed_receipt, "seed_receipts=0"),
         ("wandb", no_disabled_wandb_receipt, "disabled_wandb_receipts=0"),
         ("sampler", no_sampler_receipt, "sampler_receipts=0"),
+        ("bucket", no_reducer_bucket_receipt, "reducer_bucket_receipts=0"),
         ("hash", no_token_hash, "input_hash_inventory"),
         ("length", too_short, "landed_n_real_max=2000"),
         ("reduction", wrong_reduction, "update:"),
@@ -348,6 +1584,27 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
         result = self._classify(mutation)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any(item.startswith(reason) for item in result["reasons"]))
+
+  def test_incomplete_hbm_failure_names_the_first_red(self):
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      anchor = self._fixture(root)
+      (root / "alignment.jsonl").unlink()
+      (root / "updates.json").unlink()
+      with (root / "raw.log").open("a", encoding="utf-8") as output:
+        output.write(
+            "RESOURCE_EXHAUSTED: RuntimeProgramAllocationFailure "
+            "loading program 'jit_reduce_local'\n"
+        )
+      result = classifier.classify(
+          root,
+          workload="m15",
+          arm="r3",
+          docker_exit=137,
+          anchor_registry=anchor,
+      )
+    self.assertEqual(result["verdict"], "INCONCLUSIVE")
+    self.assertIn("runtime_hbm_exhausted:jit_reduce_local", result["reasons"])
 
   def test_runner_is_onehost_only_clean_and_observe_only(self):
     runner = RUNNER_PATH.read_text(encoding="utf-8")
@@ -362,8 +1619,25 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
     self.assertIn("--model qwen8b_tp2", runner)
     self.assertIn("CANON_P66_P59_CHECK_VMA", inner)
     self.assertIn('"backward-no-commit"', inner)
+    self.assertIn('"fixed-local-byte-buckets"', inner)
     self.assertIn("measure|certify", runner)
     self.assertIn("--require-anchor", runner)
+    self.assertIn("capture:measure", runner)
+    self.assertIn("replay:certify", runner)
+    self.assertIn('"$evidence_root"/*/training_capsule.npz', runner)
+    self.assertIn('capsule_dir_tail="${capsule_dir_name#${workload}_}"', runner)
+    self.assertIn('capsule_capture_run="${capsule_dir_tail#*_}"', runner)
+    self.assertIn("CANON_V2_TRAINING_CAPSULE_SHA256", runner + inner)
+    self.assertIn('"training_capsule": {', inner)
+    self.assertIn('sha256sum -c "$root/SHA256SUMS"', runner)
+    terminal = runner[runner.index("classifier_rc=$?") :]
+    self.assertLess(
+        terminal.index("RED docker=$docker_rc"), terminal.index("seal_evidence")
+    )
+    self.assertLess(
+        terminal.index('echo "[V2.FL.ONEHOST] $verdict evidence=$root"'),
+        terminal.rindex("seal_evidence"),
+    )
 
 
 if __name__ == "__main__":

@@ -59,8 +59,11 @@ if "--xla_force_host_platform_device_count" not in os.environ.get(
       + " --xla_force_host_platform_device_count=16"
   ).strip()
 
+import ast
 import importlib.util
+import inspect
 import sys
+import textwrap
 from pathlib import Path
 from unittest import mock
 
@@ -627,6 +630,90 @@ def test_tree_add_donates_accumulator_and_start_does_not():
   # only call site rebinds the accumulator to the result immediately.
   assert all(leaf.is_deleted() for leaf in jax.tree.leaves(started))
   assert not any(leaf.is_deleted() for leaf in jax.tree.leaves(second))
+
+
+def test_consumed_pack_release_preserves_tree_ops_bitwise_without_host_transfer():
+  adapter = _bare_adapter()
+  # Build the cached programs and their runtime scalar-zero operands before
+  # the guard.  The guarded region then covers only already-device-resident
+  # inputs, the production dispatches, deletion and device completion.
+  warm_first = _mixed_pack()
+  warm_started = adapter._p70_grad_tree_start(  # pylint: disable=protected-access
+      warm_first
+  )
+  warm_second = jax.tree.map(jnp.ones_like, warm_first)
+  jax.block_until_ready(
+      adapter._p70_grad_tree_add(  # pylint: disable=protected-access
+          warm_started, warm_second
+      )
+  )
+  first = _mixed_pack()
+  eager_started = _eager_tree_start(first)
+
+  with jax.transfer_guard("disallow"):
+    started = adapter._p70_grad_tree_start(  # pylint: disable=protected-access
+        first
+    )
+    adapter._p70_release_consumed_grad_pack(  # pylint: disable=protected-access
+        first
+    )
+    jax.block_until_ready(started)
+
+  assert all(leaf.is_deleted() for leaf in jax.tree.leaves(first))
+  assert not any(leaf.is_deleted() for leaf in jax.tree.leaves(started))
+  _assert_bitwise_equal(started, eager_started)
+
+  second = jax.tree.map(lambda value: value * 2 - 1, _mixed_pack())
+  eager_added = _eager_tree_add(eager_started, second)
+  with jax.transfer_guard("disallow"):
+    added = adapter._p70_grad_tree_add(  # pylint: disable=protected-access
+        started, second
+    )
+    adapter._p70_release_consumed_grad_pack(  # pylint: disable=protected-access
+        second
+    )
+    jax.block_until_ready(added)
+
+  assert all(leaf.is_deleted() for leaf in jax.tree.leaves(started))
+  assert all(leaf.is_deleted() for leaf in jax.tree.leaves(second))
+  assert not any(leaf.is_deleted() for leaf in jax.tree.leaves(added))
+  _assert_bitwise_equal(added, eager_added)
+
+
+def test_consumed_pack_release_deletes_each_aliased_array_once():
+  adapter = _bare_adapter()
+  value = jnp.arange(4, dtype=jnp.float32)
+  with mock.patch.object(value, "delete", wraps=value.delete) as delete:
+    adapter._p70_release_consumed_grad_pack(  # pylint: disable=protected-access
+        (value, {"alias": value, "host_metadata": 7})
+    )
+  delete.assert_called_once_with()
+  assert value.is_deleted()
+
+
+def test_consumed_pack_release_is_scoped_to_rank_parallel_reverse():
+  source = textwrap.dedent(inspect.getsource(
+      canonical_qwen3_adapter.Qwen3EngineForwardAdapter._p32_reverse_group  # pylint: disable=protected-access
+  ))
+  tree = ast.parse(source)
+  calls = [
+      node
+      for node in ast.walk(tree)
+      if isinstance(node, ast.Call)
+      and isinstance(node.func, ast.Attribute)
+      and node.func.attr == "_p70_release_consumed_grad_pack"
+  ]
+  assert len(calls) == 1
+  guarded_nodes = set()
+  for node in ast.walk(tree):
+    if (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "rank_parallel"
+    ):
+      for statement in node.body:
+        guarded_nodes.update(ast.walk(statement))
+  assert calls[0] in guarded_nodes
 
 
 # ---------------------------------------------------------------------------

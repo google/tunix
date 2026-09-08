@@ -1,4 +1,48 @@
 {
-  "anchors": {},
+  "anchors": {
+    "p45:r0d": {
+      "micro_gradient_norms": [
+        18.93467140197754,
+        3.117619276046753,
+        3.2545576095581055,
+        3.8984217643737793,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+      "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c"
+    },
+    "p45:r1": {
+      "micro_gradient_norms": [
+        18.93467140197754,
+        3.117619276046753,
+        3.2545576095581055,
+        3.8984217643737793,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+      "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c"
+    },
+    "p45:r2": {
+      "micro_gradient_norms": [
+        37.869327545166016,
+        6.235235691070557,
+        6.509113311767578,
+        7.796840667724609,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "run_id": "v2fl_p45_r0d_capsule_20260904_r32",
+      "training_capsule_sha256": "99b6dcaba5b816644a02037ef8f4e8ae0199eb1106a4142e3d076b3f48d8539c",
+      "update_gradient_norm": 23.40300178527832
+    }
+  },
   "schema": "canon.v2-frozenlake-onehost.gradient-anchors.v1"
 }

@@ -86,6 +86,47 @@ class AddedFlagPathsTest(unittest.TestCase):
           {runtime_flag},
       )
 
+  def test_ignores_only_registered_module_local_canon_identifiers(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      repo = Path(tmp)
+      runtime_flag = "CANON_" + "NEW_RUNTIME_FLAG"
+      subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+      source = repo / "runtime.py"
+      source.write_text("VALUE = 1\n")
+      subprocess.run(["git", "add", "."], cwd=repo, check=True)
+      subprocess.run(
+          [
+              "git",
+              "-c",
+              "user.name=flag-audit-test",
+              "-c",
+              "user.email=flag-audit-test@example.invalid",
+              "commit",
+              "-qm",
+              "Create test base",
+          ],
+          cwd=repo,
+          check=True,
+      )
+      base = subprocess.run(
+          ["git", "rev-parse", "HEAD"],
+          cwd=repo,
+          check=True,
+          text=True,
+          capture_output=True,
+      ).stdout.strip()
+
+      source.write_text(
+          "CANON_P57_CALIBRATION = True\n"
+          "CANON_P57_NO_UPDATE = CANON_P57_CALIBRATION\n"
+          f'VALUE = os.environ.get("{runtime_flag}")\n'
+      )
+
+      self.assertEqual(
+          AUDIT._added_flags(repo, base),
+          {runtime_flag},
+      )
+
 
 if __name__ == "__main__":
   unittest.main()
