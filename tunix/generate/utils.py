@@ -1213,13 +1213,42 @@ def _align_per_axis(
 TPU_V5P_SUBCORE_LANE_SIZE: int = 128
 
 
+def get_default_moe_lane_size() -> int:
+  """Resolves the default MoE subcore lane size based on environment and TPU type.
+
+  Returns 128 for TPU v5p (matching TPU GMM kernel requirements), 0 for other
+  TPU versions or devices without subcore lane interleaving, or the value
+  configured via MOE_INTERLEAVE_LANE_SIZE.
+  """
+  env_override = os.environ.get("MOE_INTERLEAVE_LANE_SIZE")
+  if env_override is not None:
+    try:
+      return int(env_override)
+    except ValueError:
+      logging.warning(
+          "Invalid MOE_INTERLEAVE_LANE_SIZE=%r; using default.", env_override
+      )
+  try:
+    devices = jax.devices()
+    if devices:
+      kind = getattr(devices[0], "device_kind", "").lower()
+      if "v5p" in kind:
+        return TPU_V5P_SUBCORE_LANE_SIZE
+      if "tpu" in kind:
+        # Other TPU architectures (e.g. v4, v5e) do not require 128-lane interleaving
+        return 0
+  except Exception:
+    pass
+  return TPU_V5P_SUBCORE_LANE_SIZE
+
+
 def _interleave_moe_weights(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
-    lane_size: int = TPU_V5P_SUBCORE_LANE_SIZE,
+    lane_size: Optional[int] = None,
 ) -> jax.Array | np.ndarray:
   """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
@@ -1227,6 +1256,8 @@ def _interleave_moe_weights(
   to alternate in 128-lane chunks (`deinterleave_lane`) along the inner dimension:
   `[Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]`.
   """
+  if lane_size is None:
+    lane_size = get_default_moe_lane_size()
   if axis is None:
     axis = len(tgt_shape) - 1
   elif axis < 0:

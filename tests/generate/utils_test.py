@@ -2325,6 +2325,39 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
         reshaped[0, 0, 1, 1], wi_1[0, lane_size : 2 * lane_size]
     )
 
+  def test_get_default_moe_lane_size(self):
+    mock_dev_v5p = mock.MagicMock()
+    mock_dev_v5p.device_kind = "TPU v5p"
+    with mock.patch.object(jax, "devices", return_value=[mock_dev_v5p]):
+      self.assertEqual(utils.get_default_moe_lane_size(), 128)
+
+    mock_dev_v4 = mock.MagicMock()
+    mock_dev_v4.device_kind = "TPU v4"
+    with mock.patch.object(jax, "devices", return_value=[mock_dev_v4]):
+      self.assertEqual(utils.get_default_moe_lane_size(), 0)
+
+    with mock.patch.dict(os.environ, {"MOE_INTERLEAVE_LANE_SIZE": "64"}):
+      self.assertEqual(utils.get_default_moe_lane_size(), 64)
+
+  def test_interleave_moe_weights_fallback_when_lane_size_zero(self):
+    """Verifies standard concatenation when lane_size is 0 (e.g. non-v5p TPU)."""
+    dim = 256
+    wi_0 = jnp.arange(dim, dtype=jnp.float32).reshape(1, dim)
+    wi_1 = (jnp.arange(dim, dtype=jnp.float32) + 1000.0).reshape(1, dim)
+    tgt_shape = (1, dim * 2)
+
+    interleaved = utils._interleave_moe_weights(
+        wi_0,
+        wi_1,
+        tgt_shape=tgt_shape,
+        n_shards=1,
+        axis=-1,
+        lane_size=0,
+    )
+    self.assertEqual(interleaved.shape, tgt_shape)
+    expected = jnp.concatenate([wi_0, wi_1], axis=-1)
+    np.testing.assert_array_equal(interleaved, expected)
+
 
 if __name__ == "__main__":
   absltest.main()
