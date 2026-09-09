@@ -1070,6 +1070,48 @@ class UtilsTest(parameterized.TestCase):
         dst_state['untouched_variable'][...], jnp.array(-1)
     )
 
+  def test_transfer_state_directly_with_flat_state(self):
+    """Tests transfer_state_directly with an object exposing flat_state."""
+    class FakeFlatStateModel:
+
+      def __init__(self, state_dict):
+        self._state = state_dict
+
+      def flat_state(self):
+        # Return path tuples with integer indices to verify int-to-str normalization
+        return [
+            (('layers', 0, 'weight'), self._state['layers']['0']['weight']),
+            (('layers', 0, 'bias'), self._state['layers']['0']['bias']),
+        ]
+
+    param_w = MockParam(jnp.zeros((2, 2)))
+    param_b = MockParam(jnp.zeros((2,)))
+    dst_state = FakeFlatStateModel({
+        'layers': {'0': {'weight': param_w, 'bias': param_b}}
+    })
+
+    src_state = {
+        'layers': {
+            '0': {
+                'weight': jnp.ones((2, 2)),
+                'bias': jnp.array([1.0, 2.0]),
+                'extra_unused': jnp.zeros((1,)),
+            }
+        }
+    }
+
+    mock_reshard = lambda source, target: source
+    with self.assertLogs(level='WARNING') as cm:
+      utils.transfer_state_directly(
+          src_state, dst_state, reshard_fn=mock_reshard
+      )
+
+    np.testing.assert_array_equal(param_w.value, jnp.ones((2, 2)))
+    np.testing.assert_array_equal(param_b.value, jnp.array([1.0, 2.0]))
+    self.assertTrue(
+        any('unmatched into dst_state.flat_state' in msg for msg in cm.output)
+    )
+
   def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
     """Test repeating num_heads dimension (non-last axis) for attention weights."""
     # Source k_proj: (model_dim=16, num_heads=2, head_dim=128)

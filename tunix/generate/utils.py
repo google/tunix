@@ -1889,14 +1889,34 @@ def transfer_state_directly(
     )
   if hasattr(dst_state, "flat_state"):
     flat_resharded = traverse_util.flatten_dict(resharded_weights)
+    norm_resharded = {
+        tuple(str(k) for k in key): (key, val)
+        for key, val in flat_resharded.items()
+    }
+    matched_keys = set()
     for path, var in dst_state.flat_state():
       key_tuple = tuple(path)
+      norm_key = tuple(str(k) for k in path)
       if key_tuple in flat_resharded:
+        orig_key = key_tuple
         new_val = flat_resharded[key_tuple]
-        if hasattr(var, "value"):
-          var.value = getattr(new_val, "value", new_val)
-        else:
-          var[...] = getattr(new_val, "value", new_val)
+      elif norm_key in norm_resharded:
+        orig_key, new_val = norm_resharded[norm_key]
+      else:
+        continue
+      matched_keys.add(orig_key)
+      if hasattr(var, "value"):
+        var.value = getattr(new_val, "value", new_val)
+      else:
+        var[...] = getattr(new_val, "value", new_val)
+    unmatched_keys = set(flat_resharded.keys()) - matched_keys
+    if unmatched_keys:
+      logging.warning(
+          "transfer_state_directly: %d tensors in flat_resharded were not"
+          " matched into dst_state.flat_state(): %s",
+          len(unmatched_keys),
+          sorted(unmatched_keys)[:10],
+      )
   else:
     nnx.update(dst_state, resharded_weights)
 
