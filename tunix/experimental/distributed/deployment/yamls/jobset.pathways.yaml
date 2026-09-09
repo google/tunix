@@ -16,11 +16,12 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
+  namespace: ${NAMESPACE}
 spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -152,6 +153,12 @@ spec:
                   exit $$EXIT_CODE
               env:
               # Injects the JobSet Name
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: ${HF_TOKEN_SECRET_NAME}
+                    key: HF_TOKEN
+                    optional: true
               - name: JOBSET_NAME
                 valueFrom:
                   fieldRef:

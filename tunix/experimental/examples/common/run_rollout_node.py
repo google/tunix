@@ -115,6 +115,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--maxtext_ckpt_path",
+      type=str,
+      default="",
+      help="Path to MaxText checkpoint to load initial parameters from.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for rollout worker.",
@@ -161,7 +167,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync_lib.WeightSyncMode),
       help="Weight sync mode (none, fallback, or raiden).",
   )
-  return parser.parse_args(argv)
+  parser.add_argument(
+      "--prefuse_moe_weights",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=True,
+      help="Whether to prefuse MoE weights (gate + up projection).",
+  )
+  parser.add_argument(
+      "--enable_prefix_caching",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=False,
+      help="Whether to enable prefix caching in vLLM (defaults to false).",
+  )
+  parser.add_argument("--tensor_parallel_size", type=int, default=None)
+  args = parser.parse_args(argv)
+  if args.tensor_parallel_size is None:
+    tp = getattr(args, "sampler_mesh_tp", None) or getattr(args, "mesh_tp", 1)
+    if tp > 1:
+      args.tensor_parallel_size = tp
+  return args
 
 
 def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -354,6 +378,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       engine_kwargs={
           "model": vllm_model,
           "max_model_len": max_model_len,
+          "enable_prefix_caching": args.enable_prefix_caching,
       },
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
@@ -409,6 +434,7 @@ def _create_vllm_sampler(args):
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
+      enable_prefix_caching=args.enable_prefix_caching,
   )
   if args.maxtext_model_name:
     logging.info(
@@ -417,8 +443,8 @@ def _create_vllm_sampler(args):
         args.maxtext_model_name,
     )
     engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
-    # MaxText inference config. prefuse_moe_weights is left False so rollout
-    # variable names match unfused trainer parameters during weight sync.
+    # MaxText inference config. When prefuse_moe_weights is True, MoE weights
+    # are prefused and interleaved per-shard for tensor parallel rollout.
     maxtext_config_overrides = {
         "model_name": args.maxtext_model_name,
         "model_call_mode": "inference",
@@ -426,9 +452,14 @@ def _create_vllm_sampler(args):
         "allow_split_physical_axes": True,
         "log_config": False,
         "weight_dtype": "bfloat16",
+        "prefuse_moe_weights": args.prefuse_moe_weights,
     }
     if args.maxtext_attention:
       maxtext_config_overrides["attention"] = args.maxtext_attention
+    # Note: load_parameters_path is intentionally NOT set here.
+    # Checkpoints on disk are scanned (layers.mlp.wi_0...), whereas MaxTextForCausalLM
+    # is unscanned (layers_0.mlp.wi_0...). Initial weights are pushed via Raiden
+    # weight sync (_sync_initial_weights) from the trainer after unstacking.
     engine_kwargs["additional_config"] = {
         "maxtext_config": maxtext_config_overrides
     }
@@ -448,6 +479,11 @@ def _create_vllm_sampler(args):
 
 
 def main(argv: list[str], context: Any = None) -> None:
+  from tunix.experimental.weight_sync.raiden_synchronizer import (  # pylint: disable=g-import-not-at-top
+      patch_raiden_worker_sync,
+  )
+  patch_raiden_worker_sync()
+
   if context and context.ipc and context.ipc.discovery:
     pass
   else:

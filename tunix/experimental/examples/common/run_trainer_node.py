@@ -139,6 +139,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=0,
+      help="Rollout tensor parallel mesh dimension for automatic MoE padding calculation.",
+  )
+  parser.add_argument(
+      "--prefuse_moe_weights",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=True,
+      help="Whether to prefuse MoE weights (gate + up projection).",
+  )
+  parser.add_argument(
+      "--use_weight_converter",
+      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      default=True,
+      help="Whether to use weight converter for weight sync.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
@@ -246,6 +264,8 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   )
 
 
+
+
 class _MeshBoundTrainer:
   """Binds generic PeftTrainer v2 calls to this worker's JAX mesh."""
 
@@ -316,6 +336,9 @@ def _create_maxtext_trainer_factory(args) -> Any:
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
       base_output_directory=args.maxtext_output_directory,
+      rollout_mesh_tp=args.rollout_mesh_tp,
+      prefuse_moe_weights=args.prefuse_moe_weights,
+      use_weight_converter=args.use_weight_converter,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

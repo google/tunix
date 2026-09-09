@@ -17,8 +17,8 @@
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+export MODEL_NAME=${MODEL_NAME:-Qwen3.5-35B-A3B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3.5-35B-A3B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
 # which can cause stale config/shape mismatches if shared across models.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_NAME}}
@@ -28,13 +28,13 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-export BATCH_SIZE=${BATCH_SIZE:-2}
+export BATCH_SIZE=${BATCH_SIZE:-4}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+export MAX_STEPS=${MAX_STEPS:-2}
+export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
-export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
@@ -45,30 +45,35 @@ export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
 export DEBUG=${DEBUG:-0}
-export SAMPLER=${SAMPLER:-inprocess_vllm}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export SAMPLER=${SAMPLER:-vllm}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
+export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
+export DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING:-true}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
-export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3.5-35b-a3b}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}
 # If TRAINER_BACKEND=maxtext, MAXTEXT_CKPT must be set to the path of an Orbax params-only checkpoint.
 if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
   exit 1
 fi
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
+export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-/app/artifacts/math_gsm8k_dist/maxtext}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
+export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
 
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
-export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-true}
+export RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-4}
 
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -77,44 +82,182 @@ export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 
+export NAMESPACE=${NAMESPACE:-default}
+export QUEUE_NAME=${QUEUE_NAME:-}
+
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
 
 export ROLLOUT_ID=$USER-roll
 export ROLLOUT_PORT=20001
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-2}
 
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
-export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
+export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-}
+export SYNC_CODE=${SYNC_CODE:-true}
+export DRY_RUN=${DRY_RUN:-false}
+export TUNIX_DIR=${TUNIX_DIR:-$(pwd)}
+export MAXTEXT_DIR=${MAXTEXT_DIR:-$(cd "${TUNIX_DIR}/../maxtext" 2>/dev/null && pwd || true)}
+export TPU_INFERENCE_DIR=${TPU_INFERENCE_DIR:-$(cd "${TUNIX_DIR}/../tpu-inference" 2>/dev/null && pwd || true)}
+export GCS_SYNC_TAR=${GCS_SYNC_TAR:-${GCS_SCRATCH_LOCATION:+${GCS_SCRATCH_LOCATION}/code_sync/${USER}.tar.gz}}
+export RAIDEN_WHEEL_GCS=${RAIDEN_WHEEL_GCS:-}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
-export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5e:4x4}
-export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
-export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
+export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
+export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-4}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-2}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 
-export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
-export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904}
 
-export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
-export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
+export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}
+export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
-export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
+export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
+
+apply_manifest() {
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "---"
+    cat
+  else
+    kubectl apply -f -
+  fi
+}
+
+sync_code_to_gcs() {
+  if [[ "${SYNC_CODE}" != "true" ]]; then
+    echo "ℹ️  Code sync disabled (SYNC_CODE=false). Using container image as-is."
+    return 0
+  fi
+
+  if [[ -z "${GCS_SCRATCH_LOCATION}" ]]; then
+    echo "Error: SYNC_CODE=true requires GCS_SCRATCH_LOCATION to be set (e.g. gs://<bucket>/scratch/\$USER)." >&2
+    exit 1
+  fi
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "[DRY RUN] Would package local code and upload to ${GCS_SYNC_TAR}"
+    return 0
+  fi
+
+  if [ ! -d "${TUNIX_DIR}" ] || [ ! -d "${MAXTEXT_DIR}" ]; then
+    echo "Error: Local tunix/ or maxtext/ directories not found for code sync." >&2
+    echo "Expected at: ${TUNIX_DIR} and ${MAXTEXT_DIR}" >&2
+    exit 1
+  fi
+
+  local pkg_msg="tunix/, maxtext/"
+  local extra_dirs=()
+  if [ -d "${MAXTEXT_DIR}" ]; then
+    local maxtext_parent
+    maxtext_parent="$(cd "${MAXTEXT_DIR}/.." && pwd)"
+    extra_dirs+=("-C" "${maxtext_parent}" "maxtext")
+  fi
+  if [ -d "${TPU_INFERENCE_DIR}" ]; then
+    local tpu_inf_parent
+    tpu_inf_parent="$(cd "${TPU_INFERENCE_DIR}/.." && pwd)"
+    extra_dirs+=("-C" "${tpu_inf_parent}" "tpu-inference")
+    pkg_msg="tunix/, maxtext/, tpu-inference/"
+  fi
+
+  echo "================================================================="
+  echo "📦 Packaging local changes from ${pkg_msg}..."
+  echo "================================================================="
+  local tar_file="/tmp/code_sync_${USER}.tar.gz"
+  rm -f "${tar_file}"
+
+  tar --exclude=".git" \
+      --exclude=".venv" \
+      --exclude="venv*" \
+      --exclude="myenv" \
+      --exclude="__pycache__" \
+      --exclude=".pytest_cache" \
+      --exclude="docs" \
+      --exclude="benchmarks" \
+      --exclude="tests" \
+      --exclude="artifacts" \
+      --exclude="checkpoints" \
+      --exclude="old_backup" \
+      -czf "${tar_file}" \
+      -C "${TUNIX_DIR}" . \
+      "${extra_dirs[@]}"
+
+  local tar_size
+  tar_size=$(ls -lh "${tar_file}" | awk '{print $5}')
+  echo "📦 Archive created (${tar_size}). Uploading to ${GCS_SYNC_TAR}..."
+
+  if command -v gcloud &>/dev/null; then
+    gcloud storage cp "${tar_file}" "${GCS_SYNC_TAR}" --quiet || gsutil cp "${tar_file}" "${GCS_SYNC_TAR}"
+  else
+    gsutil cp "${tar_file}" "${GCS_SYNC_TAR}"
+  fi
+  echo "✅ Local code synced to GCS: ${GCS_SYNC_TAR}"
+
+  rm -f "${tar_file}"
+  echo "================================================================="
+}
+
+get_sync_prefix() {
+  if [[ "${SYNC_CODE}" != "true" ]]; then
+    echo ""
+    return 0
+  fi
+
+  local sync_cmd=""
+  sync_cmd+="echo '==> Syncing code from ${GCS_SYNC_TAR}...'; "
+  sync_cmd+="(gcloud storage cp '${GCS_SYNC_TAR}' /tmp/code_sync.tar.gz 2>/dev/null || gsutil cp '${GCS_SYNC_TAR}' /tmp/code_sync.tar.gz 2>/dev/null || python3 -c \"import json, urllib.request, urllib.parse; token = json.loads(urllib.request.urlopen(urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', headers={'Metadata-Flavor': 'Google'})).read())['access_token']; b, p = '${GCS_SYNC_TAR}'.replace('gs://', '').split('/', 1); req = urllib.request.Request(f'https://storage.googleapis.com/storage/v1/b/{b}/o/{urllib.parse.quote(p, safe=\\\"\\\")}?alt=media', headers={'Authorization': f'Bearer {token}'}); open('/tmp/code_sync.tar.gz', 'wb').write(urllib.request.urlopen(req).read())\" 2>/dev/null || python3 -c \"import gcsfs; gcsfs.GCSFileSystem().get('${GCS_SYNC_TAR}', '/tmp/code_sync.tar.gz')\"); "
+  sync_cmd+="mkdir -p /app && tar -xzf /tmp/code_sync.tar.gz -C /app && rm -f /tmp/code_sync.tar.gz; "
+  sync_cmd+="SP=\$(python3 -c \"import site; sps = site.getsitepackages(); print(sps[0] if sps else '')\"); "
+  sync_cmd+="if [ -z \"\$SP\" ] || [ ! -d \"\$SP\" ]; then SP=\$(python3 -c \"import sysconfig; print(sysconfig.get_path('purelib'))\"); fi; "
+  sync_cmd+="if [ -z \"\$SP\" ] || [ ! -d \"\$SP\" ]; then echo 'ERROR: Failed to detect valid site-packages in container!' >&2; exit 1; fi; "
+  sync_cmd+="echo \"==> Overlaying synced checkouts onto \$SP...\"; "
+  sync_cmd+="cp -rf /app/tunix \"\$SP/\"; "
+  sync_cmd+="cp -rf /app/maxtext/src/maxtext \"\$SP/\"; "
+  if [ -d "${TPU_INFERENCE_DIR}" ]; then
+    sync_cmd+="if [ -d /app/tpu-inference/tpu_inference ]; then cp -rf /app/tpu-inference/tpu_inference \"\$SP/\"; fi; "
+  fi
+  if [[ -n "${RAIDEN_WHEEL_GCS}" ]]; then
+    local wheel_name
+    wheel_name=$(basename "${RAIDEN_WHEEL_GCS}")
+    sync_cmd+="echo '==> Installing Raiden wheel ${wheel_name}...'; "
+    sync_cmd+="if [ -f \"/app/raiden_wheels/${wheel_name}\" ]; then "
+    sync_cmd+="  pip install --force-reinstall --no-deps \"/app/raiden_wheels/${wheel_name}\"; "
+    sync_cmd+="else "
+    sync_cmd+="  (gcloud storage cp '${RAIDEN_WHEEL_GCS}' /tmp/raiden_wheel.whl 2>/dev/null || gsutil cp '${RAIDEN_WHEEL_GCS}' /tmp/raiden_wheel.whl 2>/dev/null || python3 -c \"import json, urllib.request, urllib.parse; token = json.loads(urllib.request.urlopen(urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', headers={'Metadata-Flavor': 'Google'})).read())['access_token']; b, p = '${RAIDEN_WHEEL_GCS}'.replace('gs://', '').split('/', 1); req = urllib.request.Request(f'https://storage.googleapis.com/storage/v1/b/{b}/o/{urllib.parse.quote(p, safe=\\\"\\\")}?alt=media', headers={'Authorization': f'Bearer {token}'}); open('/tmp/raiden_wheel.whl', 'wb').write(urllib.request.urlopen(req).read())\" 2>/dev/null || python3 -c \"import gcsfs; gcsfs.GCSFileSystem().get('${RAIDEN_WHEEL_GCS}', '/tmp/raiden_wheel.whl')\") && pip install --force-reinstall --no-deps /tmp/raiden_wheel.whl && rm -f /tmp/raiden_wheel.whl; "
+    sync_cmd+="fi; "
+  fi
+  sync_cmd+="export PYTHONPATH=\"/app/maxtext/src:/app/tpu-inference:/app:\${PYTHONPATH:-}\"; "
+  sync_cmd+="echo \"==> Code sync applied successfully to /app and \$SP.\"; "
+
+  echo "${sync_cmd}"
+}
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" --namespace="${NAMESPACE}" --ignore-not-found
 }
 
 start_orchestrator() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  local sync_prefix
+  sync_prefix=$(get_sync_prefix)
+  local debug_flag=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_flag="--debug"
+  fi
+
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
+    --namespace="${NAMESPACE}" \
+    ${QUEUE_NAME:+--queue_name="${QUEUE_NAME}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ${sync_prefix} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
@@ -130,22 +273,27 @@ start_orchestrator() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --rollout_replicas=${ROLLOUT_REPLICAS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
-        ${DEBUG:+--debug} \
+        ${debug_flag} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" --namespace="${NAMESPACE}" --ignore-not-found
 }
 
 start_trainer() {
   local extra_flags=""
+  local debug_flag=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_flag="--debug"
+  fi
 
   if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
@@ -159,12 +307,23 @@ start_trainer() {
       --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
+      --rollout_mesh_tp=${ROLLOUT_MESH_TP} \
+      --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
+      --use_weight_converter=${USE_WEIGHT_CONVERTER} \
     "
   fi
 
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  # Multihost Pathways trainer runs with Raiden FFI enabled
+  local trainer_ffi_env="USE_RAIDEN_FFI=true RAIDEN_USE_FFI=1 RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
+
+  local sync_prefix
+  sync_prefix=$(get_sync_prefix)
+
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
+    --namespace="${NAMESPACE}" \
+    ${QUEUE_NAME:+--queue_name="${QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
@@ -173,7 +332,8 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      ${sync_prefix} \
+      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} ${trainer_ffi_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -198,47 +358,71 @@ start_trainer() {
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${extra_flags} \
-        ${DEBUG:+--debug} \
+        ${debug_flag} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_rollout() {
-  if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
-    kubectl delete leaderworkerset "${ROLLOUT_ID}"
-  else
-    kubectl delete jobset "${ROLLOUT_ID}"
-  fi
+  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+    local target_id
+    if [[ $ROLLOUT_REPLICAS -eq 1 ]]; then
+      target_id="${ROLLOUT_ID}"
+    else
+      target_id="${ROLLOUT_ID}-${i}"
+    fi
+    if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
+      kubectl delete leaderworkerset "${target_id}" --namespace="${NAMESPACE}" --ignore-not-found
+    else
+      kubectl delete jobset "${target_id}" --namespace="${NAMESPACE}" --ignore-not-found
+    fi
+  done
 }
 
-start_rollout() {
+start_rollout_instance() {
+  local target_id="$1"
   local extra_flags=""
+  local debug_flag=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_flag="--debug"
+  fi
 
   if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    extra_flags+="\
+    extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
+      --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
     "
   fi
 
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  # mcJax rollout runs without Raiden FFI
+  local rollout_ffi_env="USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0 RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
+
+  local sync_prefix
+  sync_prefix=$(get_sync_prefix)
+
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${ROLLOUT_JOBSET_YAML} \
-    --jobset_name="${ROLLOUT_ID}" \
+    --jobset_name="${target_id}" \
+    --namespace="${NAMESPACE}" \
+    ${QUEUE_NAME:+--queue_name="${QUEUE_NAME}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
+    --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      HF_TOKEN=${HF_TOKEN} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${sync_prefix} \
+      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${rollout_ffi_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-        --worker_id=${ROLLOUT_ID} \
+        --worker_id=${target_id} \
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
@@ -251,16 +435,41 @@ start_rollout() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
         ${extra_flags} \
-        ${DEBUG:+--debug} \
+        ${debug_flag} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
+}
+
+start_rollout() {
+  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+    local target_id
+    if [[ $ROLLOUT_REPLICAS -eq 1 ]]; then
+      target_id="${ROLLOUT_ID}"
+    else
+      target_id="${ROLLOUT_ID}-${i}"
+    fi
+    start_rollout_instance "${target_id}"
+  done
 }
 
 source tunix/experimental/examples/common/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    start|stop|orchestrator|trainer|rollout)
+      COMMAND="$1"
+      shift
+      ;;
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --no-debug)
+      DEBUG=0
+      shift
+      ;;
     --command)
       COMMAND="$2"
       shift 2
@@ -277,6 +486,68 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
+    --namespace)
+      NAMESPACE="$2"
+      shift 2
+      ;;
+    --namespace=*)
+      NAMESPACE="${1#*=}"
+      shift
+      ;;
+    --queue)
+      QUEUE_NAME="$2"
+      shift 2
+      ;;
+    --queue=*)
+      QUEUE_NAME="${1#*=}"
+      shift
+      ;;
+    --sync-code)
+      SYNC_CODE=true
+      shift
+      ;;
+    --no-sync-code)
+      SYNC_CODE=false
+      shift
+      ;;
+    --dry-run|--render)
+      DRY_RUN=true
+      shift
+      ;;
+    --tunix-dir=*)
+      TUNIX_DIR="${1#*=}"
+      shift
+      ;;
+    --tunix-dir)
+      TUNIX_DIR="$2"
+      shift 2
+      ;;
+    --maxtext-dir=*)
+      MAXTEXT_DIR="${1#*=}"
+      shift
+      ;;
+    --maxtext-dir)
+      MAXTEXT_DIR="$2"
+      shift 2
+      ;;
+    --wheel=*|--raiden-wheel=*)
+      RAIDEN_WHEEL_GCS="${1#*=}"
+      shift
+      ;;
+    --wheel|--raiden-wheel)
+      RAIDEN_WHEEL_GCS="$2"
+      shift 2
+      ;;
+    --scratch=*|--gcs-scratch=*)
+      GCS_SCRATCH_LOCATION="${1#*=}"
+      GCS_SYNC_TAR="${GCS_SCRATCH_LOCATION}/code_sync/${USER}.tar.gz"
+      shift
+      ;;
+    --scratch|--gcs-scratch)
+      GCS_SCRATCH_LOCATION="$2"
+      GCS_SYNC_TAR="${GCS_SCRATCH_LOCATION}/code_sync/${USER}.tar.gz"
+      shift 2
+      ;;
     *)
       shift
       ;;
@@ -291,6 +562,7 @@ if [[ -z "$TUNIX_IMAGE" ]]; then
 fi
 
 if [[ "$COMMAND" == "start" ]]; then
+  sync_code_to_gcs
   stop_orchestrator
   stop_trainer
   stop_rollout
@@ -302,11 +574,17 @@ elif [[ "$COMMAND" == "stop" ]]; then
   stop_trainer
   stop_rollout
 elif [[ "$COMMAND" == "orchestrator" ]]; then
-  stop_orchestrator; start_orchestrator
+  sync_code_to_gcs
+  stop_orchestrator
+  start_orchestrator
 elif [[ "$COMMAND" == "trainer" ]]; then
-  stop_trainer; start_trainer
+  sync_code_to_gcs
+  stop_trainer
+  start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
-  stop_rollout; start_rollout
+  sync_code_to_gcs
+  stop_rollout
+  start_rollout
 else
   echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
   exit 1

@@ -16,9 +16,10 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
+  namespace: ${NAMESPACE}
 spec:
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -46,6 +47,10 @@ spec:
             terminationGracePeriodSeconds: 10
             nodeSelector:
               node.kubernetes.io/instance-type: ${CPU_MACHINE}
+            tolerations:
+            - key: "cloud.google.com/gke-nodepool"
+              operator: "Exists"
+              effect: "NoSchedule"
             containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
@@ -83,6 +88,12 @@ spec:
                   exit $$EXIT_CODE
               env:
               # Injects the JobSet Name
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: ${HF_TOKEN_SECRET_NAME}
+                    key: HF_TOKEN
+                    optional: true
               - name: JOBSET_NAME
                 valueFrom:
                   fieldRef:

@@ -16,9 +16,10 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
+  namespace: ${NAMESPACE}
 spec:
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
