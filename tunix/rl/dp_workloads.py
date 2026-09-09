@@ -1418,6 +1418,32 @@ def frozenlake_evaluation_enabled(
   return enabled == "1"
 
 
+DIAG_UNPIN_ENV = "CANON_DP_WORKLOAD_DIAG_UNPIN"
+
+
+def _apply_diag_unpin(
+    expected: dict[str, Any], values: Mapping[str, str]
+) -> None:
+  """Drops the ":"-separated names in CANON_DP_WORKLOAD_DIAG_UNPIN from the pins.
+
+  Diagnostic knob ablation (tasks/zero_tim_perf phase0 P0.2): the canonical
+  workload pins its determinism knobs, so a single knob cannot be turned off
+  on the certified carrier without this.  Empty (the default) changes
+  nothing; a name that is not pinned is a typo and refuses; every unpinned
+  name is printed so the run reads as diagnostic, never as certification.
+  """
+  raw = values.get(DIAG_UNPIN_ENV, "")
+  for name in (n for n in raw.split(":") if n):
+    if name not in expected:
+      raise ValueError(f"{DIAG_UNPIN_ENV} names a key that is not pinned: {name}")
+    print(
+        f"[DP_WORKLOAD] DIAG unpinned {name}={values.get(name)!r} "
+        f"(pinned {expected[name]!r}; not certification)",
+        flush=True,
+    )
+    del expected[name]
+
+
 def validate_environment(
     workload: DPWorkloadSpec,
     environ: Mapping[str, str] | None = None,
@@ -1550,6 +1576,7 @@ def validate_environment(
     })
   if workload.name.startswith("gsm8k"):
     expected["CANON_GSM8K_GRAD_PROBE"] = "0"
+  _apply_diag_unpin(expected, values)
   wrong = {
       key: values.get(key)
       for key, expected_value in expected.items()
