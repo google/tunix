@@ -202,6 +202,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+    self.mock_engine.flush_metrics = mock.AsyncMock(return_value=None)
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     self.mock_algo.group_size = 2
@@ -2177,6 +2178,99 @@ class RLProgramTest(absltest.TestCase):
       )
 
     asyncio.run(_run())
+
+  def _make_two_items(self):
+    return [
+        datatypes.TrajectoryItem(
+            group_index=gi,
+            prompt_id="prompt_0",
+            start_step=0,
+            prompt_tokens=np.array([1, 2], dtype=np.int32),
+            completion_tokens=np.array([3, 4], dtype=np.int32),
+            traj=datatypes.Trajectory(reward=1.0, status=None),
+        )
+        for gi in range(2)
+    ]
+
+  def test_final_flush_logs_at_drained_buffer_step(self):
+    # The drained final buffer must be logged at its own step id. self._step
+    # can be ahead of the trainer's completed updates (a trailing partial
+    # accumulation group advances _step without an update), so logging at
+    # self._step would attribute the final loss to a step that never ran.
+    import jax  # pylint: disable=g-import-not-at-top
+
+    records = []
+
+    def _listener(name, value, **kwargs):
+      del value
+      records.append((name, kwargs.get("step")))
+
+    async def _run():
+      flushed = exp_metrics.MetricsBuffer(
+          id=7, scalar_metrics={"loss": 0.75}, mode="train"
+      )
+      self.mock_engine.flush_metrics = mock.AsyncMock(return_value=flushed)
+      _set_mock_poll_batches(self.mock_engine, self._make_two_items(), [])
+      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+      await program.run_async(self.mock_engine)
+      return program
+
+    jax.monitoring.register_scalar_listener(_listener)
+    try:
+      program = asyncio.run(_run())
+    finally:
+      jax.monitoring.clear_event_listeners()
+
+    self.mock_engine.flush_metrics.assert_awaited()
+    self.assertNotEqual(program.step, 7)  # the discrepancy the test guards
+    loss_steps = [s for n, s in records if n.endswith("trainer/loss")]
+    self.assertIn(7, loss_steps)
+    self.assertNotIn(program.step, loss_steps)
+
+  def test_final_flush_skips_empty_sentinel_buffer(self):
+    # A trainer with nothing parked returns the empty buffer (id=-1); nothing
+    # must be logged for it.
+    async def _run():
+      self.mock_engine.flush_metrics = mock.AsyncMock(
+          return_value=exp_metrics.MetricsBuffer(id=-1)
+      )
+      _set_mock_poll_batches(self.mock_engine, self._make_two_items(), [])
+      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+      await program.run_async(self.mock_engine)
+      return program
+
+    program = asyncio.run(_run())
+    self.assertFalse(
+        program.metrics_logger.metric_exists("", "trainer/loss", "train")
+    )
+
+  def test_final_flush_logging_failure_does_not_fail_run(self):
+    # Best effort covers local logging too: a logging-backend error while
+    # emitting the drained metrics must not turn a completed run into a
+    # failure.
+    async def _run():
+      flushed = exp_metrics.MetricsBuffer(
+          id=1, scalar_metrics={"loss": 0.5}, mode="train"
+      )
+      self.mock_engine.flush_metrics = mock.AsyncMock(return_value=flushed)
+      _set_mock_poll_batches(self.mock_engine, self._make_two_items(), [])
+      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+      original = program._log_trainer_metrics
+
+      def _failing_for_flushed(trainer_metrics, log_step):
+        if trainer_metrics is flushed:
+          raise OSError("metrics backend unavailable")
+        return original(trainer_metrics, log_step)
+
+      with mock.patch.object(
+          program, "_log_trainer_metrics", side_effect=_failing_for_flushed
+      ):
+        await program.run_async(self.mock_engine)  # must not raise
+      return program
+
+    program = asyncio.run(_run())
+    self.mock_engine.flush_metrics.assert_awaited()
+    self.assertEqual(program.step, 1)
 
   def test_rollouts_without_status_omits_success_rate(self):
     async def _run():

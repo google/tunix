@@ -1264,6 +1264,35 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._written_metrics = None
     return ret
 
+  def flush_metrics(self) -> exp_metrics.MetricsBuffer:
+    """Drains the completed final train step so it is retrievable.
+
+    _write_train_metrics() writes the *previous* step and parks the just
+    completed one in _prev_buffered_train_metrics to overlap metric I/O with
+    the next step's compute. A distributed caller that pulls metrics per step
+    needs that parked step drained after the train loop, or it is never
+    emitted.
+
+    Only the parked, completed step is written. _buffered_train_metrics may
+    hold forward/backward passes of an optimizer step that never completed (a
+    trailing partial accumulation group); it is neither promoted nor logged,
+    since there is no optimizer step to attribute it to -- promoting it would
+    make a later close() emit a step that never happened. Idempotent: a second
+    call returns the empty buffer.
+    """
+    parked = self._prev_buffered_train_metrics
+    if parked is None:
+      return self.get_metrics()
+    # Same +1 as _write_train_metrics: train_step is not incremented until the
+    # next model update, so the parked buffer is logged as the completed step.
+    parked.step += 1
+    self._write_metrics(parked)
+    self._may_update_pbar(
+        self._tqdm_train_metrics, step=parked.step, loss=parked.loss
+    )
+    self._prev_buffered_train_metrics = None
+    return self.get_metrics()
+
   def train(
       self,
       train_ds: Iterable[Any],
