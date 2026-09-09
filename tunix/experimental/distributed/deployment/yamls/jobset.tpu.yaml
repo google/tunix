@@ -17,7 +17,7 @@ kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
   namespace: ${NAMESPACE}
-spec:
+${QUEUE_LABEL}spec:
   failurePolicy:
     maxRestarts: 3
     restartStrategy: Recreate
@@ -83,6 +83,12 @@ spec:
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: ${HF_TOKEN_SECRET_NAME}
+                    key: HF_TOKEN
+                    optional: true
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:

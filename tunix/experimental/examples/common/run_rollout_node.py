@@ -115,12 +115,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--maxtext_ckpt_path",
-      type=str,
-      default="",
-      help="Path to MaxText checkpoint to load initial parameters from.",
-  )
-  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for rollout worker.",
@@ -167,25 +161,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync_lib.WeightSyncMode),
       help="Weight sync mode (none, fallback, or raiden).",
   )
+  def _str2bool(v: Any) -> bool:
+    if isinstance(v, bool):
+      return v
+    return str(v).lower() in ("true", "1", "yes")
+
   parser.add_argument(
       "--prefuse_moe_weights",
-      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      nargs="?",
+      const=True,
+      type=_str2bool,
       default=True,
       help="Whether to prefuse MoE weights (gate + up projection).",
   )
   parser.add_argument(
       "--enable_prefix_caching",
-      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      nargs="?",
+      const=True,
+      type=_str2bool,
       default=False,
       help="Whether to enable prefix caching in vLLM (defaults to false).",
   )
   parser.add_argument("--tensor_parallel_size", type=int, default=None)
   args = parser.parse_args(argv)
+  _finalize_tensor_parallel_size(args)
+  return args
+
+
+def _finalize_tensor_parallel_size(args: argparse.Namespace) -> None:
+  """Derives tensor_parallel_size from mesh_tp if not explicitly set."""
   if args.tensor_parallel_size is None:
     tp = getattr(args, "sampler_mesh_tp", None) or getattr(args, "mesh_tp", 1)
     if tp > 1:
       args.tensor_parallel_size = tp
-  return args
+      logging.info("Auto-derived tensor_parallel_size=%d from mesh_tp", tp)
 
 
 def _agent_config(args: argparse.Namespace) -> dict[str, Any]:

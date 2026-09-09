@@ -490,6 +490,12 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertFalse(args_custom.use_weight_converter)
     self.assertEqual(args_custom.rollout_mesh_tp, 2)
 
+  def test_parse_args_bare_boolean_flags(self):
+    argv = ["--prefuse_moe_weights", "--use_weight_converter"]
+    args = run_trainer_node._parse_args(argv)
+    self.assertTrue(args.prefuse_moe_weights)
+    self.assertTrue(args.use_weight_converter)
+
   def test_create_mesh_validates_device_count(self):
     args = mock.MagicMock(mesh_fsdp=2, mesh_tp=2)
     with mock.patch.object(jax, "device_count", return_value=2):

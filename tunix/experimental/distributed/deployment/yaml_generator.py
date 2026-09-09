@@ -92,7 +92,11 @@ def main() -> None:
   parser.add_argument(
       "--hf_token_secret_name",
       default=os.environ.get("HF_TOKEN_SECRET_NAME", "hf-token-secret"),
-      help="Kubernetes secret name containing HF_TOKEN",
+      help=(
+          "Kubernetes secret name (not the token itself) containing HF_TOKEN."
+          " Create with: kubectl create secret generic <name>"
+          " --from-literal=HF_TOKEN=<token>"
+      ),
   )
   parser.add_argument(
       "--namespace",
@@ -156,6 +160,12 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  queue_label = (
+      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
+      if args.queue_name
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -182,6 +192,7 @@ def main() -> None:
         HF_TOKEN_SECRET_NAME=args.hf_token_secret_name,
         NAMESPACE=args.namespace or "default",
         QUEUE_NAME=args.queue_name,
+        QUEUE_LABEL=queue_label,
     )
     print(content)
 

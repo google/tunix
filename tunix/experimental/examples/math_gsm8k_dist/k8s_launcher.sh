@@ -17,8 +17,8 @@
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3.5-35B-A3B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3.5-35B-A3B}
+export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
 # which can cause stale config/shape mismatches if shared across models.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_NAME}}
@@ -28,13 +28,13 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-export BATCH_SIZE=${BATCH_SIZE:-4}
+export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-2}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
+export MAX_STEPS=${MAX_STEPS:-1}
+export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
-export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
+export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
@@ -45,24 +45,24 @@ export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
 export DEBUG=${DEBUG:-0}
-export SAMPLER=${SAMPLER:-vllm}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+export SAMPLER=${SAMPLER:-inprocess_vllm}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
 export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
-export DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING:-true}
+export DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING:-false}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
-export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3.5-35b-a3b}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}
+export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 # If TRAINER_BACKEND=maxtext, MAXTEXT_CKPT must be set to the path of an Orbax params-only checkpoint.
 if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
   exit 1
 fi
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-/app/artifacts/math_gsm8k_dist/maxtext}
+export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
@@ -72,7 +72,7 @@ export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
 
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
-export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-true}
+export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-4}
 
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
@@ -90,14 +90,14 @@ export ORCHESTRATOR_PORT=20000
 
 export ROLLOUT_ID=$USER-roll
 export ROLLOUT_PORT=20001
-export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-2}
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
-export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-}
-export SYNC_CODE=${SYNC_CODE:-true}
+export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
+export SYNC_CODE=${SYNC_CODE:-false}
 export DRY_RUN=${DRY_RUN:-false}
 export TUNIX_DIR=${TUNIX_DIR:-$(pwd)}
 export MAXTEXT_DIR=${MAXTEXT_DIR:-$(cd "${TUNIX_DIR}/../maxtext" 2>/dev/null && pwd || true)}
@@ -106,18 +106,18 @@ export GCS_SYNC_TAR=${GCS_SYNC_TAR:-${GCS_SCRATCH_LOCATION:+${GCS_SCRATCH_LOCATI
 export RAIDEN_WHEEL_GCS=${RAIDEN_WHEEL_GCS:-}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
-export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
-export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-4}
-export TRAINER_MESH_TP=${TRAINER_MESH_TP:-2}
+export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5e:4x4}
+export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 
-export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904}
-export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904}
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}
-export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
-export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
+export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 
 apply_manifest() {
   if [[ "${DRY_RUN}" == "true" ]]; then
@@ -333,7 +333,7 @@ start_trainer() {
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} ${trainer_ffi_env} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN="${HF_TOKEN}"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} ${trainer_ffi_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -418,7 +418,7 @@ start_rollout_instance() {
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${rollout_ffi_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN="${HF_TOKEN}"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${rollout_ffi_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \

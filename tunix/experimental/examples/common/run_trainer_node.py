@@ -144,15 +144,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=0,
       help="Rollout tensor parallel mesh dimension for automatic MoE padding calculation.",
   )
+
+  def _str2bool(v: Any) -> bool:
+    if isinstance(v, bool):
+      return v
+    return str(v).lower() in ("true", "1", "yes")
+
   parser.add_argument(
       "--prefuse_moe_weights",
-      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      nargs="?",
+      const=True,
+      type=_str2bool,
       default=True,
       help="Whether to prefuse MoE weights (gate + up projection).",
   )
   parser.add_argument(
       "--use_weight_converter",
-      type=lambda x: str(x).lower() in ("true", "1", "yes"),
+      nargs="?",
+      const=True,
+      type=_str2bool,
       default=True,
       help="Whether to use weight converter for weight sync.",
   )
@@ -262,8 +272,6 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   return model_utils.apply_lora_to_model(
       model, mesh=mesh, lora_config=lora_config
   )
-
-
 
 
 class _MeshBoundTrainer:
