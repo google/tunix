@@ -98,3 +98,86 @@ e188a44d287d63fc535814bb0932317f76fdee5443080c0ca969a2ec74ce8a8e  frozenlake_m15
 a85340243398af25836f9416a598a81e9efcbea46b0f0c50e9623f9693581123  frozenlake_p45_standard_r01.log
 7a3337506161895317ae61e614e3e4829ef266d3d04e2a4cdb61aa571b402ea7  frozenlake_p45_zero_r10a.log
 ```
+
+---
+
+## Errata (2026-09-09, from the same four logs listed in §4)
+
+All numbers below are read from the four log files whose SHA256 are listed in §4
+(`grep -a 'Global step .* completed in'`, `grep -a '\[PERF\] stage='`), summarised by
+`tasks/zero_tim_perf/scripts/perf_series.py` (10-step-window medians; output in
+`tasks/zero_tim_perf/P0_perf_series.md`). Corrections are listed most consequential first.
+
+### E1. "End-to-End Step Time" row — Zero-TIM columns are wrong by 5–7× (measured)
+
+The table gives Zero-TIM **~1.3m–2.0m** (P45) and **~6.5m–8.6m** (M15). The logs say:
+
+| arm | window (steps) | n | median step time |
+|---|---|---|---|
+| P45 Zero-TIM (`r10a`) | 70–79 / 80–89 / 120–129 | 6 / 5 / 3 | **442 s / 454 s / 647 s** (7.4–10.8 min) |
+| P45 Standard (`r01`) | 30–39 / 190–199 | 6 / 4 | 116 s / 137 s (row is correct) |
+| M15 Zero-TIM (`r10`) | 20–29 | 6 | **2846 s** (47.4 min) |
+| M15 Standard (`r01`) | 10–19 / 60–69 / 70–79 | 4 / 5 / 2 | 247 s / 402 s / 417 s (row quotes only the late window) |
+
+Per step, Zero-TIM is **3.3–4.7× slower** than Standard on P45 and **~7× slower** on M15 —
+not faster, as the row implies. The `rescore_b` row in the same table (58 s / 188.5 s
+for Zero-TIM) already exceeds the quoted 1.3-min step, which is the internal
+inconsistency that flags the error.
+
+### E2. "VAG Pullback Kernel ~544 ms / group" and §3 "(~540ms – 670ms)" — off by ~10× (measured)
+
+`[PERF] stage=p32_vag_reverse seconds=… groups=32 mean=… max=…` records: P45 Zero-TIM
+(14 records) `mean` = **3.44–5.18 s per group**, M15 Zero-TIM (6 records) **13.5–15.2 s per
+group**; no record is below 1 s. Per-step reverse totals: median **129.5 s** (P45) and
+**476 s** (M15). We could not find any log line supporting a sub-second per-group figure.
+
+### E3. Finding 4 "Host Garbage Collection … 4.5 s vs 0.50 s" is real but is not a gap driver (measured)
+
+`weight_sync_gc` is 4.4–4.9 s (Zero-TIM) vs ~0.5 s (Standard): a **~4 s/step delta**, i.e.
+~1.2 % of the P45 gap (456 − 119 = 337 s) and ~0.2 % of the M15 gap (2846 − 402 = 2444 s).
+The stated cause ("large retained intermediate PyTree activation graphs") is not evidenced
+by any log line; it should read *unattributed*.
+
+### E4. "Tensor Serialization: Full TiTO Host/Device Tape" as a performance cost — no measured transport stage (measured; attribution inferred)
+
+The only host-transfer counters in the Zero-TIM logs read `host_transfers=0` (493 records)
+and `[PERF] stage=weight_sync_anchor_d2h … d2h=0.000` (14 records). There is no timed
+tape-transport stage. The gap decomposes as follows (medians, Standard → Zero-TIM):
+
+| stage | P45 | M15 |
+|---|---|---|
+| rollout, per `rollout_generate` call | 14.4 → 41.4 s | 21.3 → 134 s |
+| engine prompt throughput | 11,807 → 4,445 tok/s | 23,030 → 3,675 tok/s |
+| engine generation throughput | 1,983 → 144 tok/s | 2,666 → 308 tok/s |
+| engine prefix-cache hit | 0 % → 0 % | 0 % → 0 % |
+| `rescore_b` (T_old forward) | 11.6 → 63.4 s | 34.5 → 228.9 s |
+| trainer update: Standard train loop vs Zero-TIM reverse | 30 → 129.5 s | 56.4 → 476 s |
+| `weight_sync` + gc | 8.3 → 14.5 s | 7.7 → 11.8 s |
+| forward (tape build), Zero-TIM only | 0.34 s | 0.47 s |
+
+Rollout accounts for roughly half (P45) to three quarters (M15) of the gap; the engine,
+`rescore_b` and the reverse pass each slow down by a similar factor (≈3–10×) under the same
+deterministic-kernel bundle (`cluster/profiles/_canonical_engine.env`). The consistent
+factor across three independent stages points at kernel cost as the common cause
+(*inferred*; to be confirmed by the one-host ablation in `tasks/zero_tim_perf/phase0.md`),
+not at transport or GC.
+
+### E5. Finding 4 "58 s / 188 s … due to cross-validation and tape alignment verification" (inferred)
+
+`rescore_b` is the trainer-side T_old forward over 256 rows; the alignment comparison is an
+elementwise check and is not a timed stage. Its 5–7× slowdown tracks the engine slowdown
+above; attributing it to "verification" overstates the comparison and understates the
+kernel cost.
+
+### E6. The comparison the report should make: wall-clock to quality, not seconds per step (measured)
+
+The Standard arm degrades while it runs fast: P45 Standard `trunc_ratio` 6 % → 37 % with
+`raw_compl` 890 → 1447 tokens and solve flat at 0.55–0.57; M15 Standard trunc 0.2 % → 26 %,
+solve 0.31 → 0.30. Zero-TIM keeps trunc ≤ 2.5 % and reaches P45 solve ≥ 0.70 at step 36
+(5.3 h cumulative) and ≥ 0.80 at step 39 (5.7 h); M15 solve ≥ 0.30 at step 6 (3.3 h). The
+per-step ratio in E1 therefore overstates the practical penalty; the metric this report
+should track is time-to-threshold under a truncation ceiling (see
+`tasks/zero_tim_perf/GOAL.md §2`).
+
+---
+
