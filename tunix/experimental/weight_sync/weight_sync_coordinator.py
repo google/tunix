@@ -155,6 +155,7 @@ class NullHandler(weight_sync.WeightSyncHandler):
 
 def create_default_handler(
     mode: str | weight_sync.WeightSyncMode | None = None,
+    name_resolver: Any = None,
 ) -> weight_sync.WeightSyncHandler:
   """Creates the default weight sync handler based on options or env vars."""
   mode_name = mode or os.getenv("WEIGHT_SYNC_MODE", "raiden")
@@ -165,7 +166,8 @@ def create_default_handler(
     from tunix.experimental.weight_sync import raiden_handler
 
     handler = raiden_handler.RaidenHandler(
-        transfer_options=raiden_handler.make_host_staged_transfer_options()
+        name_resolver=name_resolver,
+        transfer_options=raiden_handler.make_host_staged_transfer_options(),
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
@@ -985,6 +987,7 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
+        logging.error("pre-quiesce setup failed: %s", e, exc_info=True)
         failures.append(f"pre-quiesce setup: {e!r}")
         raise fail(
             "bind/metadata/source-prepare failed before any destination was"
@@ -1009,6 +1012,35 @@ class WeightSyncCoordinator:
         raise fail("metadata collection returned an empty side")
       source_units = tuple(m.unit for m in src_metadata)
       destination_units = tuple(m.unit for m in dst_metadata)
+      # Log the identities: Raiden partitions the weights across units sharing
+      # a job_name and broadcasts across distinct ones, so this is what decides
+      # whether a replica gets a copy or a slice. warning, not info -- absl
+      # drops INFO at its default verbosity and nothing else records the split.
+      for side, metas in (("src", src_metadata), ("dst", dst_metadata)):
+        for m in metas:
+          logging.warning(
+              "%s unit job_name=%r job_replica_id=%r shards=%d %s",
+              side,
+              m.unit.job_name,
+              m.unit.job_replica_id,
+              len(m.shards),
+              list(m.shards),
+          )
+      src_shards = sum(len(m.shards) for m in src_metadata)
+      for m in dst_metadata:
+        if src_shards and len(m.shards) != src_shards:
+          logging.warning(
+              "destination %r has %d shard(s) against the source's %d. Raiden"
+              " intersects the two global index spaces, so an unequal pair can"
+              " transfer only the overlap -- a green round that delivers part"
+              " of the model, with every tensor that did arrive checksumming"
+              " correctly. Compare __grand_total__ on both sides before"
+              " trusting this round.",
+              m.unit.job_name,
+              len(m.shards),
+              src_shards,
+          )
+
 
       # Manifest preflight, before registration and before any downtime:
       # the controller pairs variables by exact name and silently skips
@@ -1041,7 +1073,8 @@ class WeightSyncCoordinator:
         )
         raise fail(
             "manifest preflight failed before any destination was quiesced;"
-            " no rollback needed"
+            f" no rollback needed ({len(preflight_problems)} problems, first:"
+            f" {preflight_problems[0]})"
         )
 
       loop = asyncio.get_running_loop()
@@ -1181,7 +1214,7 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
-        # The call returned (by raising): the thread is done, rollback is safe.
+        logging.error("transfer raised exception: %s", e, exc_info=True)
         transfer_in_flight = False
         failures.append(f"transfer: {e!r}")
         state = await self._rollback(destinations, prepared_request, failures)

@@ -222,7 +222,9 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     sums = sync.checksums()
     self.assertEqual(sums["__grand_total__"], 8.0 + 3.0)
-    self.assertLen(sums, 5)  # two sampled tensors + three totals
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 11)
+    self.assertLen(sums, 5)  # two sampled tensors + grand total + tensor/element counts
 
   def test_checksums_count_every_tensor_not_just_the_sample(self):
     """Verifies counts cover every tensor even when sampled.
@@ -403,6 +405,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
 
   def test_proxy_multi_listener_control_addr(self):
     sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+    sync._use_ffi = True
     sync._is_proxy = True
     sync._ips = ["10.0.0.1:8000", "10.0.0.2:8000"]
     sync._unique_listeners = ["10.0.0.1:9001", "10.0.0.2:9002"]
@@ -445,6 +448,107 @@ class RaidenSynchronizerTest(absltest.TestCase):
               ],
               8,
           )
+
+  def test_resolve_use_ffi_and_normalize_host_stage_matrix(self):
+    test_cases = [
+        # (is_proxy, env_val, wheel_present, explicit, host_stage_in, expected_ffi, expected_host_stage)
+        # Proxy with wheel available:
+        (True, None, True, None, None, True, False),
+        (True, "1", True, None, None, True, False),
+        (True, "true", True, None, False, True, False),
+        (True, "yes", True, None, True, True, False),
+        (True, "0", True, None, None, False, True),
+        (True, "false", True, None, False, False, True),  # explicit host_stage=False overridden to True!
+        (True, "no", True, None, True, False, True),
+        # Proxy without wheel available:
+        (True, None, False, None, None, False, True),
+        (True, "1", False, None, False, False, True),
+        (True, "true", False, None, None, False, True),
+        # Non-proxy with wheel available:
+        (False, None, True, None, None, False, False),
+        (False, None, True, None, True, False, True),
+        (False, "1", True, None, None, True, False),
+        (False, "true", True, None, False, True, False),
+        (False, "0", True, None, None, False, False),
+        # Non-proxy without wheel available:
+        (False, "1", False, None, None, False, False),
+        # Explicit override:
+        (True, "0", True, True, None, True, False),
+        (True, "1", True, False, None, False, True),
+        (False, "0", True, True, None, True, False),
+    ]
+
+    for is_proxy, env_val, wheel_present, explicit, hs_in, exp_ffi, exp_hs in test_cases:
+      env_dict = {}
+      if env_val is not None:
+        env_dict["RAIDEN_USE_FFI"] = env_val
+      fake_wheel = mock.MagicMock() if wheel_present else None
+      with mock.patch.dict("os.environ", env_dict, clear=True), mock.patch.object(
+          raiden_synchronizer, "_get_raiden_ffi", return_value=fake_wheel
+      ):
+        res_ffi = raiden_synchronizer.resolve_use_ffi(explicit, is_proxy=is_proxy)
+        res_hs = raiden_synchronizer.normalize_host_stage(
+            hs_in, use_ffi=res_ffi, is_proxy=is_proxy
+        )
+        self.assertEqual(
+            res_ffi,
+            exp_ffi,
+            f"Failed use_ffi for case: is_proxy={is_proxy}, env={env_val}, wheel={wheel_present}, explicit={explicit}",
+        )
+        self.assertEqual(
+            res_hs,
+            exp_hs,
+            f"Failed host_stage for case: is_proxy={is_proxy}, env={env_val}, wheel={wheel_present}, explicit={explicit}, hs_in={hs_in}",
+        )
+        if is_proxy:
+          self.assertFalse(
+              res_ffi is False and res_hs is False,
+              "Under proxy, both use_ffi and host_stage cannot be False!",
+          )
+
+  def test_metadata_transport_mode(self):
+    fake_wheel = mock.MagicMock()
+    with mock.patch.object(
+        raiden_synchronizer, "_get_raiden_ffi", return_value=fake_wheel
+    ):
+      sync_ffi = raiden_synchronizer.RaidenSynchronizer("trainer", use_ffi=True)
+      meta_ffi = sync_ffi.work_unit_metadata()
+      self.assertEqual(meta_ffi.transport_mode, "ffi")
+      self.assertTrue(meta_ffi.use_ffi)
+
+      sync_tcp = raiden_synchronizer.RaidenSynchronizer("trainer", use_ffi=False)
+      meta_tcp = sync_tcp.work_unit_metadata()
+      self.assertEqual(meta_tcp.transport_mode, "tcp")
+      self.assertFalse(meta_tcp.use_ffi)
+
+  def test_work_unit_metadata_non_empty_shards_all_combinations(self):
+    fake_wheel = mock.MagicMock()
+    for is_proxy in (False, True):
+      env_dict = {"JAX_PLATFORMS": "proxy" if is_proxy else "cpu"}
+      with mock.patch.dict("os.environ", env_dict), mock.patch.object(
+          raiden_synchronizer, "_get_raiden_ffi", return_value=fake_wheel
+      ):
+        # 1. use_ffi=True: shards populated from _ips
+        sync_ffi = raiden_synchronizer.RaidenSynchronizer(
+            "trainer", use_ffi=True
+        )
+        sync_ffi._ips = ["10.0.0.1:8000"]
+        sync_ffi._unique_listeners = ["10.0.0.1:9000"]
+        meta_ffi = sync_ffi.work_unit_metadata()
+        self.assertEqual(meta_ffi.shards, ("10.0.0.1:8000",))
+        self.assertEqual(meta_ffi.control_plane_rpc_address, "10.0.0.1:9000")
+
+        # 2. use_ffi=False: shards populated from _sync (even under proxy!)
+        sync_tcp = raiden_synchronizer.RaidenSynchronizer(
+            "trainer", use_ffi=False
+        )
+        sync_tcp._sync = mock.MagicMock()
+        sync_tcp._sync.local_port = 8001
+        sync_tcp._sync.listener_port = 9001
+        sync_tcp._sync.num_shards = 1
+        meta_tcp = sync_tcp.work_unit_metadata()
+        self.assertEqual(meta_tcp.shards, (f"{sync_tcp.ip}:8001",))
+        self.assertEqual(meta_tcp.control_plane_rpc_address, f"{sync_tcp.ip}:9001")
 
 
 if __name__ == "__main__":
