@@ -202,19 +202,24 @@ def make_gsm8k_reward_fn(
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("answer", metadata.get("gold_answer"))
     reward, _ = score_gsm8k_completion(text, gold_answer)
-    if debug:
+    debug_mode = (
+        debug
+        or metadata.get("debug")
+        or os.environ.get("DEBUG") in ("1", "true", "True")
+    )
+    if debug_mode:
       prompt_id = metadata.get(
           "prompt_id",
           getattr(item, "group_id", getattr(item, "prompt_id", "unknown")),
       )
-      logging.debug(
-          "[Orchestrator] Sampler response for %s:\n"
-          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-          "Gold Answer: %s, Extracted Answer: %s",
+      logging.info(
+          "[Orchestrator GSM8K Reward] prompt_id=%s | Gold: %s | Extracted: %s | Reward: %.2f\n"
+          "Sampled Response:\n%s",
           prompt_id,
-          text,
           gold_answer,
           extract_boxed_answer(text),
+          reward,
+          text,
       )
     return reward
 
@@ -242,6 +247,11 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
         build_prompt(question) if question else ""
     )
     answer_text = answer or gold_answer
+    self.debug: bool = bool(
+        kwargs.get("debug")
+        or (isinstance(kwargs.get("task"), dict) and kwargs["task"].get("debug"))
+        or os.environ.get("DEBUG") in ("1", "true", "True")
+    )
     super().__init__(
         task={
             "prompts": prompt_text,
@@ -249,6 +259,7 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
             "answer": answer_text,
             "gold_answer": answer_text,
             "policy_version": policy_version,
+            "debug": self.debug,
         },
         max_steps=max_steps,
         prompt_id=prompt_id,
@@ -263,6 +274,23 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
     completion = action.action if hasattr(action, "action") else str(action)
     reward, info = gsm8k_env_reward(self.task, action)
     info["correct"] = bool(info["answer_correct"])
+    if self.debug:
+      logging.info(
+          "[Rollout GSM8KEnv] (prompt_id=%s, group_index=%s) evaluation:\n"
+          "Question: %s\n"
+          "Gold Answer: %s\n"
+          "Extracted Answer: %s | Correct: %s | Format: %s | Reward: %.2f\n"
+          "Model Response:\n%s",
+          self.prompt_id,
+          self.group_index,
+          self.task.get("question", ""),
+          self.task.get("gold_answer", ""),
+          info.get("extracted_answer"),
+          info.get("answer_correct"),
+          info.get("format_correct"),
+          reward,
+          completion,
+      )
     return base_environment.EnvStepResult(
         observation={
             "answer": str(completion),

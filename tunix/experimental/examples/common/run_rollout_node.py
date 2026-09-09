@@ -218,6 +218,7 @@ def _rollout_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
+      "debug": bool(args.debug or os.environ.get("DEBUG") in ("1", "true", "True")),
   }
 
 

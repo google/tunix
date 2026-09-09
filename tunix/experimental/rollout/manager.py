@@ -178,6 +178,7 @@ class RolloutManager:
         env_config.update(request_metadata["env_config"])
       env_config.setdefault("group_index", request.group_index)
       env_config.setdefault("policy_version", request.target_policy_version)
+      env_config.setdefault("debug", getattr(self.config, "debug", False))
 
       env_client = env_cls(**env_config)
     elif self.env_pool and hasattr(self.env_pool, "acquire_env"):
@@ -205,6 +206,7 @@ class RolloutManager:
         agent=agent,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        debug=getattr(self.config, "debug", False),
     )
 
     self._active_collectors[traj_id] = collector

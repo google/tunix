@@ -106,6 +106,8 @@ class StandardRLProgram(RLProgram):
       mini_batch_size: int = 4,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      tokenizer: Any | None = None,
+      debug: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
@@ -118,6 +120,8 @@ class StandardRLProgram(RLProgram):
       raise ValueError("max_staleness must be non-negative.")
     self.dataset = dataset
     self.max_steps = max_steps
+    self.tokenizer = tokenizer
+    self.debug = bool(debug or os.environ.get("DEBUG") in ("1", "true", "True"))
     self.algo = algo
     algo_max_response_length = getattr(self.algo, "max_response_length", 1024)
     if generation_args is None:
@@ -285,12 +289,62 @@ class StandardRLProgram(RLProgram):
           break
 
         rewards = []
-        for item in group:
+        for idx, item in enumerate(group):
           if self.reward_fns:
             r = sum(fn(item) for fn in self.reward_fns)
           else:
             r = getattr(item.traj, "reward", 0.0)
           rewards.append(float(r))
+
+          if self.debug:
+            meta = dict(getattr(item, "metadata", None) or {})
+            prompt_text = (
+                meta.get("prompt")
+                or meta.get("question")
+                or meta.get("env_config", {}).get("prompt")
+                or meta.get("env_config", {}).get("question")
+                or getattr(item, "prompt_id", "")
+            )
+            response_text = meta.get("text", "")
+            if not response_text and hasattr(item, "traj") and getattr(item.traj, "steps", None):
+              response_text = "\n".join(
+                  str(getattr(s, "message", getattr(s, "model_response", "")))
+                  for s in item.traj.steps
+              )
+            if not response_text and self.tokenizer is not None:
+              c_tokens = getattr(item, "completion_tokens", None)
+              if c_tokens is not None and len(c_tokens) > 0:
+                try:
+                  response_text = self.tokenizer.decode(c_tokens, skip_special_tokens=True)
+                except Exception as e:
+                  logging.debug("Failed to decode completion tokens: %s", e)
+            gold_ans = (
+                meta.get("gold_answer")
+                or meta.get("answer")
+                or meta.get("env_config", {}).get("gold_answer")
+            )
+            num_tokens = (
+                len(item.completion_tokens)
+                if getattr(item, "completion_tokens", None) is not None
+                else 0
+            )
+            logging.info(
+                "[Orchestrator] Rollout received | Prompt ID: %s | Group Index: %s | Reward: %.2f | Tokens: %d\n"
+                "================================ [PROMPT] ================================\n"
+                "%s\n"
+                "============================ [SAMPLED RESPONSE] ============================\n"
+                "%s\n"
+                "================================ [GOLD ANSWER] ============================\n"
+                "%s\n"
+                "==========================================================================",
+                item.prompt_id,
+                item.group_index,
+                float(r),
+                num_tokens,
+                prompt_text,
+                response_text,
+                gold_ans,
+            )
 
         trainer_payloads = self.algo.create_trainer_payloads(
             group, rewards=rewards

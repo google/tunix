@@ -2701,6 +2701,30 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_run_async_logs_debug_info_when_enabled(self):
+    async def _run():
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="test_p", group_size=2),
+          [],
+      )
+      mock_tokenizer = mock.MagicMock()
+      mock_tokenizer.decode.return_value = "decoded completion"
+      program = self._create_program(
+          dataset=["test_p"],
+          max_steps=1,
+          debug=True,
+          tokenizer=mock_tokenizer,
+      )
+      with self.assertLogs(level="INFO") as cm:
+        await program.run_async(self.mock_engine)
+
+      self.assertTrue(
+          any("[Orchestrator] Rollout received" in msg for msg in cm.output)
+      )
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

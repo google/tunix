@@ -15,6 +15,7 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 from typing import Any, List
+import logging
 import zlib
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -65,6 +66,7 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
+      debug: bool = False,
   ):
     if (
         sampler is None
@@ -87,6 +89,13 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    req_meta = getattr(request, "metadata", None) or {}
+    self.debug: bool = bool(
+        debug
+        or req_meta.get("debug")
+        or request.generation_kwargs.get("debug")
+        or os.environ.get("DEBUG") in ("1", "true", "True")
+    )
     self.max_response_length = request.generation_kwargs.get(
         "max_response_length"
     )
@@ -154,6 +163,24 @@ class TrajectoryCollectorEngine:
           getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
           dtype=np.int32,
       ).reshape(-1)
+
+      if self.debug:
+        prompt_text = _build_prompt(self.chat_parser, chat_completions)
+        logging.info(
+            "[RolloutWorker] Trajectory %s (prompt_id=%s, group_index=%s) sampled %d tokens:\n"
+            "================================ [PROMPT] ================================\n"
+            "%s\n"
+            "============================ [SAMPLED RESPONSE] ============================\n"
+            "%s\n"
+            "==========================================================================",
+            self.traj_id,
+            self.request.prompt_id,
+            self.request.group_index,
+            len(tokens),
+            prompt_text,
+            text,
+        )
+
       if prompt_tokens.size:
         prompt_tokens = prompt_tokens.reshape(1, -1)
       else:
@@ -194,7 +221,8 @@ class TrajectoryCollectorEngine:
         for step in getattr(rl_traj, "steps", [])
         if getattr(step, "model_response", "")
     )
-    metadata.setdefault("text", assistant_text)
+    metadata["prompt"] = self.request.prompt
+    metadata["text"] = assistant_text
     metadata["prompt_tokens"] = np.asarray(
         getattr(rl_traj, "prompt_tokens", np.zeros(0, dtype=np.int32)),
         dtype=np.int32,
