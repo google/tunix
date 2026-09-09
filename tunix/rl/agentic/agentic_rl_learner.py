@@ -1089,6 +1089,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             if trainer_buf.losses:
               extras.append(f"loss={float(trainer_buf.loss):.4f}")
             am = trainer_buf.additional_metrics
+            # Absent keys are skipped below, so entries here that belong to an
+            # optional feature simply do not print when it is off. The two
+            # sequence-level rates are worth watching live because they move in
+            # opposite directions: `kept_frac` is the share still in the loss
+            # *and its denominator*, `is_oob` the share whose weights were
+            # zeroed while staying in the denominator.
             for key, label in (
                 ("grad_norm", "grad_norm"),
                 ("reduced_pg_loss", "reduced_pg_loss"),
@@ -1096,6 +1102,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 ("kl", "kl"),
                 ("log_ratio/abs_mean", "log_ratio_abs"),
                 ("pg_clipfrac", "clipfrac"),
+                ("sample_mask/kept_frac", "kept_frac"),
+                ("tis/is_oob_ratio", "is_oob"),
             ):
               if key in am:
                 vals, _ = am[key]
