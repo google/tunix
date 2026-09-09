@@ -1,134 +1,109 @@
-"""Asynchronous file writer for Trajectory Store."""
+"""Asynchronous queue and worker thread engine for Trajectory Store."""
 
+import abc
 import atexit
 import dataclasses
 import queue
 import threading
+from typing import Any, Generic, TypeVar
 import weakref
 
 from absl import logging
-from etils import epath
-import pydantic
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 
-def _dump_json(model: pydantic.BaseModel) -> str:
-  """Serializes a Pydantic model to indented, human-readable JSON excluding None values."""
-  return model.model_dump_json(indent=2, exclude_none=True)
-
-
-@dataclasses.dataclass(frozen=True)
-class _WriteTask:
-  """Container for an asynchronous step write operation.
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class WriteTask:
+  """Container for an asynchronous trajectory write operation.
 
   Encapsulates all necessary data transferred across the thread boundary from
   the frontend calling thread (e.g. rollout worker) to the background worker
-  thread executing disk I/O. `metadata` and `step` are private deep copies
-  owned by the task, never the caller's live objects; see `write_step`.
+  thread. `metadata` and `step` are private deep copies owned by the task.
   """
 
-  traj_dir: epath.Path
-  meta_path: epath.Path
-  step_path: epath.Path | None
   metadata: trajectory_lib.TrajectoryMetadata
-  step: trajectory_lib.Step | None
+  step: trajectory_lib.Step | None = None
+  run_id: str | None = None
+
+  @property
+  def trajectory_id(self) -> str | None:
+    """Returns the trajectory this task writes, derived from `metadata`."""
+    return self.metadata.trajectory_id
 
 
-# Every live (i.e. not garbage collected) AsyncFileWriter, so that
+_TaskT = TypeVar("_TaskT", bound=WriteTask)
+
+
+# Every live (i.e. not garbage collected) AsyncWriter, so that
 # `_close_live_writers` can drain them at interpreter shutdown. Weak references
 # are used so registration does not keep writers alive.
-_LIVE_WRITERS: "weakref.WeakSet[AsyncFileWriter]" = weakref.WeakSet()
+_LIVE_WRITERS: "weakref.WeakSet[AsyncWriter[Any]]" = weakref.WeakSet()
 
 
 def _close_live_writers() -> None:
-  """Closes every live AsyncFileWriter, draining its pending writes.
+  """Closes every live AsyncWriter, draining its pending writes.
 
   Registered with `atexit`, which runs while daemon threads are still alive but
-  before the interpreter kills them. Without this, steps still sitting in a
-  writer's queue when the process ends are silently lost, because the worker is
-  a daemon thread and `__del__` is not guaranteed to run for objects that are
-  still referenced at shutdown.
+  before the interpreter kills them. Without this, write operations still
+  sitting in a writer's queue when the process ends are silently lost, because
+  the worker is a daemon thread and `__del__` is not guaranteed to run for
+  objects that are still referenced at shutdown.
   """
   for writer in list(_LIVE_WRITERS):
     try:
       writer.close()
     except Exception:  # pylint: disable=broad-exception-caught
-      # Best-effort, consistent with the writer's error handling: a failure to
-      # persist diagnostic data must not turn into a non-zero exit status.
-      logging.exception("Failed to close AsyncFileWriter at interpreter exit.")
+      # Best-effort error handling: a failure to persist diagnostic data must
+      # not turn into a non-zero exit status for training jobs.
+      logging.exception("Failed to close AsyncWriter at interpreter exit.")
 
 
 atexit.register(_close_live_writers)
 
 
-class AsyncFileWriter:
-  """Asynchronously writes trajectory metadata and step files to disk.
+class AsyncWriter(abc.ABC, Generic[_TaskT]):
+  """Abstract asynchronous queue writer managing worker thread lifecycle.
 
-  Architectural Decisions & Design Trade-offs:
-    1. Single Background Worker Thread:
-       A dedicated single background daemon thread processes write tasks
-       sequentially from an unbounded FIFO queue (`queue.Queue`). Using a single
-       sequential worker ensures:
-       - Strict chronological ordering of steps per trajectory without needing
-         complex per-file or per-trajectory locks.
-       - Elimination of concurrent file write races or corruptions.
-       - Minimal memory and thread overhead, which is critical in distributed
-         reinforcement learning (RL) training where dozens of rollout worker
-         processes run concurrently on each host.
+  Architectural Decisions & Invariants:
+    1. Single Dedicated Background Worker Thread:
+       A single background daemon thread processes write tasks sequentially
+       from an unbounded FIFO queue (`queue.Queue`). Using a single sequential
+       worker ensures chronological order per entity without requiring complex
+       per-record locking, while keeping memory and thread overhead minimal in
+       distributed training environments.
 
     2. Lazy Worker Thread Initialization:
-       The worker thread is NOT spawned during `__init__`. Instead, it is
-       lazily initialized on the first invocation of `write_step()` under a
-       thread lock (`_lock`). This prevents unnecessary OS thread allocation
-       and resource waste in read-heavy or read-only processes (such as offline
-       evaluators, visualizers, or analysis scripts) that instantiate a store
-       solely to query trajectories.
+       The worker thread is not spawned during `__init__`. Instead, it is
+       lazily initialized under a thread lock on the first enqueue operation.
+       This prevents unnecessary OS thread allocation in read-only processes.
 
-    3. Best-Effort Error Handling for Rollout Worker Resilience:
-       In distributed RL environments (e.g., Tunix rollout workers), trajectory
-       persistence is non-critical diagnostic and telemetry data compared to the
-       primary training loop and policy rollout generation. If disk I/O fails
-       (e.g., disk full, transient network filesystem error, or permission
-       issues), raising an exception would crash the entire distributed training
-       job. Therefore, `_worker_loop()` catches all exceptions during task
-       processing, logs them with full traceback via `logging.exception`, and
-       continues draining subsequent tasks. Errors are suppressed and never
-       propagated back to `write_step()` or `flush()`.
+    3. Best-Effort Fault Tolerance:
+       Persistence errors (e.g. disk full, transient network database errors)
+       must never crash distributed training loops. The worker loop catches all
+       task processing exceptions, logs them with full tracebacks via
+       `_log_task_error`, and continues draining subsequent tasks. Errors are
+       suppressed and never propagated back to callers or `flush()`.
 
-    4. Strict Barrier Synchronization via `flush()`:
-       `flush()` provides strict barrier synchronization by blocking on
-       `_queue.join()`. When `flush()` returns, all write tasks enqueued prior
-       to the call are guaranteed to have been processed by the worker thread.
-       This enables deterministic testing, reliable step inspection, and clean
-       synchronization at episode or checkpoint boundaries.
+    4. Strict Barrier Synchronization:
+       `flush()` blocks on `_queue.join()`. When `flush()` returns, all tasks
+       enqueued prior to the call are guaranteed to have completed execution.
 
-    5. Snapshot-on-Enqueue Ownership:
-       Because writes are serialized on the worker thread rather than on the
-       caller thread, `write_step()` deep copies the metadata and step it is
-       given. The queued task then owns data no other thread can mutate, so a
-       caller that keeps updating a step or trajectory after logging it cannot
-       corrupt the file that is about to be written.
-
-    6. Daemon Thread Lifecycle, Destructor & Shutdown Hook:
-       The background worker thread is marked as a daemon (`daemon=True`) so it
-       never blocks Python process termination if an unhandled signal or exit
-       occurs. The `__del__` destructor provides a best-effort graceful shutdown
-       signal and joins the worker with a short timeout during garbage
-       collection. Because a writer that is still referenced at process exit is
-       never garbage collected, and because daemon threads are killed outright
-       once the interpreter shuts down, every instance also registers itself in
-       `_LIVE_WRITERS`; the `atexit` hook `_close_live_writers` drains them all
-       so queued steps are not lost when a rollout worker exits normally.
+    5. Safe Lifecycle & Shutdown Hook:
+       `close()` enqueues a sentinel None task, joins the worker thread with a
+       configurable timeout, and deregisters from `_LIVE_WRITERS`. The `atexit`
+       hook drains all live instances when the interpreter exits.
   """
 
-  def __init__(self) -> None:
-    """Initializes AsyncFileWriter without starting the background worker."""
+  def __init__(self, thread_name: str | None = None):
+    """Initializes AsyncWriter without starting the background worker.
+
+    Args:
+      thread_name: Descriptive name for the background worker thread. Defaults
+        to '<ClassName>Worker'.
+    """
+    self._thread_name = thread_name or f"{type(self).__name__}Worker"
     # Unbounded FIFO queue for passing write tasks to the worker thread.
-    self._queue: queue.Queue[_WriteTask | None] = queue.Queue()
-    # In-memory cache mapping trajectory_id to the hash of its last written
-    # metadata JSON. Used by the worker thread to skip redundant metadata.json
-    # disk writes across steps.
-    self._metadata_hash_by_trajectory_id: dict[str, int] = {}
+    self._queue: queue.Queue[_TaskT | None] = queue.Queue()
     # Lock protecting lazy thread spawning and closed state transitions.
     self._lock = threading.Lock()
     # Users are not expected to explicitly call close() on the writer, as its
@@ -138,68 +113,44 @@ class AsyncFileWriter:
     # Drained by `_close_live_writers` at interpreter exit.
     _LIVE_WRITERS.add(self)
 
-  def write_step(
-      self,
-      traj_dir: epath.Path,
-      meta_path: epath.Path,
-      metadata: trajectory_lib.TrajectoryMetadata,
-      step_path: epath.Path | None = None,
-      step: trajectory_lib.Step | None = None,
-  ) -> None:
-    """Enqueues a step and/or trajectory metadata for asynchronous writing.
+  @property
+  def is_closed(self) -> bool:
+    """Returns True if the writer has been closed."""
+    with self._lock:
+      return self._closed
 
-    This operation is non-blocking and returns on the caller thread without
-    waiting for any disk I/O. The worker thread is lazily spawned on the first
-    invocation if not already running.
+  def _enqueue(self, task: _TaskT) -> None:
+    """Enqueues a task for asynchronous processing by the worker thread.
 
-    `metadata` and `step` are deep copied before being enqueued, so what lands
-    on disk is exactly what the caller passed in. Serialization happens on the
-    worker thread, possibly long after this call returns, and callers routinely
-    keep mutating the objects they hand over (a rollout worker appending tokens
-    to the step it just logged, or flipping trajectory status from RUNNING to
-    COMPLETED). Without the copy, those later mutations would leak into the
-    already enqueued write, producing files that never matched any state the
-    trajectory actually had. The copy makes the caller-side cost proportional
-    to the payload size rather than O(1), which is a deliberate trade for
-    correctness; the expensive part, serialization and I/O, remains off the
-    caller thread.
+    Lazily spawns the background worker thread under lock if not already
+    running.
 
     Args:
-      traj_dir: Directory path for the trajectory.
-      meta_path: File path for the trajectory metadata.json.
-      step_path: Optional file path for the step JSON.
-      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
-      step: Optional Step object to write.
+      task: Container holding task payload.
 
     Raises:
       RuntimeError: If the writer has already been closed.
     """
-    task = _WriteTask(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=metadata.model_copy(deep=True),
-        step=step.model_copy(deep=True) if step is not None else None,
-    )
     with self._lock:
       if self._closed:
-        raise RuntimeError("Cannot write to a closed AsyncFileWriter.")
+        raise RuntimeError("Cannot write to a closed writer.")
+
       if self._worker_thread is None:
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
-            name="AsyncFileWriterWorker",
+            name=self._thread_name,
             daemon=True,
         )
         self._worker_thread.start()
       self._queue.put(task)
 
   def _worker_loop(self) -> None:
-    """Worker loop processing write tasks sequentially from the queue.
+    """Worker loop processing tasks sequentially from the queue.
 
     Catches and logs all task processing exceptions without propagating them
-    to callers or breaking the loop, ensuring rollout workers are never failed
-    by write errors. Uses `task_done()` in a `finally` block to ensure queue
-    join barriers (`flush()`) unblock even when tasks fail.
+    to callers or breaking the loop, ensuring callers are never failed by
+    background write errors. Uses `task_done()` in a `finally` block to ensure
+    queue join barriers (`flush()`) unblock even when tasks fail.
     """
     try:
       while True:
@@ -212,70 +163,56 @@ class AsyncFileWriter:
         try:
           self._process_task(task)
         except Exception:  # pylint: disable=broad-exception-caught
-          # Best-effort error suppression: log full traceback but never crash the worker.
-          step_info = (
-              f"step {task.step.step_id}"
-              if task.step is not None
-              else "metadata"
-          )
-          target_path = (
-              task.step_path if task.step_path is not None else task.meta_path
-          )
-          logging.exception(
-              "Failed to write trajectory %s (trajectory_id=%s) to %s",
-              step_info,
-              task.metadata.trajectory_id,
-              target_path,
-          )
+          # Best-effort error suppression: log full traceback but never crash
+          # the worker.
+          try:
+            self._log_task_error(task)
+          except Exception:  # pylint: disable=broad-exception-caught
+            logging.exception("Failed to log task error.")
         finally:
-          # Crucial: always mark task as done so flush() barrier does not hang on failure.
+          # Crucial: always mark task as done so `flush()` barrier does not hang
+          # on failure.
           self._queue.task_done()
     except Exception:  # pylint: disable=broad-exception-caught
-      logging.exception("Fatal unhandled error in AsyncFileWriter worker loop.")
+      logging.exception("Fatal unhandled error in worker loop.")
 
-  def _process_task(self, task: _WriteTask) -> None:
-    """Processes a single write task by writing metadata and step files.
-
-    Optimizations:
-      - Directory Creation: `mkdir` is executed only once per trajectory on the
-        first step, tracked by `_metadata_hash_by_trajectory_id`.
-      - Metadata Caching: `metadata.json` is only written when its serialized
-        content changes, minimizing redundant writes across multi-step turns.
+  @abc.abstractmethod
+  def _process_task(self, task: _TaskT) -> None:
+    """Processes a single write task dequeued from the queue.
 
     Args:
-      task: Container holding directory paths, metadata, and step payload.
-
-    Raises:
-      ValueError: If metadata.trajectory_id is None.
+      task: Container holding task payload.
     """
-    traj_id = task.metadata.trajectory_id
-    if traj_id is None:
-      raise ValueError("TrajectoryMetadata.trajectory_id cannot be None.")
+    ...
 
-    # Create directory on first step of this trajectory.
-    if traj_id not in self._metadata_hash_by_trajectory_id:
-      task.traj_dir.mkdir(parents=True, exist_ok=True)
+  def _log_task_error(self, task: _TaskT) -> None:
+    """Logs an exception that occurred while processing a task.
 
-    # Only write metadata.json if metadata content has changed.
-    meta_json = _dump_json(task.metadata)
-    meta_hash = hash(meta_json)
-    if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
-      task.meta_path.write_text(meta_json)
-      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
+    Can be overridden by subclasses to provide domain-specific error details.
 
-    # Write step file if provided.
-    if task.step_path is not None and task.step is not None:
-      task.step_path.write_text(_dump_json(task.step))
+    Args:
+      task: The write task that failed to process.
+    """
+    step_id = task.step.step_id if task.step is not None else None
+    logging.exception(
+        "Failed to process task for trajectory_id=%s, step_id=%s.",
+        task.trajectory_id,
+        step_id,
+    )
 
   def flush(self) -> None:
-    """Blocks until all queued write operations have been processed to disk.
+    """Blocks until all queued write operations have been processed.
 
     Users do not need to call flush() in normal usage; it is primarily for
     testing.
 
     Provides strict barrier synchronization: when this method returns, all
     tasks enqueued prior to the call have been executed by the worker thread.
+    The barrier does not apply to a closed writer, for which this is a no-op;
+    `close()` already drains the queue.
     """
+    if self.is_closed:
+      return
     self._queue.join()
 
   def close(self, timeout: float | None = 5.0) -> None:
@@ -311,24 +248,24 @@ class AsyncFileWriter:
           try:
             task = self._queue.get_nowait()
             self._queue.task_done()
-            if (
-                task is not None
-                and task.metadata
-                and task.metadata.trajectory_id
-            ):
-              discarded_traj_ids.add(task.metadata.trajectory_id)
+            if task is not None and task.trajectory_id:
+              discarded_traj_ids.add(task.trajectory_id)
           except queue.Empty:
             break
         self._queue.put(None)
         logging.warning(
-            "AsyncFileWriter worker thread did not finish within timeout of"
+            "%s worker thread did not finish within timeout of"
             " %s seconds. Discarded remaining tasks for trajectory IDs: %s",
+            type(self).__name__,
             timeout,
             sorted(discarded_traj_ids),
         )
 
   def __del__(self) -> None:
-    """Destructor to ensure worker thread shutdown is signaled upon garbage collection."""
+    """Destructor to ensure worker thread shutdown is signaled.
+
+    Runs upon garbage collection to signal worker thread termination.
+    """
     try:
       self.close(timeout=1.0)
     except BaseException:  # pylint: disable=broad-exception-caught

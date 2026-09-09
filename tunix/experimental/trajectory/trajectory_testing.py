@@ -77,6 +77,36 @@ TRAJECTORY_2: Final[trajectory_lib.Trajectory] = trajectory_lib.Trajectory(
 )
 
 
+def make_metadata(
+    trajectory_id: str | None = TRAJECTORY_ID_1,
+    agent: trajectory_lib.Agent | None = None,
+    session_id: str | None = None,
+) -> trajectory_lib.TrajectoryMetadata:
+  """Factory creating a TrajectoryMetadata instance with sensible defaults."""
+  if agent is None:
+    agent = trajectory_lib.Agent(name="test_agent", version="1.0")
+  return trajectory_lib.TrajectoryMetadata(
+      trajectory_id=trajectory_id,
+      agent=agent,
+      session_id=session_id,
+  )
+
+
+def make_step(
+    step_id: int = 1,
+    source: trajectory_lib.Source = trajectory_lib.Source.AGENT,
+    message: str = "test message",
+    timestamp: datetime.datetime | None = TEST_TIMESTAMP,
+) -> trajectory_lib.Step:
+  """Factory creating a Step instance with sensible defaults."""
+  return trajectory_lib.Step(
+      step_id=step_id,
+      source=source,
+      message=message,
+      timestamp=timestamp,
+  )
+
+
 class TrajectoryTestCase(parameterized.TestCase):
   """Base TestCase providing custom assertion methods for trajectory objects."""
 
@@ -111,7 +141,7 @@ class TrajectoryTestCase(parameterized.TestCase):
       expected: trajectory_lib.Trajectory | trajectory_lib.TunixTrajectory,
       msg: str | None = None,
   ) -> None:
-    """Asserts that two Trajectory instances are equal, including nested steps and subagents."""
+    """Asserts that two Trajectory instances (ATIF or Tunix) are equal."""
     self.assertIsInstance(
         actual, (trajectory_lib.Trajectory, trajectory_lib.TunixTrajectory)
     )
