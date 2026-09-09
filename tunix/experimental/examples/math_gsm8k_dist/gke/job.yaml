@@ -129,6 +129,20 @@ spec:
             #     secretKeyRef:
             #       name: hf-token
             #       key: token
+            # --- W&B metrics (the only durable sink; TensorBoard files die
+            # with the pod). Without a key, wandb.init(anonymous="allow")
+            # logs to a throwaway anonymous account — avoid that.
+            # Create per cluster:
+            #   kubectl create secret generic wandb-credentials \
+            #     --from-literal=api-key=$WANDB_API_KEY
+            - name: WANDB_PROJECT
+              value: trellis-gsm8k
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-credentials
+                  key: api-key
+                  optional: true
           resources:
             requests:
               google.com/tpu: "8"
