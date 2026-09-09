@@ -76,6 +76,7 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
 
     assistant_tokens = []
     assistant_masks = []
+    assistant_logps = []
     for seg in resp.segments:
       seg_any: Any = seg
       source = (
@@ -100,10 +101,26 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
           assistant_masks.append(np.asarray(loss_mask))
         else:
           assistant_masks.append(np.ones_like(token_arr, dtype=np.float32))
+        seg_logps = (
+            seg.logps
+            if isinstance(seg, datatypes.TokenSegment)
+            else seg_any.get("logps")
+        )
+        seg_logps_arr = None
+        if seg_logps is not None:
+          seg_logps_arr = np.asarray(seg_logps, dtype=np.float32)
+          if (
+              seg_logps_arr.shape != token_arr.shape
+              or not np.isfinite(seg_logps_arr).all()
+          ):
+            seg_logps_arr = None
+        assistant_logps.append(seg_logps_arr)
 
     if assistant_tokens:
       item.completion_tokens = np.concatenate(assistant_tokens)
       item.action_mask = np.concatenate(assistant_masks)
+      if assistant_logps and all(lp is not None for lp in assistant_logps):
+        item.old_per_token_logps = np.concatenate(assistant_logps)
     else:
       item.completion_tokens = np.zeros(0, dtype=np.int32)
       item.action_mask = np.zeros(0, dtype=np.float32)

@@ -93,6 +93,102 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertGreater(payloads[1].advantages[0], 0.0)
     self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
 
+  def test_grpo_create_trainer_payloads_with_old_per_token_logps(self):
+    adapter = algorithm_adapter.GRPOAdapter(group_size=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=1.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+        old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=2.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([5, 6], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+        old_per_token_logps=None,
+    )
+
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
+    self.assertLen(payloads, 2)
+    np.testing.assert_allclose(
+        payloads[0].old_per_token_logps,
+        np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    self.assertIsNone(payloads[1].old_per_token_logps)
+
+  def test_grpo_create_trainer_payloads_with_disabled_rollout_logps(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        group_size=2, use_rollout_logps=False
+    )
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=1.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+        old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=2.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([5, 6], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+        old_per_token_logps=np.array([-0.1, -0.4], dtype=np.float32),
+    )
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
+    self.assertLen(payloads, 2)
+    self.assertIsNone(payloads[0].old_per_token_logps)
+    self.assertIsNone(payloads[1].old_per_token_logps)
+
+  def test_grpo_create_trainer_payloads_with_mismatched_logps_length(self):
+    adapter = algorithm_adapter.GRPOAdapter(group_size=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=1.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+        old_per_token_logps=np.array([-0.5, -0.2, -0.1], dtype=np.float32),
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(reward=2.0),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([5, 6], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+        old_per_token_logps=np.array([-0.3, -0.4], dtype=np.float32),
+    )
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
+    self.assertLen(payloads, 2)
+    self.assertIsNone(payloads[0].old_per_token_logps)
+    np.testing.assert_allclose(
+        payloads[1].old_per_token_logps,
+        np.array([-0.3, -0.4], dtype=np.float32),
+    )
+
   def test_ppo_advantages_and_trainer_payloads(self):
     adapter = algorithm_adapter.PPOAdapter(group_size=2, gamma=0.99, lam=0.95)
     item = datatypes.TrajectoryItem(

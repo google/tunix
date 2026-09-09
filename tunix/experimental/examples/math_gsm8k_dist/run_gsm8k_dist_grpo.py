@@ -157,6 +157,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
+      "--use_rollout_logps",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Use rollout sampler log-probs as old_per_token_logps (off-policy /"
+          " sampler importance ratio). Default True matches the"
+          " non-experimental GRPOConfig; pass --no-use_rollout_logps for"
+          " on-policy ratio=1."
+      ),
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -174,6 +185,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
       temperature=args.temperature,
+      use_rollout_logps=args.use_rollout_logps,
   )
 
 

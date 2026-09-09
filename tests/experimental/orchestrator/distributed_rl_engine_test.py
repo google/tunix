@@ -1131,6 +1131,92 @@ class DistributedRLEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(
         item.action_mask, np.array([1, 1], dtype=np.float32)
     )
+    self.assertIsNone(item.old_per_token_logps)
+
+  def test_response_to_trajectory_item_collects_aligned_logps(self):
+    resp = datatypes.RolloutResponse(
+        request_id="req_lp_ok",
+        prompt_id="p_lp",
+        group_index=0,
+        policy_version=1,
+        status="COMPLETED",
+        prompt_tokens=np.array([10], dtype=np.int32),
+        segments=[
+            datatypes.TokenSegment(
+                source="assistant",
+                tokens=np.array([1, 2], dtype=np.int32),
+                loss_mask=np.array([1, 1], dtype=np.float32),
+                logps=np.array([-0.1, -0.2], dtype=np.float32),
+            ),
+            datatypes.TokenSegment(
+                source="assistant",
+                tokens=np.array([3], dtype=np.int32),
+                loss_mask=np.array([1], dtype=np.float32),
+                logps=np.array([-0.3], dtype=np.float32),
+            ),
+        ],
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    np.testing.assert_allclose(
+        item.old_per_token_logps,
+        np.array([-0.1, -0.2, -0.3], dtype=np.float32),
+    )
+
+  def test_response_to_trajectory_item_drops_misaligned_dict_logps(self):
+    # Dict-shaped segments bypass TokenSegment.__post_init__ (which already
+    # rejects a logps/tokens shape mismatch for the typed path), so a per-
+    # segment length mismatch can only reach the engine through this path. It
+    # must not populate old_per_token_logps -- even though the totals still
+    # match the completion length (2+1 tokens vs 1+2 logps both sum to 3), which
+    # would slip past the adapter's total-length check and silently misalign the
+    # importance ratio.
+    resp = datatypes.RolloutResponse(
+        request_id="req_lp_misaligned",
+        prompt_id="p_lp",
+        group_index=0,
+        policy_version=1,
+        status="COMPLETED",
+        prompt_tokens=np.array([10], dtype=np.int32),
+        segments=[
+            {
+                "source": "assistant",
+                "tokens": [1, 2],
+                "loss_mask": [1.0, 1.0],
+                "logps": [-0.1],
+            },
+            {
+                "source": "assistant",
+                "tokens": [3],
+                "loss_mask": [1.0],
+                "logps": [-0.2, -0.3],
+            },
+        ],  # pyrefly: ignore[bad-argument-type]
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    np.testing.assert_array_equal(
+        item.completion_tokens, np.array([1, 2, 3], dtype=np.int32)
+    )
+    self.assertIsNone(item.old_per_token_logps)
+
+  def test_response_to_trajectory_item_drops_nonfinite_logps(self):
+    resp = datatypes.RolloutResponse(
+        request_id="req_lp_nonfinite",
+        prompt_id="p_lp",
+        group_index=0,
+        policy_version=1,
+        status="COMPLETED",
+        prompt_tokens=np.array([10], dtype=np.int32),
+        segments=[
+            datatypes.TokenSegment(
+                source="assistant",
+                tokens=np.array([1, 2], dtype=np.int32),
+                loss_mask=np.array([1, 1], dtype=np.float32),
+                logps=np.array([-0.1, np.nan], dtype=np.float32),
+            ),
+        ],
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertIsNone(item.old_per_token_logps)
 
   def test_response_to_trajectory_item_rejects_unsupported_type(self):
     with self.assertRaises(TypeError):

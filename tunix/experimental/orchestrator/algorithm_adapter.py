@@ -159,6 +159,7 @@ class GRPOAdapter(AlgorithmAdapter):
       loss_agg_mode: str = "sequence-mean-token-mean",
       kl_loss_mode: str = "mse_kl",
       kl_clamp_value: float | None = None,
+      use_rollout_logps: bool = True,
   ):
     if group_size <= 1:
       raise ValueError(
@@ -183,6 +184,7 @@ class GRPOAdapter(AlgorithmAdapter):
     self.kl_loss_mode = kl_loss_mode
     self.kl_clamp_value = kl_clamp_value
     self.requires_reference_kl = beta_kl != 0.0
+    self.use_rollout_logps = use_rollout_logps
 
   def compute_advantages(
       self,
@@ -243,12 +245,23 @@ class GRPOAdapter(AlgorithmAdapter):
           else np.zeros(0, dtype=np.int32)
       )
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
+      old_lp = (
+          getattr(item, "old_per_token_logps", None)
+          if self.use_rollout_logps
+          else None
+      )
+      old_lp = (
+          np.asarray(old_lp, dtype=np.float32)
+          if old_lp is not None and len(old_lp) == len(c_arr)
+          else None
+      )
       payload = datatypes.RLTrainerPayload(
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
           advantages=seq_adv,
+          old_per_token_logps=old_lp,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,

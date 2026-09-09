@@ -64,6 +64,7 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 # Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
 # both the trainer and the rollout, so the two cannot drift. A disagreement is
 # not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
@@ -708,6 +709,11 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
+    ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
+  else
+    ORCHESTRATOR_CMD+=(--use_rollout_logps)
   fi
 
   export JAX_PLATFORMS=cpu

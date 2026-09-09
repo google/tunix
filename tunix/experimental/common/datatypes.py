@@ -62,6 +62,7 @@ class TrajectoryItem:
   prompt_tokens: np.ndarray | None = None
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
+  old_per_token_logps: np.ndarray | None = None
   # `[len(prompt_tokens) + len(completion_tokens), num_layers, top_k]` expert
   # ids from the rollout, for replaying its routing during training.
   routed_experts: np.ndarray | None = None
