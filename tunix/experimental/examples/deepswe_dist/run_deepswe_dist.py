@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import logging
 import os
 import sys
@@ -44,8 +45,8 @@ from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
+from examples.deepswe import swe_env
 from tunix.sft import metrics_logger as metrics_logger_lib
-
 # pylint: enable=g-import-not-at-top
 
 
@@ -150,6 +151,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      type=int,
+      default=None,
+      help=(
+          "Maximum replicas per SandboxWarmPool (defaults to num_generations)."
+      ),
+  )
+  parser.add_argument(
+      "--max_concurrency",
+      type=int,
+      default=128,
+      help="Maximum concurrency for SandboxFleet.",
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -334,25 +349,182 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
 
+  fleet = None
+  if args.use_agent_sandbox:
+    fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
+        tasks=dataset,
+        max_concurrency=args.max_concurrency,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+    )
+
+  prompt_stream = deepswe.iter_prompt_items(
+      dataset=dataset,
+      max_steps=args.max_steps,
+      batch_size=args.batch_size,
+      max_turns=args.max_turns,
+      max_response_length=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=None if args.top_k < 0 else args.top_k,
+      step_timeout_secs=args.step_timeout_secs,
+      reward_timeout_secs=args.reward_timeout_secs,
+      env_backend=args.env_backend,
+      use_agent_sandbox=args.use_agent_sandbox,
+      scaffold=args.scaffold,
+      env_verbose=args.env_verbose,
+  )
+  if args.use_agent_sandbox:
+    prompt_stream = swe_env.PrewarmDatasetIterator(
+        prompt_stream,
+        fleet=fleet,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+    )
+
+  def _save_and_log_trajectories(
+      step: int,
+      trajectories: Any,
+      source: str = "Rollouts",
+  ) -> None:
+    if not trajectories:
+      logging.info("No trajectories recorded for step %d (%s).", step, source)
+      return
+
+    traj_records = []
+    for idx, item in enumerate(trajectories):
+      prompt_id = getattr(item, "prompt_id", f"item_{idx}")
+      metadata = dict(getattr(item, "metadata", {}) or {})
+      traj = getattr(item, "traj", None)
+      reward = float(
+          getattr(traj, "reward", metadata.get("reward", 0.0)) or 0.0
+      )
+      status = str(getattr(traj, "status", metadata.get("status", "UNKNOWN")))
+      steps_history = metadata.get("steps_history") or []
+      if not steps_history and traj and hasattr(traj, "steps"):
+        for s in traj.steps:
+          steps_history.append({
+              "model_response": str(
+                  getattr(s, "message", getattr(s, "model_response", ""))
+              ),
+              "thought": str(getattr(s, "thought", "")),
+              "action": str(getattr(s, "action", "")),
+              "observation": str(getattr(s, "observation", "")),
+              "reward": float(getattr(s, "reward", 0.0) or 0.0),
+          })
+
+      record = {
+          "step": step,
+          "index": idx,
+          "prompt_id": prompt_id,
+          "reward": reward,
+          "status": status,
+          "num_turns": len(steps_history),
+          "steps": steps_history,
+          "metadata": {
+              k: str(v)
+              for k, v in metadata.items()
+              if k not in ("steps_history", "prompt_tokens", "tokens")
+          },
+      }
+      traj_records.append(record)
+
+      error_msg = metadata.get("error") or getattr(item, "error", None)
+      if error_msg:
+        logging.error(
+            "[Trajectory Dump - %s] Item %d Error: %s", source, idx, error_msg
+        )
+      logging.info(
+          "[Trajectory Dump - %s] Step %d | Item %d | PromptID: %s |"
+          " Reward: %.2f | Status: %s | Turns: %d",
+          source,
+          step,
+          idx,
+          prompt_id,
+          reward,
+          status,
+          len(steps_history),
+      )
+      if idx < 2 or args.env_verbose:
+        for turn_idx, turn in enumerate(steps_history):
+          thought = str(turn.get("thought") or "")
+          model_resp = str(
+              turn.get("model_response") or turn.get("message") or ""
+          )
+          action = str(turn.get("action") or "")
+          obs = str(turn.get("observation") or "")
+          if thought:
+            logging.info(
+                "[Turn %d Thought]:\n%s",
+                turn_idx,
+                thought[:3000] + ("..." if len(thought) > 3000 else ""),
+            )
+          if model_resp:
+            logging.info(
+                "[Turn %d Model Response]:\n%s",
+                turn_idx,
+                model_resp[:3000] + ("..." if len(model_resp) > 3000 else ""),
+            )
+          if action:
+            logging.info(
+                "[Turn %d Action]:\n%s",
+                turn_idx,
+                action[:1000] + ("..." if len(action) > 1000 else ""),
+            )
+          if obs:
+            logging.info(
+                "[Turn %d Environment Observation]:\n%s",
+                turn_idx,
+                obs[:3000] + ("..." if len(obs) > 3000 else ""),
+            )
+
+    dump_dirs = [
+        "/tmp/deepswe_trajectories",
+        "/app/checkpoints/trajectories",
+    ]
+    for out_dir in dump_dirs:
+      try:
+        os.makedirs(out_dir, exist_ok=True)
+        file_path = os.path.join(out_dir, f"trajectories_step_{step}.json")
+        with open(file_path, "w", encoding="utf-8") as f:
+          json.dump(traj_records, f, indent=2)
+        logging.info(
+            "Saved %d trajectories to %s", len(traj_records), file_path
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Note: could not save trajectories to %s: %s", out_dir, e
+        )
+
+  def _on_rollouts_ready(step: int, trajectories: Any) -> None:
+    logging.info(
+        ">>> Rollouts ready for step %d (%d items)", step, len(trajectories)
+    )
+    _save_and_log_trajectories(step, trajectories, source="RolloutsReady")
+
+  def _dump_and_log_trajectories(
+      step: int,
+      step_result: Any,
+      trajectories: Any = None,
+  ) -> None:
+    logging.info(
+        "<<< DeepSWE step %d finished | train_result=%s", step, step_result
+    )
+    _save_and_log_trajectories(step, trajectories, source="StepEnd")
+
   program = rl_program.StandardRLProgram(
       algo=algo,
-      dataset=deepswe.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
+      dataset=prompt_stream,
+      max_steps=args.max_steps,
+      generation_args=datatypes.GenerationArgs(
           max_response_length=args.max_response_length,
           temperature=args.temperature,
           top_p=args.top_p,
           top_k=None if args.top_k < 0 else args.top_k,
-          step_timeout_secs=args.step_timeout_secs,
-          reward_timeout_secs=args.reward_timeout_secs,
-          env_backend=args.env_backend,
-          use_agent_sandbox=args.use_agent_sandbox,
-          scaffold=args.scaffold,
-          env_verbose=args.env_verbose,
+          return_logprobs=True,
       ),
-      max_steps=args.max_steps,
       reward_fns=[],
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
@@ -371,11 +543,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step,
           step,
       ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
-      ),
+      on_step_end=_dump_and_log_trajectories,
+      on_rollouts_ready=_on_rollouts_ready,
   )
 
   try:
@@ -389,6 +558,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     )
   finally:
     program.close()
+    if fleet is not None:
+      logging.info("Tearing down SandboxFleet on orchestrator...")
+      try:
+        fleet.teardown()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
       cluster.shutdown()

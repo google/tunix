@@ -447,6 +447,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.weight_decay, 0.0)
     self.assertIsNone(args.max_grad_norm)
     self.assertFalse(args.use_lora)
+    self.assertEqual(args.remat_config, "decoder")
     self.assertEqual(args.rollout_mesh_tp, 0)
     self.assertTrue(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
@@ -473,6 +474,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "--checkpoint_root_directory",
         "/checkpoints/test",
         "--use_lora",
+        "--remat_config",
+        "block",
         "--lora_rank",
         "32",
         "--lora_alpha",
@@ -503,6 +506,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.checkpoint_max_to_keep, 3)
     self.assertEqual(args_custom.checkpoint_root_directory, "/checkpoints/test")
     self.assertTrue(args_custom.use_lora)
+    self.assertEqual(args_custom.remat_config, "block")
     self.assertEqual(args_custom.lora_rank, 32)
     self.assertEqual(args_custom.lora_alpha, 64.0)
     self.assertEqual(args_custom.adam_b2, 0.99)

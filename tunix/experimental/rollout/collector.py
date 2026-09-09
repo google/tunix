@@ -14,6 +14,7 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import logging
 from typing import Any, List
 import zlib
 import numpy as np
@@ -227,6 +228,31 @@ class TrajectoryCollectorEngine:
         rl_traj.get("policy_version", 0),
     )
     metadata["policy_version"] = int(policy_version or 0)
+    prompt_tokens = rl_traj.get("prompt_tokens")
+    if prompt_tokens is not None:
+      metadata["prompt_tokens"] = np.asarray(prompt_tokens, dtype=np.int32)
+
+    steps_history = []
+    agent_traj = getattr(self.agent, "trajectory", None)
+    if agent_traj is not None and hasattr(agent_traj, "steps"):
+      for step in agent_traj.steps:
+        steps_history.append({
+            "model_response": str(getattr(step, "model_response", "")),
+            "thought": str(getattr(step, "thought", "")),
+            "action": str(getattr(step, "action", "")),
+            "observation": str(getattr(step, "observation", "")),
+            "reward": float(getattr(step, "reward", 0.0) or 0.0),
+            "done": bool(getattr(step, "done", False)),
+        })
+    metadata["steps_history"] = steps_history
+    logging.info(
+        "[RolloutCollector] Completed trajectory %s (prompt_id=%s, reward=%.2f,"
+        " turns=%d)",
+        self.traj_id,
+        self.request.prompt_id,
+        metadata["reward"],
+        len(steps_history),
+    )
 
     return agent_types.TrajectoryItem(
         prompt_id=self.request.prompt_id,

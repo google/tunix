@@ -135,6 +135,7 @@ def build_prompt_item(
     env_verbose: bool,
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
+  del max_response_length, temperature, top_p, top_k
   problem = _problem_statement(entry)
   prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
   env_config = {
@@ -153,16 +154,10 @@ def build_prompt_item(
       "prompt": problem,
       "prompt_id": prompt_id,
       "max_turns": max_turns,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
       "metadata": {
           "instance_id": prompt_id,
           "problem_statement": problem,
+          "docker_image": entry.get("docker_image"),
           "prefix_hash": prompt_id,
           "env_config": env_config,
           "agent_config": agent_config,
@@ -226,7 +221,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
       **kwargs: Any,
   ):
     entry = dict(entry or kwargs.pop("task", {}) or {})
-    if prompt_id and "instance_id" not in entry:
+    if prompt_id and not entry.get("instance_id"):
       entry["instance_id"] = prompt_id
     if group_id is None:
       group_id = prompt_id or None
@@ -263,3 +258,4 @@ class DeepSWEAgent(swe_agent.SWEAgent):
   """Registry adapter for the legacy DeepSWE XML-tool agent."""
 
   name = DEEPSWE_AGENT_NAME
+

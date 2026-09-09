@@ -15,6 +15,7 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import logging
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
@@ -246,11 +247,22 @@ class RolloutManager:
     try:
       trajectory: TrajectoryOrError = await collector.run_episode()
     except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.exception(
+          "[RolloutManager] Failed to run episode for traj_id=%s prompt_id=%s:"
+          " %s",
+          collector.traj_id,
+          request.prompt_id,
+          e,
+      )
       trajectory = trajectory_lib.TrajectoryError(
           trajectory_id=collector.traj_id,
           prompt_id=request.prompt_id,
           error_message=str(e),
           error_type=type(e).__name__,
+          metadata={
+              "prompt_id": request.prompt_id,
+              "group_index": request.group_index,
+          },
       )
     finally:
       self._active_collectors.pop(collector.traj_id, None)

@@ -27,6 +27,8 @@ def setup_sharding_environment():
 
 def is_internal_env():
   """Checks if the code is running within the internal environment."""
+  if os.environ.get('TUNIX_IS_INTERNAL_ENV', '').lower() in ('false', '0'):
+    return False
   try:
     from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile  # noqa: F401
 
