@@ -2470,23 +2470,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           np.asarray(with_reference), np.asarray(without_reference)
       )
 
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="use_rollout_logps_true",
-          use_rollout_logps=True,
-          return_logprobs=True,
-          expect_get_actor_logps=False,
-      ),
-      dict(
-          testcase_name="use_rollout_logps_false",
-          use_rollout_logps=False,
-          return_logprobs=False,
-          expect_get_actor_logps=True,
-      ),
-  )
-  def test_use_rollout_logps(
-      self, use_rollout_logps, return_logprobs, expect_get_actor_logps
-  ):
+  def _logps_fixture(self, *, use_rollout_logps, return_logprobs):
+    """Toy learner + two mock trajectories for the old-logps tests."""
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
@@ -2566,6 +2551,28 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         }
 
     trajectories = [MockTraj(0), MockTraj(1)]
+    return learner, rl_cluster, trajectories
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="use_rollout_logps_true",
+          use_rollout_logps=True,
+          return_logprobs=True,
+          expect_get_actor_logps=False,
+      ),
+      dict(
+          testcase_name="use_rollout_logps_false",
+          use_rollout_logps=False,
+          return_logprobs=False,
+          expect_get_actor_logps=True,
+      ),
+  )
+  def test_use_rollout_logps(
+      self, use_rollout_logps, return_logprobs, expect_get_actor_logps
+  ):
+    learner, rl_cluster, trajectories = self._logps_fixture(
+        use_rollout_logps=use_rollout_logps, return_logprobs=return_logprobs
+    )
 
     with mock.patch.object(
         rl_cluster,
@@ -2621,6 +2628,71 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           )
         else:
           self.assertIsNone(train_example.old_per_token_logps)
+
+  def test_audit_every_skips_the_diagnostic_trainer_forward(self):
+    """tasks/zero_tim_perf P1.2: with rollout logprobs as the PPO old values
+    and no sampler IS, the trainer-old forward is diagnostic only and a
+    non-audit step (CANON_ALIGNMENT_AUDIT_EVERY>1) skips it."""
+    learner, rl_cluster, trajectories = self._logps_fixture(
+        use_rollout_logps=True, return_logprobs=True
+    )
+    real_mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("x",))
+    self.assertFalse(real_mesh.empty)
+    # The vanilla rollout has no prefill rescore; stand in a real-rescore
+    # source so the sidecar provenance check and the audit-step rescore run.
+    rescore_source = mock.Mock(
+        return_value=np.full((2, 10), 1.0, dtype=np.float32)
+    )
+    rescore_source.is_real_rescore = True
+    with mock.patch.dict(
+        rl_cluster.r2m, {rl_cluster_lib.Role.ACTOR: real_mesh}
+    ), mock.patch.dict(
+        os.environ,
+        {
+            "CANON_ALIGNMENT_GATE": "1",
+            "CANON_ALIGNMENT_AUDIT_EVERY": "2",
+            # The signed GSM8K workload admits sampler_is=None.
+            "CANON_P32_WORKLOAD": "gsm8k",
+        },
+    ), mock.patch.object(
+        rl_cluster.rollout, "get_prefill_rescore_logps", rescore_source,
+        create=True,
+    ), mock.patch.object(
+        rl_cluster, "get_prefill_rescore_logps", rescore_source, create=True
+    ):
+      with mock.patch.object(
+          rl_cluster,
+          "get_actor_per_token_logps",
+          return_value=jnp.full((2, 10), -1.0),
+          autospec=True,
+      ) as mock_get_actor_logps:
+        results = learner._process_results(trajectories, expected_step=1)
+        self.assertLen(results, 1)
+        mock_get_actor_logps.assert_not_called()
+        rescore_source.assert_not_called()
+        core, sidecar = alignment.unwrap_train_example(results[0])
+        self.assertFalse(sidecar.audited)
+        self.assertTrue(np.all(np.isnan(np.asarray(sidecar.t_old))))
+        self.assertTrue(np.all(np.isnan(np.asarray(sidecar.s_prefill))))
+        np.testing.assert_allclose(
+            core.old_per_token_logps, np.array([[1.0] * 3 + [0.0] * 7] * 2)
+        )
+      with mock.patch.object(
+          rl_cluster,
+          "get_actor_per_token_logps",
+          return_value=jnp.full((2, 10), -1.0),
+          autospec=True,
+      ) as mock_get_actor_logps:
+        results = learner._process_results(trajectories, expected_step=2)
+        self.assertLen(results, 1)
+        mock_get_actor_logps.assert_called_once()
+        rescore_source.assert_called_once()
+        core, sidecar = alignment.unwrap_train_example(results[0])
+        self.assertTrue(sidecar.audited)
+        # Rollout logprobs stay the PPO old values on the audit step too.
+        np.testing.assert_allclose(
+            core.old_per_token_logps, np.array([[1.0] * 3 + [0.0] * 7] * 2)
+        )
 
   def test_exception_handling(self):
     vocab = test_common.MockVocab()

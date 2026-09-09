@@ -1860,7 +1860,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "use_rollout_logps=1 tis_weights=absent",
             flush=True,
         )
-      if rollout_per_token_logps is None or trainer_per_token_logps is None:
+      # A non-audit step (CANON_ALIGNMENT_AUDIT_EVERY>1) legitimately has no
+      # trainer-old forward; the sidecar row is marked audited=False below.
+      if rollout_per_token_logps is None or (
+          trainer_per_token_logps is None and audit_step
+      ):
         raise alignment.AlignmentGateError(
             "alignment batch is missing S_decode or trainer T_old"
         )
