@@ -913,6 +913,48 @@ class PeftTrainerTest(parameterized.TestCase):
         metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
     )
 
+  def test_loss_output_aux_auto_logged_without_override(self):
+    # A plain PeftTrainer (no _post_process_train_step override) must still
+    # surface LossOutput.aux_metrics via get_metrics(), so shared-loss aux like
+    # kl / pg_clipfrac reaches the experimental orchestrator's metrics logger.
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              # unreduced_sum=6, denominator=2 -> weighted mean 3.0
+              'kl': sft_utils.WeightedMetric(
+                  jnp.array(6.0, dtype=jnp.float32),
+                  jnp.array(2.0, dtype=jnp.float32),
+              ),
+          },
+      )
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    metrics = trainer.get_metrics()
+    # Reduced WeightedMetric lands as a scalar under its aux key.
+    self.assertIn('kl', metrics.scalar_metrics)
+    self.assertAlmostEqual(
+        float(metrics.scalar_metrics['kl']), 3.0, places=4
+    )
+
   def test_empty_eval_dataset(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))

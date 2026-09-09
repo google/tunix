@@ -149,6 +149,53 @@ class MetricsBuffer:
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
+def _weighted_metric_mean(values: Any) -> float:
+  """Aggregates unreduced WeightedMetrics across microbatches without mean bias.
+
+  Mirrors ``tunix.sft.peft_trainer._weighted_metric_mean`` so experimental
+  training reduces auxiliary WeightedMetrics the same way the non-experimental
+  trainer does: sum of numerators over sum of denominators, rather than a mean
+  of per-microbatch means (which would bias unequal-denominator microbatches).
+  """
+  values = list(values)
+  if not values:
+    return 0.0
+  numerator = sum(float(np.asarray(v.unreduced_sum)) for v in values)
+  denominator = sum(float(np.asarray(v.denominator)) for v in values)
+  eps = getattr(values[0], "eps", None)
+  min_denom = getattr(values[0], "min_denom", None)
+  if eps is not None:
+    denominator += eps
+  if min_denom is not None:
+    denominator = max(denominator, min_denom)
+  return numerator / denominator if denominator else 0.0
+
+
+def _metric_reducer(metric: Any) -> Any:
+  """Selects the reduction matching a buffered auxiliary metric."""
+  if isinstance(metric, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+    return _weighted_metric_mean
+  return np.mean
+
+
+def _aux_to_additional_metrics(aux: Any) -> dict[str, Any] | None:
+  """Routes a loss function's auxiliary metrics dict into buffer form.
+
+  Auto-forwards ``LossOutput.aux_metrics`` (already unwrapped to a dict upstream
+  by ``_fwd_bwd_step``) so scalars and WeightedMetrics the shared loss emits --
+  e.g. ``kl``, ``entropy``, ``pg_clipfrac`` from ``tunix.rl.algo_core`` -- reach
+  the metrics logger without every trainer subclass overriding
+  ``_post_process_*_step``. Mirrors the non-experimental
+  ``tunix.sft.peft_trainer`` train/eval loops. Returns ``None`` when ``aux`` is
+  not a non-empty dict so non-metric auxiliary payloads are left untouched.
+  """
+  if not isinstance(aux, dict) or not aux:
+    return None
+  return {
+      name: (metric, _metric_reducer(metric)) for name, metric in aux.items()
+  }
+
+
 def _calculate_global_batch_size(train_example: Any) -> int:
   """Calculates the global batch size from a training example.
 
@@ -1040,6 +1087,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
+        additional_metrics=_aux_to_additional_metrics(aux),
     )
     self._post_process_train_step(aux)
 
@@ -1123,6 +1171,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_eval_metrics,
         loss=loss,
         step=self._train_steps,
+        additional_metrics=_aux_to_additional_metrics(aux),
     )
     self._post_process_eval_step(aux)
 
