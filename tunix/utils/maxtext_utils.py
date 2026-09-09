@@ -60,6 +60,8 @@ def build_maxtext_config(
     load_parameters_path: str = "",
     padded_moe_mlp_dim: int = 0,
     base_output_directory: str = "",
+    gradient_accumulation_steps: int = 1,
+    checkpointing_options: Any = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -78,23 +80,28 @@ def build_maxtext_config(
     raise FileNotFoundError(f"MaxText base.yml not found at {base_yml}")
 
   output_dir = base_output_directory or "/tmp/maxtext"
-  enable_checkpointing = bool(load_parameters_path)
   argv = [
       "maxtext_trainer",
       base_yml,
       f"model_name={model_name}",
       f"run_name={worker_id or 'tunix_maxtext'}",
       f"base_output_directory={output_dir}",
-      f"enable_checkpointing={enable_checkpointing}",
   ]
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
+  # Checkpointing configs
+  if checkpointing_options:
+    argv.extend([
+        "enable_checkpointing=True",
+        f"checkpoint_period={checkpointing_options.save_interval_steps}",
+        f"max_num_checkpoints_to_keep={checkpointing_options.max_to_keep}",
+    ])
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
-      "gradient_accumulation_steps=1",
+      f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_prompt_length + max_response_length}",
       "attention=dot_product",
       "use_tokamax_gmm=true",

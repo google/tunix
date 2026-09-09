@@ -326,6 +326,13 @@ def _create_maxtext_trainer_factory(args) -> Any:
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
   )
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=args.checkpoint_save_interval_steps,
+      max_to_keep=args.checkpoint_max_to_keep,
+  )
+  grad_accumulation_steps = max(
+      1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
+  )
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
       worker_id=args.worker_id,
@@ -341,6 +348,8 @@ def _create_maxtext_trainer_factory(args) -> Any:
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
       base_output_directory=args.maxtext_output_directory,
+      gradient_accumulation_steps=grad_accumulation_steps,
+      checkpointing_options=checkpointing_options,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
