@@ -184,6 +184,7 @@ First up, let's load the model:
 
 ```python
 from huggingface_hub import snapshot_download
+import jax
 from tunix.models.gemma3 import model as gemma_lib
 from tunix.models.gemma3 import params_safetensors as params_safetensors_lib
 
@@ -192,11 +193,12 @@ MESH = [(1, 1), ("fsdp", "tp")]
 mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 
 # Load the model.
+model_id = "google/gemma-3-270m-it"
 model_path = snapshot_download(
     repo_id=model_id, ignore_patterns=["*.pth"]
 )
 config = gemma_lib.ModelConfig.gemma3_270m()
-with mesh:
+with jax.set_mesh(mesh):
     model = params_safetensors_lib.create_model_from_safe_tensors(
       model_path, config, mesh
     )
@@ -219,7 +221,8 @@ gcloud storage cp gs://gemma-data/tokenizers/tokenizer_gemma3.model .
 from tunix.generate import tokenizer_adapter
 from tunix.examples.data import translation_dataset as data_lib
 
-tokenizer = tokenizer_adapter.Tokenizer("./tokenizer_gemma.model")
+tokenizer = tokenizer_adapter.Tokenizer(
+    tokenizer_path="./tokenizer_gemma.model")
 train_ds, val_ds = data_lib.create_datasets(
     'mtnt/en-fr',
     global_batch_size=64,
@@ -233,6 +236,8 @@ We need to process the inputs to make sure we are feeding the data to the model
 in the right format.
 
 ```python
+from tunix.sft import utils
+
 def input_fn(x):
     mask = x.input_tokens != tokenizer.pad_id()
     return {
@@ -249,16 +254,20 @@ def input_fn(x):
 We can now train our model. We need to pass the `input_fn` defined above here:
 
 ```python
+import optax
 from tunix.sft import peft_trainer
 
+training_config = peft_trainer.TrainingConfig(
+  eval_every_n_steps=20,
+  max_steps=100,
+)
 trainer = peft_trainer.PeftTrainer(
     model=model,
     optimizer=optax.adamw(learning_rate=1e-4),
-    mesh=mesh,
-    model_input_fn=input_fn,
-)
+    training_config=training_config,
+).with_gen_model_input_fn(input_fn)
 
-trainer.train(train_ds=train_ds, num_steps=100, eval_ds=val_ds, eval_steps=20)
+trainer.train(train_ds=train_ds, eval_ds=val_ds)
 ```
 
 #### LoRA/QLoRA fine-tuning
@@ -283,7 +292,7 @@ lora_model = qwix.apply_lora_to_model(
     model, lora_provider, **model_input
 )
 
-with mesh:
+with jax.set_mesh(mesh):
   state = nnx.state(lora_model)
   pspecs = nnx.get_partition_spec(state)
   sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
@@ -297,6 +306,8 @@ The rest of the flow remains the same.
 To evaluate the model, we can use the `Sampler` API to generate outputs.
 
 ```python
+from tunix.generate import sampler as sampler_lib
+
 sampler = sampler_lib.Sampler(
     transformer=lora_model,
     tokenizer=tokenizer,
