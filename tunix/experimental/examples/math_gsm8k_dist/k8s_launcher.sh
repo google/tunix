@@ -753,12 +753,24 @@ sync_code_to_gcs() {
   if [ -d "${MAXTEXT_DIR}" ]; then
     local maxtext_parent
     maxtext_parent="$(cd "${MAXTEXT_DIR}/.." && pwd)"
-    extra_dirs+=("-C" "${maxtext_parent}" "maxtext")
+    local maxtext_name
+    maxtext_name="$(basename "${MAXTEXT_DIR}")"
+    if [ "${maxtext_name}" != "maxtext" ]; then
+      extra_dirs+=("-C" "${maxtext_parent}" "--transform" "s|^${maxtext_name}|maxtext|" "${maxtext_name}")
+    else
+      extra_dirs+=("-C" "${maxtext_parent}" "maxtext")
+    fi
   fi
   if [[ "${SYNC_TPU_INFERENCE:-true}" == "true" ]] && [ -d "${TPU_INFERENCE_DIR}" ]; then
     local tpu_inf_parent
     tpu_inf_parent="$(cd "${TPU_INFERENCE_DIR}/.." && pwd)"
-    extra_dirs+=("-C" "${tpu_inf_parent}" "tpu-inference")
+    local tpu_inf_name
+    tpu_inf_name="$(basename "${TPU_INFERENCE_DIR}")"
+    if [ "${tpu_inf_name}" != "tpu-inference" ]; then
+      extra_dirs+=("-C" "${tpu_inf_parent}" "--transform" "s|^${tpu_inf_name}|tpu-inference|" "${tpu_inf_name}")
+    else
+      extra_dirs+=("-C" "${tpu_inf_parent}" "tpu-inference")
+    fi
     pkg_msg="tunix/, maxtext/, tpu-inference/"
   fi
 
