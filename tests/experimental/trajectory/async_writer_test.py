@@ -1,8 +1,6 @@
-"""Tests for AsyncFileWriter."""
+"""Unit tests for AsyncFileWriter verifying file persistence and concurrency."""
 
-import atexit
 import concurrent.futures
-import importlib
 import tempfile
 import threading
 import time
@@ -13,6 +11,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
 from tunix.experimental.trajectory import async_writer
+from tunix.experimental.trajectory import base_writer
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
@@ -533,7 +532,7 @@ class AsyncFileWriterTest(parameterized.TestCase):
   # ============================================================================
 
   def test_error_handling_suppresses_exceptions_and_logs(self) -> None:
-    """Verifies that background write errors are logged and suppressed without raising on flush."""
+    """Verifies background write errors are logged and suppressed on flush."""
     traj_dir, meta_path, step_path = self._get_traj_paths(
         trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
     )
@@ -553,10 +552,15 @@ class AsyncFileWriterTest(parameterized.TestCase):
           step=trajectory_testing.STEP_1_1,
       )
       self.writer.flush()
-      mock_log_exc.assert_called_once()
+      mock_log_exc.assert_called_once_with(
+          "Failed to write trajectory %s (trajectory_id=%s) to %s",
+          f"step {trajectory_testing.STEP_1_1.step_id}",
+          trajectory_testing.TRAJECTORY_ID_1,
+          step_path,
+      )
 
   def test_error_handling_mkdir_failure_suppressed_and_logged(self) -> None:
-    """Verifies that directory creation errors are logged and suppressed without failing flush."""
+    """Verifies directory creation errors are logged and suppressed on flush."""
     traj_dir, meta_path, step_path = self._get_traj_paths(
         trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
     )
@@ -576,7 +580,56 @@ class AsyncFileWriterTest(parameterized.TestCase):
           step=trajectory_testing.STEP_1_1,
       )
       self.writer.flush()
-      mock_log_exc.assert_called_once()
+      mock_log_exc.assert_called_once_with(
+          "Failed to write trajectory %s (trajectory_id=%s) to %s",
+          f"step {trajectory_testing.STEP_1_1.step_id}",
+          trajectory_testing.TRAJECTORY_ID_1,
+          step_path,
+      )
+
+  def test_log_task_error_formats_step_and_step_path(self) -> None:
+    """Verifies _log_task_error formats step ID and step path when present."""
+    traj_dir, meta_path, step_path = self._get_traj_paths(
+        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
+    )
+    task = base_writer.WriteTask(
+        metadata=trajectory_testing.METADATA_1,
+        step=trajectory_testing.STEP_1_1,
+        traj_dir=traj_dir,
+        meta_path=meta_path,
+        step_path=step_path,
+    )
+    with mock.patch.object(logging, "exception") as mock_log_exc:
+      self.writer._log_task_error(task)
+      mock_log_exc.assert_called_once_with(
+          "Failed to write trajectory %s (trajectory_id=%s) to %s",
+          f"step {trajectory_testing.STEP_1_1.step_id}",
+          trajectory_testing.TRAJECTORY_ID_1,
+          step_path,
+      )
+
+  def test_log_task_error_formats_metadata_and_meta_path_when_step_none(
+      self,
+  ) -> None:
+    """Verifies _log_task_error formats metadata when step is None."""
+    traj_dir, meta_path, _ = self._get_traj_paths(
+        trajectory_testing.TRAJECTORY_ID_1, 1
+    )
+    task = base_writer.WriteTask(
+        metadata=trajectory_testing.METADATA_1,
+        step=None,
+        traj_dir=traj_dir,
+        meta_path=meta_path,
+        step_path=None,
+    )
+    with mock.patch.object(logging, "exception") as mock_log_exc:
+      self.writer._log_task_error(task)
+      mock_log_exc.assert_called_once_with(
+          "Failed to write trajectory %s (trajectory_id=%s) to %s",
+          "metadata",
+          trajectory_testing.TRAJECTORY_ID_1,
+          meta_path,
+      )
 
   def test_subsequent_writes_continue_after_error(self) -> None:
     """Verifies that worker continues processing subsequent writes after an error."""
@@ -661,7 +714,7 @@ class AsyncFileWriterTest(parameterized.TestCase):
 
     for thread_idx in range(num_threads):
       traj_id = f"concurrent_traj_{thread_idx}"
-      traj_dir, meta_path, _ = self._get_traj_paths(traj_id, 1)
+      _, meta_path, _ = self._get_traj_paths(traj_id, 1)
       self.assertTrue(meta_path.exists())
       for step_id in range(1, num_steps_per_thread + 1):
         _, _, step_path = self._get_traj_paths(traj_id, step_id)
@@ -748,7 +801,8 @@ class AsyncFileWriterTest(parameterized.TestCase):
         f.result()
       close_future.result()
 
-    # Verify that every step that was accepted before closure was written to disk.
+    # Verify that every step that was accepted before closure was written to
+    # disk.
     for step_path, expected_step in accepted_steps:
       self.assertTrue(step_path.exists(), f"Missing file: {step_path}")
       saved_step = trajectory_lib.Step.model_validate_json(
@@ -828,7 +882,8 @@ class AsyncFileWriterTest(parameterized.TestCase):
           self.assertIn(
               "Discarded remaining tasks for trajectory IDs", call_args[0]
           )
-          self.assertEqual(call_args[2], [trajectory_testing.TRAJECTORY_ID_2])
+          self.assertEqual(call_args[1], "AsyncFileWriter")
+          self.assertEqual(call_args[3], [trajectory_testing.TRAJECTORY_ID_2])
     finally:
       block_event.set()
       if worker_thread is not None:
@@ -886,27 +941,20 @@ class AsyncFileWriterShutdownHookTest(parameterized.TestCase):
     )
     return step_path
 
-  def test_hook_is_registered_with_atexit(self) -> None:
-    """Verifies the module registers its shutdown hook on import."""
-    with mock.patch.object(atexit, "register") as mock_register:
-      importlib.reload(async_writer)
-      mock_register.assert_called_with(async_writer._close_live_writers)
-    self.addCleanup(atexit.register, async_writer._close_live_writers)
-
   def test_live_writer_is_registered_and_unregistered_on_close(self) -> None:
     """Verifies writers track their liveness for the shutdown hook."""
     writer = async_writer.AsyncFileWriter()
-    self.assertIn(writer, async_writer._LIVE_WRITERS)
+    self.assertIn(writer, base_writer._LIVE_WRITERS)
 
     writer.close()
-    self.assertNotIn(writer, async_writer._LIVE_WRITERS)
+    self.assertNotIn(writer, base_writer._LIVE_WRITERS)
 
   def test_pending_writes_persisted_by_shutdown_hook(self) -> None:
     """Verifies queued steps reach disk when the hook runs, without a flush()."""
     writer = async_writer.AsyncFileWriter()
     step_path = self._write_one_step(writer)
 
-    async_writer._close_live_writers()
+    base_writer._close_live_writers()
 
     self.assertTrue(step_path.exists())
     self.assertTrue(writer._closed)
@@ -915,14 +963,14 @@ class AsyncFileWriterShutdownHookTest(parameterized.TestCase):
     """Verifies one failing writer neither propagates nor blocks the others."""
     failing_writer = async_writer.AsyncFileWriter()
     healthy_writer = async_writer.AsyncFileWriter()
-    self.addCleanup(async_writer._LIVE_WRITERS.discard, failing_writer)
+    self.addCleanup(base_writer._LIVE_WRITERS.discard, failing_writer)
     step_path = self._write_one_step(healthy_writer)
 
     with mock.patch.object(
         failing_writer, "close", side_effect=RuntimeError("close failed")
     ):
       with mock.patch.object(logging, "exception") as mock_log_exception:
-        async_writer._close_live_writers()
+        base_writer._close_live_writers()
 
     mock_log_exception.assert_called_once()
     self.assertTrue(step_path.exists())
