@@ -198,7 +198,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
-      sampler_type: str = "vanilla",  # vanilla, vllm, sglang-jax, or jax_inference
+      sampler_type: str = "vanilla",  # vanilla, vllm, sglang_jax, or jax-inference
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -206,7 +206,7 @@ class Qwen25MathEvaluator:
     self.dataset = dataset
     self.max_prompt_length = max_prompt_length
     self.max_generation_steps = max_generation_steps
-    self.sampler_type = os.environ.get("SAMPLER_TYPE", sampler_type)
+    self.sampler_type = sampler_type
 
     if mesh_config is None:
       # Default: 4-way tensor parallelism
@@ -218,7 +218,6 @@ class Qwen25MathEvaluator:
 
     print(f"Initializing {self.model_version} evaluator")
     print(f"Model path: {model_path}")
-    print(f"Sampler type: {self.sampler_type}")
     print(f"Mesh config: {mesh_config}")
     print(f"Available devices: {jax.devices()}")
 
@@ -304,19 +303,19 @@ class Qwen25MathEvaluator:
           tokenizer=self.tokenizer,
           cache_config=cache_config,
       )
-    elif self.sampler_type in ("sglang-jax", "sglang_jax"):
-      from tunix.generate import sglang_sampler  # pylint: disable=g-import-not-at-top
+    elif self.sampler_type == "sglang_jax":
+      from tunix.generate import sglang_jax_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
           backend="sglang_jax",
       )
-      self.sampler_sglang = sglang_sampler.SglangSampler(  # pyrefly: ignore[bad-instantiation]
+      self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(  # pyrefly: ignore[bad-instantiation]
           tokenizer=self.tokenizer,
-          config=sglang_sampler.SglangConfig(
+          config=sglang_jax_sampler.SglangJaxConfig(
               mesh=self.mesh,
-              max_model_len=self.max_prompt_length
+              context_length=self.max_prompt_length
               + self.max_generation_steps
               + 100,
               model_version=self.model_version,
@@ -327,9 +326,6 @@ class Qwen25MathEvaluator:
               mapping_config=mapping_config,
           ),
       )
-      # sync weights from self.model to the sampler's internal model
-      print("Syncing model weights to SGLang JAX sampler...")
-      self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
       from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
 
@@ -358,7 +354,7 @@ class Qwen25MathEvaluator:
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to VLLM sampler...")
       self.sampler_vllm.update_params(nnx.state(self.model))
-    elif self.sampler_type in ("jax_inference", "jax-inference"):
+    elif self.sampler_type == "jax-inference":
       from tunix.generate import jax_inference_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
@@ -403,19 +399,15 @@ class Qwen25MathEvaluator:
           "data_source": "math",
           }
 
-    if not self.dataset.startswith("gs://") and not os.path.exists(self.dataset):
-      import datasets as hf_datasets  # pylint: disable=g-import-not-at-top
-      hf_ds = hf_datasets.load_dataset(self.dataset, split=split)
-      test_ds = hf_ds.map(preprocess_fn, with_indices=True)
-    else:
-      with file_open(self.dataset, "rb") as test_f:
-        if self.dataset.endswith("jsonl"):
-          test_df = pd.read_json(test_f, lines=True)
-        elif self.dataset.endswith("json"):
-          test_df = pd.read_json(test_f)
-        else:
-          test_df = pd.read_parquet(test_f)
-      test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
+    with file_open(self.dataset, "rb") as test_f:
+      if self.dataset.endswith("jsonl"):
+        test_df = pd.read_json(test_f, lines=True)
+      elif self.dataset.endswith("json"):
+        test_df = pd.read_json(test_f)
+      else:
+        test_df = pd.read_parquet(test_f)
+
+    test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
 
     print(f"Loaded {len(test_ds)} examples")
     print("Example data:")
@@ -478,15 +470,12 @@ class Qwen25MathEvaluator:
 
     # Generate
     if self.sampler_type == "vanilla":
-      effective_top_p = top_p if temperature > 0.0 else None
-      effective_top_k = top_k if temperature > 0.0 else None
       out_data = self.sampler_vanilla(
           input_strings=prompts,
           max_generation_steps=safe_gen_length,
-          max_prompt_length=self.max_prompt_length,
           temperature=temperature,
-          top_k=effective_top_k,
-          top_p=effective_top_p,
+          top_k=top_k,
+          top_p=top_p,
           echo=False,
           eos_tokens=[stop_token_id],
           seed=jax.random.PRNGKey(seed) if seed is not None else None,  # pyrefly: ignore[bad-argument-type]
@@ -515,14 +504,14 @@ class Qwen25MathEvaluator:
           echo=False,
           pad_output=True,
       )
-    elif self.sampler_type in ("jax_inference", "jax-inference"):
+    elif self.sampler_type == "jax-inference":
       out_data = self.sampler_jax_inference(
           input_strings=prompts,
           max_generation_steps=safe_gen_length,
           max_prompt_length=self.max_prompt_length,
           temperature=temperature,
-          top_p=top_p,
-          top_k=top_k,
+          top_p=top_p if temperature > 0.0 else None,
+          top_k=top_k if temperature > 0.0 else None,
           seed=seed,
           echo=False,
           pad_output=True,
@@ -754,12 +743,11 @@ MODEL_MAPPING = {
 
 def main():
   tp_env = os.environ.get("TP_SIZE")
+  sampler_type = os.environ.get("SAMPLER_TYPE", "vanilla")
   model_version = os.environ.get(
       "MODEL_VERSION", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
   )
   dataset = os.environ.get("DATASET", MATH_500_DATA_PATH)
-  if dataset.startswith("gs://") and not os.path.exists(dataset):
-    dataset = "HuggingFaceH4/MATH-500"
   model_config, model_path = MODEL_MAPPING[model_version]
 
   max_tp = getattr(model_config, "num_kv_heads", len(jax.devices()))
@@ -778,6 +766,7 @@ def main():
       mesh_config=mesh_config,
       max_prompt_length=1024,
       max_generation_steps=1024,
+      sampler_type=sampler_type,
   )
 
   evaluator.load_model()
@@ -818,6 +807,7 @@ def main():
         mesh_config=mesh_config,
         max_prompt_length=2048,
         max_generation_steps=32768,
+        sampler_type=sampler_type,
     )
 
     evaluator_aime.load_model()
