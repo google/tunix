@@ -33,6 +33,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
@@ -107,6 +108,11 @@ class StandardRLProgram(RLProgram):
       max_staleness: int = 0,
       sync_weights: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
+      trajectory_store: (
+          trajectory_store_lib.TrajectoryReader
+          | trajectory_store_lib.TrajectoryWriter
+          | None
+      ) = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       on_step_begin: Callable[[int], None] | None = None,
@@ -148,6 +154,7 @@ class StandardRLProgram(RLProgram):
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
+    self._trajectory_store = trajectory_store
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
@@ -166,7 +173,12 @@ class StandardRLProgram(RLProgram):
     )
 
   def close(self) -> None:
-    """Flushes and closes the metrics logger and associated resources."""
+    """Flushes and closes the metrics logger and associated resources.
+
+    Does not close `self._trajectory_store`: this program does not own it
+    (see `__init__`), and closing a store the orchestrator may still be
+    using — e.g. across a second `run_program()` call — would be wrong.
+    """
     if self.metrics_logger is not None:
       self.metrics_logger.close()
 
