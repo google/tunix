@@ -223,6 +223,12 @@ def init_global_fleet(
           " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
       ) from e
 
+    scaffold_env = os.getenv("SCAFFOLD")
+    if scaffold == "r2egym" and scaffold_env:
+      scaffold = scaffold_env
+    elif not scaffold:
+      scaffold = scaffold_env or "r2egym"
+
     fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
     if node_selector is None:
       key = os.environ.get("NODE_SELECTOR_KEY")

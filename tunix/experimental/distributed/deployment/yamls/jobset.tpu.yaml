@@ -34,6 +34,8 @@ ${QUEUE_LABEL}spec:
         parallelism: ${PARALLELISM}
         template:
           spec:
+            priorityClassName: ${PRIORITY_CLASS}
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure
