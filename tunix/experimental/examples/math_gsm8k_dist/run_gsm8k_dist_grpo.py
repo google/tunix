@@ -300,8 +300,18 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       eos_id,
   )
 
+  rollout_router = None
+  if args.scheduler_url:
+    logging.info(
+        "Routing rollout requests via scheduler sidecar at %s.",
+        args.scheduler_url,
+    )
+    rollout_router = remote_scheduler_router.RemoteSchedulerRouter(
+        args.scheduler_url, target_model=args.model_id
+    )
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
+      rollout_router=rollout_router,
   )
   context.ipc.discovery.on_register(
       functools.partial(
