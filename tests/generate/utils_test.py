@@ -2249,6 +2249,41 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
         jnp.ones((4, 8), dtype=jnp.float32),
     )
 
+  def test_interleave_moe_weights_lane_interleaving(self):
+    """Tests 128-lane interleaving of wi_0 and wi_1 per shard."""
+    lane_size = utils.TPU_V5P_SUBCORE_LANE_SIZE  # 128
+    n_shards = 2
+    chunk_size = 2 * lane_size  # 256
+    dim = n_shards * chunk_size  # 512
+    wi_0 = jnp.arange(dim, dtype=jnp.float32).reshape(1, dim)
+    wi_1 = (jnp.arange(dim, dtype=jnp.float32) + 10000.0).reshape(1, dim)
+    tgt_shape = (1, dim * 2)
+
+    interleaved = utils._interleave_moe_weights(
+        wi_0,
+        wi_1,
+        tgt_shape=tgt_shape,
+        n_shards=n_shards,
+        axis=-1,
+        lane_size=lane_size,
+    )
+
+    self.assertEqual(interleaved.shape, tgt_shape)
+    reshaped = interleaved.reshape(1, n_shards, 2, 2, lane_size)
+    np.testing.assert_array_equal(
+        reshaped[0, 0, 0, 0], wi_0[0, :lane_size]
+    )
+    np.testing.assert_array_equal(
+        reshaped[0, 0, 0, 1], wi_1[0, :lane_size]
+    )
+    np.testing.assert_array_equal(
+        reshaped[0, 0, 1, 0], wi_0[0, lane_size : 2 * lane_size]
+    )
+    np.testing.assert_array_equal(
+        reshaped[0, 0, 1, 1], wi_1[0, lane_size : 2 * lane_size]
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
+
