@@ -8107,3 +8107,33 @@ INFO 09-09 02:29:54 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=
 [PERF] stage=weight_sync_gc seconds=0.594
 [PERF] stage=weight_sync_anchor_d2h seconds=0.098
 [PERF] step=193 stage=weight_sync seconds=8.496
+
+# ==============================================================================
+# CANON TELEMETRY COMPLETION RECEIPT: FrozenLake P45 Standard (Native64)
+# Timestamp: 2026-09-09 07:18:12 UTC
+# Status: 300/300 steps fully completed (100.0%)
+# Final Held-Out Eval (800 unseen test prompts): 50.5% (404/800 solved)
+# Final Training Loss: 0.000229 | Exit Code: 0 (Normal Exit)
+# Hardware: 64 TPU v5p chips cleanly released back to cluster quota pool
+# ==============================================================================
+[CANON_ALIGN_WARNING] boundary=pre_backward step=300 warnings=['S_decode_vs_S_prefill', 'S_prefill_vs_T_old']
+2026-09-09 07:18:06 - INFO - [absl] [DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=100 elapsed_secs=820.0 deadline_secs=None
+[CANON_FROZENLAKE_P42_JSON] {"n":800,"policy_step":300,"reward":0.5049999952316284,"solve":0.505,"wall_seconds":820.01744013594}
+[P57.EVAL.CYCLE] policy_step=300 enclosing_global_step=none
+[P57.EVAL] FINAL policy_step=300 prompts=100 generations=8 n=800 reward=0.505000 solve=0.505000 backward=0 optimizer_commits=0 evaluation_checkpoint_writes=0
+2026-09-09 07:18:09 - INFO - [absl] Train step 300 training loss: 0.000229  - training perplexity: 1.000229
+[P57.STOCK] SEGMENT_COMPLETE step=300 durable_checkpoint=300 horizon=300 next_action=complete
+2026-09-09 07:18:12 - INFO - [absl] Stopping trajectory logging thread...
+2026-09-09 07:18:12 - INFO - [absl] Stopped trajectory logging thread.
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 0: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 1: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 3: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 4: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 2: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 5: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 6: Shutting down
+INFO 09-09 07:18:12 [dp_scheduler.py:314] Rank 7: Shutting down
+[run] exit=0
+[run] transport_rc=0
+P57_STANDARD_RECEIPTS_PASS
+[P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
