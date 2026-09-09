@@ -82,6 +82,29 @@ case "$V1_GSM8K_XPROF_ARM" in
       echo "[V1.GSM8K.XPROF] zero-hp inherited the vanilla selector" >&2
       exit 2
     fi
+    # Diagnostic knob ablation (tasks/zero_tim_perf phase0 P0.2): a
+    # comma-separated list applied after the profile chain so one
+    # deterministic knob can be changed per run.  NAME=VALUE exports the
+    # value; NAME= unsets the knob (the engine shims admit only unset or 1,
+    # so "off" is unset, never 0).  Empty (the default) leaves the certified
+    # path untouched; every applied override is echoed so the run reads as
+    # diagnostic in raw.log and can never pass for certification.
+    if [ -n "${V1_GSM8K_XPROF_DIAG_OVERRIDES:-}" ]; then
+      IFS=',' read -r -a diag_overrides <<< "$V1_GSM8K_XPROF_DIAG_OVERRIDES"
+      for kv in "${diag_overrides[@]}"; do
+        if [[ ! "$kv" =~ ^CANON_[A-Z0-9_]+=[^[:space:]]*$ ]]; then
+          echo "[V1.GSM8K.XPROF] invalid diag override (want CANON_NAME=VALUE or CANON_NAME=): $kv" >&2
+          exit 2
+        fi
+        if [ -z "${kv#*=}" ]; then
+          unset "${kv%%=*}"
+          echo "[V1.GSM8K.XPROF] DIAG override unset ${kv%%=*}"
+        else
+          export "$kv"
+          echo "[V1.GSM8K.XPROF] DIAG override $kv"
+        fi
+      done
+    fi
     ;;
   *)
     echo "[V1.GSM8K.XPROF] invalid arm: $V1_GSM8K_XPROF_ARM" >&2
