@@ -59,14 +59,28 @@ def build_maxtext_config(
     warmup_steps_fraction: float = 0.0,
     load_parameters_path: str = "",
     padded_moe_mlp_dim: int = 0,
-    base_num_kv_heads: int = 0,
     base_output_directory: str = "",
+    *,
+    base_num_kv_heads: int = 0,
     rollout_mesh_tp: int = 0,
     prefuse_moe_weights: bool = True,
     use_weight_converter: bool = True,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
+
+  if padded_moe_mlp_dim < 0:
+    raise ValueError(
+        f"padded_moe_mlp_dim must be non-negative, got {padded_moe_mlp_dim}"
+    )
+  if base_num_kv_heads < 0:
+    raise ValueError(
+        f"base_num_kv_heads must be non-negative, got {base_num_kv_heads}"
+    )
+  if rollout_mesh_tp < 0:
+    raise ValueError(
+        f"rollout_mesh_tp must be non-negative, got {rollout_mesh_tp}"
+    )
 
   if train_micro_batch_size % mesh_fsdp:
     raise ValueError(
@@ -152,7 +166,9 @@ def build_maxtext_config(
         if hasattr(cfg, "raw_data_dict") and isinstance(cfg.raw_data_dict, dict):
           cfg.raw_data_dict["padded_base_moe_mlp_dim"] = auto_padded_dim
     except Exception as e:
-      logging.warning("Could not auto-compute padded_base_moe_mlp_dim: %s", e)
+      raise RuntimeError(
+          f"Failed to auto-compute padded_base_moe_mlp_dim for rollout_mesh_tp={rollout_mesh_tp}: {e}"
+      ) from e
 
   return cfg
 

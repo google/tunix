@@ -99,6 +99,40 @@ class MaxTextUtilsTest(absltest.TestCase):
           mesh_fsdp=2,
       )
 
+  def test_build_maxtext_config_range_validations(self):
+    with self.assertRaisesRegex(ValueError, "padded_moe_mlp_dim must be non-negative"):
+      maxtext_utils.build_maxtext_config("gemma2-9b", padded_moe_mlp_dim=-1)
+
+    with self.assertRaisesRegex(ValueError, "base_num_kv_heads must be non-negative"):
+      maxtext_utils.build_maxtext_config("gemma2-9b", base_num_kv_heads=-2)
+
+    with self.assertRaisesRegex(ValueError, "rollout_mesh_tp must be non-negative"):
+      maxtext_utils.build_maxtext_config("gemma2-9b", rollout_mesh_tp=-4)
+
+  def test_build_maxtext_config_auto_padding_failure_raises_runtime_error(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_cfg = mock.MagicMock()
+    mock_cfg.base_moe_mlp_dim = 2048
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True), mock.patch.dict(
+        "sys.modules",
+        {"maxtext.integration.vllm.moe_padding": mock.MagicMock(
+            compute_padded_moe_mlp_dim=mock.MagicMock(side_effect=ValueError("Padding failure"))
+        )},
+    ):
+      with self.assertRaisesRegex(RuntimeError, "Failed to auto-compute padded_base_moe_mlp_dim"):
+        maxtext_utils.build_maxtext_config(
+            model_name="moe-test",
+            rollout_mesh_tp=4,
+            padded_moe_mlp_dim=0,
+        )
+
 
 if __name__ == "__main__":
   absltest.main()
