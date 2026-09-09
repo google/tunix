@@ -234,11 +234,15 @@ class _RaidenTransport:
     )
     if control_addr and "," in control_addr:
       if self._controller.worker_rpc_client is not None:
-        for addr in control_addr.split(",")[1:]:
+        base_id = self._to_raiden_id(metadata.unit)
+        for idx, addr in enumerate(control_addr.split(",")[1:], start=1):
           addr = addr.strip()
           if addr:
+            sub_id = dataclasses.replace(
+                base_id, data_replica_idx=base_id.data_replica_idx + idx
+            )
             self._controller.worker_rpc_client.register_worker_endpoint(
-                self._to_raiden_id(metadata.unit), addr
+                sub_id, addr
             )
     with self._registered_lock:
       self._registered.add(metadata.unit)
@@ -334,11 +338,7 @@ class _RaidenTransport:
       raise ValueError(f"uuid must be positive, got {resolved_uuid}")
     resolved_options = RaidenTransferOptions(
         parallelism=options.parallelism if parallelism is None else parallelism,
-        expected_block_count=(
-            options.expected_block_count
-            if expected_block_count is None
-            else expected_block_count
-        ),
+        expected_block_count=expected_block_count,
         skip_d2h=options.skip_d2h if skip_d2h is None else skip_d2h,
         skip_tiling=(
             dict(options.skip_tiling)
@@ -372,7 +372,7 @@ class _RaidenTransport:
             " Omit it for single-controller deployments."
         )
 
-    resolved_block_count = expected_block_count or 0
+    resolved_block_count = resolved_options.expected_block_count or 0
     if kwargs["use_block_chunks"] and resolved_block_count == 0:
       logging.info(
           "transfer %s: expected_block_count auto; deferring to the"

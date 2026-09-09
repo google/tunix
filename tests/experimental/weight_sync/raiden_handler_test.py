@@ -26,6 +26,7 @@ stylistic: the handler calls the controller directly now, so a kwarg the real
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Optional
 from unittest import mock
 
@@ -304,8 +305,9 @@ class RaidenHandlerTest(absltest.TestCase):
     self.controller.register_work_unit.assert_called_once()
     kwargs = self.controller.register_work_unit.call_args.kwargs
     self.assertEqual(kwargs["control_plane_rpc_address"], "10.0.0.1:20001")
+    expected_sub_id = dataclasses.replace(RAIDEN_SRC, data_replica_idx=4)
     self.controller.worker_rpc_client.register_worker_endpoint.assert_called_with(
-        RAIDEN_SRC, "10.0.0.2:20002"
+        expected_sub_id, "10.0.0.2:20002"
     )
 
   def test_register_rejects_a_unit_without_a_data_address(self):
