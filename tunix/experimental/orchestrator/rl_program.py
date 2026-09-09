@@ -316,8 +316,8 @@ class StandardRLProgram(RLProgram):
               if c_tokens is not None and len(c_tokens) > 0:
                 try:
                   response_text = self.tokenizer.decode(c_tokens, skip_special_tokens=True)
-                except Exception:
-                  pass
+                except Exception as e:
+                  logging.debug("Failed to decode completion tokens: %s", e)
             gold_ans = (
                 meta.get("gold_answer")
                 or meta.get("answer")
