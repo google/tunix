@@ -519,12 +519,22 @@ class StandardRLProgram(RLProgram):
     advantage_std = float(np.std(step_advantages)) if step_advantages else 0.0
     advantage_min = float(np.min(step_advantages)) if step_advantages else 0.0
     advantage_max = float(np.max(step_advantages)) if step_advantages else 0.0
+    advantage_abs_mean = (
+        float(np.mean(np.abs(step_advantages))) if step_advantages else 0.0
+    )
+    advantage_nonzero_frac = (
+        float(np.mean(np.abs(step_advantages) > 1e-8))
+        if step_advantages
+        else 0.0
+    )
     if step_advantages:
       advantage_stats = {
           "mean": advantage_mean,
           "max": advantage_max,
           "min": advantage_min,
           "std": advantage_std,
+          "abs_mean": advantage_abs_mean,
+          "nonzero_frac": advantage_nonzero_frac,
       }
       for tag, val in advantage_stats.items():
         self.metrics_logger.log(

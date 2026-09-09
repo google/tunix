@@ -2435,6 +2435,8 @@ class RLProgramTest(absltest.TestCase):
         self.assertIn("train/trainer/loss", logged_keys)
         self.assertIn("train/trainer/learning_rate", logged_keys)
         self.assertIn("train/rewards/mean", logged_keys)
+        self.assertIn("train/rewards/advantage/abs_mean", logged_keys)
+        self.assertIn("train/rewards/advantage/nonzero_frac", logged_keys)
         self.assertIn("train/rollout/prompt_length_mean", logged_keys)
         self.assertIn("train/rollout/staleness_mean", logged_keys)
         self.assertIn("train/orchestrator/policy_version", logged_keys)

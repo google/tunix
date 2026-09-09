@@ -20,6 +20,22 @@ try:
 except ImportError:
   wandb = None
 
+try:
+  from wandb.proto import wandb_internal_pb2  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+
+  try:
+    from wandb.sdk.internal.datastore import DataStore  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+  except (ImportError, AttributeError):
+    try:
+      from wandb.sdk.internal import datastore  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+
+      DataStore = getattr(datastore, "DataStore", None)
+    except (ImportError, AttributeError):
+      DataStore = None
+except (ImportError, AttributeError):
+  wandb_internal_pb2 = None
+  DataStore = None
+
 
 class _FakeWandbRun:
   """Captures wandb.log calls."""
@@ -153,7 +169,10 @@ class _CountingBackend:
     pass
 
 
-@absltest.skipIf(wandb is None, "wandb is not installed")
+@absltest.skipIf(
+    wandb is None or DataStore is None or wandb_internal_pb2 is None,
+    "wandb or wandb internal datastore reader is not available",
+)
 class WandbOfflineEndToEndTest(absltest.TestCase):
   """Double-writes through the real wandb client using an offline run.
 
@@ -167,16 +186,13 @@ class WandbOfflineEndToEndTest(absltest.TestCase):
 
   def _read_history(self, wandb_dir):
     """Maps step to logged values from the offline run's transaction log."""
-    # pylint: disable=g-import-not-at-top
-    from wandb.proto import wandb_internal_pb2  # pytype: disable=import-error
-    from wandb.sdk.internal import datastore  # pytype: disable=import-error
-
-    # pylint: enable=g-import-not-at-top
+    assert DataStore is not None
+    assert wandb_internal_pb2 is not None
 
     wandb_file = glob.glob(
         os.path.join(wandb_dir, "wandb", "offline-run-*", "run-*.wandb")
     )[0]
-    store = datastore.DataStore()
+    store = DataStore()
     store.open_for_scan(wandb_file)
     history = {}
     while True:
