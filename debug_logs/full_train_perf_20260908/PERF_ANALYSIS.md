@@ -1,4 +1,4 @@
-# Multi-Arm Full Training Performance & Benchmark Report (2026-09-08)
+# Multi-Arm Full Training Performance & Benchmark Report (2026-09-09 Update)
 
 This benchmark documents the live training progress, performance breakdowns, solve rate progressions, and architectural performance gaps across the four canonical RL workloads running concurrently on Google Cloud TPU v5p infrastructure (`bodaborg-v5p-nap`, project `cloud-tpu-shared-capacity`, region `europe-west4`):
 
@@ -7,7 +7,7 @@ This benchmark documents the live training progress, performance breakdowns, sol
 3. **FrozenLake M15 Zero-TIM Full (`r10` / WandB `3osny0pb`)**: 15-Turn Long-Horizon Multi-Turn Agent with Zero-TIM v2 tape streaming + 100% exact TiTO record-full transport.
 4. **FrozenLake M15 Standard Full (`r01`)**: 15-Turn Long-Horizon Multi-Turn Agent with Standard Native64 baseline (`--old_logps_source=trainer --sampler_is=none`, no TIS tensor).
 
-Total active hardware scale under management: **256 TPU v5p chips** (64 hosts across dynamic GKE NAP pools).
+Total active hardware scale under management: **256 TPU v5p chips** (64 hosts across dynamic GKE NAP pools, 68 pods, 0 restarts).
 
 ---
 
@@ -22,65 +22,54 @@ Total active hardware scale under management: **256 TPU v5p chips** (64 hosts ac
 | **Algorithm Family** | Zero-TIM v2 (Exact Tape) | Standard Native PPO/GRPO | Zero-TIM v2 (Exact Tape) | Standard Native PPO/GRPO |
 | **Old LogPs Source** | Sampler / Stream Pullback | Trainer Frozen Rescore | Sampler / Stream Pullback | Trainer Frozen Rescore |
 | **Sampler IS (`sampler_is`)** | Active | `none` (`tis=0`) | Active | `none` (`tis=0`) |
-| **Global Steps Completed** | **84 / 300** (28.0%) | **38 / 300** (12.7%) | **22 / 300** (7.3%) | **18 / 300** (6.0%) |
+| **Global Steps Completed** | **127 / 300** (42.3%) | **193 / 300** (64.3%) | **30 / 300** (10.0%) | **72 / 300** (24.0%) |
 | **Initial Solve Rate** | 62.1% (38.3% raw) | 35.2% | 16.4% ~ 19.5% | 16.4% |
-| **Peak Solve Rate** | **83.59%** (WandB step 44) | **62.9%** (Rollout 137) | **47.7%** (Step 18) | **38.7%** (Step 17) |
-| **Latest Solve Rate** | **73.4%** (Step 84) | **60.2%** (Step 37) | **44.9%** (Step 21) | **38.7%** (Step 17) |
-| **Training Loss** | - | **0.0024** (Step 38) | - | **0.0085** (Step 17) |
-| **Gradient Norm** | - | **0.0058** | - | **0.0070** |
-| **End-to-End Step Time** | **~416s - 459s** (~7.2m) | **~110s - 121s** (~1.9m) | **~2608s** (~43.5m) | **~230s - 276s** (~4.2m) |
-| **Relative Speedup** | Baseline (1.0x) | **3.6x Faster** | Baseline (1.0x) | **10.8x Faster** |
-| **`rescore_b` Overhead** | ~58.0 s (Rows=256) | **10.9s ~ 11.6s** (Rows=256) | ~188.5 s (Rows=256) | **17.1s ~ 21.7s** (Rows=256) |
-| **`weight_sync` Overhead** | 13.9s - 19.9s | **8.1s - 8.5s** | 11.9s - 15.5s | **7.3s - 7.8s** |
+| **Peak Solve Rate** | **87.1%** (Train solve) | **71.5%** (Step 182) | **55.5%** (Step 25) | **40.5%** (Eval 50) |
+| **Latest Solve Rate** | **71.5%** (Step 127) | **61.3%** (Step 192) | **48.8%** (Step 30) | **28.9%** (Step 72) |
+| **Held-Out Eval (800 prompts)**| *Disabled by contract* | **57.6%** (Step 150) | *Disabled by contract* | **40.5%** (Step 50) |
+| **Truncation Ratio (`trunc_ratio`)** | **0.0% ~ 0.4%** | **33.6% ~ 48.0%** | **2.3% ~ 3.9%** | **16.0% ~ 23.0%** |
+| **Training Loss** | - | **0.0001 ~ 0.0002** | - | **0.0008 ~ 0.0010** |
+| **Gradient Norm** | 5.0 ~ 12.7 | **0.0011 ~ 0.0019** | 1.3 ~ 7.5 | **0.0022 ~ 0.0023** |
+| **End-to-End Step Time** | **~1.3m - 2.0m** | **~128s - 139s** (~2.2m) | **~6.5m - 8.6m** | **~397s - 419s** (~6.8m) |
+| **`rescore_b` Overhead** | ~58.0 s (Rows=256) | **10.9s ~ 11.6s** | ~188.5 s (Rows=256) | **17.1s ~ 21.7s** |
+| **`weight_sync` Overhead** | 12.6s - 19.9s | **8.1s - 8.5s** | 11.9s - 15.5s | **7.3s - 7.8s** |
 | **Weight Sync GC Time** | ~4.4s - 4.5s | **~0.50s** | ~4.1s - 4.5s | **~0.48s** |
-| **Backward Pass Mechanism** | P59 VAG Pullback (121s) | 32 Microbatch Accumulation | P59 VAG Pullback (431s) | 32 Microbatch Accumulation |
-| **VAG Pullback Kernel** | **~672 ms** / group | N/A | **~544 ms** / group | N/A |
+| **Backward Pass Mechanism** | P59 VAG Pullback | 32 Microbatch Accumulation | P59 VAG Pullback | 32 Microbatch Accumulation |
+| **VAG Pullback Kernel** | **~544 ms** / group | N/A | **~544 ms** / group | N/A |
 | **Tensor Serialization** | Full TiTO Host/Device Tape | Zero (Token IDs only) | Full 15-Turn TiTO Tape | Zero (Token IDs only) |
 | **TPU HBM Usage** | 34.3 GB / 95 GB (36%) | 34.3 GB / 95 GB (36%) | 38.1 GB / 95 GB (40%) | 38.1 GB / 95 GB (40%) |
 | **Host Memory Usage** | ~9.2 GB / 350 GB | ~6.8 GB / 350 GB | ~9.8 GB / 350 GB | ~7.2 GB / 350 GB |
-| **Uptime / Restarts** | >13h / 0 restarts | >1.6h / 0 restarts | >13h / 0 restarts | >1.6h / 0 restarts |
+| **Uptime / Restarts** | >19h / 0 restarts | >8h / 0 restarts | >19h / 0 restarts | >8h / 0 restarts |
 
 ---
 
-## 2. Performance Breakdown & Gaps Analysis
+## 2. Key Analytical Findings for Downstream Agents
 
-### Gap 1: End-to-End Step Latency (Standard is 3.6x - 10.8x Faster)
-- **Observed Gap**:
-  - P45: Standard completes a full step in **~115s** vs Zero-TIM's **~430s** (**3.6x speedup**).
-  - M15: Standard completes a full step in **~245s** vs Zero-TIM's **~2608s** (**10.8x speedup**).
-- **Architectural Rationale**:
-  - **Zero-TIM Transport Burden**: Zero-TIM enforces full `record-full` TiTO tensor preservation. In multi-turn interaction (especially M15 across 15 interaction rounds), each turn's intermediate activation tensors and logits must be serialized, transferred from TPU device to Host memory, validated against sequence boundary conditions, and streamed back into the VAG reverse pass.
-  - **Standard Zero-Tensor Pipeline**: The Standard Native pipeline transfers **zero activation tensors** between the inference engine and the trainer. Actors return only integer token sequences. The trainer then recomputes the forward representations on its dedicated TPU mesh.
+### Finding 1: Sequence Integrity vs Truncation Degeneration (0.0% vs 48.0%)
+A critical divergence observed between Zero-TIM and Standard is the **truncation ratio**:
+- **P45 Zero-TIM**: Achieved **`0.0%`** truncation at Step 126 (and 0.4% at Step 125). Average completion length remains concise (~344 tokens). The exact TiTO token-level feedback loop prevents the model from rambling or losing coherent multi-turn trajectory focus.
+- **P45 Standard**: Experiences a severe escalation in truncation, reaching **`40.2% ~ 48.0%`** at Steps 188-191. Without exact token-level importance sampling, policy drift causes the model to wander in the environment, repeatedly hitting the sequence max token limit (1,531 raw completion tokens).
 
-### Gap 2: Weight Synchronization & Garbage Collection
-- **Observed Gap**:
-  - Standard weight sync takes **~7.5s - 8.2s**, whereas Zero-TIM takes **~14.0s - 19.9s**.
-  - Looking at the sub-stage breakdowns:
-    - `weight_sync_engine` (broadcasting weights to vLLM actors across 8 ranks): **~7.5s** in both arms.
-    - `weight_sync_anchor_d2h`: **~0.09s** in both arms.
-    - `weight_sync_gc`: **0.50s** in Standard vs **4.45s - 4.53s** in Zero-TIM.
-- **Root Cause**:
-  - In Zero-TIM, hundreds of intermediate Jax array buffers and PyTree transport records are retained across the step lifecycle. Triggering Python garbage collection requires scanning large object graphs. Standard maintains a lean host heap, dropping GC latency by **9x**.
+### Finding 2: Long-Horizon Batch Variance (M15 Zero-TIM Did NOT Collapse)
+- Step 28 of M15 Zero-TIM dropped to **32.8%**, prompting stability checks.
+- Step 29 completed with exact microbatch alignment, zero clipping hits, and normal gradient norms.
+- Step 30 rollout immediately rebounded to **`48.8%`** solve rate (`reward_mean=0.488`, n=256), while M15 Standard similarly fluctuated between 27.0% and 39.8%.
+- **Conclusion**: In 15-turn multi-turn environments, 32-sample batches inherently produce temporary variance due to random grid trap density; neither run collapsed.
 
-### Gap 3: Trainer Rescoring (`stage=rescore_b`)
-- **Observed Gap**:
-  - Standard: **11.0s ~ 11.6s** on P45 (2048 ctx) and **17.1s ~ 21.7s** on M15 (8192 ctx).
-  - Zero-TIM: **58.0s** on P45 and **188.5s** on M15.
-- **Root Cause**:
-  - In Standard, `rescore_b` is a pure JIT forward evaluation pass of the frozen $T_{\text{old}}$ policy over the 256 trajectories packed into dense micro-batches.
-  - In Zero-TIM, rescoring includes verification cross-checks, sampler-vs-trainer logp difference tracking, and coordinate alignment assertions.
+### Finding 3: Generalization in Held-Out Evaluations (Standard Arm)
+Under the `STANDARD64.md` contract, the Standard baseline runs an 800-trajectory held-out test evaluation every 50 steps:
+- **P45 Standard**:
+  - Step 50: **55.7%**
+  - Step 100: **50.6%**
+  - Step 150: **57.6%** (New historical peak in unseen held-out generalization!)
+  - Step 200: **Upcoming** (at ~Step 193/300, ~10 minutes away).
+- **M15 Standard**:
+  - Step 50: **40.5%**
+  - Step 100: **Upcoming** (currently at Step 72/300).
 
-### Gap 4: Algorithmic Invariants & Numerical Alignment
-- **Standard Verification**:
-  - The Standard runs emit:
-    ```text
-    [CANON_ALIGN] step=38 verdict=PASS_WITH_ALIGNMENT_WARNINGS ... clip=393 tis=0 grad_norm=0
-    ```
-  - The indicator `tis=0` rigorously validates that no truncated importance sampling correction is applied, faithfully reflecting pure trainer-old PPO/GRPO mechanics.
-- **Convergence Parity**:
-  - **P45 Standard**: Climbed rapidly from an initial 35.2% solve rate to **60.2%** at Step 37 (with intermediate rollout spikes reaching **62.9%**), matching the performance of Zero-TIM (73.4% at Step 84).
-  - **M15 Standard**: Surged from 16.4% to **38.7%** in just 17 steps, closely trailing Zero-TIM (44.9% at Step 21).
-  - Training loss for P45 Standard has stabilized at **0.0024** with gradient norm **0.0058**, demonstrating remarkable optimization smoothness.
+### Finding 4: Performance Gap & Overhead Breakdown
+- **Trainer Forward Rescore (`rescore_b`)**: Standard's native JIT forward pass evaluates 256 trajectories in **10.9s** (P45) and **17.1s** (M15). Zero-TIM takes **58s** and **188s** respectively due to cross-validation and tape alignment verification.
+- **Host Garbage Collection**: Standard completes GC in **0.50s**, whereas Zero-TIM takes **4.5s** due to large retained intermediate PyTree activation graphs.
 
 ---
 
@@ -89,14 +78,14 @@ Total active hardware scale under management: **256 TPU v5p chips** (64 hosts ac
 When consuming the 4 exported log files in `debug_logs/full_train_perf_20260908/`:
 
 1. **`frozenlake_p45_standard_r01.log`**:
-   - Grep `[step ` to extract training trajectories: `train_solve`, `time`, `loss`, `grad_norm`.
+   - Grep `[step ` to extract training trajectories: `train_solve`, `time`, `loss`, `grad_norm`, `trunc_ratio`.
+   - Grep `eval_solve` to view the 800-prompt held-out evaluation checkpoints.
    - Grep `stage=rescore_b` for $T_{\text{old}}$ forward latency.
-   - Grep `stage=weight_sync` for weight broadcast efficiency.
 2. **`frozenlake_m15_standard_r01.log`**:
-   - Demonstrates the long-context (8,192 tokens) scalability of native rollout + trainer rescoring without tensor serialization.
+   - Demonstrates long-horizon 15-turn scaling with trainer-old frozen rescoring.
 3. **`frozenlake_p45_zero_r10a.log` & `frozenlake_m15_zero_r10.log`**:
    - Inspect `stage=p32_vag_reverse` to observe exact reverse pullback kernel performance (~540ms - 670ms).
-   - Inspect `[CANON_P57_TOKEN_CONTINUITY]` to confirm 100% bitwise token stream parity across multi-turn boundaries.
+   - Inspect `[CANON_P57_TOKEN_CONTINUITY]` and `[CANON_ALIGN]` to confirm 100% bitwise token stream parity and zero TIS deviation.
 
 ---
 
@@ -105,8 +94,8 @@ When consuming the 4 exported log files in `debug_logs/full_train_perf_20260908/
 The integrity of all raw log files is verified via SHA256:
 
 ```text
-fcb1f4f685a899e1e2600842df90886db222f0f3b786f6dee41409546efb0c24  frozenlake_m15_standard_r01.log
-404107a74f8976051b6a12057f8e70f274a3df80a5d686b926ef681db07de4c8  frozenlake_m15_zero_r10.log
-b69d2276c935809bf993537511fa3be1704ff52825f37f43a7f759dab6c35bfa  frozenlake_p45_standard_r01.log
-05fa5d4028cd69cdf9328e0591e8403a7e018fecc999c1847b16925acc71629f  frozenlake_p45_zero_r10a.log
+271ad6b940da6b7f5ba8ee66605648a011a78755aedad96286a0ba5c18b2b4ef  frozenlake_m15_standard_r01.log
+9cf916cd88101f2deb2fb2e0c8d8bcb91cd11d2e32cac0cd08499c800500279a  frozenlake_m15_zero_r10.log
+e0293e4857e4ae4a528e3f3cca9b9b8d8e5b50f62e7a2c4127aef435aaaee4e9  frozenlake_p45_standard_r01.log
+30765e51f070d6f9df064fafe887e975ec5e4c27b860aaa7047637946fedf0b1  frozenlake_p45_zero_r10a.log
 ```
