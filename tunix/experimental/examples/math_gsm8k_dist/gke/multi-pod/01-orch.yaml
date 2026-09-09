@@ -1,0 +1,83 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: orch
+  namespace: default
+spec:
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+  - name: proc
+    replicas: 1
+    template:
+      metadata:
+        annotations: {}
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations: {}
+          spec:
+            containers:
+            - command:
+              - bash
+              - -c
+              - "# PID 1 wrapper: forwards SIGTERM to background child process so\
+                \ K8s\n# termination grace period shuts down workload cleanly without\
+                \ SIGKILL.\n# Polling sleep loop ensures bash wakes up promptly to\
+                \ run trap handler.\n\necho \"Program Start: $(date)\"\n_sigterm()\
+                \ (kill -SIGTERM $! 2>/dev/null)\ntrap _sigterm SIGTERM\n\n(\n  python\
+                \ -m tunix.experimental.distributed.runtime.main --discovery_id=orch\
+                \ --discovery_port=20000 --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main\
+                \ --model_id=Qwen/Qwen3-1.7B --tokenizer_path=Qwen/Qwen3-1.7B --batch_size=4\
+                \ --num_generations=4 --max_steps=3 --max_prompt_length=512 --max_response_length=128\
+                \ --train_micro_batch_size=1 --beta=0 --weight_sync_mode=none --reward_mode=env\
+                \ --scheduler_url=http://pyis-scheduler:8100 --wandb_project=trellis-gsm8k\
+                \ --flush_metrics_every_n_steps=1 --stop_workers_on_exit\n) & PID=$!\n\
+                \nwhile kill -0 $PID 2>/dev/null; do\n  sleep 5\ndone\nwait $PID\n\
+                EXIT_CODE=$?\n\necho \"Program End: $(date)\"\necho \"EXIT_CODE=$EXIT_CODE\"\
+                \nexit $EXIT_CODE\n"
+              env:
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOB_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: POD_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+              - name: WANDB_PROJECT
+                value: trellis-gsm8k
+              - name: WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    key: api-key
+                    name: wandb-credentials
+                    optional: true
+              image: us-central1-docker.pkg.dev/kfswain-gke-dev/tunix-rl/tunix-tpu:latest
+              imagePullPolicy: Always
+              name: worker
+              ports:
+              - containerPort: 20000
+                name: grpc
+              securityContext:
+                privileged: true
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            nodeSelector:
+              node.kubernetes.io/instance-type: n2-standard-8
+            restartPolicy: Never
+            terminationGracePeriodSeconds: 10

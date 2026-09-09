@@ -1,0 +1,23 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: pyis-scheduler}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: pyis-scheduler}}
+  template:
+    metadata: {labels: {app: pyis-scheduler}}
+    spec:
+      containers:
+        - name: scheduler
+          image: us-central1-docker.pkg.dev/kfswain-gke-dev/tunix-rl/py-rl-scheduler:latest
+          args: ["--host=0.0.0.0", "--port=8100", "--config=integration/tunix/examples/scheduler.yaml"]
+          ports: [{containerPort: 8100}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8100}, periodSeconds: 3}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: pyis-scheduler}
+spec:
+  selector: {app: pyis-scheduler}
+  ports: [{port: 8100, targetPort: 8100}]
