@@ -736,7 +736,9 @@ if CANON_P32_WORKLOAD:
     expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
   if frozenlake_onehost_proxy:
     expected_mini_batch_size = P32_WORKLOAD.global_prompts
-    expected_sampler_is = "none"
+    # The one-host proxies pin sampler IS off; the stock-engine ``is`` arm
+    # (tasks/zero_tim_perf phase3) is the one diagnostic that carries it.
+    expected_sampler_is = "token" if CANON_P57_TIM_ARM == "is" else "none"
   else:
     expected_mini_batch_size, expected_sampler_is = (
         _canonical_frozenlake_admission_geometry(

@@ -282,8 +282,17 @@ if [ "$stock_engine" = 0 ]; then
     -e CANON_SHIM_ROOT="$canon_out"
   )
 else
-  echo "[V2.FL.ONEHOST] DIAG stock-engine arm=$arm: no overlay install, no overlay mounts (not certification)" >>"$driver"
-  overlay_args=(-e PYTHONPATH="$repo")
+  # Stock engine plus the P57 stock observer (prompt-logprob path only, the
+  # same two files the 64-chip stock arms install), so S_prefill and the
+  # sampled-token logprobs are read the way the Standard arm reads them.
+  bash "$script_dir/stage_p57_stock_observer.sh" "$root/stock_observer" --from-image "$image" \
+    >>"$driver" 2>&1
+  echo "[V2.FL.ONEHOST] DIAG stock-engine arm=$arm: no canonical overlay; P57 stock observer staged at $root/stock_observer (not certification)" >>"$driver"
+  overlay_args=(
+    -v "$root/stock_observer/tpu_runner.py":"$sp/runner/tpu_runner.py":ro
+    -v "$root/stock_observer/p57_stock_prompt_observer.py":"$sp/runner/p57_stock_prompt_observer.py":ro
+    -e PYTHONPATH="$repo"
+  )
 fi
 
 {
