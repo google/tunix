@@ -2880,10 +2880,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         json.dump(update_record, update_file, indent=2, sort_keys=True)
         update_file.write("\n")
     if full_train:
+      # Non-audit rows (CANON_ALIGNMENT_AUDIT_EVERY>1) carry no boundaries.
       max_differing_bytes = max(
-          boundary["differing_bytes"]
-          for record in records
-          for boundary in record["boundaries"].values()
+          (
+              boundary["differing_bytes"]
+              for record in records
+              for boundary in record["boundaries"].values()
+          ),
+          default=0,
       )
       canonical_update_metrics = {
           "canonical/segmented_loss": (

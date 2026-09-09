@@ -1031,6 +1031,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
     rollout_per_token_logps = None
     trainer_per_token_logps = None
+    # tasks/zero_tim_perf P1.2: one audit decision per batch, on the batch's
+    # own step (the trainer's train_steps that the alignment records carry);
+    # rl_cluster.global_steps can already have advanced while this batch is
+    # being processed.
+    audit_step = alignment.is_audit_step(
+        int(expected_step)
+        if expected_step is not None
+        else int(self.rl_cluster.global_steps)
+    )
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
       old_per_token_logps = rollout_per_token_logps
@@ -1041,7 +1050,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # only the alignment boundaries when rollout logprobs are the PPO old
       # values, so a non-audit step (CANON_ALIGNMENT_AUDIT_EVERY>1) skips it;
       # the sampler-IS token path and P57 Standard still need it as old logps.
-      audit_step = alignment.is_audit_step(int(self.rl_cluster.global_steps))
       need_trainer_logps = (
           (have_actor_mesh and not deepswe_debug.rollout_only() and audit_step)
           or self.algo_config.sampler_is == "token"
@@ -1894,12 +1902,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # tasks/zero_tim_perf P1.2: the engine prefill rescore (S_prefill) is
       # audit evidence only; a non-audit step skips it and the sidecar row
       # carries NaN placeholders with audited=False.
-      audit_step = alignment.is_audit_step(int(self.rl_cluster.global_steps))
       if not audit_step:
         s_prefill = None
         print(
             "[CANON_ALIGN] audit=skip "
-            f"step={int(self.rl_cluster.global_steps)} "
+            f"step={int(expected_step) if expected_step is not None else int(self.rl_cluster.global_steps)} "
             f"every={alignment.audit_every()} rescore_b=0 trainer_old=0",
             flush=True,
         )
