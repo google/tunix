@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import unittest
 from unittest import mock
 
 from absl.testing import absltest
@@ -30,12 +31,21 @@ from tunix.models.qwen3 import params as qwen3_params
 from tunix.tests import test_common as tc
 
 
+@unittest.skipIf(
+    jax_inference_sampler.JaxInferenceEngine is None,
+    "jax-inference is required for JaxInferenceSampler tests.",
+)
 class JaxInferenceSamplerTest(absltest.TestCase):
+  model_path: str | None = None
+  repo_id: str = "Qwen/Qwen3-1.7B-base"
 
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()
-    cls.repo_id = "Qwen/Qwen3-1.7B-base"
+    if jax_inference_sampler.JaxInferenceEngine is None:
+      raise unittest.SkipTest(
+          "jax-inference is required for JaxInferenceSampler tests."
+      )
 
     # Resolve model path from HuggingFace cache if available
     repo_cache = os.path.expanduser(
@@ -43,8 +53,15 @@ class JaxInferenceSamplerTest(absltest.TestCase):
     )
     if os.path.exists(repo_cache) and os.listdir(repo_cache):
       cls.model_path = os.path.join(repo_cache, os.listdir(repo_cache)[0])
-    else:
+    elif os.path.isdir(cls.repo_id):
       cls.model_path = cls.repo_id
+    else:
+      cls.model_path = None
+
+    if not cls.model_path or not os.path.isdir(cls.model_path):
+      raise unittest.SkipTest(
+          f"Model checkpoint for {cls.repo_id} not found locally."
+      )
 
     mesh_shape = (1, len(jax.devices()))
     axis_names = ("fsdp", "tp")
