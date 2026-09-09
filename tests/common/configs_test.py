@@ -132,6 +132,33 @@ class ConfigsTest(absltest.TestCase):
     self.assertFalse(configs.is_sequence_packing_enabled(cfg_disabled))
     self.assertFalse(configs.is_sequence_packing_enabled(object()))
 
+  def test_rl_profile_config_defaults_and_validation(self):
+    cfg = configs.RLProfileConfig()
+    self.assertEqual(cfg.start_step, 2)
+    self.assertEqual(cfg.num_steps, 1)
+    self.assertEqual(cfg.timeout_secs, 60.0)
+
+    cfg_custom = configs.RLProfileConfig(timeout_secs=45.0)
+    self.assertEqual(cfg_custom.timeout_secs, 45.0)
+
+    with self.assertRaisesRegex(ValueError, "start_step must be >= 0"):
+      configs.RLProfileConfig(start_step=-1)
+
+    with self.assertRaisesRegex(ValueError, "num_steps must be > 0"):
+      configs.RLProfileConfig(num_steps=0)
+
+    with self.assertRaisesRegex(ValueError, "num_steps must be > 0"):
+      configs.RLProfileConfig(num_steps=-2)
+
+    with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
+      configs.RLProfileConfig(timeout_secs=0)
+
+    with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
+      configs.RLProfileConfig(timeout_secs=-5.0)
+
+    with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
+      configs.RLProfileConfig(timeout_secs=float("nan"))
+
 
 if __name__ == "__main__":
   absltest.main()
