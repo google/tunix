@@ -109,7 +109,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     # independent rollout replicas each need their own job_name to be sent a
     # full copy. server_id already has that granularity; worker_index stays the
     # host index *within* one replica.
-    self.raiden_job_name = raiden_job_name or self.server_id
+    self.raiden_job_name = raiden_job_name or f"replica_{self.server_id}"
     self._parallelism = parallelism
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync

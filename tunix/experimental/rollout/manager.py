@@ -352,8 +352,11 @@ class RolloutManager:
   ) -> Any:
     """Discards the round, delegates to sampler if available, and resumes serving."""
     res = None
-    if self.sampler and hasattr(self.sampler, "abort_weight_sync"):
+    if self.sampler:
       res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    # TODO(tunix-dev): It might be better to fail hard if weight sync failed
+    # right now instead of letting it proceed silently, otherwise it may mess
+    # up with the policy version.
     self.resume_all()
     self.reopen_admission()
     return res

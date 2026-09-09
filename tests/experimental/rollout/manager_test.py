@@ -196,6 +196,18 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler, tokenizer="mock", chat_parser="mock")
     await manager.bind_weight_sync()
 
+  async def test_abort_weight_sync_delegates_and_reopens_admission(self):
+    sampler = mock.AsyncMock()
+    sampler.abort_weight_sync.return_value = "aborted"
+    manager = manager_lib.RolloutManager(
+        sampler=sampler, tokenizer="mock", chat_parser="mock"
+    )
+    manager._traffic.close()
+    res = await manager.abort_weight_sync()
+    self.assertEqual(res, "aborted")
+    sampler.abort_weight_sync.assert_awaited_once()
+    self.assertTrue(manager._traffic.is_admission_open())
+
   async def test_repeated_pre_is_allowed(self):
     manager = self._manager()
     await manager.pre_weight_sync()
