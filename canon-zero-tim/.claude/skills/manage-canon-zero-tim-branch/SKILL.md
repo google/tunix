@@ -132,6 +132,17 @@ See `tasks/v2-frozenlake-onehost/RECOVERY_CONTROL.md` and
 
 ## 7. Flag lifecycle
 
+Singleton-axis metadata regression: test the actual producer -> runtime-zero
+tree start (both ownership modes) -> checked report VJP, not only an explicit
+device_put fixture. A singleton TP axis can be physically redundant yet
+load-bearing in the VJP manual-axis type. Pin the responsible producer's
+output; never disable VMA or normalize arbitrary cotangents to silence it.
+Keep signed-zero/parity, wrong physical-layout, and warm H2D/D2H negatives.
+If the host JAX lacks the MAT API, run those same checked-producer cells in
+the pinned image before admission; host skips do not certify them. Regression:
+`tests/rl/test_p70_tree_start_sharding.py` (outer repository). A TP>1 hardware
+gate still follows; CPU metadata equality is not hardware gradient evidence.
+
 For changes that span renderers, profiles, process delivery, or paired treatment
 arms, also read `../manage-canon-flags/SKILL.md` and use its end-to-end flag audit.
 

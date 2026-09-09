@@ -1013,6 +1013,26 @@ CPU delivery is not TPU admission. Final-source hardware is pending;
 unregistered GSM8K DP1xTP4 and DP4 chunk-anchor coverage are NOT certified
 by another mode's or geometry's anchors. No target/full-training claim.
 
+## Flagless tree-start sharding preservation (v2_integrate F.1e, hardware pending)
+
+The existing runtime-zero `0 + x` gradient-pack starter now pins its output
+to the first input layout and rejects later physically different inputs.
+This preserves a singleton TP label required by the checked report VJP;
+dropping that label had produced `V:dp` instead of `V:(dp,tp)` on DP4xTP1.
+The addition, signed-zero behavior, donation, accumulation order and all
+checked-VMA settings are unchanged. No flag/default/lifecycle is retired.
+
+Knife class: sharding/metadata, not dispatch-exempt. Three-lane ledger:
+zero-TIM = hardware pending; correctness = real-mapping CPU/pinned-image
+bitwise checks, G4/D4/G5/G6 hardware scope still pending; performance =
+not certified, no speedup claim. The old DP4 chunk-mode anchor gap remains;
+neither another geometry's norm nor a one-run measurement is an anchor.
+Tests: `tests/rl/test_p70_tree_start_sharding.py`, plus the existing
+`test_p70_grad_programs.py` and checked-report all-transfer guard. The new
+producer integration forbids H2D/D2H, not the inherited scalar-zero D2D
+replication. Host JAX0.9.2 cannot run the checked producer's MAT API cells;
+those exact cells must pass in the pinned image, not be silently omitted.
+
 ## UI-trace census mode delivery (v2_integrate F.1d)
 
 The post-run Zero-HP trace-JSON census consumes the same resolved

@@ -10704,6 +10704,10 @@ class Qwen3EngineForwardAdapter:
     donates the first chunk pack because this dispatch is its last consumer;
     the serial/default helper remains non-donating for callers that retain
     their input handles.
+
+    Retain each input's output sharding spelling: dropping a singleton TP
+    axis is physically neutral but changes the checked report VJP's manual
+    axis type. Reject a later non-equivalent input layout before dispatch.
     """
     signature = self._p70_grad_tree_signature(pack)
     if getattr(self, "_p70_tree_start_signature", None) is None:
@@ -10717,6 +10721,9 @@ class Qwen3EngineForwardAdapter:
       )
 
       self._p70_tree_start_signature = signature
+      self._p70_tree_start_shardings = jax.tree.map(
+          lambda leaf: leaf.sharding, pack
+      )
       self._p70_tree_start_leaf_zero_index = leaf_zero_index
       self._p70_tree_start_zeros = tuple(
           jnp.asarray(0, dtype) for dtype in zero_dtypes
@@ -10726,6 +10733,19 @@ class Qwen3EngineForwardAdapter:
           "P70 tree-start gradient pack signature changed after the "
           "jitted program was built"
       )
+
+    for index, (leaf, pinned) in enumerate(zip(
+        jax.tree.leaves(pack),
+        jax.tree.leaves(self._p70_tree_start_shardings),
+        strict=True,
+    )):
+      if leaf.sharding != pinned and not leaf.sharding.is_equivalent_to(
+          pinned, leaf.ndim
+      ):
+        raise FunctionalMappingError(
+            "P70 tree-start gradient pack layout changed at leaf "
+            f"{index}: {leaf.sharding} != {pinned}"
+        )
 
     program_attribute = (
         "_p70_tree_start_donated_fn"
@@ -10751,6 +10771,7 @@ class Qwen3EngineForwardAdapter:
           start,
           module_name="zt_tr_grad_tree_start",
           scope_name="zt/tr/grad/tree_start",
+          out_shardings=self._p70_tree_start_shardings,
           **jit_kwargs,
       )
       setattr(self, program_attribute, program)
