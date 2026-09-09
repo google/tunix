@@ -285,14 +285,8 @@ class Qwen25MathEvaluator:
 
     print("Setting up model config...")
 
-    is_moe = bool(getattr(self.model_config, "num_experts", None))
     if has_safetensors(self.model_path):
-      if is_moe and self.sampler_type in ("jax_inference", "jax-inference"):
-        # For large MoE FP8 models in jax_inference, skip redundant Tunix model loading
-        # to conserve memory; jax_inference loads and shards the checkpoint directly.
-        pass
-      else:
-        self.model_from_safe_tensors()
+      self.model_from_safe_tensors()
     else:
       self.model_from_orbax_ckpt()
     print("Model loaded successfully!")
@@ -367,13 +361,11 @@ class Qwen25MathEvaluator:
     elif self.sampler_type in ("jax_inference", "jax-inference"):
       from tunix.generate import jax_inference_sampler  # pylint: disable=g-import-not-at-top
 
-      mapping_config = None
-      if self.model is not None:
-        mapping_config = mappings.MappingConfig.build(
-            mapping_obj=None,
-            model=self.model,
-            backend="jax_inference",
-        )
+      mapping_config = mappings.MappingConfig.build(
+          mapping_obj=None,
+          model=self.model,
+          backend="jax_inference",
+      )
       model_target = (
           self.model_path if os.path.exists(self.model_path) else self.model_version
       )
@@ -383,14 +375,12 @@ class Qwen25MathEvaluator:
               mesh=self.mesh,
               model_name=model_target,
               quantization=None,
-              enable_expert_parallel=is_moe,
               init_with_random_weights=False,
               mapping_config=mapping_config,
           ),
       )
-      if self.model is not None:
-        print("Syncing model weights to JAX-Inference sampler...")
-        self.sampler_jax_inference.update_params(nnx.state(self.model))
+      print("Syncing model weights to JAX-Inference sampler...")
+      self.sampler_jax_inference.update_params(nnx.state(self.model))
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -758,20 +748,6 @@ MODEL_MAPPING = {
         _resolve_model_path(
             "Qwen/Qwen3-8B",
             os.path.join(MODEL_PATH_PREFIX, "Qwen3-8B"),
-        ),
-    ),
-    "Qwen/Qwen3.5-35B-A3B-FP8": (
-        qwen3_lib.ModelConfig.qwen3p5_35b_a3b(),
-        _resolve_model_path(
-            "Qwen/Qwen3.5-35B-A3B-FP8",
-            os.path.join(MODEL_PATH_PREFIX, "Qwen3.5-35B-A3B-FP8"),
-        ),
-    ),
-    "Qwen/Qwen3.5-35B": (
-        qwen3_lib.ModelConfig.qwen3p5_35b_a3b(),
-        _resolve_model_path(
-            "Qwen/Qwen3.5-35B-A3B-FP8",
-            os.path.join(MODEL_PATH_PREFIX, "Qwen3.5-35B-A3B-FP8"),
         ),
     ),
 }
