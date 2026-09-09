@@ -37,6 +37,8 @@ case "$arm" in
   r0c) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=1; chunk_backpressure=0 ;;
   r0d) keep_tape=0; reduce_once=0; length_sort=0; report_buckets=1; chunk_ticket=0; chunk_backpressure=1 ;;
   r1) keep_tape=stream; reduce_once=0; length_sort=0; report_buckets=0 ;;
+  # stock-engine diagnostic arms: r1's trainer knobs, stock vLLM engine.
+  is|mismatch) keep_tape=stream; reduce_once=0; length_sort=0; report_buckets=0 ;;
   r2)
     if [ "$dp_size" = 1 ]; then echo "[V2.FL.ONEHOST] DP1 has no reduce-once arm" >&2; exit 2; fi
     keep_tape=stream; reduce_once=1; length_sort=0; report_buckets=0
@@ -86,6 +88,13 @@ export CANON_P57_RUN_KIND=
 export CANON_P57_TIM_ARM=
 # shellcheck disable=SC1090
 source "$pkg/$profile_rel"
+if [ "${V2_FL_STOCK_ENGINE:-0}" = 1 ]; then
+  # Diagnostic stock-engine arm (tasks/zero_tim_perf phase3): the train script
+  # selects the stock-fast inference regime from these two values; the engine
+  # overlay is not mounted by the launcher.  Never certification evidence.
+  export CANON_P57_TIM_ARM="$arm" CANON_P57_INFERENCE_REGIME=stock-fast
+  echo "[V2.FL.ONEHOST] DIAG stock-engine arm=$arm regime=stock-fast overlay=none (not certification)"
+fi
 if [ "${CANON_P75_REPORT_ADJOINT_BUCKETS:-}" != "$report_buckets" ]; then
   echo "[V2.FL.ONEHOST] profile changed report-bucket selector" >&2
   exit 2
@@ -248,7 +257,12 @@ workload = dp_workloads.get_workload(name)
 dp_workloads.validate_environment(
     workload, os.environ, require_reduction_admission=True
 )
-command = workload.command(run_stage="backward-no-commit")
+# The is arm trains with token-level sampler IS (its admission expects it);
+# every other arm keeps the proxy's --sampler_is=none.
+command = workload.command(
+    run_stage="backward-no-commit",
+    sampler_is="token" if os.environ.get("CANON_P57_TIM_ARM") == "is" else None,
+)
 print("[V2.FL.ONEHOST] exec=" + shlex.join(command), flush=True)
 os.execvp(command[0], command)
 PY

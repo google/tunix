@@ -4,10 +4,10 @@
 # only through run_frozenlake_matrix_onehost.sh, which sets V2_FL_GEOMETRY.
 set -euo pipefail
 
-workload="${1:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile>}"
-arm="${2:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile>}"
-label="${3:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile>}"
-mode="${4:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3> <fresh-label> <measure|certify|profile> [none|capture|replay] [capsule.npz]}"
+workload="${1:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3|is|mismatch> <fresh-label> <measure|certify|profile>}"
+arm="${2:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3|is|mismatch> <fresh-label> <measure|certify|profile>}"
+label="${3:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3|is|mismatch> <fresh-label> <measure|certify|profile>}"
+mode="${4:?usage: run_frozenlake_dp2tp2_onehost.sh <p45|m15> <r0|r0b|r0c|r0d|r1|r2|r3|is|mismatch> <fresh-label> <measure|certify|profile> [none|capture|replay] [capsule.npz]}"
 capsule_mode="${5:-none}"
 capsule_source="${6:-}"
 geometry="${V2_FL_GEOMETRY:-dp2-tp2}"
@@ -37,7 +37,16 @@ if [ "$segmented_actor_logps" = 1 ] && { [ "$workload" != p45 ] || [ "$geometry"
   echo "P78 segmented actor logps admit only P45 DP4xTP1" >&2
   exit 2
 fi
-case "$arm" in r0|r0b|r0c|r0d|r1|r2|r3) ;; *) echo "invalid arm: $arm" >&2; exit 2;; esac
+# is|mismatch are stock-engine diagnostic arms (tasks/zero_tim_perf phase3):
+# no overlay install or mounts, CANON_P57_TIM_ARM=<arm> with the stock-fast
+# regime inside the container.  They measure the stock engine under the
+# same workload and concurrency; they are never certification evidence.
+stock_engine=0
+case "$arm" in
+  r0|r0b|r0c|r0d|r1|r2|r3) ;;
+  is|mismatch) stock_engine=1 ;;
+  *) echo "invalid arm: $arm" >&2; exit 2;;
+esac
 capture_full_tree="${V2_FL_CAPTURE_FULL_TREE:-0}"
 case "$capture_full_tree" in 0|1) ;; *) echo "invalid V2_FL_CAPTURE_FULL_TREE selector (0|1)" >&2; exit 2;; esac
 if { [ "$arm" = r0b ] || [ "$arm" = r0c ] || [ "$arm" = r0d ]; } && \
@@ -256,8 +265,26 @@ fi
   echo "[V2.FL.ONEHOST] workload=$workload arm=$arm mode=$mode capsule_mode=$capsule_mode topology=DP${dp_size}xTP${tp_size} stage=backward-no-commit"
   echo "[V2.FL.ONEHOST] timeout_seconds=$timeout_seconds idle_120s=PASS root=$root capture_full_tree=$capture_full_tree"
 } >"$driver"
-bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model "$model_dir" \
-  >>"$driver" 2>&1
+overlay_args=()
+if [ "$stock_engine" = 0 ]; then
+  bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model "$model_dir" \
+    >>"$driver" 2>&1
+  overlay_args=(
+    -v "$canon_out":"$canon_out":ro
+    -v "$canon_out/attn_iface_patched.py":"$sp/layers/common/attention_interface.py":ro
+    -v "$canon_out/linear_p22xk.py":"$sp/layers/jax/linear.py":ro
+    -v "$canon_out/embed_patched.py":"$sp/layers/jax/embed.py":ro
+    -v "$canon_out/tpu_runner_p21_l30.py":"$sp/runner/tpu_runner.py":ro
+    -v "$canon_out/qwen3_p22xk.py":"$sp/models/jax/qwen3.py":ro
+    -v "$canon_out/qwen2_p22xk.py":"$sp/models/jax/qwen2.py":ro
+    -v "$canon_out/rpa_kernel_p66.py":"$sp/kernels/ragged_paged_attention/v3/kernel.py":ro
+    -e PYTHONPATH="$canon_out:$repo"
+    -e CANON_SHIM_ROOT="$canon_out"
+  )
+else
+  echo "[V2.FL.ONEHOST] DIAG stock-engine arm=$arm: no overlay install, no overlay mounts (not certification)" >>"$driver"
+  overlay_args=(-e PYTHONPATH="$repo")
+fi
 
 {
   echo "[V2.FL.ONEHOST] RUN_BEGIN"
@@ -277,17 +304,9 @@ set +e
 sudo docker run --rm --privileged --net=host --name "$container" \
   -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
   -v "$repo":"$repo":ro \
-  -v "$canon_out":"$canon_out":ro \
-  -v "$canon_out/attn_iface_patched.py":"$sp/layers/common/attention_interface.py":ro \
-  -v "$canon_out/linear_p22xk.py":"$sp/layers/jax/linear.py":ro \
-  -v "$canon_out/embed_patched.py":"$sp/layers/jax/embed.py":ro \
-  -v "$canon_out/tpu_runner_p21_l30.py":"$sp/runner/tpu_runner.py":ro \
-  -v "$canon_out/qwen3_p22xk.py":"$sp/models/jax/qwen3.py":ro \
-  -v "$canon_out/qwen2_p22xk.py":"$sp/models/jax/qwen2.py":ro \
-  -v "$canon_out/rpa_kernel_p66.py":"$sp/kernels/ragged_paged_attention/v3/kernel.py":ro \
-  -e PYTHONPATH="$canon_out:$repo" \
+  "${overlay_args[@]}" \
   -e PYTHONDONTWRITEBYTECODE=1 \
-  -e CANON_SHIM_ROOT="$canon_out" \
+  -e V2_FL_STOCK_ENGINE="$stock_engine" \
   -e HF_HOME=/mnt/disks/tunix-data/hf \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
   -e MODEL_DOWNLOAD_DIR="$model" \

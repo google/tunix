@@ -523,8 +523,15 @@ class DPWorkloadSpec:
           "canonical workload rank-major gradient group count changed"
       )
 
-  def command(self, *, run_stage: str = "full") -> tuple[str, ...]:
-    """Returns the frozen recipe command for review and launch wrappers."""
+  def command(
+      self, *, run_stage: str = "full", sampler_is: str | None = None
+  ) -> tuple[str, ...]:
+    """Returns the frozen recipe command for review and launch wrappers.
+
+    ``sampler_is`` replaces the one-host proxy's ``--sampler_is=none`` for the
+    stock-engine ``is`` arm (tasks/zero_tim_perf phase3); it is ignored for
+    workloads that do not pass a sampler argument.
+    """
     self.validate()
     if self.frozenlake_four_chip_proxy and run_stage != "backward-no-commit":
       raise ValueError(
@@ -588,7 +595,7 @@ class DPWorkloadSpec:
           else ()
       )
       sampler_args = (
-          ("--sampler_is=none",)
+          (f"--sampler_is={sampler_is or 'none'}",)
           if self.frozenlake_four_chip_proxy
           else ()
       )
