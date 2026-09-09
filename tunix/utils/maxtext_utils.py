@@ -95,17 +95,6 @@ def build_maxtext_config(
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
 
-  if not padded_moe_mlp_dim and rollout_mesh_tp > 0:
-    try:
-      from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim
-      tmp_cfg = pyconfig.initialize(argv)
-      base_dim = getattr(tmp_cfg, "base_moe_mlp_dim", None) or getattr(tmp_cfg, "moe_intermediate_size", None)
-      if base_dim:
-        padded_moe_mlp_dim = compute_padded_moe_mlp_dim(base_dim, rollout_mesh_tp)
-        logging.info("Auto-computed padded_base_moe_mlp_dim=%d for rollout_mesh_tp=%d", padded_moe_mlp_dim, rollout_mesh_tp)
-    except Exception as e:
-      logging.warning("Could not auto-compute padded_base_moe_mlp_dim: %s", e)
-
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -146,7 +135,26 @@ def build_maxtext_config(
       ),
   ])
   logging.info("MaxText config argv: %s", argv)
-  return pyconfig.initialize(argv)
+  cfg = pyconfig.initialize(argv)
+
+  if not padded_moe_mlp_dim and rollout_mesh_tp > 0:
+    try:
+      from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim
+      base_dim = getattr(cfg, "base_moe_mlp_dim", None) or getattr(cfg, "moe_intermediate_size", None)
+      if base_dim:
+        auto_padded_dim = compute_padded_moe_mlp_dim(base_dim, rollout_mesh_tp)
+        logging.info(
+            "Auto-computed padded_base_moe_mlp_dim=%d for rollout_mesh_tp=%d",
+            auto_padded_dim,
+            rollout_mesh_tp,
+        )
+        setattr(cfg, "padded_base_moe_mlp_dim", auto_padded_dim)
+        if hasattr(cfg, "raw_data_dict") and isinstance(cfg.raw_data_dict, dict):
+          cfg.raw_data_dict["padded_base_moe_mlp_dim"] = auto_padded_dim
+    except Exception as e:
+      logging.warning("Could not auto-compute padded_base_moe_mlp_dim: %s", e)
+
+  return cfg
 
 
 def create_maxtext_mesh(maxtext_config: Any) -> Any:
