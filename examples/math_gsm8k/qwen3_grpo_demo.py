@@ -1038,6 +1038,10 @@ def main() -> None:
         "MIN_TOKEN_BUCKET": expected_min_token_bucket,
         "CANON_GSM8K_GRAD_PROBE": expected_grad_probe,
     }
+    # Diagnostic knob ablation (tasks/zero_tim_perf phase0 P0.2): the same
+    # CANON_DP_WORKLOAD_DIAG_UNPIN list that relaxes the DP workload pins
+    # relaxes these; empty (the default) changes nothing.
+    dp_workloads.apply_diag_unpin(required, os.environ)
     wrong = {
         key: os.getenv(key)
         for key, expected in required.items()

@@ -1421,7 +1421,7 @@ def frozenlake_evaluation_enabled(
 DIAG_UNPIN_ENV = "CANON_DP_WORKLOAD_DIAG_UNPIN"
 
 
-def _apply_diag_unpin(
+def apply_diag_unpin(
     expected: dict[str, Any], values: Mapping[str, str]
 ) -> None:
   """Drops the ":"-separated names in CANON_DP_WORKLOAD_DIAG_UNPIN from the pins.
@@ -1576,7 +1576,7 @@ def validate_environment(
     })
   if workload.name.startswith("gsm8k"):
     expected["CANON_GSM8K_GRAD_PROBE"] = "0"
-  _apply_diag_unpin(expected, values)
+  apply_diag_unpin(expected, values)
   wrong = {
       key: values.get(key)
       for key, expected_value in expected.items()
