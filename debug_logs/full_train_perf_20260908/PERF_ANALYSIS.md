@@ -7,7 +7,7 @@ This benchmark documents the live training progress, performance breakdowns, sol
 3. **FrozenLake M15 Zero-TIM Full (`r10` / WandB `3osny0pb`)**: 15-Turn Long-Horizon Multi-Turn Agent with Zero-TIM v2 tape streaming + 100% exact TiTO record-full transport.
 4. **FrozenLake M15 Standard Full (`r01`)**: 15-Turn Long-Horizon Multi-Turn Agent with Standard Native64 baseline (`--old_logps_source=trainer --sampler_is=none`, no TIS tensor).
 
-Total active hardware scale under management: **256 TPU v5p chips** (64 hosts across dynamic GKE NAP pools, 68 pods, 0 restarts).
+Total active hardware scale under management: **128 TPU v5p chips** (32 hosts across dynamic GKE NAP pools, 34 pods, 0 restarts; 128 TPU v5p released).
 
 ---
 
@@ -17,43 +17,43 @@ Total active hardware scale under management: **256 TPU v5p chips** (64 hosts ac
 |---|:---:|:---:|:---:|:---:|
 | **Model** | Qwen3-8B (`flax_nnx`) | Qwen3-8B (`flax_nnx`) | Qwen3-8B (`flax_nnx`) | Qwen3-8B (`flax_nnx`) |
 | **Interaction Horizon** | 5 Turns (Short) | 5 Turns (Short) | 15 Turns (Long) | 15 Turns (Long) |
-| **Hardware Scale** | 64 TPU v5p (DP8xTP8) | **0 TPU** <sub>(64 Released)</sub> | 64 TPU v5p (DP8xTP8) | 64 TPU v5p (DP8xTP8) |
+| **Hardware Scale** | 64 TPU v5p (DP8xTP8) | **0 TPU** <sub>(64 Released)</sub> | 64 TPU v5p (DP8xTP8) | **0 TPU** <sub>(64 Released)</sub> |
 | **Max Sequence Length** | 2,048 tokens | 2,048 tokens | 8,192 tokens | 8,192 tokens |
 | **Algorithm Family** | Zero-TIM v2 (Exact Tape) | Standard Native PPO/GRPO | Zero-TIM v2 (Exact Tape) | Standard Native PPO/GRPO |
 | **Old LogPs Source** | Sampler / Stream Pullback | Trainer Frozen Rescore | Sampler / Stream Pullback | Trainer Frozen Rescore |
 | **Sampler IS (`sampler_is`)** | Active | `none` (`tis=0`) | Active | `none` (`tis=0`) |
-| **Global Steps Completed** | **154 / 300** (51.3%) | **300 / 300** (100.0% 🏁) | **37 / 300** (12.3%) | **113 / 300** (37.7%) |
+| **Global Steps Completed** | **216 / 300** (72.0%) | **300 / 300** (100.0% 🏁) | **54 / 300** (18.0%) | **182 / 300** (60.7% 🛑 Collapsed) |
 | **Initial Solve Rate** | 62.1% (38.3% raw) | 35.2% | 16.4% ~ 19.5% | 16.4% |
-| **Peak Solve Rate** | **91.8%** (Rollout 148, 154) | **71.5%** (Step 182) | **55.5%** (Step 25) | **40.5%** (Eval 50) |
-| **Latest Solve Rate** | **91.8%** (Step 154) | **50.5%** (Final Step 300 Eval) | **27.0% ~ 51.2%** (Step 37) | **9.8%** (Step 113) |
+| **Peak Solve Rate** | **92.6%** (Rollout 214) 🏆 | **71.5%** (Step 182) | **55.5%** (Step 25) / **52.0%** (Step 53) | **40.5%** (Eval 50) |
+| **Latest Solve Rate** | **86.3%** (Step 215) | **50.5%** (Final Step 300 Eval) | **52.0%** (Step 53) 🏆 | **0.0%** (Step 180-182 Total Collapse) |
 | **Held-Out Eval (800 prompts)**| *Disabled by contract* | **50.5%** (Step 300 Final; Peak 66.9% @ 250) | *Disabled by contract* | **21.6%** (Step 100 Collapse) |
-| **Truncation Ratio (`trunc_ratio`)** | **0.0% ~ 1.2%** | **33.6% ~ 52.3%** | **2.3% ~ 3.9%** | **34.8% ~ 43.4%** ⚠️ |
-| **Training Loss** | - | **0.000229** (Final Step 300) | - | **0.0004 ~ 0.0005** |
-| **Gradient Norm** | 0.5 ~ 6.7 | **0.0010 ~ 0.0019** | 1.1 ~ 7.5 | **0.0013 ~ 0.0017** |
-| **End-to-End Step Time** | **~2.0m - 3.0m** | **127.9s** (~2.1m) | **~4.9m - 8.0m** | **~447s - 457s** (~7.5m) |
+| **Truncation Ratio (`trunc_ratio`)** | **0.0% ~ 1.6%** | **33.6% ~ 52.3%** | **2.3% ~ 3.5%** | **91.0% ~ 96.1%** ⚠️💥 |
+| **Training Loss** | - | **0.000229** (Final Step 300) | - | **0.0000** (Step 182 Collapse) |
+| **Gradient Norm** | 0.5 ~ 6.7 | **0.0010 ~ 0.0019** | 1.1 ~ 7.5 | **0.0000 ~ 0.0007** |
+| **End-to-End Step Time** | **~1.5m - 2.9m** | **127.9s** (~2.1m) | **~6.4m - 8.0m** | **~447s - 540s** (~7.5m - 9.0m) |
 | **`rescore_b` Overhead** | ~58.0 s (Rows=256) | **10.9s ~ 11.6s** | ~188.5 s (Rows=256) | **17.1s ~ 21.7s** |
-| **`weight_sync` Overhead** | 12.6s - 19.9s | **8.1s - 8.5s** | 11.9s - 15.5s | **7.3s - 7.8s** |
+| **`weight_sync` Overhead** | 12.6s - 19.9s | **8.1s - 8.5s** | 11.9s - 15.5s | **7.3s - 10.6s** |
 | **Weight Sync GC Time** | ~4.4s - 4.5s | **~0.50s** | ~4.1s - 4.5s | **~0.48s** |
 | **Backward Pass Mechanism** | P59 VAG Pullback | 32 Microbatch Accumulation | P59 VAG Pullback | 32 Microbatch Accumulation |
-| **VAG Pullback Kernel** | **~512 ms - 544 ms** | N/A | **~512 ms** | N/A |
+| **VAG Pullback Kernel** | **~512 ms - 544 ms** | N/A | **~512 ms - 544 ms** | N/A |
 | **Tensor Serialization** | Full TiTO Host/Device Tape | Zero (Token IDs only) | Full 15-Turn TiTO Tape | Zero (Token IDs only) |
-| **TPU HBM Usage** | 34.3 GB / 95 GB (36%) | 0 GB (Released) | 38.1 GB / 95 GB (40%) | 38.1 GB / 95 GB (40%) |
-| **Host Memory Usage** | ~9.2 GB / 350 GB | 0 GB (Released) | ~9.8 GB / 350 GB | ~7.2 GB / 350 GB |
-| **Uptime / Restarts** | >24h / 0 restarts | **Completed (exit=0)** | >24h / 0 restarts | >14h / 0 restarts |
+| **TPU HBM Usage** | 34.3 GB / 95 GB (36%) | 0 GB (Released) | 38.1 GB / 95 GB (40%) | 0 GB (Released) |
+| **Host Memory Usage** | ~9.2 GB / 350 GB | 0 GB (Released) | ~9.8 GB / 350 GB | 0 GB (Released) |
+| **Uptime / Restarts** | >38h / 0 restarts | **Completed (exit=0)** | >39h / 0 restarts | **Collapsed @ Step 182 (Freed)** |
 
 ---
 
 ## 2. Key Analytical Findings for Downstream Agents
 
-### Finding 1: Sequence Integrity vs Truncation Degeneration (0.0%-1.2% vs 43.4%)
+### Finding 1: Sequence Integrity vs Truncation Degeneration (0.0%-1.6% vs 96.1%)
 A critical divergence observed between Zero-TIM and Standard is the **truncation ratio**:
-- **P45 Zero-TIM**: Maintained **`0.0% ~ 1.2%`** truncation as it crossed the 50% milestone (Step 154/300), hitting **`91.8%`** solve rate. Average completion length remains concise (~532 tokens). The exact TiTO token-level feedback loop prevents the model from rambling or losing coherent multi-turn trajectory focus.
+- **P45 Zero-TIM**: Maintained **`0.0% ~ 1.6%`** truncation as it surged past Step 216/300 (72%), reaching an all-time campaign peak of **`92.6%`** solve rate (Step 214). Average completion length remains concise (~492 tokens). The exact TiTO token-level feedback loop prevents the model from rambling or losing coherent multi-turn trajectory focus.
 - **P45 Standard**: Suffered high truncation (**`33.6% ~ 52.3%`**) across steps 200-300, finishing with 50.5% held-out generalization.
-- **M15 Long-Horizon Sequence Blowup**: In M15 Standard, truncation escalated to **`43.4%`** at Step 109 and **`34.8%`** at Step 111, with raw completion lengths exploding to 5,468 tokens. In stark contrast, **M15 Zero-TIM strictly caps truncation at `2.7% ~ 3.9%`**, preserving multi-turn prompt discipline.
+- **M15 Long-Horizon Sequence Blowup & Terminal Collapse**: In M15 Standard, truncation escalated out of control: **`34.8%`** at Step 111, **`91.4%`** at Step 180, and **`96.1%`** at Step 182, with completion lengths exploding to 7,982 tokens (saturating the 8,192 token window). In stark contrast, **M15 Zero-TIM strictly caps truncation at `2.3% ~ 3.5%`**, preserving multi-turn prompt discipline and reaching **`52.0%`** solve rate at Step 53.
 
-### Finding 2: Long-Horizon Standard Baseline Degeneration (Step 100 Eval Collapse)
-- **M15 Standard Step 100 Evaluation**: The 800-prompt held-out evaluation crashed from **40.5%** (at Step 50) down to **`21.6%`** (173/800 solved). Without importance sampling correction on long multi-turn trajectories, off-policy rollout drift rapidly degrades the reasoning chain.
-- **M15 Zero-TIM Stability**: Despite normal per-batch variance (27.0% on harder seeds, up to 51.2% on standard seeds), M15 Zero-TIM exhibits 100% token stream continuity (`[CANON_ALIGN] verdict=PASS`) and zero gradient divergence.
+### Finding 2: Long-Horizon Standard Baseline Collapse & Crash (Step 182)
+- **M15 Standard Terminal Collapse**: Solve rate plummeted to **`0.0%`** by Step 180-182 with gradient norm collapsing to 0.0000. At Step 182, memory pressure during KV cache re-initialization triggered a compilation crash. The entire workload was safely terminated and its **64 TPU v5p chips released**.
+- **M15 Zero-TIM Stability**: Demonstrates sustained learning, climbing from 16.4% to **`52.0%`** solve rate at Step 53 with 100% token stream continuity (`[CANON_ALIGN] verdict=PASS`), zero gradient divergence, and pure VAG reverse pullback executing in **`512ms - 544ms`**.
 
 ### Finding 3: Generalization Trajectory of Completed P45 Standard Run
 The Standard baseline successfully completed all 300 steps and executed full held-out evaluations every 50 steps:
@@ -93,8 +93,8 @@ When consuming the 4 exported log files in `debug_logs/full_train_perf_20260908/
 The integrity of all raw log files is verified via SHA256:
 
 ```text
-3975a1421409e015385cdb3438edf6cfbd07c5c790ba119e602d9fc3ab35fefa  frozenlake_m15_standard_r01.log
-37ca5fe7a8cf4e1a3b5463d39cb790782b85f558be0b3b567a512642d509281f  frozenlake_m15_zero_r10.log
+cb75dd45fe22f83ed5a6122dfa2e725573e6792fba23fbf0818d49ab06238b0c  frozenlake_m15_standard_r01.log
+e188a44d287d63fc535814bb0932317f76fdee5443080c0ca969a2ec74ce8a8e  frozenlake_m15_zero_r10.log
 a85340243398af25836f9416a598a81e9efcbea46b0f0c50e9623f9693581123  frozenlake_p45_standard_r01.log
-285b5463609e9b4d76eca5d44c31849e27afc9f71248e060b258afafc8da090d  frozenlake_p45_zero_r10a.log
+7a3337506161895317ae61e614e3e4829ef266d3d04e2a4cdb61aa571b402ea7  frozenlake_p45_zero_r10a.log
 ```
