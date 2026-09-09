@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.rl import algo_core
+from tunix.rl import function_registry
 
 
 def _algo_model_input(
@@ -137,7 +138,6 @@ class AlgorithmAdapter(abc.ABC):
     ...
 
 
-# TODO: Align adapter classes with current path and try to refactor and reuse directly instead of copying.
 class GRPOAdapter(AlgorithmAdapter):
   """Group Relative Policy Optimization (GRPO) adapter."""
 
@@ -150,12 +150,20 @@ class GRPOAdapter(AlgorithmAdapter):
       max_packed_len: int = 8192,
       max_response_length: int = 1024,
       clip_epsilon: float = 0.2,
+      epsilon_high: float | None = None,
       beta_kl: float = 0.04,
       temperature: float = 1.0,
+      loss_algo: str = "grpo",
+      policy_loss_fn: str = "grpo",
+      advantage_estimator: str = "grpo",
       loss_agg_mode: str = "sequence-mean-token-mean",
       kl_loss_mode: str = "mse_kl",
       kl_clamp_value: float | None = None,
   ):
+    if group_size <= 1:
+      raise ValueError(
+          f"group_size must be greater than 1 for GRPO. Received: {group_size}"
+      )
     super().__init__(
         group_size=group_size,
         mini_batch_size=mini_batch_size,
@@ -165,6 +173,10 @@ class GRPOAdapter(AlgorithmAdapter):
         max_response_length=max_response_length,
     )
     self.clip_epsilon = clip_epsilon
+    self.epsilon_high = epsilon_high if epsilon_high is not None else clip_epsilon
+    self.loss_algo = loss_algo
+    self.policy_loss_fn = policy_loss_fn
+    self.advantage_estimator = advantage_estimator
     self.beta_kl = beta_kl
     self.temperature = temperature
     self.loss_agg_mode = loss_agg_mode
@@ -178,14 +190,14 @@ class GRPOAdapter(AlgorithmAdapter):
       num_generations: int | None = None,
       **kwargs: Any,
   ) -> jnp.ndarray:
-    """Computes group-normalized advantages: (r - mean(group)) / (std(group) + 1e-6)."""
+    """Computes returns and advantages using the registered advantage estimator."""
     del kwargs
     g = num_generations or self.group_size
-    r = jnp.asarray(rewards, dtype=jnp.float32).reshape(-1, g)
-    mean = jnp.mean(r, axis=-1, keepdims=True)
-    std = jnp.std(r, axis=-1, keepdims=True)
-    advs = (r - mean) / (std + 1e-6)
-    return advs.reshape(-1)
+    estimator = function_registry.get_advantage_estimator(
+        self.advantage_estimator
+    )
+    r = np.asarray(rewards, dtype=np.float32).reshape(-1)
+    return jnp.asarray(estimator(rewards=r, num_generations=g))
 
   def create_trainer_payloads(
       self,
@@ -246,8 +258,8 @@ class GRPOAdapter(AlgorithmAdapter):
     return payloads
 
   def loss_fn(self) -> Callable[..., Any]:
-    """GRPO loss function executed on TrainerWorker."""
-    return algo_core.grpo_loss_fn
+    """Policy loss resolved by name via the function registry."""
+    return function_registry.get_policy_loss_fn(self.policy_loss_fn)
 
   def build_gen_model_input_fn(
       self, pad_id: int, eos_id: int
@@ -256,7 +268,8 @@ class GRPOAdapter(AlgorithmAdapter):
     algo_config = types.SimpleNamespace(
         beta=self.beta_kl,
         epsilon=self.clip_epsilon,
-        loss_algo="grpo",
+        epsilon_high=self.epsilon_high,
+        loss_algo=self.loss_algo,
         loss_agg_mode=self.loss_agg_mode,
         temperature=self.temperature,
         kl_loss_mode=self.kl_loss_mode,
@@ -284,6 +297,7 @@ class PPOAdapter(AlgorithmAdapter):
       lam: float = 0.95,
       clip_epsilon: float = 0.2,
       entropy_coef: float = 0.0,
+      policy_loss_fn: str = "ppo",
   ):
     super().__init__(
         group_size=group_size,
@@ -293,6 +307,7 @@ class PPOAdapter(AlgorithmAdapter):
         max_response_length=max_response_length,
     )
     self.gamma = gamma
+    self.policy_loss_fn = policy_loss_fn
     self.lam = lam
     self.clip_epsilon = clip_epsilon
     self.entropy_coef = entropy_coef
@@ -392,8 +407,8 @@ class PPOAdapter(AlgorithmAdapter):
     return payloads
 
   def loss_fn(self) -> Callable[..., Any]:
-    """PPO policy loss function delegating directly to `algo_core.ppo_policy_loss_fn`."""
-    return algo_core.ppo_policy_loss_fn
+    """Policy loss resolved by name via the function registry."""
+    return function_registry.get_policy_loss_fn(self.policy_loss_fn)
 
   def build_gen_model_input_fn(
       self, pad_id: int, eos_id: int
