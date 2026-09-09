@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import logging
 import threading
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
@@ -48,6 +49,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  debug: bool = False
 
 
 TrajectoryOrError = Union[
@@ -78,6 +80,10 @@ class RolloutWorker(abstract_worker.Worker):
     super().__init__()
     self.worker_id = worker_id
     self.config = config
+    self.debug: bool = bool(
+        getattr(config, "debug", False)
+        or os.environ.get("DEBUG") in ("1", "true", "True")
+    )
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
     self._init_lock = threading.Lock()
@@ -344,6 +350,28 @@ class RolloutWorker(abstract_worker.Worker):
           policy_version=self._policy_version,
       )
       self._stamp_worker_lineage(response.metadata)
+      if self.debug or (
+          isinstance(response.metadata, dict)
+          and response.metadata.get("debug")
+      ):
+        resp_prompt = response.metadata.get("prompt", "")
+        resp_text = response.metadata.get("text", "")
+        logging.info(
+            "[RolloutWorker %s] Trajectory completed (request_id=%s, prompt_id=%s, group_index=%s, status=%s, reward=%.2f):\n"
+            "================================ [PROMPT] ================================\n"
+            "%s\n"
+            "============================ [SAMPLED RESPONSE] ============================\n"
+            "%s\n"
+            "==========================================================================",
+            self.worker_id,
+            response.request_id,
+            response.prompt_id,
+            response.group_index,
+            response.status,
+            response.env_reward,
+            resp_prompt,
+            resp_text,
+        )
       return response
     return item
 
@@ -375,7 +403,23 @@ class RolloutWorker(abstract_worker.Worker):
       )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
+    metadata.setdefault("prompt", request.prompt)
     self._stamp_worker_lineage(metadata)
+    if self.debug or metadata.get("debug"):
+      logging.info(
+          "[RolloutWorker %s] Direct sampling completed (prompt_id=%s, group_index=%s, tokens=%d):\n"
+          "================================ [PROMPT] ================================\n"
+          "%s\n"
+          "============================ [SAMPLED RESPONSE] ============================\n"
+          "%s\n"
+          "==========================================================================",
+          self.worker_id,
+          request.prompt_id,
+          request.group_index,
+          len(completion_tokens),
+          request.prompt,
+          text,
+      )
     return datatypes.RolloutResponse(
         request_id=request.request_id,
         prompt_id=request.prompt_id,
