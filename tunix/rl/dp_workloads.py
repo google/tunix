@@ -1429,13 +1429,18 @@ def apply_diag_unpin(
   Diagnostic knob ablation (tasks/zero_tim_perf phase0 P0.2): the canonical
   workload pins its determinism knobs, so a single knob cannot be turned off
   on the certified carrier without this.  Empty (the default) changes
-  nothing; a name that is not pinned is a typo and refuses; every unpinned
-  name is printed so the run reads as diagnostic, never as certification.
+  nothing; a name this layer does not pin is skipped (the list is shared
+  across layers with different pinned sets); every unpinned name is
+  printed so the run reads as diagnostic, never as certification.
   """
   raw = values.get(DIAG_UNPIN_ENV, "")
   for name in (n for n in raw.split(":") if n):
     if name not in expected:
-      raise ValueError(f"{DIAG_UNPIN_ENV} names a key that is not pinned: {name}")
+      # The same list serves every pinning layer (DP workload, GSM8K demo)
+      # and their pinned sets differ, so a name this layer does not pin is
+      # simply not this layer's business.
+      print(f"[DP_WORKLOAD] DIAG unpin {name}: not pinned here, skipped", flush=True)
+      continue
     print(
         f"[DP_WORKLOAD] DIAG unpinned {name}={values.get(name)!r} "
         f"(pinned {expected[name]!r}; not certification)",
