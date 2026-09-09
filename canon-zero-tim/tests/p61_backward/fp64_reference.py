@@ -107,6 +107,19 @@ def load_example(root: Path, dtype=None):
   return common.TrainExample(**fields)
 
 
+def load_valid_mask(root: Path):
+  """The completion validity mask of a multi-turn capture, or None.
+
+  FrozenLake rows carry environment tokens inside the completion span: the
+  engine attends to them (``completion_valid_mask``) while the loss masks
+  them out (``completion_mask``).  Single-turn captures (GSM8K) have no
+  validity mask and the loss mask doubles as the validity mask, exactly as
+  the canonical adapter does."""
+  leaves = load_capture(root, "example")
+  value = leaves.get(".completion_valid_mask")
+  return None if value is None else jnp.asarray(value, jnp.bool_)
+
+
 def load_algo_config(root: Path, temperature: float | None = None):
   record = json.loads((root / "algo_config.json").read_text())
   fields = dict(record["algo_config"])
@@ -169,16 +182,60 @@ def example_rows(example, rows):
   return jax.tree.map(lambda v: v[rows] if v is not None and v.ndim >= 1 else v, example)
 
 
+def trim_example(example, pad_id: int, multiple: int = 64, valid_mask=None):
+  """Drops the padding columns of a one-row example.
+
+  The rollout example is left-padded on the prompt and right-padded on the
+  completion; the forward builds positions and the attention mask from the
+  prompt/completion masks, and every padded position is masked out of the
+  loss, so removing padding columns leaves the row's loss and gradient
+  unchanged in exact arithmetic -- and in float64 the dropped terms are exact
+  zeros.  It is the memory knob of the reference: the attention scores of a
+  6144-wide Qwen3-8B row cost about 240 GB per row in float64, a ~1k-wide
+  trimmed row about 40 GB.  The completion keeps a multiple of ``multiple``
+  columns (pad ids, mask 0) to bound the number of distinct compiled shapes.
+  """
+  prompt_mask = np.asarray(example.prompt_mask)
+  completion_mask = np.asarray(example.completion_mask).astype(bool)
+  if valid_mask is not None:
+    completion_mask = completion_mask | np.asarray(valid_mask).astype(bool)
+  if prompt_mask.shape[0] != 1:
+    raise ValueError("trim_example takes a one-row example (rows_per_step=1)")
+  real_prompt = np.flatnonzero(prompt_mask[0])
+  real_completion = np.flatnonzero(completion_mask[0])
+  if real_prompt.size == 0 or real_completion.size == 0:
+    return example, valid_mask
+  p_lo, p_hi = int(real_prompt[0]), int(real_prompt[-1]) + 1
+  c_hi = int(real_completion[-1]) + 1
+  c_width = -(-c_hi // multiple) * multiple
+  c_width = min(c_width, int(completion_mask.shape[1]))
+
+  def cut(name, value):
+    if value is None or getattr(value, "ndim", 0) < 2:
+      return value
+    if name.startswith("prompt"):
+      return value[:, p_lo:p_hi]
+    return value[:, :c_width]
+
+  fields = {name: cut(name, getattr(example, name)) for name in EXAMPLE_FIELDS}
+  trimmed_valid = None if valid_mask is None else valid_mask[:, :c_width]
+  return common.TrainExample(**fields), trimmed_valid
+
+
 def make_grad_fn(graphdef, algo, pad_id, eos_id):
   temperature = float(getattr(algo, "temperature", 1.0))
 
-  def unreduced_sum(state, example):
+  def unreduced_sum(state, example, forward_mask=None):
+    # forward_mask: the completion validity mask (environment tokens stay in
+    # the context); the loss below keeps the loss mask (example.completion_mask).
+    # None (single-turn captures) means the loss mask is also the validity mask.
+    validity = example.completion_mask if forward_mask is None else forward_mask
     logps, entropy = common.compute_per_token_logps(
         graphdef, state, prompt_tokens=example.prompt_ids,
         completion_tokens=example.completion_ids, pad_id=pad_id,
         eos_id=eos_id, stop_gradient=False, return_entropy=True,
         temperature=temperature, canonical_actor=False,
-        prompt_mask=example.prompt_mask, completion_mask=example.completion_mask,
+        prompt_mask=example.prompt_mask, completion_mask=validity,
     )
     output = algo_core.grpo_loss_from_precomputed_logps(logps, entropy, example, algo)
     return output.primary_loss.unreduced_sum, logps
@@ -226,28 +283,67 @@ def leaf_group(path: str) -> str:
   return path.split("'")[1] if "'" in path else path
 
 
+class _Stats:
+  """Streaming sums for the metrics of a concatenation (no concatenation)."""
+
+  def __init__(self):
+    self.ref_sq = 0.0
+    self.got_sq = 0.0
+    self.dot = 0.0
+    self.diff_sq = 0.0
+
+  def add(self, ref: np.ndarray, got: np.ndarray):
+    r = ref.astype(np.float64).reshape(-1)
+    g = got.astype(np.float64).reshape(-1)
+    self.ref_sq += float(np.dot(r, r))
+    self.got_sq += float(np.dot(g, g))
+    self.dot += float(np.dot(r, g))
+    d = g - r
+    self.diff_sq += float(np.dot(d, d))
+
+  def metrics(self) -> dict[str, float]:
+    ref_norm = math.sqrt(self.ref_sq)
+    got_norm = math.sqrt(self.got_sq)
+    diff_norm = math.sqrt(self.diff_sq)
+    if ref_norm == 0.0:
+      rel_l2 = 0.0 if got_norm == 0.0 else math.inf
+    else:
+      rel_l2 = diff_norm / ref_norm
+    if ref_norm == 0.0 or got_norm == 0.0:
+      one_minus_cos = 0.0 if ref_norm == got_norm else 1.0
+    else:
+      cosine = self.dot / (ref_norm * got_norm)
+      one_minus_cos = max(0.0, 1.0 - max(-1.0, min(1.0, cosine)))
+    norm_ratio_error = math.inf if ref_norm == 0.0 else abs(got_norm / ref_norm - 1.0)
+    return {
+        "rel_l2": rel_l2, "one_minus_cos": one_minus_cos,
+        "norm_ratio_error": norm_ratio_error, "ref_norm": ref_norm,
+        "got_norm": got_norm, "diff_norm": diff_norm,
+    }
+
+
 def compare_trees(reference: dict[str, np.ndarray], got: dict[str, np.ndarray]):
+  """Per-leaf, per-group and overall metrics without concatenating the
+  trees: the Qwen3-8B trees are 33 GB each in float32, and the former
+  concatenations (float64 copies of both sides, per group and overall) put
+  the host over 380 GB and the OOM killer ended the first 8B pass after its
+  16 rows had been computed."""
   per_leaf, groups = {}, {}
-  all_ref, all_got = [], []
+  overall = _Stats()
   for path, ref in reference.items():
     value = got[path]
     per_leaf[path] = metrics(ref, value)
-    groups.setdefault(leaf_group(path), ([], []))
-    groups[leaf_group(path)][0].append(ref.reshape(-1))
-    groups[leaf_group(path)][1].append(value.reshape(-1))
-    all_ref.append(ref.reshape(-1))
-    all_got.append(value.reshape(-1))
-  per_group = {
-      name: metrics(np.concatenate(r), np.concatenate(g))
-      for name, (r, g) in groups.items()
-  }
-  overall = metrics(np.concatenate(all_ref), np.concatenate(all_got))
-  return {"overall": overall, "groups": per_group, "leaves": per_leaf}
+    groups.setdefault(leaf_group(path), _Stats()).add(ref, value)
+    overall.add(ref, value)
+  per_group = {name: stats.metrics() for name, stats in groups.items()}
+  return {"overall": overall.metrics(), "groups": per_group, "leaves": per_leaf}
 
 
 def reference_gradient(root: Path, config, rows_per_step: int, max_rows: int | None, log,
                        temperature: float | None = None, zero_tim_point: bool = True,
-                       params_from: Path | None = None):
+                       params_from: Path | None = None, trim_rows: bool = False):
+  if trim_rows and rows_per_step != 1:
+    raise ValueError("--trim-rows requires --rows-per-step 1")
   params_root = params_from or root
   if params_from is not None:
     # Another capture's parameters may stand in only when they are the
@@ -261,6 +357,10 @@ def reference_gradient(root: Path, config, rows_per_step: int, max_rows: int | N
     log(f"parameters from {params_from} (all {len(own)} leaf hashes match this capture's manifest)")
   params = load_capture(params_root, "model_before")
   example = load_example(root)
+  valid_mask = load_valid_mask(root)
+  if valid_mask is not None:
+    log(f"completion validity mask present: {int(np.asarray(valid_mask).sum())} valid "
+        f"vs {int(np.asarray(example.completion_mask).astype(bool).sum())} loss positions")
   if zero_tim_point:
     # The certified run sits exactly at importance ratio 1: its trainer
     # logps are the rollout logps bit for bit (strict zero-TIM), so no
@@ -288,13 +388,32 @@ def reference_gradient(root: Path, config, rows_per_step: int, max_rows: int | N
   started = time.perf_counter()
   for start in range(0, rows, rows_per_step):
     stop = min(start + rows_per_step, rows)
-    (value, logps), grads = grad_fn(state, example_rows(example, slice(start, stop)))
+    step_example = example_rows(example, slice(start, stop))
+    step_valid = None if valid_mask is None else valid_mask[start:stop]
+    if trim_rows:
+      step_example, step_valid = trim_example(step_example, pad_id, valid_mask=step_valid)
+    forward_mask = step_example.completion_mask if step_valid is None else step_valid
+    (value, logps), grads = grad_fn(state, step_example, forward_mask)
     jax.block_until_ready(grads)
     losses.append(float(value))
-    logps_rows.append(np.asarray(logps))
-    accumulator = grads if accumulator is None else jax.tree.map(jnp.add, accumulator, grads)
+    logps = np.asarray(logps)
+    if trim_rows and logps.shape[1] != example.completion_ids.shape[1]:
+      # Pad the trimmed row's logps back to the capture's width; the
+      # validation masks the padded columns out.
+      full = np.zeros((logps.shape[0], example.completion_ids.shape[1]), logps.dtype)
+      full[:, :logps.shape[1]] = logps
+      logps = full
+    logps_rows.append(logps)
+    # Accumulate on the host, in place: the jax tree-add made a second
+    # 66 GB float64 tree per step on Qwen3-8B, and with the trainer's host
+    # buffers of a concurrent one-host run that reached the OOM killer.
+    if accumulator is None:
+      accumulator = jax.tree.map(lambda g: np.array(g, dtype=np.float64, copy=True), grads)
+    else:
+      jax.tree.map(lambda acc, g: np.add(acc, np.asarray(g, dtype=np.float64), out=acc), accumulator, grads)
+    del grads
     log(f"rows {start}..{stop - 1} unreduced_sum={float(value):.9e} elapsed={time.perf_counter() - started:.0f}s")
-  accumulator = jax.tree.map(lambda g: g * scale, accumulator)
+  accumulator = jax.tree.map(lambda g: np.multiply(g, scale, out=g), accumulator)  # in place, numpy float64
   flat = jax.tree_util.tree_flatten_with_path(accumulator, is_leaf=_is_variable)[0]
   gradient = {
       jax.tree_util.keystr(path): np.asarray(leaf[...] if _is_variable(leaf) else leaf)
@@ -330,6 +449,9 @@ def main() -> int:
                       help="which tree of capture B is the gradient (e.g. stock_gradient)")
   parser.add_argument("--out", type=Path, required=True)
   parser.add_argument("--rows-per-step", type=int, default=4)
+  parser.add_argument("--trim-rows", action="store_true",
+                      help="drop each row's padding columns (needs --rows-per-step 1); "
+                           "exact in float64, the memory knob for Qwen3-8B")
   parser.add_argument("--max-rows", type=int)
   parser.add_argument("--model", default="qwen3_1p7b")
   parser.add_argument("--temperature", type=float, help="overrides/supplies the loss temperature")
@@ -352,7 +474,7 @@ def main() -> int:
   result = reference_gradient(args.capture_a, config, args.rows_per_step, args.max_rows, log,
                               temperature=args.temperature,
                               zero_tim_point=not args.captured_old_logps,
-                              params_from=args.params_from)
+                              params_from=args.params_from, trim_rows=args.trim_rows)
   report = {
       "schema": "canon-p61-fp64-reference-v1",
       "compute_dtype": COMPUTE_DTYPE,
@@ -375,7 +497,7 @@ def main() -> int:
     second = reference_gradient(args.capture_a, config, args.rows_per_step, args.max_rows, log,
                                 temperature=args.temperature,
                                 zero_tim_point=not args.captured_old_logps,
-                                params_from=args.params_from)
+                                params_from=args.params_from, trim_rows=args.trim_rows)
     tag = args.also_dtype
     report[f"{tag}_logps_validation"] = validate_logps(
         second["logps"], args.capture_a, second["example"], second["rows"])
