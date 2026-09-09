@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import pickle
+import signal
 import sys
 from typing import Any
 
@@ -526,12 +527,30 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     logging.info("Rollout worker is registered.")
 
+    # Shut down gracefully on SIGTERM/SIGINT.
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      try:
+        loop.add_signal_handler(sig, stop_event.set)
+      except NotImplementedError:
+        pass
+
     try:
-      while True:
-        await asyncio.sleep(1)
+      await stop_event.wait()
     except asyncio.CancelledError:
       pass
     finally:
+      logging.info("Draining rollout worker...")
+      try:
+        # Cancel in-flight trajectory collections
+        worker_service.stop()
+        if hasattr(worker_service.sampler, "stop"):
+          # Shut down vLLM engine
+          await worker_service.sampler.stop()
+        logging.info("Rollout worker drained.")
+      except Exception:
+        logging.exception("Failed to drain rollout worker cleanly.")
       await server.stop_serving()
 
   asyncio.run(grpc_server_main())
