@@ -913,6 +913,44 @@ class PeftTrainerTest(parameterized.TestCase):
         metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
     )
 
+  def test_flush_metrics_drains_only_completed_step(self):
+    # Two completed optimizer updates followed by a trailing forward/backward
+    # pass with no update (partial accumulation group). flush_metrics() must
+    # drain the parked, completed step 2 and leave the unfinished group alone,
+    # so a subsequent close()-style drain emits no phantom step 3.
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000, max_steps=10
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    one = jnp.array(1.0)
+
+    trainer._record_fwd_bwd(one, None)
+    trainer._record_update(one)
+    # Double-buffering: the first completed step is parked, nothing written.
+    self.assertEqual(trainer.get_metrics().id, -1)
+
+    trainer._record_fwd_bwd(one, None)
+    trainer._record_update(one)
+    # The per-step pull now sees step 1; step 2 is parked.
+    self.assertEqual(trainer.get_metrics().id, 1)
+
+    # Trailing partial group: forward/backward without an optimizer update.
+    trainer._record_fwd_bwd(one, None)
+
+    flushed = trainer.flush_metrics()
+    self.assertEqual(flushed.id, 2)
+    self.assertIn('loss', flushed.scalar_metrics)
+    # Idempotent, and the unfinished group was not promoted.
+    self.assertEqual(trainer.flush_metrics().id, -1)
+    self.assertIsNone(trainer._prev_buffered_train_metrics)
+    self.assertIsNotNone(trainer._buffered_train_metrics)
+
+    # The drain close() performs must not emit the unfinished group as step 3.
+    trainer._write_train_metrics()
+    self.assertEqual(trainer.get_metrics().id, -1)
+
   def test_empty_eval_dataset(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))

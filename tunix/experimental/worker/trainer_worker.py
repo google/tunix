@@ -281,3 +281,13 @@ class TrainerWorker(abstract_worker.Worker):
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
     return self._trainer.get_metrics()
+
+  def flush_metrics(self) -> Any:
+    """Drains the trainer's final buffered step (see PeftTrainer.flush_metrics).
+
+    Falls back to get_metrics() for trainer backends that do not double-buffer.
+    """
+    flush = getattr(self._trainer, "flush_metrics", None)
+    if flush is None:
+      return self._trainer.get_metrics()
+    return flush()

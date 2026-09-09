@@ -567,6 +567,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
 
+  async def flush_metrics(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> (
+      exp_metrics.MetricsBuffer
+      | Sequence[exp_metrics.MetricsBuffer]
+      | dict[str, Any]
+      | None
+  ):
+    """Drains and returns the trainer worker's final buffered step metrics.
+
+    Unlike get_metrics (pulled every step), this is called once after the train
+    loop to emit the last step, which the trainer's metric double-buffer parks
+    until a subsequent update that never comes. Trainer roles only.
+    """
+    worker = self._trainer_workers.get(role) or self._inference_workers.get(
+        role
+    )
+    if worker is None:
+      return None
+    return await self._invoke_worker(worker, "flush_metrics", **kwargs)
+
   def configure_worker(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
