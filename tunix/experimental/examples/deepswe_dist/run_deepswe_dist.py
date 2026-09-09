@@ -219,6 +219,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           if args.max_seq_token_per_tpu is not None
           else args.max_prompt_length + args.max_response_length
       ),
+      max_response_length=args.max_response_length,
   )
 
 
