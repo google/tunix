@@ -51,6 +51,7 @@ from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
+from tunix.rl.profiler.profiler import RLProfiler
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
@@ -63,6 +64,7 @@ Role = datatypes.Role
 
 
 RLTrainingConfig = configs.RLTrainingConfig
+RLProfileConfig = configs.RLProfileConfig
 ClusterConfig = configs.ClusterConfig
 
 ModelOrPath = nnx.Module | str
@@ -87,6 +89,13 @@ class RLEngine:
     self.cluster_config = cluster_config
     self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
+
+    self.profiler = None
+    if getattr(cluster_config.training_config, "rl_profiler_config", None):
+      self.profiler = RLProfiler(
+          cluster_config.training_config.rl_profiler_config
+      )
+
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
 
@@ -756,11 +765,22 @@ class RLEngine:
       raise ValueError(f"Unsupported role for train: {role}")
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
+    step = getattr(self, "global_steps", 0)
+    if self.profiler:
+      self.profiler.maybe_activate(step, role="trainer")
+
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+
+    if self.profiler:
+      try:
+        jax.block_until_ready(self.actor_trainer.model)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+      self.profiler.maybe_deactivate(step, role="trainer")
 
   def eval_actor(self, eval_ds: Any) -> Any:
     """Runs an explicit actor evaluation phase."""
@@ -857,6 +877,10 @@ class RLEngine:
       if trace_tags:
         perf_tags.update(trace_tags)
 
+      step = getattr(self, "global_steps", 0)
+      if self.profiler:
+        self.profiler.maybe_activate(step, role="sampler")
+
       with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
           perf_constants.ROLLOUT,
           mesh.devices,
@@ -870,6 +894,14 @@ class RLEngine:
         ]
         span.device_end([o.tokens for o in outputs])
         span_v2.async_end([o.tokens for o in outputs])
+
+      if self.profiler:
+        try:
+          jax.block_until_ready([o.tokens for o in outputs])
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+        self.profiler.maybe_deactivate(step, role="sampler")
+
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
