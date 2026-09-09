@@ -130,6 +130,17 @@ standard failures. The control verdict must not imply optimization admission.
 See `tasks/v2-frozenlake-onehost/RECOVERY_CONTROL.md` and
 `tests/v2_frozenlake_onehost/test_recovery_control.py` (package root).
 
+For a full-tree capture of the optimized one-host program, verify the actual
+immutable run-list through outer launcher, Docker transport, inner profile
+and runtime readers before launch. Specialized capture routes intentionally
+do not acquire the ordinary default pair. Pin stream and reduce-once=1
+explicitly for an optimized capture; an empty or partial pair must fail its
+preflight, not trigger an anchor re-pin. Check one reduction per update and
+the staged-rank/VMA receipts at runtime. Retain legacy capture controls and
+their absence semantics. Regression: `tests/v1_system_optimization/
+test_onehost_defaults.py::OnehostDefaultsTest::
+test_optimized_capture_requires_the_explicit_pair` (package root).
+
 ## 7. Flag lifecycle
 
 Singleton-axis metadata regression: test the actual producer -> runtime-zero

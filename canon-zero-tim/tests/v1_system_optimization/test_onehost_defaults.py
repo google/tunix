@@ -164,6 +164,28 @@ class OnehostDefaultsTest(unittest.TestCase):
     self.assertEqual(self.readback(inner_probe(shape, geometry="dp2-tp2-p45")),
                      ["", False, True, "1"])
 
+  def test_optimized_capture_requires_the_explicit_pair(self):
+    capture = {"V2_P0_CAPTURE_FULL_TREE": "1"}
+    missing = self.readback(outer_probe(capture))
+    self.assertEqual(missing, dict.fromkeys(PAIR))
+    self.assertEqual(self.readback(inner_probe(missing)),
+                     ["", False, True, "1"])
+    explicit = self.readback(outer_probe({
+        **capture, **dict(zip(PAIR, ("stream", "1"))),
+    }))
+    self.assertEqual(explicit, dict(zip(PAIR, ("stream", "1"))))
+    self.assertEqual(self.readback(inner_probe(explicit)),
+                     ["stream", True, True, "1"])
+    # A partial override is not the optimized capture configuration.
+    # Preserve its old semantics instead of silently filling the other key.
+    for name, value in zip(PAIR, ("stream", "1")):
+      with self.subTest(name=name):
+        partial = self.readback(outer_probe({**capture, name: value}))
+        self.assertEqual(partial, {key: value if key == name else None
+                                   for key in PAIR})
+        self.assertNotEqual(self.readback(inner_probe(partial)),
+                            ["stream", True, True, "1"])
+
   def test_capture_and_signed_negative_do_not_acquire_defaults(self):
     for values in (
         {"V2_P0_CAPTURE_FULL_TREE": "1"},
