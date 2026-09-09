@@ -247,6 +247,8 @@ def _trainer_process_fn(
       training_config=trainer_config,
       sampler_type=sampler_type,
   )
+  if target_state is not None:
+    trainer.set_target_state(target_state)
   while True:
     try:
       msg = conn.recv()

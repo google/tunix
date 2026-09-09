@@ -94,6 +94,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       model_name: str = "",
       sampler_instance: Any = None,
       worker_index: int = 0,
+      raiden_job_name: str = "",
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       **kwargs,
@@ -103,6 +104,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self.model_name = model_name or (engine_args.model if engine_args else "")
     self.sampler = sampler_instance
     self.worker_index = worker_index
+    # Raiden treats units sharing a job_name as hosts of ONE job and splits the
+    # weights across them (`num_dst_physical_hosts` in raiden_controller), so
+    # independent rollout replicas each need their own job_name to be sent a
+    # full copy. server_id already has that granularity; worker_index stays the
+    # host index *within* one replica.
+    self.raiden_job_name = raiden_job_name or self.server_id
     self._parallelism = parallelism
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
@@ -273,7 +280,9 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       return None
     await self._ensure_started()
     return await self._require_sampler().bind_raiden_sync(
-        worker_index=self.worker_index, parallelism=self._parallelism
+        worker_index=self.worker_index,
+        parallelism=self._parallelism,
+        job_name=self.raiden_job_name,
     )
 
   async def get_weight_sync_metadata(
@@ -336,6 +345,16 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         result = sampler.refresh_model_state_leaves()
         if asyncio.iscoroutine(result):
           await result
+      else:
+        # Never silently skip this: the sampler's runner dispatches through a
+        # `state_leaves` view derived from `state` at load time, so without the
+        # refresh it keeps serving pre-sync weights and the only symptom is
+        # garbage completions.
+        logger.warning(
+            "sampler %s has no refresh_model_state_leaves(); the rollout's"
+            " state_leaves are not re-pointed after h2d.",
+            type(sampler).__name__,
+        )
 
       self._tracker.complete(sync_request, "h2d_done")
       return True
