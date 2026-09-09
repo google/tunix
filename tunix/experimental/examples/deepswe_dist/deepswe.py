@@ -19,19 +19,19 @@ from __future__ import annotations
 from collections.abc import Iterator
 import json
 import logging
+import os
+import threading
 from typing import Any
 
+from examples.deepswe import deepswe_data
+from examples.deepswe import swe_env
 import numpy as np
 from tunix.experimental.rl.agentic import registry
 
-from examples.deepswe import deepswe_data
-from examples.deepswe import swe_agent
-from examples.deepswe import swe_env
-
-
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
-DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-V1"
+_SANDBOX_INIT_LOCK = threading.Lock()
 
 
 def normalize_example_value(value: Any) -> Any:
@@ -56,7 +56,7 @@ def as_text(value: Any) -> str:
 
 
 def _jsonify_lists(entry: dict[str, Any]) -> dict[str, Any]:
-  """Matches the legacy DeepSWE recipe's heterogeneous dataset normalization."""
+  """Normalizes heterogeneous DeepSWE dataset values for distributed rollout."""
   normalized = {}
   for key, value in entry.items():
     value = normalize_example_value(value)
@@ -82,7 +82,6 @@ def load_deepswe_dataset(
     dataset = load_from_disk(dataset_path)
     if isinstance(dataset, DatasetDict):
       dataset = dataset[dataset_split]
-    dataset = dataset.map(_jsonify_lists, keep_in_memory=True)
     if shuffle:
       dataset = dataset.shuffle(seed=seed)
     return dataset
@@ -124,19 +123,25 @@ def build_prompt_item(
     prompt_idx: int,
     max_turns: int,
     max_response_length: int,
+    episode_timeout_secs: int,
     temperature: float,
     top_p: float | None,
     top_k: int | None,
     step_timeout_secs: int,
     reward_timeout_secs: int,
+    overlong_filter: bool,
     env_backend: str,
     use_agent_sandbox: bool,
+    batch_size: int,
+    num_generations: int,
+    max_warmpool_replicas: int | None,
     scaffold: str,
     env_verbose: bool,
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
   problem = _problem_statement(entry)
-  prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
+  instance_id = as_text(entry.get("instance_id") or "deepswe")
+  prompt_id = f"{instance_id}__{prompt_idx}"
   env_config = {
       "entry": entry,
       "prompt_id": prompt_id,
@@ -145,6 +150,9 @@ def build_prompt_item(
       "reward_timeout": reward_timeout_secs,
       "backend": env_backend,
       "use_agent_sandbox": use_agent_sandbox,
+      "batch_size": batch_size,
+      "group_size": num_generations,
+      "max_warmpool_replicas": max_warmpool_replicas,
       "scaffold": scaffold,
       "verbose": env_verbose,
   }
@@ -155,15 +163,20 @@ def build_prompt_item(
       "max_turns": max_turns,
       "generation_kwargs": {
           "max_generation_steps": max_response_length,
+          # The collector uses this as the episode-wide token budget, while
+          # max_generation_steps is the per-call sampler limit.
+          "max_response_length": max_response_length,
           "temperature": temperature,
           "top_p": top_p,
           "top_k": top_k,
           "return_logprobs": True,
       },
       "metadata": {
-          "instance_id": prompt_id,
+          "instance_id": instance_id,
           "problem_statement": problem,
-          "prefix_hash": prompt_id,
+          "prefix_hash": instance_id,
+          "episode_timeout": episode_timeout_secs,
+          "overlong_filter": overlong_filter,
           "env_config": env_config,
           "agent_config": agent_config,
       },
@@ -177,13 +190,17 @@ def iter_prompt_items(
     batch_size: int,
     max_turns: int,
     max_response_length: int,
+    episode_timeout_secs: int,
     temperature: float,
     top_p: float | None,
     top_k: int | None,
     step_timeout_secs: int,
     reward_timeout_secs: int,
+    overlong_filter: bool,
     env_backend: str,
     use_agent_sandbox: bool,
+    num_generations: int,
+    max_warmpool_replicas: int | None,
     scaffold: str,
     env_verbose: bool,
 ) -> Iterator[dict[str, Any]]:
@@ -198,15 +215,90 @@ def iter_prompt_items(
         prompt_idx=prompt_idx,
         max_turns=max_turns,
         max_response_length=max_response_length,
+        episode_timeout_secs=episode_timeout_secs,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
         step_timeout_secs=step_timeout_secs,
         reward_timeout_secs=reward_timeout_secs,
+        overlong_filter=overlong_filter,
         env_backend=env_backend,
         use_agent_sandbox=use_agent_sandbox,
+        batch_size=batch_size,
+        num_generations=num_generations,
+        max_warmpool_replicas=max_warmpool_replicas,
         scaffold=scaffold,
         env_verbose=env_verbose,
+    )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+  value = os.getenv(name)
+  if value is None:
+    return default
+  return value.lower() not in ("0", "false", "no", "off")
+
+
+def _env_int(name: str, default: int) -> int:
+  value = os.getenv(name)
+  if value is None or value == "":
+    return default
+  return int(value)
+
+
+def _sandbox_tasks_from_env() -> list[dict[str, Any]]:
+  dataset = load_deepswe_dataset(
+      dataset_name=os.getenv("DATASET_NAME", DEFAULT_DATASET_NAME),
+      dataset_split=os.getenv("DATASET_SPLIT", "train"),
+      dataset_path=os.getenv("DATASET_PATH", ""),
+      cache_dir=os.getenv("DATASET_CACHE_DIR") or None,
+      shuffle=_env_bool("SHUFFLE", True),
+      seed=_env_int("SEED", 42),
+  )
+  return [_entry_at(dataset, i) for i in range(len(dataset))]
+
+
+def _init_sandbox_fleet_from_env(
+    entry: dict[str, Any],
+    group_size: int,
+    batch_size: int,
+    max_warmpool_replicas: int | None,
+) -> Any:
+  """Initializes DeepSWE's process-wide SandboxFleet from rollout metadata."""
+  with _SANDBOX_INIT_LOCK:
+    try:
+      return swe_env._get_global_fleet()  # pylint: disable=protected-access
+    except RuntimeError:
+      pass
+
+    max_concurrency = _env_int(
+        "SANDBOX_MAX_CONCURRENCY",
+        _env_int("ROLLOUT_MAX_CONCURRENCY", group_size),
+    )
+    try:
+      tasks = _sandbox_tasks_from_env()
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception(
+          "Failed to load the full DeepSWE dataset for SandboxFleet. Falling "
+          "back to the current task only."
+      )
+      tasks = [entry]
+    logging.info(
+        "Initializing DeepSWE SandboxFleet in rollout worker with %d task(s) "
+        "(max_concurrency=%d, batch_size=%d, num_generations=%d, "
+        "max_warmpool_replicas=%s).",
+        len(tasks),
+        max_concurrency,
+        batch_size,
+        group_size,
+        max_warmpool_replicas,
+    )
+    return swe_env._init_global_fleet(  # pylint: disable=protected-access
+        tasks=tasks,
+        max_concurrency=max_concurrency,
+        num_generations=group_size,
+        batch_size=batch_size,
+        max_warmpool_replicas=max_warmpool_replicas,
     )
 
 
@@ -220,33 +312,26 @@ class DeepSWEEnv(swe_env.SWEEnv):
       prompt_id: str = "",
       group_index: int = 0,
       group_size: int = 1,
+      batch_size: int = 1,
+      max_warmpool_replicas: int | None = None,
       policy_version: int = 0,
-      group_id: Any = None,
-      pair_index: int | None = None,
       **kwargs: Any,
   ):
     entry = dict(entry or kwargs.pop("task", {}) or {})
     if prompt_id and "instance_id" not in entry:
       entry["instance_id"] = prompt_id
-    if group_id is None:
-      group_id = prompt_id or None
-    if pair_index is None:
-      pair_index = group_index
     if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
-      logging.info(
-          "Initializing DeepSWE SandboxFleet in rollout worker "
-          "(max_concurrency=%s).",
-          group_size,
-      )
-      kwargs["fleet"] = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=[entry],
-          max_concurrency=group_size,
+      kwargs["fleet"] = _init_sandbox_fleet_from_env(
+          entry,
+          group_size=group_size,
+          batch_size=batch_size,
+          max_warmpool_replicas=max_warmpool_replicas,
       )
 
     super().__init__(
         entry=entry,
-        group_id=group_id,
-        pair_index=pair_index,
+        group_id=prompt_id or None,
+        pair_index=group_index,
         **kwargs,
     )
     self.task = {
@@ -259,7 +344,17 @@ class DeepSWEEnv(swe_env.SWEEnv):
 
 
 @registry.register_agent(DEEPSWE_AGENT_NAME)
-class DeepSWEAgent(swe_agent.SWEAgent):
-  """Registry adapter for the legacy DeepSWE XML-tool agent."""
+class DeepSWEAgent:
+  """Loads the recipe Agent only inside the rollout worker process."""
 
   name = DEEPSWE_AGENT_NAME
+
+  def __init__(self, **kwargs: Any):
+    # r2egym is a rollout-only dependency, so keep it out of the CPU
+    # orchestrator process that also imports this registry module for data.
+    from examples.deepswe import swe_agent  # pylint: disable=g-import-not-at-top
+
+    self._agent = swe_agent.SWEAgent(**kwargs)
+
+  def __getattr__(self, name: str) -> Any:
+    return getattr(self._agent, name)
