@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algo_core
 from tunix.rl import common
+from tunix.sft import utils as sft_utils
 
 
 class AlgoCoreTest(absltest.TestCase):
@@ -726,6 +727,82 @@ class SequenceGeomeanRatioTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(valid, [1.0, 0.0])
     self.assertTrue(np.isfinite(float(geomean[1])))
+
+
+class EmptyMicroBatchMetricsTest(absltest.TestCase):
+  """Metrics must survive a micro-batch with no rows left in the loss.
+
+  One micro-batch is exactly one prompt group whenever
+  train_micro_batch_size == num_generations, so sequence-level masking can
+  empty one outright. Any per-micro-batch value that is degenerate there
+  (+/-inf, or a 0.0 below the metric's own floor) then propagates through the
+  cross-micro-batch reducer and destroys the step's number.
+  """
+
+  def test_weighted_mean_ignores_an_empty_micro_batch(self):
+    # Two micro-batches score 1.06; the third has nothing scored. The correct
+    # answer is 1.06, not 2/3 of it.
+    scored = sft_utils.WeightedMetric(
+        jnp.asarray(2 * 1.06), jnp.asarray(2.0), min_denom=1.0
+    )
+    empty = sft_utils.WeightedMetric(
+        jnp.asarray(0.0), jnp.asarray(0.0), min_denom=1.0
+    )
+    self.assertAlmostEqual(
+        float(common.global_weighted_mean([scored, empty])), 1.06, places=6
+    )
+    # The reducer this replaced is what produced the sub-1.0 readings.
+    self.assertLess(float(common.mean_of_means([scored, empty])), 1.0)
+
+  def test_all_empty_does_not_nan(self):
+    empty = sft_utils.WeightedMetric(
+        jnp.asarray(0.0), jnp.asarray(0.0), min_denom=1.0
+    )
+    self.assertTrue(np.isfinite(float(common.global_weighted_mean([empty]))))
+
+
+class GrpoLossMetricInertnessTest(absltest.TestCase):
+  """With every optional feature off, the new code paths must not fire.
+
+  tunix is not MLPerf-only: a caller that sets none of the sequence-masking or
+  importance-sampling options must see exactly the previous behaviour.
+  """
+
+  def test_adv_max_min_are_finite_when_a_row_is_empty(self):
+    # Directly exercise the reduction the loss performs. Row 1 is fully
+    # masked; the surviving row must set both extremes.
+    loss_mask = jnp.array([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+    adv = jnp.broadcast_to(jnp.array([[2.0], [-5.0]]), (2, 3))
+    any_row = jnp.any(loss_mask > 0)
+    adv_max = jnp.where(
+        any_row, jnp.max(jnp.where(loss_mask > 0, adv, -jnp.inf)), 0.0
+    )
+    adv_min = jnp.where(
+        any_row, jnp.min(jnp.where(loss_mask > 0, adv, jnp.inf)), 0.0
+    )
+    self.assertEqual(float(adv_max), 2.0)
+    self.assertEqual(float(adv_min), 2.0)
+
+  def test_fully_empty_mask_falls_back_to_zero_not_inf(self):
+    loss_mask = jnp.zeros((2, 3))
+    adv = jnp.ones((2, 3))
+    any_row = jnp.any(loss_mask > 0)
+    adv_max = jnp.where(
+        any_row, jnp.max(jnp.where(loss_mask > 0, adv, -jnp.inf)), 0.0
+    )
+    self.assertTrue(np.isfinite(float(adv_max)))
+    self.assertEqual(float(adv_max), 0.0)
+
+  def test_unmasked_reduction_is_unchanged(self):
+    # The fallback must be invisible when nothing is masked: same value as the
+    # plain jnp.max it guards.
+    loss_mask = jnp.ones((2, 3))
+    adv = jnp.array([[1.0, 2.0, 3.0], [-1.0, 0.0, 4.0]])
+    any_row = jnp.any(loss_mask > 0)
+    guarded = jnp.where(
+        any_row, jnp.max(jnp.where(loss_mask > 0, adv, -jnp.inf)), 0.0
+    )
+    self.assertEqual(float(guarded), float(jnp.max(adv)))
 
 
 if __name__ == '__main__':

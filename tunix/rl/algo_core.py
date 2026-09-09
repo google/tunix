@@ -1028,8 +1028,19 @@ def grpo_loss_fn(
   pg_loss_2_mean = masked_mean(pg_loss_2, loss_mask)
   adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
   adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), loss_mask)
-  adv_max = jnp.max(jnp.where(loss_mask > 0, adv_broadcast, -jnp.inf))
-  adv_min = jnp.min(jnp.where(loss_mask > 0, adv_broadcast, jnp.inf))
+  # +/-inf as the neutral element makes the reduction correct while anything
+  # survives, and poisonous when nothing does: the aggregate across
+  # micro-batches is a plain max/min, so one fully-masked micro-batch turns the
+  # whole step into -inf. Fall back to 0.0 there. A micro-batch can lose every
+  # row whenever train_micro_batch_size == num_generations, since one
+  # micro-batch is then exactly one prompt group.
+  any_loss_row = jnp.any(loss_mask > 0)
+  adv_max = jnp.where(
+      any_loss_row, jnp.max(jnp.where(loss_mask > 0, adv_broadcast, -jnp.inf)), 0.0
+  )
+  adv_min = jnp.where(
+      any_loss_row, jnp.min(jnp.where(loss_mask > 0, adv_broadcast, jnp.inf)), 0.0
+  )
   nonzero_adv_frac = masked_mean(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), loss_mask
   )
@@ -1037,8 +1048,10 @@ def grpo_loss_fn(
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "reduced_pg_loss": reduced_pg_loss,
-      # TODO(yuxzhang): equal to reduced_pg_loss today; diverges once sequence
-      # packing lands (reduced -> segment-aware metric; unreduced -> global).
+      # Aggregates differently from reduced_pg_loss across micro-batches
+      # (mean_of_means vs global_weighted_mean). The two coincide only when
+      # every micro-batch carries the same denominator, so they agree with no
+      # sequence-level masking and diverge once any of it is on.
       "unreduced_pg_loss": unreduced_pg_loss,
       "pg_clipfrac": sft_utils.WeightedMetric(
           unreduced_clip_frac, token_denom, min_denom=1.0
@@ -1066,8 +1079,19 @@ def grpo_loss_fn(
   if seq_mult_prob_error is not None:
     # Over every sequence the gate saw, kept or dropped, so the distribution is
     # visible before anyone tightens the threshold.
-    aux["sample_mask/mult_prob_error_mean"] = masked_mean(
-        seq_mult_prob_error, (seq_mult_prob_error > 0).astype(jnp.float32)
+    #
+    # Weighted rather than pre-averaged: `sequence_mult_prob_error` scores a
+    # fully-masked row 0.0, and the metric is >= 1 by construction on any real
+    # row, so a micro-batch with nothing left must contribute no weight rather
+    # than a 0.0 that drags the cross-micro-batch mean below its own floor.
+    # That happens routinely whenever train_micro_batch_size == num_generations,
+    # where one micro-batch is one prompt group and the whole group can be
+    # dropped at once.
+    scored = (seq_mult_prob_error > 0).astype(seq_mult_prob_error.dtype)
+    aux["sample_mask/mult_prob_error_mean"] = sft_utils.WeightedMetric(
+        jnp.sum(seq_mult_prob_error * scored),
+        jnp.sum(scored),
+        min_denom=1.0,
     )
     aux["sample_mask/mult_prob_error_max"] = jnp.max(seq_mult_prob_error)
   if tis_oob_ratio is not None:

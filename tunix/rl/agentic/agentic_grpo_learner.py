@@ -328,8 +328,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if cfg.truncated_importance_sampling_type is not None:
       optional_metrics["tis/is_oob_ratio"] = common.mean_of_means
     if cfg.seq_logprob_error_threshold is not None:
+      # global_weighted_mean, not mean_of_means: the latter divides each
+      # micro-batch before averaging, so a micro-batch with no scored sequence
+      # contributes a 0.0 and drags the result below the metric's own floor of
+      # 1.0. Summing numerators and denominators first gives such a
+      # micro-batch zero weight instead.
       optional_metrics["sample_mask/mult_prob_error_mean"] = (
-          common.mean_of_means
+          common.global_weighted_mean
       )
       optional_metrics["sample_mask/mult_prob_error_max"] = np.max
 
