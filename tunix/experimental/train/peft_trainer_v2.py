@@ -142,11 +142,64 @@ class MetricsBuffer:
   additional_metrics: Dict[
       str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
   ] = dataclasses.field(default_factory=dict)
+  # Auto-forwarded LossOutput.aux_metrics. Kept apart from additional_metrics
+  # so subclass hooks that write additional_metrics take precedence at write
+  # time (see _write_metrics) and no value is ever recorded twice.
+  auto_metrics: Dict[
+      str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
+  ] = dataclasses.field(default_factory=dict)
 
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
     return np.mean(np.array([np.array(x) for x in self.losses]))
+
+
+def _weighted_metric_mean(values: Any) -> float:
+  """Aggregates unreduced WeightedMetrics across microbatches without mean bias.
+
+  Mirrors ``tunix.sft.peft_trainer._weighted_metric_mean`` so experimental
+  training reduces auxiliary WeightedMetrics the same way the non-experimental
+  trainer does: sum of numerators over sum of denominators, rather than a mean
+  of per-microbatch means (which would bias unequal-denominator microbatches).
+  """
+  values = list(values)
+  if not values:
+    return 0.0
+  numerator = sum(float(np.asarray(v.unreduced_sum)) for v in values)
+  denominator = sum(float(np.asarray(v.denominator)) for v in values)
+  eps = getattr(values[0], "eps", None)
+  min_denom = getattr(values[0], "min_denom", None)
+  if eps is not None:
+    denominator += eps
+  if min_denom is not None:
+    denominator = max(denominator, min_denom)
+  return numerator / denominator if denominator else 0.0
+
+
+def _metric_reducer(metric: Any) -> Any:
+  """Selects the reduction matching a buffered auxiliary metric."""
+  if isinstance(metric, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+    return _weighted_metric_mean
+  return np.mean
+
+
+def _aux_to_additional_metrics(aux: Any) -> dict[str, Any] | None:
+  """Routes a loss function's auxiliary metrics dict into buffer form.
+
+  Auto-forwards ``LossOutput.aux_metrics`` (already unwrapped to a dict upstream
+  by ``_fwd_bwd_step``) so scalars and WeightedMetrics the shared loss emits --
+  e.g. ``kl``, ``entropy``, ``pg_clipfrac`` from ``tunix.rl.algo_core`` -- reach
+  the metrics logger without every trainer subclass overriding
+  ``_post_process_*_step``. Mirrors the non-experimental
+  ``tunix.sft.peft_trainer`` train/eval loops. Returns ``None`` when ``aux`` is
+  not a non-empty dict so non-metric auxiliary payloads are left untouched.
+  """
+  if not isinstance(aux, dict) or not aux:
+    return None
+  return {
+      name: (metric, _metric_reducer(metric)) for name, metric in aux.items()
+  }
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -933,8 +986,17 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       additional_metrics: (
           dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
       ) = None,
+      auto_metrics: (
+          dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
+      ) = None,
   ) -> MetricsBuffer:
-    """Buffers metrics for the current step."""
+    """Buffers metrics for the current step.
+
+    ``additional_metrics`` are explicit entries (trainer bookkeeping and
+    subclass hooks); ``auto_metrics`` are the loss function's own
+    ``LossOutput.aux_metrics``, buffered separately so explicit entries win
+    when both name the same key.
+    """
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step,
@@ -949,6 +1011,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           metrics_buffer.additional_metrics[k] = ([v], op)
         else:
           metrics_buffer.additional_metrics[k][0].append(v)
+    if auto_metrics is not None:
+      for k, (v, op) in auto_metrics.items():
+        if k not in metrics_buffer.auto_metrics:
+          metrics_buffer.auto_metrics[k] = ([v], op)
+        else:
+          metrics_buffer.auto_metrics[k][0].append(v)
     return metrics_buffer
 
   def _write_train_metrics(self):
@@ -979,9 +1047,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       return v
 
     loss = metrics_buffer.loss
+    # Explicit entries (hooks, grad_norm) override auto-forwarded aux under the
+    # same key, so a hook-defined reducer is preserved and nothing is reduced
+    # twice.
+    merged = dict(metrics_buffer.auto_metrics)
+    merged.update(metrics_buffer.additional_metrics)
     additional_metrics = {
-        k: op(_to_np_array(v))
-        for k, (v, op) in metrics_buffer.additional_metrics.items()
+        k: op(_to_np_array(v)) for k, (v, op) in merged.items()
     }
     self._log_metrics(
         loss=loss,
@@ -1034,12 +1106,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     payload = self._prepare_inputs(payload)
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
+  def _dedicated_aux_metrics(self, aux: Any) -> dict[str, Any] | None:
+    """Returns ``aux`` in buffer form only when it is ``LossOutput.aux_metrics``.
+
+    ``_fwd_bwd_step`` unwraps a ``LossOutput`` to its ``aux_metrics`` dict, and
+    that is the only way ``aux`` is a dict while ``has_aux`` is False. With
+    ``with_loss_fn(..., has_aux=True)`` the auxiliary payload is arbitrary
+    state that may nest arrays under non-metric keys, so it is never
+    auto-logged -- the same distinction the non-experimental trainer draws.
+    """
+    if self._has_aux:
+      return None
+    return _aux_to_additional_metrics(aux)
+
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
+        auto_metrics=self._dedicated_aux_metrics(aux),
     )
     self._post_process_train_step(aux)
 
@@ -1123,6 +1209,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_eval_metrics,
         loss=loss,
         step=self._train_steps,
+        auto_metrics=self._dedicated_aux_metrics(aux),
     )
     self._post_process_eval_step(aux)
 
