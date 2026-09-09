@@ -80,7 +80,8 @@ repo="$(git -C "$script_dir" rev-parse --show-toplevel)"
 # tasks/v2_integrate detached launch tree (Phase B/C carriers run from it).
 case "$repo" in
   /mnt/disks/tunix-data/worktrees/gsm8k_rescore_fix_0828|\
-  /mnt/disks/tunix-data/worktrees/v2_integrate_launch2) ;;
+  /mnt/disks/tunix-data/worktrees/v2_integrate_launch2|\
+  /mnt/disks/tunix-data/worktrees/zero_tim_perf_launch) ;;
   *) echo "[V2.FL.ONEHOST] physical worktree mismatch: $repo" >&2; exit 2 ;;
 esac
 if [ "$(realpath "$repo")" != "$repo" ]; then
