@@ -25,6 +25,16 @@ marker named by the current workload; paths can evolve.
 
 ## Debug order
 
+Postprocessing is also a flag consumer. A complete stream/reduce-once JSON
+capture was judged as replay/per-group because the common launcher and JSON
+wrapper omitted both mode arguments, while the full-XPlane reader received
+them. Forward the actual resolved mode to the same validator; do not bypass
+the classifier or excuse arbitrary trace failures. Required regression:
+complete16/32group off/batch/stream/reduce fixtures through the real JSON CLI
+and exact launcher shell call, plus wrong-mode, missing optimizer, compile,
+and invalid-value negatives. A genuinely capped capture must remain RED.
+See `tests/v1_gsm8k_xprof_pair/test_hierarchy.py::TraceModeDeliveryTest`.
+
 1. Find the first failure, not the final derivative exception.
 2. Print names and resolved non-secret values only; never print tokens or full
    secret-bearing environments.

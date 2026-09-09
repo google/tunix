@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import gzip
 import importlib.util
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -778,3 +782,136 @@ class ReduceOnceHierarchyTest(unittest.TestCase):
         reduce_once=True,
     )
     self.assertIn("fixed_dp_reduce:group_index=3 expected=15", reasons)
+
+
+class TraceModeDeliveryTest(unittest.TestCase):
+
+  def test_complete_trace_uses_the_same_mode_as_full_hierarchy(self):
+    for groups in (16, 32):
+      for fixture, mode in (
+          (_fixture, {}),
+          (_stream_fixture, {"stream_tape": True}),
+          (_reduce_once_fixture, {"stream_tape": True, "reduce_once": True}),
+      ):
+        with self.subTest(groups=groups, mode=mode):
+          spans, devices, compilers = fixture(groups)
+          expected = HIERARCHY.validate_hierarchy(
+              spans, device_step_counts=devices, compiler_counts=compilers,
+              expected_groups=groups, require_step_marker=False, **mode,
+          )
+          self.assertEqual(expected, [])
+          self.assertEqual(TRACE_CENSUS.validate_trace(
+              spans, compiler_counts=compilers, expected_groups=groups, **mode,
+          ), expected)
+      spans, _, compilers = _fixture(groups)
+      kept = [span for span in spans if span.name != "replay_forward"]
+      self.assertEqual(TRACE_CENSUS.validate_trace(
+          kept, compiler_counts=compilers, expected_groups=groups, keep_tape=True,
+      ), [])
+
+  def test_wrong_mode_missing_tail_and_compile_still_ring(self):
+    spans, _, compilers = _reduce_once_fixture(32)
+    self.assertTrue(TRACE_CENSUS.validate_trace(
+        spans, compiler_counts=compilers, expected_groups=32,
+    ))
+    self.assertTrue(TRACE_CENSUS.validate_trace(
+        [span for span in spans if span.name != "optimizer_commit"],
+        compiler_counts=compilers, expected_groups=32,
+        stream_tape=True, reduce_once=True,
+    ))
+    self.assertIn("captured_compile:PJRT_Client_Compile=1 expected=0",
+        TRACE_CENSUS.validate_trace(
+            spans, compiler_counts={**compilers, "PJRT_Client_Compile": 1},
+            expected_groups=32, stream_tape=True, reduce_once=True,
+        ))
+    off, _, compilers = _fixture(32)
+    self.assertTrue(TRACE_CENSUS.validate_trace(
+        off, compiler_counts=compilers, expected_groups=32,
+        stream_tape=True, reduce_once=True,
+    ))
+
+  def test_real_json_cli_modes_and_incomplete_trace(self):
+    script = TASK / "scripts/census_gsm8k_xprof_trace.py"
+    common = (TASK / "scripts/run_onehost_gsm8k_xprof_common.sh").read_text()
+    command = 'python3 "$script_dir/census_gsm8k_xprof_trace.py"'
+    common_call = command + common.split(command, 1)[1].split(
+        "trace_census_rc=$?", 1
+    )[0]
+    for groups, geometry in ((16, "dp4-tp1"), (32, "dp2-tp2")):
+      with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        profile = root / "train/xprof/plugins/profile/synthetic"
+        profile.mkdir(parents=True)
+        path = profile / "host.trace.json.gz"
+
+        def write_trace(spans):
+          events = [
+              {"ph": "M", "name": "process_name", "pid": 1,
+               "args": {"name": "/host:CPU"}},
+              {"ph": "M", "name": "thread_name", "pid": 1, "tid": 1,
+               "args": {"name": "python3"}},
+          ]
+          events.extend({"ph": "X", "name": span.name, "pid": 1, "tid": 1,
+                         "ts": span.start_ns, "dur": span.duration_ns,
+                         "args": span.stats} for span in spans)
+          with gzip.open(path, "wt", encoding="utf-8") as stream:
+            json.dump({"traceEvents": events}, stream)
+
+        def run(*mode):
+          return subprocess.run(
+              [sys.executable, str(script), "--run-root", str(root),
+               "--geometry", geometry, *mode], capture_output=True, text=True,
+          )
+
+        for fixture, keep, reduce in (
+            (_fixture, "0", "0"), (_fixture, "1", "0"),
+            (_stream_fixture, "stream", "0"),
+            (_reduce_once_fixture, "stream", "1"),
+        ):
+          with self.subTest(geometry=geometry, keep=keep, reduce=reduce):
+            spans, _, _ = fixture(groups)
+            if keep == "1":
+              spans = [span for span in spans if span.name != "replay_forward"]
+            write_trace(spans)
+            result = run("--p32-keep-tape", keep, "--dp-reduce-once", reduce)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("TRACE_CENSUS_GREEN", result.stdout)
+            # Execute the exact postprocessing call from the common launcher,
+            # without its Docker/TPU launch or any external service.
+            census = root / "trace_census.txt"
+            delivered = subprocess.run(
+                ["bash", "-c", common_call], capture_output=True, text=True,
+                env={
+                    "PATH": str(Path(sys.executable).parent) + os.pathsep
+                    + os.defpath,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "JAX_PLATFORMS": "cpu",
+                    "script_dir": str(script.parent), "root": str(root),
+                    "geometry": geometry, "trace_census": str(census),
+                    "CANON_P32_KEEP_TAPE": keep,
+                    "CANON_DP_REDUCE_ONCE": reduce,
+                },
+            )
+            self.assertEqual(delivered.returncode, 0, census.read_text())
+            self.assertEqual(census.read_text(), result.stdout)
+            if keep == "0":
+              self.assertEqual(run().stdout, result.stdout)
+              empty = run("--p32-keep-tape", "", "--dp-reduce-once", "")
+              self.assertEqual(empty.returncode, 0, empty.stderr)
+              self.assertEqual(empty.stdout, result.stdout)
+        # A mode-aware validator must not turn a truncated UI export green.
+        write_trace([span for span in spans if span.name != "optimizer_commit"])
+        result = run("--p32-keep-tape", "stream", "--dp-reduce-once", "1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("optimizer_commit:count=0 expected=1", result.stdout)
+        for option in ("--p32-keep-tape", "--dp-reduce-once"):
+          result = run(option, "invalid")
+          self.assertEqual(result.returncode, 2)
+          self.assertIn("invalid choice", result.stderr)
+
+  def test_common_delivers_modes_to_the_trace_reader(self):
+    source = (TASK / "scripts/run_onehost_gsm8k_xprof_common.sh").read_text()
+    call = source.split('python3 "$script_dir/census_gsm8k_xprof_trace.py"', 1)[1]
+    call = call.split('>"$trace_census"', 1)[0]
+    self.assertIn('--p32-keep-tape "${CANON_P32_KEEP_TAPE:-}"', call)
+    self.assertIn('--dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}"', call)

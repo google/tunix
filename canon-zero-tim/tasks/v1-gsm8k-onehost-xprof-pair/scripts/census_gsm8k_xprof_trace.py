@@ -162,6 +162,9 @@ def validate_trace(
     compiler_counts,
     expected_update_step: int = 2,
     expected_groups: int = 16,
+    keep_tape: bool = False,
+    stream_tape: bool = False,
+    reduce_once: bool = False,
 ) -> list[str]:
   """Applies hierarchy semantics without pretending JSON has device planes."""
   synthetic_device_steps = {
@@ -174,6 +177,9 @@ def validate_trace(
       expected_update_step=expected_update_step,
       expected_groups=expected_groups,
       require_step_marker=False,
+      keep_tape=keep_tape,
+      stream_tape=stream_tape,
+      reduce_once=reduce_once,
   )
 
 
@@ -181,6 +187,8 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--run-root", type=Path, required=True)
   parser.add_argument("--expected-update-step", type=int, default=2)
+  parser.add_argument("--p32-keep-tape", choices=("", "0", "1", "stream"), default="")
+  parser.add_argument("--dp-reduce-once", choices=("", "0", "1"), default="")
   parser.add_argument(
       "--geometry",
       choices=tuple(sorted(HIERARCHY.GEOMETRIES)),
@@ -196,6 +204,9 @@ def main() -> int:
       compiler_counts=compiler_counts,
       expected_update_step=args.expected_update_step,
       expected_groups=expected_groups,
+      keep_tape=args.p32_keep_tape in ("1", "stream"),
+      stream_tape=args.p32_keep_tape == "stream",
+      reduce_once=args.dp_reduce_once == "1",
   )
   counts = {
       name: sum(span.name == name for span in spans)

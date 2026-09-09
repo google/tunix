@@ -132,6 +132,23 @@ Perfetto, the full-XPlane hierarchy/warm-compile gate, and the independent UI
 trace-JSON gate. The summary is additional attribution, not a substitute for
 those gates.
 
+The common launcher passes its resolved tape/reduction modes to both the
+full-XPlane and trace-JSON hierarchy readers. For a manual JSON recheck,
+pass the modes from that run, not today's defaults. For example, an existing
+stream/reduce-once DP2xTP2 capture uses:
+
+```bash
+python3 canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/census_gsm8k_xprof_trace.py \
+  --run-root /absolute/path/to/existing-run --geometry dp2-tp2 \
+  --p32-keep-tape stream --dp-reduce-once 1
+```
+
+Use keep-tape1 for batch tape or0 for replay, and reduce-once0 for per-group
+reduction. Omitted/empty CLI values retain the historical off interpretation;
+invalid values reject. Correct mode forwarding does not repair a capped
+export: missing groups or optimizer still fail. Write any new analysis to a
+separate artifact, never overwrite a run's signed census or classification.
+
 Artifact authority is ordered as follows:
 
 1. the full XPlane plus the task-specific all-plane census decides whether the

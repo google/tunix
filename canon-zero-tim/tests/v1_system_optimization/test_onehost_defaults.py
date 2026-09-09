@@ -202,9 +202,16 @@ class OnehostDefaultsTest(unittest.TestCase):
 
   def test_census_and_docker_consume_the_same_pair(self):
     source = COMMON.read_text()
+    consumers = ("modules", "hierarchy", "trace")
     for name, option in zip(PAIR, ("p32-keep-tape", "dp-reduce-once")):
       self.assertEqual(source.count(f'-e {name}="${{{name}:-}}"'), 1)
-      self.assertEqual(source.count(f'--{option} "${{{name}:-}}"'), 2)
+      argument = f'--{option} "${{{name}:-}}"'
+      self.assertEqual(source.count(argument), len(consumers))
+      for consumer in consumers:
+        with self.subTest(consumer=consumer, name=name):
+          command = f'python3 "$script_dir/census_gsm8k_xprof_{consumer}.py"'
+          call = source.split(command, 1)[1].split("2>&1", 1)[0]
+          self.assertEqual(call.count(argument), 1)
 
   def test_policy_is_in_both_runtime_hash_lists(self):
     source = COMMON.read_text()

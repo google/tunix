@@ -506,6 +506,8 @@ if [ "$docker_rc" -eq 0 ]; then
     python3 "$script_dir/census_gsm8k_xprof_trace.py" \
       --run-root "$root" --expected-update-step 2 \
       --geometry "$geometry" \
+      --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
+      --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
       >"$trace_census" 2>&1
     trace_census_rc=$?
     if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ] || [ "$geometry" = dp2-tp2-p45 ]; then
