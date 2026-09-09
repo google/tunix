@@ -550,6 +550,59 @@ class RaidenSynchronizerTest(absltest.TestCase):
         self.assertEqual(meta_tcp.shards, (f"{sync_tcp.ip}:8001",))
         self.assertEqual(meta_tcp.control_plane_rpc_address, f"{sync_tcp.ip}:9001")
 
+  def test_apply_to_runner_success(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = ["['layers_0']['mlp']['down_proj']['weight']", "['embed_tokens']['weight']"]
+    arr1 = np.ones((4, 4), dtype=np.float32)
+    arr2 = np.ones((8, 4), dtype=np.float32)
+    sync.arrays = [arr1, arr2]
+
+    class _Runner:
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner_state = {
+        "model": {
+            "layers": [
+                {"mlp": {"down_proj": {"weight": np.zeros((4, 4), dtype=np.float32)}}}
+            ],
+            "embed_tokens": {"weight": np.zeros((8, 4), dtype=np.float32)},
+        }
+    }
+    runner = _Runner(runner_state)
+    sync.apply_to_runner(runner)
+    self.assertIs(runner.state["model"]["layers"][0]["mlp"]["down_proj"]["weight"], arr1)
+    self.assertIs(runner.state["model"]["embed_tokens"]["weight"], arr2)
+
+  def test_apply_to_runner_shape_mismatch_raises(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = ["w1"]
+    sync.arrays = [np.ones((4, 4), dtype=np.float32)]
+
+    class _Runner:
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner = _Runner({"w1": np.zeros((2, 2), dtype=np.float32)})
+    with self.assertRaisesRegex(ValueError, "Shape mismatch"):
+      sync.apply_to_runner(runner)
+
+  def test_apply_to_runner_unmatched_raises(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = ["w1", "w2"]
+    sync.arrays = [np.ones((2,), dtype=np.float32), np.ones((2,), dtype=np.float32)]
+
+    class _Runner:
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner = _Runner({"w1": np.zeros((2,), dtype=np.float32)})
+    with self.assertRaisesRegex(RuntimeError, "Not all synchronizer arrays were matched"):
+      sync.apply_to_runner(runner)
+
 
 if __name__ == "__main__":
   absltest.main()

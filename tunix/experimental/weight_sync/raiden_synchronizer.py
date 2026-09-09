@@ -176,7 +176,7 @@ def to_host_cpu_state(state: Any) -> Any:
     )
     # Proxy transit buffers land in reference cycles, so refcounting alone
     # does not reclaim them between leaves.
-    if i % 4 == 3:
+    if i % 64 == 63:
       gc.collect()
   gc.collect()
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
@@ -802,13 +802,22 @@ class RaidenSynchronizer:
       canon_p = _canonicalize_param_name(p_str)
 
       entry = None
-      if norm_p in name_to_entry:
+      if norm_p in name_to_entry and name_to_entry[norm_p][0] not in matched_indices:
         entry = name_to_entry[norm_p]
-      elif canon_p in name_to_entry:
+      elif canon_p in name_to_entry and name_to_entry[canon_p][0] not in matched_indices:
         entry = name_to_entry[canon_p]
       else:
         for k, v in name_to_entry.items():
-          if norm_p.endswith(k) or (canon_p and canon_p.endswith(k)):
+          if v[0] in matched_indices:
+            continue
+          if (
+              norm_p.endswith("." + k)
+              or norm_p.endswith("]" + k)
+              or (
+                  canon_p
+                  and (canon_p.endswith("." + k) or canon_p.endswith("]" + k))
+              )
+          ):
             entry = v
             break
 
@@ -963,5 +972,3 @@ def patch_raiden_worker_sync() -> None:
     logging.debug("tpu_inference not available to patch: %s", e)
 
 
-# Patch upon import so workers have delegation enabled automatically
-patch_raiden_worker_sync()
