@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 import threading
 from typing import Any, Mapping, Optional, Sequence
 
@@ -214,10 +215,12 @@ class _RaidenTransport:
           " so its assigned ports are known"
       )
     self._validate_metadata(metadata)
+    control_addr = metadata.control_plane_rpc_address
+    first_addr = control_addr.split(",")[0].strip() if control_addr else ""
     self._controller.register_work_unit(
         unit=self._to_raiden_id(metadata.unit),
         shards=list(metadata.shards),
-        control_plane_rpc_address=metadata.control_plane_rpc_address,
+        control_plane_rpc_address=first_addr or None,
         mesh_shape=metadata.mesh_shape,
         layout=metadata.layout,
         global_shape=metadata.global_shape,
@@ -229,6 +232,14 @@ class _RaidenTransport:
             else None
         ),
     )
+    if control_addr and "," in control_addr:
+      if self._controller.worker_rpc_client is not None:
+        for addr in control_addr.split(",")[1:]:
+          addr = addr.strip()
+          if addr:
+            self._controller.worker_rpc_client.register_worker_endpoint(
+                self._to_raiden_id(metadata.unit), addr
+            )
     with self._registered_lock:
       self._registered.add(metadata.unit)
 
@@ -273,16 +284,23 @@ class _RaidenTransport:
                 f" of {tensor.name!r} must have logical mesh size 1, got"
                 f" {logical_size}"
             )
-        elif axis not in physical_axes:
+          continue
+        # A dimension may be sharded over the product of several axes, which
+        # the wire form spells comma-joined; the controller splits it the same
+        # way to fold the sub-axis coordinates into one tensor coordinate.
+        sub_axes = axis.split(",")
+        unknown = [a for a in sub_axes if a not in physical_axes]
+        if unknown:
           raise ValueError(
               f"work unit {metadata.unit}: variable {tensor.name!r} names"
               f" unknown mesh axis {axis!r}"
           )
-        elif logical_size != physical_axes[axis]:
+        physical_size = math.prod(physical_axes[a] for a in sub_axes)
+        if logical_size != physical_size:
           raise ValueError(
               f"work unit {metadata.unit}: variable {tensor.name!r} maps axis"
               f" {axis!r} to logical size {logical_size}, but the physical"
-              f" mesh has size {physical_axes[axis]}"
+              f" mesh has size {physical_size}"
           )
 
   def transfer(
@@ -311,44 +329,24 @@ class _RaidenTransport:
     options = self._transfer_options
     if expected_block_count is None:
       expected_block_count = options.expected_block_count
-    if expected_block_count is not None and expected_block_count < 0:
-      raise ValueError(
-          "expected_block_count must be None (auto) or >= 0, got"
-          f" {expected_block_count}"
-      )
     resolved_uuid = self._transfer_uuid if generation is None else generation
     if resolved_uuid <= 0:
       raise ValueError(f"uuid must be positive, got {resolved_uuid}")
-    resolved_parallelism = (
-        options.parallelism if parallelism is None else parallelism
+    resolved_options = RaidenTransferOptions(
+        parallelism=options.parallelism if parallelism is None else parallelism,
+        expected_block_count=(
+            options.expected_block_count
+            if expected_block_count is None
+            else expected_block_count
+        ),
+        skip_d2h=options.skip_d2h if skip_d2h is None else skip_d2h,
+        skip_tiling=(
+            dict(options.skip_tiling)
+            if skip_tiling is None and options.skip_tiling is not None
+            else skip_tiling
+        ),
+        group_size=options.group_size if group_size is None else group_size,
     )
-    resolved_skip_d2h = options.skip_d2h if skip_d2h is None else skip_d2h
-    resolved_skip_tiling = (
-        dict(options.skip_tiling)
-        if skip_tiling is None and options.skip_tiling is not None
-        else skip_tiling
-    )
-    resolved_group_size = (
-        options.group_size if group_size is None else group_size
-    )
-    if resolved_parallelism is not None and resolved_parallelism <= 0:
-      raise ValueError(
-          f"parallelism must be positive when specified, got"
-          f" {resolved_parallelism}"
-      )
-    if resolved_group_size <= 0:
-      raise ValueError(
-          f"group_size must be positive, got {resolved_group_size}"
-      )
-    if resolved_skip_tiling is not None and any(
-        layer < 0 for layer in resolved_skip_tiling
-    ):
-      raise ValueError("skip_tiling layer indices must be non-negative")
-    if resolved_skip_d2h and resolved_skip_tiling is None:
-      raise ValueError(
-          "skip_d2h=True requires an explicit skip_tiling map describing"
-          " the source staging format"
-      )
 
     try:
       asyncio.get_running_loop()
@@ -406,10 +404,10 @@ class _RaidenTransport:
               dst_units=[self._to_raiden_id(unit) for unit in dst_units],
               req_id=req_id,
               expected_block_count=resolved_block_count,
-              parallelism=resolved_parallelism,
-              skip_d2h=resolved_skip_d2h,
-              skip_tiling=resolved_skip_tiling,
-              group_size=resolved_group_size,
+              parallelism=resolved_options.parallelism,
+              skip_d2h=resolved_options.skip_d2h,
+              skip_tiling=resolved_options.skip_tiling,
+              group_size=resolved_options.group_size,
               uuid=resolved_uuid,
               **kwargs,
           )

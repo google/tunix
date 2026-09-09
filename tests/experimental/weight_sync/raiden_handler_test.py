@@ -128,6 +128,7 @@ class RaidenHandlerTest(absltest.TestCase):
 
     self.server_cls.return_value.start.return_value = 15000
     self.controller = self.controller_cls.return_value
+    self.controller.worker_rpc_client = mock.MagicMock()
 
     # A fresh future per call, kept so a test can assert which way it was
     # driven. `start_transfer` returning a bare Mock would not do: the
@@ -258,6 +259,7 @@ class RaidenHandlerTest(absltest.TestCase):
     # outbound calls to worker control-plane addresses through its
     # WeightSyncWorkerRpcClient, and that client needs the resolver too.
     resolver = object()
+    self.rpc_client_cls.reset_mock()
     raiden_handler.RaidenHandler(port=0, name_resolver=resolver)
 
     self.rpc_client_cls.assert_called_once_with(name_resolver=resolver)
@@ -292,6 +294,19 @@ class RaidenHandlerTest(absltest.TestCase):
     self.assertEqual(kwargs["layout"], (1, 0))
     self.assertEqual(kwargs["itemsize"], 4)
     self.assertIn(SRC, self.handler.registered_units)
+
+  def test_register_multi_host_control_plane_rpc_address(self):
+    meta = make_metadata(
+        SRC,
+        control_plane_rpc_address="10.0.0.1:20001,10.0.0.2:20002",
+    )
+    self.handler.register_work_unit(meta)
+    self.controller.register_work_unit.assert_called_once()
+    kwargs = self.controller.register_work_unit.call_args.kwargs
+    self.assertEqual(kwargs["control_plane_rpc_address"], "10.0.0.1:20001")
+    self.controller.worker_rpc_client.register_worker_endpoint.assert_called_with(
+        RAIDEN_SRC, "10.0.0.2:20002"
+    )
 
   def test_register_rejects_a_unit_without_a_data_address(self):
     # The synchronizer assigns ports on construction; registering beforehand
