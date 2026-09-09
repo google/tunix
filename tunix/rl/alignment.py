@@ -39,6 +39,7 @@ ALIGN_ENV = "CANON_ALIGNMENT_GATE"
 GATE_ONLY_ENV = "CANON_ALIGNMENT_GATE_ONLY"
 UPDATE_CANARY_ENV = "CANON_ALIGNMENT_UPDATE_CANARY"
 TRAIN_ENV = "CANON_ALIGNMENT_TRAIN"
+AUDIT_EVERY_ENV = "CANON_ALIGNMENT_AUDIT_EVERY"
 REPORT_ENV = "CANON_ALIGN_REPORT"
 PRE_GATE_ENV = "CANON_PRE_ALIGN_GATE"
 PRE_REPORT_ENV = "CANON_PRE_ALIGN_REPORT"
@@ -337,6 +338,9 @@ class ObservedTrainExample:
   all_compact_filtered: bool = flax.struct.field(
       pytree_node=False, default=False
   )
+  # False on a non-audit step (CANON_ALIGNMENT_AUDIT_EVERY>1): s_prefill and
+  # t_old are NaN placeholders and the row carries no boundaries.
+  audited: bool = flax.struct.field(pytree_node=False, default=True)
 
   # AgenticRLLearner reads these attributes before Trainer unwraps the object.
   @property
@@ -477,6 +481,33 @@ def execution_mode() -> str:
         f"{GATE_ONLY_ENV}=1, {UPDATE_CANARY_ENV}=1, or {TRAIN_ENV}=1"
     )
   return enabled_modes[0]
+
+
+def audit_every() -> int:
+  """Return the alignment audit period; 1 (the default) audits every step.
+
+  tasks/zero_tim_perf P1.2: on a non-audit step the learner skips the engine
+  prefill rescore (S_prefill) and the trainer-old forward (T_old).  With
+  rollout logprobs as the PPO old values those two arrays feed only the
+  alignment boundaries, so the update is unchanged; the sidecar row is
+  marked ``audited=False`` and carries no boundaries.  A period other than 1
+  requires the host gate, like the execution modes.
+  """
+  raw = os.environ.get(AUDIT_EVERY_ENV, "")
+  if raw == "":
+    return 1
+  if not raw.isdigit() or int(raw) < 1:
+    raise AlignmentGateError(
+        f"{AUDIT_EVERY_ENV} must be a positive integer, got {raw!r}"
+    )
+  if os.environ.get(ALIGN_ENV, "") != "1":
+    raise AlignmentGateError(f"{AUDIT_EVERY_ENV} requires {ALIGN_ENV}=1")
+  return int(raw)
+
+
+def is_audit_step(step: int) -> bool:
+  """Whether ``step`` carries the full S_prefill/T_old alignment audit."""
+  return int(step) % audit_every() == 0
 
 
 def gsm8k_ab_report_policy() -> dict[str, Any]:
@@ -825,6 +856,7 @@ def wrap_train_example(
     top_p: float | None,
     s_prefill_source: Any,
     all_compact_filtered: bool = False,
+    audited: bool = True,
 ) -> ObservedTrainExample:
   """Validate real-rescore provenance and create a merge/slice-safe wrapper."""
   if not getattr(s_prefill_source, "is_real_rescore", False):
@@ -833,6 +865,13 @@ def wrap_train_example(
         "a cached-decode alias"
     )
   sd = np.asarray(s_decode)
+  if not audited:
+    # Non-audit step: the prefill rescore and the trainer-old forward were
+    # skipped.  Carry NaN placeholders of the decode shape so slicing and
+    # merging keep working; the checks below skip their boundaries.
+    placeholder = np.full(sd.shape, np.nan, dtype=sd.dtype)
+    s_prefill = placeholder if s_prefill is None else s_prefill
+    t_old = placeholder.copy() if t_old is None else t_old
   sp = np.asarray(s_prefill)
   to = np.asarray(t_old)
   mask = np.asarray(action_mask)
@@ -900,6 +939,7 @@ def wrap_train_example(
           axis=0,
       ),
       all_compact_filtered=bool(all_compact_filtered),
+      audited=bool(audited),
   )
 
 
@@ -1932,6 +1972,7 @@ def check_pre_backward(
   sd = np.asarray(sidecar.s_decode)
   sp = np.asarray(sidecar.s_prefill)
   to = np.asarray(sidecar.t_old)
+  audited = bool(getattr(sidecar, "audited", True))
   mask = np.asarray(sidecar.action_mask, dtype=np.bool_)
   n_action = int(mask.sum())
   policy = gsm8k_ab_report_policy()
@@ -1944,9 +1985,15 @@ def check_pre_backward(
   if n_action == 0 and not all_compact_filtered_no_signal:
     blocking_reds.append("N_action=0")
   boundaries = {}
+  # A non-audit row has no S_prefill/T_old (NaN placeholders): no boundary
+  # is evaluated and none is recorded; the audit period is in the record.
   for name, a, b in (
-      ("S_decode_vs_S_prefill", sd, sp),
-      ("S_prefill_vs_T_old", sp, to),
+      (
+          ("S_decode_vs_S_prefill", sd, sp),
+          ("S_prefill_vs_T_old", sp, to),
+      )
+      if audited
+      else ()
   ):
     difference = _masked_bitwise_difference(a, b, mask)
     _attach_tokens(difference, sidecar.tokens, mask.shape)
@@ -2010,6 +2057,8 @@ def check_pre_backward(
   record = {
       "timestamp": time.time(),
       "step": int(step),
+      "audited": audited,
+      "audit_every": audit_every(),
       "verdict": verdict,
       "reds": reds,
       "blocking_reds": blocking_reds,
@@ -2026,16 +2075,16 @@ def check_pre_backward(
       "boundaries": boundaries,
       "hashes": {
           "S_decode": _hash(sd),
-          "S_prefill": _hash(sp),
-          "T_old": _hash(to),
+          "S_prefill": _hash(sp) if audited else None,
+          "T_old": _hash(to) if audited else None,
           "tokens": _hash(sidecar.tokens),
           "action_mask": _hash(mask),
           "policy_version": _hash(sidecar.policy_version),
       },
       "masked_hashes": {
           "S_decode": _masked_hash(sd, mask),
-          "S_prefill": _masked_hash(sp, mask),
-          "T_old": _masked_hash(to, mask),
+          "S_prefill": _masked_hash(sp, mask) if audited else None,
+          "T_old": _masked_hash(to, mask) if audited else None,
       },
       "context": {
           "source": sidecar.source_name,
@@ -2132,6 +2181,7 @@ def check_batch(
   sp = np.asarray(sidecar.s_prefill)
   to = np.asarray(sidecar.t_old)
   tc = np.asarray(t_current)
+  audited = bool(getattr(sidecar, "audited", True))
   mask = np.asarray(sidecar.action_mask, dtype=np.bool_)
   sampling_values = np.asarray(sidecar.sampling_values, dtype=np.float32)
   n_action = int(mask.sum())
@@ -2179,10 +2229,16 @@ def check_batch(
   )
 
   boundaries = {}
+  # A non-audit row (CANON_ALIGNMENT_AUDIT_EVERY>1) has no S_prefill/T_old:
+  # no boundary and no old/current ratio is evaluated or recorded.
   for name, a, b in (
-      ("S_decode_vs_S_prefill", sd, sp),
-      ("S_prefill_vs_T_old", sp, to),
-      ("T_old_vs_T_current", to, tc),
+      (
+          ("S_decode_vs_S_prefill", sd, sp),
+          ("S_prefill_vs_T_old", sp, to),
+          ("T_old_vs_T_current", to, tc),
+      )
+      if audited
+      else ()
   ):
     difference = _masked_bitwise_difference(a, b, mask)
     max_abs: float | str = "nan"
@@ -2208,50 +2264,63 @@ def check_batch(
       else:
         blocking_reds.append(name)
 
-  with np.errstate(over="ignore", invalid="ignore"):
-    w = np.exp(to.astype(np.float64) - sd.astype(np.float64))
-    r = np.exp(tc.astype(np.float64) - to.astype(np.float64))
-    wr = w * r
-  ratio_finite = bool(
-      np.all(np.isfinite(w[mask]))
-      and np.all(np.isfinite(r[mask]))
-      and np.all(np.isfinite(wr[mask]))
-  )
-  ratio_stats = {}
-  for ratio_name, ratio_values in (("w", w), ("r", r), ("wr", wr)):
-    selected = ratio_values[mask]
-    ratio_stats[ratio_name] = {
-        "min": float(np.min(selected)) if selected.size and ratio_finite else None,
-        "max": float(np.max(selected)) if selected.size and ratio_finite else None,
+  if audited:
+    with np.errstate(over="ignore", invalid="ignore"):
+      w = np.exp(to.astype(np.float64) - sd.astype(np.float64))
+      r = np.exp(tc.astype(np.float64) - to.astype(np.float64))
+      wr = w * r
+    ratio_finite = bool(
+        np.all(np.isfinite(w[mask]))
+        and np.all(np.isfinite(r[mask]))
+        and np.all(np.isfinite(wr[mask]))
+    )
+    ratio_stats = {}
+    for ratio_name, ratio_values in (("w", w), ("r", r), ("wr", wr)):
+      selected = ratio_values[mask]
+      ratio_stats[ratio_name] = {
+          "min": float(np.min(selected)) if selected.size and ratio_finite else None,
+          "max": float(np.max(selected)) if selected.size and ratio_finite else None,
+      }
+    if not ratio_finite:
+      blocking_reds.append("ratio_nonfinite")
+    exact = {
+        "w_all_exactly_1": bool(np.all(w[mask] == 1.0)),
+        "r_all_exactly_1": bool(np.all(r[mask] == 1.0)),
+        "wr_all_exactly_1": bool(np.all(wr[mask] == 1.0)),
     }
-  if not ratio_finite:
-    blocking_reds.append("ratio_nonfinite")
-  exact = {
-      "w_all_exactly_1": bool(np.all(w[mask] == 1.0)),
-      "r_all_exactly_1": bool(np.all(r[mask] == 1.0)),
-      "wr_all_exactly_1": bool(np.all(wr[mask] == 1.0)),
-  }
-  ab_reported = "S_decode_vs_S_prefill" in reported_reds
-  for key, ok in exact.items():
-    if ok:
-      continue
-    if _policy_warns(policy, key):
-      warning_reds.append(key)
-    elif ab_reported and key in ("w_all_exactly_1", "wr_all_exactly_1"):
-      reported_reds.append(key)
-    else:
-      blocking_reds.append(key)
-  # Canonical GSM8K keeps rollout logprobs as the PPO old values.  Therefore
-  # the ratio that actually reaches the loss is w*r = exp(T_current-A), while
-  # r separately attests the trainer-old/current program boundary.
-  clip_hits = int(np.sum((wr[mask] < 0.8) | (wr[mask] > 1.28)))
-  tis_hits = int(np.sum(w[mask] > 2.0))
-  if clip_hits:
-    target = warning_reds if _policy_warns(policy, "clip_hits") else blocking_reds
-    target.append(f"clip_hits={clip_hits}")
-  if tis_hits:
-    target = warning_reds if _policy_warns(policy, "tis_hits") else blocking_reds
-    target.append(f"tis_hits={tis_hits}")
+    ab_reported = "S_decode_vs_S_prefill" in reported_reds
+    for key, ok in exact.items():
+      if ok:
+        continue
+      if _policy_warns(policy, key):
+        warning_reds.append(key)
+      elif ab_reported and key in ("w_all_exactly_1", "wr_all_exactly_1"):
+        reported_reds.append(key)
+      else:
+        blocking_reds.append(key)
+    # Canonical GSM8K keeps rollout logprobs as the PPO old values.  Therefore
+    # the ratio that actually reaches the loss is w*r = exp(T_current-A), while
+    # r separately attests the trainer-old/current program boundary.
+    clip_hits = int(np.sum((wr[mask] < 0.8) | (wr[mask] > 1.28)))
+    tis_hits = int(np.sum(w[mask] > 2.0))
+    if clip_hits:
+      target = warning_reds if _policy_warns(policy, "clip_hits") else blocking_reds
+      target.append(f"clip_hits={clip_hits}")
+    if tis_hits:
+      target = warning_reds if _policy_warns(policy, "tis_hits") else blocking_reds
+      target.append(f"tis_hits={tis_hits}")
+  else:
+    ratio_finite = None
+    ratio_stats = {
+        name: {"min": None, "max": None} for name in ("w", "r", "wr")
+    }
+    exact = {
+        "w_all_exactly_1": None,
+        "r_all_exactly_1": None,
+        "wr_all_exactly_1": None,
+    }
+    clip_hits = 0
+    tis_hits = 0
 
   grad_norm = float(np.asarray(gradient_norm))
   gradient = {
@@ -2290,6 +2359,8 @@ def check_batch(
   record = {
       "timestamp": time.time(),
       "step": int(step),
+      "audited": audited,
+      "audit_every": audit_every(),
       "execution_mode": mode,
       "verdict": verdict,
       "reds": reds,
@@ -2316,8 +2387,8 @@ def check_batch(
       },
       "hashes": {
           "S_decode": _hash(sd),
-          "S_prefill": _hash(sp),
-          "T_old": _hash(to),
+          "S_prefill": _hash(sp) if audited else None,
+          "T_old": _hash(to) if audited else None,
           "T_current": _hash(tc),
           "tokens": _hash(sidecar.tokens),
           "action_mask": _hash(mask),
@@ -2325,8 +2396,8 @@ def check_batch(
       },
       "masked_hashes": {
           "S_decode": _masked_hash(sd, mask),
-          "S_prefill": _masked_hash(sp, mask),
-          "T_old": _masked_hash(to, mask),
+          "S_prefill": _masked_hash(sp, mask) if audited else None,
+          "T_old": _masked_hash(to, mask) if audited else None,
           "T_current": _masked_hash(tc, mask),
       },
       "context": {

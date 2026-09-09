@@ -40,9 +40,17 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _strict_exact(records: list[dict[str, Any]]) -> bool:
   if not records:
     return False
+  # Non-audit rows (CANON_ALIGNMENT_AUDIT_EVERY>1) carry no boundaries; they
+  # must be clean PASS rows and at least one audited row must exist.
+  if not [r for r in records if r.get("audited", True) is not False]:
+    return False
   for record in records:
     if record.get("verdict") != "PASS":
       return False
+    if record.get("audited", True) is False:
+      if record.get("boundaries") not in ({}, None):
+        return False
+      continue
     boundaries = record.get("boundaries")
     if not isinstance(boundaries, dict) or not boundaries:
       return False

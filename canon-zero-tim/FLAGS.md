@@ -283,6 +283,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 ## Appendix — machine-generated full inventory (basis a94d6c0c, count must equal census)
 
 ```
+CANON_ALIGNMENT_AUDIT_EVERY
 CANON_ALIGNMENT_EXPECTED_RED
 CANON_ALIGNMENT_GATE
 CANON_ALIGNMENT_GATE_ONLY

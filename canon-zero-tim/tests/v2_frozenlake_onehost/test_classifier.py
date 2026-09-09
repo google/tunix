@@ -2247,3 +2247,41 @@ class FrozenLakeOneHostClassifierTest(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class AuditedRowsTest(unittest.TestCase):
+  """tasks/zero_tim_perf P1.2: non-audit alignment rows carry no boundaries."""
+
+  def _non_audit_row(self) -> dict:
+    row = _alignment(pre=False)
+    row["audited"] = False
+    row["boundaries"] = {}
+    return row
+
+  def test_audited_rows_alone_stay_exact(self):
+    self.assertTrue(classifier._exact_boundaries([_alignment(pre=False)]))
+
+  def test_non_audit_row_needs_an_audited_row(self):
+    self.assertFalse(classifier._exact_boundaries([self._non_audit_row()]))
+    self.assertTrue(
+        classifier._exact_boundaries(
+            [_alignment(pre=False), self._non_audit_row()]
+        )
+    )
+
+  def test_non_audit_row_must_be_clean(self):
+    bad = self._non_audit_row()
+    bad["verdict"] = "FAIL"
+    self.assertFalse(classifier._exact_boundaries([_alignment(pre=False), bad]))
+    leaky = self._non_audit_row()
+    leaky["boundaries"] = {"T_old_vs_T_current": _boundary()}
+    self.assertFalse(
+        classifier._exact_boundaries([_alignment(pre=False), leaky])
+    )
+
+  def test_audited_row_with_drift_still_fails(self):
+    drift = _alignment(pre=False)
+    drift["boundaries"]["T_old_vs_T_current"]["differing_bytes"] = 4
+    self.assertFalse(
+        classifier._exact_boundaries([drift, self._non_audit_row()])
+    )

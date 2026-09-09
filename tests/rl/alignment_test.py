@@ -1477,3 +1477,163 @@ class AlignmentTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
+
+
+class AuditEveryTest(absltest.TestCase):
+  """tasks/zero_tim_perf P1.2: CANON_ALIGNMENT_AUDIT_EVERY and non-audit rows."""
+
+  def setUp(self):
+    super().setUp()
+    self.env = mock.patch.dict(os.environ, {}, clear=False)
+    self.env.start()
+    for name in (
+        alignment.ALIGN_ENV, alignment.GATE_ONLY_ENV,
+        alignment.UPDATE_CANARY_ENV, alignment.TRAIN_ENV,
+        alignment.AUDIT_EVERY_ENV, alignment.REPORT_ENV,
+        alignment.PRE_GATE_ENV, alignment.PRE_REPORT_ENV,
+    ):
+      os.environ.pop(name, None)
+
+  def tearDown(self):
+    self.env.stop()
+    super().tearDown()
+
+  def _example(self, rows=2):
+    ids = np.arange(rows * 3, dtype=np.int32).reshape(rows, 3)
+    mask = np.ones_like(ids, dtype=np.bool_)
+    values = np.arange(rows * 3, dtype=np.float32).reshape(rows, 3) / 8
+    example = _Example(
+        completion_ids=jnp.asarray(ids),
+        completion_mask=jnp.asarray(mask),
+        advantages=jnp.ones((rows,), dtype=jnp.float32),
+        is_update_step=None,
+        prompt_ids=jnp.arange(rows * 2, dtype=jnp.int32).reshape(rows, 2),
+    )
+    return example, ids, mask, values
+
+  def _wrap(self, audited, rows=2):
+    example, ids, mask, values = self._example(rows)
+    return alignment.wrap_train_example(
+        example,
+        s_decode=values,
+        s_prefill=None if not audited else values.copy(),
+        t_old=None if not audited else values.copy(),
+        action_mask=mask,
+        completion_valid_mask=mask,
+        prompt_mask=np.ones((rows, 2), dtype=np.bool_),
+        tokens=ids,
+        policy_version=np.zeros((rows,), dtype=np.int32),
+        temperature=1.0,
+        top_k=None,
+        top_p=None,
+        s_prefill_source=_real_rescore,
+        audited=audited,
+    )
+
+  def test_audit_every_defaults_to_one(self):
+    self.assertEqual(alignment.audit_every(), 1)
+    self.assertTrue(alignment.is_audit_step(0))
+    self.assertTrue(alignment.is_audit_step(7))
+
+  def test_audit_every_requires_gate_and_positive_integer(self):
+    with mock.patch.dict(os.environ, {alignment.AUDIT_EVERY_ENV: "3"}):
+      with self.assertRaisesRegex(alignment.AlignmentGateError, "requires"):
+        alignment.audit_every()
+    with mock.patch.dict(
+        os.environ, {alignment.ALIGN_ENV: "1", alignment.AUDIT_EVERY_ENV: "0"}
+    ):
+      with self.assertRaisesRegex(alignment.AlignmentGateError, "positive"):
+        alignment.audit_every()
+    with mock.patch.dict(
+        os.environ, {alignment.ALIGN_ENV: "1", alignment.AUDIT_EVERY_ENV: "x"}
+    ):
+      with self.assertRaisesRegex(alignment.AlignmentGateError, "positive"):
+        alignment.audit_every()
+    with mock.patch.dict(
+        os.environ, {alignment.ALIGN_ENV: "1", alignment.AUDIT_EVERY_ENV: "3"}
+    ):
+      self.assertEqual(alignment.audit_every(), 3)
+      self.assertEqual(
+          [alignment.is_audit_step(s) for s in range(7)],
+          [True, False, False, True, False, False, True],
+      )
+
+  def test_default_wrap_is_audited(self):
+    wrapped = self._wrap(audited=True)
+    self.assertTrue(wrapped.audited)
+    np.testing.assert_array_equal(wrapped.s_prefill, wrapped.s_decode)
+
+  def test_non_audit_wrap_carries_nan_placeholders(self):
+    wrapped = self._wrap(audited=False)
+    self.assertFalse(wrapped.audited)
+    self.assertEqual(wrapped.s_prefill.shape, wrapped.s_decode.shape)
+    self.assertEqual(wrapped.s_prefill.dtype, wrapped.s_decode.dtype)
+    self.assertTrue(np.all(np.isnan(wrapped.s_prefill)))
+    self.assertTrue(np.all(np.isnan(wrapped.t_old)))
+
+  def test_non_audit_check_batch_records_no_boundaries(self):
+    wrapped = self._wrap(audited=False)
+    with tempfile.TemporaryDirectory() as tmpdir:
+      report = os.path.join(tmpdir, "report.jsonl")
+      with mock.patch.dict(
+          os.environ,
+          {
+              alignment.ALIGN_ENV: "1",
+              alignment.GATE_ONLY_ENV: "1",
+              alignment.AUDIT_EVERY_ENV: "2",
+              alignment.REPORT_ENV: report,
+              "CANON_ENGINE_MODULE_C": "1",
+          },
+          clear=False,
+      ):
+        with mock.patch.object(
+            alignment, "_p58_all_compact_filtered_no_signal", return_value=False
+        ):
+          from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+          with mock.patch.object(
+              canonical_forward, "attestation", return_value={"mode": "test"}
+          ):
+            result = alignment.check_batch(
+                wrapped,
+                t_current=wrapped.s_decode.copy(),
+                gradient_norm=np.asarray(2.0, np.float32),
+                optimizer_skipped=np.asarray(1, np.int32),
+                step=1,
+            )
+      self.assertFalse(result["audited"])
+      self.assertEqual(result["audit_every"], 2)
+      self.assertEqual(result["boundaries"], {})
+      self.assertEqual(result["verdict"], "PASS")
+      self.assertIsNone(result["exact"]["wr_all_exactly_1"])
+      self.assertIsNone(result["ratio_finite"])
+      self.assertIsNone(result["hashes"]["S_prefill"])
+      self.assertIsNone(result["masked_hashes"]["T_old"])
+      self.assertEqual(result["clip_hits"], 0)
+      with open(report, encoding="utf-8") as report_file:
+        row = json.loads(report_file.readline())
+      self.assertFalse(row["audited"])
+      self.assertEqual(row["boundaries"], {})
+
+  def test_non_audit_pre_backward_records_no_boundaries(self):
+    wrapped = self._wrap(audited=False)
+    with tempfile.TemporaryDirectory() as tmpdir:
+      report = os.path.join(tmpdir, "pre.jsonl")
+      with mock.patch.dict(
+          os.environ,
+          {
+              alignment.ALIGN_ENV: "1",
+              alignment.GATE_ONLY_ENV: "1",
+              alignment.AUDIT_EVERY_ENV: "2",
+              alignment.PRE_GATE_ENV: "1",
+              alignment.PRE_REPORT_ENV: report,
+          },
+          clear=False,
+      ):
+        with mock.patch.object(
+            alignment, "_p58_all_compact_filtered_no_signal", return_value=False
+        ):
+          record = alignment.check_pre_backward(wrapped, step=1)
+      self.assertFalse(record["audited"])
+      self.assertEqual(record["boundaries"], {})
+      self.assertEqual(record["verdict"], "PASS")
+      self.assertIsNone(record["hashes"]["T_old"])

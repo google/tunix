@@ -1037,23 +1037,32 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # The diagnostic pass (and the sampler-IS ``token`` path, which needs the
       # trainer's recomputed logp as ``old_per_token_logps``) requires a real
       # actor mesh; skip when not available.
+      # tasks/zero_tim_perf P1.2: the diagnostic trainer-old forward feeds
+      # only the alignment boundaries when rollout logprobs are the PPO old
+      # values, so a non-audit step (CANON_ALIGNMENT_AUDIT_EVERY>1) skips it;
+      # the sampler-IS token path and P57 Standard still need it as old logps.
+      audit_step = alignment.is_audit_step(int(self.rl_cluster.global_steps))
       need_trainer_logps = (
-          (have_actor_mesh and not deepswe_debug.rollout_only())
+          (have_actor_mesh and not deepswe_debug.rollout_only() and audit_step)
           or self.algo_config.sampler_is == "token"
           or trainer_old_no_tis
       )
       if need_trainer_logps:
-        trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
-            pad_id=pad_value,
-            eos_id=eos_value,
-            micro_batch_size=compute_logps_micro_batch_size,
-            prompt_mask=prompt_mask,
-            completion_mask=completion_valid_mask,
-            host_prompt_lengths=host_prompt_lengths,
-            host_completion_lengths=host_completion_lengths,
-        )
+        with perf_log.phase(
+            "trainer_old", step=int(self.rl_cluster.global_steps)
+        ) as trainer_old_perf:
+          trainer_old_perf["rows"] = int(completion_ids.shape[0])
+          trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+              prompt_tokens=prompt_ids,
+              completion_tokens=completion_ids,
+              pad_id=pad_value,
+              eos_id=eos_value,
+              micro_batch_size=compute_logps_micro_batch_size,
+              prompt_mask=prompt_mask,
+              completion_mask=completion_valid_mask,
+              host_prompt_lengths=host_prompt_lengths,
+              host_completion_lengths=host_completion_lengths,
+          )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout
@@ -1882,29 +1891,42 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             step=int(self.rl_cluster.global_steps),
         )
 
-      with perf_log.phase(
-          "rescore_b",
-          step=int(self.rl_cluster.global_steps),
-          sink=_perf_sink,
-      ) as perf_info:
-        perf_info["rows"] = int(completion_ids.shape[0])
-        if envelope_probe.enabled():
-          s_prefill = self.rl_cluster.get_prefill_rescore_logps(
-              prompt_ids,
-              completion_ids,
-              completion_lengths=np.asarray(
-                  raw_completion_lengths, dtype=np.int32
-              ),
-              diagnostic_arm="A",
-          )
-        else:
-          s_prefill = self.rl_cluster.get_prefill_rescore_logps(
-              prompt_ids,
-              completion_ids,
-              completion_lengths=np.asarray(
-                  raw_completion_lengths, dtype=np.int32
-              ),
-          )
+      # tasks/zero_tim_perf P1.2: the engine prefill rescore (S_prefill) is
+      # audit evidence only; a non-audit step skips it and the sidecar row
+      # carries NaN placeholders with audited=False.
+      audit_step = alignment.is_audit_step(int(self.rl_cluster.global_steps))
+      if not audit_step:
+        s_prefill = None
+        print(
+            "[CANON_ALIGN] audit=skip "
+            f"step={int(self.rl_cluster.global_steps)} "
+            f"every={alignment.audit_every()} rescore_b=0 trainer_old=0",
+            flush=True,
+        )
+      else:
+        with perf_log.phase(
+            "rescore_b",
+            step=int(self.rl_cluster.global_steps),
+            sink=_perf_sink,
+        ) as perf_info:
+          perf_info["rows"] = int(completion_ids.shape[0])
+          if envelope_probe.enabled():
+            s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+                prompt_ids,
+                completion_ids,
+                completion_lengths=np.asarray(
+                    raw_completion_lengths, dtype=np.int32
+                ),
+                diagnostic_arm="A",
+            )
+          else:
+            s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+                prompt_ids,
+                completion_ids,
+                completion_lengths=np.asarray(
+                    raw_completion_lengths, dtype=np.int32
+                ),
+            )
       rollout_config = self.rl_cluster.get_rollout_config(
           mode=rl_cluster_lib.Mode.TRAIN
       )
@@ -1923,6 +1945,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           top_p=rollout_config.top_p,
           s_prefill_source=rescore_source,
           all_compact_filtered=p58_all_compact_filtered,
+          audited=audit_step,
       )
       logging.info(
           "[CANON_ALIGN] attached host sidecar rows=%d completion_width=%d",

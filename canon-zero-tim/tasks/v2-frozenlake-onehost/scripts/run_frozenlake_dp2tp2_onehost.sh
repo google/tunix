@@ -328,6 +328,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P76_CHUNK_DEPENDENCY_TICKET="$chunk_dependency_ticket" \
   -e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure" \
   -e CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps" \
+  -e CANON_ALIGNMENT_AUDIT_EVERY="${CANON_ALIGNMENT_AUDIT_EVERY:-}" \
   -e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$capture_full_tree" = 1 ] && echo "$root/p61_numerical")" \
   -e V2_FL_MODE="$mode" \
   -e CANON_XPROF_DIR="$xprof_dir" \

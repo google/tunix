@@ -316,11 +316,21 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
 def _exact_boundaries(rows: list[dict[str, Any]]) -> bool:
   if not rows:
     return False
+  # tasks/zero_tim_perf P1.2: a row written on a non-audit step
+  # (CANON_ALIGNMENT_AUDIT_EVERY>1) carries audited=False and no boundaries;
+  # it must still be a clean PASS, and at least one audited row must exist.
+  audited_rows = [row for row in rows if row.get("audited", True) is not False]
+  if not audited_rows:
+    return False
   for row in rows:
     if row.get("verdict") != "PASS":
       return False
     if row.get("blocking_reds", []) or row.get("reds", []):
       return False
+    if row.get("audited", True) is False:
+      if row.get("boundaries") not in ({}, None):
+        return False
+      continue
     boundaries = row.get("boundaries")
     if not isinstance(boundaries, dict) or not boundaries:
       return False

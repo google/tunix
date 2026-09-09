@@ -240,42 +240,42 @@ class Trainer(peft_trainer.PeftTrainer):
         boundaries = record["boundaries"]
         exact = record["exact"]
         warning_count = len(record.get("warning_reds", ()))
+        audited = bool(record.get("audited", True))
+        nan = float("nan")
+
+        # A non-audit row (CANON_ALIGNMENT_AUDIT_EVERY>1) has no boundaries
+        # and no old/current ratios; keep the metric keys, emit NaN.
+        def _b(name, key):
+          return float(boundaries[name][key]) if audited else nan
+
+        def _v(value):
+          return nan if value is None else float(value)
+
         scalars = {
+            "zero_tim/audited": float(audited),
             "zero_tim/hard_gate_pass": float(
                 record["verdict"] == "PASS"
             ),
             "zero_tim/alignment_warning": float(warning_count > 0),
             "zero_tim/alignment_warning_count": float(warning_count),
             "zero_tim/n_action": float(record["N_action"]),
-            "zero_tim/s_decode_vs_s_prefill_bytes": float(
-                boundaries["S_decode_vs_S_prefill"]["differing_bytes"]
-            ),
-            "zero_tim/s_prefill_vs_t_old_bytes": float(
-                boundaries["S_prefill_vs_T_old"]["differing_bytes"]
-            ),
-            "zero_tim/t_old_vs_t_current_bytes": float(
-                boundaries["T_old_vs_T_current"]["differing_bytes"]
-            ),
-            "zero_tim/s_decode_vs_s_prefill_max_abs": float(
-                boundaries["S_decode_vs_S_prefill"]["max_abs"]
-            ),
-            "zero_tim/s_prefill_vs_t_old_max_abs": float(
-                boundaries["S_prefill_vs_T_old"]["max_abs"]
-            ),
-            "zero_tim/t_old_vs_t_current_max_abs": float(
-                boundaries["T_old_vs_T_current"]["max_abs"]
-            ),
-            "zero_tim/w_exact": float(exact["w_all_exactly_1"]),
-            "zero_tim/r_exact": float(exact["r_all_exactly_1"]),
-            "zero_tim/wr_exact": float(exact["wr_all_exactly_1"]),
+            "zero_tim/s_decode_vs_s_prefill_bytes": _b("S_decode_vs_S_prefill", "differing_bytes"),
+            "zero_tim/s_prefill_vs_t_old_bytes": _b("S_prefill_vs_T_old", "differing_bytes"),
+            "zero_tim/t_old_vs_t_current_bytes": _b("T_old_vs_T_current", "differing_bytes"),
+            "zero_tim/s_decode_vs_s_prefill_max_abs": _b("S_decode_vs_S_prefill", "max_abs"),
+            "zero_tim/s_prefill_vs_t_old_max_abs": _b("S_prefill_vs_T_old", "max_abs"),
+            "zero_tim/t_old_vs_t_current_max_abs": _b("T_old_vs_T_current", "max_abs"),
+            "zero_tim/w_exact": _v(exact["w_all_exactly_1"]),
+            "zero_tim/r_exact": _v(exact["r_all_exactly_1"]),
+            "zero_tim/wr_exact": _v(exact["wr_all_exactly_1"]),
             "zero_tim/clip_hits": float(record["clip_hits"]),
             "zero_tim/tis_hits": float(record["tis_hits"]),
-            "zero_tim/w_min": float(record["ratio_stats"]["w"]["min"]),
-            "zero_tim/w_max": float(record["ratio_stats"]["w"]["max"]),
-            "zero_tim/r_min": float(record["ratio_stats"]["r"]["min"]),
-            "zero_tim/r_max": float(record["ratio_stats"]["r"]["max"]),
-            "zero_tim/wr_min": float(record["ratio_stats"]["wr"]["min"]),
-            "zero_tim/wr_max": float(record["ratio_stats"]["wr"]["max"]),
+            "zero_tim/w_min": _v(record["ratio_stats"]["w"]["min"]),
+            "zero_tim/w_max": _v(record["ratio_stats"]["w"]["max"]),
+            "zero_tim/r_min": _v(record["ratio_stats"]["r"]["min"]),
+            "zero_tim/r_max": _v(record["ratio_stats"]["r"]["max"]),
+            "zero_tim/wr_min": _v(record["ratio_stats"]["wr"]["min"]),
+            "zero_tim/wr_max": _v(record["ratio_stats"]["wr"]["max"]),
             "zero_tim/gradient_nonzero": float(record["gradient"]["nonzero"]),
             "zero_tim/first_order_kl": float(
                 record["kl_protocol"]["first_order_-mean_delta"]
@@ -289,7 +289,11 @@ class Trainer(peft_trainer.PeftTrainer):
             ("S_prefill_vs_T_old", "s_prefill_vs_t_old"),
             ("T_old_vs_T_current", "t_old_vs_t_current"),
         ):
-          boundary = boundaries[boundary_name]
+          boundary = boundaries.get(boundary_name) if audited else None
+          if boundary is None:
+            for suffix in ("elements", "element_fraction", "byte_fraction"):
+              scalars[f"zero_tim/{metric_prefix}_{suffix}"] = nan
+            continue
           scalars[f"zero_tim/{metric_prefix}_elements"] = float(
               boundary["differing_elements"]
           )

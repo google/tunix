@@ -7480,6 +7480,11 @@ class Qwen3EngineForwardAdapter:
     else:
       classification = "LOCAL_CARRIER_NOT_ISOLATED"
 
+    if not getattr(row, "audited", True):
+      raise RuntimeError(
+          "P59 causal replay needs an audited sidecar row; "
+          "CANON_ALIGNMENT_AUDIT_EVERY must audit this step"
+      )
     captured = {
         "S_decode_vs_S_prefill": _host_difference_summary(
             row.s_decode[action_indices], row.s_prefill[action_indices]
