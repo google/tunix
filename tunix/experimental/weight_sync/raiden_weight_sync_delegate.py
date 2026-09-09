@@ -162,12 +162,10 @@ class RaidenWeightSyncDelegate:
         model_runner = getattr(sampler, "_model_runner", None)
         if model_runner is not None and hasattr(model_runner, "state_leaves"):
           state = getattr(model_runner, "state", None)
-          if isinstance(state, nnx.State):
+          if state is not None:
             model_runner.state_leaves = tuple(
                 jax.tree_util.tree_leaves(state)
             )
-          elif state is not None:
-            model_runner.state_leaves = state
 
         llm = getattr(sampler, "llm", None)
         driver = getattr(sampler, "_driver", None)
