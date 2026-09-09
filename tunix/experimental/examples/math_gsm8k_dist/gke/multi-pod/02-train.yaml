@@ -1,0 +1,97 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: train
+  namespace: default
+spec:
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: proc
+    template:
+      spec:
+        backoffLimit: 2048000
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          spec:
+            containers:
+            - command:
+              - bash
+              - -c
+              - "# PID 1 wrapper: forwards SIGTERM to background child process so\
+                \ K8s\n# termination grace period shuts down workload cleanly without\
+                \ SIGKILL.\n# Polling sleep loop ensures bash wakes up promptly to\
+                \ run trap handler.\n\necho \"Program Start: $(date)\"\n_sigterm()\
+                \ (kill -SIGTERM $! 2>/dev/null)\ntrap _sigterm SIGTERM\n\n(\n  python\
+                \ -c \"from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-1.7B',\
+                \ local_dir='/tmp/models/Qwen3-1.7B')\" && python -m tunix.experimental.distributed.runtime.main\
+                \ --discovery_addrs=orch:20000 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor\
+                \ --process_main=tunix.experimental.examples.common.run_trainer_node.main\
+                \ --worker_id=train --port=20002 --mesh_fsdp=1 --mesh_tp=1 --trainer_backend=tunix\
+                \ --model_id=Qwen/Qwen3-1.7B --model_name=Qwen3-1.7B --model_dir=/tmp/models/Qwen3-1.7B\
+                \ --tokenizer_path=Qwen/Qwen3-1.7B --max_prompt_length=512 --max_response_length=128\
+                \ --sampler_type=inprocess_vllm --mini_batch_size=16 --train_micro_batch_size=1\
+                \ --eval_every_n_steps=1000000 --lora_rank=16 --lora_alpha=16.0 --use_lora\
+                \ --checkpoint_save_interval_steps=1000000 --checkpoint_max_to_keep=1\
+                \ --checkpoint_root_directory=/tmp/checkpoints\n) & PID=$!\n\nwhile\
+                \ kill -0 $PID 2>/dev/null; do\n  sleep 5\ndone\nwait $PID\nEXIT_CODE=$?\n\
+                \necho \"Program End: $(date)\"\necho \"EXIT_CODE=$EXIT_CODE\"\nexit\
+                \ $EXIT_CODE\n"
+              env:
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOB_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: POD_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+              - name: JAX_PLATFORMS
+                value: tpu,cpu
+              - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: '0'
+              image: us-central1-docker.pkg.dev/kfswain-gke-dev/tunix-rl/tunix-tpu:latest
+              imagePullPolicy: Always
+              name: worker
+              ports:
+              - containerPort: 20002
+                name: grpc
+              resources:
+                limits:
+                  google.com/tpu: '1'
+                requests:
+                  google.com/tpu: '1'
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+              cloud.google.com/gke-tpu-topology: 1x1
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 10
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  startupPolicy:
+    startupPolicyOrder: AnyOrder
+  successPolicy:
+    operator: All
