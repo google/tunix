@@ -232,6 +232,11 @@ class _RaidenTransport:
             else None
         ),
     )
+    # In multi-host TPU topologies (e.g. multi-host Pathways trainer or vLLM rollout
+    # slices where TP spans multiple nodes), metadata reports comma-separated
+    # control addresses for all participating worker hosts. The primary host is
+    # registered above with the central controller; secondary hosts are registered
+    # with the WorkerRpcClient under sub-IDs so worker-to-worker RPCs reach every host.
     if control_addr and "," in control_addr:
       if self._controller.worker_rpc_client is not None:
         base_id = self._to_raiden_id(metadata.unit)
