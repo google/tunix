@@ -233,6 +233,9 @@ echo "Launching trainer node..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
+  if [[ -n "$ROLLOUT_TP" ]]; then
+    TRAINER_CMD+=(--rollout_mesh_tp="$ROLLOUT_TP")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi

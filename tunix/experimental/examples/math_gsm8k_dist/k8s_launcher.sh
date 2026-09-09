@@ -80,7 +80,6 @@ OPTIONS:
   --no-cluster-connect      Skip automatic gcloud cluster authentication check
   --use-ffi                 Enable Raiden FFI weight synchronization on Pathways TPU workers
   --no-use-ffi              Disable Raiden FFI
-  --use-weight-converter    Enable MaxText-to-MaxText weight converter (default: 1)
   --prefuse-moe-weights     Prefuse MoE weights (gate + up projection) for rollout TP
   --enable-prefix-caching   Enable prefix caching in vLLM rollout (default: false)
   --pathways-server-image <IMAGE> Pathways server container image (for FFI weight sync)
@@ -126,12 +125,10 @@ load_preset_defaults() {
       PRESET_BATCH_SIZE=4
       PRESET_NUM_GENERATIONS=2
       PRESET_ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
-      PRESET_ROLLOUT_TENSOR_PARALLEL_SIZE=2
       PRESET_ROLLOUT_MESH_TP=2
       PRESET_ROLLOUT_REPLICAS=2
       PRESET_SAMPLER="vllm"
       PRESET_WEIGHT_SYNC_MODE="raiden"
-      PRESET_USE_WEIGHT_CONVERTER=1
       PRESET_ROLLOUT_BACKEND="maxtext"
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
@@ -157,12 +154,10 @@ load_preset_defaults() {
       PRESET_BATCH_SIZE=4
       PRESET_NUM_GENERATIONS=2
       PRESET_ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
-      PRESET_ROLLOUT_TENSOR_PARALLEL_SIZE=2
       PRESET_ROLLOUT_MESH_TP=2
       PRESET_ROLLOUT_REPLICAS=2
       PRESET_SAMPLER="vllm"
       PRESET_WEIGHT_SYNC_MODE="raiden"
-      PRESET_USE_WEIGHT_CONVERTER=1
       PRESET_ROLLOUT_BACKEND="maxtext"
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
@@ -187,12 +182,10 @@ load_preset_defaults() {
       PRESET_BATCH_SIZE=4
       PRESET_NUM_GENERATIONS=2
       PRESET_ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
-      PRESET_ROLLOUT_TENSOR_PARALLEL_SIZE=1
       PRESET_ROLLOUT_MESH_TP=4
       PRESET_ROLLOUT_REPLICAS=1
       PRESET_SAMPLER="vllm"
       PRESET_WEIGHT_SYNC_MODE="raiden"
-      PRESET_USE_WEIGHT_CONVERTER=1
       PRESET_ROLLOUT_BACKEND="maxtext"
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
@@ -216,12 +209,10 @@ load_preset_defaults() {
       PRESET_BATCH_SIZE=4
       PRESET_NUM_GENERATIONS=2
       PRESET_ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
-      PRESET_ROLLOUT_TENSOR_PARALLEL_SIZE=2
       PRESET_ROLLOUT_MESH_TP=2
       PRESET_ROLLOUT_REPLICAS=2
       PRESET_SAMPLER="vllm"
       PRESET_WEIGHT_SYNC_MODE="raiden"
-      PRESET_USE_WEIGHT_CONVERTER=1
       PRESET_ROLLOUT_BACKEND="maxtext"
       PRESET_VERIFY_WEIGHTS="true"
       PRESET_DISABLE_CHECKPOINTING="true"
@@ -274,7 +265,6 @@ USER_PREFUSE_MOE_WEIGHTS=""
 USER_ENABLE_PREFIX_CACHING=""
 USER_TRAINER_MESH_FSDP=""
 USER_TRAINER_MESH_TP=""
-USER_USE_WEIGHT_CONVERTER=""
 
 RANDOMIZE_ID=false
 DRY_RUN="${DRY_RUN:-false}"
@@ -386,14 +376,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-enable-prefix-caching|--no_enable_prefix_caching|--disable-prefix-caching|--disable_prefix_caching)
       USER_ENABLE_PREFIX_CACHING="false"
-      shift
-      ;;
-    --use-weight-converter|--use_weight_converter)
-      USER_USE_WEIGHT_CONVERTER=1
-      shift
-      ;;
-    --no-use-weight-converter|--no_use_weight_converter)
-      USER_USE_WEIGHT_CONVERTER=0
       shift
       ;;
     --max-response-length=*|--max_response_length=*)
@@ -635,7 +617,6 @@ TRAINER_MESH_FSDP="${USER_TRAINER_MESH_FSDP:-${TRAINER_MESH_FSDP:-${PRESET_TRAIN
 ROLLOUT_MESH_TP="${ROLLOUT_MESH_TP:-${PRESET_ROLLOUT_MESH_TP}}"
 SAMPLER="${SAMPLER:-${PRESET_SAMPLER}}"
 WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-${PRESET_WEIGHT_SYNC_MODE}}"
-USE_WEIGHT_CONVERTER="${USER_USE_WEIGHT_CONVERTER:-${USE_WEIGHT_CONVERTER:-${PRESET_USE_WEIGHT_CONVERTER}}}"
 ROLLOUT_BACKEND="${ROLLOUT_BACKEND:-${PRESET_ROLLOUT_BACKEND}}"
 VERIFY_WEIGHTS="${USER_VERIFY_WEIGHTS:-${VERIFY_WEIGHTS:-${PRESET_VERIFY_WEIGHTS}}}"
 DISABLE_CHECKPOINTING="${DISABLE_CHECKPOINTING:-${PRESET_DISABLE_CHECKPOINTING}}"
@@ -951,7 +932,7 @@ start_trainer() {
     "${pw_server_arg[@]}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      PYTHONUNBUFFERED=1 ${ffi_env} PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} ROLLOUT_BACKEND=${ROLLOUT_BACKEND} python -m tunix.experimental.distributed.runtime.main \
+      PYTHONUNBUFFERED=1 ${ffi_env} PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS} DISABLE_CHECKPOINTING=${DISABLE_CHECKPOINTING} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ROLLOUT_BACKEND=${ROLLOUT_BACKEND} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -1014,7 +995,7 @@ start_rollout_instance() {
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
       ${sync_prefix} \
-      PYTHONUNBUFFERED=1 ${rollout_ffi_env} PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      PYTHONUNBUFFERED=1 ${rollout_ffi_env} PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \

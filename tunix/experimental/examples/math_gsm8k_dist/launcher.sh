@@ -409,6 +409,9 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
+  if [[ -n "$ROLLOUT_TP" ]]; then
+    TRAINER_CMD+=(--rollout_mesh_tp="$ROLLOUT_TP")
+  fi
   if [[ -n "$MAXTEXT_CKPT" ]]; then
     TRAINER_CMD+=(--maxtext_load_parameters_path="$MAXTEXT_CKPT")
   fi

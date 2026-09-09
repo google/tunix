@@ -94,12 +94,8 @@ def build_maxtext_config(
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
 
-  if rollout_mesh_tp <= 0:
-    rollout_mesh_tp = int(
-        os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
-        or os.environ.get("ROLLOUT_MESH_TP", 0)
-        or 0
-    )
+  if rollout_mesh_tp > 0:
+    argv.append(f"rollout_tensor_parallelism={rollout_mesh_tp}")
 
   if not padded_moe_mlp_dim and rollout_mesh_tp > 0:
     try:
