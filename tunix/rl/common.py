@@ -123,6 +123,19 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # Per-token log-probabilities the rollout engine reported for the tokens it
+  # generated -- the *behaviour* policy. Distinct from ``old_per_token_logps``,
+  # which is whatever policy the surrogate ratio is taken against: the two
+  # coincide in the common case but diverge when the ratio is taken against a
+  # trainer recompute or pinned to 1.0. Kept separate so a correction can
+  # always reference the policy that actually produced the samples. ``None``
+  # when the rollout engine does not return log-probabilities.
+  rollout_per_token_logps: ArrayType | None = None
+  # `[B]`, 1.0 where the rollout engine exhausted the response budget without
+  # emitting an end-of-sequence token, i.e. the sample is a truncated prefix of
+  # a trajectory rather than a trajectory. ``None`` when the engine reports no
+  # truncation verdict.
+  overlong: ArrayType | None = None
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
