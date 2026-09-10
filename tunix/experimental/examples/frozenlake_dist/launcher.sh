@@ -38,6 +38,10 @@ NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-450}
 MAX_TURNS=${MAX_TURNS:-8}
 DATASET_SIZE=${DATASET_SIZE:-10000}
+NUM_BATCHES=${NUM_BATCHES:-150}
+NUM_EPOCHS=${NUM_EPOCHS:-3}
+EVAL_DATASET_SIZE=${EVAL_DATASET_SIZE:-100}
+EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-10}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-4}
@@ -46,6 +50,9 @@ ADAM_B1=${ADAM_B1:-0.9}
 ADAM_B2=${ADAM_B2:-0.95}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.0}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-100.0}
+PARAM_DTYPE=${PARAM_DTYPE:-float32}
+REMAT_POLICY=${REMAT_POLICY:-decoder}
+FLASH_ATTENTION_BLOCK_SIZE=${FLASH_ATTENTION_BLOCK_SIZE:-256}
 TEMPERATURE=${TEMPERATURE:-0.7}
 TOP_P=${TOP_P:-1.0}
 TOP_K=${TOP_K:-0}
@@ -63,9 +70,15 @@ SHUFFLE=${SHUFFLE:-1}
 IS_SLIPPERY=${IS_SLIPPERY:-0}
 USE_MULTISTEP_PROMPT=${USE_MULTISTEP_PROMPT:-1}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-1}
+SAMPLER_IS=${SAMPLER_IS:-token}
+SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-2.0}
 ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-256}
 SAMPLER=${SAMPLER:-inprocess_vllm}
-WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.20}
+VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-64}
+VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}
+VLLM_MODEL_LEN_MARGIN=${VLLM_MODEL_LEN_MARGIN:-256}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1000000000}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-1}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints/frozenlake"}
@@ -221,6 +234,11 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --adam_b2="$ADAM_B2"
     --weight_decay="$WEIGHT_DECAY"
     --max_grad_norm="$MAX_GRAD_NORM"
+    --param_dtype="$PARAM_DTYPE"
+    --enable_remat
+    --remat_policy="$REMAT_POLICY"
+    --use_flash_attention
+    --flash_attention_block_size="$FLASH_ATTENTION_BLOCK_SIZE"
     --sampler_type="$SAMPLER"
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
@@ -258,6 +276,13 @@ TRAINER_PID=$!
     --env_name=frozenlake_env
     --agent_name=frozenlake_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
+    --no-vllm_async_scheduling
+    --no-vllm_enable_prefix_caching
+    --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
+    --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
+    --vllm_model_len_margin="$VLLM_MODEL_LEN_MARGIN"
+    --vllm_server_mode
     --no-enable_thinking
   )
   is_true "$DEBUG" && cmd+=(--debug)
@@ -289,6 +314,10 @@ cmd=(
   --max_steps="$MAX_STEPS"
   --max_turns="$MAX_TURNS"
   --dataset_size="$DATASET_SIZE"
+  --num_batches="$NUM_BATCHES"
+  --num_epochs="$NUM_EPOCHS"
+  --eval_dataset_size="$EVAL_DATASET_SIZE"
+  --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
   --max_prompt_length="$MAX_PROMPT_LENGTH"
   --max_response_length="$MAX_RESPONSE_LENGTH"
   --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
@@ -304,6 +333,8 @@ cmd=(
   --advantage_estimator="$ADVANTAGE_ESTIMATOR"
   --max_staleness="$OFF_POLICY_STEPS"
   --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
+  --sampler_is="$SAMPLER_IS"
+  --sampler_is_threshold="$SAMPLER_IS_THRESHOLD"
   --seed="$SEED"
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
   --trainer_fsdp="$TRAINER_FSDP"

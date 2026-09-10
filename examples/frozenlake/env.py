@@ -176,9 +176,9 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
 
     desc = kwargs.pop("desc", None)
     is_slippery = kwargs.pop("is_slippery", False)
-    self.seed = int(entry.get("seed", 42))
-    self.size = int(entry.get("size", 8))
-    self.p = float(entry.get("p", 0.8))
+    self.seed = entry["seed"].item() if "seed" in entry else 42
+    self.size = entry["size"].item() if "size" in entry else 8
+    self.p = entry["p"].item() if "p" in entry else 0.8
 
     if desc is None:
       random_map, goal_position = generate_random_map(

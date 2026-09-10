@@ -4,9 +4,10 @@ This directory ports `examples/frozenlake/train_frozenlake_qwen3.py` to the
 experimental distributed RL stack. The control plane runs on CPU, while the
 generic distributed trainer and rollout workers own model execution.
 
-The distributed module keeps only its in-memory dataset and request wiring. It
-directly registers and reuses `examples/frozenlake/agent.py` and
-`examples/frozenlake/env.py`, avoiding a second copy of the recipe behavior.
+The distributed module keeps only its in-memory dataset, a thin wire adapter,
+and request wiring. It reuses `examples/frozenlake/agent.py` and subclasses the
+unchanged `examples/frozenlake/env.py` only to restore NumPy scalar wrappers
+after RPC serialization.
 
 The defaults preserve the reference Qwen3 recipe: Qwen3-8B, 64 prompt groups
 per full step, 64 prompt groups per optimizer update, 8 generations, 8 turns,
@@ -15,7 +16,16 @@ GSPO-token loss, RLOO advantages, asymmetric clipping (`0.003`/`0.005`),
 (`1e-6`, `b1=0.9`, `b2=0.95`, no weight decay), and gradient clipping at 100.
 Maps use the same seed/size/frozen-probability distribution as the original
 dataset recipe, but are generated directly in memory without Grain, pandas, or
-Parquet.
+Parquet. The training stream also matches the recipe's NumPy/Hugging Face
+shuffle, 150-batch truncation, and three-epoch repetition. A 100-map held-out
+set (generation seed 123) is evaluated at steps 0, 10, 20, ... and reports the
+same solve metrics.
+
+The model path is aligned as well: BF16 compute with FP32 actor parameters,
+decoder rematerialization, flash attention (block size 256), and the recipe's
+vLLM HBM/capacity/cache settings. FrozenLake uses token-level truncated sampler
+importance sampling with threshold 2.0; trainer log-probabilities are captured
+for the entire full batch before any mini-batch update.
 
 Install the FrozenLake and distributed extras, then launch from an 8-chip TPU
 host:
@@ -41,6 +51,7 @@ ROLLOUT_TPU_CHIPS=2,3 ROLLOUT_FSDP=1 ROLLOUT_TP=2 \
 TPU_CHIPS_PER_HOST_BOUNDS=1,2,1 TPU_HOST_BOUNDS=1,1,1 \
 BATCH_SIZE=1 MINI_BATCH_SIZE=1 NUM_GENERATIONS=2 \
 TRAIN_MICRO_BATCH_SIZE=1 DATASET_SIZE=32 \
+NUM_BATCHES=1 NUM_EPOCHS=1 EVAL_EVERY_N_STEPS=0 \
 MAX_STEPS=1 MAX_TURNS=3 \
 MAX_PROMPT_LENGTH=1024 MAX_RESPONSE_LENGTH=1024 \
 BETA=0.0 WEIGHT_SYNC_MODE=none ./launcher.sh
@@ -54,17 +65,12 @@ multi-step training test.
 `BATCH_SIZE` is the full/global batch and determines checkpointing, global
 step advancement, and weight-sync cadence. `MINI_BATCH_SIZE` determines each
 optimizer update, so one full step performs
-`BATCH_SIZE / MINI_BATCH_SIZE` updates. Multi-step training should use
-`WEIGHT_SYNC_MODE=raiden`; `none` is intended for smoke tests, and the launcher
-rejects the protocol-only `fallback` mode through the orchestrator validation.
+`BATCH_SIZE / MINI_BATCH_SIZE` updates. Weight sync defaults to `raiden`;
+`none` is intended only for one-step smoke tests, and the launcher rejects the
+protocol-only `fallback` mode through the orchestrator validation.
 
 The launcher starts one actor and one rollout worker, so `BETA` must remain
 zero. A nonzero KL coefficient requires adding a reference inference worker.
 FrozenLake is deterministic by default, matching the reference recipe's
 environment construction; set `IS_SLIPPERY=1` to enable Gymnasium's slippery
 transitions.
-
-One reference-only feature is not modeled separately: the original recipe's
-`sampler_is` threshold is folded into the distributed path's rollout-logprob
-importance ratio because Orchestrator V2 currently exposes
-`use_rollout_logps`, but not an independent sampler-IS threshold.

@@ -61,6 +61,26 @@ def create_dataset(size: int = 10000, seed: int = 42) -> list[dict[str, Any]]:
   ]
 
 
+def prepare_dataset(
+    dataset: list[dict[str, Any]],
+    *,
+    shuffle: bool,
+    seed: int,
+    batch_size: int,
+    num_batches: int,
+    num_epochs: int,
+) -> list[dict[str, Any]]:
+  """Matches Dataset.shuffle + post_init_dataset truncation and repetition."""
+  if batch_size <= 0 or num_batches <= 0 or num_epochs <= 0:
+    raise ValueError("batch_size, num_batches, and num_epochs must be positive.")
+  ordered = list(dataset)
+  if shuffle:
+    order = np.random.default_rng(seed).permutation(len(ordered))
+    ordered = [ordered[int(index)] for index in order]
+  ordered = ordered[: min(num_batches * batch_size, len(ordered))]
+  return ordered * num_epochs
+
+
 def build_prompt_item(
     *,
     entry: dict[str, Any],
@@ -73,12 +93,13 @@ def build_prompt_item(
     top_k: int,
     is_slippery: bool,
     use_multistep_prompt: bool,
+    prompt_id_prefix: str = "frozenlake",
 ) -> dict[str, Any]:
   """Builds one serializable distributed rollout request input."""
   normalized_entry = {
       key: _python_scalar(value) for key, value in entry.items()
   }
-  prompt_id = f"frozenlake_{prompt_idx}"
+  prompt_id = f"{prompt_id_prefix}_{prompt_idx}"
   return {
       # The registered environment supplies the first user observation.
       "prompt": "",
@@ -120,11 +141,16 @@ def iter_prompt_items(
     top_k: int,
     is_slippery: bool,
     use_multistep_prompt: bool,
+    prompt_id_prefix: str = "frozenlake",
+    num_prompt_items: int | None = None,
 ) -> Iterator[dict[str, Any]]:
   """Yields exactly one full-batch worth of prompt groups per RL step."""
   if not dataset:
     raise ValueError("FrozenLake dataset is empty.")
-  for prompt_idx in range(max_steps * batch_size):
+  prompt_count = (
+      max_steps * batch_size if num_prompt_items is None else num_prompt_items
+  )
+  for prompt_idx in range(prompt_count):
     yield build_prompt_item(
         entry=dataset[prompt_idx % len(dataset)],
         prompt_idx=prompt_idx,
@@ -136,14 +162,22 @@ def iter_prompt_items(
         top_k=top_k,
         is_slippery=is_slippery,
         use_multistep_prompt=use_multistep_prompt,
+        prompt_id_prefix=prompt_id_prefix,
     )
 
 
-# Both recipe classes already accept the configuration emitted above, so the
-# distributed registry can use them without adapter subclasses.
-FrozenLakeEnv = registry.register_env(FROZENLAKE_ENV_NAME)(
-    frozenlake_env.FrozenLakeEnv
-)
+class FrozenLakeEnv(frozenlake_env.FrozenLakeEnv):
+  """Wire adapter preserving the recipe environment implementation verbatim."""
+
+  def __init__(self, **kwargs: Any):
+    entry = dict(kwargs.get("entry") or {})
+    for key in ("seed", "size", "p"):
+      if key in entry:
+        entry[key] = np.asarray(entry[key])
+    super().__init__(**{**kwargs, "entry": entry})
+
+
+FrozenLakeEnv = registry.register_env(FROZENLAKE_ENV_NAME)(FrozenLakeEnv)
 FrozenLakeAgent = registry.register_agent(FROZENLAKE_AGENT_NAME)(
     frozenlake_agent.FrozenLakeAgent
 )

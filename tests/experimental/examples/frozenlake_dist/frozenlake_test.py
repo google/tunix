@@ -36,7 +36,9 @@ class FrozenLakeDistTest(absltest.TestCase):
         registry.AGENT_REGISTRY.get(frozenlake.FROZENLAKE_AGENT_NAME),
         frozenlake.FrozenLakeAgent,
     )
-    self.assertIs(frozenlake.FrozenLakeEnv, frozenlake_env.FrozenLakeEnv)
+    self.assertTrue(
+        issubclass(frozenlake.FrozenLakeEnv, frozenlake_env.FrozenLakeEnv)
+    )
     self.assertIs(frozenlake.FrozenLakeAgent, frozenlake_agent.FrozenLakeAgent)
 
   def test_package_reuses_recipe_agent_and_env(self):
@@ -45,7 +47,7 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertIn("from examples.frozenlake import agent", source)
     self.assertIn("from examples.frozenlake import env", source)
     self.assertNotIn("class FrozenLakeAgent", source)
-    self.assertNotIn("class FrozenLakeEnv", source)
+    self.assertIn("class FrozenLakeEnv", source)
 
   def test_dataset_is_deterministic_and_uses_reference_ranges(self):
     first = frozenlake.create_dataset(size=5, seed=123)
@@ -58,6 +60,21 @@ class FrozenLakeDistTest(absltest.TestCase):
       self.assertBetween(entry["size"], 2, 9)
       self.assertGreaterEqual(entry["p"], 0.6)
       self.assertLess(entry["p"], 0.85)
+
+  def test_dataset_preparation_matches_recipe_shuffle_truncate_repeat(self):
+    dataset = [{"seed": index} for index in range(10)]
+    prepared = frozenlake.prepare_dataset(
+        dataset,
+        shuffle=True,
+        seed=42,
+        batch_size=2,
+        num_batches=3,
+        num_epochs=2,
+    )
+    expected_epoch = [5, 6, 0, 7, 3, 2]
+    self.assertEqual(
+        [item["seed"] for item in prepared], expected_epoch * 2
+    )
 
   def test_generated_map_is_reproducible_and_reachable(self):
     previous_max_steps = frozenlake_env.MAX_STEPS
@@ -157,6 +174,13 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(args.epsilon_high, 0.005)
     self.assertEqual(args.loss_algo, "gspo-token")
     self.assertEqual(args.advantage_estimator, "rloo")
+    self.assertEqual(args.num_batches, 150)
+    self.assertEqual(args.num_epochs, 3)
+    self.assertEqual(args.eval_dataset_size, 100)
+    self.assertEqual(args.eval_every_n_steps, 10)
+    self.assertEqual(args.sampler_is, "token")
+    self.assertEqual(args.sampler_is_threshold, 2.0)
+    self.assertEqual(args.weight_sync_mode.value, "raiden")
 
   def test_qwen3_8b_supported_by_distributed_workers(self):
     config = models._qwen3_config("Qwen3-8B")
