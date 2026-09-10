@@ -906,7 +906,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
         self.rl_engine.buffer_metrics_async(
             {  # pyrefly: ignore[bad-argument-type]
-                "packing/dummy_ratio": (
+                "packing/dummy_ratio": (  # pyrefly: ignore[bad-assignment]
                     dummy_ratio,
                     common.global_weighted_mean,
                 ),

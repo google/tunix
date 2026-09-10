@@ -205,7 +205,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
         lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
-            "algo_config": self.algo_config,
+            "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
     )
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({

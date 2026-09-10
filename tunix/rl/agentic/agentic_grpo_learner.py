@@ -293,28 +293,28 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
         lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
-            "algo_config": self.algo_config,
+            "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
     )
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
-        "kl": common.mean_of_means,
-        "entropy": common.mean_of_means,
-        "reduced_pg_loss": common.mean_of_means,
-        "unreduced_pg_loss": common.global_weighted_mean,
-        "pg_clipfrac": common.mean_of_means,
-        "ppo_kl": common.mean_of_means,
-        "kl_loss": common.mean_of_means,
-        "is_ratio/mean": common.mean_of_means,
+        "kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "entropy": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "reduced_pg_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "unreduced_pg_loss": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "pg_clipfrac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "ppo_kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "kl_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "is_ratio/mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "is_ratio/max": np.max,
         "is_ratio/min": np.min,
-        "log_ratio/abs_mean": common.mean_of_means,
-        "pg_loss/unclipped_mean": common.mean_of_means,
-        "pg_loss/clipped_mean": common.mean_of_means,
-        "advantage/abs_mean": common.mean_of_means,
+        "log_ratio/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "pg_loss/unclipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "pg_loss/clipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "advantage/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "advantage/max": np.max,
         "advantage/min": np.min,
-        "advantage/nonzero_frac": common.mean_of_means,
-        "sampler_is/weight_mean": common.mean_of_means,
+        "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "sampler_is/weight_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
