@@ -18,8 +18,12 @@ tokens, 50 turns, RLOO advantages, asymmetric clipping (`0.2`/`0.28`),
 `sequence-mean-token-scale` loss aggregation, a `1e-6` learning rate, AdamW
 (`b1=0.9`, `b2=0.99`, `weight_decay=0.01`), global gradient clipping at `1.0`,
 a three-hour episode timeout, overlong filtering, and rollout concurrency 200.
-The reused `examples/deepswe/deepswe_data.py` loader defaults to
-`R2E-Gym/R2E-Gym-V1`.
+The distributed launcher selects `R2E-Gym/R2E-Gym-Subset`, matching the active
+training script, and still delegates loading to
+`examples/deepswe/deepswe_data.py`. It also matches the recipe's FP32 actor
+parameter storage with BF16 compute, decoder rematerialization, flash attention
+(block size 1024), vLLM capacity settings, and actor-side recomputation of the
+start-of-step old log-probabilities (`USE_ROLLOUT_LOGPS=false`).
 
 `BATCH_SIZE` is the number of prompt groups in one full/global step, while
 `MINI_BATCH_SIZE` is the number of prompt groups in each optimizer update.
@@ -32,10 +36,11 @@ are 8, preserving the original DeepSWE recipe's single update per full step.
 For example, `BATCH_SIZE=8 MINI_BATCH_SIZE=2` performs four optimizer updates
 before one weight synchronization.
 
-Weight synchronization defaults to `none`, matching the other distributed
-examples and keeping a one-step smoke test dependency-free. For a real
-multi-step training run, set `WEIGHT_SYNC_MODE=raiden` so updated trainer
-weights reach the rollout worker. `fallback` is intentionally rejected because
+Weight synchronization defaults to `raiden`, so the rollout starts from the
+actor weights and receives one update after every full batch. Set
+`WEIGHT_SYNC_MODE=none` only for the explicit one-step infrastructure smoke
+test below; in that mode vLLM loads the real checkpoint rather than dummy
+weights. `fallback` is intentionally rejected because
 it acknowledges the synchronization protocol without transferring weights.
 Like the non-experimental recipe, the environment defaults to R2E-Gym's
 Kubernetes backend without Agent Sandbox (`USE_AGENT_SANDBOX=0` and

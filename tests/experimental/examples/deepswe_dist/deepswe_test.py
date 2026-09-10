@@ -77,7 +77,7 @@ class DeepSWEDistTest(absltest.TestCase):
     self.assertIn("ENV_BACKEND=${ENV_BACKEND:-kubernetes}", local_launcher)
     self.assertIn("USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}", local_launcher)
     self.assertIn(
-        "WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}", local_launcher
+        "WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", local_launcher
     )
     self.assertIn(
         "ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}",
@@ -101,7 +101,7 @@ class DeepSWEDistTest(absltest.TestCase):
         "export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}", k8s_launcher
     )
     self.assertIn(
-        "export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}", k8s_launcher
+        "export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", k8s_launcher
     )
     self.assertIn("--sampler_type=${SAMPLER}", k8s_launcher)
     self.assertNotIn("--sampler_mesh_tp", k8s_launcher)
@@ -280,7 +280,9 @@ class DeepSWEDistTest(absltest.TestCase):
     self.assertEqual(args.env_backend, "kubernetes")
     self.assertEqual(args.episode_timeout_secs, 3 * 60 * 60)
     self.assertTrue(args.overlong_filter)
-    self.assertEqual(args.weight_sync_mode.value, "none")
+    self.assertFalse(args.use_rollout_logps)
+    self.assertEqual(args.dataset_name, "R2E-Gym/R2E-Gym-Subset")
+    self.assertEqual(args.weight_sync_mode.value, "raiden")
 
   def test_algorithm_uses_prompt_group_mini_batch_size(self):
     args = run_deepswe_dist._parse_args(  # pylint: disable=protected-access

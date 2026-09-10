@@ -56,19 +56,22 @@ ADAM_B1=${ADAM_B1:-0.9}
 ADAM_B2=${ADAM_B2:-0.99}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+PARAM_DTYPE=${PARAM_DTYPE:-float32}
+REMAT_POLICY=${REMAT_POLICY:-decoder}
+FLASH_ATTENTION_BLOCK_SIZE=${FLASH_ATTENTION_BLOCK_SIZE:-1024}
 SAMPLER=${SAMPLER:-inprocess_vllm}
-WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 DEBUG=${DEBUG:-0}
-USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
 
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-500}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-4}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 
-DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-V1}
+DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
 DATASET_PATH=${DATASET_PATH:-}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-"${ARTIFACT_ROOT}/dataset_cache"}
@@ -87,6 +90,10 @@ REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
 EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-10800}
 OVERLONG_FILTER=${OVERLONG_FILTER:-true}
 ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}
+VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.4}
+VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8}
+VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
+VLLM_MODEL_LEN_MARGIN=${VLLM_MODEL_LEN_MARGIN:-128}
 
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -291,6 +298,11 @@ echo "Launching trainer node..."
     --adam_b2="$ADAM_B2"
     --weight_decay="$WEIGHT_DECAY"
     --max_grad_norm="$MAX_GRAD_NORM"
+    --param_dtype="$PARAM_DTYPE"
+    --enable_remat
+    --remat_policy="$REMAT_POLICY"
+    --use_flash_attention
+    --flash_attention_block_size="$FLASH_ATTENTION_BLOCK_SIZE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --sampler_type="$SAMPLER"
@@ -339,6 +351,13 @@ echo "Launching DeepSWE rollout node..."
     --env_name=deepswe_env
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
+    --vllm_async_scheduling
+    --vllm_enable_prefix_caching
+    --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
+    --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
+    --vllm_model_len_margin="$VLLM_MODEL_LEN_MARGIN"
+    --vllm_server_mode
     --enable_thinking
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then

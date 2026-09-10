@@ -30,7 +30,7 @@ from tunix.experimental.rl.agentic import registry
 
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
-DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-V1"
+DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
 _SANDBOX_INIT_LOCK = threading.Lock()
 
 

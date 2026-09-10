@@ -171,12 +171,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
-      default=True,
+      default=False,
       help=(
           "Use rollout sampler log-probs as old_per_token_logps (off-policy /"
-          " sampler importance ratio). Default True matches the"
-          " non-experimental GRPOConfig; pass --no-use_rollout_logps for"
-          " on-policy ratio=1."
+          " sampler importance ratio). The DeepSWE recipe default is False,"
+          " which recomputes start-of-step actor log-probs."
       ),
   )
   parser.add_argument(
@@ -190,7 +189,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(
-          os.getenv("WEIGHT_SYNC_MODE", "none")
+          os.getenv("WEIGHT_SYNC_MODE", "raiden")
       ),
       choices=list(weight_sync.WeightSyncMode),
   )

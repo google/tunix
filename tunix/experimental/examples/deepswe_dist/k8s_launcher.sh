@@ -51,9 +51,12 @@ export ADAM_B1=${ADAM_B1:-0.9}
 export ADAM_B2=${ADAM_B2:-0.99}
 export WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
-export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+export PARAM_DTYPE=${PARAM_DTYPE:-float32}
+export REMAT_POLICY=${REMAT_POLICY:-decoder}
+export FLASH_ATTENTION_BLOCK_SIZE=${FLASH_ATTENTION_BLOCK_SIZE:-1024}
+export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 export USE_LORA=${USE_LORA:-0}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
@@ -63,7 +66,7 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-500}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-4}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints/deepswe}
 
-export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-V1}
+export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
 export DATASET_PATH=${DATASET_PATH:-}
 export DATASET_SPLIT=${DATASET_SPLIT:-train}
 export DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-artifacts/qwen3_dist_deepswe/dataset_cache}
@@ -82,6 +85,10 @@ export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
 export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-10800}
 export OVERLONG_FILTER=${OVERLONG_FILTER:-true}
 export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}
+export VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.4}
+export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8}
+export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
+export VLLM_MODEL_LEN_MARGIN=${VLLM_MODEL_LEN_MARGIN:-128}
 
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -269,6 +276,11 @@ start_trainer() {
         --adam_b2=${ADAM_B2} \
         --weight_decay=${WEIGHT_DECAY} \
         --max_grad_norm=${MAX_GRAD_NORM} \
+        --param_dtype=${PARAM_DTYPE} \
+        --enable_remat \
+        --remat_policy=${REMAT_POLICY} \
+        --use_flash_attention \
+        --flash_attention_block_size=${FLASH_ATTENTION_BLOCK_SIZE} \
         --sampler_type=${SAMPLER} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
@@ -339,6 +351,13 @@ start_rollout() {
           --env_name=deepswe_env \
           --agent_name=deepswe_agent \
           --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+          --vllm_hbm_utilization=${VLLM_HBM_UTILIZATION} \
+          --vllm_async_scheduling \
+          --vllm_enable_prefix_caching \
+          --vllm_max_num_seqs=${VLLM_MAX_NUM_SEQS} \
+          --vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS} \
+          --vllm_model_len_margin=${VLLM_MODEL_LEN_MARGIN} \
+          --vllm_server_mode \
           --enable_thinking \
           ${USE_LORA_FLAG} \
           ${DEBUG_FLAG} \
