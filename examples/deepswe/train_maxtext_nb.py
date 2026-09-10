@@ -54,6 +54,14 @@ import vllm  # pytype: disable=import-error
 maxtext_vllm_adapter.register()
 logging.info("Successfully registered MaxTextForCausalLM model with vLLM.")
 
+# Disable MRoPE in vLLM to prevent slow 3D position ID generation for text-only sampling
+try:
+  from vllm.config import ModelConfig
+  ModelConfig.uses_mrope = property(lambda self: False)
+  logging.info("Successfully patched vLLM ModelConfig.uses_mrope to False for sampling.")
+except Exception as e:
+  logging.warning("Could not patch vLLM ModelConfig.uses_mrope: %s", e)
+
 faulthandler.register(signal.SIGINT, all_threads=True)
 
 Dataset = datasets_lib.Dataset
@@ -129,17 +137,31 @@ parser.add_argument("--train_with_lora", type=str2bool, default=False)
 # GRPO Config
 parser.add_argument("--num_generations", type=int, default=8)
 parser.add_argument("--num_iterations", type=int, default=1)
-parser.add_argument("--beta", type=float, default=0.0)
-parser.add_argument("--epsilon", type=float, default=0.2)
+parser.add_argument("--beta", "--grpo_beta", dest="beta", type=float, default=0.0)
+parser.add_argument("--epsilon", "--grpo_epsilon", dest="epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
 parser.add_argument("--off_policy_steps", type=int, default=0)
+parser.add_argument("--overlong_loss_masking", type=str2bool, default=False)
+parser.add_argument("--seq_logprob_error_threshold", type=float, default=None)
+parser.add_argument("--truncated_importance_sampling_type", type=str, default=None)
+parser.add_argument("--truncated_importance_sampling_ratio_min", type=float, default=None)
+parser.add_argument("--truncated_importance_sampling_ratio", type=float, default=None)
+parser.add_argument(
+    "--force_on_policy_ratio",
+    type=str2bool,
+    default=False,
+    help=(
+        "Pin the surrogate ratio to 1.0 (old_logp := stop_gradient(current_logp)). "
+        "Valid for single-iteration on-policy training only."
+    ),
+)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
 parser.add_argument("--max_response_length", type=int, default=8192)
-parser.add_argument("--temperature", type=float, default=1.0)
-parser.add_argument("--top_p", type=float, default=None)
-parser.add_argument("--top_k", type=int, default=None)
+parser.add_argument("--temperature", "--decode_sampling_temperature", dest="temperature", type=float, default=1.0)
+parser.add_argument("--top_p", "--decode_sampling_nucleus_p", dest="top_p", type=float, default=None)
+parser.add_argument("--top_k", "--decode_sampling_top_k", dest="top_k", type=int, default=None)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
 parser.add_argument("--vllm_utilization", type=float, default=0.4)
 parser.add_argument(
@@ -154,13 +176,18 @@ parser.add_argument(
     default=8192,
     help="Max number of tokens to be processed in parallel by vLLM.",
 )
+parser.add_argument("--enable_prefix_caching", type=str2bool, default=False)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
-parser.add_argument("--b1", type=float, default=0.9)
-parser.add_argument("--b2", type=float, default=0.99)
-parser.add_argument("--weight_decay", type=float, default=0.01)
+parser.add_argument("--b1", "--adam_b1", dest="b1", type=float, default=0.9)
+parser.add_argument("--b2", "--adam_b2", dest="b2", type=float, default=0.99)
+parser.add_argument("--weight_decay", "--adam_weight_decay", dest="weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
+parser.add_argument("--warmup_steps_fraction", type=float, default=0.0)
+parser.add_argument("--learning_rate_final_fraction", type=float, default=1.0)
+parser.add_argument("--float32_gate_logits", type=str2bool, default=False)
+parser.add_argument("--trainable_parameters_mask", type=str, default=None)
 parser.add_argument(
     "--optimizer_offload",
     type=bool,
@@ -278,10 +305,16 @@ parser.add_argument(
 parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
 )
+parser.add_argument(
+    "--sampler_is",
+    type=str,
+    default=None,
+    help="Truncated importance sampling mode for GRPO (e.g. 'token' or None)",
+)
 parser.add_argument("--advantage_estimator", type=str, default="rloo")
 parser.add_argument(
     "--use_rollout_logps",
-    type=bool,
+    type=str2bool,
     default=False,
     help=(
         "Whether to use rollout-cached logprobs as old policy logps. "
@@ -319,6 +352,20 @@ parser.add_argument(
     ),
 )
 
+
+# Profiler Config
+parser.add_argument(
+    "--enable_jax_profiler",
+    type=str2bool,
+    default=False,
+    help="Whether to start JAX profiler server for live/on-demand XProf collection.",
+)
+parser.add_argument(
+    "--jax_profiler_port",
+    type=int,
+    default=9999,
+    help="Port to start JAX profiler server on.",
+)
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
@@ -411,6 +458,23 @@ except ImportError as e:
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
   pathwaysutils.initialize()
 
+if args.enable_jax_profiler:
+  logging.info(
+      "Starting JAX profiler server on port %d...", args.jax_profiler_port
+  )
+  try:
+    jax.profiler.start_server(args.jax_profiler_port)
+    logging.info(
+        "JAX profiler server successfully started on port %d",
+        args.jax_profiler_port,
+    )
+  except Exception as e:
+    logging.warning(
+        "Failed to start JAX profiler server on port %d: %s",
+        args.jax_profiler_port,
+        e,
+    )
+
 
 # %%
 # ==========================================
@@ -497,6 +561,7 @@ BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 OFF_POLICY_STEPS = args.off_policy_steps
+FORCE_ON_POLICY_RATIO = args.force_on_policy_ratio
 
 # ====== Training ======
 DTYPE_MAP = {
@@ -815,7 +880,9 @@ if num_rollout_devices + num_train_devices > total_devices:
       f"train devices, but cluster only has {total_devices} available."
   )
 
-base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
+base_yml = os.path.join(
+    os.path.dirname(pyconfig.__file__), "post_train", "rl.yml"
+)
 vllm_yml = os.path.join(
     os.path.dirname(pyconfig.__file__), "inference", "vllm.yml"
 )
@@ -850,11 +917,19 @@ trainer_config = pyconfig.initialize(
         f"checkpoint_storage_use_ocdbt={args.checkpoint_storage_use_ocdbt}",
         f"checkpoint_storage_use_zarr3={args.checkpoint_storage_use_zarr3}",
         f"checkpoint_storage_concurrent_gb={args.checkpoint_storage_concurrent_gb}",
+        f"float32_gate_logits={args.float32_gate_logits}",
+        *(
+            [f"trainable_parameters_mask={args.trainable_parameters_mask}"]
+            if args.trainable_parameters_mask
+            else []
+        ),
         "skip_jax_distributed_system=True",
         "load_checkpoint_only_once=True",
         "use_standalone_converter=False",
         "log_config=False",
+        "allow_split_physical_axes=True",
     ],
+    config_class=types.RLConfig,
     vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
 )
 
@@ -872,10 +947,12 @@ sampler_config = pyconfig.initialize(
         f"max_prefill_predict_length={MAX_PROMPT_LENGTH}",
         f"dtype={args.dtype}",
         "attention=vllm_rpa",
+        "use_mrope=False",
         "skip_jax_distributed_system=True",
         "remat_policy=none",
         "use_standalone_converter=False",
         "log_config=False",
+        "allow_split_physical_axes=True",
     ],
     config_class=types.RLConfig,
     vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
@@ -996,19 +1073,38 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=args.metric_logger_dir, flush_every_n_steps=2
 )
 
-optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
-    learning_rate=LEARNING_RATE,
+warmup_steps = int(MAX_STEPS * args.warmup_steps_fraction)
+if warmup_steps > 0 or args.learning_rate_final_fraction < 1.0:
+  lr_schedule = optax.warmup_cosine_decay_schedule(
+      init_value=0.0 if warmup_steps > 0 else LEARNING_RATE,
+      peak_value=LEARNING_RATE,
+      warmup_steps=warmup_steps,
+      decay_steps=MAX_STEPS,
+      end_value=LEARNING_RATE * args.learning_rate_final_fraction,
+  )
+else:
+  lr_schedule = LEARNING_RATE
+
+adamw_opt = optax.adamw(
+    learning_rate=lr_schedule,
     b1=B1,
     b2=B2,
     weight_decay=WEIGHT_DECAY,
     eps=1e-8,
 )
 
+from maxtext.optimizers import optimizers as maxtext_optimizers
+
+adamw_opt = maxtext_optimizers.apply_trainable_parameters_mask(
+    adamw_opt, trainer_config
+)
+
+transforms = []
 if MAX_GRAD_NORM is not None:
-  optimizer = optax.chain(
-      optax.clip_by_global_norm(MAX_GRAD_NORM),
-      optimizer,
-  )
+  transforms.append(optax.clip_by_global_norm(MAX_GRAD_NORM))
+transforms.append(adamw_opt)
+
+optimizer = optax.chain(*transforms)
 
 # %%
 # ==========================================
@@ -1023,6 +1119,7 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "kv_cache_size": KV_CACHE_SIZE,
+    "return_logprobs": USE_ROLLOUT_LOGPS,
 }
 
 vllm_rollout_dict = {
@@ -1040,7 +1137,7 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": False,
+        "enable_prefix_caching": args.enable_prefix_caching,
         "tokenizer": tokenizer_path,
         "dtype": "bfloat16",
         "enable_expert_parallel": False,
@@ -1173,6 +1270,13 @@ config_kwargs = {
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "force_on_policy_ratio": FORCE_ON_POLICY_RATIO,
+    "sampler_is": args.sampler_is,
+    "overlong_loss_masking": args.overlong_loss_masking,
+    "seq_logprob_error_threshold": args.seq_logprob_error_threshold,
+    "truncated_importance_sampling_type": args.truncated_importance_sampling_type,
+    "truncated_importance_sampling_ratio_min": args.truncated_importance_sampling_ratio_min,
+    "truncated_importance_sampling_ratio": args.truncated_importance_sampling_ratio,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
