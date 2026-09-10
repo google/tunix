@@ -20,6 +20,8 @@ Defines the pure ML algorithmic core of a trainer.
 import abc
 from typing import Any, Callable, List, Optional
 
+import numpy as np
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
 
@@ -136,6 +138,40 @@ class AbstractTrainer(abc.ABC):
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement eval_step."
+    )
+
+  @abc.abstractmethod
+  def per_token_logps(
+      self,
+      *,
+      prompt_tokens: ArrayLike,
+      completion_tokens: ArrayLike,
+      pad_id: int,
+      eos_id: int,
+      temperature: float | None = None,
+      segment_ids: ArrayLike | None = None,
+      segment_positions: ArrayLike | None = None,
+      micro_batch_size: int | None = None,
+  ) -> np.ndarray:
+    """Scores per-token log-probabilities of completions under live weights.
+
+    Unlike a frozen reference scorer, this uses the trainer's current (actor)
+    parameters, so callers can measure sampler-vs-trainer agreement. Must not
+    mutate trainer state (no gradient accumulation, no optimizer update).
+    Args:
+      prompt_tokens: [B, P] token ids, LEFT-padded (or [B, 0] in packed mode).
+      completion_tokens: [B, C] token ids, RIGHT-padded; results align to these.
+      pad_id: Pad token id.
+      eos_id: End-of-sequence token id.
+      temperature: Softmax temperature to score under; defaults to 1.0 when None.
+      segment_ids: Optional packing segment ids (sequence packing).
+      segment_positions: Optional packing local position indices.
+      micro_batch_size: Optional row chunk size to bound peak memory.
+    Returns:
+      [B, C] per-token log-probabilities aligned to `completion_tokens`.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement per_token_logps."
     )
 
   @abc.abstractmethod
