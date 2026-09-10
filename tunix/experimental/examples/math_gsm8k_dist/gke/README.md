@@ -1,35 +1,52 @@
-# GKE deployment: 6-worker GSM8K GRPO + py-inference-scheduler sidecar
+# GKE deployment: multi-pod GSM8K GRPO + py-inference-scheduler
 
-Runs the distributed GRPO demo on one TPU v5e 8-chip node (`ct5lp-hightpu-8t`,
-us-central1-a): 2 chips for the trainer, 6 × 1-chip vLLM rollout workers, with
-rollout routing decided by the py-inference-scheduler sidecar.
+Runs the distributed GRPO demo across separate pods on GKE, one TPU host per
+worker, with rollout routing decided by the py-inference-scheduler service.
+
+Manifests live in `multi-pod/` and were rendered from the templates in
+`tunix/experimental/distributed/deployment/yamls/`:
+
+| File | What it is | Where it runs |
+| --- | --- | --- |
+| `00-scheduler.yaml` | `pyis-scheduler` Deployment + Service (`:8100`) | CPU default pool |
+| `01-orch.yaml` | `orch` JobSet: orchestrator + discovery server (`:20000`) | n2-standard-8 |
+| `02-train.yaml` | `train` JobSet: trainer, LoRA, model prefetch (`:20002`) | 1-chip v6e |
+| `10-roll.yaml` | `roll` JobSet, `replicas: 6`: vLLM rollout workers (`:20001`) | 6 × 1-chip v6e |
+
+Each rollout replica derives `--worker_id=roll-${JOB_INDEX}` from the JobSet
+job-index label, so the workers register with discovery as `roll-0..roll-5`.
 
 ## 1. Cluster + node pools
 
 ```bash
 PROJECT=<your-project>
 CLUSTER=tunix-rl-demo
-ZONE=us-central1-a
+ZONE=asia-northeast1-b          # any zone with v6e capacity
 REPO=us-central1-docker.pkg.dev/${PROJECT}/tunix-rl
 
 gcloud container clusters create "$CLUSTER" \
   --project="$PROJECT" --zone="$ZONE" --release-channel=rapid \
   --machine-type=n2-standard-8 --num-nodes=1 --disk-size=100 \
-  --workload-pool="${PROJECT}.svc.id.goog" --addons=GcsFuseCsiDriver
+  --workload-pool="${PROJECT}.svc.id.goog"
 
-# Spot capacity (~60-70% cheaper, preemptible; drop --spot for on-demand).
-# Starts at 0 nodes: the TPU node only exists (and bills) while a Job runs.
-gcloud container node-pools create tpu-v5e-8t \
+# This pool is configured for spot capacity, its cheaper and easier to find. If you have access to more reliable capacity, use that.
+gcloud container node-pools create tpu-v6e-1t-spot \
   --project="$PROJECT" --cluster="$CLUSTER" --zone="$ZONE" \
-  --node-locations="$ZONE" --machine-type=ct5lp-hightpu-8t \
+  --node-locations="$ZONE" --machine-type=ct6e-standard-1t \
   --spot --num-nodes=0 --disk-size=200 \
-  --enable-autoscaling --min-nodes=0 --max-nodes=1
+  --enable-autoscaling --min-nodes=0 --max-nodes=8
 ```
 
-Preflight: `gcloud compute machine-types list --zones=us-central1-a
---filter="name~ct5lp"` must return results, and the project needs >= 8 chips of
-"TPU v5 Lite PodSlice" quota in us-central1. Native sidecars require GKE >=
-1.29 (the `rapid` channel is well past this).
+Preflight: `gcloud compute machine-types list --zones="$ZONE"
+--filter="name~ct6e"` must return results, and the project needs >= 7 chips
+of TPU v6e (spot/preemptible) quota in the region.
+
+Install the JobSet controller (the manifests use `jobset.x-k8s.io/v1alpha2`):
+
+```bash
+VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/jobset/releases/latest | jq -r .tag_name)
+kubectl apply --server-side -f "https://github.com/kubernetes-sigs/jobset/releases/download/${VERSION}/manifests.yaml"
+```
 
 ## 2. Build and push images
 
@@ -41,49 +58,76 @@ gcloud artifacts repositories create tunix-rl \
 docker build -t "$REPO/tunix-tpu:latest" .
 docker push "$REPO/tunix-tpu:latest"
 
-# Scheduler sidecar image (py-rl-scheduler repo root)
+# Scheduler image (py-rl-scheduler repo root)
 docker build -f integration/tunix/Dockerfile -t "$REPO/py-rl-scheduler:latest" .
 docker push "$REPO/py-rl-scheduler:latest"
 ```
 
-## 3. Launch
+## 3. W&B credentials (optional)
+
+The orchestrator reads `WANDB_API_KEY` from the `wandb-credentials` secret;
+without it the run still works, just unlogged:
 
 ```bash
-sed "s/PROJECT_ID/${PROJECT}/g" job.yaml | kubectl apply -f -
-
-kubectl get pods -l app=tunix-gsm8k-grpo -w
-kubectl logs -f job/tunix-gsm8k-grpo-6w -c tunix        # launcher + orchestrator
-kubectl logs -f job/tunix-gsm8k-grpo-6w -c scheduler    # per-request /schedule decisions
+kubectl create secret generic wandb-credentials --from-literal=api-key=<your-key>
 ```
 
-Success looks like: the tunix container prints "Distributed GSM8K GRPO chain
-demo (vLLM) finished successfully." and the scheduler log shows one scheduling
-decision per rollout request, spread across `rollout-0..rollout-5`.
+## 4. Launch
 
-## 4. Teardown / cost control
+The manifests hardcode the image project; point them at yours, then apply the
+whole directory:
 
 ```bash
-kubectl delete job tunix-gsm8k-grpo-6w
+sed "s/PROJECT_ID/${PROJECT}/g" multi-pod/*.yaml | kubectl apply -f -
+
+kubectl get pods -w
+kubectl logs -f job/orch-proc-0             # orchestrator / training progress
+kubectl logs -f deploy/pyis-scheduler       # per-request /schedule decisions
+kubectl logs -f job/roll-proc-0             # a rollout worker (0..5)
+```
+
+Success looks like: the orch pod completes with `EXIT_CODE=0`, W&B shows the
+run under `trellis-gsm8k`, and the scheduler log shows one scheduling decision
+per rollout request, spread across `roll-0..roll-5`.
+
+## 5. Teardown / cost control
+
+```bash
+kubectl delete -f multi-pod/
 # TPU pool autoscales to 0 when idle; force it down immediately with:
-gcloud container clusters resize "$CLUSTER" --node-pool=tpu-v5e-8t \
+gcloud container clusters resize "$CLUSTER" --node-pool=tpu-v6e-1t-spot \
   --num-nodes=0 --zone="$ZONE" --quiet
 ```
 
 ## Notes / knobs
 
-- Chip layout and workload sizing live as env vars in `job.yaml`
-  (`ROLLOUT_PORTS` / `ROLLOUT_TPU_CHIPS_LIST` are parallel lists; ports are
-  comma-separated, chip groups semicolon-separated).
-- `USE_LORA=1` is set because full fine-tuning 1.7B with fp32 Adam state is
-  tight on the trainer's 2 × 16GB chips.
-- The model is downloaded from HuggingFace into an emptyDir on first start;
-  for faster restarts, swap the `artifacts` volume for a GCS bucket via the
-  gcsfuse CSI driver (addon is already enabled on the cluster).
-- The reference inference node (KL, `--beta != 0`) is not enabled: it would
-  need chips beyond the 8 on this host.
-- The TPU pool is Spot: a preemption kills the run mid-flight (the Job has
-  `backoffLimit: 0`, so it won't retry automatically — re-apply it). Fine for
-  this demo; use on-demand for anything long-running.
-- This manifest was drafted alongside the integration and has not yet been
-  run on a real cluster; expect first-run friction (image sizes, vLLM warmup
-  timeouts — bump `WAIT_TIMEOUT_SECS` if node startup is slow).
+- The manifests are a rendered snapshot (kept apply-able as a record of the
+  proven run). To change topology/model/flags, either edit them directly or
+  re-render from `tunix/experimental/distributed/deployment/yamls/`.
+- Pods use `hostNetwork` on dedicated TPU hosts; discovery is at `orch:20000`,
+  rollout workers serve gRPC on `:20001`, trainer on `:20002`. The orchestrator
+  reaches the scheduler via the ClusterIP service (`http://pyis-scheduler:8100`).
+- The trainer prefetches Qwen3-1.7B from HuggingFace into a `/tmp` hostPath
+  before starting, so restarts on the same node skip the download.
+- `--weight_sync_mode=none` and LoRA (rank 16) — this demo exercises the
+  scheduler-routed rollout path, not weight sync.
+- The TPU pool is spot: worker pods restart on preemption (huge
+  `backoffLimit`), but the orchestrator Job has `backoffLimit: 0` — if the
+  orch pod dies, delete and re-apply the JobSets.
+
+## Single-host variant (legacy: `job.yaml`)
+
+The original demo packed everything onto one `ct5lp-hightpu-8t` host
+(2 trainer chips + 6 × 1-chip rollout workers, scheduler as a native sidecar):
+
+```bash
+sed "s/PROJECT_ID/${PROJECT}/g" job.yaml | kubectl apply -f -
+kubectl logs -f job/tunix-gsm8k-grpo-6w -c tunix        # launcher + orchestrator
+kubectl logs -f job/tunix-gsm8k-grpo-6w -c scheduler    # /schedule decisions
+kubectl delete job tunix-gsm8k-grpo-6w
+```
+
+Needs a `tpu-v5e-8t` pool (`ct5lp-hightpu-8t`) and >= 8 chips of TPU v5 Lite
+PodSlice quota; chip layout and sizing live as env vars in `job.yaml`
+(`ROLLOUT_PORTS` / `ROLLOUT_TPU_CHIPS_LIST`). Native sidecars require
+GKE >= 1.29.
