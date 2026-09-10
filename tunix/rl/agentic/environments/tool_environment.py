@@ -180,6 +180,13 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
       for call in action:
         if call.get("function", {}).get("name") == "finish":
           args = call["function"].get("arguments", {})
+          if isinstance(args, str):
+            # ToolAgent serializes parsed tool-call arguments with json.dumps,
+            # so explicit finish tool calls arrive as a JSON string.
+            try:
+              args = json.loads(args)
+            except json.JSONDecodeError:
+              return args
           return args.get("response", "")
     # Fallback: convert action to string representation.
     return str(action)
