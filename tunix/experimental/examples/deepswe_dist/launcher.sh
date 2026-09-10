@@ -23,6 +23,7 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 PYTHON_BIN=${PYTHON_BIN:-python3}
 ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
 ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
+ORCHESTRATOR_ADDR=${ORCHESTRATOR_ADDR:-localhost}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
@@ -51,6 +52,7 @@ WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
+REMAT_CONFIG=${REMAT_CONFIG:-decoder}
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 
@@ -226,17 +228,73 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   exit 1
 fi
 
-ensure_model_dir
-mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
-: > "$TRAINER_LOG"
-: > "$ROLLOUT_LOG"
-: > "$ORCHESTRATOR_LOG"
+COMMAND=""
 
-echo "Launching trainer node..."
-(
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --command)
+      COMMAND="$2"
+      shift 2
+      ;;
+    --command=*)
+      COMMAND="${1#*=}"
+      shift
+      ;;
+    --role)
+      COMMAND="$2"
+      shift 2
+      ;;
+    --role=*)
+      COMMAND="${1#*=}"
+      shift
+      ;;
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout)
+      COMMAND="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+COMMAND="${COMMAND:-start}"
+
+stop_trainer() {
+  if [[ -f "${LOG_ROOT}/trainer.pid" ]]; then
+    local pid
+    pid="$(cat "${LOG_ROOT}/trainer.pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping trainer (PID $pid)..."
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "${LOG_ROOT}/trainer.pid"
+  fi
+}
+
+stop_rollout() {
+  if [[ -f "${LOG_ROOT}/rollout.pid" ]]; then
+    local pid
+    pid="$(cat "${LOG_ROOT}/rollout.pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping rollout (PID $pid)..."
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "${LOG_ROOT}/rollout.pid"
+  fi
+}
+
+stop_all() {
+  stop_trainer
+  stop_rollout
+}
+
+start_trainer() {
+  local in_background="${1:-false}"
+  echo "Launching trainer node..."
   TRAINER_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
-    --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+    --discovery_addrs="${ORCHESTRATOR_ADDR}:${ORCHESTRATOR_PORT}"
     --process_main=tunix.experimental.examples.common.run_trainer_node.main
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
@@ -257,6 +315,7 @@ echo "Launching trainer node..."
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
+    --remat_config="$REMAT_CONFIG"
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
@@ -272,15 +331,21 @@ echo "Launching trainer node..."
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
   print_command "Trainer command" "${TRAINER_CMD[@]}"
-  exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
-) &
-TRAINER_PID=$!
+  if [[ "$in_background" == "true" ]]; then
+    "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1 &
+    TRAINER_PID=$!
+    echo "$TRAINER_PID" > "${LOG_ROOT}/trainer.pid"
+  else
+    exec "${TRAINER_CMD[@]}"
+  fi
+}
 
-echo "Launching DeepSWE rollout node..."
-(
+start_rollout() {
+  local in_background="${1:-false}"
+  echo "Launching DeepSWE rollout node..."
   ROLLOUT_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
-    --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+    --discovery_addrs="${ORCHESTRATOR_ADDR}:${ORCHESTRATOR_PORT}"
     --process_main=tunix.experimental.examples.common.run_rollout_node.main
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
@@ -322,15 +387,62 @@ echo "Launching DeepSWE rollout node..."
   fi
   export PYTHONUNBUFFERED=1
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
-  exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
-) &
-ROLLOUT_PID=$!
+  if [[ "$in_background" == "true" ]]; then
+    "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1 &
+    ROLLOUT_PID=$!
+    echo "$ROLLOUT_PID" > "${LOG_ROOT}/rollout.pid"
+  else
+    exec "${ROLLOUT_CMD[@]}"
+  fi
+}
 
-wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
-wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+start_mock_trainer() {
+  local in_background="${1:-false}"
+  echo "Launching mock CPU trainer worker..."
+  TRAINER_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_addrs="${ORCHESTRATOR_ADDR}:${ORCHESTRATOR_PORT}"
+    --process_executor=tunix.experimental.distributed.runtime.executor.LocalExecutor
+    --process_main=tunix.experimental.examples.common.run_mock_trainer_node.main
+    --worker_id="trainer-0"
+    --port="$TRAINER_PORT"
+  )
+  export PYTHONUNBUFFERED=1
+  print_command "Mock Trainer command" "${TRAINER_CMD[@]}"
+  if [[ "$in_background" == "true" ]]; then
+    "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1 &
+    TRAINER_PID=$!
+    echo "$TRAINER_PID" > "${LOG_ROOT}/trainer.pid"
+  else
+    exec "${TRAINER_CMD[@]}"
+  fi
+}
 
-echo "Launching CPU orchestrator..."
-(
+start_mock_rollout() {
+  local in_background="${1:-false}"
+  echo "Launching mock CPU rollout worker..."
+  ROLLOUT_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_addrs="${ORCHESTRATOR_ADDR}:${ORCHESTRATOR_PORT}"
+    --process_executor=tunix.experimental.distributed.runtime.executor.LocalExecutor
+    --process_main=tunix.experimental.examples.common.run_mock_rollout_node.main
+    --worker_id="rollout-0"
+    --port="$ROLLOUT_PORT"
+  )
+  export PYTHONUNBUFFERED=1
+  print_command "Mock Rollout command" "${ROLLOUT_CMD[@]}"
+  if [[ "$in_background" == "true" ]]; then
+    "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1 &
+    ROLLOUT_PID=$!
+    echo "$ROLLOUT_PID" > "${LOG_ROOT}/rollout.pid"
+  else
+    exec "${ROLLOUT_CMD[@]}"
+  fi
+}
+
+start_orchestrator() {
+  local redirect_log="${1:-false}"
+  echo "Launching CPU orchestrator..."
   ORCHESTRATOR_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_id="${ORCHESTRATOR_ID}"
@@ -393,10 +505,69 @@ echo "Launching CPU orchestrator..."
   export WANDB_RUN_NAME="$WANDB_RUN_NAME"
   export WANDB_API_KEY="$WANDB_API_KEY"
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
-  "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
-)
+  if [[ "$redirect_log" == "true" ]]; then
+    "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
+  else
+    exec "${ORCHESTRATOR_CMD[@]}"
+  fi
+}
 
-echo "Distributed DeepSWE GRPO pipeline finished successfully."
-echo "Trainer log:      $TRAINER_LOG"
-echo "Rollout log:      $ROLLOUT_LOG"
-echo "Orchestrator log: $ORCHESTRATOR_LOG"
+if [[ "$COMMAND" == "start" ]]; then
+  stop_all
+  ensure_model_dir
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  : > "$TRAINER_LOG"
+  : > "$ROLLOUT_LOG"
+  : > "$ORCHESTRATOR_LOG"
+  start_trainer true
+  start_rollout true
+  wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
+  wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+  start_orchestrator true
+  echo "Distributed DeepSWE GRPO pipeline finished successfully."
+  echo "Trainer log:      $TRAINER_LOG"
+  echo "Rollout log:      $ROLLOUT_LOG"
+  echo "Orchestrator log: $ORCHESTRATOR_LOG"
+elif [[ "$COMMAND" == "test_orchestrator" ]]; then
+  stop_all
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  : > "$TRAINER_LOG"
+  : > "$ROLLOUT_LOG"
+  : > "$ORCHESTRATOR_LOG"
+  start_mock_trainer true
+  start_mock_rollout true
+  wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
+  wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+  start_orchestrator true
+  echo "Test orchestrator with mock workers finished successfully."
+  echo "Trainer log:      $TRAINER_LOG"
+  echo "Rollout log:      $ROLLOUT_LOG"
+  echo "Orchestrator log: $ORCHESTRATOR_LOG"
+elif [[ "$COMMAND" == "stop" ]]; then
+  stop_all
+elif [[ "$COMMAND" == "trainer" ]]; then
+  stop_trainer
+  ensure_model_dir
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  start_trainer false
+elif [[ "$COMMAND" == "mock_trainer" ]]; then
+  stop_trainer
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  start_mock_trainer false
+elif [[ "$COMMAND" == "rollout" ]]; then
+  stop_rollout
+  ensure_model_dir
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  start_rollout false
+elif [[ "$COMMAND" == "mock_rollout" ]]; then
+  stop_rollout
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  start_mock_rollout false
+elif [[ "$COMMAND" == "orchestrator" ]]; then
+  ensure_model_dir
+  mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
+  start_orchestrator false
+else
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout'."
+  exit 1
+fi
