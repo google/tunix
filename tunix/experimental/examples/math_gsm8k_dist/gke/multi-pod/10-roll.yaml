@@ -1,7 +1,7 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: roll-1
+  name: roll
   namespace: default
 spec:
   failurePolicy:
@@ -11,6 +11,9 @@ spec:
     publishNotReadyAddresses: true
   replicatedJobs:
   - name: proc
+    # One single-chip v6e rollout worker per replica; worker_id is derived
+    # from the JobSet job-index label (roll-0 .. roll-5).
+    replicas: 6
     template:
       spec:
         backoffLimit: 2048000
@@ -23,21 +26,28 @@ spec:
             - command:
               - bash
               - -c
-              - "# PID 1 wrapper: forwards SIGTERM to background child process so\
-                \ K8s\n# termination grace period shuts down workload cleanly without\
-                \ SIGKILL.\n# Polling sleep loop ensures bash wakes up promptly to\
-                \ run trap handler.\n\necho \"Program Start: $(date)\"\n_sigterm()\
-                \ (kill -SIGTERM $! 2>/dev/null)\ntrap _sigterm SIGTERM\n\n(\n  python\
-                \ -m tunix.experimental.distributed.runtime.main --discovery_addrs=orch:20000\
-                \ --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor\
-                \ --process_main=tunix.experimental.examples.common.run_rollout_node.main\
-                \ --worker_id=roll-1 --port=20001 --mesh_fsdp=1 --mesh_tp=1 --model_id=Qwen/Qwen3-1.7B\
-                \ --model_name=Qwen3-1.7B --model_dir=/tmp/models/Qwen3-1.7B --tokenizer_path=Qwen/Qwen3-1.7B\
-                \ --max_prompt_length=512 --max_response_length=128 --sampler=inprocess_vllm\
-                \ --lora_rank=16 --lora_alpha=16.0 --weight_sync_mode=none\n) & PID=$!\n\
-                \nwhile kill -0 $PID 2>/dev/null; do\n  sleep 5\ndone\nwait $PID\n\
-                EXIT_CODE=$?\n\necho \"Program End: $(date)\"\necho \"EXIT_CODE=$EXIT_CODE\"\
-                \nexit $EXIT_CODE\n"
+              - |
+                # PID 1 wrapper: forwards SIGTERM to background child process so K8s
+                # termination grace period shuts down workload cleanly without SIGKILL.
+                # Polling sleep loop ensures bash wakes up promptly to run trap handler.
+
+                echo "Program Start: $(date)"
+                _sigterm() (kill -SIGTERM $! 2>/dev/null)
+                trap _sigterm SIGTERM
+
+                (
+                  python -m tunix.experimental.distributed.runtime.main --discovery_addrs=orch:20000 --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor --process_main=tunix.experimental.examples.common.run_rollout_node.main --worker_id=roll-${JOB_INDEX} --port=20001 --mesh_fsdp=1 --mesh_tp=1 --model_id=Qwen/Qwen3-1.7B --model_name=Qwen3-1.7B --model_dir=/tmp/models/Qwen3-1.7B --tokenizer_path=Qwen/Qwen3-1.7B --max_prompt_length=512 --max_response_length=128 --sampler=inprocess_vllm --lora_rank=16 --lora_alpha=16.0 --weight_sync_mode=none
+                ) & PID=$!
+
+                while kill -0 $PID 2>/dev/null; do
+                  sleep 5
+                done
+                wait $PID
+                EXIT_CODE=$?
+
+                echo "Program End: $(date)"
+                echo "EXIT_CODE=$EXIT_CODE"
+                exit $EXIT_CODE
               env:
               - name: JOBSET_NAME
                 valueFrom:
