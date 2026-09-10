@@ -487,6 +487,7 @@ class TrainRequest(Request):
 
 @dataclasses.dataclass(kw_only=True)
 class LogprobsRequest(Request):
+  # TODO(tunix-dev): add router replay support to LogprobsRequest.
   """Request to score per-token log-probabilities under a frozen model.
 
   Attributes:
@@ -496,12 +497,23 @@ class LogprobsRequest(Request):
     temperature: Softmax temperature to score under. Mandatory: it must match
       the temperature the tokens were sampled at, or the log-probs are biased.
     model_role: Which hosted model to score against (v1: "reference").
+    pad_id: Pad token id. Used by the trainer/actor scoring path; the reference
+      path leaves it unset and relies on the worker's own id.
+    eos_id: End-of-sequence token id, used by the trainer/actor scoring path.
+    segment_ids: Optional 1D packing segment ids (sequence packing); trainer path
+      only.
+    segment_positions: Optional 1D packing local position indices (sequence
+      packing); trainer path only.
   """
 
-  prompt_tokens: np.ndarray
-  completion_tokens: np.ndarray
+  prompt_tokens: ArrayLike
+  completion_tokens: ArrayLike
   temperature: float
   model_role: str = "reference"
+  pad_id: int | None = None
+  eos_id: int | None = None
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
 
 
 ##### Inference DTOs #####

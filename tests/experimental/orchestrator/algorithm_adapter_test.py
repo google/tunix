@@ -279,6 +279,39 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(algo_config.loss_algo, "gspo-token")
     self.assertEqual(algo_config.kl_loss_mode, "mse_kl")
 
+  def test_grpo_sampler_is_defaults(self):
+    adapter = algorithm_adapter.GRPOAdapter(group_size=4)
+    self.assertTrue(adapter.use_rollout_logps)
+    self.assertIsNone(adapter.sampler_is)
+    self.assertEqual(adapter.sampler_is_threshold, 2.0)
+
+    gen_fn = adapter.build_gen_model_input_fn(pad_id=0, eos_id=1)
+    algo_config = gen_fn({})["algo_config"]
+    self.assertTrue(algo_config.use_rollout_logps)
+    self.assertIsNone(algo_config.sampler_is)
+    self.assertEqual(algo_config.sampler_is_threshold, 2.0)
+
+  def test_grpo_sampler_is_custom(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        group_size=4,
+        use_rollout_logps=False,
+        sampler_is="token",
+        sampler_is_threshold=3.5,
+    )
+    self.assertFalse(adapter.use_rollout_logps)
+    self.assertEqual(adapter.sampler_is, "token")
+    self.assertEqual(adapter.sampler_is_threshold, 3.5)
+
+    gen_fn = adapter.build_gen_model_input_fn(pad_id=0, eos_id=1)
+    algo_config = gen_fn({})["algo_config"]
+    self.assertFalse(algo_config.use_rollout_logps)
+    self.assertEqual(algo_config.sampler_is, "token")
+    self.assertEqual(algo_config.sampler_is_threshold, 3.5)
+
+  def test_grpo_sampler_is_invalid_raises(self):
+    with self.assertRaises(ValueError):
+      algorithm_adapter.GRPOAdapter(group_size=4, sampler_is="unsupported")
+
   def test_ppo_build_gen_model_input_fn(self):
     adapter = algorithm_adapter.PPOAdapter(
         clip_epsilon=0.3,

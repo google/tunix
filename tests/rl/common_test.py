@@ -1114,5 +1114,65 @@ class AlignRoutedExpertsTest(parameterized.TestCase):
       )
 
 
+class SamplerTrainerAgreementTest(parameterized.TestCase):
+
+  def test_returns_empty_when_logps_missing(self):
+    mask = jnp.ones((2, 3), dtype=jnp.int32)
+    logps = jnp.zeros((2, 3), dtype=jnp.float32)
+    self.assertEqual(
+        common.sampler_trainer_agreement(None, logps, mask), ({}, None)
+    )
+    self.assertEqual(
+        common.sampler_trainer_agreement(logps, None, mask), ({}, None)
+    )
+
+  def test_identical_logps_report_agreement(self):
+    logps = jnp.array(
+        [[-0.1, -0.5, -2.0], [-0.3, -1.0, -0.2]], dtype=jnp.float32
+    )
+    mask = jnp.ones((2, 3), dtype=jnp.int32)
+    metrics, weights = common.sampler_trainer_agreement(logps, logps, mask)
+    self.assertIsNone(weights)
+    self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_mean"][0], 0.0)
+    self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_max"][0], 0.0)
+    self.assertAlmostEqual(metrics["sampler_trainer/prob_diff_mean"][0], 0.0)
+    self.assertAlmostEqual(
+        metrics["sampler_trainer/probs_pearson_corr"][0], 1.0, places=4
+    )
+    # No importance-sampling metrics unless sampler_is == "token".
+    self.assertNotIn("sampler_is/weight_mean", metrics)
+
+  def test_logp_diff_uses_only_masked_positions(self):
+    rollout = jnp.array([[-0.1, -0.5, -2.0]], dtype=jnp.float32)
+    trainer = jnp.array([[-0.1, -0.5, -5.0]], dtype=jnp.float32)
+    # Mask out the divergent third token; the metric must ignore it.
+    mask = jnp.array([[1, 1, 0]], dtype=jnp.int32)
+    metrics, _ = common.sampler_trainer_agreement(rollout, trainer, mask)
+    self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_mean"][0], 0.0)
+    self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_max"][0], 0.0)
+
+  def test_token_importance_sampling_weights(self):
+    rollout = jnp.array([[-1.0, -1.0, -1.0]], dtype=jnp.float32)
+    # trainer - rollout = log([1, 3, 10]) -> exp(log_ratio) = [1, 3, 10].
+    trainer = rollout + jnp.log(
+        jnp.array([[1.0, 3.0, 10.0]], dtype=jnp.float32)
+    )
+    mask = jnp.ones((1, 3), dtype=jnp.int32)
+    metrics, weights = common.sampler_trainer_agreement(
+        rollout, trainer, mask, sampler_is="token", sampler_is_threshold=2.0
+    )
+    self.assertIsNotNone(weights)
+    # Clamped at threshold 2.0: [1, 2, 2].
+    np.testing.assert_allclose(
+        np.asarray(weights), np.array([[1.0, 2.0, 2.0]]), rtol=1e-5
+    )
+    self.assertIn("sampler_is/weight_mean", metrics)
+    self.assertAlmostEqual(metrics["sampler_is/weight_max"][0], 2.0, places=5)
+    # Two of three positions (3x, 10x) exceed the threshold.
+    self.assertAlmostEqual(
+        metrics["sampler_is/frac_clipped_at_threshold"][0], 2.0 / 3.0, places=5
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -17,6 +17,7 @@ import functools
 import inspect
 from typing import Any, Iterable, Sequence
 
+from absl import logging
 import flax
 from flax import nnx
 import jax
@@ -565,6 +566,126 @@ def compute_per_token_logps(
       entropy = compute_entropy_from_logits(logits)
       return per_token_logps, entropy
     return per_token_logps
+
+
+def sampler_trainer_agreement(
+    rollout_per_token_logps,
+    trainer_per_token_logps,
+    completion_mask,
+    sampler_is: str | None = None,
+    sampler_is_threshold: float = 2.0,
+):
+  """Sampler-vs-trainer agreement metrics and the TIS weights built from them.
+
+  Shared by the RL orchestrator (``rl_program``) and the agentic GRPO learner.
+  The unpacked and packed paths differ only in which representation the two logp
+  tensors come from.
+
+  Args:
+    rollout_per_token_logps: per-token logps recorded by the sampler at rollout
+      time, or None (in which case no metrics/weights are produced).
+    trainer_per_token_logps: per-token logps recomputed under the trainer's
+      (actor) weights, or None.
+    completion_mask: assistant-vs-env mask (1 for assistant-generated tokens, 0
+      for env-injected tokens) scoping the comparison to model-emitted positions.
+    sampler_is: if ``"token"``, also builds truncated per-token
+      importance-sampling weights; otherwise no weights are returned.
+    sampler_is_threshold: clamp applied to the importance-sampling weights.
+
+  Returns:
+    A tuple ``(metrics, sampler_is_weights)`` where ``metrics`` maps a metric
+    name to ``(value, aggregation_fn)`` and ``sampler_is_weights`` is the
+    detached TIS weight array (or None when ``sampler_is != "token"`` or either
+    logp tensor is missing).
+  """
+  metrics = {}
+  sampler_is_weights = None
+  if rollout_per_token_logps is None or trainer_per_token_logps is None:
+    return metrics, sampler_is_weights
+
+  # ``completion_mask`` is the assistant-vs-env mask built upstream (1 for
+  # assistant-generated tokens, 0 for env-injected tokens), and already
+  # correctly scopes the comparison to model-emitted positions. We
+  # deliberately do NOT additionally drop positions where the rollout logprob
+  # equals exactly 0.0 -- that value can legitimately occur for near-certain
+  # tokens and excluding them removes the most consistent positions from the
+  # statistic, inflating the per-position mean.
+  mask = completion_mask.astype(jnp.bool_)
+  mask_f = mask.astype(jnp.float32)
+  mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+  diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+  diff_mean = float((diff * mask_f).sum() / mask_sum)
+  diff_max = float(jnp.where(mask, diff, 0.0).max())
+  # Probability-space diff is more representative than logp_diff for
+  # confidence agreement: logp can diverge arbitrarily for very
+  # low-probability tokens whose contribution to the ratio is negligible.
+  rp = jnp.exp(rollout_per_token_logps)
+  tp = jnp.exp(trainer_per_token_logps)
+  prob_diff = jnp.abs(rp - tp)
+  prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+  prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+  rp_flat, tp_flat, mf = rp.reshape(-1), tp.reshape(-1), mask_f.reshape(-1)
+  rp_mean = (rp_flat * mf).sum() / mask_sum
+  tp_mean = (tp_flat * mf).sum() / mask_sum
+  rp_d = (rp_flat - rp_mean) * mf
+  tp_d = (tp_flat - tp_mean) * mf
+  cov = (rp_d * tp_d).sum() / mask_sum
+  rp_var = (rp_d * rp_d).sum() / mask_sum
+  tp_var = (tp_d * tp_d).sum() / mask_sum
+  pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+  metrics.update({
+      "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+      "sampler_trainer/logp_diff_max": (diff_max, np.max),
+      "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+      "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
+      "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+  })
+  logging.info(
+      "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
+      " pearson=%.5f",
+      diff_mean,
+      diff_max,
+      prob_diff_mean,
+      prob_diff_max,
+      pearson,
+  )
+
+  # Truncated importance-sampling weights: per-token trainer-vs-sampler log
+  # ratio, masked to assistant tokens, clamped at the threshold, detached.
+  # The policy loss picks these up via ``train_example.sampler_is_weights``.
+  if sampler_is == "token":
+    asst_mask_f = completion_mask.astype(jnp.float32)
+    log_ratio = trainer_per_token_logps - rollout_per_token_logps
+    log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
+    sampler_is_weights = jax.lax.stop_gradient(
+        jnp.minimum(jnp.exp(log_ratio), sampler_is_threshold) * asst_mask_f
+    )
+    is_mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
+    is_mean = float((sampler_is_weights * asst_mask_f).sum() / is_mask_sum)
+    is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
+    frac_clipped = float(
+        (
+            (jnp.exp(log_ratio) > sampler_is_threshold)
+            & (asst_mask_f > 0)
+        )
+        .astype(jnp.float32)
+        .sum()
+        / is_mask_sum
+    )
+    metrics.update({
+        "sampler_is/weight_mean": (is_mean, np.mean),
+        "sampler_is/weight_max": (is_max, np.max),
+        "sampler_is/frac_clipped_at_threshold": (frac_clipped, np.mean),
+    })
+    logging.info(
+        "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
+        " (threshold=%.2f)",
+        is_mean,
+        is_max,
+        frac_clipped,
+        sampler_is_threshold,
+    )
+  return metrics, sampler_is_weights
 
 
 def compute_chunked_logps(

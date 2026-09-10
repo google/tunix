@@ -33,6 +33,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
+from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
@@ -162,6 +163,8 @@ class StandardRLProgram(RLProgram):
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
+    self.sampler_is = getattr(self.algo, "sampler_is", None)
+    self.sampler_is_threshold = getattr(self.algo, "sampler_is_threshold", 2.0)
     self._in_flight_rollouts = 0
     self._dispatch_capacity: asyncio.Semaphore | None = None
     self._dispatch_done = asyncio.Event()
@@ -361,6 +364,7 @@ class StandardRLProgram(RLProgram):
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
+      sampler_agreement: dict[str, tuple[Any, list[float]]] | None = None,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -665,6 +669,22 @@ class StandardRLProgram(RLProgram):
               self.metrics_prefix, metric_key, val, self.mode, log_step
           )
 
+    # --- 5. Sampler/Trainer Agreement Metrics ---
+    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
+    # the shared helper; reduce each metric's per-microbatch values with the
+    # aggregation fn the helper paired with it.
+    if sampler_agreement:
+      for name, (agg_fn, values) in sampler_agreement.items():
+        if not values:
+          continue
+        self.metrics_logger.log(
+            self.metrics_prefix,
+            name,
+            float(agg_fn(values)),
+            self.mode,
+            log_step,
+        )
+
     return {
         "reward_mean": reward_mean,
         "reward_std": reward_std,
@@ -673,6 +693,64 @@ class StandardRLProgram(RLProgram):
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
     }
+
+  async def _apply_sampler_trainer_agreement(
+      self,
+      batch: datatypes.RLTrainerPayload,
+      accumulator: dict[str, tuple[Any, list[float]]],
+  ) -> datatypes.RLTrainerPayload:
+    """Records sampler-vs-trainer agreement and feeds TIS weights into a batch.
+
+    Recomputes per-token log-probs under the trainer's live (actor) weights and
+    compares them against the sampler's recorded ``old_per_token_logps`` to
+    quantify sampler-vs-trainer drift, appending the resulting metrics to
+    ``accumulator`` (keyed by the shared helper's already-namespaced names).
+    When ``sampler_is == "token"`` it also writes truncated importance-sampling
+    weights and overwrites ``old_per_token_logps`` with the trainer logps so the
+    policy loss can correct for off-policy drift, matching the agentic learner.
+
+    Args:
+      batch: The microbatch to score; must carry ``old_per_token_logps``.
+      accumulator: Per-step map of metric name -> (agg_fn, values) to extend.
+
+    Returns:
+      The batch, updated with TIS weights / trainer logps when
+      ``sampler_is == "token"``; otherwise returned unchanged.
+    """
+    assert self.engine is not None
+    gen_temp = getattr(self.generation_args, "temperature", None)
+    logps_req = datatypes.LogprobsRequest(
+        prompt_tokens=batch.prompt_ids,
+        completion_tokens=batch.completion_ids,
+        temperature=gen_temp if gen_temp is not None else 1.0,
+        model_role="actor",
+        pad_id=self.batch_config.pad_id,
+        eos_id=getattr(self.assembler, "eos_id", self.batch_config.pad_id),
+        segment_ids=batch.segment_ids,
+        segment_positions=batch.segment_positions,
+    )
+    trainer_logps = await self.engine.per_token_logps(
+        datatypes.Role.ACTOR, items=logps_req
+    )
+    trainer_logps = np.asarray(trainer_logps.per_token_logps, dtype=np.float32)
+    sa_metrics, sampler_is_weights = rl_common.sampler_trainer_agreement(
+        batch.old_per_token_logps,
+        trainer_logps,
+        batch.completion_mask,
+        sampler_is=self.sampler_is,
+        sampler_is_threshold=self.sampler_is_threshold,
+    )
+    for name, (value, agg_fn) in sa_metrics.items():
+      accumulator.setdefault(name, (agg_fn, []))[1].append(float(value))
+
+    updates: dict[str, Any] = {}
+    if sampler_is_weights is not None:
+      updates["sampler_is_weights"] = sampler_is_weights
+    if self.sampler_is == "token":
+      updates["old_per_token_logps"] = trainer_logps
+    if updates:
+      batch = dataclasses.replace(batch, **updates)
+    return batch
 
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
@@ -686,6 +764,7 @@ class StandardRLProgram(RLProgram):
       uncommitted_groups = []
       step_result = None
       trainer_metrics = None
+      step_sampler_agreement: dict[str, tuple[Any, list[float]]] = {}
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
@@ -741,6 +820,15 @@ class StandardRLProgram(RLProgram):
                 datatypes.Role.REFERENCE, items=batch
             )
             batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+
+          if (
+              isinstance(batch, datatypes.RLTrainerPayload)
+              and batch.old_per_token_logps is not None
+              and self.algo.use_rollout_logps
+          ):
+            batch = await self._apply_sampler_trainer_agreement(
+                batch, step_sampler_agreement
+            )
 
           num_microbatches += 1
           logging.info(
@@ -817,6 +905,7 @@ class StandardRLProgram(RLProgram):
           step_time_sec=step_time_sec,
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
+          sampler_agreement=step_sampler_agreement,
       )
 
       self.last_step_result = RLStepResult(

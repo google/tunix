@@ -139,6 +139,9 @@ class AlgorithmAdapter(abc.ABC):
     self.requires_reference_kl = False
     self.has_critic = False
     self.requires_old_logprobs = False
+    self.use_rollout_logps: bool = True
+    self.sampler_is: str | None = None
+    self.sampler_is_threshold: float = 2.0
 
   @abc.abstractmethod
   def compute_advantages(
@@ -193,10 +196,17 @@ class GRPOAdapter(AlgorithmAdapter):
       kl_loss_mode: str = "mse_kl",
       kl_clamp_value: float | None = None,
       use_rollout_logps: bool = True,
+      sampler_is: str | None = None,
+      sampler_is_threshold: float = 2.0,
   ):
     if group_size <= 1:
       raise ValueError(
           f"group_size must be greater than 1 for GRPO. Received: {group_size}"
+      )
+    if sampler_is not in (None, "token"):
+      raise ValueError(
+          "sampler_is should be either None or 'token'. Received: "
+          f"{sampler_is}"
       )
     super().__init__(
         group_size=group_size,
@@ -218,6 +228,8 @@ class GRPOAdapter(AlgorithmAdapter):
     self.kl_clamp_value = kl_clamp_value
     self.requires_reference_kl = beta_kl != 0.0
     self.use_rollout_logps = use_rollout_logps
+    self.sampler_is = sampler_is
+    self.sampler_is_threshold = sampler_is_threshold
 
   def compute_advantages(
       self,
@@ -296,6 +308,9 @@ class GRPOAdapter(AlgorithmAdapter):
         temperature=self.temperature,
         kl_loss_mode=self.kl_loss_mode,
         kl_clamp_value=self.kl_clamp_value,
+        use_rollout_logps=self.use_rollout_logps,
+        sampler_is=self.sampler_is,
+        sampler_is_threshold=self.sampler_is_threshold,
     )
     return functools.partial(
         _algo_model_input,
