@@ -4107,6 +4107,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     training_config = self.rl_cluster.cluster_config.training_config
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    _canon_xprof_step_immediate_entry()
 
     # 1. Start the rollout producer, except for explicitly hash-bound
     # diagnostic replays.  Replays must never regenerate environment or
@@ -6043,6 +6044,35 @@ def _canon_xprof_v2_frozenlake_update_complete(arm: str) -> None:
   )
 
 
+def _canon_xprof_step_immediate_entry() -> None:
+  """Opens the phase=step window before the first rollout (skip=0).
+
+  tasks/zero_tim_perf2 phase A2: the one-step FrozenLake proxy has no later
+  step boundary at which the step profiler could activate, so
+  CANON_XPROF_STEP_IMMEDIATE=1 activates it where the rollout producer
+  starts; the first completed step closes it through the usual boundary
+  hook.  Unset or empty (the docker -e K="" idiom) stays inert.  Diagnostic
+  only, never certification evidence.
+  """
+  if os.environ.get("CANON_XPROF_STEP_IMMEDIATE", "") != "1":
+    return
+  if not _canon_xprof_configure() or _CANON_XPROF["mode"] != "step":
+    raise ValueError(
+        "CANON_XPROF_STEP_IMMEDIATE=1 requires CANON_XPROF_DIR and "
+        "CANON_XPROF_PHASE=step"
+    )
+  if _CANON_XPROF["skip"] != 0:
+    raise ValueError(
+        "CANON_XPROF_STEP_IMMEDIATE=1 requires CANON_XPROF_SKIP_STEPS=0"
+    )
+  _CANON_XPROF["profiler"].maybe_activate(0)
+  print(
+      "[P51.XPROF] phase=step started step=0 anchor=producer_start "
+      "(immediate)",
+      flush=True,
+  )
+
+
 def _canon_xprof_step_boundary():
   """Drives the xprof capture window at global-step boundaries.
 
@@ -6113,6 +6143,7 @@ def _canon_xprof_configure() -> bool:
     onehost_immediate = bool(
         deepswe_debug.onehost_xprof_arm()
         or _canon_v2_frozenlake_profile_arm()
+        or os.environ.get("CANON_XPROF_STEP_IMMEDIATE", "") == "1"
     )
     if skip < 0 or steps < 1 or (skip == 0 and not onehost_immediate):
       raise ValueError(

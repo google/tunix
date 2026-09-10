@@ -146,15 +146,28 @@ if [ "$mode" = profile ]; then
   xprof_python_tracer=0
   xprof_tpu_trace_mode=TRACE_ONLY_XLA
   xprof_labels=1
-  # tasks/zero_tim_perf2 phase A2: a step-window capture (the engine rollout)
-  # is a diagnostic only; the profiler rejects TRACE_ONLY_XLA for that phase
-  # (zero_tim_perf phase0.md P0.3), so the trace mode is left at its default.
-  if [ "${V2_FL_XPROF_PHASE:-update}" = step ]; then
-    xprof_dir="$root/xprof-step"
-    xprof_phase=step
-    xprof_tpu_trace_mode=
-    echo "[V2.FL.ONEHOST] DIAG xprof phase=step (rollout window; not certification)"
+fi
+# tasks/zero_tim_perf2 phase A2: a step-window capture of the live rollout.
+# Profile mode replays a capsule (no engine decode), so the live window rides
+# on measure mode.  The profiler rejects TRACE_ONLY_XLA for phase=step
+# (zero_tim_perf phase0.md P0.3), the trace mode stays at its default, and
+# the learner opens the window before the first rollout
+# (CANON_XPROF_STEP_IMMEDIATE=1).  Diagnostic only, never certification.
+if [ "${V2_FL_XPROF_PHASE:-}" = step ]; then
+  if [ "$mode" != measure ]; then
+    echo "V2_FL_XPROF_PHASE=step is a live-rollout diagnostic: measure mode only" >&2
+    exit 2
   fi
+  xprof_dir="$root/xprof-step"
+  perf_trace_dir="$root/perfetto"
+  xprof_skip=0
+  xprof_steps=1
+  xprof_phase=step
+  xprof_host_tracer=1
+  xprof_python_tracer=0
+  xprof_tpu_trace_mode=
+  xprof_labels=1
+  echo "[V2.FL.ONEHOST] DIAG xprof phase=step on a live measure run (rollout window; not certification)"
 fi
 seal_evidence() {
   find "$root" -type f ! -name SHA256SUMS -print0 \
@@ -361,6 +374,7 @@ sudo docker run --rm --init --privileged --net=host --name "$container" \
   -e CANON_XPROF_PYTHON_TRACER="$xprof_python_tracer" \
   -e CANON_XPROF_TPU_TRACE_MODE="$xprof_tpu_trace_mode" \
   -e CANON_XPROF_LABELS="$xprof_labels" \
+  -e CANON_XPROF_STEP_IMMEDIATE="$([ "${V2_FL_XPROF_PHASE:-}" = step ] && echo 1)" \
   -e V2_FL_CAPSULE_MODE="$capsule_mode" \
   -e V2_FL_CAPSULE_CAPTURE_RUN="$capsule_capture_run" \
   -e CANON_V2_TRAINING_CAPSULE_MODE="${capsule_mode#none}" \
