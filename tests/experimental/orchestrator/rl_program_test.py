@@ -2703,6 +2703,75 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_program_creates_sequence_packed_assembler(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        assembler=None,
+        batch_config=batch_assembly.BatchConfig(
+            max_seq_token_per_tpu=1024,
+            max_segments_per_packed_row=4,
+            trainer_fsdp=2,
+            trainer_dp=2,
+        ),
+    )
+    self.assertIsInstance(
+        program.assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(program.assembler.max_packed_len, 1024)
+    self.assertEqual(program.assembler.batch_size, 4)
+    self.assertEqual(program.assembler.max_segments_per_packed_row, 4)
+
+  def test_program_creates_padded_assembler(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        assembler=None,
+        generation_args=datatypes.GenerationArgs(max_response_length=2048),
+        batch_config=batch_assembly.BatchConfig(
+            max_prompt_length=128,
+            pad_id=5,
+        ),
+    )
+    self.assertIsInstance(
+        program.assembler, batch_assembly.PaddedBatchAssembler
+    )
+    self.assertEqual(program.assembler.max_prompt_length, 128)
+    self.assertEqual(program.assembler.max_response_length, 2048)
+    self.assertEqual(program.assembler.pad_id, 5)
+
+    program_override = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        assembler=None,
+        generation_args=datatypes.GenerationArgs(max_response_length=2048),
+        batch_config=batch_assembly.BatchConfig(
+            max_prompt_length=128,
+            max_response_length=512,
+            pad_id=5,
+        ),
+    )
+    self.assertEqual(program_override.assembler.max_response_length, 512)
+
+  def test_program_creates_default_assembler(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        assembler=None,
+    )
+    self.assertIsInstance(
+        program.assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(program.assembler.max_packed_len, 8192)
+
 
 if __name__ == "__main__":
   absltest.main()

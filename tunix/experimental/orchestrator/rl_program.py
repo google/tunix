@@ -39,6 +39,7 @@ MetricsLogger = metrics_logger_lib.MetricsLogger
 MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
 _extract_scalar = metrics_logger_lib.extract_scalar
+BatchConfig = batch_assembly.BatchConfig
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -101,6 +102,7 @@ class StandardRLProgram(RLProgram):
       max_steps: int | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
+      batch_config: batch_assembly.BatchConfig | None = None,
       generation_args: datatypes.GenerationArgs | None = None,
       group_size: int = 8,
       mini_batch_size: int = 4,
@@ -136,15 +138,23 @@ class StandardRLProgram(RLProgram):
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
-    self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
-        batch_size=getattr(algo, "train_micro_batch_size", 1),
-        group_size=self.group_size,
-        mini_batch_size=self.mini_batch_size,
-        max_packed_len=getattr(algo, "max_packed_len", 8192),
-    )
-    self.assembler.group_size = self.group_size
-
-    self.assembler.mini_batch_size = self.mini_batch_size
+    self.batch_config = batch_config or batch_assembly.BatchConfig()
+    if self.batch_config.max_response_length is None:
+      self.batch_config = dataclasses.replace(
+          self.batch_config,
+          max_response_length=self.generation_args.max_response_length,
+      )
+    if assembler is not None:
+      self.assembler = assembler
+      self.assembler.group_size = self.group_size
+      self.assembler.mini_batch_size = self.mini_batch_size
+    else:
+      self.assembler = batch_assembly.create_batch_assembler(
+          group_size=self.group_size,
+          mini_batch_size=self.mini_batch_size,
+          train_micro_batch_size=getattr(algo, "train_micro_batch_size", 1),
+          batch_config=self.batch_config,
+      )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)

@@ -1929,5 +1929,120 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     self.assertTrue(res[1].is_final_batch)
 
 
+class CreateBatchAssemblerTest(absltest.TestCase):
+
+  def test_create_sequence_packed_assembler_with_mesh_dims(self):
+    assembler = batch_assembly.create_batch_assembler(
+        group_size=2,
+        mini_batch_size=2,
+        train_micro_batch_size=1,
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=42,
+            max_prompt_length=256,
+            max_response_length=256,
+            max_seq_token_per_tpu=1024,
+            max_segments_per_packed_row=8,
+            trainer_fsdp=2,
+            trainer_dp=4,
+        ),
+    )
+    self.assertIsInstance(
+        assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(assembler.batch_size, 8)
+    self.assertEqual(assembler.max_packed_len, 1024)
+    self.assertEqual(assembler.pad_id, 42)
+    self.assertEqual(assembler.max_segments_per_packed_row, 8)
+    self.assertEqual(assembler.group_size, 2)
+    self.assertEqual(assembler.mini_batch_size, 2)
+
+  def test_create_sequence_packed_assembler_defaults_pack_size(self):
+    assembler = batch_assembly.create_batch_assembler(
+        group_size=4,
+        mini_batch_size=2,
+        train_micro_batch_size=3,
+        batch_config=batch_assembly.BatchConfig(
+            max_seq_token_per_tpu=512,
+        ),
+    )
+    self.assertIsInstance(
+        assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(assembler.batch_size, 3)
+    self.assertEqual(assembler.max_packed_len, 512)
+
+  def test_create_sequence_packed_assembler_validates_budget(self):
+    with self.assertRaises(ValueError):
+      batch_assembly.create_batch_assembler(
+          group_size=2,
+          mini_batch_size=2,
+          train_micro_batch_size=1,
+          batch_config=batch_assembly.BatchConfig(
+              max_prompt_length=512,
+              max_response_length=512,
+              max_seq_token_per_tpu=256,  # 256 < 512 + 512
+          ),
+      )
+
+  def test_create_padded_batch_assembler(self):
+    assembler = batch_assembly.create_batch_assembler(
+        group_size=2,
+        mini_batch_size=2,
+        train_micro_batch_size=4,
+        batch_config=batch_assembly.BatchConfig(
+            max_prompt_length=128,
+            max_response_length=256,
+            pad_id=7,
+        ),
+    )
+    self.assertIsInstance(assembler, batch_assembly.PaddedBatchAssembler)
+    self.assertEqual(assembler.batch_size, 4)
+    self.assertEqual(assembler.max_prompt_length, 128)
+    self.assertEqual(assembler.max_response_length, 256)
+    self.assertEqual(assembler.pad_id, 7)
+
+  def test_create_padded_batch_assembler_with_config_response_length(self):
+    assembler = batch_assembly.create_batch_assembler(
+        group_size=2,
+        mini_batch_size=2,
+        train_micro_batch_size=4,
+        batch_config=batch_assembly.BatchConfig(
+            max_prompt_length=128,
+            max_response_length=512,
+            pad_id=7,
+        ),
+    )
+    self.assertIsInstance(assembler, batch_assembly.PaddedBatchAssembler)
+    self.assertEqual(assembler.max_prompt_length, 128)
+    self.assertEqual(assembler.max_response_length, 512)
+
+  def test_create_sequence_packed_assembler_validates_budget_from_config(self):
+    with self.assertRaises(ValueError):
+      batch_assembly.create_batch_assembler(
+          group_size=2,
+          mini_batch_size=2,
+          train_micro_batch_size=1,
+          batch_config=batch_assembly.BatchConfig(
+              max_prompt_length=512,
+              max_response_length=512,
+              max_seq_token_per_tpu=256,  # 256 < 512 + 512
+          ),
+      )
+
+  def test_create_default_batch_assembler(self):
+    assembler = batch_assembly.create_batch_assembler(
+        group_size=2,
+        mini_batch_size=1,
+        train_micro_batch_size=2,
+        batch_config=batch_assembly.BatchConfig(),
+    )
+    self.assertIsInstance(
+        assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(assembler.batch_size, 2)
+    self.assertEqual(assembler.max_packed_len, 8192)
+
+
 if __name__ == "__main__":
   absltest.main()
+

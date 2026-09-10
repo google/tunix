@@ -62,6 +62,41 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
+  parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=None,
+      help=(
+          "Maximum sequence tokens per TPU for sequence packing. When"
+          " configured, SequencePackedBatchAssembler is used instead of"
+          " PaddedBatchAssembler."
+      ),
+  )
+  parser.add_argument(
+      "--max_segments_per_packed_row",
+      type=int,
+      default=None,
+      help="Maximum segments per packed row when sequence packing is enabled.",
+  )
+  # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
+  parser.add_argument(
+      "--trainer_fsdp",
+      type=int,
+      default=None,
+      help=(
+          "Trainer FSDP mesh dimension size for sequence packing pack_size"
+          " computation."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_dp",
+      type=int,
+      default=None,
+      help=(
+          "Trainer DP mesh dimension size for sequence packing pack_size"
+          " computation."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -142,7 +177,11 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       mini_batch_size=args.batch_size,
       train_micro_batch_size=args.train_micro_batch_size,
       max_turns=args.max_turns,
-      max_packed_len=args.max_prompt_length + args.max_response_length,
+      max_packed_len=(
+          args.max_seq_token_per_tpu
+          if args.max_seq_token_per_tpu is not None
+          else args.max_prompt_length + args.max_response_length
+      ),
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
       temperature=args.temperature,
@@ -208,12 +247,18 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
-  tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+  tokenizer_path = (
+      args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
+  )
+  tokenizer = AutoTokenizer.from_pretrained(
+      tokenizer_path, trust_remote_code=True
+  )
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token
   pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-  eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+  eos_id = (
+      tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+  )
   logging.info(
       "Loaded tokenizer from %s (vocab_size=%d, pad_id=%d, eos_id=%d).",
       tokenizer_path,
@@ -297,13 +342,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       max_steps=args.max_steps,
       reward_fns=[],
-      assembler=batch_assembly.PaddedBatchAssembler(
-          batch_size=args.train_micro_batch_size,
+      batch_config=batch_assembly.BatchConfig(
+          pad_id=pad_id,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
-          pad_id=pad_id,
-          group_size=algo.group_size,
-          mini_batch_size=algo.mini_batch_size,
+          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+          max_segments_per_packed_row=args.max_segments_per_packed_row,
+          trainer_fsdp=args.trainer_fsdp,
+          trainer_dp=args.trainer_dp,
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,

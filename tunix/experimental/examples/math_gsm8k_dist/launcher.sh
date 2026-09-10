@@ -34,6 +34,8 @@ MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
+MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-1}
@@ -355,6 +357,8 @@ echo "  eval interval:  $EVAL_EVERY_N_STEPS"
 echo "  learning rate:  $LEARNING_RATE"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
+echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
+echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  beta:           $BETA"
@@ -714,6 +718,15 @@ echo "Launching CPU orchestrator..."
     ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
   else
     ORCHESTRATOR_CMD+=(--use_rollout_logps)
+  fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    ORCHESTRATOR_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
+  if [[ -n "$MAX_SEGMENTS_PER_PACKED_ROW" ]]; then
+    ORCHESTRATOR_CMD+=(--max_segments_per_packed_row="$MAX_SEGMENTS_PER_PACKED_ROW")
+  fi
+  if [[ -n "$TRAINER_FSDP" ]]; then
+    ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
   fi
 
   export JAX_PLATFORMS=cpu

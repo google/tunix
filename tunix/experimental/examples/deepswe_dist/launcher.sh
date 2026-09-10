@@ -39,6 +39,8 @@ NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
 MAX_TURNS=${MAX_TURNS:-3}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
+MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
@@ -202,6 +204,8 @@ echo "  max steps:      ${MAX_STEPS}"
 echo "  max turns:      ${MAX_TURNS}"
 echo "  prompt length:  ${MAX_PROMPT_LENGTH}"
 echo "  response len:   ${MAX_RESPONSE_LENGTH}"
+echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
+echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
 echo "  learning rate:  ${LEARNING_RATE}"
 echo "  beta:           ${BETA}"
 echo "  sampler:        ${SAMPLER}"
@@ -367,6 +371,15 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--debug)
+  fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    ORCHESTRATOR_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
+  if [[ -n "$MAX_SEGMENTS_PER_PACKED_ROW" ]]; then
+    ORCHESTRATOR_CMD+=(--max_segments_per_packed_row="$MAX_SEGMENTS_PER_PACKED_ROW")
+  fi
+  if [[ -n "$TRAINER_FSDP" ]]; then
+    ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
   fi
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1

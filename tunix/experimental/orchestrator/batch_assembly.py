@@ -33,6 +33,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.rl import packing
+from tunix.rl import utils as rl_utils
 
 T = TypeVar("T")
 
@@ -45,6 +46,33 @@ class AssembledBatch(NamedTuple):
   payload: datatypes.RLTrainerPayload
   is_final_batch: bool
   trajectory_ids: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass
+class BatchConfig:
+  """Configuration for batch assembly.
+
+  Attributes:
+    pad_id: Token ID used for padding prompts and completions.
+    max_prompt_length: Maximum prompt length for padding or budget validation.
+    max_response_length: Maximum response length for padding or budget
+      validation.
+    max_seq_token_per_tpu: Maximum packed sequence tokens per TPU. When
+      configured, SequencePackedBatchAssembler is used instead of
+      PaddedBatchAssembler.
+    max_segments_per_packed_row: Maximum segments per packed row when sequence
+      packing is enabled.
+    trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
+    trainer_dp: Trainer DP mesh dimension size for sequence packing.
+  """
+
+  pad_id: int = 0
+  max_prompt_length: int | None = None
+  max_response_length: int | None = None
+  max_seq_token_per_tpu: int | None = None
+  max_segments_per_packed_row: int | None = None
+  trainer_fsdp: int | None = None
+  trainer_dp: int | None = None
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -925,3 +953,98 @@ class PaddedBatchAssembler:
         ),
         metadata=payload_metadata,
     )
+
+
+def create_batch_assembler(
+    *,
+    group_size: int,
+    mini_batch_size: int,
+    train_micro_batch_size: int,
+    batch_config: BatchConfig,
+) -> BatchAssembler:
+  """Builds the batch assembler based on sequence packing or padding parameters.
+
+  If `batch_config.max_seq_token_per_tpu` is provided, a
+  `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
+  is computed from `batch_config.trainer_fsdp` and `batch_config.trainer_dp`
+  (or defaults to `train_micro_batch_size` with a warning if neither is set).
+  The packing budget is validated against `batch_config.max_prompt_length` and
+  `max_response_length`.
+
+  If `batch_config.max_seq_token_per_tpu` is None and
+  `batch_config.max_prompt_length` is specified, a `PaddedBatchAssembler` is
+  used.
+
+  Otherwise, falls back to `SequencePackedBatchAssembler`.
+
+  Args:
+    group_size: Number of rollout generations per prompt group (G).
+    mini_batch_size: Number of prompt groups per model update.
+    train_micro_batch_size: Micro-batch size for training.
+    batch_config: BatchConfig containing packing, padding, and mesh dimension
+      settings.
+
+  Returns:
+    A BatchAssembler instance.
+  """
+  if batch_config.max_seq_token_per_tpu is not None:
+    if batch_config.trainer_fsdp is None and batch_config.trainer_dp is None:
+      logging.warning(
+          "trainer_fsdp and trainer_dp are not set, defaulting pack_size to "
+          "train_micro_batch_size=%d.",
+          train_micro_batch_size,
+      )
+      pack_size = train_micro_batch_size
+    else:
+      pack_size = (batch_config.trainer_fsdp or 1) * (
+          batch_config.trainer_dp or 1
+      )
+
+    if (
+        batch_config.max_prompt_length is not None
+        and batch_config.max_response_length is not None
+    ):
+      rl_utils.validate_packing_budget(
+          batch_config.max_seq_token_per_tpu,
+          batch_config.max_prompt_length,
+          batch_config.max_response_length,
+      )
+
+    logging.info(
+        "Using SequencePackedBatchAssembler with max_seq_token_per_tpu: %d, "
+        "max_segments_per_packed_row: %s, pack_size: %d",
+        batch_config.max_seq_token_per_tpu,
+        batch_config.max_segments_per_packed_row,
+        pack_size,
+    )
+    return SequencePackedBatchAssembler(
+        batch_size=pack_size,
+        group_size=group_size,
+        mini_batch_size=mini_batch_size,
+        max_packed_len=batch_config.max_seq_token_per_tpu,
+        pad_id=batch_config.pad_id,
+        max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+    )
+
+  if batch_config.max_prompt_length is not None:
+    if batch_config.max_response_length is None:
+      raise ValueError(
+          "max_response_length must be specified in batch_config when"
+          " max_prompt_length is set for PaddedBatchAssembler."
+      )
+    return PaddedBatchAssembler(
+        batch_size=train_micro_batch_size,
+        max_prompt_length=batch_config.max_prompt_length,
+        max_response_length=batch_config.max_response_length,
+        pad_id=batch_config.pad_id,
+        group_size=group_size,
+        mini_batch_size=mini_batch_size,
+    )
+
+  return SequencePackedBatchAssembler(
+      batch_size=train_micro_batch_size,
+      group_size=group_size,
+      mini_batch_size=mini_batch_size,
+      pad_id=batch_config.pad_id,
+      max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+  )
