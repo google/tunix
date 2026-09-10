@@ -171,12 +171,39 @@ def _zero_safe_reciprocal(denom: jax.Array) -> jax.Array:
   return jnp.where(denom == 0, jnp.zeros_like(denom), 1.0 / denom)
 
 
+def _is_masked_node(value: Any) -> bool:
+  """True for the sentinel `optax.multi_transform` leaves in a partitioned state.
+
+  `optax.multi_transform` builds every sub-optimizer over the whole parameter
+  tree and writes `optax.MaskedNode()` wherever a parameter belongs to another
+  branch. Freezing parameters -- e.g. a MoE router via
+  `trainable_parameters_mask` -- therefore puts sentinels in the optimizer
+  state that are neither arrays nor `nnx.Variable`s, so every traversal here
+  has to tolerate them. A `MaskedNode` also flattens to *no* leaves, which is
+  why callers zipping it against a partition-spec tree need it treated as a
+  leaf rather than expanded.
+  """
+  return isinstance(value, optax.MaskedNode)
+
+
 def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
-  """Returns the array dtype of every optimizer-state variable."""
+  """Returns the array dtype of every optimizer-state variable.
+
+  Masked sentinels map to `None`, which `_restore_opt_state_float_dtypes`
+  skips.
+  """
+
+  def _dtype_of(value):
+    array = value.get_value() if hasattr(value, "get_value") else value
+    if _is_masked_node(array):
+      return None
+    return array.dtype
+
   return jax.tree_util.tree_map(
-      lambda value: value.get_value().dtype,
+      _dtype_of,
       nnx.state(optimizer, nnx.optimizer.OptState),
-      is_leaf=lambda value: isinstance(value, nnx.Variable),
+      is_leaf=lambda value: isinstance(value, nnx.Variable)
+      or _is_masked_node(value),
   )
 
 
@@ -186,7 +213,11 @@ def _restore_opt_state_float_dtypes(
   """Restores floating optimizer-state leaves to their pre-update dtypes."""
 
   def _restore(value, dtype):
-    array = value.get_value()
+    if dtype is None:
+      return
+    array = value.get_value() if hasattr(value, "get_value") else value
+    if _is_masked_node(array):
+      return
     if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
       value.set_value(array.astype(dtype))
 
@@ -194,7 +225,8 @@ def _restore_opt_state_float_dtypes(
       _restore,
       nnx.state(optimizer, nnx.optimizer.OptState),
       dtypes,
-      is_leaf=lambda value: isinstance(value, nnx.Variable),
+      is_leaf=lambda value: isinstance(value, nnx.Variable)
+      or _is_masked_node(value),
   )
 
 
@@ -659,8 +691,12 @@ class PeftTrainer:
 
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
+    # `is_leaf` so a MaskedNode pairs with its partition spec instead of
+    # flattening to nothing: it has no children, so without this the state tree
+    # is missing a leaf exactly where the spec tree still has one and the zip
+    # fails with a structure error. `_shard` returns non-arrays untouched.
     optimizer_sharded_state = jax.tree.map(
-        _shard, optimizer_state, optimizer_pspecs
+        _shard, optimizer_state, optimizer_pspecs, is_leaf=_is_masked_node
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 

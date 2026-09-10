@@ -2180,5 +2180,79 @@ class TrainStepGlobalWeightedTest(parameterized.TestCase):
     self.assertGreater(float(max_diff), 1e-3)
 
 
+class FrozenParameterOptStateTest(absltest.TestCase):
+  """Optimizer-state traversals must tolerate `optax.multi_transform`.
+
+  Freezing parameters -- e.g. a MoE router via MaxText's
+  `trainable_parameters_mask` -- is expressed with `optax.multi_transform`,
+  which writes `optax.MaskedNode()` into each sub-optimizer's state wherever a
+  parameter belongs to a different branch. Those sentinels are not arrays and
+  flatten to no leaves at all, which broke two traversals here: one read
+  `.dtype` off them, the other zipped the state against a partition-spec tree
+  and hit a structure mismatch.
+  """
+
+  def _frozen_optimizer(self):
+    class _Tiny(nnx.Module):
+
+      def __init__(self, rngs):
+        # `gate` stands in for the MoE router: the thing being frozen.
+        self.gate = nnx.Linear(8, 4, rngs=rngs)
+        self.mlp = nnx.Linear(8, 8, rngs=rngs)
+
+    model = _Tiny(nnx.Rngs(0))
+    freeze_gate = lambda params: jax.tree_util.tree_map_with_path(
+        lambda path, _: (
+            'frozen'
+            if 'gate'
+            in jax.tree_util.keystr(path, simple=True, separator='/')
+            else 'trainable'
+        ),
+        params,
+    )
+    tx = optax.multi_transform(
+        {'trainable': optax.adamw(1e-3), 'frozen': optax.set_to_zero()},
+        freeze_gate,
+    )
+    return nnx.Optimizer(model, tx, wrt=nnx.Param)
+
+  def test_state_really_contains_masked_sentinels(self):
+    # Guards the premise: if optax stops emitting these, the two tests below
+    # would pass vacuously.
+    optimizer = self._frozen_optimizer()
+    leaves = jax.tree_util.tree_leaves(
+        nnx.state(optimizer, nnx.optimizer.OptState),
+        is_leaf=peft_trainer._is_masked_node,  # pylint: disable=protected-access
+    )
+    self.assertTrue(any(peft_trainer._is_masked_node(v) for v in leaves))  # pylint: disable=protected-access
+
+  def test_opt_state_dtypes_skips_masked_nodes(self):
+    optimizer = self._frozen_optimizer()
+    dtypes = peft_trainer._opt_state_dtypes(optimizer)  # pylint: disable=protected-access
+    # Masked entries carry no dtype; real ones still do.
+    flat = jax.tree_util.tree_leaves(dtypes, is_leaf=lambda x: x is None)
+    self.assertIn(None, flat)
+    self.assertTrue(any(x is not None for x in flat))
+
+  def test_restore_dtypes_is_a_noop_on_masked_nodes(self):
+    optimizer = self._frozen_optimizer()
+    dtypes = peft_trainer._opt_state_dtypes(optimizer)  # pylint: disable=protected-access
+    peft_trainer._restore_opt_state_float_dtypes(optimizer, dtypes)  # pylint: disable=protected-access
+
+  def test_state_zips_against_its_partition_spec_tree(self):
+    # The shape of the failure in `_shard_optimizer`: a MaskedNode flattens to
+    # nothing, so without `is_leaf` the state tree is short exactly one leaf
+    # wherever the spec tree still has one.
+    optimizer = self._frozen_optimizer()
+    state = nnx.state(optimizer, nnx.optimizer.OptState)
+    pspecs = nnx.get_partition_spec(state)
+    jax.tree.map(
+        lambda x, _: x,
+        state,
+        pspecs,
+        is_leaf=peft_trainer._is_masked_node,  # pylint: disable=protected-access
+    )
+
+
 if __name__ == '__main__':
   absltest.main()
