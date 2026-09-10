@@ -51,11 +51,7 @@ export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
 export DEBUG=${DEBUG:-0}
-if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-  export SAMPLER=${SAMPLER:-vllm}
-else
-  export SAMPLER=${SAMPLER:-inprocess_vllm}
-fi
+export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
 export TRAINER_PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false}
