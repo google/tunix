@@ -294,6 +294,13 @@ class VllmSamplerAdapterTest(absltest.TestCase):
       with self.assertRaises(RuntimeError):
         asyncio.run(coro)
 
+  def test_raiden_job_name_derived_from_server_id(self):
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="worker-42",
+        sampler_instance=self.mock_sampler_instance,
+    )
+    self.assertEqual(adapter.raiden_job_name, "replica_worker-42")
+
 
 if __name__ == "__main__":
   absltest.main()
