@@ -1,4 +1,5 @@
 import atexit
+import collections
 import json
 import logging
 import os
@@ -91,10 +92,26 @@ def _normalize_tasks_for_fleet(tasks: Any) -> list[Any]:
     if isinstance(item, Task):
       normalized.append(item)
     elif isinstance(item, dict):
-      img = item.get("docker_image") or item.get("image", "default")
+      img = item.get("docker_image") or item.get("image")
+      if not img and "metadata" in item and isinstance(item["metadata"], dict):
+        img = item["metadata"].get("docker_image") or item["metadata"].get(
+            "env_config", {}
+        ).get("entry", {}).get("docker_image")
+      if (
+          not img
+          and "env_config" in item
+          and isinstance(item["env_config"], dict)
+      ):
+        img = item["env_config"].get("entry", {}).get("docker_image")
+      img = img or "default"
       if isinstance(img, (list, np.ndarray)):
         img = img[0] if len(img) > 0 else "default"
-      t_id = item.get("instance_id") or item.get("id") or img
+      t_id = (
+          item.get("instance_id")
+          or item.get("id")
+          or item.get("prompt_id")
+          or img
+      )
       if isinstance(t_id, (list, np.ndarray)):
         t_id = t_id[0] if len(t_id) > 0 else "default"
       normalized.append(
@@ -192,7 +209,18 @@ def _get_global_fleet() -> Any:
 
 
 class PrewarmDatasetIterator:
-  """2-slot Lookahead iterator: guarantees the upcoming batch is always pre-warming ahead on K8s."""
+  """Lookahead dataset iterator: pre-warms Agent Sandboxes on Kubernetes.
+
+  Maintains two queues:
+    - current_batch: samples for the current batch being processed.
+    - next_batch: samples for the next batch being pre-warmed.
+  A dictionary maintains the sample counts of both queues.
+  After the dictionary is updated, we interact with the fleet:
+    * New image key: fleet.warm_image(img, replicas, wait=False)
+    * Changed count: fleet.set_pool_replicas(img, replicas)
+    * Deleted image key (count 0): fleet.unwarm_image(img)
+  Cleans up all warm pools upon iteration completion or close().
+  """
 
   def __init__(
       self,
@@ -200,123 +228,229 @@ class PrewarmDatasetIterator:
       fleet: Any | None = None,
       num_generations: int = 8,
       batch_size: int = 8,
+      lookahead_steps: int = 1,
       max_warmpool_replicas: int | None = None,
+      unwarm_on_exhaustion: bool = False,
   ):
+    del lookahead_steps
     self.dataset_iter = iter(dataset)
-    self.num_generations = num_generations
-    self.batch_size = batch_size
-    self.max_warmpool_replicas = max_warmpool_replicas
     self.fleet = fleet or _get_global_fleet()
-    self.current_batch = None
-    self.next_batch = None
-    self.prev_batch_images: list[str] = []
+    self.num_generations = num_generations
+    self.batch_size = max(1, batch_size)
+    self.max_warmpool_replicas = max_warmpool_replicas
+    self.unwarm_on_exhaustion = unwarm_on_exhaustion
 
-    # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
-    try:
-      self.current_batch = next(self.dataset_iter)
+    self.current_batch: collections.deque[tuple[Any, dict[str, int], int]] = (
+        collections.deque()
+    )
+    self.next_batch: collections.deque[tuple[Any, dict[str, int], int]] = (
+        collections.deque()
+    )
+    self._current_batch_counts: dict[str, int] = {}
+    self._next_batch_counts: dict[str, int] = {}
+    self._previous_batch_counts: dict[str, int] = {}
+    self._image_counts: dict[str, int] = {}
+    self._active_replicas: dict[str, int] = {}
+    self._exhausted = False
+
+    # 1. Fill current_batch queue up to batch_size
+    self._fill_batch(self.current_batch, self._current_batch_counts)
+
+    # 2. Fill next_batch queue up to batch_size
+    self._fill_batch(self.next_batch, self._next_batch_counts)
+
+    # 3. Dict maintains the samples of active batches
+    self._update_image_counts()
+
+    # 4. After the dict updated, we interact the fleet
+    if self._image_counts:
       logging.info(
-          "[PrewarmDatasetIterator] Warming initial batch on K8s and waiting"
-          " for pods to be ready..."
+          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s..."
       )
-      self._warm_batch(self.current_batch, wait=True)
-    except StopIteration:
-      pass
+      self._interact_fleet(wait=False)
 
-    # 2. Prime Slot 2 (Next Batch - Pre-warming in background!)
-    try:
-      self.next_batch = next(self.dataset_iter)
-      self._warm_batch(self.next_batch, wait=False)
-    except StopIteration:
-      pass
+  def _extract_item_image_counts(self, item: Any) -> dict[str, int]:
+    """Extracts a dict mapping docker_image -> count for a dataset item."""
+    counts: dict[str, int] = {}
+    if item is None:
+      return counts
+    if isinstance(item, (list, tuple)):
+      for sub in item:
+        for img, cnt in self._extract_item_image_counts(sub).items():
+          counts[img] = counts.get(img, 0) + cnt
+      return counts
 
-  def _extract_images(self, batch: Any) -> list[str]:
     raw_images = []
-    if isinstance(batch, dict) and "docker_image" in batch:
-      raw = batch["docker_image"]
-      if isinstance(raw, (list, np.ndarray)):
-        raw_images = np.array(raw).flatten().tolist()
-      elif isinstance(raw, str):
-        raw_images = [raw]
-      elif hasattr(raw, "decode"):
-        raw_images = [raw]
-    elif isinstance(batch, list):
-      raw_images = [
-          item.get("docker_image")
-          for item in batch
-          if isinstance(item, dict) and item.get("docker_image")
-      ]
+    if isinstance(item, dict):
+      if "docker_image" in item:
+        raw = item["docker_image"]
+        if isinstance(raw, (list, tuple, np.ndarray)):
+          raw_images.extend(np.array(raw).flatten().tolist())
+        elif isinstance(raw, (str, bytes)):
+          raw_images.append(raw)
+      elif "metadata" in item and isinstance(item["metadata"], dict):
+        meta = item["metadata"]
+        if "docker_image" in meta:
+          raw_images.append(meta["docker_image"])
+        elif "env_config" in meta and isinstance(meta["env_config"], dict):
+          entry = meta["env_config"].get("entry", {})
+          if isinstance(entry, dict) and "docker_image" in entry:
+            raw_images.append(entry["docker_image"])
+      elif "env_config" in item and isinstance(item["env_config"], dict):
+        entry = item["env_config"].get("entry", {})
+        if isinstance(entry, dict) and "docker_image" in entry:
+          raw_images.append(entry["docker_image"])
 
-    # Safely decode/stringify all elements
-    str_images = []
     for img in raw_images:
-      str_images.append(
-          img.decode("utf-8") if hasattr(img, "decode") else str(img)
-      )
+      if img is not None:
+        str_img = img.decode("utf-8") if hasattr(img, "decode") else str(img)
+        counts[str_img] = counts.get(str_img, 0) + 1
+    return counts
 
-    return list(dict.fromkeys(str_images))
-
-  def _warm_batch(self, batch: Any, wait: bool = False):
-    images = self._extract_images(batch)
-    if images and self.fleet:
-      target_replicas = self.max_warmpool_replicas or self.num_generations
+  def _fill_batch(
+      self,
+      queue: collections.deque[tuple[Any, dict[str, int], int]],
+      counts_dict: dict[str, int],
+  ) -> int:
+    """Consumes from dataset and adds item(s) to queue until samples >= batch_size."""
+    current_samples = sum(s_cnt for _, _, s_cnt in queue)
+    while current_samples < self.batch_size and not self._exhausted:
       try:
-        self.fleet.warm_images(
-            images, replicas_override=target_replicas, wait=wait
-        )
-        logging.info(
-            "[PrewarmDatasetIterator] Pre-warming %d image(s) (%d replicas"
-            " each) on K8s: %s",
-            len(images),
-            target_replicas,
-            images[:3],
-        )
-      except Exception as e:
-        logging.warning("[PrewarmDatasetIterator] Warm note: %s", e)
+        item = next(self.dataset_iter)
+      except StopIteration:
+        self._exhausted = True
+        break
+      item_counts = self._extract_item_image_counts(item)
+      sample_count = max(1, sum(item_counts.values()))
+      queue.append((item, item_counts, sample_count))
+      for img, count in item_counts.items():
+        counts_dict[img] = counts_dict.get(img, 0) + count
+      current_samples += sample_count
+    return current_samples
 
-  def _unwarm_batch(self, images: list[str]):
-    if images and self.fleet:
-      for img in images:
+  def _update_image_counts(self) -> None:
+    """Updates dict to maintain samples of active batches."""
+    self._image_counts.clear()
+    for img, count in self._previous_batch_counts.items():
+      self._image_counts[img] = self._image_counts.get(img, 0) + count
+    for img, count in self._current_batch_counts.items():
+      self._image_counts[img] = self._image_counts.get(img, 0) + count
+    for img, count in self._next_batch_counts.items():
+      self._image_counts[img] = self._image_counts.get(img, 0) + count
+
+  def _interact_fleet(self, wait: bool = False) -> None:
+    """Interacts with the fleet to reconcile warm pools with self._image_counts."""
+    if not self.fleet:
+      return
+
+    desired: dict[str, int] = {}
+    for img, count in self._image_counts.items():
+      if count > 0:
+        reps = count * self.num_generations
+        if self.max_warmpool_replicas is not None:
+          reps = min(reps, self.max_warmpool_replicas)
+        desired[img] = reps
+
+    # 1. Warm new keys or scale existing keys
+    for img, target_reps in desired.items():
+      if img not in self._active_replicas:
         try:
-          self.fleet.unwarm_image(img)
-          logging.info(
-              "[PrewarmDatasetIterator] Unwarmed finished pool on K8s: %s",
-              img,
+          self.fleet.warm_image(
+              img, replicas_override=target_reps, wait=wait
           )
-        except Exception as e:
-          logging.warning("[PrewarmDatasetIterator] Unwarm note: %s", e)
+          self._active_replicas[img] = target_reps
+          logging.info(
+              "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+              " (replicas=%d, wait=%s)",
+              img,
+              target_reps,
+              wait,
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "[PrewarmDatasetIterator] Warm note for %s: %s", img, e
+          )
+      elif self._active_replicas[img] != target_reps:
+        try:
+          self.fleet.set_pool_replicas(img, target_reps)
+          logging.info(
+              "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
+              " %d)",
+              img,
+              self._active_replicas[img],
+              target_reps,
+          )
+          self._active_replicas[img] = target_reps
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
+          )
+
+    # 2. Delete / unwarm keys no longer in desired
+    to_delete = [img for img in self._active_replicas if img not in desired]
+    for img in to_delete:
+      try:
+        self.fleet.unwarm_image(img)
+        logging.info(
+            "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
+        )
+      del self._active_replicas[img]
 
   def __iter__(self):
     return self
 
   def __next__(self):
-    if self.current_batch is None:
-      raise StopIteration
+    if not self.current_batch:
+      if not self.next_batch:
+        if self.unwarm_on_exhaustion:
+          self.close()
+        raise StopIteration
 
-    # 1. Deliver current batch to Tunix
-    batch_to_return = self.current_batch
-    current_images = self._extract_images(batch_to_return)
+      # The previous current_batch is now in-flight/running on the cluster.
+      # Retain its counts in _previous_batch_counts so its warm pool stays alive
+      # while workers connect and claim sandboxes.
+      self._previous_batch_counts = self._current_batch_counts
 
-    # 2. 🧹 Unwarm previous batch (which has completed its execution)
-    if self.prev_batch_images:
-      active_images = set(
-          current_images + self._extract_images(self.next_batch)
-      )
-      for old_img in self.prev_batch_images:
-        if old_img not in active_images:
-          self._unwarm_batch([old_img])
+      # Shift next_batch to current_batch
+      self.current_batch = self.next_batch
+      self._current_batch_counts = self._next_batch_counts
 
-    # 3. Shift window: next becomes current
-    self.prev_batch_images = current_images
-    self.current_batch = self.next_batch
+      # Refill new next_batch from dataset
+      self.next_batch = collections.deque()
+      self._next_batch_counts = {}
+      self._fill_batch(self.next_batch, self._next_batch_counts)
 
-    # 4. 🚀 Pull fresh next batch and kick off background pre-warm on K8s!
-    try:
-      self.next_batch = next(self.dataset_iter)
-      self._warm_batch(self.next_batch, wait=False)
-    except StopIteration:
-      self.next_batch = None
+      # Dict maintains the samples of active batches
+      self._update_image_counts()
 
-    return batch_to_return
+      # After the dict updated, we interact the fleet
+      self._interact_fleet(wait=False)
+
+    item, _, _ = self.current_batch.popleft()
+    return item
+
+  def close(self) -> None:
+    """Explicitly tears down active warm pools managed by this iterator."""
+    for img in list(self._active_replicas):
+      if self.fleet:
+        try:
+          self.fleet.unwarm_image(img)
+          logging.info(
+              "[PrewarmDatasetIterator] Cleaned up warm pool on K8s: %s", img
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning("[PrewarmDatasetIterator] Final unwarm note: %s", e)
+    self._active_replicas.clear()
+    self._image_counts.clear()
+    self._previous_batch_counts.clear()
+    self._current_batch_counts.clear()
+    self._next_batch_counts.clear()
+    self.current_batch.clear()
+    self.next_batch.clear()
 
 
 def _teardown_global_fleet() -> None:
