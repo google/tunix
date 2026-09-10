@@ -55,7 +55,6 @@ from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-im
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
-from tunix.rl import algorithm_config  # pylint: disable=g-import-not-at-top
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
 ProcessContext = runtime_context.ProcessContext
@@ -214,16 +213,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  algo_config = algorithm_config.GRPOConfig(
-      num_generations=args.num_generations,
-      epsilon=args.epsilon,
-      beta=args.beta,
-      temperature=args.temperature,
-      use_rollout_logps=args.use_rollout_logps,
-  )
   return algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      temperature=args.temperature,
+      group_size=args.num_generations,
+      # StandardRLProgram consumes this many prompt groups per trainer update.
       mini_batch_size=args.batch_size,
       max_packed_len=(
           args.max_seq_token_per_tpu
@@ -231,6 +223,10 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           else args.max_prompt_length + args.max_response_length
       ),
       max_response_length=args.max_response_length,
+      clip_epsilon=args.epsilon,
+      beta_kl=args.beta,
+      temperature=args.temperature,
+      use_rollout_logps=args.use_rollout_logps,
   )
 
 

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Iterable, List, Sequence, TypeVar
 
 import flax
@@ -43,8 +44,89 @@ class TrainExample(common.TrainExample):
   pass
 
 
-# Re-export canonical GRPOConfig from algorithm_config for backward compatibility.
-GRPOConfig = algo_config_lib.GRPOConfig
+@dataclasses.dataclass(kw_only=True)
+class GRPOConfig(algo_config_lib.AlgorithmConfig):
+  """Configuration for GRPO algorithms.
+
+  Attributes:
+    algo_variant: The algorithm variant to use. Default: `grpo`.
+    advantage_estimator: The advantage estimator to use. Default: `grpo`.
+    policy_loss_fn: The policy loss function to use. Default: `grpo`.
+    loss_agg_mode: The aggregation mode for the loss function. Supported values
+      include `token-mean`, `sequence-mean-token-mean`,
+      `sequence-mean-token-scale`, `seq-mean-token-sum`, and
+      `sequence-mean-token-sum-norm`. Default: `sequence-mean-token-mean`.
+    reward_manager: The reward manager to use. Default: `sequence-level`.
+    loss_algo: The loss algorithm to use. To be deprecated.
+    num_generations: The number of times the policy generates multiple responses
+      for a given prompt within a single training step. This corresponds to 'G'
+      in Algorithm 1 in the `paper <https://arxiv.org/abs/2402.03300>`_. A
+      higher value means more samples are used to compute relative advantages.
+    num_iterations: The number of iterations per batch (𝜇 in GRPO algo 1).
+    beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
+      function. This term prevents policy updates from deviating too far from
+      the reference model. A value of 0.0 means no KL penalty is applied.
+    kl_loss_mode: The divergence mode used for KL penalty estimation. Default:
+      `kl`.
+    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
+      PPO, it ensures stable updates.
+    epsilon_high: Epsilon value for upper bound clipping.
+    loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
+      normalized instead of per-response normalized as mentioned in the paper.
+      For GSPO, we use gspo-token loss which is more flexible.
+    use_rollout_logps: Whether to use rollout-side log probabilities as
+      old-policy log probabilities. If False, recompute old-policy log
+      probabilities on the trainer actor.
+    sampler_is: Optional truncated importance-sampling correction between the
+      rollout sampler and trainer actor. Set to "token" to use trainer
+      recomputed logps as old-policy logps and multiply the policy loss by
+      detached per-token sampler/trainer correction weights.
+    sampler_is_threshold: Maximum per-token TIS correction weight.
+
+  References:
+    - GRPO: https://arxiv.org/abs/2402.03300
+    - GSPO: https://arxiv.org/abs/2507.18071
+  """
+
+  algo_variant: str = "grpo"
+  advantage_estimator: str = "grpo"
+  policy_loss_fn: str = "grpo"
+  loss_agg_mode: str = "sequence-mean-token-mean"
+  reward_manager: str = "sequence-level"
+  loss_algo: (
+      str
+  ) = (  # grpo or gspo-token # TODO(sizhi): Remove this option once gspo is
+      # refactored to a separate loss fn.
+      "grpo"
+  )
+  num_generations: int = 2
+  num_iterations: int = 1
+  beta: float = 0.04
+  kl_loss_mode: str = "kl"
+  epsilon: float = 0.2
+  use_rollout_logps: bool = True
+  sampler_is: str | None = None
+  sampler_is_threshold: float = 2.0
+
+  def __post_init__(self):
+    if self.num_generations <= 1:
+      raise ValueError(
+          "num_generations must be greater than 1. Received: "
+          f"{self.num_generations}"
+      )
+
+    if self.loss_algo not in ["grpo", "gspo-token"]:
+      raise ValueError(
+          "loss_algo should be either grpo or gspo-token. Received: "
+          f"{self.loss_algo}"
+      )
+    if self.sampler_is not in (None, "token"):
+      raise ValueError(
+          "sampler_is should be either None or 'token'. Received: "
+          f"{self.sampler_is}"
+      )
+
+
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
 
 

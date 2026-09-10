@@ -2632,61 +2632,6 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_program_temperature_conflict_raises(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = 0.8
-
-    gen_args = datatypes.GenerationArgs(temperature=1.0)
-    with self.assertRaisesRegex(ValueError, "Conflicting temperature"):
-      rl_program.StandardRLProgram(
-          dataset=("p0",),
-          algo=mock_algo,
-          generation_args=gen_args,
-      )
-
-  def test_program_temperature_matching_sets_algo_config(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = 0.8
-
-    gen_args = datatypes.GenerationArgs(temperature=0.8)
-    rl_program.StandardRLProgram(
-        dataset=("p0",),
-        algo=mock_algo,
-        generation_args=gen_args,
-    )
-    self.assertEqual(mock_algo.algo_config.temperature, 0.8)
-
-  def test_program_temperature_missing_in_generation_args_raises(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = 0.8
-
-    with self.assertRaisesRegex(ValueError, "Conflicting temperature"):
-      rl_program.StandardRLProgram(
-          dataset=("p0",),
-          algo=mock_algo,
-      )
-
   def test_run_async_auto_configures_worker_on_engine(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
