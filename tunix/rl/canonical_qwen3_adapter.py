@@ -2877,6 +2877,23 @@ def _canonical_dp_attention_metadata_arrays(
   )
 
 
+_CANON_ROW_BUCKET_RECEIPTS: set[tuple[str, int, int]] = set()
+
+
+def _canon_row_bucket_receipt(kind: str, rows: int, target: int, local_m: int):
+  """Prints one PATHTRACE line per (kind, rows, target) row-bucket decision."""
+  key = (kind, rows, target)
+  if key in _CANON_ROW_BUCKET_RECEIPTS:
+    return
+  _CANON_ROW_BUCKET_RECEIPTS.add(key)
+  print(
+      f"[PATHTRACE] {canonical_logsoftmax.ROW_BUCKET_ENV}="
+      f"{int(canonical_logsoftmax.row_bucket_enabled())} {kind} "
+      f"rows={rows} m={target} local_m={local_m}",
+      flush=True,
+  )
+
+
 def _make_canonical_compute_and_gather(gather_logprobs, mesh):
   """Builds the one shared rollout/trainer logprob function object."""
 
@@ -2899,11 +2916,20 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
     if data_size > 1:
       rows = int(logits.shape[0])
       if rows in admitted_local_rows and rows != local_m:
-        logits = jnp.pad(
-            logits,
-            ((0, local_m - rows), (0, 0)),
-            constant_values=jnp.float32(0),
+        # B2 knife 1 (tasks/zero_tim_perf2): a short slice runs at its own
+        # row bucket; the padded M=256 program stays available for A/B.
+        target = (
+            canonical_logsoftmax.row_bucket(rows)
+            if canonical_logsoftmax.row_bucket_enabled()
+            else local_m
         )
+        _canon_row_bucket_receipt("log-softmax", rows, target, local_m)
+        if target != rows:
+          logits = jnp.pad(
+              logits,
+              ((0, target - rows), (0, 0)),
+              constant_values=jnp.float32(0),
+          )
         return canonical_logsoftmax.log_softmax(logits)[:rows]
       if rows != local_m:
         raise FunctionalMappingError(
@@ -2958,14 +2984,23 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
         )
       if data_size > 1:
         if rows in admitted_local_rows and rows != local_m:
+          # B2 knife 1: bucket instead of the M=256 pad (see local_log_softmax).
+          target = (
+              canonical_logsoftmax.row_bucket(rows)
+              if canonical_logsoftmax.row_bucket_enabled()
+              else local_m
+          )
+          _canon_row_bucket_receipt("gathered-logprobs", rows, target, local_m)
+          if target == rows:
+            return canonical_logsoftmax.gathered_logprobs(logits, tokens)
           padded_logits = jnp.pad(
               logits,
-              ((0, local_m - rows), (0, 0)),
+              ((0, target - rows), (0, 0)),
               constant_values=jnp.float32(0),
           )
           padded_tokens = jnp.pad(
               tokens,
-              ((0, local_m - rows),),
+              ((0, target - rows),),
               constant_values=jnp.int32(0),
           )
           output = canonical_logsoftmax.gathered_logprobs(

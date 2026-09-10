@@ -19,6 +19,31 @@ ENV = "CANON_PALLAS_LOGSOFTMAX"
 PRODUCTION_M = 256
 PRODUCTION_V = 151936
 VOCAB_ALIGN = 128
+# tasks/zero_tim_perf2 B2 knife 1: every stage of the canonical log-softmax
+# is row-independent (block_rows=8 grids; per-row max/sum/normalize/gather),
+# so a shorter row bucket runs the identical per-row arithmetic as the
+# 256-row production program.  Measured bitwise on TPU for m=8/32/64/128
+# against m=256 (scratch/zero_tim_perf2/probe, 2026-09-10).  The engine's
+# short decode slices use their own bucket instead of padding to M=256;
+# CANON_LOGPROB_M_BUCKET=0 restores the padded program for A/B runs.
+ROW_BUCKET_ALIGN = 8
+ROW_BUCKET_ENV = "CANON_LOGPROB_M_BUCKET"
+
+
+def row_bucket_admitted(m: int) -> bool:
+  """Whether ``m`` rows is an admitted TPU row bucket."""
+  return m % ROW_BUCKET_ALIGN == 0 and ROW_BUCKET_ALIGN <= m <= PRODUCTION_M
+
+
+def row_bucket_enabled() -> bool:
+  """Whether short decode slices run at their own row bucket (default)."""
+  return os.environ.get(ROW_BUCKET_ENV, "1") != "0"
+
+
+def row_bucket(rows: int) -> int:
+  """The smallest admitted bucket holding ``rows`` (never above PRODUCTION_M)."""
+  bucket = max(ROW_BUCKET_ALIGN, -(-rows // ROW_BUCKET_ALIGN) * ROW_BUCKET_ALIGN)
+  return min(bucket, PRODUCTION_M)
 VOCAB_TILE = 1024
 TILES_PER_GROUP = 8
 SUMMARY_ALIGN = 128
@@ -36,10 +61,11 @@ def _validate(logits, *, interpret: bool) -> tuple[int, int, int]:
         f"canonical log-softmax requires rank-2 f32, got {logits.shape}/{logits.dtype}"
     )
   m, vocab = map(int, logits.shape)
-  if not interpret and (m, vocab) != (PRODUCTION_M, PRODUCTION_V):
+  if not interpret and (vocab != PRODUCTION_V or not row_bucket_admitted(m)):
     raise CanonicalLogSoftmaxError(
-        "TPU canonical log-softmax requires exact production shape "
-        f"{(PRODUCTION_M, PRODUCTION_V)}, got {(m, vocab)}"
+        "TPU canonical log-softmax requires the production vocabulary "
+        f"{PRODUCTION_V} and a row bucket (multiple of {ROW_BUCKET_ALIGN} "
+        f"up to {PRODUCTION_M}), got {(m, vocab)}"
     )
   padded_vocab = ((vocab + VOCAB_ALIGN - 1) // VOCAB_ALIGN) * VOCAB_ALIGN
   return m, vocab, padded_vocab
@@ -409,6 +435,16 @@ def continue_decode_gathered_logprobs(
         "continue-decode gather admits only request buckets 8/16/32 or "
         f"production M={PRODUCTION_M}, got {rows}"
     )
+  if row_bucket_enabled():
+    # B2 knife 1: the bucket runs the same per-row arithmetic as the padded
+    # 256-row program (row-independent stages), without the inert rows.
+    output = gathered_logprobs(logits, token_ids, interpret=interpret)
+    print(
+        f"[PATHTRACE] {ROW_BUCKET_ENV}=1 gathered-logprobs M-bucket "
+        f"M={rows} (no padding)",
+        flush=True,
+    )
+    return output
 
   # The normalizer, token gather, top-1, and rank are all row-independent.
   # Append inert rows to restore the certified M=256 program, then discard
