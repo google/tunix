@@ -253,14 +253,18 @@ Key properties of the double-write path:
     keyword-only `otel_meter_provider` argument) and own its flush/shutdown.
     `MetricsLogger.close()` only closes the Metrax backends.
 *   **Process policy.** Like the Metrax backends, only JAX process 0 emits.
-*   **Naming.** Known metrics map to stable instrument names (`loss` →
+*   **Naming.** Instrument names mirror the `{prefix}/{name}` identity the
+    Metrax backends log under: prefix and metric name are normalized into the
+    `tunix.*` namespace (`actor` + `loss` → `tunix.actor.loss`, `rewards` +
+    `score mean` → `tunix.rewards.score.mean`), so the W&B chart
+    `rewards/train/mean` and the OpenTelemetry series `tunix.rewards.mean` name
+    the same metric. Unprefixed known metrics keep curated instruments (`loss` →
     `tunix.training.loss`, `perplexity` → `tunix.training.perplexity`,
     `learning_rate` → `tunix.training.learning_rate`, `grad_norm` →
-    `tunix.training.gradient.norm`); other metric keys are normalized into the
-    `tunix.*` namespace (e.g. `rewards/score mean` →
-    `tunix.rewards.score.mean`). The legacy prefix and mode become the
-    low-cardinality attributes `tunix.metrics.prefix` and `tunix.training.mode`,
-    and the logical step is emitted as a separate `tunix.training.step` gauge.
+    `tunix.training.gradient.norm`). The legacy prefix and mode are also
+    attached as the low-cardinality attributes `tunix.metrics.prefix` and
+    `tunix.training.mode`, and the logical step is emitted as a separate
+    `tunix.training.step` gauge.
 
 #### OpenTelemetry → Weights & Biases
 
@@ -269,7 +273,7 @@ W&B ingests OpenTelemetry traces natively (via the
 has no OTLP endpoint for run metrics. Tunix therefore ships
 `tunix.sft.otel_wandb.WandbMetricsExporter`, an OpenTelemetry SDK metric
 exporter that forwards the gauges above to `wandb.log`, using the familiar
-`{prefix}/{mode}/{name}` chart keys (e.g. `actor/train/tunix.training.loss`) and
+`{prefix}/{mode}/{name}` chart keys (e.g. `actor/train/tunix.actor.loss`) and
 the `tunix.training.step` gauge as the W&B step:
 
 ```python

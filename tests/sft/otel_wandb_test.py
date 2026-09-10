@@ -95,10 +95,8 @@ class WandbMetricsExporterTest(absltest.TestCase):
     self.assertLen(self.run.calls, 1)  # pyrefly: ignore[missing-attribute]
     values, step = self.run.calls[0]  # pyrefly: ignore[missing-attribute]
     self.assertEqual(step, 3)
-    self.assertAlmostEqual(values["actor/train/tunix.training.loss"], 0.5)
-    self.assertAlmostEqual(
-        values["actor/train/tunix.training.perplexity"], 1.65
-    )
+    self.assertAlmostEqual(values["actor/train/tunix.actor.loss"], 0.5)
+    self.assertAlmostEqual(values["actor/train/tunix.actor.perplexity"], 1.65)
 
   def test_groups_are_logged_in_step_order(self):
     logger = self._make_logger()
@@ -112,8 +110,8 @@ class WandbMetricsExporterTest(absltest.TestCase):
     logged_keys = set()
     for values, _ in self.run.calls:  # pyrefly: ignore[missing-attribute]
       logged_keys.update(values)
-    self.assertIn("actor/train/tunix.training.loss", logged_keys)
-    self.assertIn("critic/eval/tunix.training.loss", logged_keys)
+    self.assertIn("actor/train/tunix.actor.loss", logged_keys)
+    self.assertIn("critic/eval/tunix.critic.loss", logged_keys)
 
   def _collect_metrics_data(self):
     """Builds one metric export batch through an in-memory reader."""
@@ -253,16 +251,13 @@ class WandbOfflineEndToEndTest(absltest.TestCase):
 
     history = self._read_history(wandb_dir.name)
     self.assertEqual(
-        [
-            history[step]["actor/train/tunix.training.loss"]
-            for step in (1, 2, 3)
-        ],
+        [history[step]["actor/train/tunix.actor.loss"] for step in (1, 2, 3)],
         [2.31, 1.87, 1.52],
     )
     self.assertAlmostEqual(
-        history[3]["actor/train/tunix.rewards.score.mean"], 0.3
+        history[3]["actor/train/tunix.actor.rewards.score.mean"], 0.3
     )
-    self.assertEqual(history[3]["actor/eval/tunix.training.loss"], 1.61)
+    self.assertEqual(history[3]["actor/eval/tunix.actor.loss"], 1.61)
     # The legacy jax.monitoring path received every scalar in the same run.
     self.assertLen(legacy_backend.scalars, 7)
     self.assertIn(("actor/train/loss", 2.31, 1), legacy_backend.scalars)

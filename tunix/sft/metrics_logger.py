@@ -91,13 +91,31 @@ def _normalize_otel_metric_name(metric_name: str) -> str:
   return f"tunix.{normalized.lower()}"
 
 
-def _otel_metric_spec(metric_name: str) -> _OtelMetricSpec:
-  """Returns the stable specification for a Tunix metric."""
-  return _OTEL_KNOWN_METRICS.get(
-      metric_name,
-      _OtelMetricSpec(
-          name=_normalize_otel_metric_name(metric_name),
-          description=f"Tunix metric derived from {metric_name!r}.",
+def _otel_metric_spec(metrics_prefix: str, metric_name: str) -> _OtelMetricSpec:
+  """Returns the stable specification for a Tunix metric.
+
+  The instrument name mirrors the ``{prefix}/{name}`` identity the legacy
+  backends log under (the mode stays a data-point attribute): ``mean`` logged
+  with prefix ``rewards`` becomes ``tunix.rewards.mean`` and ``loss`` logged
+  with prefix ``actor`` becomes ``tunix.actor.loss``. Unprefixed known metrics
+  keep their curated instruments (``loss`` -> ``tunix.training.loss``).
+  """
+  known = _OTEL_KNOWN_METRICS.get(metric_name)
+  if not metrics_prefix:
+    if known is not None:
+      return known
+    return _OtelMetricSpec(
+        name=_normalize_otel_metric_name(metric_name),
+        description=f"Tunix metric derived from {metric_name!r}.",
+    )
+  qualified_name = f"{metrics_prefix}/{metric_name}"
+  return _OtelMetricSpec(
+      name=_normalize_otel_metric_name(qualified_name),
+      unit=known.unit if known is not None else "1",
+      description=(
+          known.description
+          if known is not None
+          else f"Tunix metric derived from {qualified_name!r}."
       ),
   )
 
@@ -369,7 +387,8 @@ class MetricsLogger:
     attributes = {"tunix.training.mode": str(mode)}
     if metrics_prefix:
       attributes["tunix.metrics.prefix"] = metrics_prefix
-    self._otel_gauge(_otel_metric_spec(metric_name)).set(value, attributes)
+    spec = _otel_metric_spec(metrics_prefix, metric_name)
+    self._otel_gauge(spec).set(value, attributes)
 
     # The logical step is a separate gauge rather than a metric attribute: an
     # attribute value per step would create unbounded time-series cardinality.
