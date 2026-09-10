@@ -83,34 +83,31 @@ spec:
               value: /artifacts/models
             - name: TOKENIZER_PATH
               value: /artifacts/models
-            # --- chip partitioning: 1-chip trainer + 6x 1-chip rollouts ---
-            # TPU_CHIPS_PER_HOST_BOUNDS describes each PROCESS's sub-slice, not
-            # the physical host: bounds product must equal that process's chip
-            # count or libtpu refuses to init (verified on v6e 2026-08-26).
-            # Uniform 1-chip processes keep the bounds uniform too.
-            # tpu stays the default backend; cpu must remain registered for
-            # vLLM/tpu-inference host-side ops (crashes with tpu-only; the node
-            # scripts use setdefault so the env wins).
-            - name: JAX_PLATFORMS
-              value: tpu,cpu
             # 1-chip trainer needs a 1x1 mesh (launcher defaults are fsdp=1,tp=2
             # for a 2-chip trainer; env names follow the launcher's knobs).
-            - name: TRAINER_FSDP
-              value: "1"
-            - name: TRAINER_TP
-              value: "1"
-            - name: TRAINER_TPU_CHIPS
-              value: "0"
-            - name: ROLLOUT_PORTS
-              value: "20001,20003,20004,20005,20006,20007"
-            - name: ROLLOUT_TPU_CHIPS_LIST
-              value: "1;2;3;4;5;6"
+            # Single-pod layout: discovery server and all workers share one
+            # container, so the discovery address must be localhost (the
+            # launcher default "orchestrator" is a multi-pod k8s service name).
+            # Topology: launcher defaults (trainer chips 0,1 + ONE rollout
+            # node on chips 2,3; bounds 1,2,1) — the post-review launcher runs
+            # a single rollout worker; multi-worker launch loop is a pending
+            # launcher restoration. Chips 4-7 idle on a v6e-8.
+            # GKE injects TPU_CHIPS_PER_HOST_BOUNDS with the FULL host topology
+            # (2,4,1 on v6e-8) into TPU containers; per-process bounds must be
+            # overridden to each worker's sub-slice (launcher default topology
+            # uses 2-chip processes) or libtpu fails with expected-8-actual-2.
             - name: TPU_CHIPS_PER_HOST_BOUNDS
-              value: "1,1,1"
+              value: "1,2,1"
             - name: TPU_HOST_BOUNDS
               value: "1,1,1"
+            - name: ORCHESTRATOR_ID
+              value: localhost
             # LoRA keeps the 1-chip trainer comfortably inside a single
             # chip's HBM (16GB v5e / 32GB v6e).
+            # No reference inference worker in this layout; BETA=0 disables
+            # KL (launcher default is 0.04 which hard-requires one).
+            - name: BETA
+              value: "0"
             - name: USE_LORA
               value: "1"
             # Enough per-step requests (4x4=16) to make 6-worker routing visible.
