@@ -51,7 +51,11 @@ export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
 export DEBUG=${DEBUG:-0}
-export SAMPLER=${SAMPLER:-inprocess_vllm}
+if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
+  export SAMPLER=${SAMPLER:-vllm}
+else
+  export SAMPLER=${SAMPLER:-inprocess_vllm}
+fi
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
 export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
@@ -133,7 +137,9 @@ apply_manifest() {
 
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}" --namespace="${NAMESPACE}" --ignore-not-found
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    kubectl delete jobset "${ORCHESTRATOR_ID}" --namespace="${NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_orchestrator() {
@@ -183,7 +189,9 @@ start_orchestrator() {
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}" --namespace="${NAMESPACE}" --ignore-not-found
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    kubectl delete jobset "${TRAINER_ID}" --namespace="${NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_trainer() {
@@ -261,6 +269,9 @@ start_trainer() {
 }
 
 stop_rollout() {
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    return 0
+  fi
   for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
     local target_id
     if [[ $ROLLOUT_REPLICAS -eq 1 ]]; then
