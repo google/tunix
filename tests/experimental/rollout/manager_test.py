@@ -22,7 +22,6 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 
 
@@ -107,9 +106,10 @@ class _NoopCollector:
     self.env = env_client
 
   async def run_episode(self):
-    return trajectory_lib.Trajectory(
-        trajectory_id=self.traj_id,
-        agent=trajectory_lib.Agent(name="test-agent", version="1.0"),
+    return datatypes.TrajectoryItem(
+        prompt_id=self.traj_id,
+        group_index=0,
+        traj={},
     )
 
 

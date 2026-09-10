@@ -42,93 +42,31 @@ from tunix.experimental.worker import remote_execution
 _summarize_list = logging_utils.summarize_list
 
 
-# TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
-  """Converts a worker rollout response to an TrajectoryItem."""
-  if isinstance(resp, datatypes.TrajectoryItem):
-    return resp
+  """Converts a worker rollout response to a TrajectoryItem."""
+  if not isinstance(resp, datatypes.RolloutResponse):
+    raise TypeError(f"Unsupported response type: {type(resp)}")
 
-  if isinstance(resp, datatypes.RolloutResponse):
+  if resp.payload is not None:
+    return resp.payload
+
+  if resp.error is not None:
     metadata = dict(resp.metadata) if resp.metadata else {}
-    success_statuses = {"COMPLETED", "SUCCEEDED"}
-    traj = datatypes.Trajectory(
-        reward=resp.env_reward,
-        status=(
-            datatypes.TrajectoryStatus.SUCCEEDED
-            if resp.status in success_statuses
-            else datatypes.TrajectoryStatus.FAILED
-        ),
-    )
-    prompt_tokens = (
-        np.asarray(resp.prompt_tokens, dtype=np.int32)
-        if resp.prompt_tokens is not None
-        else np.zeros(0, dtype=np.int32)
-    )
-    item = datatypes.TrajectoryItem(
-        prompt_id=resp.prompt_id,
-        group_index=resp.group_index,
-        start_step=0,
-        traj=traj,
+    prompt_id = metadata.get("prompt_id", "")
+    group_index = metadata.get("group_index", 0)
+    metadata["error"] = str(resp.error)
+    return datatypes.TrajectoryItem(
+        prompt_id=prompt_id,
+        group_index=group_index,
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED,
+            "reward": 0.0,
+        },
         metadata=metadata,
-        prompt_tokens=prompt_tokens,
-        policy_version=resp.policy_version,
     )
 
-    assistant_tokens = []
-    assistant_masks = []
-    assistant_logps = []
-    for seg in resp.segments:
-      seg_any: Any = seg
-      source = (
-          seg.source
-          if isinstance(seg, datatypes.TokenSegment)
-          else seg_any.get("source")
-      )
-      tokens = (
-          seg.tokens
-          if isinstance(seg, datatypes.TokenSegment)
-          else seg_any.get("tokens")
-      )
-      loss_mask = (
-          seg.loss_mask
-          if isinstance(seg, datatypes.TokenSegment)
-          else seg_any.get("loss_mask")
-      )
-      if source == "assistant" and tokens is not None:
-        token_arr = np.asarray(tokens)
-        assistant_tokens.append(token_arr)
-        if loss_mask is not None:
-          assistant_masks.append(np.asarray(loss_mask))
-        else:
-          assistant_masks.append(np.ones_like(token_arr, dtype=np.float32))
-        seg_logps = (
-            seg.logps
-            if isinstance(seg, datatypes.TokenSegment)
-            else seg_any.get("logps")
-        )
-        seg_logps_arr = None
-        if seg_logps is not None:
-          seg_logps_arr = np.asarray(seg_logps, dtype=np.float32)
-          if (
-              seg_logps_arr.shape != token_arr.shape
-              or not np.isfinite(seg_logps_arr).all()
-          ):
-            seg_logps_arr = None
-        assistant_logps.append(seg_logps_arr)
+  raise ValueError("RolloutResponse payload is None.")
 
-    if assistant_tokens:
-      item.completion_tokens = np.concatenate(assistant_tokens)
-      item.action_mask = np.concatenate(assistant_masks)
-      if assistant_logps and all(lp is not None for lp in assistant_logps):
-        item.old_per_token_logps = np.concatenate(assistant_logps)
-    else:
-      item.completion_tokens = np.zeros(0, dtype=np.int32)
-      item.action_mask = np.zeros(0, dtype=np.float32)
-    return item
-
-  raise TypeError(
-      f"Unsupported response type for trajectory conversion: {type(resp)}"
-  )
 
 
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
@@ -359,8 +297,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     responses = await asyncio.gather(*tasks, return_exceptions=True)
     completed: list[datatypes.TrajectoryItem] = []
 
-    for resp in responses:
-      if isinstance(resp, Exception) or resp is None:
+    for idx, resp in enumerate(responses):
+      if isinstance(resp, Exception):
+        logging.error(
+            "Failed polling rollout worker %s: %s",
+            self._rollout_workers[idx],
+            resp,
+        )
+        continue
+      if resp is None:
         continue
       unwrap_fn = getattr(resp, "unwrap", None)
       res = (

@@ -59,15 +59,19 @@ class SimulatedRolloutWorker(abstract_worker.Worker):
           datatypes.RolloutResponse(
               request_id=f"req_{idx}",
               status="COMPLETED",
-              env_reward=1.0,
-              prompt_tokens=np.array([10, 11], dtype=np.int32),
-              segments=[
-                  datatypes.TokenSegment(
-                      source="assistant",
-                      tokens=np.array([20, 21], dtype=np.int32),
-                      loss_mask=np.array([1, 1], dtype=np.int32),
-                  )
-              ],
+              payload=datatypes.TrajectoryItem(
+                  prompt_id=f"prompt_{idx}",
+                  group_index=0,
+                  start_step=0,
+                  traj={
+                      "reward": 1.0,
+                      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  },
+                  prompt_tokens=np.array([10, 11], dtype=np.int32),
+                  completion_tokens=np.array([20, 21], dtype=np.int32),
+                  action_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  metadata={"prompt_id": f"prompt_{idx}"},
+              ),
               metadata={"prompt_id": f"prompt_{idx}"},
           )
       )

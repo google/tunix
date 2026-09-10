@@ -51,6 +51,17 @@ def _algo_model_input(
   }
 
 
+def _extract_tokens_and_masks(
+    item: datatypes.TrajectoryItem,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
+  return (
+      np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1),
+      np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
+      np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
+  )
+
+
 def _routed_experts_for(
     item: datatypes.TrajectoryItem, seq_len: int
 ) -> np.ndarray | None:
@@ -67,22 +78,44 @@ def _routed_experts_for(
     model falls back to its own gate there rather than replaying a wrong
     expert.
   """
-  if item.routed_experts is None:
+  routed = getattr(item, "routed_experts", None)
+  if routed is None and isinstance(item.traj, dict):
+    routed = item.traj.get("routed_experts")
+  if routed is None:
+    routed = item.metadata.get("routed_experts")
+  if routed is None:
     return None
-  routed = np.asarray(item.routed_experts, dtype=np.int32)
-  if routed.ndim != 3:
+  routed_arr = np.asarray(routed, dtype=np.int32)
+  if routed_arr.ndim != 3:
     raise ValueError(
         "routed_experts must be [length, num_layers, top_k]; got shape"
-        f" {routed.shape}"
+        f" {routed_arr.shape}"
     )
-  if routed.shape[0] >= seq_len:
-    return routed[:seq_len]
+  if routed_arr.shape[0] >= seq_len:
+    return routed_arr[:seq_len]
   pad = np.full(
-      (seq_len - routed.shape[0],) + routed.shape[1:],
+      (seq_len - routed_arr.shape[0],) + routed_arr.shape[1:],
       datatypes.UNSET_ROUTED_EXPERT,
       dtype=np.int32,
   )
-  return np.concatenate([routed, pad], axis=0)
+  return np.concatenate([routed_arr, pad], axis=0)
+
+
+def _extract_old_logps(
+    item: datatypes.TrajectoryItem, completion_len: int
+) -> np.ndarray | None:
+  """Extracts old_per_token_logps from TrajectoryItem."""
+  old_lp = item.traj.get("old_logprobs")
+  if old_lp is None:
+    return None
+  old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
+  if len(old_lp) != completion_len:
+    raise ValueError(
+        f"old_logprobs length {len(old_lp)} does not match completion length"
+        f" {completion_len}"
+    )
+  return old_lp
+
 
 
 class AlgorithmAdapter(abc.ABC):
@@ -214,30 +247,11 @@ class GRPOAdapter(AlgorithmAdapter):
     payloads = []
 
     for i, item in enumerate(group):
-      prompt_tokens = (
-          item.prompt_tokens
-          if item.prompt_tokens is not None
-          else np.zeros(0, dtype=np.int32)
-      )
-      completion_tokens = (
-          item.completion_tokens
-          if item.completion_tokens is not None
-          else np.zeros(0, dtype=np.int32)
-      )
-      action_mask = (
-          item.action_mask
-          if item.action_mask is not None
-          else np.zeros(0, dtype=np.float32)
-      )
-
+      p_arr, c_arr, act_arr = _extract_tokens_and_masks(item)
       adv_val = float(advs[i]) if i < len(advs) else 0.0
       ref_lp = (
           ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
       )
-
-      p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
-      c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
-      act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
 
       seq_tokens = (
           np.concatenate([p_arr, c_arr])
@@ -246,13 +260,8 @@ class GRPOAdapter(AlgorithmAdapter):
       )
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
       old_lp = (
-          getattr(item, "old_per_token_logps", None)
+          _extract_old_logps(item, len(c_arr))
           if self.use_rollout_logps
-          else None
-      )
-      old_lp = (
-          np.asarray(old_lp, dtype=np.float32)
-          if old_lp is not None and len(old_lp) == len(c_arr)
           else None
       )
       payload = datatypes.RLTrainerPayload(
@@ -311,6 +320,7 @@ class PPOAdapter(AlgorithmAdapter):
       clip_epsilon: float = 0.2,
       entropy_coef: float = 0.0,
       policy_loss_fn: str = "ppo",
+      use_rollout_logps: bool = True,
   ):
     super().__init__(
         group_size=group_size,
@@ -327,6 +337,7 @@ class PPOAdapter(AlgorithmAdapter):
     self.has_critic = True
     self.requires_reference_kl = True
     self.requires_old_logprobs = True
+    self.use_rollout_logps = use_rollout_logps
 
   def compute_advantages(
       self,
@@ -366,21 +377,7 @@ class PPOAdapter(AlgorithmAdapter):
     )
 
     for i, item in enumerate(trajectories):
-      prompt_tokens = (
-          item.prompt_tokens
-          if item.prompt_tokens is not None
-          else np.zeros(0, dtype=np.int32)
-      )
-      completion_tokens = (
-          item.completion_tokens
-          if item.completion_tokens is not None
-          else np.zeros(0, dtype=np.int32)
-      )
-      action_mask = (
-          item.action_mask
-          if item.action_mask is not None
-          else np.ones(len(completion_tokens), dtype=np.float32)
-      )
+      p_arr, c_arr, act_arr = _extract_tokens_and_masks(item)
 
       adv_val = float(advs[i]) if i < len(advs) else 0.0
       vt_val = float(val_targets[i]) if i < len(val_targets) else 0.0
@@ -390,10 +387,8 @@ class PPOAdapter(AlgorithmAdapter):
       old_lp = (
           old_logps[i] if old_logps is not None and i < len(old_logps) else None
       )
-
-      p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
-      c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
-      act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
+      if old_lp is None and self.use_rollout_logps:
+        old_lp = _extract_old_logps(item, len(c_arr))
 
       seq_tokens = (
           np.concatenate([p_arr, c_arr])

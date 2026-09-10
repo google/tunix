@@ -112,21 +112,24 @@ def _create_rollout_response(
     policy_version: int = 0,
     reward: float = 1.0,
 ) -> datatypes.RolloutResponse:
-  return datatypes.RolloutResponse(
-      request_id=request_id,
+  traj_item = datatypes.TrajectoryItem(
       prompt_id=prompt_id,
       group_index=group_index,
-      status="COMPLETED",
-      env_reward=reward,
-      policy_version=policy_version,
+      start_step=0,
+      traj={
+          "reward": reward,
+          "status": datatypes.TrajectoryStatus.SUCCEEDED,
+      },
       prompt_tokens=np.array([1, 2], dtype=np.int32),
-      segments=[
-          datatypes.TokenSegment(
-              source="assistant",
-              tokens=np.array([3, 4], dtype=np.int32),
-              loss_mask=np.array([1, 1], dtype=np.int32),
-          )
-      ],
+      completion_tokens=np.array([3, 4], dtype=np.int32),
+      action_mask=np.array([1, 1], dtype=np.float32),
+      policy_version=policy_version,
+      metadata={},
+  )
+  return datatypes.RolloutResponse(
+      request_id=request_id,
+      status="COMPLETED",
+      payload=traj_item,
       metadata={},
   )
 
@@ -670,7 +673,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=group_index,
             prompt_id="prompt_0",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
             group_index
@@ -727,7 +730,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -791,7 +794,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=0,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -857,7 +860,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id="prompt_0",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -920,7 +923,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -981,7 +984,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=idx,
             prompt_id=prompt_id,
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -1053,7 +1056,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=idx,
             prompt_id="prompt_0",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -1136,7 +1139,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=group_index,
             prompt_id="prompt_0",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
             group_index
@@ -1198,7 +1201,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj=datatypes.Trajectory(reward=1.0),
+            traj={"reward": 1.0},
         )
         item.payload = payload
         return item
@@ -2082,7 +2085,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj=datatypes.Trajectory(reward=1.0),
+          traj={"reward": 1.0},
       )
       traj_item_0.payload = payload_0
       traj_item_1 = datatypes.TrajectoryItem(
@@ -2091,7 +2094,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj=datatypes.Trajectory(reward=1.0),
+          traj={"reward": 1.0},
       )
       traj_item_1.payload = payload_1
       self.mock_algo.create_trainer_payloads.return_value = [
@@ -2143,7 +2146,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj=datatypes.Trajectory(reward=1.0),
+          traj={"reward": 1.0},
       )
       traj_item_0.payload = payload_0
       traj_item_1 = datatypes.TrajectoryItem(
@@ -2152,7 +2155,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj=datatypes.Trajectory(reward=1.0),
+          traj={"reward": 1.0},
       )
       traj_item_1.payload = payload_1
       self.mock_algo.create_trainer_payloads.return_value = [
@@ -2186,7 +2189,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj=datatypes.Trajectory(reward=1.0, status=None),
+          traj={"reward": 1.0, "status": None},
       )
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
@@ -2194,7 +2197,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj=datatypes.Trajectory(reward=1.0, status=None),
+          traj={"reward": 1.0, "status": None},
       )
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
@@ -2266,7 +2269,7 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj=datatypes.Trajectory(reward=1.0, steps=[mock_step, mock_step]),
+          traj={"reward": 1.0, "steps": [mock_step, mock_step]},
       )
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
@@ -2274,9 +2277,10 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj=datatypes.Trajectory(
-              reward=1.0, steps=[mock_step, mock_step, mock_step, mock_step]
-          ),
+          traj={
+              "reward": 1.0,
+              "steps": [mock_step, mock_step, mock_step, mock_step],
+          },
       )
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])

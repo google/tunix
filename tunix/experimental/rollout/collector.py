@@ -20,7 +20,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
-from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
 
@@ -111,9 +111,8 @@ class TrajectoryCollectorEngine:
           f" {type(overlong_filter).__name__}: {overlong_filter!r}."
       )
 
-  async def run_episode(self) -> trajectory_lib.Trajectory:
-    """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
-
+  async def run_episode(self) -> agent_types.TrajectoryItem:
+    """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
     # threads.
@@ -203,65 +202,39 @@ class TrajectoryCollectorEngine:
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
     )
-    rl_traj = await inner_engine.collect(mode="Trajectory")
+    rl_traj = await inner_engine.collect(mode="Token")
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
-  def _convert_to_trajectory(self, rl_traj: Any) -> trajectory_lib.Trajectory:
-    """Converts internal rollout trajectory to standardized Trajectory format."""
+  def _convert_to_trajectory(
+      self, rl_traj: dict[str, Any]
+  ) -> agent_types.TrajectoryItem:
+    """Converts internal Token-mode rollout trajectory to agent_types.TrajectoryItem."""
+    if not isinstance(rl_traj, dict):
+      raise TypeError(
+          f"Expected rl_traj to be a dict, got {type(rl_traj).__name__}"
+      )
+
     metadata = dict(self.request.metadata or {})
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
-    assistant_text = "\n".join(
-        str(getattr(step, "model_response", ""))
-        for step in getattr(rl_traj, "steps", [])
-        if getattr(step, "model_response", "")
+    metadata.setdefault("text", rl_traj.get("conversation_text", ""))
+    metadata["reward"] = float(rl_traj.get("trajectory_reward", 0.0) or 0.0)
+    metadata["status"] = rl_traj.get("status", "")
+    policy_version = getattr(
+        self.request,
+        "target_policy_version",
+        rl_traj.get("policy_version", 0),
     )
-    metadata.setdefault("text", assistant_text)
-    metadata["prompt_tokens"] = np.asarray(
-        getattr(rl_traj, "prompt_tokens", np.zeros(0, dtype=np.int32)),
-        dtype=np.int32,
+    metadata["policy_version"] = int(policy_version or 0)
+
+    return agent_types.TrajectoryItem(
+        prompt_id=self.request.prompt_id,
+        group_index=self.request.group_index,
+        start_step=0,
+        traj=rl_traj,
+        metadata=metadata,
     )
-    metadata["reward"] = float(getattr(rl_traj, "reward", 0.0) or 0.0)
-    trajectory = trajectory_lib.Trajectory(
-        trajectory_id=self.traj_id,
-        agent=trajectory_lib.Agent(
-            name=getattr(self.agent, "name", "agent"),
-            version="1.0",
-        ),
-        extra=metadata,
-    )
-    if hasattr(rl_traj, "steps"):
-      for step in rl_traj.steps:
-        obs_val = getattr(step, "observation", None)
-        obs_obj = None
-        if obs_val:
-          obs_obj = trajectory_lib.Observation(
-              results=[trajectory_lib.ObservationResult(content=str(obs_val))]
-          )
-        new_step = trajectory.add_step(
-            source=trajectory_lib.Source.AGENT,
-            message=getattr(step, "model_response", str(step)),
-            observation=obs_obj,
-        )
-        extra_dict = {}
-        for attr in (
-            "assistant_tokens",
-            "assistant_masks",
-            "env_tokens",
-            "env_masks",
-            "logprobs",
-        ):
-          val = getattr(step, attr, None)
-          if val is not None:
-            extra_dict[attr] = val
-            try:
-              setattr(new_step, attr, val)
-            except (AttributeError, ValueError):
-              pass
-        if extra_dict:
-          new_step.extra = extra_dict
-    return trajectory
 
   def pause(self) -> None:
     self.is_paused = True

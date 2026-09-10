@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -57,21 +58,22 @@ class AlgorithmAdapterTest(absltest.TestCase):
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
     )
-    item1.prompt_tokens = np.array([1, 2], dtype=np.int32)
-    item1.completion_tokens = np.array([3, 4], dtype=np.int32)
-    item1.action_mask = np.array([1, 1], dtype=np.float32)
-
     item2 = datatypes.TrajectoryItem(
         group_index=1,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=2.0),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
     )
-    item2.prompt_tokens = np.array([1, 2], dtype=np.int32)
-    item2.completion_tokens = np.array([5, 6], dtype=np.int32)
-    item2.action_mask = np.array([1, 1], dtype=np.float32)
 
     payloads = adapter.create_trainer_payloads(
         [item1, item2], rewards=[1.0, 2.0]
@@ -93,27 +95,29 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertGreater(payloads[1].advantages[0], 0.0)
     self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
 
-  def test_grpo_create_trainer_payloads_with_old_per_token_logps(self):
+  def test_grpo_create_trainer_payloads_with_rollout_logprobs(self):
     adapter = algorithm_adapter.GRPOAdapter(group_size=2)
     item1 = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([3, 4], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
-        old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2], dtype=np.float32),
+        },
     )
     item2 = datatypes.TrajectoryItem(
         group_index=1,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=2.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([5, 6], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
-        old_per_token_logps=None,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": None,
+        },
     )
 
     payloads = adapter.create_trainer_payloads(
@@ -134,21 +138,23 @@ class AlgorithmAdapterTest(absltest.TestCase):
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([3, 4], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
-        old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2], dtype=np.float32),
+        },
     )
     item2 = datatypes.TrajectoryItem(
         group_index=1,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=2.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([5, 6], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
-        old_per_token_logps=np.array([-0.1, -0.4], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.1, -0.4], dtype=np.float32),
+        },
     )
     payloads = adapter.create_trainer_payloads(
         [item1, item2], rewards=[1.0, 2.0]
@@ -163,31 +169,26 @@ class AlgorithmAdapterTest(absltest.TestCase):
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([3, 4], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
-        old_per_token_logps=np.array([-0.5, -0.2, -0.1], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2, -0.1], dtype=np.float32),
+        },
     )
     item2 = datatypes.TrajectoryItem(
         group_index=1,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=2.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([5, 6], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
-        old_per_token_logps=np.array([-0.3, -0.4], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.3, -0.4], dtype=np.float32),
+        },
     )
-    payloads = adapter.create_trainer_payloads(
-        [item1, item2], rewards=[1.0, 2.0]
-    )
-    self.assertLen(payloads, 2)
-    self.assertIsNone(payloads[0].old_per_token_logps)
-    np.testing.assert_allclose(
-        payloads[1].old_per_token_logps,
-        np.array([-0.3, -0.4], dtype=np.float32),
-    )
+    with self.assertRaises(ValueError):
+      adapter.create_trainer_payloads([item1, item2], rewards=[1.0, 2.0])
 
   def test_ppo_advantages_and_trainer_payloads(self):
     adapter = algorithm_adapter.PPOAdapter(group_size=2, gamma=0.99, lam=0.95)
@@ -195,10 +196,12 @@ class AlgorithmAdapterTest(absltest.TestCase):
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
+        traj={
+            "prompt_tokens": np.array([10], dtype=np.int32),
+            "conversation_tokens": np.array([20], dtype=np.int32),
+            "conversation_masks": np.array([1.0], dtype=np.float32),
+        },
     )
-    item.prompt_tokens = np.array([10], dtype=np.int32)
-    item.completion_tokens = np.array([20], dtype=np.int32)
 
     payloads = adapter.create_trainer_payloads(
         [item], rewards=[2.0], values=[1.0]
@@ -306,19 +309,21 @@ class AlgorithmAdapterTest(absltest.TestCase):
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([3, 4], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
     )
     item2 = datatypes.TrajectoryItem(
         group_index=1,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=2.0),
-        prompt_tokens=np.array([1, 2], dtype=np.int32),
-        completion_tokens=np.array([5, 6], dtype=np.int32),
-        action_mask=np.array([1, 1], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
     )
     ref_logps = [
         np.array([-0.1, -0.2], dtype=np.float32),
@@ -336,10 +341,11 @@ class AlgorithmAdapterTest(absltest.TestCase):
         group_index=0,
         prompt_id="g1",
         start_step=0,
-        traj=datatypes.Trajectory(reward=1.0),
-        prompt_tokens=np.array([10], dtype=np.int32),
-        completion_tokens=np.array([20], dtype=np.int32),
-        action_mask=np.array([0.0], dtype=np.float32),
+        traj={
+            "prompt_tokens": np.array([10], dtype=np.int32),
+            "conversation_tokens": np.array([20], dtype=np.int32),
+            "conversation_masks": np.array([0.0], dtype=np.float32),
+        },
     )
     payloads = adapter.create_trainer_payloads(
         [item],
@@ -363,16 +369,17 @@ class AlgorithmAdapterTest(absltest.TestCase):
       g = adapter.group_size
       rewards = [float(i + 1) for i in range(g)]
 
-      # 1. Both prompt_tokens and completion_tokens are None.
+      # 1. Both prompt_tokens and conversation_tokens are empty.
       items = [
           datatypes.TrajectoryItem(
               group_index=0,
               prompt_id="g1",
               start_step=0,
-              traj=datatypes.Trajectory(reward=float(i + 1)),
-              prompt_tokens=None,
-              completion_tokens=None,
-              action_mask=None,
+              traj={
+                  "prompt_tokens": np.zeros(0, dtype=np.int32),
+                  "conversation_tokens": np.zeros(0, dtype=np.int32),
+                  "conversation_masks": np.zeros(0, dtype=np.float32),
+              },
           )
           for i in range(g)
       ]
@@ -387,16 +394,17 @@ class AlgorithmAdapterTest(absltest.TestCase):
         if adapter.has_critic:
           self.assertEqual(payload.returns.shape, (0,))
 
-      # 2. prompt_tokens provided, completion_tokens is None.
+      # 2. prompt_tokens provided, conversation_tokens is empty.
       items_prompt_only = [
           datatypes.TrajectoryItem(
               group_index=0,
               prompt_id="g1",
               start_step=0,
-              traj=datatypes.Trajectory(reward=float(i + 1)),
-              prompt_tokens=np.array([1, 2], dtype=np.int32),
-              completion_tokens=None,
-              action_mask=None,
+              traj={
+                  "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                  "conversation_tokens": np.zeros(0, dtype=np.int32),
+                  "conversation_masks": np.zeros(0, dtype=np.float32),
+              },
           )
           for i in range(g)
       ]
@@ -411,16 +419,17 @@ class AlgorithmAdapterTest(absltest.TestCase):
         self.assertEqual(payload.completion_mask.shape, (0,))
         self.assertEqual(payload.advantages.shape, (0,))
 
-      # 3. prompt_tokens is None, completion_tokens provided.
+      # 3. prompt_tokens is empty, conversation_tokens provided.
       items_completion_only = [
           datatypes.TrajectoryItem(
               group_index=0,
               prompt_id="g1",
               start_step=0,
-              traj=datatypes.Trajectory(reward=float(i + 1)),
-              prompt_tokens=None,
-              completion_tokens=np.array([3, 4], dtype=np.int32),
-              action_mask=None,
+              traj={
+                  "prompt_tokens": np.zeros(0, dtype=np.int32),
+                  "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                  "conversation_masks": np.ones(2, dtype=np.float32),
+              },
           )
           for i in range(g)
       ]
@@ -449,7 +458,7 @@ class RoutedExpertsForItemTest(absltest.TestCase):
   """`_routed_experts_for` must match the payload's sequence length exactly."""
 
   def _align(self, routed, seq_len=8):
-    item = datatypes.TrajectoryItem(routed_experts=routed)
+    item = datatypes.TrajectoryItem(routed_experts=routed, traj={})
     return algorithm_adapter._routed_experts_for(item, seq_len)  # pylint: disable=protected-access
 
   def test_returns_none_without_capture(self):

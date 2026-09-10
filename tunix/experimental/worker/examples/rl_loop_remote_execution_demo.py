@@ -121,12 +121,14 @@ class MockRolloutWorker(abstract_worker.Worker):
       obs, reward, done, info = env.step(action)
       assert done
 
-      return datatypes.RolloutResponse(
-          request_id=request.request_id,
+      traj_item = datatypes.TrajectoryItem(
           prompt_id=request.prompt_id,
           group_index=request.group_index,
-          status="COMPLETED",
-          env_reward=reward,
+          start_step=0,
+          traj={
+              "reward": reward,
+              "status": datatypes.TrajectoryStatus.SUCCEEDED,
+          },
           policy_version=self.policy_version,
           metadata={
               "worker_id": self.worker_id,
@@ -136,6 +138,12 @@ class MockRolloutWorker(abstract_worker.Worker):
               "pod_id": info.get("pod_id"),
               "delay_s": delay,
           },
+      )
+      return datatypes.RolloutResponse(
+          request_id=request.request_id,
+          status="COMPLETED",
+          payload=traj_item,
+          metadata=dict(traj_item.metadata),
       )
     finally:
       env.close()
@@ -229,12 +237,22 @@ async def run_rl_training_loop(
             result.metadata.get("worker_id"),
             result.metadata.get("action"),
             result.metadata.get("observation"),
-            result.env_reward,
+            result.payload.traj.get("reward", 0.0)
+            if result.payload and result.payload.traj
+            else 0.0,
         )
 
     # 3. Compute batch statistics and simulate policy update
     avg_reward = (
-        sum(r.env_reward for r in completed_rollouts) / len(completed_rollouts)
+        sum(
+            (
+                r.payload.traj.get("reward", 0.0)
+                if r.payload and r.payload.traj
+                else 0.0
+            )
+            for r in completed_rollouts
+        )
+        / len(completed_rollouts)
         if completed_rollouts
         else 0.0
     )

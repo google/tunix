@@ -242,7 +242,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         collector.rl_collect_engine, "TrajectoryCollectEngine"
     ) as inner_engine_cls:
       inner_engine_cls.return_value.collect = mock.AsyncMock(
-          return_value=mock.MagicMock(steps=[])
+          return_value={}
       )
       asyncio.run(engine.run_episode())
 
@@ -412,7 +412,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
       ) as mock_engine_cls:
         mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_instance.collect.return_value = {}
         mock_engine_cls.return_value = mock_instance
 
         await engine.run_episode()
@@ -458,7 +458,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
       ) as mock_engine_cls:
         mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_instance.collect.return_value = {}
         mock_engine_cls.return_value = mock_instance
 
         await engine.run_episode()
@@ -497,7 +497,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
       ) as mock_engine_cls:
         mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_instance.collect.return_value = {}
         mock_engine_cls.return_value = mock_instance
 
         await engine.run_episode()
@@ -551,7 +551,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
             "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
         ) as mock_engine_cls:
           mock_instance = mock.AsyncMock()
-          mock_instance.collect.return_value = mock.MagicMock(steps=[])
+          mock_instance.collect.return_value = {}
           mock_engine_cls.return_value = mock_instance
           await engine.run_episode()
           model_call = mock_engine_cls.call_args.kwargs["model_call"]
@@ -604,7 +604,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
       ) as mock_engine_cls:
         mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = mock.MagicMock(steps=[])
+        mock_instance.collect.return_value = {}
         mock_engine_cls.return_value = mock_instance
 
         await engine.run_episode()
@@ -651,11 +651,16 @@ class _FakeInnerEngine:
         self._env,
         max_generation_steps=self.next_max_generation_steps,
     )
-    return types.SimpleNamespace(
-        steps=[],
-        prompt_tokens=np.asarray([1, 2, 3], dtype=np.int32),
-        reward=0.0,
-    )
+    return {
+        "conversation_text": "",
+        "prompt_tokens": np.asarray([1, 2, 3], dtype=np.int32),
+        "conversation_tokens": np.array([], dtype=np.int32),
+        "conversation_masks": np.array([], dtype=np.float32),
+        "old_logprobs": np.array([], dtype=np.float32),
+        "trajectory_reward": 0.0,
+        "status": "COMPLETED",
+        "policy_version": 0,
+    }
 
 
 class RunEpisodeSamplingParamsTest(absltest.TestCase):
@@ -703,6 +708,114 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
       asyncio.run(engine.run_episode())
 
     self.assertEqual(engine.sampler.seen_max_tokens, [17])
+
+
+class ConvertTrajectoryItemTest(absltest.TestCase):
+
+  def test_convert_to_trajectory_returns_trajectory_item(self):
+    request = datatypes.RolloutRequest(
+        request_id="req_test",
+        prompt="hello",
+        prompt_id="prompt_test",
+        group_index=2,
+        target_policy_version=5,
+        generation_kwargs={"max_generation_steps": 64},
+        metadata={"custom_key": "custom_val"},
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+
+    rl_traj = {
+        "conversation_text": "first step second step",
+        "prompt_tokens": np.array([1, 2, 3], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11, 12], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.array([-0.1, -0.2, -0.3], dtype=np.float32),
+        "trajectory_reward": 2.5,
+        "status": "COMPLETED",
+        "policy_version": 5,
+    }
+
+    item = engine._convert_to_trajectory(rl_traj)
+    self.assertIsInstance(item, datatypes.TrajectoryItem)
+    self.assertEqual(item.prompt_id, "prompt_test")
+    self.assertEqual(item.group_index, 2)
+    self.assertEqual(item.policy_version, 5)
+    self.assertEqual(item.metadata.get("custom_key"), "custom_val")
+    self.assertEqual(item.metadata.get("reward"), 2.5)
+    self.assertEqual(item.metadata.get("text"), "first step second step")
+    np.testing.assert_array_equal(item.prompt_tokens, [1, 2, 3])
+    np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 12])
+    np.testing.assert_array_equal(item.conversation_masks, [1.0, 1.0, 1.0])
+    np.testing.assert_allclose(item.old_logprobs, [-0.1, -0.2, -0.3])
+    self.assertEqual(item.traj, rl_traj)
+
+  def test_convert_to_trajectory_with_env_tokens_and_masks(self):
+    request = datatypes.RolloutRequest(
+        request_id="req_multi",
+        prompt="hello",
+        prompt_id="prompt_multi",
+        group_index=0,
+        target_policy_version=1,
+        generation_kwargs={"max_generation_steps": 64},
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+
+    rl_traj = {
+        "conversation_text": "assistant action final response",
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11, 20, 21, 12], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.array([-0.1, -0.2, 0.0, 0.0, -0.3], dtype=np.float32),
+        "trajectory_reward": 1.0,
+        "status": "COMPLETED",
+        "policy_version": 1,
+    }
+
+    item = engine._convert_to_trajectory(rl_traj)
+    np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 20, 21, 12])
+    np.testing.assert_array_equal(item.conversation_masks, [1.0, 1.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(item.old_logprobs, [-0.1, -0.2, 0.0, 0.0, -0.3])
+
+  def test_convert_to_trajectory_rejects_non_dict(self):
+    request = datatypes.RolloutRequest(
+        request_id="req_fallback",
+        prompt="hello",
+        prompt_id="prompt_fallback",
+        group_index=1,
+        target_policy_version=3,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+    mock_traj = types.SimpleNamespace(
+        reward=1.5,
+        status="COMPLETED",
+        text="mock output",
+    )
+    with self.assertRaisesRegex(TypeError, "Expected rl_traj to be a dict"):
+      engine._convert_to_trajectory(mock_traj)
 
 
 if __name__ == "__main__":

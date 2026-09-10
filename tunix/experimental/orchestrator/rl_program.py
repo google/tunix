@@ -299,7 +299,7 @@ class StandardRLProgram(RLProgram):
           if self.reward_fns:
             r = sum(fn(item) for fn in self.reward_fns)
           else:
-            r = getattr(item.traj, "reward", 0.0)
+            r = item.traj.get("reward", 0.0) if item.traj else 0.0
           rewards.append(float(r))
 
         trainer_payloads = self.algo.create_trainer_payloads(
@@ -308,10 +308,8 @@ class StandardRLProgram(RLProgram):
         for idx, payload in enumerate(trainer_payloads):
           reward_val = rewards[idx] if idx < len(rewards) else 0.0
           src_item = group[idx] if idx < len(group) else None
-          src_traj = getattr(src_item, "traj", None)
-          raw_status = (
-              getattr(src_traj, "status", None) if src_traj else None
-          ) or getattr(src_item, "status", None)
+          src_traj = getattr(src_item, "traj", None) or {}
+          raw_status = src_traj.get("status") or getattr(src_item, "status", None)
           if isinstance(raw_status, datatypes.TrajectoryStatus):
             status = raw_status
           elif isinstance(raw_status, str):
@@ -324,19 +322,19 @@ class StandardRLProgram(RLProgram):
             )
           else:
             status = datatypes.TrajectoryStatus.RUNNING
-          raw_steps = getattr(src_traj, "steps", None) if src_traj else None
+          raw_steps = src_traj.get("steps")
           steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
+          traj_dict = dict(src_traj)
+          traj_dict["reward"] = reward_val
+          traj_dict["status"] = status
+          traj_dict["steps"] = steps
           item = datatypes.TrajectoryItem(
               prompt_id=getattr(src_item, "prompt_id", ""),
               group_index=getattr(src_item, "group_index", 0),
               start_step=0,
-              traj=datatypes.Trajectory(
-                  reward=reward_val,
-                  status=status,
-                  steps=steps,
-              ),
+              traj=traj_dict,
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
@@ -424,14 +422,12 @@ class StandardRLProgram(RLProgram):
       if p_len is not None and c_len is not None:
         total_lengths.append(p_len + c_len)
 
-      traj = getattr(item, "traj", None)
-      steps = getattr(traj, "steps", None) if traj else None
+      traj = getattr(item, "traj", None) or {}
+      steps = traj.get("steps")
       if steps and len(steps) > 0:
         turns_list.append(len(steps))
 
-      status = (getattr(traj, "status", None) if traj else None) or getattr(
-          item, "status", None
-      )
+      status = traj.get("status") or getattr(item, "status", None)
       if status is not None:
         if isinstance(status, datatypes.TrajectoryStatus):
           if status != datatypes.TrajectoryStatus.RUNNING:
@@ -711,7 +707,9 @@ class StandardRLProgram(RLProgram):
           all_step_items.extend(scored_items)
           num_rollouts += len(scored_items)
           for item in scored_items:
-            step_rewards.append(float(item.traj.reward if item.traj else 0.0))
+            step_rewards.append(
+                float(item.traj.get("reward", 0.0) if item.traj else 0.0)
+            )
             payload = getattr(item, "payload", None)
             if payload is not None and payload.advantages is not None:
               step_advantages.append(float(np.mean(payload.advantages)))

@@ -103,17 +103,25 @@ class DistributedRolloutWorker(abstract_worker.Worker):
       action = agent.step(obs)
       obs, reward, done, info = env.step(action)
 
-      return datatypes.RolloutResponse(
-          request_id=request.request_id,
+      traj_item = datatypes.TrajectoryItem(
           prompt_id=request.prompt_id,
           group_index=request.group_index,
-          status="COMPLETED",
-          env_reward=reward,
+          start_step=0,
+          traj={
+              "reward": reward,
+              "status": datatypes.TrajectoryStatus.SUCCEEDED,
+          },
           metadata={
               "worker_id": self.worker_id,
               "observation": obs,
               "reward": reward,
           },
+      )
+      return datatypes.RolloutResponse(
+          request_id=request.request_id,
+          status="COMPLETED",
+          payload=traj_item,
+          metadata=dict(traj_item.metadata),
       )
     finally:
       env.close()

@@ -27,7 +27,8 @@ from tunix.experimental.worker import traffic_controller as traffic_controller_l
 from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
-    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+    datatypes.TrajectoryItem,
+    trajectory_lib.TrajectoryError,
 ]
 
 

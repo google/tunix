@@ -113,10 +113,28 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_generate_load_balances_across_rollout_workers(self):
     async def _run():
       resp1 = datatypes.RolloutResponse(
-          request_id="r1", status="COMPLETED", env_reward=1.0
+          request_id="r1",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       resp2 = datatypes.RolloutResponse(
-          request_id="r2", status="COMPLETED", env_reward=2.0
+          request_id="r2",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p2",
+              group_index=0,
+              traj={
+                  "reward": 2.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
 
       self.mock_rollout_1.generate.return_value = [resp1]
@@ -127,7 +145,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           {"prompt": "p2", "prompt_id": "p2", "metadata": {"prefix_hash": 1}},
       ])
       self.assertLen(results, 2)
-      rewards = {res.traj.reward for res in results}
+      rewards = {res.traj["reward"] for res in results}
       self.assertEqual(rewards, {1.0, 2.0})
 
       # Verify underlying logical methods were called correctly
@@ -146,7 +164,16 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_generate_uses_explicit_generation_args(self):
     async def _run():
       resp = datatypes.RolloutResponse(
-          request_id="r1", status="COMPLETED", env_reward=1.0
+          request_id="r1",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
       results = await self.engine.generate(
@@ -193,9 +220,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="prompt_1",
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
 
@@ -214,14 +247,21 @@ class DistributedRLEngineTest(absltest.TestCase):
       resp1 = datatypes.RolloutResponse(
           request_id="r1",
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.poll_responses.return_value = [resp1]
       self.mock_rollout_2.poll_responses.return_value = []
 
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
-      self.assertEqual(results[0].traj.reward, 1.0)
+      self.assertEqual(results[0].traj["reward"], 1.0)
 
       self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
       self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
@@ -934,10 +974,16 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="p1",
-          group_index=0,
           status="COMPLETED",
-          env_reward=1.5,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.5,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+              metadata={"lineage": ctx},
+          ),
           metadata={"lineage": ctx},
       )
       self.mock_rollout_1.poll_responses.return_value = [resp]
@@ -1036,9 +1082,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="prompt_1",
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
       self.mock_rollout_2.generate.return_value = [resp]
@@ -1069,10 +1121,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       }
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="prompt_dict_1",
-          group_index=2,
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_dict_1",
+              group_index=2,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
       self.mock_rollout_2.generate.return_value = [resp]
@@ -1101,25 +1158,28 @@ class DistributedRLEngineTest(absltest.TestCase):
     ctx = lineage.LineageContext(
         tracking_id="traj_p_extra_g1", parent_tracking_ids=["p_extra"]
     )
-    resp = datatypes.RolloutResponse(
-        request_id="req_1",
+    traj_item = datatypes.TrajectoryItem(
         prompt_id="p_extra",
         group_index=1,
         policy_version=2,
-        status="COMPLETED",
-        env_reward=2.0,
+        traj={
+            "reward": 2.0,
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        },
         prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=np.array([1, 2], dtype=np.int32),
-                loss_mask=np.array([1, 1], dtype=np.float32),
-            )
-        ],
+        completion_tokens=np.array([1, 2], dtype=np.int32),
+        action_mask=np.array([1.0, 1.0], dtype=np.float32),
+        metadata={"lineage": ctx},
+    )
+    resp = datatypes.RolloutResponse(
+        request_id="req_1",
+        status="COMPLETED",
+        payload=traj_item,
         metadata={"lineage": ctx},
     )
 
     item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertIs(item, traj_item)
     self.assertEqual(item.prompt_id, "p_extra")
     self.assertEqual(item.group_index, 1)
     self.assertEqual(item.policy_version, 2)
@@ -1131,92 +1191,54 @@ class DistributedRLEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(
         item.action_mask, np.array([1, 1], dtype=np.float32)
     )
-    self.assertIsNone(item.old_per_token_logps)
+    self.assertIsNone(getattr(item, "logprobs", None))
 
   def test_response_to_trajectory_item_collects_aligned_logps(self):
-    resp = datatypes.RolloutResponse(
-        request_id="req_lp_ok",
+    traj_item = datatypes.TrajectoryItem(
         prompt_id="p_lp",
         group_index=0,
         policy_version=1,
-        status="COMPLETED",
+        traj={"reward": 1.0},
         prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=np.array([1, 2], dtype=np.int32),
-                loss_mask=np.array([1, 1], dtype=np.float32),
-                logps=np.array([-0.1, -0.2], dtype=np.float32),
-            ),
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=np.array([3], dtype=np.int32),
-                loss_mask=np.array([1], dtype=np.float32),
-                logps=np.array([-0.3], dtype=np.float32),
-            ),
-        ],
+        completion_tokens=np.array([1, 2, 3], dtype=np.int32),
+        action_mask=np.array([1.0, 1.0, 1.0], dtype=np.float32),
+        logprobs=np.array([-0.1, -0.2, -0.3], dtype=np.float32),
+    )
+    resp = datatypes.RolloutResponse(
+        request_id="req_lp_ok",
+        status="COMPLETED",
+        payload=traj_item,
     )
     item = distributed_rl_engine._response_to_trajectory_item(resp)
     np.testing.assert_allclose(
-        item.old_per_token_logps,
+        item.logprobs,
         np.array([-0.1, -0.2, -0.3], dtype=np.float32),
     )
 
-  def test_response_to_trajectory_item_drops_misaligned_dict_logps(self):
-    # Dict-shaped segments bypass TokenSegment.__post_init__ (which already
-    # rejects a logps/tokens shape mismatch for the typed path), so a per-
-    # segment length mismatch can only reach the engine through this path. It
-    # must not populate old_per_token_logps -- even though the totals still
-    # match the completion length (2+1 tokens vs 1+2 logps both sum to 3), which
-    # would slip past the adapter's total-length check and silently misalign the
-    # importance ratio.
+  def test_response_to_trajectory_item_with_error(self):
+    err = datatypes.ErrorInfo(error_type="Timeout", message="Timed out")
     resp = datatypes.RolloutResponse(
-        request_id="req_lp_misaligned",
-        prompt_id="p_lp",
-        group_index=0,
-        policy_version=1,
-        status="COMPLETED",
-        prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            {
-                "source": "assistant",
-                "tokens": [1, 2],
-                "loss_mask": [1.0, 1.0],
-                "logps": [-0.1],
-            },
-            {
-                "source": "assistant",
-                "tokens": [3],
-                "loss_mask": [1.0],
-                "logps": [-0.2, -0.3],
-            },
-        ],  # pyrefly: ignore[bad-argument-type]
+        request_id="req_err",
+        status="ERROR",
+        error=err,
+        metadata={"prompt_id": "p_err", "group_index": 1},
     )
     item = distributed_rl_engine._response_to_trajectory_item(resp)
-    np.testing.assert_array_equal(
-        item.completion_tokens, np.array([1, 2, 3], dtype=np.int32)
-    )
-    self.assertIsNone(item.old_per_token_logps)
+    self.assertEqual(item.prompt_id, "p_err")
+    self.assertEqual(item.group_index, 1)
+    self.assertIsInstance(item.traj, dict)
+    self.assertEqual(item.traj["status"], datatypes.TrajectoryStatus.FAILED)
+    self.assertEqual(item.status, datatypes.TrajectoryStatus.FAILED)
+    self.assertIn("Timed out", item.metadata["error"])
 
-  def test_response_to_trajectory_item_drops_nonfinite_logps(self):
+  def test_response_to_trajectory_item_none_payload_raises(self):
     resp = datatypes.RolloutResponse(
-        request_id="req_lp_nonfinite",
-        prompt_id="p_lp",
-        group_index=0,
-        policy_version=1,
+        request_id="req_none",
         status="COMPLETED",
-        prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=np.array([1, 2], dtype=np.int32),
-                loss_mask=np.array([1, 1], dtype=np.float32),
-                logps=np.array([-0.1, np.nan], dtype=np.float32),
-            ),
-        ],
+        payload=None,
     )
-    item = distributed_rl_engine._response_to_trajectory_item(resp)
-    self.assertIsNone(item.old_per_token_logps)
+    with self.assertRaises(ValueError):
+      distributed_rl_engine._response_to_trajectory_item(resp)
 
   def test_response_to_trajectory_item_rejects_unsupported_type(self):
     with self.assertRaises(TypeError):
@@ -1268,101 +1290,39 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_response_to_trajectory_item_with_dict_segments(self):
-    ctx = lineage.LineageContext(
-        tracking_id="traj_p_dict_g0", parent_tracking_ids=["p_dict"]
-    )
+  def test_response_to_trajectory_item_handles_error_response(self):
     resp = datatypes.RolloutResponse(
-        request_id="req_dict_seg",
-        prompt_id="p_dict",
-        group_index=0,
-        policy_version=1,
-        status="COMPLETED",
-        env_reward=1.0,
-        prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            {
-                "source": "assistant",
-                "tokens": [1, 2],
-                "loss_mask": [1.0, 1.0],
-            },
-            {
-                "source": "env",
-                "tokens": [3],
-            },
-        ],  # pyrefly: ignore[bad-argument-type]
-        metadata={"lineage": ctx},
+        request_id="req_err",
+        status="FAILED",
+        error=datatypes.ErrorInfo(
+            error_type="WorkerTimeout",
+            message="timed out",
+        ),
+        payload=None,
     )
-
     item = distributed_rl_engine._response_to_trajectory_item(resp)
-    self.assertEqual(item.prompt_id, "p_dict")
-    self.assertEqual(item.group_index, 0)
-    self.assertIn("lineage", item.metadata)
-    np.testing.assert_array_equal(
-        item.completion_tokens, np.array([1, 2], dtype=np.int32)
-    )
-    np.testing.assert_array_equal(
-        item.action_mask, np.array([1, 1], dtype=np.float32)
-    )
+    self.assertIsInstance(item.traj, dict)
+    self.assertEqual(item.traj["status"], datatypes.TrajectoryStatus.FAILED)
+    self.assertEqual(item.status, datatypes.TrajectoryStatus.FAILED)
+    self.assertIn("WorkerTimeout", item.metadata.get("error", ""))
 
-  def test_response_to_trajectory_item_with_dict_segments_missing_loss_mask(
+  def test_response_to_trajectory_item_raises_when_payload_none_without_error(
       self,
   ):
     resp = datatypes.RolloutResponse(
-        request_id="req_dict_no_mask",
-        prompt_id="p_dict",
-        group_index=0,
-        policy_version=1,
+        request_id="req_none",
         status="COMPLETED",
-        segments=[{
-            "source": "assistant",
-            "tokens": [5, 6],
-        }],  # pyrefly: ignore[bad-argument-type]
+        payload=None,
     )
-    item = distributed_rl_engine._response_to_trajectory_item(resp)
-    np.testing.assert_array_equal(
-        item.completion_tokens, np.array([5, 6], dtype=np.int32)
+    with self.assertRaisesRegex(ValueError, "RolloutResponse payload is None"):
+      distributed_rl_engine._response_to_trajectory_item(resp)
+
+  def test_response_to_trajectory_item_rejects_trajectory_item(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="direct_item", group_index=0, traj={}
     )
-    np.testing.assert_array_equal(
-        item.action_mask, np.array([1.0, 1.0], dtype=np.float32)
-    )
-
-  def test_poll_rollouts_deserializes_dict_responses_with_dict_segments(self):
-    async def _run():
-      raw_dict_response = {
-          "request_id": "r_deserialized",
-          "prompt_id": "p_raw",
-          "group_index": 0,
-          "policy_version": 1,
-          "status": "COMPLETED",
-          "env_reward": 2.5,
-          "prompt_tokens": [10, 20],
-          "segments": [{
-              "source": "assistant",
-              "tokens": [30, 40],
-              "loss_mask": [1.0, 1.0],
-          }],
-          "metadata": {},
-      }
-      self.mock_rollout_1.poll_responses.return_value = [raw_dict_response]
-      self.mock_rollout_2.poll_responses.return_value = []
-
-      items = await self.engine.poll_rollouts()
-      self.assertLen(items, 1)
-      item = items[0]
-      self.assertEqual(item.prompt_id, "p_raw")
-      self.assertEqual(item.traj.reward, 2.5)
-      np.testing.assert_array_equal(
-          item.prompt_tokens, np.array([10, 20], dtype=np.int32)
-      )
-      np.testing.assert_array_equal(
-          item.completion_tokens, np.array([30, 40], dtype=np.int32)
-      )
-      np.testing.assert_array_equal(
-          item.action_mask, np.array([1.0, 1.0], dtype=np.float32)
-      )
-
-    asyncio.run(_run())
+    with self.assertRaises(TypeError):
+      distributed_rl_engine._response_to_trajectory_item(item)
 
   def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
     mock_algo = mock.MagicMock()

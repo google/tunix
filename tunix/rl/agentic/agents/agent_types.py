@@ -145,21 +145,148 @@ class Trajectory:
     }
 
 
+def format_traj_id(prompt_id: Hashable = "", group_index: int = 0) -> str:
+  """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+  return f"traj_{prompt_id}_g{group_index}"
+
+
 @dataclasses.dataclass(kw_only=True)
 class TrajectoryItem:
-  """Represents a Trajectory with additional metadata.
+  """Canonical trajectory container with metadata and token arrays for RL training.
+
+  This class acts as a flexible container representing an individual rollout trajectory.
+  Attribute lookups for fields not defined explicitly on the dataclass (such as
+  `status`, `reward`, `prompt_tokens`, `conversation_tokens`, `conversation_masks`,
+  `routed_experts`, or `policy_version`) fall back dynamically via `__getattr__` to
+  `traj` (when it is a dictionary) and then to `metadata`.
 
   Attributes:
-    pair_index: Index of the trajectory within a group.
-    group_id: Identifier for grouping trajectories. By default, this is the row
-      index in the full dataset.
-    start_step: The starting step index within the full trajectory.
-    traj: The Trajectory object itself, or a dictionary representation.
-    metadata: Additional metadata.
+    prompt_id: Unique identifier for the prompt/task. Standardized across
+      orchestrator and training workflows (equivalent to `group_id`).
+    group_index: Index of the rollout within its prompt group (0 .. G-1).
+      Standardized across orchestrator and training workflows (equivalent to
+      `pair_index`).
+    start_step: Starting step index within the full trajectory.
+    traj: The trajectory payload. Typically a dictionary in tokenized RL training
+      workflows (e.g. from `TrajectoryCollectEngine(mode="Token")` containing
+      `"prompt_tokens"`, `"conversation_tokens"`, `"conversation_masks"`, etc.,
+      or an error dictionary), or a `Trajectory` dataclass instance when collecting
+      step-by-step agent interactions (`mode="Trajectory"`) for evaluation or
+      inspection.
+    metadata: Arbitrary metadata dictionary for tracking, lineage, or extra parameters.
+    group_id: Deprecated alias for prompt_id.
+    pair_index: Deprecated alias for group_index.
   """
 
-  pair_index: int
-  group_id: Hashable
-  start_step: int
-  traj: Trajectory | Dict[str, Any]
-  metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
+  prompt_id: Hashable = ""
+  group_index: int = 0
+  start_step: int = 0
+  traj: Any = None
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  # Legacy aliases
+  group_id: Hashable | None = None
+  pair_index: int | None = None
+
+  def __init__(
+      self,
+      *,
+      prompt_id: Hashable = "",
+      group_index: int = 0,
+      start_step: int = 0,
+      traj: Any = None,
+      metadata: dict[str, Any] | None = None,
+      group_id: Hashable | None = None,
+      pair_index: int | None = None,
+      **kwargs: Any,
+  ):
+    if group_id is not None and not prompt_id:
+      prompt_id = group_id
+    elif prompt_id and group_id is None:
+      group_id = prompt_id
+    if group_id is None:
+      group_id = prompt_id
+
+    if pair_index is not None and group_index == 0:
+      group_index = pair_index
+    elif group_index != 0 and pair_index is None:
+      pair_index = group_index
+    if pair_index is None:
+      pair_index = group_index
+
+    self.prompt_id = prompt_id
+    self.group_index = group_index
+    self.group_id = group_id
+    self.pair_index = pair_index
+    self.start_step = start_step
+    self.traj = traj
+    self.metadata = dict(metadata or {})
+    for k, v in kwargs.items():
+      if v is not None:
+        self.metadata[k] = v
+
+  @property
+  def traj_id(self) -> str:
+    """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+    return format_traj_id(self.prompt_id, self.group_index)
+
+  def __getattr__(self, name: str) -> Any:
+    if name.startswith("__") and name.endswith("__"):
+      raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    traj = self.__dict__.get("traj")
+    if isinstance(traj, dict) and name in traj:
+      return traj[name]
+    metadata = self.__dict__.get("metadata")
+    if isinstance(metadata, dict) and name in metadata:
+      return metadata[name]
+    raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+  def __getstate__(self) -> dict[str, Any]:
+    return self.__dict__
+
+  def __setstate__(self, state: dict[str, Any]) -> None:
+    self.__dict__.update(state)
+
+  def to_dict(self) -> dict[str, Any]:
+    """Serializes TrajectoryItem to a dictionary."""
+    traj_dict = (
+        self.traj.to_dict()
+        if hasattr(self.traj, "to_dict") and callable(self.traj.to_dict)
+        else self.traj
+    )
+    return {
+        "prompt_id": str(self.prompt_id),
+        "group_index": int(self.group_index),
+        "start_step": int(self.start_step),
+        "traj": traj_dict,
+        "metadata": dict(self.metadata),
+    }
+
+  @classmethod
+  def from_dict(cls, data: dict[str, Any]) -> "TrajectoryItem":
+    """Reconstructs TrajectoryItem from a dictionary."""
+    group_index_raw = data.get("group_index", data.get("pair_index", 0))
+    group_index = int(group_index_raw) if group_index_raw is not None else 0
+    start_step_raw = data.get("start_step", 0)
+    start_step = int(start_step_raw) if start_step_raw is not None else 0
+    metadata = dict(data.get("metadata", {}) or {})
+    for k, v in data.items():
+      if k not in (
+          "prompt_id",
+          "group_id",
+          "group_index",
+          "pair_index",
+          "start_step",
+          "traj",
+          "metadata",
+      ):
+        if k not in metadata:
+          metadata[k] = v
+    return cls(
+        prompt_id=data.get("prompt_id", data.get("group_id", "")),
+        group_index=group_index,
+        start_step=start_step,
+        traj=data.get("traj"),
+        metadata=metadata,
+    )
+
