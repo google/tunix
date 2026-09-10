@@ -99,7 +99,7 @@ RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
 fi
 
 # Force install numpy version to avoid version conflicts.
-RUN uv pip install numpy==2.3.5; \
+RUN uv pip install numpy==2.3.5
 
 # Copy the rest of the project files
 COPY . .
