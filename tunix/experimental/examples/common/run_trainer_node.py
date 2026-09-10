@@ -180,7 +180,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       nargs="?",
       const=True,
       type=_str2bool,
-      default=True,
+      default=False,
       help="Whether to prefuse MoE weights (gate + up projection).",
   )
   parser.add_argument(

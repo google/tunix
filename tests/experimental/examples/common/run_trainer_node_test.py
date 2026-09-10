@@ -441,7 +441,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.checkpoint_save_interval_steps, 1)
     self.assertEqual(args.checkpoint_max_to_keep, 10)
     self.assertFalse(args.use_lora)
-    self.assertTrue(args.prefuse_moe_weights)
+    self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
     self.assertEqual(args.rollout_mesh_tp, 0)
 

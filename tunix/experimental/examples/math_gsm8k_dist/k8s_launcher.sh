@@ -58,6 +58,8 @@ else
 fi
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
+export TRAINER_PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false}
+export ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-true}
 export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
@@ -220,12 +222,12 @@ start_trainer() {
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       --rollout_mesh_tp=${ROLLOUT_MESH_TP} \
-      --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
+      --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
     "
   fi
 
-  local trainer_env="RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
+  local trainer_env="RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS}"
 
   python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
@@ -315,11 +317,11 @@ start_rollout_instance() {
     extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-      --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
+      --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
     "
   fi
 
-  local rollout_env="RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
+  local rollout_env="RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS}"
 
   python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${ROLLOUT_JOBSET_YAML} \
@@ -341,6 +343,7 @@ start_rollout_instance() {
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
+        --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \
@@ -369,7 +372,14 @@ start_rollout() {
   done
 }
 
-source tunix/experimental/examples/common/enter_kube_context.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/../common/enter_kube_context.sh" ]]; then
+  source "${SCRIPT_DIR}/../common/enter_kube_context.sh"
+elif [[ -f "tunix/tunix/experimental/examples/common/enter_kube_context.sh" ]]; then
+  source tunix/tunix/experimental/examples/common/enter_kube_context.sh
+elif [[ -f "tunix/experimental/examples/common/enter_kube_context.sh" ]]; then
+  source tunix/experimental/examples/common/enter_kube_context.sh
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
