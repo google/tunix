@@ -157,7 +157,8 @@ def np_find_first_non_pad_idx(ids: np.ndarray, pad_id: int) -> int:
 
 
 def np_find_first_eos_idx(
-    ids: np.ndarray, eos_id: int | jax.Array,
+    ids: np.ndarray,
+    eos_id: int | jax.Array,
 ) -> int:
   """Numpy version of find_first_eos_idx. Works on CPU arrays."""
   assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
@@ -663,16 +664,24 @@ def _align_shape(
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
     elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
       tp_size = kwargs['tp_size']
-      num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
+      num_experts, expert_dim, embed_dim = (
+          val.shape[0],
+          val.shape[2],
+          val.shape[3],
+      )
       gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
       chunk_size = expert_dim // tp_size
-      padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
+      padded_expert_chunk_dim = ((chunk_size + 127) // 128) * 128
       pad_amount = padded_expert_chunk_dim - chunk_size
       gate_chunks = gate_chunks.reshape(num_experts, tp_size, -1, embed_dim)
       up_chunks = up_chunks.reshape(num_experts, tp_size, -1, embed_dim)
       if pad_amount > 0:
-        gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-        up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+        gate_chunks = jnp.pad(
+            gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0))
+        )
+        up_chunks = jnp.pad(
+            up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0))
+        )
       val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
       val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
       val_chunks = val_chunks.transpose(0, 2, 1)
@@ -682,9 +691,7 @@ def _align_shape(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
       )
   elif re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key):
-    logging.debug(
-        'Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key
-    )
+    logging.debug('Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key)
     assert tgt_shape[0] > val.shape[0] and tgt_shape[0] % val.shape[0] == 0, (
         f'Unexpected attention bias shape: {val.shape} and target shape:'
         f' {tgt_shape}'
@@ -957,7 +964,11 @@ def transfer_state_with_mappings(
     return dst_state.from_flat_path(tgt_flat_list)
   elif isinstance(dst_state, dict):
     return {
-        ('.'.join(str(k) for k in key) if isinstance(key, (tuple, list)) else key): val
+        (
+            '.'.join(str(k) for k in key)
+            if isinstance(key, (tuple, list))
+            else key
+        ): val
         for key, val in tgt_flat_list
     }
   else:
@@ -1023,7 +1034,9 @@ def _unstack_scanned_param(
     if scan_axis is not None:
       # Transpose the scanned axis to the 0th position
       if scan_axis != 0:
-        perm = (scan_axis,) + tuple(i for i in range(len(src_shape)) if i != scan_axis)
+        perm = (scan_axis,) + tuple(
+            i for i in range(len(src_shape)) if i != scan_axis
+        )
         if hasattr(src_val, 'transpose'):
           src_val = src_val.transpose(perm)
         elif isinstance(src_val, np.ndarray):
@@ -1037,19 +1050,22 @@ def _unstack_scanned_param(
         elif hasattr(jnp, 'unstack'):
           return jnp.unstack(src_val)
         else:
-           # Fallback for older JAX versions
+          # Fallback for older JAX versions
           return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
       except Exception as e:
         logging.debug(
             "Failed to unstack parameter '%s'. Error: %s. Using original.",
-            key_path, e
+            key_path,
+            e,
         )
         return (src_val,)
     else:
       logging.warning(
           "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
           ' determine scan axis.',
-          key_path, src_shape, tgt_shape,
+          key_path,
+          src_shape,
+          tgt_shape,
       )
 
   return (src_val,)
@@ -1158,7 +1174,7 @@ def _align_per_axis(
     return arr
   if len(arr.shape) != len(tgt_shape):
     raise ShapeMismatchError(
-        f"Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}"
+        f'Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}'
     )
 
   mismatches = []
@@ -1167,7 +1183,7 @@ def _align_per_axis(
       continue
     if t < s:
       raise ShapeMismatchError(
-          f"Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}"
+          f'Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}'
       )
     mismatches.append((axis, s, t))
   if not mismatches:
@@ -1182,16 +1198,16 @@ def _align_per_axis(
         n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)  # pyrefly: ignore[bad-argument-type]
         if t % n_shards != 0:
           raise ValueError(
-              f"Target dimension {t} on axis {axis} for {key_path} is not "
-              f"divisible by n_shards={n_shards}; the target shape itself "
-              f"is misconfigured for the requested sharding."
+              f'Target dimension {t} on axis {axis} for {key_path} is not '
+              f'divisible by n_shards={n_shards}; the target shape itself '
+              'is misconfigured for the requested sharding.'
           )
         if (t - s) % n_shards != 0 or s % n_shards != 0:
           raise ValueError(
-              f"Cannot interleave pad axis {axis} for {key_path}: src_dim "
-              f"({s}) or extra ({t - s}) is not cleanly divisible by "
-              f"n_shards ({n_shards}). Ensure the source tensor is evenly "
-              f"partitionable."
+              f'Cannot interleave pad axis {axis} for {key_path}: src_dim '
+              f'({s}) or extra ({t - s}) is not cleanly divisible by '
+              f'n_shards ({n_shards}). Ensure the source tensor is evenly '
+              'partitionable.'
           )
         pad_specs.append((axis, n_shards, (t - s) // n_shards))
     else:
@@ -1202,9 +1218,9 @@ def _align_per_axis(
   for axis, s, t in mismatches:
     if t % s != 0:
       raise ShapeMismatchError(
-          f"Cannot align axis {axis} for {key_path}: src={s} -> tgt={t} "
-          f"is not an integer multiple and the key is not a recognized "
-          f"MoE pattern."
+          f'Cannot align axis {axis} for {key_path}: src={s} -> tgt={t} '
+          'is not an integer multiple and the key is not a recognized '
+          'MoE pattern.'
       )
     repeats.append((axis, t // s))
   return _jit_repeat_axes(arr, tuple(repeats))
@@ -1216,17 +1232,27 @@ def _interleave_moe_weights(
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
+    lane_size: Optional[int] = 0,
 ) -> jax.Array | np.ndarray:
-  """Interleaves wi_0 and wi_1 per-shard into a single tensor."""
+  """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
+
+  When lane_size > 0, Gate and Up alternate in lane_size chunks along the inner dimension.
+  When lane_size == 0 or None, each TP shard is plain concatenation [local_gate, local_up].
+  """
+  if lane_size is None:
+    lane_size = 0
+
   if axis is None:
     axis = len(tgt_shape) - 1
-    
+  elif axis < 0:
+    axis = len(tgt_shape) + axis
+
   target_half_dim = tgt_shape[axis] // 2
+  target_chunk_size = target_half_dim // n_shards
 
   def _pad_and_chunk(arr):
     current_total_size = arr.shape[axis]
     chunk_size = current_total_size // n_shards
-    target_chunk_size = target_half_dim // n_shards
 
     # Safely reshape to expose per-shard chunk without assuming the last axis
     new_shape = list(arr.shape)
@@ -1244,8 +1270,20 @@ def _interleave_moe_weights(
   p_wi_0 = _pad_and_chunk(wi_0)
   p_wi_1 = _pad_and_chunk(wi_1)
 
-  # Interleave along the chunked dimension
-  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+  if lane_size > 0 and target_chunk_size % lane_size == 0:
+    # Interleave in 128-lane chunks within each shard:
+    # [Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]
+    num_lanes = target_chunk_size // lane_size
+    shape_lanes = list(p_wi_0.shape)
+    shape_lanes[axis + 1] = num_lanes
+    shape_lanes.insert(axis + 2, lane_size)
+    p_wi_0 = p_wi_0.reshape(shape_lanes)
+    p_wi_1 = p_wi_1.reshape(shape_lanes)
+    combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
+  else:
+    # Fallback when dimension is not divisible by lane_size:
+    combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+
   return combined.reshape(tgt_shape)
 
 
@@ -1334,7 +1372,7 @@ def _scanned_sharding_from_per_layer(
   )
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8))
 def _jit_fuse_and_unstack_moe(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
@@ -1344,6 +1382,7 @@ def _jit_fuse_and_unstack_moe(
     tgt_shape: Tuple[int, ...],
     scan_padded_axis: int,
     tgt_padded_axis: int,
+    lane_size: Optional[int] = 0,
 ) -> Tuple[jax.Array | np.ndarray, ...]:
   """Fuses wi_0/wi_1 along the padded axis, then unstacks along scan_axis.
 
@@ -1360,6 +1399,7 @@ def _jit_fuse_and_unstack_moe(
     tgt_shape: Per-layer fused target shape (fused mlp dim on `tgt_padded_axis`).
     scan_padded_axis: Position of the padded axis in the scanned layout.
     tgt_padded_axis: Position of the padded axis in the per-layer layout.
+    lane_size: Subcore lane size for interleaving (defaults to 0 for TPU GMM layout concatenation).
 
   Returns:
     Tuple of `num_layers` per-layer arrays, each with shape `tgt_shape`.
@@ -1369,7 +1409,12 @@ def _jit_fuse_and_unstack_moe(
   fused_shape[scan_padded_axis] = tgt_shape[tgt_padded_axis]
 
   fused = _interleave_moe_weights(
-      wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
+      wi_0,
+      wi_1,
+      tuple(fused_shape),
+      n_shards,
+      axis=scan_padded_axis,
+      lane_size=lane_size,
   )
   return jnp.unstack(fused, axis=scan_axis)
 
@@ -1377,6 +1422,7 @@ def _jit_fuse_and_unstack_moe(
 def _fuse_moe_weights(
     src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
     tgt_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
+    lane_size: Optional[int] = 0,
 ) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
   """Fuses unscanned wi_0/wi_1 into wi for unscanned-fused targets.
 
@@ -1389,6 +1435,7 @@ def _fuse_moe_weights(
   Args:
     src_flat: Flat dict of source key tuples to JAX arrays.
     tgt_flat: Flat dict of target key tuples to target leaves.
+    lane_size: Subcore lane size for interleaving (defaults to 0 for TPU GMM layout concatenation).
 
   Returns:
     A new flat dict with wi_0/wi_1 fused into wi at matching prefixes. Any
@@ -1416,10 +1463,13 @@ def _fuse_moe_weights(
     logging.info(
         'Fusing MoE %s: wi_0=%s, wi_1=%s -> %s on axis %d',
         '.'.join(str(k) for k in tgt_key),
-        wi_0.shape, wi_1.shape, tgt_val.shape, axis,
+        wi_0.shape,
+        wi_1.shape,
+        tgt_val.shape,
+        axis,
     )
     new_src_flat[tgt_key] = _interleave_moe_weights(
-        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis
+        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis, lane_size=lane_size
     )
     del wi_0, wi_1  # Free memory immediately after fusion.
   return new_src_flat
@@ -1444,7 +1494,7 @@ def _collect_src_buffer_ids(
       try:
         ids.add(shard.data.unsafe_buffer_pointer())
       except jax.errors.JaxRuntimeError as e:
-        if "PjRt-compatible backend only" in str(e):
+        if 'PjRt-compatible backend only' in str(e):
           # Backend doesn't support unsafe pointers (e.g., disaggregated Pathways setup).
           # Fast-fail and return None to signal that aliasing checks should be skipped.
           return None
@@ -1465,9 +1515,10 @@ def _delete_target_buffers(
   for tgt_val in spec_flat.values():
     tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
     # Skip if the array cannot be deleted or is already deleted
-    if not hasattr(tgt_arr, 'delete') or getattr(
-        tgt_arr, 'is_deleted', lambda: False
-    )():
+    if (
+        not hasattr(tgt_arr, 'delete')
+        or getattr(tgt_arr, 'is_deleted', lambda: False)()
+    ):
       continue
     # Check for aliasing only if the backend supports buffer pointer tracking
     if src_buffer_ids is not None and hasattr(tgt_arr, 'addressable_shards'):
@@ -1495,7 +1546,9 @@ def _snapshot_dst_sharding(
   ):
     return arr
 
-  assert hasattr(arr, 'sharding'), f'Expected array with sharding, got {type(arr)}'
+  assert hasattr(
+      arr, 'sharding'
+  ), f'Expected array with sharding, got {type(arr)}'
   s = arr.sharding
 
   if isinstance(
@@ -1507,7 +1560,9 @@ def _snapshot_dst_sharding(
 
 def _reshard_in_chunks(
     src_flat: Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray],
-    spec_flat: Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray | nnx.Variable],
+    spec_flat: Dict[
+        Union[str, Tuple[str, ...]], jax.Array | np.ndarray | nnx.Variable
+    ],
     reshard_fn: Callable[..., Mapping[str, Any]],
     chunk_size: int,
     delete_spec_buffers: bool = False,
@@ -1585,6 +1640,7 @@ def transfer_state_directly(
     scan_axis: int = 1,
     delete_dst_buffers: bool = False,
     reshard_chunk_size: Optional[int] = None,
+    moe_lane_size: Optional[int] = 0,
 ) -> None:
   """Transfers state directly by matching structure, stripping wrappers.
 
@@ -1612,7 +1668,10 @@ def transfer_state_directly(
       start with roughly `10 * num_layers` for a dense transformer and tune
       downward if you still see fragmentation. When None (default) the
       original single-call reshard behavior is preserved.
+    moe_lane_size: Subcore lane size for MoE weight interleaving (defaults to 0
+      for TPU GMM layout concatenation).
   """
+
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
     if isinstance(obj, dict):
       return key in obj
@@ -1620,16 +1679,12 @@ def transfer_state_directly(
     return hasattr(obj, key)
 
   # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, abc.Mapping) and safe_has_key(
-      src_state, 'base'
-  ):
+  if isinstance(src_state, abc.Mapping) and safe_has_key(src_state, 'base'):
     logging.info("Unwrapping 'base' key from source state.")
     src_state = src_state['base']
 
   # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, abc.Mapping) and safe_has_key(
-      dst_state, 'model'
-  ):
+  while isinstance(dst_state, abc.Mapping) and safe_has_key(dst_state, 'model'):
     logging.info("Unwrapping nested 'model' key from target state.")
     dst_state = dst_state['model']
 
@@ -1661,7 +1716,9 @@ def transfer_state_directly(
     Uses flat dictionary traversal for efficiency.
     """
     # Fast path for non-dict inputs (leaves)
-    if not isinstance(src, abc.Mapping) or not isinstance(tgt_spec, abc.Mapping):
+    if not isinstance(src, abc.Mapping) or not isinstance(
+        tgt_spec, abc.Mapping
+    ):
       return src, tgt_spec
 
     # Flatten both structures to (path_tuple) -> value
@@ -1669,7 +1726,7 @@ def transfer_state_directly(
     src_flat = traverse_util.flatten_dict(src)
     tgt_flat = traverse_util.flatten_dict(tgt_spec)
 
-    src_flat = _fuse_moe_weights(src_flat, tgt_flat)
+    src_flat = _fuse_moe_weights(src_flat, tgt_flat, lane_size=moe_lane_size)
 
     filtered_src_flat = {}
     filtered_tgt_flat = {}
@@ -1734,7 +1791,7 @@ def transfer_state_directly(
             # Cast the bulk tensor once before unstacking.
             src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
             scanned_per_layer_shape = (
-                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1:]
+                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1 :]
             )
             if scanned_per_layer_shape == tgt_val.shape:
               # Pure unstack — no alignment needed.
@@ -1747,7 +1804,9 @@ def transfer_state_directly(
               # one bulk op + free unstack.
               logging.info(
                   'Bulk-aligning scanned %s: %s -> per-layer %s',
-                  candidate_path, src_val.shape, tgt_val.shape,
+                  candidate_path,
+                  src_val.shape,
+                  tgt_val.shape,
               )
               unstacked_cache[cache_key] = _bulk_align_and_unstack(
                   src_val, scan_axis, tgt_val, candidate_path
@@ -1767,7 +1826,9 @@ def transfer_state_directly(
         # allocations that cause compilation pressure and memory fragmentation.
         if key_tuple and key_tuple[-1] == 'wi':
           scanned_prefix = (
-              key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
+              key_tuple[:match_index]
+              + ('layers',)
+              + key_tuple[match_index + 1 : -1]
           )
           wi_0_key = scanned_prefix + ('wi_0',)
           wi_1_key = scanned_prefix + ('wi_1',)
@@ -1776,28 +1837,54 @@ def transfer_state_directly(
             fused_scanned_key = scanned_prefix + ('wi_fused',)
             if fused_scanned_key not in unstacked_cache:
               scanned_prefix_path = '.'.join(str(k) for k in scanned_prefix)
-              logging.info('Fusing scanned MoE weights for %s', scanned_prefix_path)
+              logging.info(
+                  'Fusing scanned MoE weights for %s', scanned_prefix_path
+              )
               wi_0_full = _apply_dtype_cast(
-                  src_flat[wi_0_key], tgt_val.dtype, '.'.join(str(k) for k in wi_0_key)
+                  src_flat[wi_0_key],
+                  tgt_val.dtype,
+                  '.'.join(str(k) for k in wi_0_key),
               )
               wi_1_full = _apply_dtype_cast(
-                  src_flat[wi_1_key], tgt_val.dtype, '.'.join(str(k) for k in wi_1_key)
+                  src_flat[wi_1_key],
+                  tgt_val.dtype,
+                  '.'.join(str(k) for k in wi_1_key),
               )
               num_layers = src_flat[wi_0_key].shape[scan_axis]
-              
+
               # Remove scan_axis to compare against the per-layer tgt_val shape
-              wi_0_single_shape = wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1:]
+              wi_0_single_shape = (
+                  wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1 :]
+              )
               mismatched_axes = [
-                  i for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape)) if s != t
+                  i
+                  for i, (s, t) in enumerate(
+                      zip(wi_0_single_shape, tgt_val.shape)
+                  )
+                  if s != t
               ]
-              tgt_axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
+              tgt_axis = (
+                  mismatched_axes[-1]
+                  if mismatched_axes
+                  else len(tgt_val.shape) - 1
+              )
               n_shards = _get_n_shards(tgt_val, tgt_axis)
-              
+
               # Offset the axis by 1 if it falls after the scan axis in the bulk tensor
-              scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+              scan_padded_axis = (
+                  tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+              )
 
               unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-                  wi_0_full, wi_1_full, scan_axis, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
+                  wi_0_full,
+                  wi_1_full,
+                  scan_axis,
+                  num_layers,
+                  n_shards,
+                  tgt_val.shape,
+                  scan_padded_axis,
+                  tgt_axis,
+                  lane_size=moe_lane_size,
               )
               del wi_0_full, wi_1_full
 
@@ -1892,20 +1979,20 @@ def resolve_parallelism_sizes(
 
   if total_mesh_devices % expert_parallel_size != 0:
     raise ValueError(
-        f"Total mesh devices ({total_mesh_devices}) must be divisible by"
-        f" expert_parallel_size ({expert_parallel_size})."
+        f'Total mesh devices ({total_mesh_devices}) must be divisible by'
+        f' expert_parallel_size ({expert_parallel_size}).'
     )
 
   if tensor_parallel_size == -1 and data_parallel_size == -1:
     tensor_parallel_size = total_mesh_devices // expert_parallel_size
     data_parallel_size = 1
   elif tensor_parallel_size == -1:
-    tensor_parallel_size = (
-        total_mesh_devices // (data_parallel_size * expert_parallel_size)
+    tensor_parallel_size = total_mesh_devices // (
+        data_parallel_size * expert_parallel_size
     )
   elif data_parallel_size == -1:
-    data_parallel_size = (
-        total_mesh_devices // (tensor_parallel_size * expert_parallel_size)
+    data_parallel_size = total_mesh_devices // (
+        tensor_parallel_size * expert_parallel_size
     )
 
   return tensor_parallel_size, data_parallel_size, expert_parallel_size
@@ -1943,7 +2030,6 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
   # Check that weights match
   matched = True
   for key in golden_state_flatten.keys():
-
     if golden_state_flatten[key].value.shape != state_flatten[key].value.shape:
       logging.info(
           'Shape mismatch for key %s: golden %s, loaded %s',
