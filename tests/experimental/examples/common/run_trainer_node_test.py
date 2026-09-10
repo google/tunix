@@ -441,6 +441,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.checkpoint_save_interval_steps, 1)
     self.assertEqual(args.checkpoint_max_to_keep, 10)
     self.assertFalse(args.use_lora)
+    self.assertTrue(args.prefuse_moe_weights)
+    self.assertTrue(args.use_weight_converter)
+    self.assertEqual(args.rollout_mesh_tp, 0)
 
     custom_argv = [
         "--port",
@@ -464,6 +467,12 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "32",
         "--lora_alpha",
         "64.0",
+        "--prefuse_moe_weights",
+        "false",
+        "--use_weight_converter",
+        "false",
+        "--rollout_mesh_tp",
+        "2",
     ]
     args_custom = run_trainer_node._parse_args(custom_argv)
     self.assertEqual(args_custom.port, 20050)
@@ -477,6 +486,15 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertTrue(args_custom.use_lora)
     self.assertEqual(args_custom.lora_rank, 32)
     self.assertEqual(args_custom.lora_alpha, 64.0)
+    self.assertFalse(args_custom.prefuse_moe_weights)
+    self.assertFalse(args_custom.use_weight_converter)
+    self.assertEqual(args_custom.rollout_mesh_tp, 2)
+
+  def test_parse_args_bare_boolean_flags(self):
+    argv = ["--prefuse_moe_weights", "--use_weight_converter"]
+    args = run_trainer_node._parse_args(argv)
+    self.assertTrue(args.prefuse_moe_weights)
+    self.assertTrue(args.use_weight_converter)
 
   def test_create_mesh_validates_device_count(self):
     args = mock.MagicMock(mesh_fsdp=2, mesh_tp=2)

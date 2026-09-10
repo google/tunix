@@ -89,6 +89,25 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--hf_token_secret_name",
+      default=os.environ.get("HF_TOKEN_SECRET_NAME", "hf-token-secret"),
+      help=(
+          "Kubernetes secret name (not the token itself) containing HF_TOKEN."
+          " Create with: kubectl create secret generic <name>"
+          " --from-literal=HF_TOKEN=<token>"
+      ),
+  )
+  parser.add_argument(
+      "--namespace",
+      default=os.environ.get("K8S_NAMESPACE", "default"),
+      help="Kubernetes namespace (default: default)",
+  )
+  parser.add_argument(
+      "--queue_name",
+      default=os.environ.get("KUEUE_QUEUE_NAME", ""),
+      help="Kueue local queue name (optional)",
+  )
 
   args = parser.parse_args()
 
@@ -141,6 +160,12 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  queue_label = (
+      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
+      if args.queue_name
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -164,6 +189,10 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        HF_TOKEN_SECRET_NAME=args.hf_token_secret_name,
+        NAMESPACE=args.namespace or "default",
+        QUEUE_NAME=args.queue_name,
+        QUEUE_LABEL=queue_label,
     )
     print(content)
 

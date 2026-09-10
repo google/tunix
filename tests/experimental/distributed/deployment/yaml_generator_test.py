@@ -52,6 +52,37 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("test-cpu-job", rendered)
         self.assertIn("9999", rendered)
 
+  def test_generate_yaml_with_queue_name(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-cpu-job",
+        "--cpu_machine=n2-standard-64",
+        "--queue_name=research-queue",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("kueue.x-k8s.io/queue-name: research-queue", rendered)
+
+  def test_generate_tpu_yaml_with_hf_token_secret(self):
+    template_file = _get_template_path("jobset.tpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-tpu-job",
+        "--tpu_slice=tpuv5:2x2x2",
+        "--hf_token_secret_name=custom-hf-secret",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("custom-hf-secret", rendered)
+        self.assertIn("name: HF_TOKEN", rendered)
+
   @parameterized.named_parameters(
       (
           f"{tpl_label}_{name}",

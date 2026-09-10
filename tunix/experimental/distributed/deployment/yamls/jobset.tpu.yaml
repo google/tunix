@@ -16,9 +16,10 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
-spec:
+  namespace: ${NAMESPACE}
+${QUEUE_LABEL}spec:
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -82,6 +83,12 @@ spec:
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: ${HF_TOKEN_SECRET_NAME}
+                    key: HF_TOKEN
+                    optional: true
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
