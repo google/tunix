@@ -28,6 +28,7 @@ from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
 from tunix.sft import checkpoint_options
+from tunix.sft import sharding_utils
 
 
 def _convert_host_local_array(x: Any) -> Any:
@@ -58,13 +59,8 @@ def _replicate_if_pspec_uses_unknown_mesh_axis(
 ) -> jax.sharding.PartitionSpec:
   if pspec is None:
     return jax.sharding.PartitionSpec()
-  for axis_name in pspec:
-    if axis_name is None:
-      continue
-    axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
-    if any(name is not None and name not in mesh.shape for name in axis_names):
-      return jax.sharding.PartitionSpec()
-  return pspec
+  cleaned = sharding_utils.deduplicate_mesh_axes(pspec, mesh)
+  return cleaned if cleaned is not None else jax.sharding.PartitionSpec()
 
 
 def _get_named_sharding(

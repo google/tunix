@@ -663,6 +663,13 @@ class CheckpointManagerTest(parameterized.TestCase):
     )
     self.assertEqual(fixed_pspec, shd.PartitionSpec())
 
+  def test_duplicate_partition_spec_axis_is_deduplicated_for_restore(self):
+    pspec = shd.PartitionSpec(('fsdp',), None, ('fsdp',))
+    fixed_pspec = checkpoint_manager._replicate_if_pspec_uses_unknown_mesh_axis(
+        pspec, self.mesh
+    )
+    self.assertEqual(fixed_pspec, shd.PartitionSpec('fsdp', None, None))
+
   def test_save_with_host_local_optimizer_state(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)
