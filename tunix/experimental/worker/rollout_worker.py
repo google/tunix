@@ -427,11 +427,10 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Discards the round and resumes serving the previous weights."""
-    self.manager.resume_all()
-    self.manager.reopen_admission()
+    res = await self.manager.abort_weight_sync(sync_request, **kwargs)
     self.state = WorkerState.READY
     self._record_round(sync_request, "aborted")
-    return None
+    return res
 
   async def get_weight_sync_status(self, **kwargs) -> Any:
     """Returns this worker's view of the current weight sync round."""

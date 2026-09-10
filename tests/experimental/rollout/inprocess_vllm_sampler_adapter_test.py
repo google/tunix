@@ -173,6 +173,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.weight_sync = mock.AsyncMock(return_value=5)
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
 
     fake_transformer_state = {"param": "tensor"}
     self.mock_vllm_sampler.transformer_state = fake_transformer_state
@@ -192,7 +193,9 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     # 1. bind_weight_sync
     asyncio.run(raiden_adapter.bind_weight_sync(sync_req))
     mock_delegate.bind_weight_sync.assert_awaited_once_with(
-        sync_request=sync_req, state=fake_transformer_state
+        sync_request=sync_req,
+        state=fake_transformer_state,
+        sampler=self.mock_vllm_sampler,
     )
     mock_delegate.is_bounded.return_value = True
 

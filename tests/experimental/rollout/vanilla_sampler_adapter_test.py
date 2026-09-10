@@ -163,6 +163,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.weight_sync = mock.AsyncMock(return_value=10)
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
 
     sampler_with_raiden = vanilla_sampler_adapter.VanillaSamplerAdapter(
         server_id="tpu_slice_raiden",
@@ -183,6 +184,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     mock_delegate.bind_weight_sync.assert_awaited_once_with(
         sync_request=sync_req,
         state=sampler_with_raiden.sampler.transformer_state,
+        sampler=sampler_with_raiden.sampler,
     )
     mock_delegate.is_bounded.return_value = True
 

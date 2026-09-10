@@ -196,6 +196,18 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
         sampler=sampler, tokenizer="mock", chat_parser="mock")
     await manager.bind_weight_sync()
 
+  async def test_abort_weight_sync_delegates_and_reopens_admission(self):
+    sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
+    sampler.abort_weight_sync.return_value = "aborted"
+    manager = manager_lib.RolloutManager(
+        sampler=sampler, tokenizer="mock", chat_parser="mock"
+    )
+    manager._traffic.transition_to_syncing()
+    res = await manager.abort_weight_sync()
+    self.assertEqual(res, "aborted")
+    sampler.abort_weight_sync.assert_awaited_once()
+    self.assertTrue(manager._traffic.is_admission_open())
+
   async def test_repeated_pre_is_allowed(self):
     manager = self._manager()
     await manager.pre_weight_sync()
@@ -339,7 +351,10 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
 class WeightSyncModeTest(absltest.TestCase):
 
-  def test_config_weight_sync_mode_raiden(self):
+  @mock.patch(
+      "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
+  )
+  def test_config_weight_sync_mode_raiden(self, mock_delegate_cls):
     config = types.SimpleNamespace(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
@@ -362,9 +377,14 @@ class WeightSyncModeTest(absltest.TestCase):
     self.assertIsNone(getattr(manager.sampler, "raiden_sync_delegate", None))
 
   @mock.patch(
+      "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
+  )
+  @mock.patch(
       "tunix.experimental.rollout.inprocess_vllm_sampler_adapter._get_vllm_sampler_cls"
   )
-  def test_config_weight_sync_mode_inprocess_vllm_raiden(self, mock_get_vllm):
+  def test_config_weight_sync_mode_inprocess_vllm_raiden(
+      self, mock_get_vllm, mock_delegate_cls
+  ):
     mock_lib = mock.MagicMock()
     mock_lib.VllmSampler.return_value = mock.MagicMock()
     mock_get_vllm.return_value = mock_lib
