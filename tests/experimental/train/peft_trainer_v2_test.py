@@ -15,6 +15,7 @@
 """Peft trainer unittest."""
 
 import contextlib
+import dataclasses
 import functools
 import os
 import tempfile
@@ -1130,6 +1131,29 @@ class OptimizerMemoryTest(parameterized.TestCase):
         if jnp.issubdtype(dtype, jnp.floating)
     }
     self.assertEqual(floating_dtypes, {jnp.dtype(jnp.float32)})
+
+  def test_prepare_payload_clears_metadata(self):
+    @dataclasses.dataclass
+    class DummyPayload:
+      x: jax.Array
+      metadata: dict[str, Any]
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    payload = DummyPayload(
+        x=jnp.ones((2, 4)),
+        metadata={'lineage': 'ctx_123', 'trajectory_ids': ('t1', 't2')},
+    )
+    prepared = trainer._prepare_payload(payload)
+
+    self.assertEqual(prepared.metadata, {})
+    self.assertEqual(
+        payload.metadata,
+        {'lineage': 'ctx_123', 'trajectory_ids': ('t1', 't2')},
+    )
 
 
 class V1ParityTest(parameterized.TestCase):

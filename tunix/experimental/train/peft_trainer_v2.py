@@ -1032,6 +1032,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def _prepare_payload(self, payload: Any) -> Any:
     """Applies input preparation and sharding to one training payload."""
     payload = self._prepare_inputs(payload)
+    if dataclasses.is_dataclass(payload) and hasattr(payload, "metadata"):
+      payload = dataclasses.replace(payload, metadata={})
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
@@ -1113,11 +1115,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     mode is set to EVAL and buffered metrics are written on exit.
     """
     _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step()
-    payload = self._prepare_inputs(payload)
-    payload = sharding_utils.shard_input(
-        payload, self.config.data_sharding_axis
-    )
-    loss, aux = eval_step_fn(payload)
+    loss, aux = eval_step_fn(self._prepare_payload(payload))
     loss = jax.lax.stop_gradient(loss)
     self._buffered_eval_metrics = self._buffer_metrics(
         self._buffered_eval_metrics,
