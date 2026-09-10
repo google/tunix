@@ -307,6 +307,44 @@ start_rollout() {
     | kubectl apply -f -
 }
 
+start_mock_trainer() {
+  python tunix/experimental/distributed/deployment/yaml_generator.py \
+    tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
+    --jobset_name="${TRAINER_ID}" \
+    --cpu_machine="${CPU_MACHINE}" \
+    --worker_container_image="${TUNIX_IMAGE}" \
+    --worker_container_port="${TRAINER_PORT}" \
+    --worker_startup_command=" \
+      TUNIX_IS_INTERNAL_ENV=false \
+      python -m tunix.experimental.distributed.runtime.main \
+        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.examples.common.run_mock_trainer_node.main \
+        --worker_id=${TRAINER_ID} \
+        --port=${TRAINER_PORT} \
+    " \
+    | kubectl apply -f -
+}
+
+start_mock_rollout() {
+  python tunix/experimental/distributed/deployment/yaml_generator.py \
+    tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
+    --jobset_name="${ROLLOUT_ID}" \
+    --cpu_machine="${CPU_MACHINE}" \
+    --worker_container_image="${TUNIX_IMAGE}" \
+    --worker_container_port="${ROLLOUT_PORT}" \
+    --worker_startup_command=" \
+      TUNIX_IS_INTERNAL_ENV=false \
+      python -m tunix.experimental.distributed.runtime.main \
+        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.examples.common.run_mock_rollout_node.main \
+        --worker_id=${ROLLOUT_ID} \
+        --port=${ROLLOUT_PORT} \
+    " \
+    | kubectl apply -f -
+}
+
 if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
   source tunix/experimental/examples/common/enter_kube_context.sh
 elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
@@ -331,6 +369,10 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout)
+      COMMAND="$1"
+      shift
+      ;;
     *)
       shift
       ;;
@@ -351,6 +393,13 @@ if [[ "$COMMAND" == "start" ]]; then
   start_orchestrator
   start_trainer
   start_rollout
+elif [[ "$COMMAND" == "test_orchestrator" ]]; then
+  stop_orchestrator
+  stop_trainer
+  stop_rollout
+  start_orchestrator
+  start_mock_trainer
+  start_mock_rollout
 elif [[ "$COMMAND" == "stop" ]]; then
   stop_orchestrator
   stop_trainer
@@ -359,9 +408,13 @@ elif [[ "$COMMAND" == "orchestrator" ]]; then
   stop_orchestrator; start_orchestrator
 elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
+elif [[ "$COMMAND" == "mock_trainer" ]]; then
+  stop_trainer; start_mock_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "mock_rollout" ]]; then
+  stop_rollout; start_mock_rollout
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout'."
   exit 1
 fi
