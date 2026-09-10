@@ -487,11 +487,11 @@ class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
 
   def _create_agent_env_pair(
-      self, single_example, group_id: int, pair_index: int
+      self, single_example, prompt_id: int, group_index: int
   ):
     normalized_example = normalize_single_example(single_example)
     return super()._create_agent_env_pair(
-        normalized_example, group_id=group_id, pair_index=pair_index
+        normalized_example, prompt_id=prompt_id, group_index=group_index
     )
 
 

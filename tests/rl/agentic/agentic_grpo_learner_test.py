@@ -285,7 +285,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           async for example in prompt_iterator:
             group = [
                 types.SimpleNamespace(
-                    pair_index=i * self.algo_config.num_generations + j
+                    group_index=i * self.algo_config.num_generations + j,
                 )
                 for j in range(self.algo_config.num_generations)
             ]
@@ -295,7 +295,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           for example in prompt_iterator:
             group = [
                 types.SimpleNamespace(
-                    pair_index=i * self.algo_config.num_generations + j
+                    group_index=i * self.algo_config.num_generations + j,
                 )
                 for j in range(self.algo_config.num_generations)
             ]
@@ -784,7 +784,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
-            "group_id": "group1",
+            "prompt_id": "group1",
         }
 
     trajectories = [MockTraj(0), MockTraj(1)]
@@ -1018,7 +1018,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       def __init__(
           self,
           index,
-          group_id,
+          prompt_id,
           reward,
           has_assistant_message=True,
           old_logprobs=None,
@@ -1032,7 +1032,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "trajectory_reward": reward,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
-            "group_id": group_id,
+            "prompt_id": prompt_id,
         }
         self.traj["conversation_text"].append(
             {"role": "user", "content": "user message"}
@@ -1520,7 +1520,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
-            "group_id": "test_group",
+            "prompt_id": "test_group",
         }
 
     trajectories = [MockTraj(0), MockTraj(1)]
@@ -1628,7 +1628,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
-            "group_id": "test_group",
+            "prompt_id": "test_group",
         }
 
     trajectories = [MockTraj(0), MockTraj(1)]
@@ -2315,8 +2315,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     original_fn = grpo_learner._create_agent_env_pair
 
-    def _patch_create_agent_env_pair(single_example, group_id, pair_index):
-      agent, env = original_fn(single_example, group_id, pair_index)
+    def _patch_create_agent_env_pair(single_example, prompt_id, group_index):
+      agent, env = original_fn(single_example, prompt_id, group_index)
       agents.append(agent)
       envs.append(env)
       return agent, env
@@ -2440,7 +2440,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
-            "group_id": "test_group",
+            "prompt_id": "test_group",
         }
 
     trajectories = [MockTraj(0), MockTraj(1)]

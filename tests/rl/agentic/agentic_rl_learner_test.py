@@ -33,6 +33,15 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
     return []
 
 
+class MockEnv:
+
+  def __init__(self, single_example: Any, prompt_id: int, group_index: int):
+    self.single_example = single_example
+    self.prompt_id = prompt_id
+    self.group_index = group_index
+    self.extra_kwargs = {"prompt_id": prompt_id, "group_index": group_index}
+
+
 class AgenticRLLearnerTest(parameterized.TestCase):
 
   def test_validate_rollout_config_mismatch_max_tokens(self):
@@ -227,6 +236,34 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           learner, "_orchestrator_producer", side_effect=mock_producer
       ):
         learner.train(train_dataset)
+
+  def test_create_agent_env_pair(self):
+    rl_engine = mock.Mock()
+    rl_engine.cluster_config = mock.Mock()
+    rl_engine.cluster_config.rollout_engine = "generic"
+    rl_engine.cluster_config.rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=10, return_logprobs=True
+    )
+    mesh = mock.Mock()
+    mesh.shape = {"fsdp": 1, "dp": 1}
+    rl_engine.cluster_config.role_to_mesh = {
+        rl_engine_lib.Role.ACTOR: mesh,
+        rl_engine_lib.Role.ROLLOUT: mesh,
+    }
+    algo_config = agentic_rl_learner.AgenticRLConfig(max_response_length=10)
+    mock_agent_class = mock.Mock()
+    with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
+      learner = DummyLearner(
+          rl_engine=rl_engine,
+          algo_config=algo_config,
+          agent_class=mock_agent_class,
+          env_class=MockEnv,
+      )
+    unused_agent, env = learner._create_agent_env_pair(
+        "sample", prompt_id=10, group_index=2
+    )
+    self.assertEqual(env.prompt_id, 10)
+    self.assertEqual(env.group_index, 2)
 
 
 if __name__ == "__main__":

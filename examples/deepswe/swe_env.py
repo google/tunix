@@ -387,8 +387,8 @@ class SWEEnv(BaseTaskEnv):
   def __init__(
       self,
       entry: dict,
-      group_id: int | None = None,
-      pair_index: int | None = None,
+      prompt_id: int | None = None,
+      group_index: int | None = None,
       step_timeout: int = 30 * 60,
       reward_timeout: int = 30 * 60,
       backend: str = "kubernetes",
@@ -398,13 +398,14 @@ class SWEEnv(BaseTaskEnv):
       max_steps: int = 1,
       use_agent_sandbox: bool = False,
       fleet: Any | None = None,
+      **kwargs: Any,
   ):
     """Initialize the SWE environment.
 
     Args:
         entry: Dataset containing the tasks. If None, uses default dataset.
-        group_id: ID of the group to which the task belongs.
-        pair_index: Index of the pair to use. If None, selects a random pair.
+        prompt_id: ID of the prompt to which the task belongs.
+        group_index: Index of the rollout within the group.
         step_timeout: Timeout for each step in seconds.
         reward_timeout: Timeout for reward computation in seconds.
         backend: Backend to use for the environment.
@@ -415,6 +416,7 @@ class SWEEnv(BaseTaskEnv):
         use_agent_sandbox: If True, strictly forces SandboxFleet and
           AgentSandboxRuntime.
         fleet: Optional SandboxFleet instance to use.
+        **kwargs: Additional keyword arguments.
     """
     self.entry = _unpack_entry(entry)
     self.step_timeout = step_timeout
@@ -438,8 +440,8 @@ class SWEEnv(BaseTaskEnv):
     if not hasattr(self, "extra_kwargs"):
       self.extra_kwargs = {}
 
-    self.extra_kwargs["group_id"] = group_id
-    self.extra_kwargs["pair_index"] = pair_index
+    self.extra_kwargs["prompt_id"] = prompt_id
+    self.extra_kwargs["group_index"] = group_index
 
   def _initial_observation(self) -> Any:
     if not self.env:

@@ -166,8 +166,8 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
   def __init__(
       self,
       entry: dict[str, Any],
-      group_id: int | None = None,
-      pair_index: int | None = None,
+      prompt_id: int | None = None,
+      group_index: int | None = None,
       max_steps: int = 5,
       **kwargs,
   ):
@@ -216,8 +216,8 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
 
     if not hasattr(self, "extra_kwargs"):
       self.extra_kwargs = {}
-    self.extra_kwargs["group_id"] = group_id
-    self.extra_kwargs["pair_index"] = pair_index
+    self.extra_kwargs["prompt_id"] = prompt_id
+    self.extra_kwargs["group_index"] = group_index
 
   def _get_player_position(self):
     return (self.s // self.ncol, self.s % self.ncol)
