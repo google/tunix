@@ -72,6 +72,17 @@ def _chat_parser_for(
   )
 
 
+def _str2bool(v: str | bool) -> bool:
+  """Converts string representations of booleans to bool."""
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ("yes", "true", "t", "y", "1"):
+    return True
+  if v.lower() in ("no", "false", "f", "n", "0"):
+    return False
+  raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
   parser = argparse.ArgumentParser(description="Distributed rollout worker")
@@ -170,7 +181,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync_lib.WeightSyncMode),
       help="Weight sync mode (none, fallback, or raiden).",
   )
-  return parser.parse_args(argv)
+  parser.add_argument(
+      "--prefuse_moe_weights",
+      type=_str2bool,
+      default=True,
+      nargs="?",
+      const=True,
+      help="Prefuse MoE weights for MaxText inference in vLLM.",
+  )
+  parser.add_argument(
+      "--enable_prefix_caching",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Enable KV prefix caching in vLLM sampler.",
+  )
+  parser.add_argument(
+      "--tensor_parallel_size",
+      type=int,
+      default=None,
+      help=(
+          "Explicit tensor parallel size for vLLM sampler (defaults to"
+          " mesh_tp)."
+      ),
+  )
+  args = parser.parse_args(argv)
+  _finalize_tensor_parallel_size(args)
+  return args
+
+
+def _finalize_tensor_parallel_size(args: argparse.Namespace) -> None:
+  """Derives tensor_parallel_size from mesh_tp if not explicitly set."""
+  if args.tensor_parallel_size is None:
+    tp = getattr(args, "sampler_mesh_tp", None) or getattr(args, "mesh_tp", 1)
+    args.tensor_parallel_size = tp
+    if tp > 1:
+      logging.info("Auto-derived tensor_parallel_size=%d from mesh_tp", tp)
 
 
 def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -339,18 +386,20 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   engine_kwargs = {
       "model": vllm_model,
       "max_model_len": max_model_len,
+      "enable_prefix_caching": args.enable_prefix_caching,
   }
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
   server_mode = True if multihost_backend else None
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
+  tp_size = args.tensor_parallel_size
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
       vllm_model,
       rollout_mesh,
-      args.mesh_tp,
+      tp_size,
       args.mesh_fsdp,
       max_model_len,
   )
@@ -363,15 +412,12 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   vllm_config = vllm_sampler.VllmConfig(
       server_mode=server_mode,
       mesh=rollout_mesh,
-      tensor_parallel_size=args.mesh_tp,
+      tensor_parallel_size=tp_size,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      engine_kwargs={
-          "model": vllm_model,
-          "max_model_len": max_model_len,
-      },
+      engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -409,23 +455,25 @@ def _create_vllm_sampler(args):
       else args.model_id
   )
   max_model_len = args.max_prompt_length + args.max_response_length
+  tp_size = args.tensor_parallel_size
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "max_model_len=%d...",
       vllm_model,
-      args.mesh_tp,
+      tp_size,
       max_model_len,
   )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
-      tensor_parallel_size=args.mesh_tp,
+      tensor_parallel_size=tp_size,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
+      enable_prefix_caching=args.enable_prefix_caching,
   )
   if args.maxtext_model_name:
     logging.info(
@@ -434,8 +482,7 @@ def _create_vllm_sampler(args):
         args.maxtext_model_name,
     )
     engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
-    # MaxText inference config. prefuse_moe_weights is left False so rollout
-    # variable names match unfused trainer parameters during weight sync.
+    # MaxText inference config.
     maxtext_config_overrides = {
         "model_name": args.maxtext_model_name,
         "model_call_mode": "inference",
@@ -444,6 +491,8 @@ def _create_vllm_sampler(args):
         "log_config": False,
         "weight_dtype": "bfloat16",
     }
+    if args.prefuse_moe_weights is not None:
+      maxtext_config_overrides["prefuse_moe_weights"] = args.prefuse_moe_weights
     if args.maxtext_attention:
       maxtext_config_overrides["attention"] = args.maxtext_attention
     engine_kwargs["additional_config"] = {

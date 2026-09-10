@@ -71,7 +71,17 @@ def _build_optimizer(args):
   return adamw
 
 
+def _str2bool(v: str | bool) -> bool:
+  """Converts string representations of booleans to bool."""
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ("yes", "true", "t", "y", "1"):
+    return True
+  if v.lower() in ("no", "false", "f", "n", "0"):
+    return False
+  raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+  """Parses command line arguments for trainer worker process."""
   parser = argparse.ArgumentParser(description="JAX trainer worker process")
   parser.add_argument("--port", type=int, default=20000)
   parser.add_argument("--worker_id", type=str, default="trainer-0")
@@ -178,6 +188,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Warmup fraction for MaxText LR schedule (0.0 enables updates from"
           " step 0)."
       ),
+  )
+  parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=0,
+      help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
+  )
+  parser.add_argument(
+      "--prefuse_moe_weights",
+      type=_str2bool,
+      default=True,
+      nargs="?",
+      const=True,
+      help="Prefuse MoE weights for MaxText training.",
+  )
+  parser.add_argument(
+      "--use_weight_converter",
+      type=_str2bool,
+      default=True,
+      nargs="?",
+      const=True,
+      help="Use weight converter for MaxText weight synchronization.",
   )
   parser.add_argument(
       "--debug",
@@ -349,6 +381,17 @@ def _create_maxtext_trainer_factory(args) -> Any:
   grad_accumulation_steps = max(
       1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
   )
+  extra_cfg_kwargs = {}
+  import inspect  # pylint: disable=g-import-not-at-top
+  sig = inspect.signature(maxtext_utils.build_maxtext_config)
+  for k, v in [
+      ("rollout_mesh_tp", args.rollout_mesh_tp),
+      ("prefuse_moe_weights", args.prefuse_moe_weights),
+      ("use_weight_converter", args.use_weight_converter),
+  ]:
+    if k in sig.parameters:
+      extra_cfg_kwargs[k] = v
+
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
       worker_id=args.worker_id,
@@ -366,6 +409,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
       base_output_directory=args.maxtext_output_directory,
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
+      **extra_cfg_kwargs,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

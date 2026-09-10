@@ -17,6 +17,15 @@
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
+LAUNCHER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" &>/dev/null; then
+  PYTHON="python"
+fi
+
+YAML_GEN=${YAML_GEN:-"${LAUNCHER_DIR}/../../distributed/deployment/yaml_generator.py"}
+YAML_DIR=${YAML_DIR:-"${LAUNCHER_DIR}/../../distributed/deployment/yamls"}
+
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
@@ -61,17 +70,23 @@ export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
 export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
-# If TRAINER_BACKEND=maxtext, MAXTEXT_CKPT must be set to the path of an Orbax params-only checkpoint.
-if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
-  echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
-  exit 1
-fi
 export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
+
+# MoE & Weight Sync Flags
+export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
+export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
+export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
+# Number of Raiden TPU devices per host. For v5p, 4t machines have 4 chips/host.
+# For other hardware or full hosts, configure accordingly (e.g. 8 for 8t).
+# TODO (tunix-dev): remove this and detect automatically. This is added temporarily
+# since in Pathways proxy mode, the task_id is either None or identical across all
+# proxy devices, which makes auto-detection hard.
+export RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-}
 
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
@@ -89,6 +104,7 @@ export ORCHESTRATOR_PORT=20000
 
 export ROLLOUT_ID=$USER-roll
 export ROLLOUT_PORT=20001
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
@@ -110,18 +126,44 @@ export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 
+# Kubernetes Cluster & Scheduling Options
+export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
+export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${QUEUE_NAME:-}}
+export DRY_RUN=${DRY_RUN:-false}
+
+apply_manifest() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "---"
+    cat
+  else
+    kubectl apply -f -
+  fi
+}
+
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_orchestrator() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
+  local debug_flag=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_flag="--debug"
+  fi
+
+  "$PYTHON" "$YAML_GEN" \
+    "$YAML_DIR/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
@@ -137,6 +179,7 @@ start_orchestrator() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --rollout_replicas=${ROLLOUT_REPLICAS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
@@ -146,36 +189,67 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
-        ${DEBUG:+--debug} \
+        ${debug_flag} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_trainer() {
   local extra_flags=""
+  local debug_flag=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_flag="--debug"
+  fi
 
   if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
+    if [[ -z "${MAXTEXT_CKPT}" ]]; then
+      if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "Warning: TRAINER_BACKEND=maxtext without MAXTEXT_CKPT (Orbax params-only checkpoint)." >&2
+      else
+        echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)." >&2
+        exit 1
+      fi
+    fi
     extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
-      --maxtext_ckpt_path=${MAXTEXT_CKPT} \
+      ${MAXTEXT_CKPT:+--maxtext_ckpt_path=${MAXTEXT_CKPT}} \
       --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
+      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
+      --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
+      --use_weight_converter=${USE_WEIGHT_CONVERTER} \
     "
   fi
 
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
+  local raiden_env=""
+  if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
+    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+      raiden_env+=" RAIDEN_USE_FFI=1"
+    fi
+    if [[ -n "${RAIDEN_DEVICES_PER_HOST}" ]]; then
+      raiden_env+=" RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
+    fi
+  fi
+
+  "$PYTHON" "$YAML_GEN" \
+    "$YAML_DIR/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
@@ -184,7 +258,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      HF_TOKEN=${HF_TOKEN} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -213,21 +287,45 @@ start_trainer() {
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${extra_flags} \
-        ${DEBUG:+--debug} \
+        ${debug_flag} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
-stop_rollout() {
+stop_rollout_instance() {
+  local target_id="$1"
   if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
-    kubectl delete leaderworkerset "${ROLLOUT_ID}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "kubectl delete leaderworkerset ${target_id} -n ${K8S_NAMESPACE}"
+    else
+      kubectl delete leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    fi
   else
-    kubectl delete jobset "${ROLLOUT_ID}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "kubectl delete jobset ${target_id} -n ${K8S_NAMESPACE}"
+    else
+      kubectl delete jobset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    fi
   fi
 }
 
-start_rollout() {
+stop_rollout() {
+  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+    local target_id="${ROLLOUT_ID}"
+    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
+      target_id="${ROLLOUT_ID}-${i}"
+    fi
+    stop_rollout_instance "${target_id}"
+  done
+}
+
+start_rollout_instance() {
+  local target_id="$1"
   local extra_flags=""
+  local debug_flag=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_flag="--debug"
+  fi
 
   if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
@@ -240,20 +338,32 @@ start_rollout() {
     "
   fi
 
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/${ROLLOUT_JOBSET_YAML} \
-    --jobset_name="${ROLLOUT_ID}" \
+  local raiden_env=""
+  if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
+    # mcJax rollout uses TCP transport (FFI disabled)
+    raiden_env+=" RAIDEN_USE_FFI=0"
+    if [[ -n "${RAIDEN_DEVICES_PER_HOST}" ]]; then
+      raiden_env+=" RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
+    fi
+  fi
+
+  "$PYTHON" "$YAML_GEN" \
+    "$YAML_DIR/${ROLLOUT_JOBSET_YAML}" \
+    --jobset_name="${target_id}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
+    --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      HF_TOKEN=${HF_TOKEN} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-        --worker_id=${ROLLOUT_ID} \
+        --worker_id=${target_id} \
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
@@ -266,16 +376,38 @@ start_rollout() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
+        --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
         ${extra_flags} \
-        ${DEBUG:+--debug} \
+        ${debug_flag} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
-source tunix/experimental/examples/common/enter_kube_context.sh
+start_rollout() {
+  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+    local target_id="${ROLLOUT_ID}"
+    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
+      target_id="${ROLLOUT_ID}-${i}"
+    fi
+    start_rollout_instance "${target_id}"
+  done
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    start|stop|orchestrator|trainer|rollout)
+      COMMAND="$1"
+      shift
+      ;;
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --no-debug)
+      DEBUG=0
+      shift
+      ;;
     --command)
       COMMAND="$2"
       shift 2
@@ -292,11 +424,56 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
+    --namespace)
+      K8S_NAMESPACE="$2"
+      shift 2
+      ;;
+    --namespace=*)
+      K8S_NAMESPACE="${1#*=}"
+      shift
+      ;;
+    --queue)
+      KUEUE_QUEUE_NAME="$2"
+      shift 2
+      ;;
+    --queue=*)
+      KUEUE_QUEUE_NAME="${1#*=}"
+      shift
+      ;;
+    --dry-run|--render)
+      DRY_RUN=true
+      shift
+      ;;
+    --scratch=*|--gcs-scratch=*)
+      GCS_SCRATCH_LOCATION="${1#*=}"
+      shift
+      ;;
+    --scratch|--gcs-scratch)
+      GCS_SCRATCH_LOCATION="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout] [options]"
+      echo "Options:"
+      echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout)"
+      echo "  --namespace <ns>         Kubernetes namespace (default: default)"
+      echo "  --queue <name>           Kueue local queue name (optional)"
+      echo "  --image <image>          Container image to use"
+      echo "  --dry-run, --render      Print generated YAMLs without applying"
+      echo "  --scratch, --gcs-scratch GCS scratch location"
+      echo "  --debug, --no-debug      Toggle debug logging (default: disabled)"
+      exit 0
+      ;;
     *)
       shift
       ;;
   esac
 done
+
+if [[ "$DRY_RUN" != "true" ]]; then
+  ENTER_KUBE_CONTEXT=${ENTER_KUBE_CONTEXT:-"${LAUNCHER_DIR}/../common/enter_kube_context.sh"}
+  source "${ENTER_KUBE_CONTEXT}"
+fi
 
 if [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \

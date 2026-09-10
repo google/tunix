@@ -183,6 +183,23 @@ class YamlGeneratorTest(parameterized.TestCase):
       with self.assertRaises(expected_exception):
         yaml_generator.main()
 
+  def test_generate_yaml_with_queue_name(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-queue-job",
+        "--cpu_machine=n2-standard-64",
+        "--queue_name=test-local-queue",
+        "--namespace=test-namespace",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("kueue.x-k8s.io/queue-name: test-local-queue", rendered)
+        self.assertIn("namespace: test-namespace", rendered)
+
 
 if __name__ == "__main__":
   absltest.main()

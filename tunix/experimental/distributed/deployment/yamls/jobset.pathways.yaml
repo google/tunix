@@ -16,11 +16,12 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
-spec:
+  namespace: ${NAMESPACE}
+${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true

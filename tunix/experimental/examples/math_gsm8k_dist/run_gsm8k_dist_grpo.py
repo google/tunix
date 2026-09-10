@@ -137,6 +137,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=1,
+      help="Number of rollout worker replicas to wait for.",
+  )
+  parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
@@ -362,7 +368,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
@@ -438,6 +444,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         num_steps=args.max_steps,
         bring_up=False,
     )
+  except BaseException as exc:
+    logging.exception("FATAL: StandardRLProgram execution failed: %s", exc)
+    raise
   finally:
     program.close()
     if args.stop_workers_on_exit:
