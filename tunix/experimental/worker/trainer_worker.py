@@ -188,6 +188,16 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
+  def per_token_logps(self, items: datatypes.RLTrainerPayload) -> Any:
+    """Computes per-token log-probabilities on the current actor policy."""
+    self._ensure_ready()
+    scorer = getattr(self._trainer, "per_token_logps", None)
+    if not callable(scorer):
+      raise AttributeError(
+          f"{type(self._trainer).__name__} does not support per_token_logps."
+      )
+    return scorer(items)
+
   def eval_step(
       self,
       request: datatypes.TrainRequest,

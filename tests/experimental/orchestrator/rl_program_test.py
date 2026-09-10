@@ -210,6 +210,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.max_packed_len = 16
     self.mock_algo.max_response_length = 1024
     self.mock_algo.requires_reference_kl = False
+    self.mock_algo.requires_actor_logps = False
 
     mock_payload = datatypes.RLTrainerPayload(
         prompt_ids=np.array([1, 2], dtype=np.int32),
@@ -1641,6 +1642,49 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_actor_logps_are_recomputed_before_any_minibatch_update(self):
+    async def _run():
+      self.mock_algo.requires_actor_logps = True
+      self.mock_algo.sampler_is = None
+      self.mock_algo.sampler_is_threshold = 2.0
+      self.mock_algo.mini_batch_size = 1
+      events = []
+
+      async def _logps(role, items):
+        del items
+        events.append(("logps", role))
+        return np.zeros((2, 4), dtype=np.float32)
+
+      async def _train(*args, **kwargs):
+        del args, kwargs
+        events.append(("train", datatypes.Role.ACTOR))
+        return {}
+
+      self.mock_engine.per_token_logps = mock.AsyncMock(side_effect=_logps)
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_train)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      program = self._create_program(
+          dataset=["prompt_0", "prompt_1"], batch_size=2
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          events,
+          [
+              ("logps", datatypes.Role.ACTOR),
+              ("logps", datatypes.Role.ACTOR),
+              ("train", datatypes.Role.ACTOR),
+              ("train", datatypes.Role.ACTOR),
+          ],
+      )
+
+    asyncio.run(_run())
+
   def test_reference_kl_raises_type_error_for_invalid_microbatch(self):
     async def _run():
       self.mock_algo.requires_reference_kl = True
@@ -2107,6 +2151,56 @@ class RLProgramTest(absltest.TestCase):
       )
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh", "trainer/loss", "eval"), 0.2
+      )
+
+    asyncio.run(_run())
+
+  def test_held_out_evaluation_runs_before_step_zero_update(self):
+    async def _run():
+      events = []
+
+      async def _generate(*args, **kwargs):
+        events.append("eval")
+        self.assertEqual(kwargs["group_size"], 2)
+        self.assertEqual(kwargs["policy_version"], 0)
+        return [
+            datatypes.TrajectoryItem(
+                prompt_id="eval_0",
+                group_index=0,
+                start_step=0,
+                traj=datatypes.Trajectory(reward=1.0),
+            ),
+            datatypes.TrajectoryItem(
+                prompt_id="eval_0",
+                group_index=1,
+                start_step=0,
+                traj=datatypes.Trajectory(reward=0.0),
+            ),
+        ]
+
+      async def _train(*args, **kwargs):
+        del args, kwargs
+        events.append("train")
+        return {}
+
+      self.mock_engine.generate = mock.AsyncMock(side_effect=_generate)
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_train)
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          dataset=["prompt_0"],
+          evaluation_dataset=[{"prompt": "", "prompt_id": "eval_0"}],
+          eval_every_n_steps=10,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(events, ["eval", "train"])
+      logger = program.metrics_logger
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/solve_ratio", "eval"), 0.5
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/solve_partial", "eval"), 1.0
       )
 
     asyncio.run(_run())

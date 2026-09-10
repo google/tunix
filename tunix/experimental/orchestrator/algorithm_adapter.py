@@ -104,6 +104,7 @@ class AlgorithmAdapter(abc.ABC):
     self.max_packed_len = max_packed_len
     self.max_response_length = max_response_length
     self.requires_reference_kl = False
+    self.requires_actor_logps = False
     self.has_critic = False
     self.requires_old_logprobs = False
 
@@ -160,6 +161,8 @@ class GRPOAdapter(AlgorithmAdapter):
       kl_loss_mode: str = "mse_kl",
       kl_clamp_value: float | None = None,
       use_rollout_logps: bool = True,
+      sampler_is: str | None = None,
+      sampler_is_threshold: float = 2.0,
   ):
     if group_size <= 1:
       raise ValueError(
@@ -185,6 +188,16 @@ class GRPOAdapter(AlgorithmAdapter):
     self.kl_clamp_value = kl_clamp_value
     self.requires_reference_kl = beta_kl != 0.0
     self.use_rollout_logps = use_rollout_logps
+    if sampler_is not in (None, "token"):
+      raise ValueError(
+          "sampler_is must be either None or 'token'; got "
+          f"{sampler_is!r}."
+      )
+    if sampler_is_threshold <= 0:
+      raise ValueError("sampler_is_threshold must be positive.")
+    self.sampler_is = sampler_is
+    self.sampler_is_threshold = sampler_is_threshold
+    self.requires_actor_logps = not use_rollout_logps or sampler_is == "token"
 
   def compute_advantages(
       self,

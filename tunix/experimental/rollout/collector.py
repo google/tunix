@@ -205,9 +205,15 @@ class TrajectoryCollectorEngine:
     )
     rl_traj = await inner_engine.collect(mode="Trajectory")
     self.is_done = True
-    return self._convert_to_trajectory(rl_traj)
+    masked_out = (
+        self.overlong_filter
+        and getattr(rl_traj, "status", None) in inner_engine.filter_statuses
+    )
+    return self._convert_to_trajectory(rl_traj, masked_out=masked_out)
 
-  def _convert_to_trajectory(self, rl_traj: Any) -> trajectory_lib.Trajectory:
+  def _convert_to_trajectory(
+      self, rl_traj: Any, *, masked_out: bool = False
+  ) -> trajectory_lib.Trajectory:
     """Converts internal rollout trajectory to standardized Trajectory format."""
     metadata = dict(self.request.metadata or {})
     metadata["prompt_id"] = self.request.prompt_id
@@ -223,6 +229,10 @@ class TrajectoryCollectorEngine:
         dtype=np.int32,
     )
     metadata["reward"] = float(getattr(rl_traj, "reward", 0.0) or 0.0)
+    raw_status = getattr(rl_traj, "status", None)
+    if raw_status is not None:
+      metadata["status"] = getattr(raw_status, "name", str(raw_status))
+    metadata["masked_out"] = masked_out
     trajectory = trajectory_lib.Trajectory(
         trajectory_id=self.traj_id,
         agent=trajectory_lib.Agent(
@@ -254,6 +264,8 @@ class TrajectoryCollectorEngine:
         ):
           val = getattr(step, attr, None)
           if val is not None:
+            if attr == "assistant_masks" and masked_out:
+              val = np.zeros_like(np.asarray(val))
             extra_dict[attr] = val
             try:
               setattr(new_step, attr, val)

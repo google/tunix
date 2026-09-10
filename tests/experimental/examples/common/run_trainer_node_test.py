@@ -25,6 +25,7 @@ from unittest import mock
 
 from absl.testing import absltest
 import jax
+from jax import numpy as jnp
 from jax.sharding import Mesh
 from tunix.experimental.examples.common import run_trainer_node
 from tunix.experimental.train import peft_trainer_v2
@@ -161,6 +162,40 @@ class MeshBoundTrainerTest(absltest.TestCase):
   def test_getattr_delegates_to_underlying_trainer(self):
     self.mock_trainer.custom_attr = "custom_value"
     self.assertEqual(self.mesh_trainer.custom_attr, "custom_value")
+
+
+class ActorModelConfigTest(absltest.TestCase):
+
+  def test_actor_model_forwards_precision_and_memory_controls(self):
+    args = run_trainer_node._parse_args([
+        "--model_dir=/tmp/model",
+        "--param_dtype=float32",
+        "--enable_remat",
+        "--remat_policy=decoder",
+        "--use_flash_attention",
+        "--flash_attention_block_size=256",
+    ])
+    mesh = mock.MagicMock(spec=Mesh)
+    expected_model = object()
+
+    with mock.patch.object(
+        run_trainer_node.models,
+        "create_model",
+        return_value=expected_model,
+    ) as create_model:
+      result = run_trainer_node._load_actor_model(args, mesh, lora=False)
+
+    self.assertIs(result, expected_model)
+    create_model.assert_called_once_with(
+        args.model_name,
+        "/tmp/model",
+        mesh,
+        param_dtype=jnp.float32,
+        enable_remat=True,
+        remat_policy="decoder",
+        use_flash_attention=True,
+        flash_attention_block_size=256,
+    )
 
 
 class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):

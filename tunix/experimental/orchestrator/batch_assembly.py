@@ -267,6 +267,60 @@ def with_ref_per_token_logps(
   return dataclasses.replace(batch, ref_per_token_logps=ref_logps_arr)
 
 
+def with_actor_per_token_logps(
+    batch: datatypes.RLTrainerPayload,
+    actor_logps: datatypes.LogprobsResponse | np.ndarray,
+    *,
+    sampler_is: str | None = None,
+    sampler_is_threshold: float = 2.0,
+) -> datatypes.RLTrainerPayload:
+  """Adds start-of-step actor logps and optional token sampler-IS weights."""
+  if not isinstance(batch, datatypes.RLTrainerPayload):
+    raise TypeError(
+        "with_actor_per_token_logps expects an RLTrainerPayload; got "
+        f"{type(batch).__name__}."
+    )
+  if isinstance(actor_logps, datatypes.LogprobsResponse):
+    if actor_logps.error is not None:
+      raise RuntimeError(actor_logps.error.message)
+    actor_logps = actor_logps.per_token_logps
+  actor_logps_arr = np.asarray(actor_logps, dtype=np.float32)
+  completion_shape = np.asarray(batch.completion_ids).shape
+  if actor_logps_arr.shape != completion_shape:
+    raise ValueError(
+        "Actor logps shape must match completion_ids shape: got "
+        f"{actor_logps_arr.shape}, expected {completion_shape}."
+    )
+
+  sampler_is_weights = None
+  if sampler_is == "token":
+    if batch.old_per_token_logps is None:
+      raise ValueError(
+          "sampler_is='token' requires rollout old_per_token_logps."
+      )
+    rollout_logps = np.asarray(batch.old_per_token_logps, dtype=np.float32)
+    if rollout_logps.shape != completion_shape:
+      raise ValueError(
+          "Rollout logps shape must match completion_ids shape: got "
+          f"{rollout_logps.shape}, expected {completion_shape}."
+      )
+    completion_mask = np.asarray(batch.completion_mask, dtype=np.float32)
+    log_ratio = np.clip(actor_logps_arr - rollout_logps, -20.0, 20.0)
+    sampler_is_weights = (
+        np.minimum(np.exp(log_ratio), sampler_is_threshold) * completion_mask
+    ).astype(np.float32)
+  elif sampler_is is not None:
+    raise ValueError(
+        "sampler_is must be either None or 'token'; got " f"{sampler_is!r}."
+    )
+
+  return dataclasses.replace(
+      batch,
+      old_per_token_logps=actor_logps_arr,
+      sampler_is_weights=sampler_is_weights,
+  )
+
+
 def _as_1d(values: Any, dtype: Any) -> np.ndarray:
   return np.asarray(values, dtype=dtype).reshape(-1)
 

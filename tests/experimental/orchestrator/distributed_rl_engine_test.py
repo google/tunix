@@ -174,6 +174,29 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
     asyncio.run(_run())
 
+  def test_generate_expands_prompt_groups_at_explicit_policy_version(self):
+    async def _run():
+      self.mock_rollout_1.generate.return_value = []
+      self.mock_rollout_2.generate.return_value = []
+
+      await self.engine.generate(
+          [{"prompt": "p1", "prompt_id": "prompt_1"}],
+          group_size=2,
+          policy_version=7,
+      )
+
+      requests = []
+      for worker in (self.mock_rollout_1, self.mock_rollout_2):
+        if worker.generate.called:
+          requests.extend(worker.generate.call_args.kwargs["requests"])
+      self.assertLen(requests, 2)
+      self.assertEqual({request.group_index for request in requests}, {0, 1})
+      self.assertEqual(
+          {request.target_policy_version for request in requests}, {7}
+      )
+
+    asyncio.run(_run())
+
   def test_generate_rejects_legacy_generation_kwargs(self):
     async def _run():
       with self.assertRaisesRegex(TypeError, "GenerationArgs"):

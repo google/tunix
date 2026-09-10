@@ -182,6 +182,43 @@ class BuildPromptTest(absltest.TestCase):
 
 class TrajectoryCollectorEngineTest(absltest.TestCase):
 
+  def test_masked_trajectory_zeros_assistant_masks_and_preserves_status(self):
+    request = datatypes.RolloutRequest(
+        prompt_id="p1", group_index=0, metadata={"group_index": 0}
+    )
+    agent = mock.MagicMock()
+    agent.name = "agent"
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="t1",
+        request=request,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=agent,
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    rl_traj = types.SimpleNamespace(
+        prompt_tokens=np.array([1], dtype=np.int32),
+        reward=0.0,
+        status=datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+        steps=[
+            types.SimpleNamespace(
+                model_response="response",
+                observation="observation",
+                assistant_tokens=np.array([2, 3], dtype=np.int32),
+                assistant_masks=np.array([1, 1], dtype=np.int32),
+            )
+        ],
+    )
+
+    result = engine._convert_to_trajectory(rl_traj, masked_out=True)
+
+    self.assertEqual(result.extra["status"], "MAX_CONTEXT_LIMIT_REACHED")
+    self.assertTrue(result.extra["masked_out"])
+    np.testing.assert_array_equal(
+        result.steps[0].extra["assistant_masks"], [0, 0]
+    )
+
   def test_max_response_length_extraction(self):
     sampler = _MockSampler()
     agent = mock.MagicMock()

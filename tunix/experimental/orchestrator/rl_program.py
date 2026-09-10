@@ -112,6 +112,9 @@ class StandardRLProgram(RLProgram):
       metrics_logging_options: MetricsLoggerOptions | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
+      evaluation_dataset: Sequence[Any] | None = None,
+      eval_every_n_steps: int | None = None,
+      success_reward_threshold: float | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
   ):
@@ -174,6 +177,11 @@ class StandardRLProgram(RLProgram):
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
+    if eval_every_n_steps is not None and eval_every_n_steps <= 0:
+      raise ValueError("eval_every_n_steps must be positive when specified.")
+    self.evaluation_dataset = list(evaluation_dataset or ())
+    self.eval_every_n_steps = eval_every_n_steps
+    self.success_reward_threshold = success_reward_threshold
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
@@ -187,6 +195,58 @@ class StandardRLProgram(RLProgram):
     )
     self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         group_size=self.group_size
+    )
+
+  async def _run_evaluation(self, current_step: int) -> None:
+    """Runs held-out rollouts on the current policy without updating it."""
+    if (
+        not self.evaluation_dataset
+        or self.eval_every_n_steps is None
+        or current_step % self.eval_every_n_steps != 0
+    ):
+      return
+    assert self.engine is not None
+    logging.info(
+        "Running evaluation at train step %d over %d prompt(s).",
+        current_step,
+        len(self.evaluation_dataset),
+    )
+    items = await self.engine.generate(
+        self.evaluation_dataset,
+        generation_args=self.generation_args,
+        group_size=self.group_size,
+        policy_version=self.policy_version,
+    )
+    rewards = np.asarray(
+        [float(item.traj.reward if item.traj else 0.0) for item in items],
+        dtype=np.float32,
+    )
+    if rewards.size == 0:
+      logging.warning("Evaluation at step %d returned no rollouts.", current_step)
+      return
+    metrics = {
+        "rewards/mean": float(np.mean(rewards)),
+        "rewards/std": float(np.std(rewards)),
+    }
+    if self.success_reward_threshold is not None:
+      solved = rewards > self.success_reward_threshold
+      solve_all = bool(np.all(solved))
+      solve_none = bool(np.all(rewards == 0.0))
+      metrics.update({
+          "rewards/solve_all": float(solve_all),
+          "rewards/solve_none": float(solve_none),
+          "rewards/solve_partial": float(not solve_all and not solve_none),
+          "rewards/solve_ratio": float(np.mean(solved)),
+      })
+    for key, value in metrics.items():
+      self.metrics_logger.log(
+          self.metrics_prefix, key, value, Mode.EVAL, current_step
+      )
+    logging.info(
+        "Eval step %d - reward_mean=%.4f solve_ratio=%.4f.",
+        current_step,
+        metrics["rewards/mean"],
+        metrics.get("rewards/solve_ratio", float("nan")),
     )
 
   def close(self) -> None:
@@ -534,6 +594,21 @@ class StandardRLProgram(RLProgram):
         self.metrics_logger.log(
             self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
         )
+      if self.success_reward_threshold is not None:
+        reward_values = np.asarray(step_rewards, dtype=np.float32)
+        solved = reward_values > self.success_reward_threshold
+        solve_all = bool(np.all(solved))
+        solve_none = bool(np.all(reward_values == 0.0))
+        solve_stats = {
+            "solve_all": float(solve_all),
+            "solve_none": float(solve_none),
+            "solve_partial": float(not solve_all and not solve_none),
+            "solve_ratio": float(np.mean(solved)),
+        }
+        for tag, val in solve_stats.items():
+          self.metrics_logger.log(
+              self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
+          )
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -708,6 +783,7 @@ class StandardRLProgram(RLProgram):
       all_step_items = []
       scored_items = []
       groups_consumed = 0
+      assembled_step_batches = []
 
       while groups_consumed < self.full_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
@@ -741,61 +817,7 @@ class StandardRLProgram(RLProgram):
             payloads.append(payload)
           assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
 
-        for mb in assembled_batches:
-          batch = mb.payload
-          if getattr(self.algo, "requires_reference_kl", False):
-            if not isinstance(batch, datatypes.RLTrainerPayload):
-              raise TypeError(
-                  "Reference KL requires an assembler that returns "
-                  "datatypes.RLTrainerPayload microbatches; got "
-                  f"{type(batch).__name__}."
-              )
-            ref_logps = await self.engine.per_token_logps(
-                datatypes.Role.REFERENCE, items=batch
-            )
-            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-
-          num_microbatches += 1
-          logging.info(
-              "Packed %d trajectories into microbatch: %s",
-              len(mb.trajectory_ids),
-              logging_utils.summarize_list(list(mb.trajectory_ids)),
-          )
-          step_result = await self.engine.train_step(
-              batch,
-              role=datatypes.Role.ACTOR,
-              accumulate_gradients=True,
-              apply_optimizer=mb.is_final_batch,
-          )
-          if mb.is_final_batch:
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
-            )
-            # Save only at a resumable full-batch boundary. An optimizer step
-            # can occur earlier when a full batch contains multiple mini
-            # batches, but the dataset resume cursor advances in full batches.
-            # TODO(tunix-dev): For now any failures in save_checkpoint will
-            # abort the entire program. Make it configurable on whether to fail
-            # or continue.
-            full_batch_complete = (
-                groups_consumed >= self.full_batch_size or not scored_items
-            )
-            if full_batch_complete:
-              optimizer_step = self.step + 1
-              if isinstance(step_result, dict):
-                optimizer_step = int(
-                    step_result.get("train_step", optimizer_step)
-                )
-              await self.engine.save_checkpoint(
-                  role=datatypes.Role.ACTOR,
-                  metadata={
-                      "step": optimizer_step,
-                      "global_step": self.step + 1,
-                      "policy_version": self.policy_version + 1,
-                      "num_rollouts": num_rollouts,
-                      "num_microbatches": num_microbatches,
-                  },
-              )
+        assembled_step_batches.extend(assembled_batches)
 
         if not scored_items:
           break
@@ -805,6 +827,91 @@ class StandardRLProgram(RLProgram):
             "Dataset exhausted at step %d before max_steps.", current_step
         )
         break
+
+      # Match the recipe learner: run evaluation before the optimizer update
+      # at steps 0, N, 2N, ... . The initial rollout weights were prepared in
+      # run_async, so step-zero evaluation observes the initial actor policy.
+      await self._run_evaluation(current_step)
+
+      # All start-of-step actor log-probabilities must be captured before the
+      # first mini-batch optimizer update. Otherwise later mini-batches would
+      # use a different policy as their PPO/GRPO denominator.
+      if getattr(self.algo, "requires_actor_logps", False):
+        prepared_batches = []
+        for mb in assembled_step_batches:
+          batch = mb.payload
+          if not isinstance(batch, datatypes.RLTrainerPayload):
+            raise TypeError(
+                "Actor log-prob recomputation requires an assembler that "
+                "returns RLTrainerPayload microbatches; got "
+                f"{type(batch).__name__}."
+            )
+          actor_logps = await self.engine.per_token_logps(
+              datatypes.Role.ACTOR, items=batch
+          )
+          batch = batch_assembly.with_actor_per_token_logps(
+              batch,
+              actor_logps,
+              sampler_is=getattr(self.algo, "sampler_is", None),
+              sampler_is_threshold=getattr(
+                  self.algo, "sampler_is_threshold", 2.0
+              ),
+          )
+          prepared_batches.append(mb._replace(payload=batch))
+        assembled_step_batches = prepared_batches
+
+      for batch_index, mb in enumerate(assembled_step_batches):
+        batch = mb.payload
+        if getattr(self.algo, "requires_reference_kl", False):
+          if not isinstance(batch, datatypes.RLTrainerPayload):
+            raise TypeError(
+                "Reference KL requires an assembler that returns "
+                "datatypes.RLTrainerPayload microbatches; got "
+                f"{type(batch).__name__}."
+            )
+          ref_logps = await self.engine.per_token_logps(
+              datatypes.Role.REFERENCE, items=batch
+          )
+          batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+
+        num_microbatches += 1
+        logging.info(
+            "Packed %d trajectories into microbatch: %s",
+            len(mb.trajectory_ids),
+            logging_utils.summarize_list(list(mb.trajectory_ids)),
+        )
+        step_result = await self.engine.train_step(
+            batch,
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=mb.is_final_batch,
+        )
+        if mb.is_final_batch:
+          trainer_metrics = await self.engine.get_metrics(
+              role=datatypes.Role.ACTOR
+          )
+          # Save only at a resumable full-batch boundary. An optimizer step
+          # can occur earlier when a full batch contains multiple mini
+          # batches, but the dataset resume cursor advances in full batches.
+          # TODO(tunix-dev): For now any failures in save_checkpoint will
+          # abort the entire program. Make it configurable on whether to fail
+          # or continue.
+          if batch_index == len(assembled_step_batches) - 1:
+            optimizer_step = self.step + 1
+            if isinstance(step_result, dict):
+              optimizer_step = int(
+                  step_result.get("train_step", optimizer_step)
+              )
+            await self.engine.save_checkpoint(
+                role=datatypes.Role.ACTOR,
+                metadata={
+                    "step": optimizer_step,
+                    "global_step": self.step + 1,
+                    "policy_version": self.policy_version + 1,
+                    "num_rollouts": num_rollouts,
+                    "num_microbatches": num_microbatches,
+                },
+            )
 
       if self.sync_weights:
         new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)

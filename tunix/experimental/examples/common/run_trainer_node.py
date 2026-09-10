@@ -36,10 +36,12 @@ from jax.sharding import Mesh
 import optax
 from orbax import checkpoint as ocp
 from tunix.cli.utils import model as model_utils
+from tunix.experimental.common import datatypes
 from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
+from tunix.rl import common as rl_common
 from tunix.utils import maxtext_utils
 
 REPO_ROOT = os.path.abspath(
@@ -117,6 +119,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--adam_b1", type=float, default=0.9)
   parser.add_argument("--adam_b2", type=float, default=0.999)
   parser.add_argument("--weight_decay", type=float, default=0.0)
+  parser.add_argument(
+      "--param_dtype",
+      choices=("bfloat16", "float32"),
+      default="bfloat16",
+      help="Storage dtype for trainable actor parameters.",
+  )
+  parser.add_argument("--enable_remat", action="store_true")
+  parser.add_argument(
+      "--remat_policy", choices=("block", "decoder"), default="decoder"
+  )
+  parser.add_argument("--use_flash_attention", action="store_true")
+  parser.add_argument("--flash_attention_block_size", type=int, default=1024)
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=64)
   parser.add_argument("--lora_alpha", type=float, default=64.0)
@@ -271,7 +285,19 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
         " --model_dir=/path/to/local/safetensors."
     )
-  model = models.create_model(args.model_name, args.model_dir, mesh)
+  model = models.create_model(
+      args.model_name,
+      args.model_dir,
+      mesh,
+      param_dtype={
+          "bfloat16": jnp.bfloat16,
+          "float32": jnp.float32,
+      }[args.param_dtype],
+      enable_remat=args.enable_remat,
+      remat_policy=args.remat_policy,
+      use_flash_attention=args.use_flash_attention,
+      flash_attention_block_size=args.flash_attention_block_size,
+  )
   if not lora:
     return model
   lora_config = {
@@ -296,6 +322,56 @@ class _MeshBoundTrainer:
 
   def __getattr__(self, name: str) -> Any:
     return getattr(self._trainer, name)
+
+  def per_token_logps(self, items: datatypes.RLTrainerPayload) -> Any:
+    """Computes start-of-step logps using the trainer's current actor."""
+    delegated = getattr(self._trainer, "per_token_logps", None)
+    if callable(delegated):
+      with self._mesh:
+        return delegated(items)
+    if not isinstance(items, datatypes.RLTrainerPayload):
+      raise TypeError("per_token_logps expects an RLTrainerPayload.")
+    model = getattr(self._trainer, "model", None)
+    if model is None:
+      raise AttributeError(
+          f"{type(self._trainer).__name__} does not expose actor logps."
+      )
+    input_fn = getattr(self._trainer, "gen_model_input_fn", None)
+    input_keywords = getattr(input_fn, "keywords", {}) or {}
+    algo_config = input_keywords.get("algo_config")
+    if "pad_id" not in input_keywords or "eos_id" not in input_keywords:
+      raise RuntimeError(
+          "Configure the trainer model-input function before computing logps."
+      )
+    with self._mesh:
+      graphdef, state = nnx.split(model)
+      logps = rl_common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens=jnp.asarray(items.prompt_ids, dtype=jnp.int32),
+          completion_tokens=jnp.asarray(
+              items.completion_ids, dtype=jnp.int32
+          ),
+          pad_id=int(input_keywords["pad_id"]),
+          eos_id=int(input_keywords["eos_id"]),
+          segment_ids=(
+              jnp.asarray(items.segment_ids, dtype=jnp.int32)
+              if items.segment_ids is not None
+              else None
+          ),
+          segment_positions=(
+              jnp.asarray(items.segment_positions, dtype=jnp.int32)
+              if items.segment_positions is not None
+              else None
+          ),
+          temperature=float(getattr(algo_config, "temperature", 1.0)),
+          routed_experts=(
+              jnp.asarray(items.routed_experts, dtype=jnp.int32)
+              if items.routed_experts is not None
+              else None
+          ),
+      )
+      return np.asarray(jax.device_get(logps), dtype=np.float32)
 
   def fwd_bwd(self, *args, **kwargs) -> None:
     with self._mesh:

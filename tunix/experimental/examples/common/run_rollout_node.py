@@ -160,6 +160,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=False,
       help="Enable the model family's thinking chat-template mode.",
   )
+  parser.add_argument("--vllm_hbm_utilization", type=float, default=0.5)
+  parser.add_argument(
+      "--vllm_async_scheduling",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+  )
+  parser.add_argument(
+      "--vllm_enable_prefix_caching",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+  )
+  parser.add_argument("--vllm_max_num_seqs", type=int, default=None)
+  parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None)
+  parser.add_argument("--vllm_model_len_margin", type=int, default=0)
+  parser.add_argument(
+      "--vllm_server_mode",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+  )
 
   parser.add_argument(
       "--weight_sync_mode",
@@ -328,7 +347,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  max_model_len = (
+      args.max_prompt_length
+      + args.max_response_length
+      + args.vllm_model_len_margin
+  )
 
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
   if multihost_backend:
@@ -340,9 +363,21 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "model": vllm_model,
       "max_model_len": max_model_len,
   }
+  for key, value in (
+      ("async_scheduling", args.vllm_async_scheduling),
+      ("enable_prefix_caching", args.vllm_enable_prefix_caching),
+      ("max_num_seqs", args.vllm_max_num_seqs),
+      ("max_num_batched_tokens", args.vllm_max_num_batched_tokens),
+  ):
+    if value is not None:
+      engine_kwargs[key] = value
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  server_mode = True if multihost_backend else None
+  server_mode = (
+      args.vllm_server_mode
+      if args.vllm_server_mode is not None
+      else bool(multihost_backend)
+  )
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   logging.info(
@@ -366,12 +401,13 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tensor_parallel_size=args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
+      init_with_random_weights=(
+          args.weight_sync_mode != weight_sync_lib.WeightSyncMode.NONE
+      ),
+      hbm_utilization=args.vllm_hbm_utilization,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      engine_kwargs={
-          "model": vllm_model,
-          "max_model_len": max_model_len,
-      },
+      engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -408,7 +444,11 @@ def _create_vllm_sampler(args):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  max_model_len = (
+      args.max_prompt_length
+      + args.max_response_length
+      + args.vllm_model_len_margin
+  )
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "max_model_len=%d...",
@@ -423,10 +463,19 @@ def _create_vllm_sampler(args):
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
+      gpu_memory_utilization=args.vllm_hbm_utilization,
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
   )
+  for key, value in (
+      ("async_scheduling", args.vllm_async_scheduling),
+      ("enable_prefix_caching", args.vllm_enable_prefix_caching),
+      ("max_num_seqs", args.vllm_max_num_seqs),
+      ("max_num_batched_tokens", args.vllm_max_num_batched_tokens),
+  ):
+    if value is not None:
+      engine_kwargs[key] = value
   if args.maxtext_model_name:
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"

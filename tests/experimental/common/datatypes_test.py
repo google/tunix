@@ -21,6 +21,7 @@ import cloudpickle
 import jax
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 WorkerState = datatypes.WorkerState
 
@@ -237,6 +238,26 @@ class WireSerializationTest(absltest.TestCase):
         result.metadata,
         {"caller_meta": "bar", "traj_meta": "foo", "group_index": 0},
     )
+
+  def test_from_atif_trajectory_preserves_status_from_extra(self):
+    traj = trajectory_lib.Trajectory(
+        trajectory_id="traj-1",
+        agent=trajectory_lib.Agent(name="agent", version="1"),
+        extra={
+            "prompt_id": "prompt-1",
+            "group_index": 0,
+            "status": "MAX_CONTEXT_LIMIT_REACHED",
+        },
+    )
+
+    result = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-1",
+        traj=traj,
+        prompt_tokens=np.array([1], dtype=np.int32),
+        policy_version=0,
+    )
+
+    self.assertEqual(result.status, "MAX_CONTEXT_LIMIT_REACHED")
 
   def test_from_trajectory_metadata_edge_cases(self):
     # 1. Neither metadata nor traj.metadata provided besides group_index

@@ -55,6 +55,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def eval_step(self, payload, **kwargs):
     self.eval_step_calls.append((payload, kwargs))
 
+  def per_token_logps(self, items):
+    return np.full_like(items.completion_ids, -0.5, dtype=np.float32)
+
   def save_checkpoint(self, metadata, **kwargs):
     pass
 
@@ -137,6 +140,19 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
+
+  def test_per_token_logps_delegates_to_current_actor(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1]], dtype=np.int32),
+        prompt_mask=np.ones((1, 1), dtype=np.float32),
+        completion_ids=np.array([[2, 3]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.ones((1, 2), dtype=np.float32),
+    )
+
+    result = self.worker.per_token_logps(payload)
+
+    np.testing.assert_allclose(result, [[-0.5, -0.5]])
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}

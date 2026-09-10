@@ -240,6 +240,55 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
       batch_assembly.with_ref_per_token_logps(batch, bad_shape_logps)
 
 
+class WithActorPerTokenLogpsTest(absltest.TestCase):
+
+  def _make_payload(self):
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.ones((1, 2), dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.ones((1, 3), dtype=np.int32),
+        completion_mask=np.array([[1.0, 1.0, 0.0]], dtype=np.float32),
+        advantages=np.ones((1, 3), dtype=np.float32),
+        old_per_token_logps=np.array(
+            [[-2.0, -1.0, 0.0]], dtype=np.float32
+        ),
+    )
+
+  def test_recomputed_actor_logps_replace_old_logps(self):
+    batch = self._make_payload()
+    actor_logps = np.array([[-1.5, -0.5, 0.0]], dtype=np.float32)
+
+    updated = batch_assembly.with_actor_per_token_logps(batch, actor_logps)
+
+    np.testing.assert_allclose(updated.old_per_token_logps, actor_logps)
+    self.assertIsNone(updated.sampler_is_weights)
+
+  def test_token_sampler_is_uses_rollout_and_actor_logps(self):
+    batch = self._make_payload()
+    actor_logps = np.array([[0.0, -2.0, 4.0]], dtype=np.float32)
+
+    updated = batch_assembly.with_actor_per_token_logps(
+        batch, actor_logps, sampler_is="token", sampler_is_threshold=2.0
+    )
+
+    np.testing.assert_allclose(updated.old_per_token_logps, actor_logps)
+    np.testing.assert_allclose(
+        updated.sampler_is_weights,
+        np.array([[2.0, np.exp(-1.0), 0.0]], dtype=np.float32),
+    )
+
+  def test_token_sampler_is_requires_rollout_logps(self):
+    batch = dataclasses.replace(
+        self._make_payload(), old_per_token_logps=None
+    )
+    with self.assertRaisesRegex(ValueError, "requires rollout"):
+      batch_assembly.with_actor_per_token_logps(
+          batch,
+          np.zeros((1, 3), dtype=np.float32),
+          sampler_is="token",
+      )
+
+
 class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
   def _make_assembler(self, max_packed_len=16, **kwargs):
@@ -2045,4 +2094,3 @@ class CreateBatchAssemblerTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-

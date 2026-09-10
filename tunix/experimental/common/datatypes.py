@@ -427,11 +427,6 @@ class RolloutResponse(Response):
                 logps=None,
             )
         )
-    if hasattr(traj, "status") and traj.status is not None:
-      status_val = getattr(traj.status, "name", str(traj.status))
-    else:
-      status_val = "COMPLETED"
-
     resp_metadata = {}
     extra = getattr(traj, "extra", None)
     if isinstance(extra, dict):
@@ -440,6 +435,11 @@ class RolloutResponse(Response):
       resp_metadata.update(traj.metadata)
     if metadata:
       resp_metadata.update(metadata)
+
+    if hasattr(traj, "status") and traj.status is not None:
+      status_val = getattr(traj.status, "name", str(traj.status))
+    else:
+      status_val = str(resp_metadata.get("status", "COMPLETED"))
 
     raw_prompt_id = resp_metadata.get("prompt_id")
     if raw_prompt_id is None:

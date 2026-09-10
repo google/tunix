@@ -50,14 +50,17 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
 
   if isinstance(resp, datatypes.RolloutResponse):
     metadata = dict(resp.metadata) if resp.metadata else {}
-    success_statuses = {"COMPLETED", "SUCCEEDED"}
+    raw_status = str(resp.status).upper()
+    status = getattr(
+        datatypes.TrajectoryStatus,
+        raw_status,
+        datatypes.TrajectoryStatus.SUCCEEDED
+        if raw_status == "COMPLETED"
+        else datatypes.TrajectoryStatus.FAILED,
+    )
     traj = datatypes.Trajectory(
         reward=resp.env_reward,
-        status=(
-            datatypes.TrajectoryStatus.SUCCEEDED
-            if resp.status in success_statuses
-            else datatypes.TrajectoryStatus.FAILED
-        ),
+        status=status,
     )
     prompt_tokens = (
         np.asarray(resp.prompt_tokens, dtype=np.int32)
@@ -385,6 +388,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       prompts: Sequence[Any],
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
+      group_size: int = 1,
+      policy_version: int | None = None,
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
@@ -409,7 +414,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     requests = self._build_rollout_requests(
         prompts,
-        policy_version=self._policy_version,
+        group_size=group_size,
+        policy_version=(
+            self._policy_version if policy_version is None else policy_version
+        ),
         generation_args=generation_args,
         route_metadata=route_metadata,
     )

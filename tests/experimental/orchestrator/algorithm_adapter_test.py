@@ -157,6 +157,29 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertIsNone(payloads[0].old_per_token_logps)
     self.assertIsNone(payloads[1].old_per_token_logps)
 
+  def test_grpo_requests_actor_logps_for_recompute_and_sampler_is(self):
+    rollout_adapter = algorithm_adapter.GRPOAdapter(
+        group_size=2, use_rollout_logps=True
+    )
+    recompute_adapter = algorithm_adapter.GRPOAdapter(
+        group_size=2, use_rollout_logps=False
+    )
+    sampler_is_adapter = algorithm_adapter.GRPOAdapter(
+        group_size=2, sampler_is="token", sampler_is_threshold=2.0
+    )
+
+    self.assertFalse(rollout_adapter.requires_actor_logps)
+    self.assertTrue(recompute_adapter.requires_actor_logps)
+    self.assertTrue(sampler_is_adapter.requires_actor_logps)
+
+  def test_grpo_rejects_invalid_sampler_is(self):
+    with self.assertRaisesRegex(ValueError, "sampler_is"):
+      algorithm_adapter.GRPOAdapter(group_size=2, sampler_is="sequence")
+    with self.assertRaisesRegex(ValueError, "sampler_is_threshold"):
+      algorithm_adapter.GRPOAdapter(
+          group_size=2, sampler_is="token", sampler_is_threshold=0.0
+      )
+
   def test_grpo_create_trainer_payloads_with_mismatched_logps_length(self):
     adapter = algorithm_adapter.GRPOAdapter(group_size=2)
     item1 = datatypes.TrajectoryItem(

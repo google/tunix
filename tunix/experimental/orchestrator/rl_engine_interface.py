@@ -93,6 +93,8 @@ class AbstractRLEngine(Protocol):
       prompts: Sequence[Any],
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
+      group_size: int = 1,
+      policy_version: int | None = None,
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Synchronous batched rollout generation over rollout workers."""
