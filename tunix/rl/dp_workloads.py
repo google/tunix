@@ -523,6 +523,31 @@ class DPWorkloadSpec:
           "canonical workload rank-major gradient group count changed"
       )
 
+  def diag_vllm_max_num_seqs(self) -> int:
+    """The engine sequence cap: the spec's local_trajectories, or the
+    diagnostic override for the four-chip proxy.
+
+    tasks/zero_tim_perf2 phase A1 (scaling probe): the proxy runs 16
+    trajectories through an engine capped at 8 sequences.  Setting
+    CANON_FL_DIAG_VLLM_MAX_NUM_SEQS to a positive integer changes the cap
+    for one diagnostic run; the train script accepts the same value in its
+    geometry check.  Unset (the default) leaves the certified command
+    unchanged.  Never certification evidence.
+    """
+    raw = os.environ.get(DIAG_VLLM_MAX_NUM_SEQS_ENV, "")
+    if not raw or not self.frozenlake_four_chip_proxy:
+      return self.local_trajectories
+    if not raw.isdigit() or int(raw) < 1:
+      raise ValueError(
+          f"{DIAG_VLLM_MAX_NUM_SEQS_ENV} must be a positive integer, got {raw!r}"
+      )
+    print(
+        f"[DP_WORKLOAD] DIAG vllm_max_num_seqs={int(raw)} "
+        f"(spec {self.local_trajectories}; not certification)",
+        flush=True,
+    )
+    return int(raw)
+
   def command(
       self, *, run_stage: str = "full", sampler_is: str | None = None
   ) -> tuple[str, ...]:
@@ -604,7 +629,7 @@ class DPWorkloadSpec:
           "-u",
           "examples/frozenlake/train_frozenlake_qwen3.py",
           *common,
-          f"--vllm_max_num_seqs={self.local_trajectories}",
+          f"--vllm_max_num_seqs={self.diag_vllm_max_num_seqs()}",
           f"--vllm_max_num_batched_tokens={self.local_m}",
           f"--env_max_steps={2 if short_alignment else self.frozenlake_max_turns}",
           "--num_batches=150",
@@ -1433,6 +1458,7 @@ def frozenlake_evaluation_enabled(
 
 
 DIAG_UNPIN_ENV = "CANON_DP_WORKLOAD_DIAG_UNPIN"
+DIAG_VLLM_MAX_NUM_SEQS_ENV = "CANON_FL_DIAG_VLLM_MAX_NUM_SEQS"
 
 
 def apply_diag_unpin(

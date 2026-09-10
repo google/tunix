@@ -769,7 +769,7 @@ if CANON_P32_WORKLOAD:
       ),
       "vllm_max_num_seqs": (
           VLLM_MAX_NUM_SEQS,
-          P32_WORKLOAD.local_trajectories,
+          P32_WORKLOAD.diag_vllm_max_num_seqs(),
       ),
       "vllm_max_num_batched_tokens": (
           VLLM_MAX_BATCHED_TOKENS,
