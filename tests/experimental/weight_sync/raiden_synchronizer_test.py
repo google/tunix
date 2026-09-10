@@ -222,7 +222,9 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
     sums = sync.checksums()
     self.assertEqual(sums["__grand_total__"], 8.0 + 3.0)
-    self.assertLen(sums, 5)  # two sampled tensors + three totals
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 11)
+    self.assertLen(sums, 5)  # two sampled tensors + grand total + tensor/element counts
 
   def test_checksums_count_every_tensor_not_just_the_sample(self):
     """Verifies counts cover every tensor even when sampled.
@@ -411,6 +413,39 @@ class RaidenSynchronizerTest(absltest.TestCase):
         metadata.control_plane_rpc_address, "10.0.0.1:9001,10.0.0.2:9002"
     )
 
+  def test_devices_per_host_groups_by_task_id(self):
+    def _dev(task_id):
+      # Pathways: one client process drives every worker, so process_index is
+      # 0 on every proxy device and only task_id separates the hosts.
+      return mock.Mock(task_id=task_id, process_index=0)
+
+    with mock.patch.dict("os.environ", {}, clear=True):
+      # 8 devices over 2 hosts -> 4 per host, despite a single process_index.
+      devices = [_dev(t) for t in (0, 0, 0, 0, 1, 1, 1, 1)]
+      self.assertEqual(raiden_synchronizer._devices_per_host(devices), 4)
+
+      # Single host.
+      self.assertEqual(
+          raiden_synchronizer._devices_per_host([_dev(0)] * 8), 8
+      )
+
+      # Ragged slice: prefer the smaller count, never overstate num_shards.
+      ragged = [_dev(0), _dev(0), _dev(0), _dev(1)]
+      self.assertEqual(raiden_synchronizer._devices_per_host(ragged), 1)
+
+      # No task_id at all -> assume one host.
+      self.assertEqual(
+          raiden_synchronizer._devices_per_host([object(), object()]), 2
+      )
+
+    # Explicit override wins when it divides the device count, and is ignored
+    # when it does not.
+    devices = [_dev(t) for t in (0, 0, 1, 1)]
+    with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "4"}):
+      self.assertEqual(raiden_synchronizer._devices_per_host(devices), 4)
+    with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "3"}):
+      self.assertEqual(raiden_synchronizer._devices_per_host(devices), 2)
+
   def test_devices_per_host_proxy_defaults_and_env_override(self):
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
       sync = raiden_synchronizer.RaidenSynchronizer("trainer")
@@ -429,22 +464,121 @@ class RaidenSynchronizerTest(absltest.TestCase):
           "jax.experimental.multihost_utils.process_allgather",
           return_value=fake_info,
       ):
-        # Default under proxy mode: min(4, len(src_devices)) = min(4, 1) = 1
+        # One device on one task_id -> one shard per host.
         sync._init_ffi_transport(is_d2h=True)
         self.assertEqual(
             ffi.init_weight_synchronizer_and_d2h.call_args.kwargs["num_shards"],
             1,
         )
 
-        # Environment variable override:
+        # An override that does not divide the device count is refused rather
+        # than overstating num_shards.
         with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "8"}):
           sync._init_ffi_transport(is_d2h=True)
           self.assertEqual(
               ffi.init_weight_synchronizer_and_d2h.call_args.kwargs[
                   "num_shards"
               ],
-              8,
+              1,
           )
+
+  def test_metadata_transport_mode_follows_platform(self):
+    fake_wheel = mock.MagicMock()
+    with mock.patch.object(
+        raiden_synchronizer, "_get_raiden_ffi", return_value=fake_wheel
+    ):
+      # Pathways is FFI, everything else is the native TCP transport.
+      with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+        meta_ffi = raiden_synchronizer.RaidenSynchronizer(
+            "trainer"
+        ).work_unit_metadata()
+      self.assertEqual(meta_ffi.transport_mode, "ffi")
+      self.assertTrue(meta_ffi.use_ffi)
+
+      with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "cpu"}):
+        meta_tcp = raiden_synchronizer.RaidenSynchronizer(
+            "trainer"
+        ).work_unit_metadata()
+      self.assertEqual(meta_tcp.transport_mode, "tcp")
+      self.assertFalse(meta_tcp.use_ffi)
+
+  def test_work_unit_metadata_non_empty_shards(self):
+    fake_wheel = mock.MagicMock()
+    with mock.patch.object(
+        raiden_synchronizer, "_get_raiden_ffi", return_value=fake_wheel
+    ):
+      # Proxy: shards come from the FFI endpoints gathered in d2h().
+      with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+        sync_ffi = raiden_synchronizer.RaidenSynchronizer("trainer")
+      sync_ffi._ips = ["10.0.0.1:8000"]
+      sync_ffi._unique_listeners = ["10.0.0.1:9000"]
+      meta_ffi = sync_ffi.work_unit_metadata()
+      self.assertEqual(meta_ffi.shards, ("10.0.0.1:8000",))
+      self.assertEqual(meta_ffi.control_plane_rpc_address, "10.0.0.1:9000")
+
+      # Non-proxy: shards come from the native synchronizer's ports.
+      with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "cpu"}):
+        sync_tcp = raiden_synchronizer.RaidenSynchronizer("trainer")
+      sync_tcp._sync = mock.MagicMock()
+      sync_tcp._sync.local_port = 8001
+      sync_tcp._sync.listener_port = 9001
+      sync_tcp._sync.num_shards = 1
+      meta_tcp = sync_tcp.work_unit_metadata()
+      self.assertEqual(meta_tcp.shards, (f"{sync_tcp.ip}:8001",))
+      self.assertEqual(meta_tcp.control_plane_rpc_address, f"{sync_tcp.ip}:9001")
+
+  def test_apply_to_runner_success(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = ["['layers_0']['mlp']['down_proj']['weight']", "['embed_tokens']['weight']"]
+    arr1 = np.ones((4, 4), dtype=np.float32)
+    arr2 = np.ones((8, 4), dtype=np.float32)
+    sync.arrays = [arr1, arr2]
+
+    class _Runner:
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner_state = {
+        "model": {
+            "layers": [
+                {"mlp": {"down_proj": {"weight": np.zeros((4, 4), dtype=np.float32)}}}
+            ],
+            "embed_tokens": {"weight": np.zeros((8, 4), dtype=np.float32)},
+        }
+    }
+    runner = _Runner(runner_state)
+    sync.apply_to_runner(runner)
+    self.assertIs(runner.state["model"]["layers"][0]["mlp"]["down_proj"]["weight"], arr1)
+    self.assertIs(runner.state["model"]["embed_tokens"]["weight"], arr2)
+
+  def test_apply_to_runner_shape_mismatch_raises(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = ["w1"]
+    sync.arrays = [np.ones((4, 4), dtype=np.float32)]
+
+    class _Runner:
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner = _Runner({"w1": np.zeros((2, 2), dtype=np.float32)})
+    with self.assertRaisesRegex(ValueError, "Shape mismatch"):
+      sync.apply_to_runner(runner)
+
+  def test_apply_to_runner_unmatched_raises(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = ["w1", "w2"]
+    sync.arrays = [np.ones((2,), dtype=np.float32), np.ones((2,), dtype=np.float32)]
+
+    class _Runner:
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner = _Runner({"w1": np.zeros((2,), dtype=np.float32)})
+    with self.assertRaisesRegex(RuntimeError, "Not all synchronizer arrays were matched"):
+      sync.apply_to_runner(runner)
 
 
 if __name__ == "__main__":
