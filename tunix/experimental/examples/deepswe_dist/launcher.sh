@@ -52,6 +52,7 @@ USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 DEBUG=${DEBUG:-0}
+USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
@@ -380,6 +381,11 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$TRAINER_FSDP" ]]; then
     ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
+  fi
+  if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
+    ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
+  else
+    ORCHESTRATOR_CMD+=(--use_rollout_logps)
   fi
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1

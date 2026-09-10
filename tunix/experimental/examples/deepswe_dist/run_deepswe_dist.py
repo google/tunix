@@ -105,6 +105,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument(
+      "--use_rollout_logps",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Use rollout sampler log-probs as old_per_token_logps (off-policy /"
+          " sampler importance ratio). Default True matches the"
+          " non-experimental GRPOConfig; pass --no-use_rollout_logps for"
+          " on-policy ratio=1."
+      ),
+  )
+  parser.add_argument(
       "--offpolicy",
       "--max_staleness",
       dest="max_staleness",
@@ -185,6 +196,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
       temperature=args.temperature,
+      use_rollout_logps=args.use_rollout_logps,
   )
 
 
