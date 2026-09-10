@@ -31,6 +31,21 @@ import jax.numpy as jnp
 import numpy as np
 
 
+def cdiv(a: int | jax.Array, b: int | jax.Array) -> int | jax.Array:
+  """Ceiling division."""
+  return (a + b - 1) // b
+
+
+def shard(x: jnp.ndarray, s: tuple[str | None, ...]):
+  """Shards an array with the given sharding spec."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh is None or mesh.empty or jax.devices()[0].platform == 'cpu':
+    return x
+  return jax.lax.with_sharding_constraint(
+      x, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*s))
+  )
+
+
 def compute_attention_masks(
     time_step: int, seq_len: int, input_mask: jax.Array
 ) -> jax.Array:
