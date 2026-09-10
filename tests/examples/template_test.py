@@ -75,6 +75,13 @@ def test_get_openhands_pod_template_default():
     assert container["readinessProbe"]["httpGet"]["path"] == "/health"
     assert container["ports"] == [{"containerPort": 8000}]
     assert container["env"] == []
+    assert container["volumeMounts"] == [{"name": "oh", "mountPath": "/oh"}]
+    init_c = pod_template.extra_pod_spec["initContainers"][0]
+    assert init_c["name"] == "oh-server"
+    assert "agent-server" in init_c["image"]
+    assert init_c["command"] == ["cp", "/usr/local/bin/openhands-agent-server", "/oh/"]
+    assert init_c["volumeMounts"] == [{"name": "oh", "mountPath": "/oh"}]
+    assert pod_template.extra_pod_spec["volumes"] == [{"name": "oh", "emptyDir": {}}]
 
 
 def test_get_openhands_pod_template_with_overrides():

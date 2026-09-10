@@ -626,6 +626,25 @@ class SWEEnv(BaseTaskEnv):
               "OPENHANDS_WORKING_DIR", "/testbed"
           )
           self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
+          try:
+            from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
+                make_fleet_repo_env,
+                r2egym_command_files,
+            )
+            cmd_files = r2egym_command_files()
+            self.env = make_fleet_repo_env(
+                self.handle,
+                command_files=cmd_files,
+                step_timeout=self.step_timeout,
+                reward_timeout=self.reward_timeout,
+                verbose=self.verbose,
+            )
+          except Exception as e:
+            logging.debug(
+                "[SWEEnv] Could not bind FleetRepoEnv alongside OpenHands"
+                " workspace: %s",
+                e,
+            )
           self._setup_openhands_workspace()
         else:
           from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
@@ -888,11 +907,21 @@ class SWEEnv(BaseTaskEnv):
             info={"max_steps": self.max_steps},
         )
 
+      if action_obj.function_name == "str_replace_editor" and self.env is not None:
+        obs, reward, done, info = self.env.step(action_obj)
+        self.total_steps += 1
+        return EnvStepResult(
+            observation=str(obs),
+            reward=0,
+            done=done,
+            info={"max_steps": self.max_steps},
+        )
+
       if action_obj.function_name != "execute_bash":
         return EnvStepResult(
             observation=(
                 f"ERROR: Tool '{action_obj.function_name}' is not recognized. "
-                "Only 'execute_bash' and 'submit' are available."
+                "Only 'execute_bash', 'str_replace_editor', and 'submit' are available."
             ),
             reward=0,
             done=False,

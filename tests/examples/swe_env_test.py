@@ -294,3 +294,87 @@ def test_acquire_retry_on_transient_error():
   assert mock_fleet.acquire.call_count == 2
   assert env.handle == mock_handle
   mock_sleep.assert_called_once_with(5)
+
+
+def test_openhands_step_impl_str_replace_editor_and_reward():
+  """Verify openhands delegates str_replace_editor and compute_reward to bound env."""
+  env = object.__new__(swe_env.SWEEnv)
+  env.scaffold = "openhands"
+  env.max_steps = 30
+  env.total_steps = 0
+  env._cached_reward = None
+
+  mock_workspace = mock.MagicMock()
+  env.workspace = mock_workspace
+
+  mock_inner_env = mock.MagicMock()
+  mock_inner_env.step.return_value = ("replacement done", 0, False, {})
+  mock_inner_env.compute_reward.return_value = 1.0
+  env.env = mock_inner_env
+
+  # Test str_replace_editor delegation
+  action_editor = swe_env._ActionFallback(
+      function_name="str_replace_editor",
+      parameters={"command": "str_replace", "path": "/testbed/f.py"},
+  )
+  res = env._step_impl(action_editor)
+  assert res.observation == "replacement done"
+  assert res.done is False
+  mock_inner_env.step.assert_called_once_with(action_editor)
+
+  # Test compute_reward delegation
+  reward = env.compute_reward()
+  assert reward == 1.0
+  mock_inner_env.compute_reward.assert_called_once()
+
+  # Test tool error message mentions str_replace_editor
+  action_invalid = swe_env._ActionFallback(
+      function_name="invalid_tool",
+      parameters={},
+  )
+  res_err = env._step_impl(action_invalid)
+  assert "str_replace_editor" in res_err.observation
+
+
+def test_openhands_initial_observation_binds_workspace_and_env():
+  """Verify _initial_observation binds both OpenHands workspace and FleetRepoEnv."""
+  import types
+  env = object.__new__(swe_env.SWEEnv)
+  env.entry = {"instance_id": "test_inst", "docker_image": "test_image:latest", "problem_statement": "fix bug"}
+  env.scaffold = "openhands"
+  env.env = None
+  env.workspace = None
+  env.use_agent_sandbox = True
+  env.step_timeout = 60
+  env.reward_timeout = 180
+  env.verbose = False
+  mock_fleet = mock.MagicMock()
+  mock_handle = mock.MagicMock()
+  mock_fleet.acquire.return_value = mock_handle
+  env.fleet = mock_fleet
+  swe_env._fleet = mock_fleet
+
+  mock_oh = types.ModuleType("agent_sandbox_rl.adapters.openhands")
+  mock_ws = mock.MagicMock()
+  mock_oh.make_handle_workspace = mock.MagicMock(return_value=mock_ws)
+
+  mock_r2e = types.ModuleType("agent_sandbox_rl.adapters.r2egym")
+  mock_repo_env = mock.MagicMock()
+  mock_r2e.make_fleet_repo_env = mock.MagicMock(return_value=mock_repo_env)
+  mock_r2e.r2egym_command_files = mock.MagicMock(return_value=[])
+
+  mock_as_rl = _setup_mock_agent_sandbox()
+  with mock.patch.dict(sys.modules, {
+      "agent_sandbox_rl": mock_as_rl,
+      "agent_sandbox_rl.adapters.openhands": mock_oh,
+      "agent_sandbox_rl.adapters.r2egym": mock_r2e,
+  }), mock.patch.object(env, "_setup_openhands_workspace") as mock_setup:
+    obs = env._initial_observation()
+
+  assert obs == "fix bug"
+  assert env.workspace == mock_ws
+  assert env.env == mock_repo_env
+  mock_oh.make_handle_workspace.assert_called_once()
+  mock_r2e.make_fleet_repo_env.assert_called_once()
+  mock_setup.assert_called_once()
+
