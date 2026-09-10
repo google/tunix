@@ -99,6 +99,22 @@ print("jax devices: ", jax.devices())
 # %%
 import argparse
 
+
+def _str_to_bool(value):
+  if isinstance(value, bool):
+    return value
+
+  normalized_value = value.lower()
+  if normalized_value in ("true", "t", "1", "yes", "y"):
+    return True
+  if normalized_value in ("false", "f", "0", "no", "n"):
+    return False
+
+  raise argparse.ArgumentTypeError(
+      "expected one of: true, false, 1, 0, yes, no"
+  )
+
+
 arg_parser = argparse.ArgumentParser(
     description="Train FrozenLake on Gemma4-2B (single-host TPU)."
 )
@@ -147,7 +163,7 @@ arg_parser.add_argument("--top_k", type=int, default=0)
 # every multi-turn agent step its env without waiting for a previous wave to
 # drain. Drop only if KV cache saturates or generation throughput regresses.
 arg_parser.add_argument("--max_concurrency", type=int, default=512)
-arg_parser.add_argument("--shuffle_data", type=bool, default=True)
+arg_parser.add_argument("--shuffle_data", type=_str_to_bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
