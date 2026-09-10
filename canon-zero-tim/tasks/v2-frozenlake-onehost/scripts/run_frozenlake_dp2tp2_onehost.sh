@@ -311,7 +311,7 @@ fi
 } >"$raw"
 
 set +e
-sudo docker run --rm --privileged --net=host --name "$container" \
+sudo docker run --rm --init --privileged --net=host --name "$container" \
   -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
   -v "$repo":"$repo":ro \
   "${overlay_args[@]}" \
