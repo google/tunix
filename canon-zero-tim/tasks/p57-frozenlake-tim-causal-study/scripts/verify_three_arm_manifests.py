@@ -21,7 +21,12 @@ ARMS = {
     "native": ("mismatch", "none", "stock-fast", "0", "1"),
     "is": ("is", "token", "stock-fast", "0", "1"),
     "standard": ("standard", "none", "stock-fast", "0", "1"),
-    "zero": ("zero", "none", "", "1", "0"),
+    # The V1-HP zero arm (paired 300-update train, no eval, checkpoints
+    # disabled) is rendered as a warning-only alignment observer since
+    # ae8d4721 (render_p57_frozenlake_tim.py zero_ab_warning), and the
+    # v1-hp profile refuses any other value; the r10a/r10 references ran
+    # that way.  Alignment verdicts are still logged for self-certification.
+    "zero": ("zero", "none", "", "1", "1"),
 }
 WORKLOADS = {
     "p45": (300, 5, 2048, "", ""),
