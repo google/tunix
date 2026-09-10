@@ -164,6 +164,34 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=0,
+      help="Rollout tensor parallel mesh dimension for automatic MoE padding calculation.",
+  )
+
+  def _str2bool(v: Any) -> bool:
+    if isinstance(v, bool):
+      return v
+    return str(v).lower() in ("true", "1", "yes")
+
+  parser.add_argument(
+      "--prefuse_moe_weights",
+      nargs="?",
+      const=True,
+      type=_str2bool,
+      default=False,
+      help="Whether to prefuse MoE weights (gate + up projection).",
+  )
+  parser.add_argument(
+      "--use_weight_converter",
+      nargs="?",
+      const=True,
+      type=_str2bool,
+      default=True,
+      help="Whether to use weight converter for weight sync.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
@@ -350,6 +378,9 @@ def _create_maxtext_trainer_factory(args) -> Any:
       base_output_directory=args.maxtext_output_directory,
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
+      rollout_mesh_tp=args.rollout_mesh_tp,
+      prefuse_moe_weights=args.prefuse_moe_weights,
+      use_weight_converter=args.use_weight_converter,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
