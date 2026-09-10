@@ -62,9 +62,49 @@ def build_maxtext_config(
     base_output_directory: str = "",
     gradient_accumulation_steps: int = 1,
     checkpointing_options: Any = None,
+    *,
+    base_num_kv_heads: int = 0,
+    kv_tp_size: int = 0,
+    moe_mlp_tp_size: int = 0,
+    rollout_mesh_tp: int = 0,
+    prefuse_moe_weights: bool = False,
+    use_weight_converter: bool = True,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
+
+  # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
+  if rollout_mesh_tp > 0:
+    if kv_tp_size == 0:
+      logging.info(
+          "Overriding kv_tp_size from 0 to rollout_mesh_tp=%d", rollout_mesh_tp
+      )
+      kv_tp_size = rollout_mesh_tp
+    if moe_mlp_tp_size == 0:
+      logging.info(
+          "Overriding moe_mlp_tp_size from 0 to rollout_mesh_tp=%d",
+          rollout_mesh_tp,
+      )
+      moe_mlp_tp_size = rollout_mesh_tp
+
+  if padded_moe_mlp_dim < 0:
+    raise ValueError(
+        f"padded_moe_mlp_dim must be non-negative, got {padded_moe_mlp_dim}"
+    )
+  if base_num_kv_heads < 0:
+    raise ValueError(
+        f"base_num_kv_heads must be non-negative, got {base_num_kv_heads}"
+    )
+  if kv_tp_size < 0:
+    raise ValueError(f"kv_tp_size must be non-negative, got {kv_tp_size}")
+  if moe_mlp_tp_size < 0:
+    raise ValueError(
+        f"moe_mlp_tp_size must be non-negative, got {moe_mlp_tp_size}"
+    )
+  if rollout_mesh_tp < 0:
+    raise ValueError(
+        f"rollout_mesh_tp must be non-negative, got {rollout_mesh_tp}"
+    )
 
   if train_micro_batch_size % mesh_fsdp:
     raise ValueError(
@@ -78,6 +118,87 @@ def build_maxtext_config(
   )
   if not os.path.exists(base_yml):
     raise FileNotFoundError(f"MaxText base.yml not found at {base_yml}")
+
+  effective_kv_heads = base_num_kv_heads
+  effective_padded_moe_mlp_dim = padded_moe_mlp_dim
+
+  # Determine if we need to inspect the model's YAML configuration
+  needs_model_yml = (effective_kv_heads <= 0 and kv_tp_size > 0) or (
+      not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0
+  )
+  model_data = None
+  if needs_model_yml:
+    models_dir = os.path.join(os.path.dirname(base_yml), "models")
+    model_yml = os.path.join(models_dir, f"{model_name}.yml")
+    if os.path.exists(model_yml):
+      try:
+        import yaml
+
+        with open(model_yml, "r") as f:
+          data = yaml.safe_load(f)
+        if isinstance(data, dict):
+          model_data = data
+        else:
+          logging.warning(
+              "Expected dict in model config %s, got %s",
+              model_yml,
+              type(data).__name__,
+          )
+      except Exception as e:
+        logging.warning("Failed to load model config from %s: %s", model_yml, e)
+    else:
+      logging.warning("Model config file not found at %s", model_yml)
+
+  # 1. Resolve KV head replication:
+  if effective_kv_heads <= 0 and kv_tp_size > 0:
+    if model_data:
+      effective_kv_heads = int(model_data.get("base_num_kv_heads") or 0)
+    if effective_kv_heads <= 0:
+      raise ValueError(
+          f"kv_tp_size ({kv_tp_size}) requires base_num_kv_heads > 0, but could"
+          f" not determine base_num_kv_heads from config or {model_name}.yml."
+          " Please specify --base_num_kv_heads."
+      )
+
+  if effective_kv_heads > 0 and kv_tp_size > effective_kv_heads:
+    if kv_tp_size % effective_kv_heads != 0:
+      raise ValueError(
+          f"kv_tp_size ({kv_tp_size}) must be cleanly divisible by "
+          f"base_num_kv_heads ({effective_kv_heads})."
+      )
+    effective_kv_heads = kv_tp_size
+
+  # 2. Resolve padded MoE MLP dimension before pyconfig initialization:
+  if not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0:
+    compute_padded_moe_mlp_dim = None
+    try:
+      from maxtext.integration.vllm.convert_utils import compute_padded_moe_mlp_dim
+    except (ImportError, ModuleNotFoundError) as e:
+      logging.warning(
+          "Could not import compute_padded_moe_mlp_dim: %s. Skipping automatic"
+          " MoE dimension padding.",
+          e,
+      )
+
+    if compute_padded_moe_mlp_dim is not None and model_data:
+      base_dim = model_data.get("base_moe_mlp_dim") or model_data.get(
+          "moe_intermediate_size"
+      )
+      if base_dim:
+        try:
+          effective_padded_moe_mlp_dim = compute_padded_moe_mlp_dim(
+              base_dim, moe_mlp_tp_size
+          )
+          logging.info(
+              "Auto-computed padded_base_moe_mlp_dim=%d for moe_mlp_tp_size=%d",
+              effective_padded_moe_mlp_dim,
+              moe_mlp_tp_size,
+          )
+        except Exception as e:
+          raise RuntimeError(
+              "Failed to auto-compute padded_base_moe_mlp_dim for"
+              f" moe_mlp_tp_size={moe_mlp_tp_size}: {e}"
+          ) from e
 
   output_dir = base_output_directory or "/tmp/maxtext"
   argv = [
@@ -96,6 +217,10 @@ def build_maxtext_config(
         f"checkpoint_period={checkpointing_options.save_interval_steps}",
         f"max_num_checkpoints_to_keep={checkpointing_options.max_to_keep}",
     ])
+  elif load_parameters_path:
+    argv.append("enable_checkpointing=True")
+  else:
+    argv.append("enable_checkpointing=False")
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -108,8 +233,18 @@ def build_maxtext_config(
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
       *(
-          [f"padded_base_moe_mlp_dim={padded_moe_mlp_dim}"]
-          if padded_moe_mlp_dim
+          [f"padded_base_moe_mlp_dim={effective_padded_moe_mlp_dim}"]
+          if effective_padded_moe_mlp_dim
+          else []
+      ),
+      # The vLLM rollout replicates KV heads up to kv_tp_size (tp*ep) when the
+      # model has fewer -- see maxtext_vllm_adapter. Weight sync pairs by name,
+      # so the trainer must build the same shape. Prefer attention DP on the
+      # rollout instead, which avoids the replication entirely; this is the
+      # fallback when that is not available.
+      *(
+          [f"base_num_kv_heads={effective_kv_heads}"]
+          if effective_kv_heads
           else []
       ),
       f"ici_tensor_parallelism={mesh_tp}",
@@ -122,6 +257,15 @@ def build_maxtext_config(
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
+      f"prefuse_moe_weights={prefuse_moe_weights}",
+      f"use_weight_converter={use_weight_converter}",
+      *(
+          [
+              f"rollout_tensor_parallelism={rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size}"
+          ]
+          if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
+          else []
+      ),
   ])
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
