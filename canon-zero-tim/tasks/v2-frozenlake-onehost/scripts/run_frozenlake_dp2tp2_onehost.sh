@@ -146,6 +146,15 @@ if [ "$mode" = profile ]; then
   xprof_python_tracer=0
   xprof_tpu_trace_mode=TRACE_ONLY_XLA
   xprof_labels=1
+  # tasks/zero_tim_perf2 phase A2: a step-window capture (the engine rollout)
+  # is a diagnostic only; the profiler rejects TRACE_ONLY_XLA for that phase
+  # (zero_tim_perf phase0.md P0.3), so the trace mode is left at its default.
+  if [ "${V2_FL_XPROF_PHASE:-update}" = step ]; then
+    xprof_dir="$root/xprof-step"
+    xprof_phase=step
+    xprof_tpu_trace_mode=
+    echo "[V2.FL.ONEHOST] DIAG xprof phase=step (rollout window; not certification)"
+  fi
 fi
 seal_evidence() {
   find "$root" -type f ! -name SHA256SUMS -print0 \
@@ -339,6 +348,7 @@ sudo docker run --rm --init --privileged --net=host --name "$container" \
   -e CANON_P77_CHUNK_BACKPRESSURE="$chunk_backpressure" \
   -e CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps" \
   -e CANON_ALIGNMENT_AUDIT_EVERY="${CANON_ALIGNMENT_AUDIT_EVERY:-}" \
+  -e CANON_FL_DIAG_VLLM_MAX_NUM_SEQS="${CANON_FL_DIAG_VLLM_MAX_NUM_SEQS:-}" \
   -e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$capture_full_tree" = 1 ] && echo "$root/p61_numerical")" \
   -e V2_FL_MODE="$mode" \
   -e CANON_XPROF_DIR="$xprof_dir" \
