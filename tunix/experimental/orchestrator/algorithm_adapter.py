@@ -28,7 +28,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
-from tunix.rl import algo_core
+from tunix.rl import algorithm_config
 from tunix.rl import function_registry
 
 
@@ -39,10 +39,7 @@ def _algo_model_input(
     pad_id: int,
     eos_id: int,
 ) -> dict[str, Any]:
-  """Maps an RLTrainerPayload microbatch to algorithm loss kwargs (e.g.
-
-  GRPO/PPO).
-  """
+  """Maps an RLTrainerPayload microbatch to algorithm loss kwargs."""
   return {
       "train_example": train_example,
       "algo_config": algo_config,
@@ -143,48 +140,62 @@ class GRPOAdapter(AlgorithmAdapter):
 
   def __init__(
       self,
-      group_size: int = 8,
+      algo_config: algorithm_config.GRPOConfig | None = None,
+      *,
+      group_size: int | None = None,
+      temperature: float | None = None,
       mini_batch_size: int = 4,
       train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
       max_response_length: int = 1024,
-      clip_epsilon: float = 0.2,
-      epsilon_high: float | None = None,
-      beta_kl: float = 0.04,
-      temperature: float = 1.0,
-      loss_algo: str = "grpo",
-      policy_loss_fn: str = "grpo",
-      advantage_estimator: str = "grpo",
-      loss_agg_mode: str = "sequence-mean-token-mean",
-      kl_loss_mode: str = "mse_kl",
-      kl_clamp_value: float | None = None,
-      use_rollout_logps: bool = True,
+      use_rollout_logps: bool | None = None,
   ):
-    if group_size <= 1:
-      raise ValueError(
-          f"group_size must be greater than 1 for GRPO. Received: {group_size}"
-      )
+    if algo_config is not None:
+      self.algo_config = algo_config
+      if (
+          group_size is not None
+          and getattr(self.algo_config, "num_generations", None) != group_size
+      ):
+        raise ValueError(
+            f"Conflicting group_size values: kwarg group_size={group_size} "
+            f"does not match algo_config.num_generations="
+            f"{getattr(self.algo_config, 'num_generations', None)}."
+        )
+      if use_rollout_logps is not None:
+        self.algo_config.use_rollout_logps = use_rollout_logps
+    else:
+      config_kwargs = {}
+      if group_size is not None:
+        config_kwargs["num_generations"] = group_size
+      if use_rollout_logps is not None:
+        config_kwargs["use_rollout_logps"] = use_rollout_logps
+      self.algo_config = algorithm_config.GRPOConfig(**config_kwargs)
+
+    config_temp = getattr(self.algo_config, "temperature", None)
+    if temperature is not None and config_temp is not None:
+      if temperature != config_temp:
+        raise ValueError(
+            f"Conflicting temperature values: kwarg temperature={temperature} "
+            f"does not match algo_config.temperature={config_temp}."
+        )
+
+    if temperature is not None:
+      self.algo_config.temperature = temperature
+
     super().__init__(
-        group_size=group_size,
+        group_size=self.algo_config.num_generations,
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=train_micro_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,
         max_response_length=max_response_length,
     )
-    self.clip_epsilon = clip_epsilon
-    self.epsilon_high = epsilon_high if epsilon_high is not None else clip_epsilon
-    self.loss_algo = loss_algo
-    self.policy_loss_fn = policy_loss_fn
-    self.advantage_estimator = advantage_estimator
-    self.beta_kl = beta_kl
-    self.temperature = temperature
-    self.loss_agg_mode = loss_agg_mode
-    self.kl_loss_mode = kl_loss_mode
-    self.kl_clamp_value = kl_clamp_value
-    self.requires_reference_kl = beta_kl != 0.0
-    self.use_rollout_logps = use_rollout_logps
+    self.requires_reference_kl = (
+        getattr(self.algo_config, "beta", 0.0) != 0.0
+        or getattr(self.algo_config, "force_compute_kl", False)
+    )
+    self.use_rollout_logps = getattr(self.algo_config, "use_rollout_logps", True)
 
   def compute_advantages(
       self,
@@ -196,7 +207,7 @@ class GRPOAdapter(AlgorithmAdapter):
     del kwargs
     g = num_generations or self.group_size
     estimator = function_registry.get_advantage_estimator(
-        self.advantage_estimator
+        self.algo_config.advantage_estimator
     )
     r = np.asarray(rewards, dtype=np.float32).reshape(-1)
     return jnp.asarray(estimator(rewards=r, num_generations=g))
@@ -272,25 +283,26 @@ class GRPOAdapter(AlgorithmAdapter):
 
   def loss_fn(self) -> Callable[..., Any]:
     """Policy loss resolved by name via the function registry."""
-    return function_registry.get_policy_loss_fn(self.policy_loss_fn)
+    return function_registry.get_policy_loss_fn(
+        self.algo_config.policy_loss_fn
+    )
 
   def build_gen_model_input_fn(
       self, pad_id: int, eos_id: int
   ) -> Callable[[Any], dict[str, Any]]:
     """Returns a model input generator function for TrainerWorker."""
-    algo_config = types.SimpleNamespace(
-        beta=self.beta_kl,
-        epsilon=self.clip_epsilon,
-        epsilon_high=self.epsilon_high,
-        loss_algo=self.loss_algo,
-        loss_agg_mode=self.loss_agg_mode,
-        temperature=self.temperature,
-        kl_loss_mode=self.kl_loss_mode,
-        kl_clamp_value=self.kl_clamp_value,
-    )
+    if (
+        not hasattr(self.algo_config, "temperature")
+        or self.algo_config.temperature is None
+    ):
+      raise ValueError(
+          "Trainer temperature must be explicitly set (either via kwarg or on"
+          " algo_config) to match rollout generation temperature. Running with"
+          " an unset temperature biases policy gradient importance ratios."
+      )
     return functools.partial(
         _algo_model_input,
-        algo_config=algo_config,
+        algo_config=self.algo_config,
         pad_id=pad_id,
         eos_id=eos_id,
     )
