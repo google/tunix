@@ -129,7 +129,7 @@ def main() -> None:
       tpu_machine = "tpu7x-standard-4t"
       tpu_type = "tpu7x"
       pw_instance_type = "tpu7x"
-    elif tpu_type in ("tpuv5", "tpu-v5p-slice"):
+    elif tpu_type in ("tpuv5", "tpuv5p", "tpu-v5p-slice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct5p-hightpu-4t"
