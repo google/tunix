@@ -27,6 +27,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 from jax.sharding import Mesh
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.examples.common import run_trainer_node
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
@@ -277,13 +278,18 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
       if sig == signal.SIGTERM:
         loop_self.call_soon(callback)
 
-    with self._patch_signal_handlers(mock_add_signal_handler):
+    with (
+        self._patch_signal_handlers(mock_add_signal_handler),
+        mock.patch.object(otel_setup, "setup_metrics") as mock_otel_setup,
+    ):
       run_trainer_node.main(
           [
               "--port",
               "20000",
               "--worker_id",
               "trainer-0",
+              "--run_id",
+              "run_xyz",
               "--compute_logps_chunk_size",
               "128",
               "--compute_logps_micro_batch_size",
@@ -292,6 +298,14 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
           context=self.mock_context,
       )
 
+    mock_otel_setup.assert_called_once_with(
+        default_service_name="tunix-trainer",
+        resource_attributes={
+            "tunix.worker_id": "trainer-0",
+            "tunix.role": "trainer",
+            "tunix.run_id": "run_xyz",
+        },
+    )
     self.assertIn(signal.SIGINT, signal_handlers)
     self.assertIn(signal.SIGTERM, signal_handlers)
     self.mock_context.jax.initialize.assert_called_once()

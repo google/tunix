@@ -36,6 +36,7 @@ if REPO_ROOT not in sys.path:
 
 # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.examples.deepswe_dist import deepswe
@@ -406,6 +407,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   weight_sync_timeouts = _validate_args(args)
 
+  otel_enabled = otel_setup.setup_metrics(
+      default_service_name="tunix-orchestrator",
+      resource_attributes={
+          "tunix.role": "orchestrator",
+          "tunix.run_id": args.run_id,
+      },
+  )
+
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
@@ -494,6 +503,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
       flush_every_n_steps=args.flush_every_n_steps,
+      enable_opentelemetry=otel_enabled,
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
 

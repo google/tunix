@@ -250,6 +250,7 @@ def main() -> None:
         USER_CONTAINER=args.worker_container_name,
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
+        WORKER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
         RAY_HEAD_PRE_INIT_COMMAND=args.ray_head_pre_init_command,
         RAY_WORKER_PRE_INIT_COMMAND=args.ray_worker_pre_init_command,

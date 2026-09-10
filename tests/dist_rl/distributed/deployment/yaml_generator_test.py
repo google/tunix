@@ -369,6 +369,27 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("echo head_pre_init", rendered)
         self.assertIn("echo worker_pre_init", rendered)
 
+  def test_generate_otel_collector_k8s_yaml(self):
+    template_file = _get_template_path("jobset.otel.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-user-otel",
+        "--namespace=test-ns",
+        "--worker_container_port=4317",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("kind: ConfigMap", rendered)
+        self.assertIn("kind: Deployment", rendered)
+        self.assertIn("kind: Service", rendered)
+        self.assertIn("name: test-user-otel", rendered)
+        self.assertIn("namespace: test-ns", rendered)
+        self.assertIn("otel/opentelemetry-collector-contrib:0.114.0", rendered)
+        self.assertIn("endpoint: 0.0.0.0:4317", rendered)
+
 
 if __name__ == "__main__":
   absltest.main()
