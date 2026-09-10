@@ -33,24 +33,34 @@ BK = 256
 # fixed tiles for A/B runs.
 TILES_ENV = "CANON_PALLAS_MATMUL_TILES"
 _TILE_RECEIPTS: set[tuple[int, int, int]] = set()
+# The fixed tile triples the P22.XF model contracts pass explicitly
+# (models/*/p22xf_contract.py: tp1/tp2/1.7B 128/256/256, tp8 128/128/128).
+# A caller passing one of these gets the shape policy; any other explicit
+# tiles are honored as written.
+CONTRACT_TILES = frozenset({(BM, BN, BK), (128, 128, 128)})
 
 
-def tile_policy(m: int, k: int, n: int) -> tuple[int, int, int]:
+def tile_policy(
+    m: int, k: int, n: int, tiles: tuple[int, int, int] = (BM, BN, BK)
+) -> tuple[int, int, int]:
     """Return (block_m, block_n, block_k) for a [m,k]@[k,n] bf16 matmul.
 
-    v2 (default): block_m 256 when m divides by 256 else BM; block_n the
-    largest of 1024/512 dividing n else BN; block_k always BK so the
-    per-element accumulation order never changes.  v1: the fixed tiles.
+    v2 (default): block_m 256 when m divides by 256 else the caller's;
+    block_n the largest of 1024/512 dividing n else the caller's; block_k
+    always the caller's, so the per-element accumulation order never
+    changes (the tp8 contract accumulates in 128-wide k blocks).  v1: the
+    caller's tiles unchanged.
     """
+    block_m, block_n, block_k = tiles
     if os.environ.get(TILES_ENV, "v2") == "v1":
-        return BM, BN, BK
-    block_m = 256 if m % 256 == 0 else BM
-    block_n = BN
+        return block_m, block_n, block_k
+    if m % 256 == 0:
+        block_m = 256
     for candidate in (1024, 512):
         if n % candidate == 0:
             block_n = candidate
             break
-    return block_m, block_n, BK
+    return block_m, block_n, block_k
 
 
 def _tile_receipt(m: int, k: int, n: int, tiles: tuple[int, int, int]) -> None:
@@ -184,10 +194,12 @@ def matmul(
         raise ValueError(f"P22.XE contracted dimensions differ: {k} vs {ky}")
     if x.dtype != jnp.bfloat16 or y.dtype != jnp.bfloat16:
         raise ValueError(f"P22.XE requires bf16 inputs, got {x.dtype}, {y.dtype}")
-    if (block_m, block_n, block_k) == (BM, BN, BK):
-        # Callers that pass the module defaults (or nothing) get the shape
-        # policy; explicit non-default tiles are honored as written.
-        block_m, block_n, block_k = tile_policy(m, k, n)
+    if (block_m, block_n, block_k) in CONTRACT_TILES:
+        # Callers that pass a contract's fixed tiles (or nothing) get the
+        # shape policy; explicit non-contract tiles are honored as written.
+        block_m, block_n, block_k = tile_policy(
+            m, k, n, (block_m, block_n, block_k)
+        )
         _tile_receipt(m, k, n, (block_m, block_n, block_k))
     if min(block_m, block_n, block_k) <= 0:
         raise ValueError("P22.XE block sizes must be positive")
