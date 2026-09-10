@@ -138,7 +138,10 @@ apply_manifest() {
 
 stop_orchestrator() {
   if [[ "${DRY_RUN}" != "true" ]]; then
-    kubectl delete jobset "${ORCHESTRATOR_ID}" --namespace="${NAMESPACE}" --ignore-not-found
+    kubectl delete jobset "${ORCHESTRATOR_ID}" --namespace="${NAMESPACE}" --ignore-not-found --wait=true
+    while kubectl get jobset "${ORCHESTRATOR_ID}" --namespace="${NAMESPACE}" &>/dev/null; do
+      sleep 2
+    done
   fi
 }
 
@@ -190,7 +193,10 @@ start_orchestrator() {
 
 stop_trainer() {
   if [[ "${DRY_RUN}" != "true" ]]; then
-    kubectl delete jobset "${TRAINER_ID}" --namespace="${NAMESPACE}" --ignore-not-found
+    kubectl delete jobset "${TRAINER_ID}" --namespace="${NAMESPACE}" --ignore-not-found --wait=true
+    while kubectl get jobset "${TRAINER_ID}" --namespace="${NAMESPACE}" &>/dev/null; do
+      sleep 2
+    done
   fi
 }
 
@@ -280,9 +286,15 @@ stop_rollout() {
       target_id="${ROLLOUT_ID}-${i}"
     fi
     if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
-      kubectl delete leaderworkerset "${target_id}" --namespace="${NAMESPACE}" --ignore-not-found
+      kubectl delete leaderworkerset "${target_id}" --namespace="${NAMESPACE}" --ignore-not-found --wait=true
+      while kubectl get leaderworkerset "${target_id}" --namespace="${NAMESPACE}" &>/dev/null; do
+        sleep 2
+      done
     else
-      kubectl delete jobset "${target_id}" --namespace="${NAMESPACE}" --ignore-not-found
+      kubectl delete jobset "${target_id}" --namespace="${NAMESPACE}" --ignore-not-found --wait=true
+      while kubectl get jobset "${target_id}" --namespace="${NAMESPACE}" &>/dev/null; do
+        sleep 2
+      done
     fi
   done
 }
