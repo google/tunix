@@ -691,11 +691,17 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     fl_geom = fl_geometry.from_env(os.environ)
     admitted = (
         workload in ("frozenlake", fl_geom.workload)
+        and stage == "full"
+        and no_commit == "0"
         and execution_mode() == "train"
-        and (
-            (stage == "full" and no_commit == "0")
-            or _p57_stock_onehost_proxy()
-        )
+    ) or (
+        # The four-chip proxy names its workload frozenlake-<candidate>-onehost-
+        # dp<d>-tp<t> (dp_workloads); the stock-engine arms observe under the
+        # 64-chip stock arms' warning policy there.
+        _p57_stock_onehost_proxy()
+        and workload.startswith("frozenlake-")
+        and "-onehost-" in workload
+        and execution_mode() == "train"
     )
     if not admitted:
       raise AlignmentGateError(

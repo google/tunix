@@ -1035,7 +1035,9 @@ class AlignmentTest(absltest.TestCase):
         alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
         alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "0",
         alignment.FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV: "1",
-        "CANON_P32_WORKLOAD": "frozenlake",
+        # The carrier's real workload name (dp_workloads four-chip proxy), not
+        # the 64-chip family name: the r4 run failed on exactly this value.
+        "CANON_P32_WORKLOAD": "frozenlake-p45-onehost-dp2-tp2",
         "CANON_P33_RUN_STAGE": "backward-no-commit",
         "CANON_P33_NO_COMMIT": "1",
         "CANON_P57_RUN_KIND": "",
