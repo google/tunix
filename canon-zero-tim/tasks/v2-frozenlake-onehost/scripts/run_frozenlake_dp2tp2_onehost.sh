@@ -363,6 +363,7 @@ sudo docker run --rm --init --privileged --net=host --name "$container" \
   -e CANON_P78_SEGMENTED_ACTOR_LOGPS="$segmented_actor_logps" \
   -e CANON_ALIGNMENT_AUDIT_EVERY="${CANON_ALIGNMENT_AUDIT_EVERY:-}" \
   -e CANON_FL_DIAG_VLLM_MAX_NUM_SEQS="${CANON_FL_DIAG_VLLM_MAX_NUM_SEQS:-}" \
+  -e CANON_LOGPROB_M_BUCKET="${CANON_LOGPROB_M_BUCKET:-}" \
   -e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$capture_full_tree" = 1 ] && echo "$root/p61_numerical")" \
   -e V2_FL_MODE="$mode" \
   -e CANON_XPROF_DIR="$xprof_dir" \
