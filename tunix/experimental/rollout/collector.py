@@ -24,6 +24,8 @@ from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
 
+_DEFAULT_EPISODE_TIMEOUT_SECS: float = 600.0
+
 
 def generate_vanilla_rollout_seed(
     prompt_id: str | int,
@@ -52,6 +54,7 @@ def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
         chat_completions, add_generation_prompt=True, is_first_msg=True
     )
   return chat_completions
+
 
 class TrajectoryCollectorEngine:
   """Wrapper around TrajectoryCollectEngine providing lifecycle controls and Trajectory conversion."""
@@ -90,9 +93,27 @@ class TrajectoryCollectorEngine:
     self.max_response_length = request.generation_kwargs.get(
         "max_response_length"
     )
+    metadata = request.metadata or {}
+    timeout = metadata.get("episode_timeout")
+    self.episode_timeout = float(
+        timeout if timeout is not None else _DEFAULT_EPISODE_TIMEOUT_SECS
+    )
+    if self.episode_timeout <= 0:
+      raise ValueError("episode_timeout must be positive.")
+    overlong_filter = metadata.get("overlong_filter")
+    if overlong_filter is None:
+      self.overlong_filter = False
+    elif isinstance(overlong_filter, bool):
+      self.overlong_filter = overlong_filter
+    else:
+      raise TypeError(
+          "overlong_filter must be a boolean, got"
+          f" {type(overlong_filter).__name__}: {overlong_filter!r}."
+      )
 
   async def run_episode(self) -> trajectory_lib.Trajectory:
     """Executes multi-turn agentic rollout episode and returns standardized Trajectory."""
+
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
     # threads.
@@ -179,6 +200,8 @@ class TrajectoryCollectorEngine:
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         max_response_length=self.max_response_length,
+        timeout=self.episode_timeout,
+        overlong_filter=self.overlong_filter,
     )
     rl_traj = await inner_engine.collect(mode="Trajectory")
     self.is_done = True

@@ -220,6 +220,139 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     )
     self.assertIsNone(engine2.max_response_length)
 
+  def test_episode_options_are_forwarded_to_inner_engine(self):
+    request = datatypes.RolloutRequest(
+        prompt_id="p1",
+        generation_kwargs={"max_response_length": 512},
+        metadata={"episode_timeout": 10800, "overlong_filter": True},
+    )
+    agent = mock.MagicMock()
+    agent.name = "agent"
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="t1",
+        request=request,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=agent,
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+
+    with mock.patch.object(
+        collector.rl_collect_engine, "TrajectoryCollectEngine"
+    ) as inner_engine_cls:
+      inner_engine_cls.return_value.collect = mock.AsyncMock(
+          return_value=mock.MagicMock(steps=[])
+      )
+      asyncio.run(engine.run_episode())
+
+    self.assertEqual(inner_engine_cls.call_args.kwargs["timeout"], 10800)
+    self.assertTrue(inner_engine_cls.call_args.kwargs["overlong_filter"])
+
+  def test_episode_timeout_defaults_to_constant(self):
+    req_empty_meta = datatypes.RolloutRequest(
+        prompt_id="p1",
+        generation_kwargs={},
+    )
+    engine1 = collector.TrajectoryCollectorEngine(
+        traj_id="t1",
+        request=req_empty_meta,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=mock.MagicMock(),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertEqual(
+        engine1.episode_timeout, collector._DEFAULT_EPISODE_TIMEOUT_SECS
+    )
+
+    req_none_meta = datatypes.RolloutRequest(
+        prompt_id="p2",
+        generation_kwargs={},
+        metadata={"episode_timeout": None},
+    )
+    engine2 = collector.TrajectoryCollectorEngine(
+        traj_id="t2",
+        request=req_none_meta,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=mock.MagicMock(),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertEqual(
+        engine2.episode_timeout, collector._DEFAULT_EPISODE_TIMEOUT_SECS
+    )
+
+  def test_episode_timeout_invalid_raises_value_error(self):
+    req = datatypes.RolloutRequest(
+        prompt_id="p1",
+        generation_kwargs={},
+        metadata={"episode_timeout": 0},
+    )
+    with self.assertRaises(ValueError):
+      collector.TrajectoryCollectorEngine(
+          traj_id="t1",
+          request=req,
+          sampler=_MockSampler(),
+          env_client=mock.MagicMock(),
+          agent=mock.MagicMock(),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+
+  def test_overlong_filter_defaults_to_false(self):
+    req_empty_meta = datatypes.RolloutRequest(
+        prompt_id="p1",
+        generation_kwargs={},
+    )
+    engine1 = collector.TrajectoryCollectorEngine(
+        traj_id="t1",
+        request=req_empty_meta,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=mock.MagicMock(),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertFalse(engine1.overlong_filter)
+
+    req_none_meta = datatypes.RolloutRequest(
+        prompt_id="p2",
+        generation_kwargs={},
+        metadata={"overlong_filter": None},
+    )
+    engine2 = collector.TrajectoryCollectorEngine(
+        traj_id="t2",
+        request=req_none_meta,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=mock.MagicMock(),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertFalse(engine2.overlong_filter)
+
+  def test_overlong_filter_invalid_type_raises_type_error(self):
+    for invalid_val in ("False", "True", "false", 1, 0, [True]):
+      with self.subTest(invalid_val=invalid_val):
+        req = datatypes.RolloutRequest(
+            prompt_id="p1",
+            generation_kwargs={},
+            metadata={"overlong_filter": invalid_val},
+        )
+        with self.assertRaises(TypeError):
+          collector.TrajectoryCollectorEngine(
+              traj_id="t1",
+              request=req,
+              sampler=_MockSampler(),
+              env_client=mock.MagicMock(),
+              agent=mock.MagicMock(),
+              tokenizer=_MockTokenizer(),
+              chat_parser=_RecordingParser(),
+          )
+
   def test_dynamic_capping_of_max_tokens_across_turns(self):
     async def _run():
       sampler = _MockSampler(token_lengths=[30, 20])
