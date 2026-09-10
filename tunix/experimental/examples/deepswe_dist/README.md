@@ -41,14 +41,33 @@ Like the non-experimental recipe, the environment defaults to R2E-Gym's
 Kubernetes backend without Agent Sandbox (`USE_AGENT_SANDBOX=0` and
 `ENV_BACKEND=kubernetes`).
 
-For a one-step infrastructure smoke test, override the full-recipe defaults:
+## Local 4-chip TPU VM smoke test
+
+The following command splits a single 4-chip TPU VM into two chips for the
+trainer and two chips for rollout. It runs one full step with the smaller
+Qwen3-1.7B model and disables weight synchronization, which is sufficient for
+checking the local distributed infrastructure. DeepSWE uses the local Docker
+backend in this command, so the Docker daemon and R2E-Gym runtime dependencies
+must already be available on the VM.
 
 ```bash
 cd tunix/experimental/examples/deepswe_dist
-BETA=0.0 MODEL_NAME=Qwen3-1.7B \
-MODEL_ID=Qwen/Qwen3-1.7B MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 \
-MAX_TURNS=3 MAX_PROMPT_LENGTH=1024 MAX_RESPONSE_LENGTH=1024 ./launcher.sh
+MODEL_NAME=Qwen3-1.7B MODEL_ID=Qwen/Qwen3-1.7B \
+DATASET_NAME=R2E-Gym/R2E-Gym-Subset \
+ENV_BACKEND=docker USE_AGENT_SANDBOX=0 SCAFFOLD=r2egym \
+TRAINER_TPU_CHIPS=0,1 TRAINER_FSDP=1 TRAINER_TP=2 \
+ROLLOUT_TPU_CHIPS=2,3 ROLLOUT_FSDP=1 ROLLOUT_TP=2 \
+TPU_CHIPS_PER_HOST_BOUNDS=1,2,1 TPU_HOST_BOUNDS=1,1,1 \
+BATCH_SIZE=1 MINI_BATCH_SIZE=1 NUM_GENERATIONS=2 \
+TRAIN_MICRO_BATCH_SIZE=1 MAX_STEPS=1 MAX_TURNS=3 \
+MAX_PROMPT_LENGTH=1024 MAX_RESPONSE_LENGTH=1024 \
+BETA=0.0 WEIGHT_SYNC_MODE=none ./launcher.sh
 ```
+
+The launcher downloads the model when `MODEL_DIR` does not already contain
+safetensors. Logs are written to `trainer.log`, `rollout.log`, and
+`orchestrator.log` in this directory. Use `WEIGHT_SYNC_MODE=raiden` for a
+multi-step training test.
 
 To opt into the Kubernetes Agent Sandbox and its process-wide SandboxFleet,
 explicitly set `USE_AGENT_SANDBOX=1`:
