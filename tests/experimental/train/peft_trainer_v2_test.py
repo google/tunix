@@ -955,6 +955,51 @@ class PeftTrainerTest(parameterized.TestCase):
         float(metrics.scalar_metrics['kl']), 3.0, places=4
     )
 
+  def test_loss_output_aux_auto_logged_with_has_aux_true(self):
+    # The distributed engine registers algo_core losses -- which return a
+    # LossOutput -- with with_loss_fn(..., has_aux=True)
+    # (distributed_rl_engine.py). The has_aux flag must not suppress the
+    # LossOutput's aux_metrics: whether aux is auto-logged is decided by its
+    # type, not by the flag.
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'kl': sft_utils.WeightedMetric(
+                  jnp.array(6.0, dtype=jnp.float32),
+                  jnp.array(2.0, dtype=jnp.float32),
+              ),
+              'pg_clipfrac': jnp.array(0.25, dtype=jnp.float32),
+          },
+      )
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn, has_aux=True)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    metrics = trainer.get_metrics()
+    self.assertIn('kl', metrics.scalar_metrics)
+    self.assertAlmostEqual(float(metrics.scalar_metrics['kl']), 3.0, places=4)
+    self.assertIn('pg_clipfrac', metrics.scalar_metrics)
+    self.assertAlmostEqual(
+        float(metrics.scalar_metrics['pg_clipfrac']), 0.25, places=4
+    )
+
   def test_legacy_has_aux_payload_is_not_auto_logged(self):
     # with_loss_fn(..., has_aux=True) returns arbitrary auxiliary state that
     # may nest arrays under non-metric keys. It must neither be auto-forwarded

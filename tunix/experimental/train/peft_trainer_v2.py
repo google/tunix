@@ -693,7 +693,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     if isinstance(aux, utils.LossOutput):
-      return loss_val, aux.aux_metrics
+      # Return the LossOutput itself (not just aux_metrics) so the Python side
+      # can tell "the loss emitted metrics" apart from "the caller passed
+      # has_aux=True", the same distinction the non-experimental trainer draws.
+      return loss_val, aux
     elif self._has_aux:
       return loss_val, aux
     else:
@@ -756,7 +759,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
-      return out.primary_loss.compute(), out.aux_metrics
+      return out.primary_loss.compute(), out
     elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
@@ -1104,28 +1107,37 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     payload = self._prepare_inputs(payload)
     return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
 
-  def _dedicated_aux_metrics(self, aux: Any) -> dict[str, Any] | None:
-    """Returns ``aux`` in buffer form only when it is ``LossOutput.aux_metrics``.
+  def _split_aux(self, aux: Any) -> tuple[dict[str, Any] | None, Any]:
+    """Splits a step's auxiliary output into (auto_metrics, hook_aux).
 
-    ``_fwd_bwd_step`` unwraps a ``LossOutput`` to its ``aux_metrics`` dict, and
-    that is the only way ``aux`` is a dict while ``has_aux`` is False. With
-    ``with_loss_fn(..., has_aux=True)`` the auxiliary payload is arbitrary
-    state that may nest arrays under non-metric keys, so it is never
-    auto-logged -- the same distinction the non-experimental trainer draws.
+    A ``LossOutput`` carries metrics by construction, so its ``aux_metrics``
+    are auto-forwarded to the logger regardless of ``has_aux`` -- the
+    distributed engine registers ``algo_core`` losses (which return
+    ``LossOutput``) with ``with_loss_fn(..., has_aux=True)``, and those
+    metrics must still reach the logger. Subclass hooks keep receiving the
+    ``aux_metrics`` dict, as before.
+
+    With ``has_aux=True`` and a loss that returns a plain ``(loss, aux)``
+    tuple, ``aux`` is arbitrary legacy state that may nest arrays under
+    non-metric keys; it is handed to the hooks untouched and never
+    auto-logged.
     """
+    if isinstance(aux, utils.LossOutput):
+      return _aux_to_additional_metrics(aux.aux_metrics), aux.aux_metrics
     if self._has_aux:
-      return None
-    return _aux_to_additional_metrics(aux)
+      return None, aux
+    return _aux_to_additional_metrics(aux), aux
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
+    auto_metrics, hook_aux = self._split_aux(aux)
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
-        auto_metrics=self._dedicated_aux_metrics(aux),
+        auto_metrics=auto_metrics,
     )
-    self._post_process_train_step(aux)
+    self._post_process_train_step(hook_aux)
 
   def _record_update(self, grad_norm: ArrayLike) -> int:
     """Bookkeeping for one optimizer update, independent of how it ran."""
@@ -1203,13 +1215,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     loss, aux = eval_step_fn(payload)
     loss = jax.lax.stop_gradient(loss)
+    auto_metrics, hook_aux = self._split_aux(aux)
     self._buffered_eval_metrics = self._buffer_metrics(
         self._buffered_eval_metrics,
         loss=loss,
         step=self._train_steps,
-        auto_metrics=self._dedicated_aux_metrics(aux),
+        auto_metrics=auto_metrics,
     )
-    self._post_process_eval_step(aux)
+    self._post_process_eval_step(hook_aux)
 
   @contextlib.contextmanager
   def eval_context(self):
