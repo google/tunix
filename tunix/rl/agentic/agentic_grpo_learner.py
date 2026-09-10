@@ -1836,7 +1836,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "causal-study, M15 APC target-debug, P64 numeric-debug, or V2 "
             "FrozenLake one-host contract"
         )
-      if v2_fl_onehost_alignment:
+      # The stock-engine ``is`` arm (tasks/zero_tim_perf phase3) is the one
+      # one-host diagnostic that carries token-level sampler IS; the
+      # certification arms keep the no-TIS contract.
+      if v2_fl_onehost_alignment and os.environ.get(
+          "CANON_P57_TIM_ARM", ""
+      ) != "is":
         if (
             self.algo_config.sampler_is is not None
             or sampler_is_weights is not None
