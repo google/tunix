@@ -111,8 +111,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=str,
       default="",
       help=(
-          "Override MaxText inference attention kernel (e.g."
-          " vllm_batched_rpa)."
+          "Override MaxText inference attention kernel (e.g. vllm_batched_rpa)."
       ),
   )
   parser.add_argument(
@@ -124,9 +123,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--registry_module",
       type=str,
       default=os.getenv("ROLLOUT_REGISTRY_MODULE", DEFAULT_REGISTRY_MODULE),
-      help=(
-          "Module imported at startup to register rollout env/agent classes."
-      ),
+      help="Module imported at startup to register rollout env/agent classes.",
   )
   parser.add_argument(
       "--env_name",
@@ -203,7 +200,9 @@ def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
   try:
     config = json.loads(args.agent_config_json or "{}")
   except json.JSONDecodeError as exc:
-    raise ValueError("--agent_config_json must be a valid JSON object.") from exc
+    raise ValueError(
+        "--agent_config_json must be a valid JSON object."
+    ) from exc
   if not isinstance(config, dict):
     raise ValueError("--agent_config_json must decode to a JSON object.")
   return config
@@ -381,7 +380,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   vllm_config = vllm_sampler.VllmConfig(
       server_mode=server_mode,
       mesh=rollout_mesh,
-      tensor_parallel_size=args.mesh_tp,
+      tensor_parallel_size=args.tensor_parallel_size or args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
       lora_config=lora_config,
@@ -438,7 +437,7 @@ def _create_vllm_sampler(args):
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
-      tensor_parallel_size=args.mesh_tp,
+      tensor_parallel_size=args.tensor_parallel_size or args.mesh_tp,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
