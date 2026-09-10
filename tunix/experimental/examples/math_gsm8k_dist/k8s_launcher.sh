@@ -144,7 +144,10 @@ stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
   else
-    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    while kubectl get jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
+      sleep 2
+    done
   fi
 }
 
@@ -198,7 +201,10 @@ stop_trainer() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
   else
-    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    while kubectl get jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
+      sleep 2
+    done
   fi
 }
 
@@ -298,13 +304,19 @@ stop_rollout_instance() {
     if [[ "$DRY_RUN" == "true" ]]; then
       echo "kubectl delete leaderworkerset ${target_id} -n ${K8S_NAMESPACE}"
     else
-      kubectl delete leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found
+      kubectl delete leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+      while kubectl get leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
+        sleep 2
+      done
     fi
   else
     if [[ "$DRY_RUN" == "true" ]]; then
       echo "kubectl delete jobset ${target_id} -n ${K8S_NAMESPACE}"
     else
-      kubectl delete jobset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found
+      kubectl delete jobset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+      while kubectl get jobset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
+        sleep 2
+      done
     fi
   fi
 }
@@ -367,6 +379,7 @@ start_rollout_instance() {
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
+        --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \

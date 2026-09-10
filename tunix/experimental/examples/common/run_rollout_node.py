@@ -207,17 +207,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   args = parser.parse_args(argv)
-  _finalize_tensor_parallel_size(args)
+  _get_tensor_parallel_size(args)
   return args
 
 
-def _finalize_tensor_parallel_size(args: argparse.Namespace) -> None:
+def _get_tensor_parallel_size(args: argparse.Namespace) -> int:
   """Derives tensor_parallel_size from mesh_tp if not explicitly set."""
-  if args.tensor_parallel_size is None:
+  tp = getattr(args, "tensor_parallel_size", None)
+  if tp is None:
     tp = getattr(args, "sampler_mesh_tp", None) or getattr(args, "mesh_tp", 1)
     args.tensor_parallel_size = tp
     if tp > 1:
       logging.info("Auto-derived tensor_parallel_size=%d from mesh_tp", tp)
+  return tp
 
 
 def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -393,7 +395,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   server_mode = True if multihost_backend else None
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
-  tp_size = args.tensor_parallel_size
+  tp_size = _get_tensor_parallel_size(args)
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
@@ -455,7 +457,7 @@ def _create_vllm_sampler(args):
       else args.model_id
   )
   max_model_len = args.max_prompt_length + args.max_response_length
-  tp_size = args.tensor_parallel_size
+  tp_size = _get_tensor_parallel_size(args)
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "max_model_len=%d...",

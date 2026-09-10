@@ -21,11 +21,17 @@ REGION=${REGION:-us-central1}
 ZONE=${ZONE:-us-central1-a}
 CLUSTER=${CLUSTER:-trellis-demo-0810}
 
-LOCATION_NAME=$(gcloud container clusters list \
-  --project="$PROJECT" \
-  --filter="name=$CLUSTER" \
-  --format='value(location)' \
-  | head -n 1)
+if [[ "${DRY_RUN}" == "true" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+if [[ -z "${LOCATION_NAME:-}" ]]; then
+  LOCATION_NAME=$(gcloud container clusters list \
+    --project="$PROJECT" \
+    --filter="name=$CLUSTER" \
+    --format='value(location)' \
+    | head -n 1)
+fi
 
 if [[ -z "$LOCATION_NAME" ]]; then
   echo "Could not determine location for cluster '$CLUSTER' in project '$PROJECT'." >&2

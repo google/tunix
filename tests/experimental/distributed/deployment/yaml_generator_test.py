@@ -84,6 +84,12 @@ class YamlGeneratorTest(parameterized.TestCase):
               "tpu-v5p-slice",
           ),
           (
+              "tpuv5p",
+              "tpuv5p:2x2x2",
+              "test-tpuv5p",
+              "tpu-v5p-slice",
+          ),
+          (
               "tpuv5e",
               "tpuv5e:2x4",
               "test-tpuv5e",
