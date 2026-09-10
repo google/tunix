@@ -31,6 +31,7 @@ import jax.sharding as shd
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.experimental.common import datatypes
 from tunix.experimental.train import peft_trainer_v2
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
@@ -1299,6 +1300,41 @@ class V1ParityTest(parameterized.TestCase):
       trainer.train(dummy_datasets(batch_size=4))
     self.assertGreater(fused.call_count, 0)
     split.assert_not_called()
+
+  def test_per_token_logps(self):
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer_v2(model)
+    req = datatypes.LogprobsRequest(
+        request_id="test_req",
+        prompt_tokens=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32),
+        completion_tokens=np.array([[7, 8], [9, 10]], dtype=np.int32),
+        pad_id=0,
+        eos_id=1,
+    )
+    logps = trainer.per_token_logps(req)
+    self.assertEqual(logps.shape, (2, 2))
+    self.assertEqual(logps.dtype, np.float32)
+    self.assertTrue(np.all(np.isfinite(logps)))
+
+    # Verify micro-batching yields identical outputs
+    req_chunked = datatypes.LogprobsRequest(
+        request_id="test_req_chunked",
+        prompt_tokens=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32),
+        completion_tokens=np.array([[7, 8], [9, 10]], dtype=np.int32),
+        pad_id=0,
+        eos_id=1,
+        micro_batch_size=1,
+    )
+    logps_chunked = trainer.per_token_logps(req_chunked)
+    np.testing.assert_allclose(logps, logps_chunked, rtol=1e-5, atol=1e-5)
+
+  def test_per_token_logps_invalid_payload_raises_error(self):
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer_v2(model)
+    with self.assertRaises(AssertionError):
+      trainer.per_token_logps("invalid_payload")  # pyrefly: disable=bad-argument-type
+
+
 
 
 class GradientAccumulatorTest(parameterized.TestCase):

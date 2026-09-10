@@ -16,7 +16,7 @@
 
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, Mapping, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence, cast
 
 from absl import logging
 from flax import nnx
@@ -653,3 +653,189 @@ def pack_sequences(
 
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"
+
+AgreementMetric = tuple[float, Any]
+AgreementMetrics = Mapping[str, AgreementMetric]
+
+
+def sampler_trainer_agreement(
+    rollout_per_token_logps: Any,
+    trainer_per_token_logps: Any,
+    completion_mask: Any = None,
+    sampler_is: str | None = None,
+    sampler_is_threshold: float = 2.0,
+) -> tuple[dict[str, AgreementMetric], jax.Array | None]:
+  """Sampler-vs-trainer agreement metrics and the TIS weights built from them.
+
+  Shared by orchestrators, learners, and unpacked/packed paths.
+
+  Args:
+    rollout_per_token_logps: Rollout sampler per-token log-probabilities.
+    trainer_per_token_logps: Trainer model per-token log-probabilities.
+    completion_mask: Optional mask (1 for completion/assistant tokens, 0
+      otherwise). If None, all positions are considered.
+    sampler_is: Type of importance sampling correction, e.g. "token".
+    sampler_is_threshold: Threshold to clip importance sampling weights.
+
+  Returns:
+    A tuple of (metrics_dict, sampler_is_weights).
+  """
+  metrics = {}
+  sampler_is_weights = None
+  if rollout_per_token_logps is None or trainer_per_token_logps is None:
+    return metrics, sampler_is_weights
+
+  # ``completion_mask`` is the assistant-vs-env mask built upstream (1 for
+  # assistant-generated tokens, 0 for env-injected tokens), and already
+  # correctly scopes the comparison to model-emitted positions. We
+  # deliberately do NOT additionally drop positions where the rollout logprob
+  # equals exactly 0.0 -- that value can legitimately occur for near-certain
+  # tokens and excluding them removes the most consistent positions from the
+  # statistic, inflating the per-position mean.
+  rollout_per_token_logps = jnp.asarray(rollout_per_token_logps)
+  trainer_per_token_logps = jnp.asarray(trainer_per_token_logps)
+
+  if completion_mask is not None:
+    mask = jnp.asarray(completion_mask).astype(jnp.bool_)
+  else:
+    mask = jnp.ones_like(rollout_per_token_logps, dtype=jnp.bool_)
+  mask_f = mask.astype(jnp.float32)
+  mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+  diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+  diff_mean = float((diff * mask_f).sum() / mask_sum)
+  diff_max = float(jnp.where(mask, diff, 0.0).max())
+  # Probability-space diff is more representative than logp_diff for
+  # confidence agreement: logp can diverge arbitrarily for very
+  # low-probability tokens whose contribution to the ratio is negligible.
+  rp = jnp.exp(rollout_per_token_logps)
+  tp = jnp.exp(trainer_per_token_logps)
+  prob_diff = jnp.abs(rp - tp)
+  prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+  prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+  rp_flat, tp_flat, mf = rp.reshape(-1), tp.reshape(-1), mask_f.reshape(-1)
+  rp_mean = (rp_flat * mf).sum() / mask_sum
+  tp_mean = (tp_flat * mf).sum() / mask_sum
+  rp_d = (rp_flat - rp_mean) * mf
+  tp_d = (tp_flat - tp_mean) * mf
+  cov = (rp_d * tp_d).sum() / mask_sum
+  rp_var = (rp_d * rp_d).sum() / mask_sum
+  tp_var = (tp_d * tp_d).sum() / mask_sum
+  pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+  metrics.update({
+      "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+      "sampler_trainer/logp_diff_max": (diff_max, np.max),
+      "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+      "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
+      "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+  })
+  logging.info(
+      "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
+      " pearson=%.5f",
+      diff_mean,
+      diff_max,
+      prob_diff_mean,
+      prob_diff_max,
+      pearson,
+  )
+
+  # Truncated importance-sampling weights: per-token trainer-vs-sampler log
+  # ratio, masked to assistant tokens, clamped at the threshold, detached.
+  # The policy loss picks these up via ``train_example.sampler_is_weights``.
+  if sampler_is == "token":
+    asst_mask_f = mask_f
+    log_ratio = trainer_per_token_logps - rollout_per_token_logps
+    log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
+    sampler_is_weights = jax.lax.stop_gradient(
+        jnp.minimum(jnp.exp(log_ratio), sampler_is_threshold)
+        * asst_mask_f
+    )
+    is_mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
+    is_mean = float((sampler_is_weights * asst_mask_f).sum() / is_mask_sum)
+    is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
+    frac_clipped = float(
+        (
+            (jnp.exp(log_ratio) > sampler_is_threshold)
+            & (asst_mask_f > 0)
+        )
+        .astype(jnp.float32)
+        .sum()
+        / is_mask_sum
+    )
+    metrics.update({
+        "sampler_is/weight_mean": (is_mean, np.mean),
+        "sampler_is/weight_max": (is_max, np.max),
+        "sampler_is/frac_clipped_at_threshold": (frac_clipped, np.mean),
+    })
+    logging.info(
+        "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
+        " (threshold=%.2f)",
+        is_mean,
+        is_max,
+        frac_clipped,
+        sampler_is_threshold,
+    )
+  return metrics, sampler_is_weights
+
+
+def aggregate_agreement_metrics(
+    metrics: AgreementMetrics | Sequence[AgreementMetrics] | None,
+) -> dict[str, float]:
+  """Aggregates sampler-vs-trainer agreement metrics across microbatches.
+
+  Post-processes metrics returned by `sampler_trainer_agreement`. Accepts either
+  a single metrics dictionary or a sequence of metrics dictionaries (e.g.
+  collected across microbatches).
+
+  Args:
+    metrics: A single metrics dictionary or a sequence of metrics dictionaries
+      mapping each metric name to a `(value, reducer_fn)` tuple (or scalar
+      float).
+
+  Returns:
+    A dictionary mapping each metric name to its aggregated scalar float value.
+  """
+  if not metrics:
+    return {}
+
+  if isinstance(metrics, (dict, Mapping)):
+    metric_dicts = [metrics]
+  elif isinstance(metrics, Sequence):
+    metric_dicts = [m for m in metrics if m]
+  else:
+    raise TypeError(
+        "Unsupported input type for aggregate_agreement_metrics: "
+        f"{type(metrics).__name__}"
+    )
+
+  if not metric_dicts:
+    return {}
+
+  agg_metrics: dict[str, list[float]] = {}
+  reducers: dict[str, Any] = {}
+  for m_dict in metric_dicts:
+    for k, v in m_dict.items():
+      if isinstance(v, tuple) and len(v) == 2:
+        val, fn = v
+      else:
+        val, fn = v, (np.max if "max" in k else np.mean)
+      if k not in agg_metrics:
+        agg_metrics[k] = []
+        reducers[k] = fn
+      agg_metrics[k].append(float(val))
+
+  result: dict[str, float] = {}
+  for k, vals in agg_metrics.items():
+    if not vals:
+      continue
+    fn = reducers.get(k)
+    if callable(fn):
+      reduced_val = float(cast(Any, fn(vals)))
+    else:
+      reduced_val = float(np.mean(vals))
+    result[k] = reduced_val
+  return result
+
+
+aggregate_aggrement_metrics = aggregate_agreement_metrics
+aggregated_sampler_trainer_agreement = aggregate_agreement_metrics
+

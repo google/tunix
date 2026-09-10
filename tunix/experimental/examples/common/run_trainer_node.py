@@ -299,6 +299,10 @@ class _MeshBoundTrainer:
       with self._trainer.eval_context():
         yield
 
+  def per_token_logps(self, *args, **kwargs) -> Any:
+    with self._mesh:
+      return self._trainer.per_token_logps(*args, **kwargs)
+
   def compile(self, *args, **kwargs) -> None:
     with self._mesh:
       self._trainer.compile(*args, **kwargs)

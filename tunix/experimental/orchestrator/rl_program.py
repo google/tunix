@@ -33,6 +33,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
+from tunix.rl import utils as rl_utils
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
@@ -361,6 +362,7 @@ class StandardRLProgram(RLProgram):
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
+      agreement_metrics: Sequence[rl_utils.AgreementMetrics] | None = None,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -665,6 +667,13 @@ class StandardRLProgram(RLProgram):
               self.metrics_prefix, metric_key, val, self.mode, log_step
           )
 
+    # Sampler-Trainer Agreement & IS Metrics
+    if agreement_metrics:
+      for k, val in rl_utils.aggregate_agreement_metrics(
+          agreement_metrics
+      ).items():
+        self.metrics_logger.log(self.metrics_prefix, k, val, self.mode, log_step)
+
     return {
         "reward_mean": reward_mean,
         "reward_std": reward_std,
@@ -688,6 +697,7 @@ class StandardRLProgram(RLProgram):
       trainer_metrics = None
       step_rewards = []
       step_advantages = []
+      step_agreement_metrics = []
       num_microbatches = 0
       num_rollouts = 0
       all_step_items = []
@@ -741,6 +751,85 @@ class StandardRLProgram(RLProgram):
                 datatypes.Role.REFERENCE, items=batch
             )
             batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+
+          if getattr(batch, "old_per_token_logps", None) is not None:
+            # TODO(tunix-dev): Refine condition for when trainer logps are needed
+            # (e.g. checking mesh existence or algo_config.sampler_is == "token").
+            req = datatypes.LogprobsRequest(
+                request_id=f"actor_logps_{current_step}_{num_microbatches}",
+                prompt_tokens=np.asarray(batch.prompt_ids, dtype=np.int32),
+                completion_tokens=np.asarray(
+                    batch.completion_ids, dtype=np.int32
+                ),
+                temperature=getattr(self.algo, "temperature", 1.0),
+                model_role="actor",
+                pad_id=getattr(self.assembler, "pad_id", 0),
+                eos_id=getattr(
+                    self.assembler,
+                    "eos_id",
+                    getattr(self.assembler, "pad_id", 0),
+                ),
+                segment_ids=(
+                    np.asarray(batch.segment_ids)
+                    if getattr(batch, "segment_ids", None) is not None
+                    else None
+                ),
+                segment_positions=(
+                    np.asarray(batch.segment_positions)
+                    if getattr(batch, "segment_positions", None) is not None
+                    else None
+                ),
+                routed_experts=(
+                    np.asarray(batch.routed_experts)
+                    if getattr(batch, "routed_experts", None) is not None
+                    else None
+                ),
+                micro_batch_size=getattr(
+                    self.algo, "train_micro_batch_size", None
+                ),
+            )
+            trainer_logps = await self.engine.per_token_logps(
+                datatypes.Role.ACTOR, items=req
+            )
+            if isinstance(trainer_logps, datatypes.LogprobsResponse):
+              trainer_logps = trainer_logps.per_token_logps
+            trainer_logps = np.asarray(trainer_logps, dtype=np.float32)
+
+            algo_config = getattr(self.algo, "algo_config", None)
+            sampler_is = getattr(
+                self.algo,
+                "sampler_is",
+                getattr(algo_config, "sampler_is", None),
+            )
+            sampler_is_threshold = getattr(
+                self.algo,
+                "sampler_is_threshold",
+                getattr(algo_config, "sampler_is_threshold", 2.0),
+            )
+            force_on_policy_ratio = getattr(
+                self.algo,
+                "force_on_policy_ratio",
+                getattr(algo_config, "force_on_policy_ratio", False),
+            )
+            agreement_metrics, sampler_is_weights = (
+                rl_utils.sampler_trainer_agreement(
+                    batch.old_per_token_logps,
+                    trainer_logps,
+                    batch.completion_mask,
+                    sampler_is=sampler_is,
+                    sampler_is_threshold=sampler_is_threshold,
+                )
+            )
+            if agreement_metrics:
+              step_agreement_metrics.append(agreement_metrics)
+            if sampler_is_weights is not None:
+              batch = dataclasses.replace(
+                  batch, sampler_is_weights=sampler_is_weights
+              )
+            if sampler_is == "token" and not force_on_policy_ratio:
+              batch = dataclasses.replace(
+                  batch, old_per_token_logps=trainer_logps
+              )
 
           num_microbatches += 1
           logging.info(
@@ -817,6 +906,7 @@ class StandardRLProgram(RLProgram):
           step_time_sec=step_time_sec,
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
+          agreement_metrics=step_agreement_metrics,
       )
 
       self.last_step_result = RLStepResult(

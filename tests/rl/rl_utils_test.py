@@ -848,5 +848,118 @@ class ValidatePackingBudgetTest(absltest.TestCase):
       )
 
 
+class SamplerTrainerAgreementTest(absltest.TestCase):
+
+  def test_returns_empty_when_inputs_none(self):
+    metrics, is_weights = utils.sampler_trainer_agreement(
+        rollout_per_token_logps=None,
+        trainer_per_token_logps=np.array([[-0.1, -0.2]]),
+    )
+    self.assertEqual(metrics, {})
+    self.assertIsNone(is_weights)
+
+    metrics, is_weights = utils.sampler_trainer_agreement(
+        rollout_per_token_logps=np.array([[-0.1, -0.2]]),
+        trainer_per_token_logps=None,
+    )
+    self.assertEqual(metrics, {})
+    self.assertIsNone(is_weights)
+
+  def test_agreement_metrics_calculation(self):
+    rollout_logps = np.array([[-1.0, -2.0], [-0.5, -1.5]], dtype=np.float32)
+    trainer_logps = np.array([[-1.2, -1.8], [-0.5, -2.0]], dtype=np.float32)
+    completion_mask = np.array([[1, 1], [0, 1]], dtype=np.int32)
+
+    metrics, is_weights = utils.sampler_trainer_agreement(
+        rollout_per_token_logps=rollout_logps,
+        trainer_per_token_logps=trainer_logps,
+        completion_mask=completion_mask,
+    )
+    self.assertIsNone(is_weights)
+    self.assertIn("sampler_trainer/logp_diff_mean", metrics)
+    self.assertIn("sampler_trainer/logp_diff_max", metrics)
+    self.assertIn("sampler_trainer/prob_diff_mean", metrics)
+    self.assertIn("sampler_trainer/prob_diff_max", metrics)
+    self.assertIn("sampler_trainer/probs_pearson_corr", metrics)
+
+    # Check that reducer functions work
+    for k, (v, fn) in metrics.items():
+      self.assertIsInstance(v, float)
+      self.assertTrue(callable(fn))
+
+  def test_sampler_is_token_mode(self):
+    rollout_logps = np.array([[-1.0, -2.0]], dtype=np.float32)
+    trainer_logps = np.array([[-0.5, -0.5]], dtype=np.float32)
+    completion_mask = np.array([[1, 1]], dtype=np.int32)
+
+    metrics, is_weights = utils.sampler_trainer_agreement(
+        rollout_per_token_logps=rollout_logps,
+        trainer_per_token_logps=trainer_logps,
+        completion_mask=completion_mask,
+        sampler_is="token",
+        sampler_is_threshold=2.0,
+    )
+    self.assertIsNotNone(is_weights)
+    self.assertEqual(is_weights.shape, (1, 2))
+    self.assertIn("sampler_is/weight_mean", metrics)
+    self.assertIn("sampler_is/weight_max", metrics)
+    self.assertIn("sampler_is/frac_clipped_at_threshold", metrics)
+
+
+class AggregateAgreementMetricsTest(absltest.TestCase):
+
+  def test_aggregated_metrics_from_sequence_of_dicts(self):
+    dict1 = {
+        "sampler_trainer/logp_diff_mean": (1.0, np.mean),
+        "sampler_trainer/logp_diff_max": (2.0, np.max),
+    }
+    dict2 = {
+        "sampler_trainer/logp_diff_mean": (3.0, np.mean),
+        "sampler_trainer/logp_diff_max": (4.0, np.max),
+    }
+    agg = utils.aggregate_agreement_metrics([dict1, dict2])
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_mean"], 2.0)
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_max"], 4.0)
+
+  def test_aggregated_metrics_from_single_dict(self):
+    metrics = {
+        "sampler_trainer/logp_diff_mean": (1.5, np.mean),
+        "sampler_trainer/logp_diff_max": (2.5, np.max),
+    }
+    agg = utils.aggregate_agreement_metrics(metrics)
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_mean"], 1.5)
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_max"], 2.5)
+
+  def test_aggregated_metrics_empty_or_none(self):
+    self.assertEqual(utils.aggregate_agreement_metrics(None), {})
+    self.assertEqual(utils.aggregate_agreement_metrics([]), {})
+    self.assertEqual(utils.aggregate_agreement_metrics({}), {})
+
+  def test_aggregated_metrics_from_sequence_of_scalar_dicts(self):
+    dict1 = {
+        "sampler_trainer/logp_diff_mean": 1.0,
+        "sampler_trainer/logp_diff_max": 2.0,
+    }
+    dict2 = {
+        "sampler_trainer/logp_diff_mean": 3.0,
+        "sampler_trainer/logp_diff_max": 4.0,
+    }
+    agg = utils.aggregate_agreement_metrics([dict1, dict2])
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_mean"], 2.0)
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_max"], 4.0)
+
+  def test_alias_aggregate_aggrement_metrics(self):
+    dict1 = {
+        "sampler_trainer/logp_diff_mean": 1.0,
+    }
+    agg = utils.aggregate_aggrement_metrics(dict1)
+    self.assertAlmostEqual(agg["sampler_trainer/logp_diff_mean"], 1.0)
+
+  def test_aggregated_metrics_invalid_type_raises(self):
+    with self.assertRaises(TypeError):
+      utils.aggregate_agreement_metrics(12345)
+
+
 if __name__ == '__main__':
   absltest.main()
+

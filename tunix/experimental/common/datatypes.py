@@ -487,7 +487,7 @@ class TrainRequest(Request):
 
 @dataclasses.dataclass(kw_only=True)
 class LogprobsRequest(Request):
-  """Request to score per-token log-probabilities under a frozen model.
+  """Request to score per-token log-probabilities under a model.
 
   Attributes:
     prompt_tokens: [B, P] token ids, already LEFT-padded by the caller.
@@ -495,13 +495,25 @@ class LogprobsRequest(Request):
       the result aligns to these completion columns.
     temperature: Softmax temperature to score under. Mandatory: it must match
       the temperature the tokens were sampled at, or the log-probs are biased.
-    model_role: Which hosted model to score against (v1: "reference").
+    model_role: Which model to score against (e.g. "reference", "actor").
+    pad_id: Pad token identifier.
+    eos_id: End of sequence identifier.
+    segment_ids: Optional 1D or 2D sequential document identifiers for packing.
+    segment_positions: Optional 1D or 2D local position indices for packing.
+    routed_experts: Optional MoE routed expert ids.
+    micro_batch_size: Optional micro batch size for chunked evaluation.
   """
 
   prompt_tokens: np.ndarray
   completion_tokens: np.ndarray
-  temperature: float
+  temperature: float = 1.0
   model_role: str = "reference"
+  pad_id: int = 0
+  eos_id: int = 0
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
+  micro_batch_size: int | None = None
 
 
 ##### Inference DTOs #####

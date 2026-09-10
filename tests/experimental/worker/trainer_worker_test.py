@@ -32,6 +32,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def __init__(self):
     self.fwd_bwd_calls = []
     self.eval_step_calls = []
+    self.per_token_logps_calls = []
     self.policy_version = 3
     self.step_count = 10
     self.target_state = None
@@ -54,6 +55,10 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
 
   def eval_step(self, payload, **kwargs):
     self.eval_step_calls.append((payload, kwargs))
+
+  def per_token_logps(self, payload, **kwargs):
+    self.per_token_logps_calls.append((payload, kwargs))
+    return np.array([[-0.5, -0.2]], dtype=np.float32)
 
   def save_checkpoint(self, metadata, **kwargs):
     pass
@@ -150,6 +155,35 @@ class TrainerWorkerTest(absltest.TestCase):
     self.fake_trainer.set_target_state = None
     with self.assertRaises(AttributeError):
       self.worker.set_target_state(target_state={"params": 1})
+
+  def test_per_token_logps_delegates_to_trainer(self):
+    req = datatypes.LogprobsRequest(
+        request_id="req-logps-1",
+        prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+        completion_tokens=np.array([[3, 4]], dtype=np.int32),
+    )
+    res = self.worker.per_token_logps(req, temperature=0.7)
+    self.assertLen(self.fake_trainer.per_token_logps_calls, 1)
+    call_payload, call_kwargs = self.fake_trainer.per_token_logps_calls[0]
+    self.assertIs(call_payload, req)
+    self.assertEqual(call_kwargs, {"temperature": 0.7})
+    np.testing.assert_allclose(res, [[-0.5, -0.2]])
+
+  def test_per_token_logps_invalid_payload_raises_error(self):
+    with self.assertRaises(TypeError):
+      self.worker.per_token_logps("invalid_payload")  # pyrefly: disable=bad-argument-type
+
+  def test_per_token_logps_rejects_train_request(self):
+    request = datatypes.TrainRequest(
+        request_id="req-logps-bad",
+        payload=datatypes.LogprobsRequest(
+            request_id="req-1",
+            prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+            completion_tokens=np.array([[3, 4]], dtype=np.int32),
+        ),
+    )
+    with self.assertRaises(TypeError):
+      self.worker.per_token_logps(request)  # pyrefly: disable=bad-argument-type
 
 
 if __name__ == "__main__":

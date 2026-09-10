@@ -207,6 +207,27 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
+  def per_token_logps(
+      self,
+      items: datatypes.LogprobsRequest,
+      **kwargs: Any,
+  ) -> Any:
+    """Evaluates per-token log probabilities using the trainer."""
+    self._ensure_ready()
+    if not isinstance(items, datatypes.LogprobsRequest):
+      raise TypeError(
+          "per_token_logps expects datatypes.LogprobsRequest, got"
+          f" {type(items).__name__}."
+      )
+    try:
+      result = self._trainer.per_token_logps(items, **kwargs)
+      self._last_error = None
+      return result
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
   def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
     self._ensure_ready()
