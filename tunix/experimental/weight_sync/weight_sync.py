@@ -39,6 +39,9 @@ class WeightSyncMode(str, enum.Enum):
   RAIDEN = "raiden"
 
 
+DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkUnitId:
   """Transport-neutral identity for one participant's data work unit.
@@ -76,12 +79,19 @@ class TensorMetadata:
     layout: Layout mapping.
     item_size: Bytes per element.
     layer_idx: Stable batching ordinal.
-    sharding_spec: One mesh axis name per TENSOR dimension, empty string where
-      that dimension is replicated. This is the subset of JAX `PartitionSpec`
-      used by the Tunix/JAX adapters: `P(None, "y")` is `("", "y")`. Together
-      with the work unit's physical `mesh_axes`, it maps device coordinates onto
-      the variable's logical mesh. A concrete transport must reject forms its
-      wire representation cannot encode.
+    sharding_spec: The mesh axis name sharding each TENSOR dimension, empty
+      string where that dimension is replicated. This is the subset of JAX
+      `PartitionSpec` used by the Tunix/JAX adapters: `P(None, "y")` is `("",
+      "y")`. A dimension sharded over the product of several axes -- JAX
+      `P(("x", "y"))`, as MoE weights get when tensor and attention-data
+      parallelism are combined -- is the axes joined by commas, major first:
+      `("x,y",)`. Together with the work unit's physical `mesh_axes`, it maps
+      device coordinates onto the variable's logical mesh. A concrete transport
+      must reject forms its wire representation cannot encode.  TODO(tunix-dev):
+      replace the comma-joined string with a structured per-dimension tuple,
+      e.g. `((), ("tp",), ("attention_dp", "tp"))`. The string form makes every
+      consumer re-parse it and reserves the comma. Needs the Raiden handler and
+      the MaxText adapter migrated together.
   """
 
   name: str
@@ -129,7 +139,9 @@ class TensorMetadata:
           f"variable {self.name!r}: sharding_spec {self.sharding_spec} must"
           f" have rank {rank}"
       )
-    named_axes = [axis for axis in self.sharding_spec if axis]
+    named_axes = [
+        a for axis in self.sharding_spec for a in axis.split(",") if a
+    ]
     if len(named_axes) != len(set(named_axes)):
       raise ValueError(
           f"variable {self.name!r}: a mesh axis may not shard two tensor"
@@ -156,12 +168,12 @@ class WorkUnitMetadata:
 
   Attributes:
     unit: Stable identity, e.g. WorkUnitId(job_name="trainer").
-    shards: Data-plane addresses, one "ip:port" per participating shard.
-      Repeats are expected: a process serving several local devices shares one
-      transfer port, so the list may carry repeated addresses while preserving
-      the shard count.
-    control_plane_rpc_address: Optional listener address used by transports
-      that send commands back to workers.
+    shards: Data-plane addresses, one "ip:port" per participating shard. Repeats
+      are expected: a process serving several local devices shares one transfer
+      port, so the list may carry repeated addresses while preserving the shard
+      count.
+    control_plane_rpc_address: Optional listener address used by transports that
+      send commands back to workers.
     global_shape: Global shape of the tensor, when the unit carries exactly one.
     mesh_shape: Physical JAX mesh shape for this work unit. For a variable's
       logical per-tensor mesh, see `TensorMetadata.mesh_shape`.
@@ -169,12 +181,16 @@ class WorkUnitMetadata:
     item_size: Bytes per element.
     variables: Multi-variable manifest. When a unit carries several tensors this
       is populated instead of the single-tensor fields above.
-    mesh_axes: Names of the mesh axes, in mesh order, e.g. ("fsdp", "tp") or
-      the ("x", "y") a jax.sharding.Mesh was built with. The counterpart to a
-      variable's `sharding_spec`: the spec names axes, this says which
-      physical mesh dimension each name is. Both sides are needed before the
-      a transport can map device coordinates without guessing axes from equal
-      dimension sizes.
+    mesh_axes: Names of the mesh axes, in mesh order, e.g. ("fsdp", "tp") or the
+      ("x", "y") a jax.sharding.Mesh was built with. The counterpart to a
+      variable's `sharding_spec`: the spec names axes, this says which physical
+      mesh dimension each name is. Both sides are needed before the a transport
+      can map device coordinates without guessing axes from equal dimension
+      sizes.
+    transport_mode: Transport this unit is bound on, "ffi" or "tcp". None means
+      unreported, not a default. Source and destination need not match.
+    use_ffi: `transport_mode == "ffi"` as a bool, for consumers that would
+      otherwise compare strings. None when unreported.
   """
 
   unit: WorkUnitId
@@ -186,6 +202,8 @@ class WorkUnitMetadata:
   item_size: Optional[int] = None
   variables: tuple[TensorMetadata, ...] = ()
   mesh_axes: Optional[tuple[str, ...]] = None
+  transport_mode: Optional[str] = None
+  use_ffi: Optional[bool] = None
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -253,6 +271,8 @@ class WorkUnitMetadata:
         mesh_axes=(
             tuple(d["mesh_axes"]) if d.get("mesh_axes") is not None else None
         ),
+        transport_mode=d.get("transport_mode"),
+        use_ffi=d.get("use_ffi"),
     )
 
 

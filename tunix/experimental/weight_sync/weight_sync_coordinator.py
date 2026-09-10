@@ -985,6 +985,7 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
+        logging.error("pre-quiesce setup failed: %s", e, exc_info=True)
         failures.append(f"pre-quiesce setup: {e!r}")
         raise fail(
             "bind/metadata/source-prepare failed before any destination was"
@@ -1009,6 +1010,34 @@ class WeightSyncCoordinator:
         raise fail("metadata collection returned an empty side")
       source_units = tuple(m.unit for m in src_metadata)
       destination_units = tuple(m.unit for m in dst_metadata)
+      # Diagnostics only (--v=1). Raiden partitions across units sharing a
+      # job_name and broadcasts across distinct ones, so these identities decide
+      # whether a replica gets a copy or a slice.
+      if logging.vlog_is_on(1):
+        for side, metas in (("src", src_metadata), ("dst", dst_metadata)):
+          for m in metas:
+            logging.vlog(
+                1,
+                "%s unit job_name=%r job_replica_id=%r shards=%d %s",
+                side,
+                m.unit.job_name,
+                m.unit.job_replica_id,
+                len(m.shards),
+                list(m.shards),
+            )
+        # Unequal shard counts are normal -- each side is sized by its own
+        # topology. Correctness is the manifest preflight's job, below.
+        src_shards = sum(len(m.shards) for m in src_metadata)
+        for m in dst_metadata:
+          if src_shards and len(m.shards) != src_shards:
+            logging.vlog(
+                1,
+                "destination %r has %d shard(s) against the source's %d;"
+                " expected whenever the two sides differ in topology.",
+                m.unit.job_name,
+                len(m.shards),
+                src_shards,
+            )
 
       # Manifest preflight, before registration and before any downtime:
       # the controller pairs variables by exact name and silently skips
@@ -1041,7 +1070,8 @@ class WeightSyncCoordinator:
         )
         raise fail(
             "manifest preflight failed before any destination was quiesced;"
-            " no rollback needed"
+            f" no rollback needed ({len(preflight_problems)} problems, first:"
+            f" {preflight_problems[0]})"
         )
 
       loop = asyncio.get_running_loop()
@@ -1181,7 +1211,7 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
-        # The call returned (by raising): the thread is done, rollback is safe.
+        logging.error("transfer raised exception: %s", e, exc_info=True)
         transfer_in_flight = False
         failures.append(f"transfer: {e!r}")
         state = await self._rollback(destinations, prepared_request, failures)
