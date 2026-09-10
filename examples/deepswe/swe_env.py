@@ -2,9 +2,16 @@ import atexit
 import json
 import logging
 import os
+import re
 import threading
+import time
 from typing import Any, Optional, cast
 import numpy as np
+
+try:
+  from examples.deepswe import template as template_mod
+except ImportError:
+  import template as template_mod  # pytype: disable=import-error
 
 _GLOBAL_FLEET = None
 _FLEET_LOCK = threading.Lock()
@@ -79,26 +86,57 @@ def _patch_r2egym_for_agent_sandbox() -> None:
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
 
-def _normalize_tasks_for_fleet(tasks: Any) -> list[Any]:
+def _get_image_rewrite_fn(image_rewrite: Any | None = None) -> Any | None:
+  """Retrieve or construct the image rewrite function from prefix if configured."""
+  if image_rewrite is not None:
+    return image_rewrite
+  if os.getenv("IMAGE_REWRITE_PREFIX"):
+    prefix = os.environ["IMAGE_REWRITE_PREFIX"].rstrip("/")
+    return lambda img: f"{prefix}/{img.split('/')[-1]}"
+  return None
+
+
+def _normalize_tasks_for_fleet(
+    tasks: Any, scaffold: str = "r2egym"
+) -> list[Any]:
   """Normalize heterogeneous dataset entries into Task objects for SandboxFleet."""
+  TaskCls = None
   try:
     from agent_sandbox_rl import Task  # pytype: disable=import-error
+    if isinstance(Task, type):
+      TaskCls = Task
   except ImportError:
-    return list(tasks)
+    pass
 
+  if TaskCls is None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class TaskCls:  # pytype: disable=reimported
+      id: str
+      image: str
+      metadata: dict[str, Any]
+
+  agent_server_override = (
+      os.getenv("AGENT_SERVER_IMAGE") if scaffold == "openhands" else None
+  )
   normalized = []
   for item in tasks:
-    if isinstance(item, Task):
+    if hasattr(item, "image") and hasattr(item, "id"):
       normalized.append(item)
     elif isinstance(item, dict):
-      img = item.get("docker_image") or item.get("image", "default")
+      img = (
+          agent_server_override
+          or item.get("docker_image")
+          or item.get("image", "default")
+      )
       if isinstance(img, (list, np.ndarray)):
         img = img[0] if len(img) > 0 else "default"
       t_id = item.get("instance_id") or item.get("id") or img
       if isinstance(t_id, (list, np.ndarray)):
         t_id = t_id[0] if len(t_id) > 0 else "default"
       normalized.append(
-          Task(id=str(t_id), image=str(img), metadata={"ds": item})
+          TaskCls(id=str(t_id), image=str(img), metadata={"ds": item})
       )
     else:
       normalized.append(item)
@@ -111,6 +149,8 @@ def _init_global_fleet(
     num_generations: int = 8,
     batch_size: int = 8,
     max_warmpool_replicas: int | None = None,
+    scaffold: str = "r2egym",
+    image_rewrite: Any | None = None,
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -126,7 +166,6 @@ def _init_global_fleet(
           FleetConfig,
           SandboxFleet,
           Task,
-          TemplateSpec,
       )
     except ImportError as e:
       raise ImportError(
@@ -144,8 +183,17 @@ def _init_global_fleet(
     effective_max_concurrent = max(
         max_concurrency, batch_size * num_generations * 2
     )
-    fleet_cfg = FleetConfig(
-        clusters=[
+
+    template = template_mod.get_template(scaffold, node_sel)
+
+    is_shared_image = scaffold == "openhands" and bool(
+        os.getenv("AGENT_SERVER_IMAGE")
+    )
+    default_warmpool_size = (
+        effective_max_concurrent if is_shared_image else num_generations
+    )
+    fleet_kwargs = {
+        "clusters": [
             ClusterConfig(
                 name="default",
                 namespace=fleet_ns,
@@ -153,21 +201,38 @@ def _init_global_fleet(
                 in_cluster=in_cluster,
             )
         ],
-        max_concurrent=effective_max_concurrent,
-        window_size=batch_size,
-        max_warmpool_size=max_warmpool_replicas
-        if max_warmpool_replicas is not None
-        else num_generations,
-        warm_per_task=True,
-    )
+        "max_concurrent": effective_max_concurrent,
+        "window_size": batch_size,
+        "max_warmpool_size": (
+            max_warmpool_replicas
+            if max_warmpool_replicas is not None
+            else default_warmpool_size
+        ),
+        "warm_per_task": True,
+    }
+    if template is not None:
+      fleet_kwargs["template"] = template
+    if scaffold == "openhands":
+      fleet_kwargs["template_name_prefix"] = "oh-img-"
+    fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
+    image_rewrite_fn = _get_image_rewrite_fn(image_rewrite)
+    fleet_inst._image_rewrite_fn = image_rewrite_fn
     if tasks is not None:
-      fleet_inst.load_tasks(_normalize_tasks_for_fleet(tasks))
+      normalized_tasks = _normalize_tasks_for_fleet(tasks, scaffold=scaffold)
+      should_rewrite = (
+          image_rewrite_fn is not None
+          and (scaffold != "openhands" or not os.getenv("AGENT_SERVER_IMAGE"))
+      )
+      if should_rewrite:
+        fleet_inst.load_tasks(normalized_tasks, image_rewrite=image_rewrite_fn)
+      else:
+        fleet_inst.load_tasks(normalized_tasks)
     msg = (
         f"[SandboxFleet] Initializing pipelined fleet in namespace={fleet_ns}"
         f" (max_concurrent={effective_max_concurrent},"
         f" window_size={batch_size},"
-        f" max_warmpool_replicas={max_warmpool_replicas if max_warmpool_replicas is not None else num_generations},"
+        f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
         " warm_per_task=True)..."
     )
     logging.info(msg)
@@ -201,12 +266,18 @@ class PrewarmDatasetIterator:
       num_generations: int = 8,
       batch_size: int = 8,
       max_warmpool_replicas: int | None = None,
+      scaffold: str = "r2egym",
+      image_rewrite: Any | None = None,
   ):
     self.dataset_iter = iter(dataset)
     self.num_generations = num_generations
     self.batch_size = batch_size
     self.max_warmpool_replicas = max_warmpool_replicas
+    self.scaffold = scaffold
     self.fleet = fleet or _get_global_fleet()
+    self.image_rewrite = _get_image_rewrite_fn(
+        image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
+    )
     self.current_batch = None
     self.next_batch = None
     self.prev_batch_images: list[str] = []
@@ -230,6 +301,14 @@ class PrewarmDatasetIterator:
       pass
 
   def _extract_images(self, batch: Any) -> list[str]:
+    agent_server_override = (
+        os.getenv("AGENT_SERVER_IMAGE")
+        if self.scaffold == "openhands"
+        else None
+    )
+    if agent_server_override:
+      return [agent_server_override]
+
     raw_images = []
     if isinstance(batch, dict) and "docker_image" in batch:
       raw = batch["docker_image"]
@@ -246,19 +325,29 @@ class PrewarmDatasetIterator:
           if isinstance(item, dict) and item.get("docker_image")
       ]
 
-    # Safely decode/stringify all elements
+    # Safely decode/stringify all elements and apply rewrite if configured
+    rewrite_fn = getattr(self, "image_rewrite", None) or _get_image_rewrite_fn()
     str_images = []
     for img in raw_images:
-      str_images.append(
-          img.decode("utf-8") if hasattr(img, "decode") else str(img)
-      )
+      s = img.decode("utf-8") if hasattr(img, "decode") else str(img)
+      if rewrite_fn is not None:
+        s = rewrite_fn(s)
+      str_images.append(s)
 
     return list(dict.fromkeys(str_images))
 
   def _warm_batch(self, batch: Any, wait: bool = False):
     images = self._extract_images(batch)
     if images and self.fleet:
-      target_replicas = self.max_warmpool_replicas or self.num_generations
+      is_shared_image = self.scaffold == "openhands" and bool(
+          os.getenv("AGENT_SERVER_IMAGE")
+      )
+      default_replicas = (
+          getattr(self.fleet.config, "max_concurrent", self.num_generations)
+          if is_shared_image
+          else self.num_generations
+      )
+      target_replicas = self.max_warmpool_replicas or default_replicas
       try:
         self.fleet.warm_images(
             images, replicas_override=target_replicas, wait=wait
@@ -276,6 +365,8 @@ class PrewarmDatasetIterator:
   def _unwarm_batch(self, images: list[str]):
     if images and self.fleet:
       for img in images:
+        if self.scaffold == "openhands" and os.getenv("AGENT_SERVER_IMAGE"):
+          continue
         try:
           self.fleet.unwarm_image(img)
           logging.info(
@@ -341,7 +432,25 @@ except ImportError:
   r2egym = cast(Any, None)
   EnvArgs = cast(Any, None)
   RepoEnv = cast(Any, None)
-  Action = cast(Any, None)
+  Action = None
+
+
+class _ActionFallback:
+  """Minimal Action parser fallback when r2egym is not installed."""
+
+  def __init__(self, function_name: str, parameters: dict[str, str]):
+    self.function_name = function_name
+    self.parameters = parameters
+
+  @classmethod
+  def from_string(cls, action_str: str) -> "_ActionFallback":
+    fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
+    function_name = fn_match.group(1).strip() if fn_match else ""
+    pattern = r"<parameter\s*=\s*([^>]+)>(.*?)</parameter>"
+    param_matches = re.findall(pattern, action_str, flags=re.DOTALL)
+    params = {k.strip(): v.strip() for k, v in param_matches}
+    return cls(function_name, params)
+
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 
@@ -410,7 +519,7 @@ class SWEEnv(BaseTaskEnv):
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
         verbose: Verbose output toggle.
-        scaffold: Scaffold tool set ('r2egym' or 'sweagent').
+        scaffold: Scaffold tool set ('r2egym', 'sweagent', or 'openhands').
         max_steps: Maximum interaction steps.
         use_agent_sandbox: If True, strictly forces SandboxFleet and
           AgentSandboxRuntime.
@@ -423,16 +532,19 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env = None
+    self.workspace = None
     self.handle = None
     self.verbose = verbose
     self.scaffold = scaffold
     self.use_agent_sandbox = use_agent_sandbox
     self.fleet = fleet
+    self._cached_reward = None
 
     assert scaffold in [
         "r2egym",
         "sweagent",
-    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+        "openhands",
+    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent', 'openhands']"
     super().__init__(max_steps=max_steps)
 
     if not hasattr(self, "extra_kwargs"):
@@ -442,34 +554,86 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["pair_index"] = pair_index
 
   def _initial_observation(self) -> Any:
-    if not self.env:
+    if not self.env and not self.workspace:
       if self.use_agent_sandbox:
         _patch_r2egym_for_agent_sandbox()
         from agent_sandbox_rl import Task  # pytype: disable=import-error
-        from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
-            make_fleet_repo_env,
-            r2egym_command_files,
-        )
 
         fleet = self.fleet or _get_global_fleet()
         msg = (
-            "[SWEEnv] Acquiring SandboxHandle from SandboxFleet and"
-            " constructing FleetRepoEnv!"
+            "[SWEEnv] Acquiring SandboxHandle from SandboxFleet!"
         )
         logging.info(msg)
-        task = Task(
-            id=str(
-                self.entry.get(
-                    "instance_id", self.entry.get("docker_image", "default")
-                )
-            ),
-            image=self.entry.get("docker_image", "default"),
-            metadata={"ds": self.entry},
+        task_id = str(
+            self.entry.get(
+                "instance_id", self.entry.get("docker_image", "default")
+            )
         )
-        self.handle = fleet.acquire(task)
-        # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
-        cmd_files = r2egym_command_files()
-        self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
+        task = None
+        if hasattr(fleet, "tasks") and fleet.tasks:
+          for t in fleet.tasks:
+            if t.id == task_id:
+              task = t
+              break
+        if task is None:
+          task_img = (
+              os.getenv("AGENT_SERVER_IMAGE")
+              if self.scaffold == "openhands" and os.getenv("AGENT_SERVER_IMAGE")
+              else self.entry.get("docker_image", "default")
+          )
+          if isinstance(task_img, (list, np.ndarray)):
+            task_img = task_img[0] if len(task_img) > 0 else "default"
+          task_img_str = str(task_img)
+          rewrite_fn = _get_image_rewrite_fn(
+              getattr(fleet, "_image_rewrite_fn", None)
+          )
+          if rewrite_fn and not (
+              self.scaffold == "openhands" and os.getenv("AGENT_SERVER_IMAGE")
+          ):
+            task_img_str = rewrite_fn(task_img_str)
+          task = Task(
+              id=task_id,
+              image=task_img_str,
+              metadata={"ds": self.entry},
+          )
+        max_acquire_retries = 5
+        for attempt in range(max_acquire_retries):
+          try:
+            self.handle = fleet.acquire(task)
+            break
+          except Exception as e:
+            if attempt < max_acquire_retries - 1:
+              logging.warning(
+                  "[SWEEnv] fleet.acquire failed (attempt %d/%d): %s; retrying in %ds...",
+                  attempt + 1,
+                  max_acquire_retries,
+                  e,
+                  5 * (attempt + 1),
+              )
+              time.sleep(5 * (attempt + 1))
+            else:
+              raise
+        if self.scaffold == "openhands":
+          from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
+          ws_kwargs = {}
+          if os.getenv("SANDBOX_SESSION_KEY"):
+            ws_kwargs["api_key"] = os.getenv("SANDBOX_SESSION_KEY")
+          if os.getenv("ROUTER_URL"):
+            ws_kwargs["router_url"] = os.getenv("ROUTER_URL")
+          if os.getenv("ROUTER_AUTH_TOKEN"):
+            ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
+          ws_kwargs["working_dir"] = os.getenv(
+              "OPENHANDS_WORKING_DIR", "/testbed"
+          )
+          self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
+          self._setup_openhands_workspace()
+        else:
+          from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
+              make_fleet_repo_env,
+              r2egym_command_files,
+          )
+          cmd_files = r2egym_command_files()
+          self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)
       else:
         # Initialize standard local Docker RepoEnv
         global EnvArgs, RepoEnv, Action
@@ -486,28 +650,285 @@ class SWEEnv(BaseTaskEnv):
         )
         if self.scaffold == "r2egym":
           self.env.add_commands(R2EGYM_COMMAND_FILES)
-        else:
+        elif self.scaffold == "sweagent":
           self.env.add_commands(SWEAGENT_COMMAND_FILES)
     else:
-      self.env.reset()
+      if self.env is not None:
+        self.env.reset()
 
-    self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
+    self.final_reward_fn = self.compute_reward
+    self._cached_reward = None
     self.total_steps = 0
+
+    if self.workspace is not None:
+      return str(
+          self.entry.get("problem_statement")
+          or self.entry.get("instruction")
+          or ""
+      )
 
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()  # pytype: disable=attribute-error
 
+  def _setup_openhands_workspace(self) -> None:
+    """Configure repository environment in the OpenHands workspace."""
+    if self.workspace is None:
+      return
+
+    entry = getattr(self, "entry", None) or {}
+    repo = (
+        entry.get("repo_name")
+        or entry.get("repo")
+        or ""
+    )
+    commit = (
+        entry.get("commit_hash")
+        or entry.get("base_commit")
+        or ""
+    )
+    if isinstance(repo, (list, np.ndarray)):
+      repo = repo[0] if len(repo) > 0 else ""
+    if isinstance(commit, (list, np.ndarray)):
+      commit = commit[0] if len(commit) > 0 else ""
+
+    repo_map = {
+        "pandas": "https://github.com/pandas-dev/pandas.git",
+        "numpy": "https://github.com/numpy/numpy.git",
+        "pillow": "https://github.com/python-pillow/Pillow.git",
+        "tornado": "https://github.com/tornadoweb/tornado.git",
+        "orange3": "https://github.com/biolab/orange3.git",
+        "datalad": "https://github.com/datalad/datalad.git",
+        "aiohttp": "https://github.com/aio-libs/aiohttp.git",
+        "pyramid": "https://github.com/Pylons/pyramid.git",
+        "scrapy": "https://github.com/scrapy/scrapy.git",
+        "coveragepy": "https://github.com/nedbat/coveragepy.git",
+    }
+    if repo in repo_map:
+      repo_url = repo_map[repo]
+    elif "/" in repo:
+      repo_url = (
+          f"https://github.com/{repo}.git"
+          if not repo.startswith("http")
+          else repo
+      )
+    elif repo:
+      repo_url = f"https://github.com/{repo}/{repo}.git"
+    else:
+      repo_url = ""
+
+    setup_cmds = [
+        "git config --global user.email 'openhands@agent.sandbox'",
+        "git config --global user.name 'OpenHands Agent'",
+        "git config --global --add safe.directory /testbed 2>/dev/null || true",
+        "git config --global --add safe.directory /workspace 2>/dev/null || true",
+    ]
+    if repo_url:
+      setup_cmds.append(
+          f"if [ ! -d /testbed/.git ] && [ ! -d /workspace/.git ]; then "
+          f"  git clone {repo_url} /tmp/repo_clone && "
+          f"  cp -a /tmp/repo_clone/. /workspace/ && "
+          f"  rm -rf /tmp/repo_clone && "
+          f"  (([ ! -d /testbed ] || rmdir /testbed 2>/dev/null || true) && ln -s /workspace /testbed 2>/dev/null || true); "
+          f"elif [ ! -e /testbed ] && [ -d /workspace ]; then "
+          f"  ln -s /workspace /testbed 2>/dev/null || true; "
+          f"fi"
+      )
+      if commit:
+        setup_cmds.append(
+            f"if [ ! -d /testbed/.git ] || [ -L /testbed ]; then "
+            f"  if [ -d /workspace/.git ]; then "
+            f"    cd /workspace && git fetch origin 2>/dev/null || true && "
+            f"    git checkout -f {commit} 2>/dev/null || true; "
+            f"  fi; "
+            f"fi"
+        )
+    else:
+      setup_cmds.append(
+          f"if [ ! -e /testbed ] && [ -d /workspace ]; then "
+          f"  ln -s /workspace /testbed 2>/dev/null || true; "
+          f"fi"
+      )
+
+    full_setup_cmd = " && ".join(setup_cmds)
+    try:
+      logging.info(
+          "[SWEEnv] Configuring repository environment for %s...",
+          repo,
+      )
+      res = self.workspace.execute_command(full_setup_cmd, timeout=180.0)
+      if res.exit_code != 0:
+        logging.warning(
+            "[SWEEnv] Repository setup exit code %s: %s",
+            res.exit_code,
+            res.stderr or res.stdout,
+        )
+      else:
+        logging.info(
+            "[SWEEnv] Successfully configured repository environment for %s", repo
+        )
+    except Exception as e:
+      logging.warning(
+          "[SWEEnv] Failed to set up repository in workspace: %s", e
+      )
+
+  def compute_reward(self, verbose: bool = False) -> float:
+    """Compute task reward for the current environment state."""
+    if self._cached_reward is not None:
+      return self._cached_reward
+
+    if self.env is not None and hasattr(self.env, "compute_reward"):
+      try:
+        reward = float(self.env.compute_reward(verbose=verbose))
+      except TypeError:
+        reward = float(self.env.compute_reward())
+      self._cached_reward = reward
+      return reward
+
+    if self.workspace is not None:
+      test_patch = self.entry.get("test_patch")
+      if test_patch:
+        if hasattr(test_patch, "decode"):
+          test_patch = test_patch.decode("utf-8")
+        apply_cmd = (
+            f"cat << '__EOF_PATCH__' > /tmp/test_patch.diff\n{test_patch}\n__EOF_PATCH__\n"
+            "(cd /testbed 2>/dev/null || cd /workspace) && "
+            "(git apply --whitespace=nowarn /tmp/test_patch.diff 2>/dev/null || patch -p1 < /tmp/test_patch.diff)"
+        )
+        try:
+          self.workspace.execute_command(apply_cmd, timeout=60.0)
+        except Exception as e:
+          logging.warning("[SWEEnv] Failed to apply test_patch: %s", e)
+
+      eval_script = (
+          self.entry.get("eval_script")
+          or self.entry.get("run_tests_regression")
+      )
+      if eval_script:
+        if hasattr(eval_script, "decode"):
+          eval_script = eval_script.decode("utf-8")
+        eval_cmd = (
+            f"cat << '__EOF_EVAL__' > /tmp/eval.sh\n{eval_script}\n__EOF_EVAL__\n"
+            "chmod +x /tmp/eval.sh && (cd /testbed 2>/dev/null || cd /workspace) && /tmp/eval.sh"
+        )
+        try:
+          res = self.workspace.execute_command(
+              eval_cmd, timeout=float(self.reward_timeout)
+          )
+          reward = 1.0 if res.exit_code == 0 else 0.0
+          self._cached_reward = reward
+          return reward
+        except Exception as e:
+          logging.warning("[SWEEnv] Reward computation error: %s", e)
+          self._cached_reward = 0.0
+          return 0.0
+
+      test_cmd = self.entry.get("test_command")
+      if test_cmd:
+        try:
+          res = self.workspace.execute_command(
+              f"(cd /testbed 2>/dev/null || cd /workspace) && {test_cmd}",
+              timeout=float(self.reward_timeout),
+          )
+          reward = 1.0 if res.exit_code == 0 else 0.0
+          self._cached_reward = reward
+          return reward
+        except Exception as e:
+          logging.warning("[SWEEnv] Reward computation error: %s", e)
+          self._cached_reward = 0.0
+          return 0.0
+
+      try:
+        run_cmd = (
+            "if [ -f /testbed/run_tests.sh ]; then "
+            "cd /testbed && bash /testbed/run_tests.sh; "
+            "elif [ -f /run_tests.sh ]; then "
+            "(cd /testbed 2>/dev/null || cd /workspace) && bash /run_tests.sh; "
+            "else exit 1; fi"
+        )
+        res = self.workspace.execute_command(
+            run_cmd,
+            timeout=float(self.reward_timeout),
+        )
+        reward = 1.0 if res.exit_code == 0 else 0.0
+        self._cached_reward = reward
+        return reward
+      except Exception as e:
+        logging.warning("[SWEEnv] Reward computation error: %s", e)
+        self._cached_reward = 0.0
+        return 0.0
+
+    return 0.0
+
   def _step_impl(self, action: Any) -> EnvStepResult:
     global Action
     if Action is None:
-      from r2egym.agenthub.action import Action  # pytype: disable=import-error
+      try:
+        from r2egym.agenthub.action import Action  # pytype: disable=import-error
+      except ImportError:
+        Action = _ActionFallback
     if isinstance(action, str):
       action_obj = Action.from_string(action)
     else:
       action_obj = action
 
     if not action_obj.function_name:
-      return EnvStepResult(observation="", reward=0, done=False, info={})
+      return EnvStepResult(
+          observation="",
+          reward=0,
+          done=False,
+          info={"max_steps": self.max_steps},
+      )
+
+    if self.scaffold == "openhands" and self.workspace is not None:
+      if action_obj.function_name in ("finish", "submit"):
+        return EnvStepResult(
+            observation="Task submitted.",
+            reward=0,
+            done=True,
+            info={"max_steps": self.max_steps},
+        )
+
+      if action_obj.function_name != "execute_bash":
+        return EnvStepResult(
+            observation=(
+                f"ERROR: Tool '{action_obj.function_name}' is not recognized. "
+                "Only 'execute_bash' and 'submit' are available."
+            ),
+            reward=0,
+            done=False,
+            info={"max_steps": self.max_steps},
+        )
+
+      cmd = action_obj.parameters.get("command") or action_obj.parameters.get(
+          "cmd"
+      )
+      if not cmd:
+        return EnvStepResult(
+            observation="ERROR: No command specified for execute_bash.",
+            reward=0,
+            done=False,
+            info={"max_steps": self.max_steps},
+        )
+
+      try:
+        wrapped_cmd = f"(cd /testbed 2>/dev/null || cd /workspace) && {cmd}"
+        result = self.workspace.execute_command(
+            wrapped_cmd, timeout=float(self.step_timeout)
+        )
+        obs = (
+            result.stdout
+            if result.exit_code == 0
+            else f"{result.stdout}\n{result.stderr}"
+        )
+      except Exception as e:
+        obs = f"Command execution failed: {e}"
+      self.total_steps += 1
+      return EnvStepResult(
+          observation=obs,
+          reward=0,
+          done=False,
+          info={"max_steps": self.max_steps},
+      )
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
@@ -522,8 +943,16 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    self._cached_reward = None
     if self.env is not None:
       self.env.close()
+
+    if getattr(self, "workspace", None) is not None:
+      try:
+        self.workspace.cleanup()
+      except Exception as e:
+        logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
+      self.workspace = None
 
     fleet = self.fleet or _GLOBAL_FLEET
     if (
