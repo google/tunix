@@ -1015,6 +1015,80 @@ class AlignmentTest(absltest.TestCase):
         flush=True,
     )
 
+  def test_frozenlake_warning_policy_admits_the_onehost_stock_engine_proxy(
+      self,
+  ):
+    # tasks/zero_tim_perf P3.1: the four-chip stock-engine ``is`` arm runs
+    # backward-no-commit with no P57 run kind; it observes the boundaries
+    # under the FrozenLake warning policy and attests native-stock-trainer.
+    wrapped = self._wrapped()
+    wrapped = wrapped.replace(
+        s_decode=wrapped.s_decode - np.float32(0.3),
+        s_prefill=wrapped.s_prefill + np.float32(0.5),
+    )
+    t_current = wrapped.t_old - np.float32(0.75)
+    proxy = {
+        alignment.GATE_ONLY_ENV: "0",
+        alignment.UPDATE_CANARY_ENV: "0",
+        alignment.TRAIN_ENV: "1",
+        alignment.PRE_GATE_ENV: "1",
+        alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+        alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "0",
+        alignment.FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV: "1",
+        "CANON_P32_WORKLOAD": "frozenlake",
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P57_RUN_KIND": "",
+        "CANON_P57_INFERENCE_REGIME": "stock-fast",
+        "CANON_ENGINE_MODULE_C": "",
+    }
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            **proxy,
+            "CANON_P57_TIM_ARM": "is",
+            alignment.PRE_REPORT_ENV: os.path.join(tmpdir, "pre.jsonl"),
+            alignment.REPORT_ENV: os.path.join(tmpdir, "post.jsonl"),
+        },
+        clear=False,
+    ):
+      pre = alignment.check_pre_backward(wrapped, step=0)
+      # backward-no-commit: the compiled step skips the optimizer.
+      post = alignment.check_batch(
+          wrapped,
+          t_current=t_current,
+          gradient_norm=np.asarray(1.0, np.float32),
+          optimizer_skipped=np.asarray(1, np.int32),
+          step=0,
+      )
+    self.assertEqual(pre["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(pre["blocking_reds"])
+    self.assertSameElements(
+        pre["warning_reds"],
+        ("S_decode_vs_S_prefill", "S_prefill_vs_T_old"),
+    )
+    self.assertEqual(
+        pre["admission_policy"]["id"],
+        "frozenlake-full-alignment-warning-v1",
+    )
+    self.assertEqual(post["verdict"], "PASS_WITH_ALIGNMENT_WARNINGS")
+    self.assertEmpty(post["blocking_reds"])
+    self.assertEqual(
+        post["context"]["canonical_c"],
+        {"mode": "native-stock-trainer", "canonical_engine_registered": False},
+    )
+    self.assertEqual(post["admission_policy"]["claim_level"], "convergence-only")
+
+    # The zero arm on the same proxy keeps the committed-full-training scope.
+    with mock.patch.dict(
+        os.environ,
+        {**proxy, "CANON_P57_TIM_ARM": "zero"},
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "committed FrozenLake full training"
+    ):
+      alignment.check_pre_backward(wrapped, step=0)
+
   def test_deepswe_full_warning_policy_continues_finite_bc_only(self):
     wrapped = self._wrapped().replace(
         s_decode=self._wrapped().s_decode - np.float32(0.5),

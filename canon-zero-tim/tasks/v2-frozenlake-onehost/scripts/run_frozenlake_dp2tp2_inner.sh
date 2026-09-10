@@ -93,7 +93,13 @@ if [ "${V2_FL_STOCK_ENGINE:-0}" = 1 ]; then
   # selects the stock-fast inference regime from these two values; the engine
   # overlay is not mounted by the launcher.  Never certification evidence.
   export CANON_P57_TIM_ARM="$arm" CANON_P57_INFERENCE_REGIME=stock-fast
-  echo "[V2.FL.ONEHOST] DIAG stock-engine arm=$arm regime=stock-fast overlay=none (not certification)"
+  # The stock engine is not bitwise against the trainer; observe the three
+  # boundaries under the same warning-only policy the 64-chip stock arms use
+  # (dp_workloads P57_STOCK_TRAIN_ONE_SWITCHES), unpinning the proxy's
+  # WARN_ONLY=0 pin through the diagnostic unpin list.
+  export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
+  export CANON_DP_WORKLOAD_DIAG_UNPIN="${CANON_DP_WORKLOAD_DIAG_UNPIN:+${CANON_DP_WORKLOAD_DIAG_UNPIN}:}CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"
+  echo "[V2.FL.ONEHOST] DIAG stock-engine arm=$arm regime=stock-fast overlay=none warn_only=1 unpin=$CANON_DP_WORKLOAD_DIAG_UNPIN (not certification)"
 fi
 if [ "${CANON_P75_REPORT_ADJOINT_BUCKETS:-}" != "$report_buckets" ]; then
   echo "[V2.FL.ONEHOST] profile changed report-bucket selector" >&2

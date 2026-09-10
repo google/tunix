@@ -510,6 +510,26 @@ def is_audit_step(step: int) -> bool:
   return int(step) % audit_every() == 0
 
 
+def _p57_stock_onehost_proxy() -> bool:
+  """Whether this is the one-host four-chip stock-engine diagnostic arm.
+
+  tasks/zero_tim_perf P3.1: the ``is`` / ``mismatch`` arms run the untreated
+  stock engine on the backward-no-commit one-host proxy.  They observe the
+  same warning-only alignment boundaries and the same native-stock-trainer
+  attestation as the 64-chip P57 stock arms, which carry
+  ``CANON_P57_RUN_KIND=train``; the proxy carries no run kind and is never
+  certification evidence.  The zero arm and every 64-chip path leave this
+  predicate false.
+  """
+  return (
+      os.environ.get("CANON_P57_TIM_ARM", "") in ("is", "mismatch")
+      and os.environ.get("CANON_P57_INFERENCE_REGIME", "") == "stock-fast"
+      and os.environ.get("CANON_P57_RUN_KIND", "") == ""
+      and os.environ.get("CANON_P33_RUN_STAGE", "") == "backward-no-commit"
+      and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+  )
+
+
 def gsm8k_ab_report_policy() -> dict[str, Any]:
   """Returns the narrow, preregistered full-run alignment policy."""
   raw = os.environ.get(GSM8K_AB_REPORT_ONLY_ENV, "")
@@ -671,14 +691,17 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     fl_geom = fl_geometry.from_env(os.environ)
     admitted = (
         workload in ("frozenlake", fl_geom.workload)
-        and stage == "full"
-        and no_commit == "0"
         and execution_mode() == "train"
+        and (
+            (stage == "full" and no_commit == "0")
+            or _p57_stock_onehost_proxy()
+        )
     )
     if not admitted:
       raise AlignmentGateError(
           "FrozenLake alignment warning policy is admitted only for committed "
-          "FrozenLake full training"
+          "FrozenLake full training or the one-host stock-engine diagnostic "
+          "proxy"
       )
     p57_zero_arm = os.environ.get("CANON_P57_TIM_ARM", "") == "zero"
     if p57_zero_arm:
@@ -2203,7 +2226,7 @@ def check_batch(
       os.environ.get("CANON_P57_RUN_KIND", "") == "train"
       and os.environ.get("CANON_P57_TIM_ARM", "") in ("mismatch", "is", "standard")
       and os.environ.get("CANON_P57_INFERENCE_REGIME", "") == "stock-fast"
-  )
+  ) or _p57_stock_onehost_proxy()
   if p58_native or p57_stock:
     canonical_c = {
         "mode": "native-stock-trainer",

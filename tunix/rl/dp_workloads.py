@@ -1507,6 +1507,9 @@ def validate_environment(
         "CANON_V1_HP_FULL": "0",
         "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
     }
+    # The diagnostic unpin list reaches the proxy pins too (tasks/zero_tim_perf
+    # P3.1: the stock-engine arms lift the WARN_ONLY=0 pin).
+    apply_diag_unpin(proxy_expected, values)
     proxy_wrong = {
         name: values.get(name)
         for name, expected_value in proxy_expected.items()
