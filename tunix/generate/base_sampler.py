@@ -98,3 +98,11 @@ class BaseSampler(ABC):
     raise NotImplementedError(
         f"{type(self).__name__} does not implement update_params."
     )
+
+  def delete_cache(self) -> None:
+    """Deletes KV cache to free up memory before weight sync."""
+    pass
+
+  def reinitialize_cache(self) -> None:
+    """Reinitializes KV cache after weight sync."""
+    pass

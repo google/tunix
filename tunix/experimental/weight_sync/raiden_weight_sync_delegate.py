@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any, List
+from typing import Any, List, Mapping
 
 from absl import logging
+import jax
 from tunix.experimental.weight_sync import raiden_synchronizer
+from tunix.experimental.weight_sync import weight_sync_coordinator
 
 
 class RaidenWeightSyncDelegate:
@@ -36,14 +38,24 @@ class RaidenWeightSyncDelegate:
   abort after a partial weight_sync cannot restore the previous weights.
   """
 
-  def __init__(self, *args, worker_index: int = 0, **kwargs):
-    super().__init__(*args, **kwargs)
+  def __init__(
+      self,
+      *args,
+      worker_index: int = 0,
+      **kwargs,
+  ):
+    del args, kwargs
+    # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
+    self._sampler = None
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
-            "rollout", worker_index=worker_index, auto_h2d=True
+            "rollout",
+            worker_index=worker_index,
+            auto_h2d=True,
         )
     ]
     self._version = 0
+    self._tracker = weight_sync_coordinator.WorkerRoundTracker()
 
   def is_bounded(
       self,
@@ -52,10 +64,12 @@ class RaidenWeightSyncDelegate:
     return all(s.bound for s in self._synchronizers)
 
   async def bind_weight_sync(
-      self, sync_request: Any = None, state: Any = None, **kwargs
+      self, sync_request: Any = None, state: Any = None, sampler: Any = None, **kwargs
   ) -> Any:
     """Binds destination-side transport resources for weight sync."""
     del sync_request, kwargs
+    if sampler is not None:
+      self._sampler = sampler
 
     for sync in self._synchronizers:
       # The state arrays never change, so one bind covers every round.
@@ -69,14 +83,33 @@ class RaidenWeightSyncDelegate:
     del kwargs
     return [s.work_unit_metadata() for s in self._synchronizers]
 
+  def _has_round(self, sync_request: Any) -> bool:
+    extra = getattr(sync_request, "extra_config", None) or {}
+    return extra.get("req_id") is not None
+
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Pre-sync phase hook executed before weight transfer begins."""
-    del sync_request, kwargs
+    del kwargs
+    if self._has_round(sync_request):
+      if not self._tracker.admit(sync_request, "prepared"):
+        return True
+      self._tracker.complete(sync_request, "prepared")
+
+    if self._sampler is None:
+      raise RuntimeError("Sampler is not available for weight sync")
+
+    self._sampler.delete_cache()
+    jax.effects_barrier()
+
     return True
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Executes weight installation on device from host staging buffer."""
     del kwargs
+    if self._has_round(sync_request):
+      if not self._tracker.admit(sync_request, "h2d_done"):
+        return self._version
+
     for sync in self._synchronizers:
       if not sync.bound:
         raise RuntimeError("bind_weight_sync must run before weight_sync")
@@ -87,12 +120,42 @@ class RaidenWeightSyncDelegate:
         logging.info("destination checksums: %s", sync.checksums())
     version = getattr(sync_request, "policy_version", 0)
     self._version = version if version else self._version + 1
+
+    if self._has_round(sync_request):
+      self._tracker.complete(sync_request, "h2d_done")
+
     return self._version
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Post-sync phase hook executed after weight installation completes."""
-    del sync_request, kwargs
+    del kwargs
+    if self._has_round(sync_request):
+      if not self._tracker.admit(sync_request, "committed"):
+        return True
+
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
       for sync in self._synchronizers:
         logging.info("raiden metrics: %s", sync.metrics())
+
+    if self._sampler is None:
+      raise RuntimeError("Sampler is not available for weight sync")
+
+    self._sampler.reinitialize_cache()
+
+    if self._has_round(sync_request):
+      self._tracker.complete(sync_request, "committed")
+
     return True
+
+  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Safely handles abort of weight sync round."""
+    del kwargs
+    if self._has_round(sync_request):
+      if not self._tracker.admit(sync_request, "aborted"):
+        return False
+      self._tracker.complete(sync_request, "aborted")
+    return True
+
+  def get_weight_sync_status(self) -> Mapping[str, Any]:
+    """Reports worker-side round status for coordinator recovery checks."""
+    return self._tracker.report()

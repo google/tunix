@@ -56,8 +56,9 @@ class _FakeWorker:
 
 class _Request:
 
-  def __init__(self, policy_version):
+  def __init__(self, policy_version, req_id=None):
     self.policy_version = policy_version
+    self.extra_config = {"req_id": req_id} if req_id else {}
 
 
 class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
@@ -90,7 +91,7 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
   async def test_repeat_phases_bind_exactly_once(self):
     delegate = self._delegate()
     fake_state = {"w": 1}
-    await delegate.bind_weight_sync(state=fake_state)
+    await delegate.bind_weight_sync(state=fake_state, sampler=mock.MagicMock())
     await delegate.get_weight_sync_metadata()
     await delegate.pre_weight_sync()
     await delegate.weight_sync()
@@ -126,7 +127,49 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_post_weight_sync_returns_true(self):
     delegate = self._delegate()
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=mock.MagicMock())
     self.assertTrue(await delegate.post_weight_sync())
+
+  async def test_pre_weight_sync_without_sampler_raises(self):
+    delegate = self._delegate()
+    await delegate.bind_weight_sync(state={"w": 1})
+    with self.assertRaisesRegex(RuntimeError, "Sampler is not available"):
+      await delegate.pre_weight_sync()
+
+  async def test_pre_weight_sync_clears_prefix_and_kv_cache(self):
+    sampler = mock.MagicMock()
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+    await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
+    req = _Request(policy_version=1, req_id="req-1")
+    await delegate.pre_weight_sync(sync_request=req)
+    sampler.delete_cache.assert_called_once()
+
+  async def test_post_weight_sync_reinitializes_kv_cache(self):
+    sampler = mock.MagicMock()
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+    await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
+    req = _Request(policy_version=1, req_id="req-1")
+    # Only a pre (or an abort) may open a round on the tracker, so the commit
+    # phase has to follow one that carries the same round key.
+    await delegate.pre_weight_sync(sync_request=req)
+    await delegate.post_weight_sync(sync_request=req)
+    sampler.reinitialize_cache.assert_called_once()
+
+  async def test_round_tracker_lifecycle_and_status(self):
+    delegate = self._delegate()
+    await delegate.bind_weight_sync(state={"w": 1}, sampler=mock.MagicMock())
+    req = _Request(policy_version=1, req_id="req-1")
+    await delegate.pre_weight_sync(sync_request=req)
+    await delegate.weight_sync(sync_request=req)
+    await delegate.post_weight_sync(sync_request=req)
+    report = delegate.get_weight_sync_status()
+    self.assertIsNotNone(report)
+
+  async def test_abort_weight_sync_marks_aborted(self):
+    delegate = self._delegate()
+    req = _Request(policy_version=1, req_id="req-1")
+    res = await delegate.abort_weight_sync(sync_request=req)
+    self.assertTrue(res)
 
 
 if __name__ == "__main__":
