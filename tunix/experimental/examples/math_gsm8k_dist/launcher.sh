@@ -64,6 +64,10 @@ FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
+# OpenTelemetry metrics export (opt-in): set to a collector endpoint such as
+# http://localhost:4317 to enable; unset keeps the default backends only.
+OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-tunix-orchestrator}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
@@ -734,6 +738,8 @@ echo "Launching CPU orchestrator..."
   export WANDB_PROJECT="$WANDB_PROJECT"
   export WANDB_RUN_NAME="$WANDB_RUN_NAME"
   export WANDB_API_KEY="$WANDB_API_KEY"
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="$OTEL_SERVICE_NAME"
   env | egrep 'JAX|TPU'
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1

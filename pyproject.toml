@@ -82,6 +82,8 @@ otel = [
   # Experimental OpenTelemetry double-write path for MetricsLogger.
   "opentelemetry-api>=1.25.0",
   "opentelemetry-sdk>=1.25.0",
+  # OTLP/gRPC exporter so the SDK can reach a collector.
+  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
 ]
 frozenlake = [
   "gymnasium",
