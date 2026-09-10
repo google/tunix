@@ -205,7 +205,7 @@ def make_gsm8k_reward_fn(
     if debug:
       prompt_id = metadata.get(
           "prompt_id",
-          getattr(item, "group_id", getattr(item, "prompt_id", "unknown")),
+          getattr(item, "prompt_id", "unknown"),
       )
       logging.debug(
           "[Orchestrator] Sampler response for %s:\n"

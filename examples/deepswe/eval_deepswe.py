@@ -563,15 +563,15 @@ async def run_evaluation():
   async for batch in orchestrator.yield_batches(batch_size=1):
     for item in batch:
       traj = item.traj
-      entry = entries[item.pair_index]
+      entry = entries[item.group_index]
       guard_reasons = sorted({
           (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
           for step in traj.steps
           if (getattr(step, "info", {}) or {}).get("guard_blocked")
       })
       result = {
-          "pair_index": item.pair_index,
-          "instance_id": entry.get("instance_id", item.pair_index),
+          "pair_index": item.group_index,
+          "instance_id": entry.get("instance_id", item.group_index),
           "reward": float(traj.reward),
           "num_steps": len(traj.steps),
           "status": getattr(traj.status, "name", str(traj.status)),

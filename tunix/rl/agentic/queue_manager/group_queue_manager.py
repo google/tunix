@@ -38,7 +38,7 @@ class GroupQueueManager(Generic[_T]):
   """Manages queues of items with pluggable grouping and filtering.
 
   This class collects instances into buckets based on a pluggable grouping
-  strategy (defaulting to grouping by `item.group_id` / `item.prompt_id`).
+  strategy (defaulting to grouping by `item.prompt_id`).
   Once a candidate group reaches completion, it passes through an optional
   `filter_fn` before being made available for retrieval in batches.
   """

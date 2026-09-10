@@ -162,10 +162,9 @@ class TrajectoryItem:
 
   Attributes:
     prompt_id: Unique identifier for the prompt/task. Standardized across
-      orchestrator and training workflows (equivalent to `group_id`).
+      orchestrator and training workflows.
     group_index: Index of the rollout within its prompt group (0 .. G-1).
-      Standardized across orchestrator and training workflows (equivalent to
-      `pair_index`).
+      Standardized across orchestrator and training workflows.
     start_step: Starting step index within the full trajectory.
     traj: The trajectory payload. Typically a dictionary in tokenized RL training
       workflows (e.g. from `TrajectoryCollectEngine(mode="Token")` containing
@@ -174,8 +173,6 @@ class TrajectoryItem:
       step-by-step agent interactions (`mode="Trajectory"`) for evaluation or
       inspection.
     metadata: Arbitrary metadata dictionary for tracking, lineage, or extra parameters.
-    group_id: Deprecated alias for prompt_id.
-    pair_index: Deprecated alias for group_index.
   """
 
   prompt_id: Hashable = ""
@@ -183,10 +180,6 @@ class TrajectoryItem:
   start_step: int = 0
   traj: Any = None
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-  # Legacy aliases
-  group_id: Hashable | None = None
-  pair_index: int | None = None
 
   def __init__(
       self,
@@ -196,28 +189,10 @@ class TrajectoryItem:
       start_step: int = 0,
       traj: Any = None,
       metadata: dict[str, Any] | None = None,
-      group_id: Hashable | None = None,
-      pair_index: int | None = None,
       **kwargs: Any,
   ):
-    if group_id is not None and not prompt_id:
-      prompt_id = group_id
-    elif prompt_id and group_id is None:
-      group_id = prompt_id
-    if group_id is None:
-      group_id = prompt_id
-
-    if pair_index is not None and group_index == 0:
-      group_index = pair_index
-    elif group_index != 0 and pair_index is None:
-      pair_index = group_index
-    if pair_index is None:
-      pair_index = group_index
-
     self.prompt_id = prompt_id
     self.group_index = group_index
-    self.group_id = group_id
-    self.pair_index = pair_index
     self.start_step = start_step
     self.traj = traj
     self.metadata = dict(metadata or {})
@@ -265,7 +240,7 @@ class TrajectoryItem:
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> "TrajectoryItem":
     """Reconstructs TrajectoryItem from a dictionary."""
-    group_index_raw = data.get("group_index", data.get("pair_index", 0))
+    group_index_raw = data.get("group_index", 0)
     group_index = int(group_index_raw) if group_index_raw is not None else 0
     start_step_raw = data.get("start_step", 0)
     start_step = int(start_step_raw) if start_step_raw is not None else 0
@@ -273,9 +248,7 @@ class TrajectoryItem:
     for k, v in data.items():
       if k not in (
           "prompt_id",
-          "group_id",
           "group_index",
-          "pair_index",
           "start_step",
           "traj",
           "metadata",
@@ -283,7 +256,7 @@ class TrajectoryItem:
         if k not in metadata:
           metadata[k] = v
     return cls(
-        prompt_id=data.get("prompt_id", data.get("group_id", "")),
+        prompt_id=data.get("prompt_id", ""),
         group_index=group_index,
         start_step=start_step,
         traj=data.get("traj"),

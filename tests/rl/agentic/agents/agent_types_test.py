@@ -45,8 +45,6 @@ class TrajectoryItemTest(absltest.TestCase):
 
     self.assertEqual(restored.prompt_id, "prompt_42")
     self.assertEqual(restored.group_index, 1)
-    self.assertEqual(restored.group_id, "prompt_42")
-    self.assertEqual(restored.pair_index, 1)
     self.assertEqual(restored.start_step, 0)
     self.assertEqual(restored.reward, 1.5)
     self.assertEqual(restored.status, agent_types.TrajectoryStatus.SUCCEEDED)
@@ -131,24 +129,16 @@ class TrajectoryItemTest(absltest.TestCase):
     with self.assertRaises(AttributeError):
       _ = item.non_existent_key
 
-  def test_identifier_aliases(self):
-    # Initializing with standard names populates legacy aliases
-    item1 = agent_types.TrajectoryItem(
+  def test_identifier_attributes(self):
+    item = agent_types.TrajectoryItem(
         prompt_id="prompt_a", group_index=3, traj={}
     )
-    self.assertEqual(item1.prompt_id, "prompt_a")
-    self.assertEqual(item1.group_id, "prompt_a")
-    self.assertEqual(item1.group_index, 3)
-    self.assertEqual(item1.pair_index, 3)
-
-    # Initializing with legacy names populates standard names
-    item2 = agent_types.TrajectoryItem(
-        group_id="prompt_b", pair_index=5, traj={}
-    )
-    self.assertEqual(item2.prompt_id, "prompt_b")
-    self.assertEqual(item2.group_id, "prompt_b")
-    self.assertEqual(item2.group_index, 5)
-    self.assertEqual(item2.pair_index, 5)
+    self.assertEqual(item.prompt_id, "prompt_a")
+    self.assertEqual(item.group_index, 3)
+    with self.assertRaises(AttributeError):
+      _ = item.group_id
+    with self.assertRaises(AttributeError):
+      _ = item.pair_index
 
   def test_traj_id_property(self):
     item = agent_types.TrajectoryItem(

@@ -168,16 +168,6 @@ class WireSerializationTest(absltest.TestCase):
       )
 
 
-  def test_trajectory_item_group_id_and_pair_index_aliases(self):
-    # Test setting prompt_id and group_index synchronizes aliases
-    item1 = datatypes.TrajectoryItem(prompt_id="p1", group_index=3)
-    self.assertEqual(item1.group_id, "p1")
-    self.assertEqual(item1.pair_index, 3)
-
-    # Test setting legacy group_id and pair_index synchronizes standardized names
-    item2 = datatypes.TrajectoryItem(group_id="p2", pair_index=4)
-    self.assertEqual(item2.prompt_id, "p2")
-    self.assertEqual(item2.group_index, 4)
 
   def test_trajectory_item_to_and_from_dict(self):
     traj = {
