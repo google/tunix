@@ -6066,12 +6066,43 @@ def _canon_xprof_step_immediate_entry() -> None:
     raise ValueError(
         "CANON_XPROF_STEP_IMMEDIATE=1 requires CANON_XPROF_SKIP_STEPS=0"
     )
-  _CANON_XPROF["profiler"].maybe_activate(0)
-  print(
-      "[P51.XPROF] phase=step started step=0 anchor=producer_start "
-      "(immediate)",
-      flush=True,
+  # A whole-step window on the one-step proxy (rollout + audits + backward,
+  # ~25 min) fills the device trace buffer and the 2 GB XSpace limit with
+  # host events, and the device planes come back empty
+  # (ztp2_a2_zero_step_20260910_r3).  The window is therefore a short timer:
+  # DELAY seconds after the producer starts (past engine warm-up) it opens,
+  # SECONDS later it closes.  Zero values keep the open-at-start /
+  # close-on-return behavior.
+  delay = float(os.environ.get("CANON_XPROF_STEP_IMMEDIATE_DELAY", "") or "0")
+  seconds = float(
+      os.environ.get("CANON_XPROF_STEP_IMMEDIATE_SECONDS", "") or "0"
   )
+  import threading  # pylint: disable=g-import-not-at-top
+
+  def _close_after_timer():
+    _CANON_XPROF["profiler"].maybe_deactivate(
+        _CANON_XPROF["skip"] + _CANON_XPROF["steps"]
+    )
+    print(
+        f"[P51.XPROF] phase=step stopped step=0 anchor=timer "
+        f"seconds={seconds:g} (immediate)",
+        flush=True,
+    )
+
+  def _open():
+    _CANON_XPROF["profiler"].maybe_activate(0)
+    print(
+        "[P51.XPROF] phase=step started step=0 anchor=producer_start "
+        f"delay={delay:g} (immediate)",
+        flush=True,
+    )
+    if seconds > 0:
+      threading.Timer(seconds, _close_after_timer).start()
+
+  if delay > 0:
+    threading.Timer(delay, _open).start()
+  else:
+    _open()
 
 
 def _canon_xprof_step_immediate_exit() -> None:

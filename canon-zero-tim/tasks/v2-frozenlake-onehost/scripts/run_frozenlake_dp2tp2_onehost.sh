@@ -167,7 +167,8 @@ if [ "${V2_FL_XPROF_PHASE:-}" = step ]; then
   xprof_python_tracer=0
   xprof_tpu_trace_mode=
   xprof_labels=1
-  echo "[V2.FL.ONEHOST] DIAG xprof phase=step on a live measure run (rollout window; not certification)"
+  : "${V2_FL_XPROF_STEP_DELAY:=60}"; : "${V2_FL_XPROF_STEP_SECONDS:=20}"
+  echo "[V2.FL.ONEHOST] DIAG xprof phase=step on a live measure run (rollout window; delay=${V2_FL_XPROF_STEP_DELAY}s seconds=${V2_FL_XPROF_STEP_SECONDS}s; not certification)"
 fi
 seal_evidence() {
   find "$root" -type f ! -name SHA256SUMS -print0 \
@@ -375,6 +376,8 @@ sudo docker run --rm --init --privileged --net=host --name "$container" \
   -e CANON_XPROF_TPU_TRACE_MODE="$xprof_tpu_trace_mode" \
   -e CANON_XPROF_LABELS="$xprof_labels" \
   -e CANON_XPROF_STEP_IMMEDIATE="$([ "${V2_FL_XPROF_PHASE:-}" = step ] && echo 1)" \
+  -e CANON_XPROF_STEP_IMMEDIATE_DELAY="${V2_FL_XPROF_STEP_DELAY:-}" \
+  -e CANON_XPROF_STEP_IMMEDIATE_SECONDS="${V2_FL_XPROF_STEP_SECONDS:-}" \
   -e V2_FL_CAPSULE_MODE="$capsule_mode" \
   -e V2_FL_CAPSULE_CAPTURE_RUN="$capsule_capture_run" \
   -e CANON_V2_TRAINING_CAPSULE_MODE="${capsule_mode#none}" \
