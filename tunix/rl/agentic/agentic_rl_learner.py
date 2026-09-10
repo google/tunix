@@ -2552,6 +2552,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "segmented backward no-commit mutated training state: "
             f"{no_commit_record}"
         )
+      _canon_xprof_step_immediate_exit()
       return no_commit_record
 
     first_update_admission = bool(
@@ -6068,6 +6069,28 @@ def _canon_xprof_step_immediate_entry() -> None:
   _CANON_XPROF["profiler"].maybe_activate(0)
   print(
       "[P51.XPROF] phase=step started step=0 anchor=producer_start "
+      "(immediate)",
+      flush=True,
+  )
+
+
+def _canon_xprof_step_immediate_exit() -> None:
+  """Closes the immediate phase=step window on the no-commit return path.
+
+  The one-step proxy returns from the segmented no-commit update before the
+  step-boundary hook runs, so a window opened by
+  _canon_xprof_step_immediate_entry would otherwise stay open until process
+  exit and never be written.  Inert unless that entry opened the window.
+  """
+  if os.environ.get("CANON_XPROF_STEP_IMMEDIATE", "") != "1":
+    return
+  if not _canon_xprof_configure() or _CANON_XPROF["mode"] != "step":
+    return
+  _CANON_XPROF["profiler"].maybe_deactivate(
+      _CANON_XPROF["skip"] + _CANON_XPROF["steps"]
+  )
+  print(
+      "[P51.XPROF] phase=step stopped step=0 anchor=no_commit_return "
       "(immediate)",
       flush=True,
   )
