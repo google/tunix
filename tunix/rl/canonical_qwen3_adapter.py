@@ -3143,8 +3143,36 @@ def _install_shared_logprob_pipeline(
   return canonical
 
 
-def _make_processed_target_logprob_vjp(compute_and_gather, max_logprobs):
-  """Keeps the exact engine primal while supplying the analytic logp VJP."""
+def _make_processed_target_logprob_vjp(
+    compute_and_gather, max_logprobs, mesh=None
+):
+  """Keeps the exact engine primal while supplying the analytic logp VJP.
+
+  ``mesh`` is the execution mesh the forward's canonical kernels are bound
+  to; the fused gradient kernel (CANON_LOGPROB_VJP_KERNEL=1) runs inside a
+  shard_map over its data axis, one row slice per DP rank, exactly like the
+  forward -- a Mosaic kernel cannot be SPMD-partitioned automatically.
+  """
+  data_size = 1
+  if mesh is not None and "data" in tuple(mesh.axis_names):
+    data_size = int(mesh.shape["data"])
+
+  def kernel_grad(logits, token_ids, cotangent):
+    if data_size == 1 and (
+        mesh is None or "data" not in tuple(mesh.axis_names)
+    ):
+      return canonical_logsoftmax.target_logprob_grad_rows(
+          logits, token_ids, cotangent
+      )
+    row_spec = _canonical_logprob_row_spec(mesh)
+    vector_spec = jax.sharding.PartitionSpec("data")
+    mapped = jax.shard_map(
+        canonical_logsoftmax.target_logprob_grad_rows,
+        mesh=mesh,
+        in_specs=(row_spec, vector_spec, vector_spec),
+        out_specs=row_spec,
+    )
+    return mapped(logits, token_ids, cotangent)
 
   def exact_value(logits, token_ids):
     return compute_and_gather(
@@ -3167,19 +3195,17 @@ def _make_processed_target_logprob_vjp(compute_and_gather, max_logprobs):
     if logprob_vjp_kernel_enabled():
       # tasks/zero_tim_perf3 E2b: one tiled pass instead of a materialized
       # f32 softmax; sound but not bitwise against the XLA path.
+      rows = int(logits.shape[0])
       plan = canonical_logsoftmax.target_logprob_grad_row_plan(
-          int(logits.shape[0])
+          rows // data_size
       )
       print(
           f"[PATHTRACE] {LOGPROB_VJP_KERNEL_ENV}=1 target-logprob VJP via "
-          f"canon_logprob_grad (fused tiled pass) rows={int(logits.shape[0])} "
-          f"blocks={list(plan)}",
+          f"canon_logprob_grad (fused tiled pass) rows={rows} "
+          f"data={data_size} local_blocks={list(plan)}",
           flush=True,
       )
-      d_logits = canonical_logsoftmax.target_logprob_grad_rows(
-          logits, token_ids, cotangent
-      )
-      return d_logits, None
+      return kernel_grad(logits, token_ids, cotangent), None
     probabilities = jax.nn.softmax(logits, axis=-1)
     selected = jax.nn.one_hot(
         token_ids, logits.shape[-1], dtype=logits.dtype
@@ -6899,7 +6925,9 @@ class Qwen3EngineForwardAdapter:
       self._compute_and_gather_logprobs = serving_compute_and_gather
     self._max_logprobs = int(runner.model_config.max_logprobs)
     self._processed_target_logprobs = _make_processed_target_logprob_vjp(
-        self._compute_and_gather_logprobs, self._max_logprobs
+        self._compute_and_gather_logprobs,
+        self._max_logprobs,
+        mesh=self._execution_mesh,
     )
 
     g5c_shared_logsoftmax = os.environ.get(
@@ -6911,7 +6939,9 @@ class Qwen3EngineForwardAdapter:
       )
     self._p28_g5c_shared_logsoftmax = g5c_shared_logsoftmax == "1"
     stock_target_logprobs = _make_processed_target_logprob_vjp(
-        compute_and_gather_logprobs, self._max_logprobs
+        compute_and_gather_logprobs,
+        self._max_logprobs,
+        mesh=self._execution_mesh,
     )
     p28_target_logprobs = (
         self._processed_target_logprobs
