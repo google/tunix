@@ -22,6 +22,7 @@ from tunix.models.qwen2 import params
 BACKEND_MAPPINGS = {
     'vllm_jax': mapping_vllm_jax.VLLM_JAX_MAPPING,
     'sglang_jax': mapping_sglang_jax.SGLANG_JAX_MAPPING,
+    'jax_inference': mapping_vllm_jax.VLLM_JAX_MAPPING,
 }
 
 

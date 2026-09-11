@@ -37,6 +37,8 @@ except Exception:
 with cm:
   from tunix.models.qwen2 import model as qwen2_lib
   from tunix.models.qwen2 import params as qwen2_params_lib
+  from tunix.models.qwen3 import model as qwen3_lib
+  from tunix.models.qwen3 import params as qwen3_params_lib
   from tunix.generate import sampler as sampler_lib
   from tunix.utils import math_utils
 # %%
@@ -196,7 +198,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
-      sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
+      sampler_type: str = "vanilla",  # vanilla, vllm, sglang_jax, or jax-inference
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -222,9 +224,14 @@ class Qwen25MathEvaluator:
   def model_from_safe_tensors(self):
     print("Loading model from safe tensors...")
     with self.mesh:
-      self.model = qwen2_params_lib.create_model_from_safe_tensors(
-          file_dir=self.model_path, config=self.model_config, mesh=self.mesh
-      )
+      if isinstance(self.model_config, qwen3_lib.ModelConfig):
+        self.model = qwen3_params_lib.create_model_from_safe_tensors(
+            file_dir=self.model_path, config=self.model_config, mesh=self.mesh
+        )
+      else:
+        self.model = qwen2_params_lib.create_model_from_safe_tensors(
+            file_dir=self.model_path, config=self.model_config, mesh=self.mesh
+        )
 
   def model_from_orbax_ckpt(self):
     print(f"Loading model from orbax checkpoint {self.model_path}...")
@@ -267,9 +274,9 @@ class Qwen25MathEvaluator:
 
     print("Loading tokenizer...")
 
-    # Huggingface API doesn't work with gcs, OSS loads from model directly
+    # Use local model_path if available for offline loading
     tokenizer_source = (
-        self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
+        self.model_path if os.path.exists(self.model_path) else self.model_version
     )
     self.tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_source, trust_remote_code=True
@@ -319,9 +326,6 @@ class Qwen25MathEvaluator:
               mapping_config=mapping_config,
           ),
       )
-      # sync weights from self.model to the sampler's internal model
-      print("Syncing model weights to SGLang JAX sampler...")
-      self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
       from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
 
@@ -350,6 +354,29 @@ class Qwen25MathEvaluator:
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to VLLM sampler...")
       self.sampler_vllm.update_params(nnx.state(self.model))
+    elif self.sampler_type == "jax-inference":
+      from tunix.generate import jax_inference_sampler  # pylint: disable=g-import-not-at-top
+
+      mapping_config = mappings.MappingConfig.build(
+          mapping_obj=None,
+          model=self.model,
+          backend="jax_inference",
+      )
+      model_target = (
+          self.model_path if os.path.exists(self.model_path) else self.model_version
+      )
+      self.sampler_jax_inference = jax_inference_sampler.JaxInferenceSampler(
+          tokenizer=self.tokenizer,
+          config=jax_inference_sampler.JaxInferenceConfig(
+              mesh=self.mesh,
+              model_name=model_target,
+              quantization=None,
+              init_with_random_weights=False,
+              mapping_config=mapping_config,
+          ),
+      )
+      print("Syncing model weights to JAX-Inference sampler...")
+      self.sampler_jax_inference.update_params(nnx.state(self.model))
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -474,6 +501,18 @@ class Qwen25MathEvaluator:
           top_p=top_p,
           top_k=top_k,
           seed=None,
+          echo=False,
+          pad_output=True,
+      )
+    elif self.sampler_type == "jax-inference":
+      out_data = self.sampler_jax_inference(
+          input_strings=prompts,
+          max_generation_steps=safe_gen_length,
+          max_prompt_length=self.max_prompt_length,
+          temperature=temperature,
+          top_p=top_p if temperature > 0.0 else None,
+          top_k=top_k if temperature > 0.0 else None,
+          seed=seed,
           echo=False,
           pad_output=True,
       )
@@ -638,103 +677,161 @@ else:
 MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 
+def _resolve_model_path(repo_id: str, default_path: str) -> str:
+  if os.path.exists(default_path):
+    return default_path
+  repo_cache = os.path.expanduser(
+      f"~/.cache/huggingface/hub/models--{repo_id.replace('/', '--')}/snapshots"
+  )
+  if os.path.exists(repo_cache):
+    snapshots = os.listdir(repo_cache)
+    if snapshots:
+      return os.path.join(repo_cache, snapshots[0])
+  return default_path
+
 MODEL_MAPPING = {
     "Qwen/Qwen2.5-1.5B-Instruct": (
         qwen2_lib.ModelConfig.qwen2p5_1p5b(),
-        os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
+        _resolve_model_path(
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
+        ),
     ),
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
-        os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B"),
+        _resolve_model_path(
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B"),
+        ),
     ),
     "agentica-org/DeepScaleR-1.5B-Preview": (
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
-        os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
+        _resolve_model_path(
+            "agentica-org/DeepScaleR-1.5B-Preview",
+            os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
+        ),
+    ),
+    "Qwen/Qwen3-1.7B-base": (
+        qwen3_lib.ModelConfig.qwen3_1p7b_base(),
+        _resolve_model_path(
+            "Qwen/Qwen3-1.7B-base",
+            os.path.join(MODEL_PATH_PREFIX, "Qwen3-1.7B-base"),
+        ),
+    ),
+    "Qwen/Qwen3-1.7B": (
+        qwen3_lib.ModelConfig.qwen3_1p7b(),
+        _resolve_model_path(
+            "Qwen/Qwen3-1.7B",
+            os.path.join(MODEL_PATH_PREFIX, "Qwen3-1.7B"),
+        ),
+    ),
+    "Qwen/Qwen3-8B": (
+        qwen3_lib.ModelConfig.qwen3_8b(),
+        _resolve_model_path(
+            "Qwen/Qwen3-8B",
+            os.path.join(MODEL_PATH_PREFIX, "Qwen3-8B"),
+        ),
+    ),
+    "Qwen/Qwen3.5-8B": (
+        qwen3_lib.ModelConfig.qwen3_8b(),
+        _resolve_model_path(
+            "Qwen/Qwen3-8B",
+            os.path.join(MODEL_PATH_PREFIX, "Qwen3-8B"),
+        ),
     ),
 }
 
-mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
-# %%
-# MATH-500
-num_batches_env = os.environ.get("NUM_BATCHES")
-num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) > 0 else None
+def main():
+  tp_env = os.environ.get("TP_SIZE")
+  sampler_type = os.environ.get("SAMPLER_TYPE", "vanilla")
+  model_version = os.environ.get(
+      "MODEL_VERSION", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  )
+  dataset = os.environ.get("DATASET", MATH_500_DATA_PATH)
+  model_config, model_path = MODEL_MAPPING[model_version]
 
-# model_version = "Qwen/Qwen2.5-1.5B-Instruct"
-model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-dataset = MATH_500_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
+  max_tp = getattr(model_config, "num_kv_heads", len(jax.devices()))
+  tp_size = int(tp_env) if tp_env else min(max_tp, len(jax.devices()))
+  mesh_config = [[1, tp_size], ["fsdp", "tp"]]
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=1024,  # Increased
-    max_generation_steps=1024,  # Increased
-)
+  # MATH-500
+  num_batches_env = os.environ.get("NUM_BATCHES")
+  num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) > 0 else None
 
-evaluator.load_model()
+  evaluator = Qwen25MathEvaluator(
+      model_config=model_config,
+      model_version=model_version,
+      model_path=model_path,
+      dataset=dataset,
+      mesh_config=mesh_config,
+      max_prompt_length=1024,
+      max_generation_steps=1024,
+      sampler_type=sampler_type,
+  )
 
-print("\nStarting evaluation...")
-results = evaluator.evaluate(
-    batch_size=8,
-    num_batches=num_batches,
-    temperature=0.6,
-    top_k=50,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+  evaluator.load_model()
 
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
-# AIME-2024
-model_version = "agentica-org/DeepScaleR-1.5B-Preview"
-# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-dataset = AIME_2024_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
+  batch_size = int(os.environ.get("BATCH_SIZE", "8"))
+  print("\nStarting evaluation...")
+  results = evaluator.evaluate(
+      batch_size=batch_size,
+      num_batches=num_batches,
+      temperature=0.6,
+      top_k=50,
+      top_p=0.95,
+      num_passes=1,
+      debug_first_n=5,
+  )
+
+  # Print results
+  print("\n" + "=" * 60)
+  print("Evaluation Results")
+  print("=" * 60)
+  print(f"Model: {model_path}")
+  print(f"Dataset: {dataset}")
+  print(f"Correct: {results['correct']}/{results['total']}")
+  print(f"Accuracy: {results['accuracy']:.2f}%")
+  print("=" * 60)
+
+  # AIME-2024
+  if os.environ.get("RUN_AIME", "0") == "1":
+    aime_model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+    aime_dataset = AIME_2024_DATA_PATH
+    aime_config, aime_path = MODEL_MAPPING[aime_model_version]
+
+    evaluator_aime = Qwen25MathEvaluator(
+        model_config=aime_config,
+        model_version=aime_model_version,
+        model_path=aime_path,
+        dataset=aime_dataset,
+        mesh_config=mesh_config,
+        max_prompt_length=2048,
+        max_generation_steps=32768,
+        sampler_type=sampler_type,
+    )
+
+    evaluator_aime.load_model()
+
+    print("\nStarting evaluation...")
+    results_aime = evaluator_aime.evaluate(
+        batch_size=1,
+        num_batches=num_batches,
+        temperature=0.6,
+        top_k=None,
+        top_p=0.95,
+        num_passes=1,
+        debug_first_n=5,
+    )
+
+    print("\n" + "=" * 60)
+    print("Evaluation Results")
+    print("=" * 60)
+    print(f"Model: {aime_path}")
+    print(f"Dataset: {aime_dataset}")
+    print(f"Correct: {results_aime['correct']}/{results_aime['total']}")
+    print(f"Accuracy: {results_aime['accuracy']:.2f}%")
+    print("=" * 60)
 
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=2048,  # Increased
-    max_generation_steps=32768,  # Increased
-)
-
-evaluator.load_model()
-
-print("\nStarting evaluation...")
-
-results = evaluator.evaluate(
-    batch_size=1,
-    num_batches=num_batches,
-    temperature=0.6,
-    top_k=None,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
-
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
+if __name__ == "__main__":
+  main()

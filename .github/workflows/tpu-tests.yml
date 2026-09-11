@@ -103,7 +103,8 @@ jobs:
           --ignore=tests/generate/vllm_driver_test.py \
           --ignore=tests/generate/tokenizer_adapter_test.py \
           --ignore=tests/generate/sglang_jax_sampler_test.py \
-          --ignore=tests/generate/sglang_jax_lora_test.py
+          --ignore=tests/generate/sglang_jax_lora_test.py \
+          --ignore=tests/generate/jax_inference_sampler_test.py
 
     - name: Run tunix SFT tests
       run: |
