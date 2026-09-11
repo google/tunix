@@ -3,7 +3,9 @@
 import collections
 from collections.abc import Callable
 import datetime
-from typing import Any, Final
+import threading
+import types
+from typing import Any, Final, Self
 
 from absl import logging
 import sqlalchemy as sa
@@ -11,7 +13,11 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite
 from tunix.experimental.trajectory import async_writer
 from tunix.experimental.trajectory import schema
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+POSTGRESQL_DIALECT: Final[str] = "postgresql"
+SQLITE_DIALECT: Final[str] = "sqlite"
 
 # Maximum number of trajectory metadata entries retained per run in the worker's
 # bounded LRU cache to skip redundant trajectory table upserts across multi-step
@@ -22,6 +28,15 @@ from tunix.experimental.trajectory import trajectory as trajectory_lib
 # `run_gsm8k_dist_grpo.py`), one rollout step runs 128 * 8 = 1,024 trajectories;
 # 4,096 provides 4x headroom across overlapping steps (~4.5 MB RAM).
 _MAX_CACHED_TRAJECTORIES: Final[int] = 4_096
+
+# Process-local lock serializing concurrent schema initialization across threads
+# within a single process (e.g. shared SQLite StaticPool engines).
+_SCHEMA_INIT_LOCK: Final[threading.Lock] = threading.Lock()
+
+# Deterministic 64-bit signed integer key for PostgreSQL `pg_advisory_xact_lock`
+# during cold-start schema DDL initialization (derived from SHA-256 of
+# `"TRAJECTORY_STORE"`).
+_POSTGRES_SCHEMA_INIT_LOCK_ID: Final[int] = 0x568C418D_F1971EA0
 
 
 def _to_utc_timestamp(dt: datetime.datetime | None) -> datetime.datetime:
@@ -123,14 +138,15 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
 
     # Dialect-specific insert statement constructor for ON CONFLICT DO UPDATE.
     self._insert_fn: Callable[..., Any]
-    if engine.dialect.name == "postgresql":
+    if engine.dialect.name == POSTGRESQL_DIALECT:
       self._insert_fn = postgresql.insert
-    elif engine.dialect.name == "sqlite":
+    elif engine.dialect.name == SQLITE_DIALECT:
       self._insert_fn = sqlite.insert
     else:
       raise ValueError(
           f"Unsupported database dialect: {engine.dialect.name}. "
-          "Supported dialects are 'postgresql' and 'sqlite'."
+          f"Supported dialects are {POSTGRESQL_DIALECT!r} and"
+          f" {SQLITE_DIALECT!r}."
       )
 
   def enqueue_write(
@@ -386,3 +402,189 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
         task.run_id,
         task.trajectory_id,
     )
+
+
+class SqlTrajectoryStore(store.TrajectoryWriter):
+  """SQL-backed implementation of TrajectoryWriter.
+
+  `SqlTrajectoryStore` manages the persistence of reinforcement learning (RL)
+  agent rollouts and step trajectories into relational database backends (e.g.
+  SQLite, PostgreSQL) using SQLAlchemy.
+
+  Architectural Separation of Responsibilities:
+    `SqlTrajectoryStore` acts as a lightweight frontend responsible for:
+    1. Schema initialization (`_initialize_schema`) and run scoping.
+    2. Synchronous frontend input validation on the calling thread.
+    3. Forwarding step write tasks, metadata updates, and flush barriers to
+       `_AsyncSqlWriter`.
+
+    All asynchronous queuing, background worker thread lifecycle, error
+    suppression for rollout resilience, and database transactions are handled
+    by `_AsyncSqlWriter`.
+  """
+
+  def __init__(
+      self,
+      engine: sa.Engine,
+      run_id: str,
+      auto_init: bool = True,
+  ) -> None:
+    """Initializes SqlTrajectoryStore.
+
+    Args:
+      engine: Configured SQLAlchemy Engine providing database connectivity. The
+        caller retains ownership of `engine` and is responsible for calling
+        `engine.dispose()` when the connection pool is no longer needed.
+      run_id: Run identifier used to scope trajectories and steps. Lazily
+        registered in `RUNS_TABLE` on the first write task once
+        `TrajectoryMetadata` (e.g. `agent_name`) is provided.
+      auto_init: If True, automatically creates database tables and indexes on
+        startup via `_initialize_schema`.
+
+    Raises:
+      ValueError: If run_id is empty, None, or whitespace, or if the engine uses
+        an unsupported database dialect.
+    """
+    if not run_id or not run_id.strip():
+      raise ValueError("SqlTrajectoryStore requires a non-empty run_id.")
+    self._engine = engine
+    self._run_id = run_id.strip()
+    self._writer = _AsyncSqlWriter(engine=engine)
+
+    if auto_init:
+      self._initialize_schema()
+
+  def _has_all_schema_tables(self, conn: sa.Connection) -> bool:
+    """Returns True if all Trajectory Store tables exist in the database."""
+    existing_tables = set(sa.inspect(conn).get_table_names())
+    return schema.METADATA.tables.keys() <= existing_tables
+
+  def _acquire_schema_init_lock(self, conn: sa.Connection) -> None:
+    """Acquires a dialect-specific transaction lock before running schema DDL."""
+    dialect_name = self._engine.dialect.name
+    if dialect_name == POSTGRESQL_DIALECT:
+      conn.execute(
+          sa.select(
+              sa.func.pg_advisory_xact_lock(_POSTGRES_SCHEMA_INIT_LOCK_ID)
+          )
+      )
+    elif dialect_name == SQLITE_DIALECT:
+      conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+  def _initialize_schema(self) -> None:
+    """Creates database tables and indexes safely under multi-worker concurrency.
+
+    Implements a two-phase initialization protocol to prevent concurrent DDL
+    race conditions when multiple distributed rollout workers start
+    simultaneously:
+
+    1. Read-Only Fast Path: Checks whether all required tables (`runs`,
+       `trajectories`, `steps`) already exist. On warm databases, returns
+       immediately without acquiring write locks or opening a write transaction.
+    2. Serialized Transactional DDL: On cold databases, acquires a dialect-level
+       transaction lock (`pg_advisory_xact_lock` on PostgreSQL or
+       `BEGIN IMMEDIATE` on SQLite) inside `engine.begin()` and delegates table
+       creation to `schema.METADATA.create_all(conn, checkfirst=True)`, which
+       re-verifies table existence inside the lock before releasing it on
+       commit.
+    """
+    with _SCHEMA_INIT_LOCK:
+      with self._engine.connect() as conn:
+        if self._has_all_schema_tables(conn):
+          return
+
+      with self._engine.begin() as conn:
+        self._acquire_schema_init_lock(conn)
+        schema.METADATA.create_all(conn, checkfirst=True)
+
+  @property
+  def engine(self) -> sa.Engine:
+    """Returns the underlying SQLAlchemy engine."""
+    return self._engine
+
+  @property
+  def run_id(self) -> str:
+    """Returns the configured run identifier."""
+    return self._run_id
+
+  def add_step(
+      self,
+      step: trajectory_lib.Step,
+      metadata: trajectory_lib.TrajectoryMetadata,
+  ) -> None:
+    """Asynchronously logs a turn step and its trajectory metadata.
+
+    Validates input parameters on the calling thread so invalid IDs fail fast
+    with actionable errors, then delegates asynchronous queuing and non-blocking
+    database persistence to `_AsyncSqlWriter`.
+
+    Args:
+      step: Step object to log.
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+
+    Raises:
+      ValueError: If metadata.trajectory_id is empty, None, or whitespace.
+      RuntimeError: If the store has already been closed.
+    """
+    self._writer.enqueue_write(
+        run_id=self._run_id, metadata=metadata, step=step
+    )
+
+  def update_metadata(
+      self,
+      metadata: trajectory_lib.TrajectoryMetadata,
+  ) -> None:
+    """Updates or creates trajectory metadata asynchronously.
+
+    Validates input parameters on the calling thread so invalid IDs fail fast
+    with actionable errors, then delegates asynchronous queuing and non-blocking
+    database persistence to `_AsyncSqlWriter`.
+
+    Args:
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+
+    Raises:
+      ValueError: If metadata.trajectory_id is empty, None, or whitespace.
+      RuntimeError: If the store has already been closed.
+    """
+    self._writer.enqueue_write(
+        run_id=self._run_id, metadata=metadata, step=None
+    )
+
+  def flush(self) -> None:
+    """Flushes any pending or asynchronous writes to persistent storage.
+
+    Users do not need to call `flush()` in normal usage; it is primarily for
+    testing.
+
+    Delegates directly to `_AsyncSqlWriter.flush()` to provide strict barrier
+    synchronization.
+    """
+    self._writer.flush()
+
+  def close(self) -> None:
+    """Flushes pending writes and shuts down the background writer thread.
+
+    Calling `close()` is optional: the underlying `_AsyncSqlWriter` also drains
+    itself at interpreter exit. It is worth calling explicitly for a store that
+    becomes garbage well before the process ends, so its worker thread is
+    released promptly. Closing is idempotent, but the store must not be written
+    to afterwards; reads remain available. Does not dispose `self._engine` so
+    shared engines remain usable; callers are responsible for calling
+    `engine.dispose()`.
+    """
+    self._writer.close()
+
+  def __enter__(self) -> Self:
+    """Returns this store, for use as a context manager."""
+    return self
+
+  def __exit__(
+      self,
+      exc_type: type[BaseException] | None,
+      exc_value: BaseException | None,
+      traceback: types.TracebackType | None,
+  ) -> None:
+    """Closes the store on exiting the context manager."""
+    del exc_type, exc_value, traceback
+    self.close()
