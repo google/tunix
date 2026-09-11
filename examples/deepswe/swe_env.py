@@ -214,6 +214,7 @@ def _get_global_fleet() -> Any:
     )
   return _GLOBAL_FLEET
 
+_MAX_IN_FLIGHT_BATCHES = 2
 
 class PrewarmDatasetIterator:
   """2-slot Lookahead iterator: guarantees the upcoming batch is always pre-warming ahead on K8s."""
@@ -240,7 +241,7 @@ class PrewarmDatasetIterator:
     self.current_batch = None
     self.next_batch = None
     self.in_flight_batches: list[list[str]] = []
-    self.max_in_flight_batches = 2
+    self.max_in_flight_batches = _MAX_IN_FLIGHT_BATCHES
 
     # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
     try:

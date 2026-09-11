@@ -521,7 +521,8 @@ def test_prewarm_dataset_iterator_max_in_flight_batches():
       [{"docker_image": "img4"}],
   ]
   it = swe_env.PrewarmDatasetIterator(dataset, fleet=mock_fleet)
-  assert it.max_in_flight_batches == 2
+  assert it.max_in_flight_batches == swe_env._MAX_IN_FLIGHT_BATCHES
+  assert swe_env._MAX_IN_FLIGHT_BATCHES == 2
 
   b1 = next(it)
   assert b1[0]["docker_image"] == "img1"
@@ -537,6 +538,4 @@ def test_prewarm_dataset_iterator_max_in_flight_batches():
   assert b3[0]["docker_image"] == "img3"
   assert len(it.in_flight_batches) == 2
   mock_fleet.unwarm_image.assert_called_with("img1")
-
-
 
