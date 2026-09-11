@@ -209,6 +209,25 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
         sync_request=sync_req
     )
 
+  def test_real_raiden_delegate_instantiation_and_sync(self):
+    sampler_with_raiden = vanilla_sampler_adapter.VanillaSamplerAdapter(
+        server_id="tpu_slice_raiden",
+        transformer=self.transformer,
+        tokenizer=self.vocab,
+        cache_config=self.cache_config,
+        config=types.SimpleNamespace(
+            weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
+        ),
+    )
+    sampler_with_raiden.initialize()
+    self.assertTrue(sampler_with_raiden.enable_raiden)
+    self.assertIsNotNone(sampler_with_raiden.raiden_sync_delegate)
+    self.assertEqual(
+        sampler_with_raiden.raiden_sync_delegate._synchronizers[0].job_name,
+        "tpu_slice_raiden",
+    )
+    self.assertFalse(sampler_with_raiden.raiden_sync_delegate.is_bounded())
+
 
 if __name__ == "__main__":
   absltest.main()

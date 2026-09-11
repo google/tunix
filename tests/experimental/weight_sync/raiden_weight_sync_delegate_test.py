@@ -125,6 +125,33 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaisesRegex(RuntimeError, "bind_weight_sync"):
       await delegate.weight_sync()
 
+  def test_default_server_id_is_rollout(self):
+    delegate = self._delegate()
+    worker = delegate._synchronizers[0]
+    self.assertEqual(worker.job_name, "rollout")
+    self.assertEqual(worker.worker_index, 0)
+
+  def test_custom_server_id_and_worker_index_propagated(self):
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        server_id="replica_worker_1", worker_index=3
+    )
+    worker = delegate._synchronizers[0]
+    self.assertEqual(worker.job_name, "replica_worker_1")
+    self.assertEqual(worker.worker_index, 3)
+
+  def test_server_id_in_kwargs_propagated(self):
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        **{"server_id": "custom_server_id"}
+    )
+    worker = delegate._synchronizers[0]
+    self.assertEqual(worker.job_name, "custom_server_id")
+
+  async def test_is_bounded_lifecycle(self):
+    delegate = self._delegate()
+    self.assertFalse(delegate.is_bounded())
+    await delegate.bind_weight_sync(state={"w": 1})
+    self.assertTrue(delegate.is_bounded())
+
   async def test_post_weight_sync_returns_true(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1}, sampler=mock.MagicMock())

@@ -363,7 +363,9 @@ class WeightSyncModeTest(absltest.TestCase):
         config=config, tokenizer="mock", chat_parser="mock"
     )
     self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    self.assertIsNotNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
+    self.assertIsNotNone(delegate)
+    mock_delegate_cls.assert_called_once_with(server_id="vanilla_sampler")
 
   def test_config_weight_sync_mode_fallback(self):
     config = types.SimpleNamespace(
@@ -396,7 +398,11 @@ class WeightSyncModeTest(absltest.TestCase):
         config=config, tokenizer="mock", chat_parser="mock"
     )
     self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    self.assertIsNotNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
+    self.assertIsNotNone(delegate)
+    mock_delegate_cls.assert_called_once_with(
+        server_id="inprocess_vllm_sampler"
+    )
 
 
 if __name__ == "__main__":
