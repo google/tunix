@@ -3166,12 +3166,29 @@ def _make_processed_target_logprob_vjp(
       )
     row_spec = _canonical_logprob_row_spec(mesh)
     vector_spec = jax.sharding.PartitionSpec("data")
-    mapped = jax.shard_map(
-        canonical_logsoftmax.target_logprob_grad_rows,
-        mesh=mesh,
-        in_specs=(row_spec, vector_spec, vector_spec),
-        out_specs=row_spec,
-    )
+    # check_vma=False, as the forward's canonical log-softmax shard_map: the
+    # Pallas out_shapes carry no varying-axis type, so check_vma=True rejects
+    # them at trace time ("manual_axis_type ... must not be None", jax
+    # 0.10.2).  The mapped function is a pure per-rank kernel with no
+    # collectives and is never differentiated through (it is the custom
+    # VJP's backward), so there is no psum placement for the check to guard;
+    # the outputs are plain global arrays once the shard_map returns.
+    try:
+      mapped = jax.shard_map(
+          canonical_logsoftmax.target_logprob_grad_rows,
+          mesh=mesh,
+          in_specs=(row_spec, vector_spec, vector_spec),
+          out_specs=row_spec,
+          check_vma=False,
+      )
+    except TypeError:
+      mapped = jax.shard_map(
+          canonical_logsoftmax.target_logprob_grad_rows,
+          mesh=mesh,
+          in_specs=(row_spec, vector_spec, vector_spec),
+          out_specs=row_spec,
+          check_rep=False,
+      )
     return mapped(logits, token_ids, cotangent)
 
   def exact_value(logits, token_ids):

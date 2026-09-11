@@ -92,3 +92,22 @@ def test_rows_wrapper_passes_an_admitted_bucket_straight_through(monkeypatch):
   got = cls.target_logprob_grad_rows(logits, token_ids, cotangent, interpret=True)
   assert seen == [(16, 1024)]
   np.testing.assert_allclose(np.asarray(got), np.asarray(_reference(logits, token_ids, cotangent)), rtol=1e-5, atol=1e-6)
+
+
+def test_real_kernel_runs_per_rank_inside_the_forward_style_shard_map():
+  """The interpret-mode kernel itself, one row slice per data rank, under check_vma=False."""
+  from jax.sharding import Mesh, PartitionSpec as P
+  devices = jax.devices()
+  if len(devices) < 2:
+    pytest.skip("needs --xla_force_host_platform_device_count=2")
+  mesh = Mesh(np.array(devices[:2]).reshape(2, 1), axis_names=("data", "model"))
+  logits, token_ids, cotangent = _random_case(512, 2048, 29)
+
+  def per_rank(l, i, c):
+    assert l.shape == (256, 2048)  # the rank's own slice, never the global 512 rows
+    return cls.target_logprob_grad_rows(l, i, c, interpret=True)
+
+  mapped = jax.shard_map(per_rank, mesh=mesh, in_specs=(P("data", None), P("data"), P("data")), out_specs=P("data", None), check_vma=False)
+  got = mapped(logits, token_ids, cotangent)
+  assert got.shape == (512, 2048)
+  np.testing.assert_allclose(np.asarray(got), np.asarray(_reference(logits, token_ids, cotangent)), rtol=1e-5, atol=1e-6)
