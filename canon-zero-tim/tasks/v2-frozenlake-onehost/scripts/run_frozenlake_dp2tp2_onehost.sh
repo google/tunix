@@ -371,6 +371,7 @@ sudo docker run --rm --init --privileged --net=host --name "$container" \
   -e CANON_ENTROPY_VJP="${CANON_ENTROPY_VJP:-}" \
   -e CANON_LOGPROB_VJP_KERNEL="${CANON_LOGPROB_VJP_KERNEL:-}" \
   -e CANON_RPA_VJP_BLOCKWISE="${CANON_RPA_VJP_BLOCKWISE:-}" \
+  -e CANON_MATMUL_VJP_PLAIN="${CANON_MATMUL_VJP_PLAIN:-}" \
   -e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$capture_full_tree" = 1 ] && echo "$root/p61_numerical")" \
   -e V2_FL_MODE="$mode" \
   -e CANON_XPROF_DIR="$xprof_dir" \
