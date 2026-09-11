@@ -2060,3 +2060,25 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
       logging.info('Loaded state: %s', state_flatten[key].value.ravel()[:10])
       matched = False
   return matched
+
+
+def detach_incompatible_vllm_cleanup_finalizer(llm_engine: Any) -> None:
+  """Removes vLLM's torch-only cleanup hook for TPU/JAX model objects."""
+  get_model = getattr(llm_engine, '_get_driver_model_for_cleanup', None)
+  if not callable(get_model):
+    return
+
+  model = get_model()
+  if model is None or hasattr(model, 'modules'):
+    return
+
+  finalizer = getattr(llm_engine, '_finalizer', None)
+  detach = getattr(finalizer, 'detach', None)
+  if not callable(detach):
+    return
+
+  detach()
+  logging.info(
+      'Detached vLLM cleanup finalizer for non-torch model type %s.',
+      type(model).__name__,
+  )

@@ -2401,6 +2401,56 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
     expected = jnp.concatenate([wi_0, wi_1], axis=-1)
     np.testing.assert_array_equal(interleaved, expected)
 
+  def test_detach_incompatible_vllm_cleanup_finalizer_non_torch_model(self):
+    mock_engine = mock.MagicMock()
+    mock_model = mock.NonCallableMagicMock(spec=[])
+    mock_engine._get_driver_model_for_cleanup.return_value = mock_model
+    mock_finalizer = mock.MagicMock()
+    mock_engine._finalizer = mock_finalizer
+
+    utils.detach_incompatible_vllm_cleanup_finalizer(mock_engine)
+
+    mock_finalizer.detach.assert_called_once()
+
+  def test_detach_incompatible_vllm_cleanup_finalizer_torch_model(self):
+    mock_engine = mock.MagicMock()
+    mock_model = mock.MagicMock()
+    mock_model.modules = mock.MagicMock()
+    mock_engine._get_driver_model_for_cleanup.return_value = mock_model
+    mock_finalizer = mock.MagicMock()
+    mock_engine._finalizer = mock_finalizer
+
+    utils.detach_incompatible_vllm_cleanup_finalizer(mock_engine)
+
+    mock_finalizer.detach.assert_not_called()
+
+  def test_detach_incompatible_vllm_cleanup_finalizer_no_model(self):
+    mock_engine = mock.MagicMock()
+    mock_engine._get_driver_model_for_cleanup.return_value = None
+    mock_finalizer = mock.MagicMock()
+    mock_engine._finalizer = mock_finalizer
+
+    utils.detach_incompatible_vllm_cleanup_finalizer(mock_engine)
+
+    mock_finalizer.detach.assert_not_called()
+
+  def test_detach_incompatible_vllm_cleanup_finalizer_no_get_model_method(self):
+    mock_engine = mock.NonCallableMagicMock(spec=[])
+
+    utils.detach_incompatible_vllm_cleanup_finalizer(mock_engine)
+
+  def test_detach_incompatible_vllm_cleanup_finalizer_no_finalizer(self):
+    mock_engine = mock.MagicMock()
+    mock_model = mock.NonCallableMagicMock(spec=[])
+    mock_engine._get_driver_model_for_cleanup.return_value = mock_model
+    mock_engine._finalizer = None
+
+    utils.detach_incompatible_vllm_cleanup_finalizer(mock_engine)
+
+  def test_detach_incompatible_vllm_cleanup_finalizer_none_engine(self):
+    utils.detach_incompatible_vllm_cleanup_finalizer(None)
+
 
 if __name__ == "__main__":
   absltest.main()
+

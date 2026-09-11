@@ -143,6 +143,10 @@ class VLLMInProcessDriver:
       return True
     return False
 
+  @property
+  def llm_engine(self) -> LLMEngine:
+    return self._llm_engine
+
   def submit_request(
       self,
       request_id: str,
