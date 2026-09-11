@@ -43,6 +43,8 @@ def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
     config = qwen3_model_lib.ModelConfig.qwen3_0p6b()
   elif "1.7b" in normalized or "1p7b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
+  elif "8b" in normalized:
+    config = qwen3_model_lib.ModelConfig.qwen3_8b()
   elif "32b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_32b()
   else:
