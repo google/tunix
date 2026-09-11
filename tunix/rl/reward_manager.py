@@ -34,8 +34,12 @@ def _calculate_scalar_reward_log_metrics(
     axis: int = 1,
 ) -> Dict[str, Any]:
   """Helper to calculate sum, mean, min, and max log metrics for rewards."""
+  # The second element of each tuple reduces the per-micro-batch values into
+  # the step-level metric. A sum must reduce with np.sum: reducing it with
+  # np.mean reports the *average* micro-batch sum, understating the true total
+  # by the number of micro-batches (e.g. 22.5 instead of 90.0 across four).
   return {
-      f"{prefix}/sum": (np.nansum(rewards, axis=axis), np.mean),
+      f"{prefix}/sum": (np.nansum(rewards, axis=axis), np.sum),
       f"{prefix}/mean": (np.nanmean(rewards, axis=axis), np.mean),
       f"{prefix}/min": (np.min(rewards, axis=axis), np.min),
       f"{prefix}/max": (np.max(rewards, axis=axis), np.max),

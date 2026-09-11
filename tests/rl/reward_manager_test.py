@@ -264,6 +264,30 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
     self.assertIn("rewards/sum", log_metrics)
     self.assertIn("rewards/len_reward", log_metrics)
 
+  def test_sum_metric_reduces_with_sum_across_micro_batches(self):
+    """A /sum metric must reduce with np.sum, not np.mean.
+
+    Each call contributes one micro-batch of a step. Reducing a sum with
+    np.mean reports the average micro-batch sum, understating the step total
+    by the number of micro-batches.
+    """
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    micro_batch_values = []
+    reducer = None
+    for traj_rewards in ([1.0, 1.0], [1.0, 0.0]):
+      log_metrics = manager(
+          self.prompts, self.completions, trajectory_rewards=traj_rewards
+      )["log_metrics"]
+      value, reducer = log_metrics["trajectory_rewards/sum"]
+      micro_batch_values.append(value)
+
+    self.assertIs(reducer, np.sum)
+    # Step total is 3.0; reducing with np.mean would report 1.5.
+    self.assertEqual(reducer(micro_batch_values), 3.0)
+
   def test_log_metrics_non_interference_no_reward_fns(self):
     manager = reward_manager.AgenticSequenceRewardManager(
         reward_fns=None,
