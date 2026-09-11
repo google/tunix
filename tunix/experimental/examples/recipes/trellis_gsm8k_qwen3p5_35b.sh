@@ -46,7 +46,6 @@ export TRAIN_MICRO_BATCH_SIZE=8  # Must be a multiple of TRAINER_MESH_FSDP (4)
 export PREFUSE_MOE_WEIGHTS="true"
 export USE_WEIGHT_CONVERTER="true"
 export VERIFY_WEIGHTS="true"
-export RAIDEN_DEVICES_PER_HOST=4
 export ENABLE_PREFIX_CACHING="false"
 
 # Topologies

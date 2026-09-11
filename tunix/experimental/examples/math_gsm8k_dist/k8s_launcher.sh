@@ -66,6 +66,7 @@ export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
+export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -81,12 +82,6 @@ export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
 export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
 export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
-# Number of Raiden TPU devices per host. For v5p, 4t machines have 4 chips/host.
-# For other hardware or full hosts, configure accordingly (e.g. 8 for 8t).
-# TODO (tunix-dev): remove this and detect automatically. This is added temporarily
-# since in Pathways proxy mode, the task_id is either None or identical across all
-# proxy devices, which makes auto-detection hard.
-export RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-}
 
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
@@ -236,7 +231,6 @@ start_trainer() {
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
-      --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
     "
   fi
@@ -245,9 +239,6 @@ start_trainer() {
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
       raiden_env+=" RAIDEN_USE_FFI=1"
-    fi
-    if [[ -n "${RAIDEN_DEVICES_PER_HOST}" ]]; then
-      raiden_env+=" RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
     fi
   fi
 
@@ -264,7 +255,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -354,9 +345,6 @@ start_rollout_instance() {
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     # mcJax rollout uses TCP transport (FFI disabled)
     raiden_env+=" RAIDEN_USE_FFI=0"
-    if [[ -n "${RAIDEN_DEVICES_PER_HOST}" ]]; then
-      raiden_env+=" RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
-    fi
   fi
 
   "$PYTHON" "$YAML_GEN" \

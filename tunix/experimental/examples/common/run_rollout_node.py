@@ -30,6 +30,7 @@ from typing import Any
 from tunix.experimental.examples.common import models
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+from tunix.utils import maxtext_utils
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -390,6 +391,27 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "max_model_len": max_model_len,
       "enable_prefix_caching": args.enable_prefix_caching,
   }
+  # Select MaxText's `MaxTextForCausalLM` as rollout model.
+  # `additional_config` must be set on VllmConfig (not engine_kwargs): the
+  # sampler overwrites args["additional_config"] from the VllmConfig field.
+  maxtext_additional_config = None
+  if args.maxtext_model_name:
+    logging.info(
+        "Loading MaxText model %r natively via maxtext_vllm_adapter's"
+        " MaxTextForCausalLM (architectures override).",
+        args.maxtext_model_name,
+    )
+    engine_kwargs["hf_overrides"] = dict(
+        maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES
+    )
+    maxtext_additional_config = (
+        maxtext_utils.build_vllm_maxtext_additional_config(
+            args.maxtext_model_name,
+            attention=args.maxtext_attention,
+            prefuse_moe_weights=args.prefuse_moe_weights,
+        )
+    )
+
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
   server_mode = True if multihost_backend else None
@@ -419,6 +441,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
+      additional_config=maxtext_additional_config,
       engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
@@ -483,23 +506,16 @@ def _create_vllm_sampler(args):
         " MaxTextForCausalLM (architectures override).",
         args.maxtext_model_name,
     )
-    engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
-    # MaxText inference config.
-    maxtext_config_overrides = {
-        "model_name": args.maxtext_model_name,
-        "model_call_mode": "inference",
-        "enable_dp_attention": False,
-        "allow_split_physical_axes": True,
-        "log_config": False,
-        "weight_dtype": "bfloat16",
-    }
-    if args.prefuse_moe_weights is not None:
-      maxtext_config_overrides["prefuse_moe_weights"] = args.prefuse_moe_weights
-    if args.maxtext_attention:
-      maxtext_config_overrides["attention"] = args.maxtext_attention
-    engine_kwargs["additional_config"] = {
-        "maxtext_config": maxtext_config_overrides
-    }
+    engine_kwargs["hf_overrides"] = dict(
+        maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES
+    )
+    engine_kwargs["additional_config"] = (
+        maxtext_utils.build_vllm_maxtext_additional_config(
+            args.maxtext_model_name,
+            attention=args.maxtext_attention,
+            prefuse_moe_weights=args.prefuse_moe_weights,
+        )
+    )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
       server_id=args.worker_id,
