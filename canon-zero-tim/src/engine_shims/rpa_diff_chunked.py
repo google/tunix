@@ -15,6 +15,21 @@ import jax
 import jax.numpy as jnp
 
 
+BLOCKWISE_VJP_ENV = "CANON_RPA_VJP_BLOCKWISE"
+_BLOCKWISE_RECEIPT = set()
+
+
+def blockwise_vjp_enabled():
+    value = os.environ.get(BLOCKWISE_VJP_ENV, "0")
+    if value not in ("0", "1"):
+        raise ValueError(f"{BLOCKWISE_VJP_ENV} must be unset, 0 or 1, got {value!r}")
+    if value == "1" and "on" not in _BLOCKWISE_RECEIPT:
+        _BLOCKWISE_RECEIPT.add("on")
+        print(f"[PATHTRACE] {BLOCKWISE_VJP_ENV}=1 chunked RPA VJP runs the page-blockwise "
+              "backward (dynamic prefix pages)", flush=True)
+    return value == "1"
+
+
 def make_diff_rpa_chunked(kernel_fn, *, sm_scale, page_size, num_q_heads, num_kv_heads,
                           out_dtype=None, compute_dtype=jnp.float32):
     group = num_q_heads // num_kv_heads
@@ -61,6 +76,122 @@ def make_diff_rpa_chunked(kernel_fn, *, sm_scale, page_size, num_q_heads, num_kv
         o = jnp.where(row_ok[:, None, None], o, 0.0)
         return o.astype(out_dtype if out_dtype is not None else q.dtype)
 
+    # tasks/zero_tim_perf3 E2c.  Differentiating _replica materializes the
+    # f32 score/probability matrices over the STATIC page-table span S
+    # (max_model_len: 26 pages x 256 = 6656 for FrozenLake 8B) for every
+    # layer and chunk, although the real prefix is ~1.7k; in the 2026-09-11
+    # one-host 8B update window that backward was 42% of the reverse chunk.
+    # _blockwise_vjp is the same math in the FlashAttention-2 shape: a
+    # lax.fori_loop over the context pages whose trip count is the DYNAMIC
+    # number of pages the prefix actually occupies, one page-sized f32 block
+    # at a time, so work follows kv_len and program shapes never change (the
+    # P59 per-layer pullbacks stay AOT-compiled).  Numerics: same masked
+    # softmax over the same columns, but blockwise online normalization and
+    # blockwise accumulation, so gradient bytes differ from the autodiff
+    # replica; the backward only has to be sound, and the update anchors are
+    # re-pinned deliberately.  CANON_RPA_VJP_BLOCKWISE=1 selects it.
+    def _blockwise_vjp(q, k, v, kv_cache, kv_len, q_len, page_indices, g_out):
+        T = q.shape[0]
+        hd = q.shape[-1]
+        nkv_l = kv_cache.shape[2]
+        nq_l = q.shape[-2]
+        grp_l = nq_l // nkv_l
+        n_tbl = page_indices.shape[0]
+        ctx = kv_len - q_len
+        neg = jnp.finfo(compute_dtype).min
+        row_pos = ctx + jnp.arange(T)                              # [T]
+        row_ok = jnp.arange(T) < q_len                              # [T]
+        # heads as [nkv, grp]: q head h reads kv head h // grp (jnp.repeat order)
+        qg = q.astype(compute_dtype).reshape(T, nkv_l, grp_l, hd)
+        gog = g_out.astype(compute_dtype).reshape(T, nkv_l, grp_l, hd)
+        gog = jnp.where(row_ok[:, None, None, None], gog, 0.0)
+        kc = k.astype(compute_dtype)                                # chunk keys [T, nkv, hd]
+        vc = v.astype(compute_dtype)
+        n_ctx_pages = jnp.minimum((ctx + page_size - 1) // page_size, n_tbl)
+
+        def scores(kb, col_pos, col_ok):
+            # kb [B, nkv, hd] -> s [nkv, grp, T, B]
+            sb = jnp.einsum("ikgd,jkd->kgij", qg, kb,
+                            preferred_element_type=compute_dtype) * sm_scale
+            keep = (row_pos[:, None] >= col_pos[None, :]) & col_ok[None, :] & row_ok[:, None]
+            return jnp.where(keep[None, None], sb, neg)
+
+        def page_kv(p):
+            pg = page_indices[p]
+            # cache layout [np, PAGE, nkv, 2, hd] (k/v axis after the kv heads)
+            blk = jax.lax.dynamic_index_in_dim(kv_cache, pg, axis=0, keepdims=False)
+            return blk[:, :, 0].astype(compute_dtype), blk[:, :, 1].astype(compute_dtype)
+
+        def page_cols(p):
+            col_pos = p * page_size + jnp.arange(page_size)
+            return col_pos, col_pos < ctx
+
+        chunk_cols = (ctx + jnp.arange(T), jnp.arange(T) < q_len)
+
+        # ---- pass 1: online row statistics and the f32 output -------------
+        def stats_step(sb, carry):
+            m, l, o_acc, vb = carry
+            m_new = jnp.maximum(m, jnp.max(sb, axis=-1))
+            alpha = jnp.exp(m - m_new)
+            pb = jnp.exp(sb - m_new[..., None])
+            l_new = l * alpha + jnp.sum(pb, axis=-1)
+            o_new = o_acc * alpha[..., None] + jnp.einsum(
+                "kgij,jkd->kgid", pb, vb, preferred_element_type=compute_dtype)
+            return m_new, l_new, o_new
+
+        m0 = jnp.full((nkv_l, grp_l, T), neg, compute_dtype)
+        l0 = jnp.zeros((nkv_l, grp_l, T), compute_dtype)
+        o0 = jnp.zeros((nkv_l, grp_l, T, hd), compute_dtype)
+
+        def pass1_body(p, carry):
+            m, l, o_acc = carry
+            kb, vb = page_kv(p)
+            col_pos, col_ok = page_cols(p)
+            return stats_step(scores(kb, col_pos, col_ok), (m, l, o_acc, vb))
+
+        m, l, o_acc = jax.lax.fori_loop(0, n_ctx_pages, pass1_body, (m0, l0, o0))
+        m, l, o_acc = stats_step(scores(kc, *chunk_cols), (m, l, o_acc, vc))
+        lse = m + jnp.log(jnp.maximum(l, 1e-30))                    # [nkv, grp, T]
+        o = jnp.where(l[..., None] > 0, o_acc / jnp.maximum(l, 1e-30)[..., None], 0.0)
+        gog_t = jnp.transpose(gog, (1, 2, 0, 3))                    # [nkv, grp, T, hd]
+        delta = jnp.sum(o * gog_t, axis=-1)                         # [nkv, grp, T]
+
+        # ---- pass 2: gradients block by block --------------------------------
+        def grad_block(sb, kb, vb):
+            pb = jnp.exp(sb - lse[..., None])                       # [nkv, grp, T, B]
+            dvb = jnp.einsum("kgij,kgid->jkd", pb, gog_t,
+                             preferred_element_type=compute_dtype)
+            dpb = jnp.einsum("kgid,jkd->kgij", gog_t, vb,
+                             preferred_element_type=compute_dtype)
+            dsb = pb * (dpb - delta[..., None]) * sm_scale
+            dq_add = jnp.einsum("kgij,jkd->ikgd", dsb, kb,
+                                preferred_element_type=compute_dtype)
+            dkb = jnp.einsum("kgij,ikgd->jkd", dsb, qg,
+                             preferred_element_type=compute_dtype)
+            return dq_add, dkb, dvb
+
+        dq0 = jnp.zeros((T, nkv_l, grp_l, hd), compute_dtype)
+        dcache0 = jnp.zeros(kv_cache.shape, compute_dtype)
+
+        def pass2_body(p, carry):
+            dq_acc, dcache = carry
+            kb, vb = page_kv(p)
+            col_pos, col_ok = page_cols(p)
+            dq_add, dkb, dvb = grad_block(scores(kb, col_pos, col_ok), kb, vb)
+            pg = page_indices[p]
+            blk = jnp.stack([dkb, dvb], axis=2)                     # [B, nkv, 2, hd]
+            dcache = jax.lax.dynamic_update_index_in_dim(
+                dcache, jax.lax.dynamic_index_in_dim(dcache, pg, axis=0, keepdims=False) + blk,
+                pg, axis=0)
+            return dq_acc + dq_add, dcache
+
+        dq_acc, dcache = jax.lax.fori_loop(0, n_ctx_pages, pass2_body, (dq0, dcache0))
+        dq_add, dk, dv = grad_block(scores(kc, *chunk_cols), kc, vc)
+        dq_acc = dq_acc + dq_add
+        dq = jnp.where(row_ok[:, None, None], dq_acc.reshape(T, nq_l, hd), 0.0)
+        return (dq.astype(q.dtype), dk.astype(k.dtype), dv.astype(v.dtype),
+                dcache.astype(kv_cache.dtype))
+
     @jax.custom_vjp
     def diff_rpa(q, k, v, kv_cache, kv_len, q_len, page_indices):
         return kernel_fn(q, k, v, kv_cache, kv_len, q_len, page_indices)
@@ -76,11 +207,15 @@ def make_diff_rpa_chunked(kernel_fn, *, sm_scale, page_size, num_q_heads, num_kv
         hd = q.shape[-1]
         ctx = kv_len - q_len
 
-        def f(q_, k_, v_, cache_):
-            return _replica(q_, k_, v_, cache_, kv_len, q_len, page_indices)
+        if blockwise_vjp_enabled():
+            dq, dk, dv, dcache_attn = _blockwise_vjp(
+                q, k, v, kv_cache, kv_len, q_len, page_indices, g_out)
+        else:
+            def f(q_, k_, v_, cache_):
+                return _replica(q_, k_, v_, cache_, kv_len, q_len, page_indices)
 
-        _, vjp = jax.vjp(f, q, k, v, kv_cache)
-        dq, dk, dv, dcache_attn = vjp(g_out.astype(q.dtype))
+            _, vjp = jax.vjp(f, q, k, v, kv_cache)
+            dq, dk, dv, dcache_attn = vjp(g_out.astype(q.dtype))
         # dcache_attn already lands on context slots in PAGED layout (replica gathers via
         # jnp indexing => JAX derives the scatter transpose) -- G2x2 form A ≡ form B proven.
 
@@ -105,6 +240,7 @@ def make_diff_rpa_chunked(kernel_fn, *, sm_scale, page_size, num_q_heads, num_kv
 
     diff_rpa.defvjp(_fwd, _bwd)
     diff_rpa._replica = _replica                                # exposed for tests
+    diff_rpa._blockwise_vjp = _blockwise_vjp                    # exposed for tests
     return diff_rpa
 
 
@@ -243,11 +379,15 @@ def make_diff_rpa_chunked_ragged(kernel_fn, *, sm_scale, page_size, num_q_heads,
             vi = jnp.where(src_ok[:, None, None], v[gidx], 0)
             goi = jnp.where(src_ok[:, None, None], g_out[gidx], 0)
 
-            def f_i(q_, k_, v_, cache_):
-                return core._replica(q_, k_, v_, cache_, kv_len_i, q_len_i, tbl_i)
+            if blockwise_vjp_enabled():
+                dqi, dki, dvi, dca_i = core._blockwise_vjp(
+                    qi, ki, vi, kv_cache, kv_len_i, q_len_i, tbl_i, goi)
+            else:
+                def f_i(q_, k_, v_, cache_):
+                    return core._replica(q_, k_, v_, cache_, kv_len_i, q_len_i, tbl_i)
 
-            _, vjp_i = jax.vjp(f_i, qi, ki, vi, kv_cache)
-            dqi, dki, dvi, dca_i = vjp_i(goi.astype(q.dtype))
+                _, vjp_i = jax.vjp(f_i, qi, ki, vi, kv_cache)
+                dqi, dki, dvi, dca_i = vjp_i(goi.astype(q.dtype))
             # Move cotangents back to their original rows.
             back = jnp.clip(rows - q0_i, 0, T - 1)
             put_ok = sel
