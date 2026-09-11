@@ -32,7 +32,7 @@
  def sharded_ragged_paged_attention(
      mesh: Mesh,
      q: jax.Array,
-@@ -452,16 +466,103 @@
+@@ -452,16 +466,97 @@
          if not use_hd64:
              kwargs["update_kv_cache"] = update_kv_cache
              kwargs["use_causal_mask"] = use_causal_mask
@@ -76,9 +76,6 @@
 +        # cotangents + g[1] routing (fp64 chain-vs-oracle selftest PASS).  Single-seq mode.
 +        if use_hd64 or attention_sink is not None:
 +            raise NotImplementedError("CANON_RPA_VJP2: v3 default path only")
-+        import sys as _sys
-+        if "/mnt/disks/tunix-data/claude_work" not in _sys.path:
-+            _sys.path.insert(0, "/mnt/disks/tunix-data/claude_work")
 +        from rpa_diff_chunked import make_diff_rpa_chunked_ragged as _mk2
 +        _local_fn = _mk2(_ragged_paged_attention, sm_scale=sm_scale,
 +                         page_size=args[3].shape[1], num_q_heads=args[0].shape[-2],
@@ -89,9 +86,6 @@
 +            raise NotImplementedError(
 +                "CANON_RPA_VJP is only wired for the v3 default RPA path without attention sink "
 +                f"(use_hd64={use_hd64}, attention_sink={attention_sink is not None})")
-+        import sys as _sys
-+        if "/mnt/disks/tunix-data/claude_work" not in _sys.path:
-+            _sys.path.insert(0, "/mnt/disks/tunix-data/claude_work")
 +        from rpa_diff import make_diff_rpa as _make_diff_rpa
 +        _local_fn = _make_diff_rpa(_ragged_paged_attention, sm_scale=sm_scale,
 +                                   use_causal_mask=use_causal_mask)
@@ -138,7 +132,7 @@
  
  def attention(
      kv_cache: jax.Array,
-@@ -500,6 +601,21 @@
+@@ -500,6 +595,21 @@
  
      md = attention_metadata
  
@@ -160,7 +154,7 @@
      # (T, N, H)
      output, kv_cache = sharded_ragged_paged_attention(
          mesh,
-@@ -510,7 +626,7 @@
+@@ -510,7 +620,7 @@
          md.seq_lens,
          md.block_tables,
          md.query_start_loc,
