@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")  # the checked-shard_map test
 import jax
 import jax.numpy as jnp
 
@@ -68,3 +69,25 @@ def test_switch_default_off(monkeypatch):
   monkeypatch.setenv(rdc.BLOCKWISE_VJP_ENV, "x")
   with pytest.raises(ValueError):
     rdc.blockwise_vjp_enabled()
+
+
+def test_blockwise_runs_inside_a_checked_shard_map_one_head_slice_per_rank():
+  """The P59 layer pullbacks run under shard_map(check_vma=True): the loop carries must be typed varying."""
+  from jax.sharding import Mesh, PartitionSpec as P
+  devices = jax.devices()
+  if len(devices) < 2:
+    pytest.skip("needs --xla_force_host_platform_device_count=2")
+  mesh = Mesh(np.array(devices[:2]).reshape(2, 1), axis_names=("data", "model"))
+  d = rdc.make_diff_rpa_chunked(lambda *a: None, sm_scale=SM, page_size=PAGE, num_q_heads=NQ, num_kv_heads=NKV)
+  q, k, v, cache, kv_len, q_len_a, tbl, g_out = _case(3, 40, 32, 6)
+  ref = jax.jit(d._blockwise_vjp)(q, k, v, cache, kv_len, q_len_a, tbl, g_out)
+  heads = P(None, "data", None)                       # kv heads split across the ranks (q heads follow their group)
+  cache_spec = P(None, None, "data", None, None)      # [np, PAGE, nkv, 2, hd]
+  rep = P()
+  mapped = jax.shard_map(
+      d._blockwise_vjp, mesh=mesh,
+      in_specs=(heads, heads, heads, cache_spec, rep, rep, rep, heads),
+      out_specs=(heads, heads, heads, cache_spec), check_vma=True)
+  got = mapped(q, k, v, cache, kv_len, q_len_a, tbl, g_out)
+  for name, a, b in zip(("dq", "dk", "dv", "dcache"), got, ref):
+    np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6, err_msg=name)

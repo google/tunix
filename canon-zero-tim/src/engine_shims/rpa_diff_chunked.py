@@ -19,6 +19,24 @@ BLOCKWISE_VJP_ENV = "CANON_RPA_VJP_BLOCKWISE"
 _BLOCKWISE_RECEIPT = set()
 
 
+def _varying_like(value, *refs):
+    """Type a loop-carry initializer as varying over every mesh axis a ref varies over.
+
+    Inside a shard_map with check_vma=True (the P59 layer pullbacks under
+    CANON_P66_P59_CHECK_VMA=1) a fori_loop carry built from jnp.zeros/full is
+    typed replicated while the body's outputs, derived from q/k/v and the
+    cache, are typed varying; JAX then rejects the loop ("carry input and
+    carry output must have equal types").  Outside such a shard_map every
+    ref has an empty vma and the value is returned untouched.
+    """
+    axes = set()
+    for ref in refs:
+        axes |= set(getattr(jax.typeof(ref), "vma", ()) or ())
+    if not axes:
+        return value
+    return jax.lax.pcast(value, tuple(sorted(axes)), to="varying")
+
+
 def blockwise_vjp_enabled():
     value = os.environ.get(BLOCKWISE_VJP_ENV, "0")
     if value not in ("0", "1"):
@@ -139,9 +157,9 @@ def make_diff_rpa_chunked(kernel_fn, *, sm_scale, page_size, num_q_heads, num_kv
                 "kgij,jkd->kgid", pb, vb, preferred_element_type=compute_dtype)
             return m_new, l_new, o_new
 
-        m0 = jnp.full((nkv_l, grp_l, T), neg, compute_dtype)
-        l0 = jnp.zeros((nkv_l, grp_l, T), compute_dtype)
-        o0 = jnp.zeros((nkv_l, grp_l, T, hd), compute_dtype)
+        m0 = _varying_like(jnp.full((nkv_l, grp_l, T), neg, compute_dtype), qg, kv_cache)
+        l0 = _varying_like(jnp.zeros((nkv_l, grp_l, T), compute_dtype), qg, kv_cache)
+        o0 = _varying_like(jnp.zeros((nkv_l, grp_l, T, hd), compute_dtype), qg, kv_cache)
 
         def pass1_body(p, carry):
             m, l, o_acc = carry
@@ -170,8 +188,8 @@ def make_diff_rpa_chunked(kernel_fn, *, sm_scale, page_size, num_q_heads, num_kv
                              preferred_element_type=compute_dtype)
             return dq_add, dkb, dvb
 
-        dq0 = jnp.zeros((T, nkv_l, grp_l, hd), compute_dtype)
-        dcache0 = jnp.zeros(kv_cache.shape, compute_dtype)
+        dq0 = _varying_like(jnp.zeros((T, nkv_l, grp_l, hd), compute_dtype), qg, kv_cache)
+        dcache0 = _varying_like(jnp.zeros(kv_cache.shape, compute_dtype), qg, kv_cache)
 
         def pass2_body(p, carry):
             dq_acc, dcache = carry
