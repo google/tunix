@@ -179,6 +179,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Directory for local event logging (TensorBoard/CLU).",
   )
   parser.add_argument(
+      "--trajectory_log_dir",
+      type=str,
+      default=os.getenv("TRAJECTORY_LOG_DIR", None),
+      help=(
+          "Directory for trajectory logging. Defaults to "
+          "<log_dir>/trajectories when log_dir is set."
+      ),
+  )
+  parser.add_argument(
       "--flush_metrics_every_n_steps",
       type=int,
       default=1,
@@ -421,6 +430,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           trainer_dp=args.trainer_dp,
       ),
       metrics_logging_options=metrics_logging_options,
+      trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
       sync_weights=(args.weight_sync_mode != "none"),
       on_step_begin=lambda step: logging.info(

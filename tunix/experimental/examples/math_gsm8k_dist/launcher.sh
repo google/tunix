@@ -64,6 +64,7 @@ FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
+TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
@@ -727,6 +728,9 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$TRAINER_FSDP" ]]; then
     ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
+  fi
+  if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
   fi
 
   export JAX_PLATFORMS=cpu
