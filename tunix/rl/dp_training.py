@@ -1192,6 +1192,12 @@ def _build_reducer_programs(
     reduce_collective = gathered_tree_vma_dp_collective
   else:
     reduce_collective = select_dp_collective(reduce_mode)
+  # tasks/zero_tim_perf3 E2e: the receipt is the only proof the selector took.
+  print(
+      f"[PATHTRACE] CANON_DP_COLLECTIVE_REDUCE={reduce_mode or '0'} dp reduce "
+      f"via {reduce_collective.__name__}",
+      flush=True,
+  )
 
   bucket_indices, bucket_local_bytes = _reducer_leaf_buckets(
       spec_template, max_local_bytes=max_local_bytes
