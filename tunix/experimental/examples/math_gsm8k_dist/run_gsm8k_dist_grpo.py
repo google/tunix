@@ -302,6 +302,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   args = _parse_args(argv)
+  if args.debug:
+    # Enable canonical debug logging and print full sampler responses
+    logging.getLogger().setLevel(logging.DEBUG)
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:

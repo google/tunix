@@ -450,7 +450,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.optimizer_chain_kwargs, {})
     self.assertFalse(args.use_lora)
     self.assertEqual(args.rollout_mesh_tp, 0)
-    self.assertTrue(args.prefuse_moe_weights)
+    self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
 
     custom_argv = [
@@ -519,6 +519,33 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.mini_batch_size, 2)
     self.assertEqual(args_custom.num_generations, 8)
     self.assertEqual(args_custom.train_micro_batch_size, 4)
+
+  def test_checkpointing_options_zero_is_read_only(self):
+    args = mock.Mock(
+        checkpoint_save_interval_steps=0,
+        checkpoint_max_to_keep=10,
+    )
+    opts = run_trainer_node._checkpointing_options(args)
+    self.assertEqual(opts.save_interval_steps, 0)
+
+  def test_checkpointing_options_positive(self):
+    args = mock.Mock(
+        checkpoint_save_interval_steps=5,
+        checkpoint_max_to_keep=3,
+    )
+    opts = run_trainer_node._checkpointing_options(args)
+    self.assertEqual(opts.save_interval_steps, 5)
+    self.assertEqual(opts.max_to_keep, 3)
+
+  def test_checkpointing_options_negative_raises(self):
+    args = mock.Mock(
+        checkpoint_save_interval_steps=-1,
+        checkpoint_max_to_keep=3,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "checkpoint_save_interval_steps must be non-negative"
+    ):
+      run_trainer_node._checkpointing_options(args)
 
   def test_gradient_accumulation_uses_prompt_level_mini_batch(self):
     # pylint: disable=protected-access
