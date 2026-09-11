@@ -342,8 +342,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         **optional_metrics,
         "sample_mask/kept_frac": common.mean_of_means,
         "sampler_is/token_logdiff_absmean": common.mean_of_means,
+        "sampler_is/token_logdiff_absmax": np.max,
+        "sampler_is/token_outlier_frac": common.mean_of_means,
+        # Already per-sequence within a micro-batch, so pooling is a mean of
+        # those means -- the same convention as the other per-sequence metrics.
+        "sampler_is/token_outliers_per_seq": common.mean_of_means,
         "sampler_is/token_weight_mean": common.mean_of_means,
         "sampler_is/token_weight_max": np.max,
+        "sampler_is/token_weight_min": np.min,
         "sampler_is/seq_geomean_mean": common.mean_of_means,
         "sampler_is/seq_geomean_min": np.min,
         "sampler_is/seq_geomean_max": np.max,

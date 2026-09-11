@@ -330,6 +330,43 @@ def sequence_loss_mask(
   )
 
 
+def token_outlier_stats(
+    log_is: jax.Array,
+    completion_mask: jax.Array,
+    n_seq: jax.Array | float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Extreme-value statistics of the sampler-trainer per-token disagreement.
+
+  `token_logdiff_absmean` is a mean, and a mean cannot tell "every token
+  disagrees slightly" apart from "a few tokens disagree categorically". Those
+  have different causes -- the first is numerics, the second is an alignment or
+  tokenisation defect -- and different fixes, so the diagnostic has to separate
+  them. A handful of tokens off by tens of nats can dominate a sequence's
+  geometric mean while leaving the per-token mean looking unremarkable.
+
+  Args:
+    log_is: Per-token trainer-minus-sampler log ratio, `[B, T]`.
+    completion_mask: Per-token mask over scored tokens, `[B, T]`.
+    n_seq: Sequence count to divide the per-sequence count by; already floored
+      away from zero by the caller.
+
+  Returns:
+    `(absmax, outlier_frac, outliers_per_seq)` -- the largest single
+    disagreement in nats, the share of scored tokens beyond
+    `TOKEN_LOGDIFF_OUTLIER_NATS`, and the mean number of such tokens per
+    sequence. The last is the useful one when a defect fires once per
+    conversation turn, since the count is then meaningful on its own.
+  """
+  abs_log_is = jnp.abs(log_is)
+  scored = completion_mask > 0
+  absmax = jnp.where(
+      scored.any(), jnp.max(jnp.where(scored, abs_log_is, 0.0)), 0.0
+  )
+  outliers = (abs_log_is > TOKEN_LOGDIFF_OUTLIER_NATS) * completion_mask
+  outlier_frac = outliers.sum() / jnp.maximum(completion_mask.sum(), 1.0)
+  return absmax, outlier_frac, outliers.sum() / n_seq
+
+
 def truncated_importance_weights(
     log_is_raw: jax.Array,
     seq_geomean: jax.Array,
@@ -387,6 +424,13 @@ def truncated_importance_weights(
   oob_ratio = 1.0 - (keep * counted).sum() / jnp.maximum(counted.sum(), 1.0)
   return weights * keep[:, None], oob_ratio
 
+
+# |log pi_trainer - log pi_sampler| above which a token counts as an outlier for
+# the reported diagnostic. Well clear of any plausible numerical disagreement --
+# a well-matched stack sits three orders of magnitude below it -- so a non-zero
+# count means a token the two engines disagree about categorically, not
+# imprecisely. Reporting only; nothing keys off this value.
+TOKEN_LOGDIFF_OUTLIER_NATS = 10.0
 
 # Metric suffixes emitted per (length bucket, completion status). Raw sums, so
 # that pooling across micro-batches, shards and steps is exact -- and so that
@@ -1112,8 +1156,12 @@ def grpo_loss_fn(
   bucket_edges = getattr(algo_config, "sampler_is_length_buckets", None)
   if log_is is None:
     aux["sampler_is/token_logdiff_absmean"] = jnp.float32(0.0)
+    aux["sampler_is/token_logdiff_absmax"] = jnp.float32(0.0)
+    aux["sampler_is/token_outlier_frac"] = jnp.float32(0.0)
+    aux["sampler_is/token_outliers_per_seq"] = jnp.float32(0.0)
     aux["sampler_is/token_weight_mean"] = jnp.float32(1.0)
     aux["sampler_is/token_weight_max"] = jnp.float32(1.0)
+    aux["sampler_is/token_weight_min"] = jnp.float32(1.0)
     aux["sampler_is/seq_geomean_mean"] = jnp.float32(1.0)
     aux["sampler_is/seq_geomean_min"] = jnp.float32(1.0)
     aux["sampler_is/seq_geomean_max"] = jnp.float32(1.0)
@@ -1125,6 +1173,7 @@ def grpo_loss_fn(
     is_w = jnp.nan_to_num(jnp.exp(log_is), nan=0.0, posinf=0.0, neginf=0.0)
     n_seq = jnp.maximum(seq_valid.sum(), 1.0)
     has_seq = seq_valid.sum() > 0
+    has_tok = completion_mask.sum() > 0
     aux["sampler_is/token_logdiff_absmean"] = masked_mean(
         jnp.abs(log_is), completion_mask
     )
@@ -1132,6 +1181,19 @@ def grpo_loss_fn(
     aux["sampler_is/token_weight_max"] = jnp.max(
         jnp.where(completion_mask > 0, is_w, 0.0)
     )
+    # Minimum weight, i.e. the single worst token the trainer thought the
+    # sampler should never have emitted. `token_weight_max` alone cannot see
+    # these: a catastrophic disagreement in that direction is a weight near
+    # zero, not a large one.
+    aux["sampler_is/token_weight_min"] = jnp.where(
+        has_tok, jnp.min(jnp.where(completion_mask > 0, is_w, jnp.inf)), 1.0
+    )
+    absmax, outlier_frac, outliers_per_seq = token_outlier_stats(
+        log_is, completion_mask, n_seq
+    )
+    aux["sampler_is/token_logdiff_absmax"] = absmax
+    aux["sampler_is/token_outlier_frac"] = outlier_frac
+    aux["sampler_is/token_outliers_per_seq"] = outliers_per_seq
     aux["sampler_is/seq_geomean_mean"] = (seq_geomean * seq_valid).sum() / n_seq
     aux["sampler_is/seq_geomean_min"] = jnp.where(
         has_seq, jnp.min(jnp.where(seq_valid > 0, seq_geomean, jnp.inf)), 1.0
