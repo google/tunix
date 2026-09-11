@@ -914,6 +914,114 @@ class PeftTrainerTest(parameterized.TestCase):
         metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
     )
 
+  def test_loss_output_aux_auto_logged_without_override(self):
+    # A plain PeftTrainer (no _post_process_train_step override) must still
+    # surface LossOutput.aux_metrics via get_metrics(), so shared-loss aux like
+    # kl / pg_clipfrac reaches the experimental orchestrator's metrics logger.
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              # unreduced_sum=6, denominator=2 -> weighted mean 3.0
+              'kl': sft_utils.WeightedMetric(
+                  jnp.array(6.0, dtype=jnp.float32),
+                  jnp.array(2.0, dtype=jnp.float32),
+              ),
+          },
+      )
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    metrics = trainer.get_metrics()
+    # Reduced WeightedMetric lands as a scalar under its aux key.
+    self.assertIn('kl', metrics.scalar_metrics)
+    self.assertAlmostEqual(
+        float(metrics.scalar_metrics['kl']), 3.0, places=4  # pyrefly: ignore[bad-argument-type]
+    )
+
+  def test_legacy_has_aux_payload_is_not_auto_logged(self):
+    # with_loss_fn(..., has_aux=True) returns arbitrary auxiliary state that
+    # may nest arrays under non-metric keys. It must neither be auto-forwarded
+    # nor crash the metrics flush: only LossOutput.aux_metrics is auto-logged.
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ):
+      del model, input_tokens, input_mask, positions, attention_mask
+      return jnp.array(1.0), {
+          'foo': jnp.array(1.0),
+          'cache': {'key': jnp.zeros((2,), dtype=jnp.float32)},
+      }
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn, has_aux=True)
+
+    trainer.train(self.train_ds, self.eval_ds)  # must not raise at flush
+
+    metrics = trainer.get_metrics()
+    self.assertNotIn('cache', metrics.scalar_metrics)
+    self.assertNotIn('cache', metrics.weighted_metrics)
+    self.assertNotIn('foo', metrics.scalar_metrics)
+
+  def test_auto_aux_keeps_subclass_reducer_and_records_once(self):
+    # RL-style subclass hooks install their own reducer with create-or-append
+    # semantics. Auto-forwarding must not pre-create the key (which would make
+    # the hook append a duplicate) nor replace the hook's reducer.
+    class HookTrainer(peft_trainer_v2.PeftTrainer):
+
+      def _post_process_train_step(self, aux):
+        buf = self._buffered_train_metrics
+        assert buf is not None
+        if 'foo' not in buf.additional_metrics:
+          buf.additional_metrics['foo'] = ([aux['foo']], lambda xs: sum(xs))  # pyrefly: ignore[no-matching-overload]
+        else:
+          buf.additional_metrics['foo'][0].append(aux['foo'])
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=10)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = HookTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    # Two microbatches of one optimizer step, as under gradient accumulation;
+    # the aux dict is what _fwd_bwd_step yields for a LossOutput loss.
+    trainer._record_fwd_bwd(jnp.array(1.0), {'foo': 2.0})
+    trainer._record_fwd_bwd(jnp.array(1.0), {'foo': 4.0})
+
+    buf = trainer._buffered_train_metrics
+    self.assertIsNotNone(buf)
+    assert buf is not None
+    self.assertEqual(buf.additional_metrics['foo'][0], [2.0, 4.0])
+    trainer._write_metrics(buf)
+    self.assertIsNotNone(trainer._written_metrics)
+    assert trainer._written_metrics is not None
+    self.assertAlmostEqual(
+        float(trainer._written_metrics.scalar_metrics['foo']), 6.0  # pyrefly: ignore[bad-argument-type]
+    )
+
   def test_empty_eval_dataset(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
