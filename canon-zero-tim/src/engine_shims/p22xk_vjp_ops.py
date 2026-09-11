@@ -40,6 +40,44 @@ def canonical_swiglu(gate, up):
     return (jax.nn.silu(gate) * up).astype(jnp.bfloat16)
 
 
+# tasks/zero_tim_perf3 E2d.  The coats below differentiate canonical_matmul,
+# the 16-K-block replica of the forward's accumulation order, so every
+# projection's backward is 16 sliced dots whose weight cotangents are padded
+# back into full-size buffers and summed: in the 2026-09-11 one-host 8B
+# update window that structure was the add_bitcast_fusion bf16[1,4096,6144]/
+# [1,6144,4096] family (21.5% of jit_zt_tr_bwd_chunk) plus the
+# fusion bf16[256,256] sea (4032 per launch, 5%).  The backward does not
+# need the forward's K-blocking: dX = cot . W^T and dW = X^T . cot as two
+# plain f32-accumulating dots give the same gradient up to summation order.
+# CANON_MATMUL_VJP_PLAIN=1 selects the plain dots; the default 0 keeps the
+# replica pullback.
+PLAIN_VJP_ENV = "CANON_MATMUL_VJP_PLAIN"
+_PLAIN_RECEIPT = set()
+
+
+def plain_matmul_vjp_enabled():
+    import os
+
+    value = os.environ.get(PLAIN_VJP_ENV, "0")
+    if value not in ("0", "1"):
+        raise ValueError(f"{PLAIN_VJP_ENV} must be unset, 0 or 1, got {value!r}")
+    if value == "1" and "on" not in _PLAIN_RECEIPT:
+        _PLAIN_RECEIPT.add("on")
+        print(f"[PATHTRACE] {PLAIN_VJP_ENV}=1 projection VJPs use plain f32 dots "
+              "(dX = cot.W^T, dW = X^T.cot)", flush=True)
+    return value == "1"
+
+
+def plain_matmul_pullback(a, b, cotangent):
+    """dX, dW of X @ W for bf16 operands with f32 accumulation."""
+    import jax.numpy as jnp
+
+    cot = cotangent.astype(jnp.bfloat16)
+    da = jnp.dot(cot, b.T, preferred_element_type=jnp.float32).astype(a.dtype)
+    db = jnp.dot(a.T, cot, preferred_element_type=jnp.float32).astype(b.dtype)
+    return da, db
+
+
 def matmul(x, y, *, forward):
     """Use ``forward`` verbatim for primal and canonical_matmul only for VJP."""
     import jax
@@ -55,6 +93,8 @@ def matmul(x, y, *, forward):
 
     def bwd(residual, cotangent):
         a, b = residual
+        if plain_matmul_vjp_enabled():
+            return plain_matmul_pullback(a, b, cotangent)
         _, pullback = jax.vjp(canonical_matmul, a, b)
         return pullback(cotangent)
 
@@ -110,6 +150,13 @@ def norm_matmul(x, gamma, y, *, epsilon: float, forward):
 
     def bwd(residual, cotangent):
         a, g, b = residual
+        if plain_matmul_vjp_enabled():
+            h, norm_pullback = jax.vjp(
+                lambda a_, g_: canonical_rmsnorm(a_, g_, epsilon=epsilon), a, g
+            )
+            dh, db = plain_matmul_pullback(h, b, cotangent)
+            da, dg = norm_pullback(dh)
+            return da, dg, db
         _, pullback = jax.vjp(oracle, a, g, b)
         return pullback(cotangent)
 
