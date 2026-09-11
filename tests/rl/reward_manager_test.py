@@ -13,9 +13,13 @@
 # limitations under the License.
 
 import dataclasses
+import gc
 import inspect
+import multiprocessing
+import time
 from typing import Any, List
 from unittest import mock
+
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -278,6 +282,175 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
     self.assertIn("trajectory_rewards/sum", log_metrics)
     self.assertIn("trajectory_rewards/mean", log_metrics)
     self.assertNotIn("rewards/sum", log_metrics)
+
+
+def answer_reward(
+    prompts: List[str],
+    completions: List[str],
+    answer: List[str],
+    **kwargs: Any,
+) -> List[float]:
+  del completions, kwargs  # Unused
+  assert len(answer) == len(prompts)
+  return [float(a) for a in answer]
+
+
+answer_reward.__name__ = "answer_reward"
+
+
+def _noop():
+  pass
+
+
+def child_spawning_reward(
+    prompts: List[str], completions: List[str], **kwargs: Any
+) -> List[float]:
+  """Spawns a subprocess of its own, which a daemonic pool worker forbids."""
+  del completions, kwargs  # Unused
+  ctx = multiprocessing.get_context("forkserver")
+  p = ctx.Process(target=_noop)
+  p.start()
+  p.join()
+  return [7.0] * len(prompts)
+
+
+child_spawning_reward.__name__ = "child_spawning_reward"
+
+
+def slow_reward(
+    prompts: List[str], completions: List[str], **kwargs: Any
+) -> List[float]:
+  """Takes longer than the (tiny) worker timeout used in the timeout test."""
+  del completions, kwargs  # Unused
+  time.sleep(0.5)
+  return [3.0] * len(prompts)
+
+
+slow_reward.__name__ = "slow_reward"
+
+
+@absltest.skipIf(
+    reward_manager._fork_context() is None,  # pylint: disable=protected-access
+    "parallel reward evaluation requires the forkserver start method",
+)
+class ParallelSequenceRewardManagerTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.serial_config = TestAlgoConfig()
+    self.parallel_config = TestAlgoConfig(reward_num_workers=4)
+    self.prompts = [f"p{i}" for i in range(10)]
+    self.completions = [f"c{i}" * (i + 1) for i in range(10)]
+    self.answers = [str(float(i)) for i in range(10)]
+    self._managers = []
+
+  def tearDown(self):
+    for m in self._managers:
+      m.close()
+    super().tearDown()
+
+  def _make(self, reward_fns, config):
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=reward_fns, algo_config=config
+    )
+    self._managers.append(manager)
+    return manager
+
+  def test_parallel_matches_serial(self):
+    fns = [len_reward, prompt_len_reward, answer_reward, nan_reward]
+    serial = self._make(fns, self.serial_config)(
+        self.prompts, self.completions, answer=self.answers
+    )
+    parallel = self._make(fns, self.parallel_config)(
+        self.prompts, self.completions, answer=self.answers
+    )
+    np.testing.assert_array_equal(serial["rewards"], parallel["rewards"])
+    for name in (
+        "rewards/len_reward",
+        "rewards/prompt_len_reward",
+        "rewards/answer_reward",
+    ):
+      np.testing.assert_array_equal(
+          serial["log_metrics"][name][0],
+          parallel["log_metrics"][name][0],
+          err_msg=f"{name} mismatch",
+      )
+
+  def test_per_example_kwargs_sliced_in_order(self):
+    manager = self._make([answer_reward], self.parallel_config)
+    rewards_info = manager(self.prompts, self.completions, answer=self.answers)
+    np.testing.assert_array_equal(
+        rewards_info["rewards"], np.array([float(i) for i in range(10)])
+    )
+
+  def test_unpicklable_fn_evaluated_in_parent(self):
+    unpicklable = lambda prompts, completions, **kw: [2.0] * len(prompts)
+    unpicklable.__name__ = "unpicklable_fn"
+    manager = self._make([unpicklable], self.parallel_config)
+    rewards_info = manager(self.prompts, self.completions)
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 2.0))
+    self.assertIn("unpicklable_fn", manager._parent_only_fns)
+
+  def test_subprocess_spawning_fn_evaluated_in_parent(self):
+    manager = self._make([child_spawning_reward], self.parallel_config)
+    rewards_info = manager(self.prompts, self.completions)
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 7.0))
+    self.assertIn("child_spawning_reward", manager._parent_only_fns)
+    # Subsequent calls still succeed (fn now runs in the parent).
+    rewards_info = manager(self.prompts, self.completions)
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 7.0))
+
+  def test_minus_one_uses_one_worker_per_cpu(self):
+    # Pin the CPU count: the point is the resolution rule, and a real
+    # many-core test machine must not spawn one worker per core here.
+    with mock.patch.object(reward_manager.os, "cpu_count", return_value=3):
+      manager = self._make([len_reward], TestAlgoConfig(reward_num_workers=-1))
+      rewards_info = manager(self.prompts, self.completions)
+      self.assertEqual(manager._pool._processes, 3)
+    expected = np.array([float(len(c)) for c in self.completions])
+    np.testing.assert_array_equal(rewards_info["rewards"], expected)
+
+  def test_empty_batch_raises(self):
+    manager = self._make([len_reward], self.parallel_config)
+    with self.assertRaisesRegex(ValueError, "empty batch"):
+      manager([], [])
+    self.assertIsNone(manager._pool)
+
+  def test_zero_workers_creates_no_pool(self):
+    manager = self._make([len_reward], self.serial_config)
+    manager(self.prompts, self.completions)
+    self.assertIsNone(manager._pool)
+
+  def test_default_is_serial(self):
+    self.assertEqual(algo_config_lib.AlgorithmConfig().reward_num_workers, 0)
+
+  def test_worker_timeout_is_configurable(self):
+    config = TestAlgoConfig(
+        reward_num_workers=2, reward_worker_timeout_seconds=0.01
+    )
+    manager = self._make([slow_reward], config)
+    rewards_info = manager(self.prompts, self.completions)
+    # The chunk timed out in the worker, so the fn was evaluated in the
+    # parent and is parent-only from now on; the result is still correct.
+    np.testing.assert_array_equal(rewards_info["rewards"], np.full(10, 3.0))
+    self.assertIn("slow_reward", manager._parent_only_fns)
+
+  def test_dropped_manager_terminates_its_workers(self):
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[len_reward], algo_config=self.parallel_config
+    )
+    manager(self.prompts, self.completions)
+    workers = list(manager._pool._pool)  # pylint: disable=protected-access
+    self.assertTrue(all(w.is_alive() for w in workers))
+    del manager
+    gc.collect()
+    for w in workers:
+      w.join(timeout=5)
+    self.assertFalse(any(w.is_alive() for w in workers))
+
+  def test_invalid_timeout_rejected(self):
+    with self.assertRaisesRegex(ValueError, "reward_worker_timeout_seconds"):
+      TestAlgoConfig(reward_worker_timeout_seconds=0)
 
 
 if __name__ == "__main__":
