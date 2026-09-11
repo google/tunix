@@ -22,7 +22,6 @@ import os
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from absl import logging
-from flax import nnx
 import jax
 import jaxtyping
 import numpy as np
@@ -184,6 +183,24 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
+  def delete_cache(self) -> None:
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+      self.llm.collective_rpc("delete_kv_cache")  # will free hbm
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+
+  def reinitialize_cache(self) -> None:
+    self._model_runner.state_leaves = tuple(
+        jax.tree_util.tree_leaves(self._model_runner.state)
+    )
+
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
       self,
@@ -192,12 +209,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   ):
     del filter_types
 
-    if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache") # will free hbm
-    elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    self.delete_cache()
 
     # Synchronization point before weight sync
     jax.effects_barrier()
@@ -235,18 +247,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
-    if hasattr(self._model_runner, "state_leaves"):
-      if isinstance(self._model_runner.state, nnx.State):
-        self._model_runner.state_leaves = tuple(
-            jax.tree_util.tree_leaves(self._model_runner.state)
-        )
-      else:
-        self._model_runner.state_leaves = self._model_runner.state
-
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    self.reinitialize_cache()
 
   def _is_torchax_backend(self) -> bool:
     """True when tpu-inference runs the vLLM (torchax) model implementation.
