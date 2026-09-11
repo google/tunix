@@ -434,6 +434,10 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(engine._policy_version, 3)
       self.assertEqual(coordinator.calls, [3])
       self.mock_actor.restore_checkpoint.assert_called_once_with()
+      self.mock_rollout_1.get_target_state.assert_called_once_with()
+      self.mock_actor.set_target_state.assert_called_once_with(
+          target_state={"params": 1}
+      )
 
     asyncio.run(_run())
 
@@ -674,6 +678,67 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(coordinator.calls, [0])
 
     asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_no_trainer_or_rollout_workers(
+      self,
+  ):
+    async def _run():
+      engine_no_rollout = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+      )
+      await engine_no_rollout._maybe_configure_trainer_target_state(
+          datatypes.Role.ACTOR
+      )
+      self.mock_actor.set_target_state.assert_not_called()
+
+      # Role with no registered trainer
+      await self.engine._maybe_configure_trainer_target_state(
+          datatypes.Role.CRITIC
+      )
+      self.mock_rollout_1.get_target_state.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_tolerates_attribute_error(self):
+    async def _run():
+      # Direct AttributeError
+      self.mock_rollout_1.get_target_state.side_effect = AttributeError(
+          "Worker has no method get_target_state"
+      )
+      await self.engine._maybe_configure_trainer_target_state(
+          datatypes.Role.ACTOR
+      )
+      self.mock_actor.set_target_state.assert_not_called()
+
+      # Remote RuntimeError wrapping an AttributeError
+      self.mock_rollout_1.get_target_state.side_effect = RuntimeError(
+          "Actor method call failed with AttributeError: 'Worker' object has no"
+          " attribute 'get_target_state'"
+      )
+      await self.engine._maybe_configure_trainer_target_state(
+          datatypes.Role.ACTOR
+      )
+      self.mock_actor.set_target_state.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_raises_unrelated_runtime_error(
+      self,
+  ):
+    async def _run():
+      self.mock_rollout_1.get_target_state.side_effect = RuntimeError(
+          "Worker connection timed out"
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "Worker connection timed out"
+      ):
+        await self.engine._maybe_configure_trainer_target_state(
+            datatypes.Role.ACTOR
+        )
+
+    asyncio.run(_run())
+
 
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():

@@ -90,6 +90,25 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
 
+  async def _maybe_configure_trainer_target_state(
+      self,
+      role: datatypes.Role,
+  ) -> None:
+    """Seeds trainer-side weight sync with the rollout target-state skeleton."""
+    trainer = self._trainer_workers.get(role)
+    if trainer is None or not self._rollout_workers:
+      return
+
+    rollout = self._rollout_workers[0]
+    try:
+      target_state = await self._invoke_worker(rollout, "get_target_state")
+      await self._invoke_worker(
+          trainer, "set_target_state", target_state=target_state
+      )
+    except (AttributeError, RuntimeError) as exc:
+      if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
+        raise
+
   async def _invoke_worker(
       self,
       worker: remote_execution.ActorHandle,
@@ -591,16 +610,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if trainer is None:
       raise ValueError(f"No trainer worker registered for role {role}")
 
-    if self._rollout_workers:
-      rollout = self._rollout_workers[0]
-      try:
-        target_state = await self._invoke_worker(rollout, "get_target_state")
-        await self._invoke_worker(
-            trainer, "set_target_state", target_state=target_state
-        )
-      except (AttributeError, RuntimeError) as exc:
-        if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
-          raise
+    await self._maybe_configure_trainer_target_state(role)
 
     if not sync_weights:
       return None
@@ -730,6 +740,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         metadata,
     )
     if resync_rollout_weights:
+      await self._maybe_configure_trainer_target_state(role)
       synced_version = await self.sync_weights(
           role=role,
           policy_version=restored_policy_version,
