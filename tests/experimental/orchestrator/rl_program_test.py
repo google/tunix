@@ -187,9 +187,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.restore_checkpoint = mock.AsyncMock(
         return_value={"step": 0}
     )
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=0
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=0)
 
     async def _mock_poll(*args, **kwargs):
       del args, kwargs
@@ -199,6 +197,7 @@ class RLProgramTest(absltest.TestCase):
     async def _mock_sync_weights(*args, policy_version=None, **kwargs):
       del args, kwargs
       return 1 if policy_version is None else policy_version
+
     self.mock_engine.sync_weights = mock.AsyncMock(
         side_effect=_mock_sync_weights
     )
@@ -299,6 +298,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.step, 0)
     self.assertEqual(program.group_size, 2)
     self.assertEqual(program.mini_batch_size, 1)
+    self.assertEqual(program.full_batch_size, 1)
     self.assertIsNotNone(program.raw_q)
     self.assertIsNotNone(program.scored_q)
 
@@ -357,6 +357,7 @@ class RLProgramTest(absltest.TestCase):
           role=datatypes.Role.ACTOR,
           metadata={
               "step": 1,
+              "global_step": 1,
               "policy_version": 1,
               "num_rollouts": 2,
               "num_microbatches": 1,
@@ -459,9 +460,7 @@ class RLProgramTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_resume_sets_step_and_policy_version_from_engine(self):
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=3
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)
     program = self._create_program(dataset=["p0"], max_steps=5)
 
     async def _run():
@@ -473,9 +472,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.policy_version, 3)
 
   def test_resume_forwards_role_and_resync_flag_when_sync_enabled(self):
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=3
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)
     program = self._create_program(
         dataset=["p0"], max_steps=5, sync_weights=True
     )
@@ -490,9 +487,7 @@ class RLProgramTest(absltest.TestCase):
     )
 
   def test_resume_forwards_resync_disabled_when_sync_weights_false(self):
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=2
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=2)
     program = self._create_program(
         dataset=["p0"], max_steps=5, sync_weights=False
     )
@@ -508,9 +503,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.step, 2)
 
   def test_resume_skips_already_consumed_dataset_prefix(self):
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=3
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)
     dataset = [f"p{i}" for i in range(5)]
     program = self._create_program(
         dataset=dataset,
@@ -527,12 +520,40 @@ class RLProgramTest(absltest.TestCase):
         call.args[0][0]["prompt_id"]
         for call in self.mock_engine.dispatch_rollouts.call_args_list
     ]
-    self.assertEqual(dispatched, ["prompt_3", "prompt_4",],)
+    self.assertEqual(
+        dispatched,
+        [
+            "prompt_3",
+            "prompt_4",
+        ],
+    )
+
+  def test_resume_skip_uses_full_batch_size(self):
+    self.mock_algo.mini_batch_size = 2
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=1)
+    dataset = [f"p{i}" for i in range(8)]
+    program = self._create_program(
+        dataset=dataset,
+        max_steps=2,
+        batch_size=4,
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+      await program.rollout_dispatch_stage()
+
+    asyncio.run(_run())
+    dispatched = [
+        call.args[0][0]["prompt_id"]
+        for call in self.mock_engine.dispatch_rollouts.call_args_list
+    ]
+    self.assertEqual(
+        dispatched, ["prompt_4", "prompt_5", "prompt_6", "prompt_7"]
+    )
 
   def test_fresh_run_does_not_skip_dataset(self):
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=0
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=0)
     dataset = [f"p{i}" for i in range(5)]
     program = self._create_program(
         dataset=dataset,
@@ -550,9 +571,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_resume_runs_before_first_dispatch(self):
     call_order = []
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(
-        return_value=1
-    )
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=1)
 
     async def _resume(*args, **kwargs):
       del args, kwargs
@@ -756,6 +775,83 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_full_batch_contains_multiple_optimizer_updates_and_one_sync(self):
+    async def _run():
+      self.mock_algo.group_size = 2
+      self.mock_algo.mini_batch_size = 2
+      self.mock_engine.train_step.side_effect = [
+          "queued",
+          {"train_step": 1},
+          "queued",
+          {"train_step": 2},
+      ]
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          group_size=2,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=4,
+          reward_fns=[lambda x: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+      )
+      program.engine = self.mock_engine
+
+      for group_idx in range(4):
+        for item_idx in range(2):
+          payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+          )
+          item = datatypes.TrajectoryItem(
+              group_index=item_idx,
+              prompt_id=f"prompt_{group_idx}",
+              start_step=0,
+              traj=datatypes.Trajectory(reward=1.0),
+          )
+          item.payload = payload
+          await program.scored_q.put(item)
+
+      program._dispatch_capacity = asyncio.Semaphore(4)
+      await program.train_stage()
+
+      self.assertEqual(
+          [
+              call.kwargs["apply_optimizer"]
+              for call in self.mock_engine.train_step.call_args_list
+          ],
+          [False, True, False, True],
+      )
+      self.mock_engine.sync_weights.assert_called_once_with(
+          role=datatypes.Role.ACTOR
+      )
+      self.mock_engine.save_checkpoint.assert_called_once()
+      checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
+          "metadata"
+      ]
+      self.assertEqual(checkpoint_metadata["step"], 2)
+      self.assertEqual(checkpoint_metadata["global_step"], 1)
+      self.assertEqual(checkpoint_metadata["policy_version"], 1)
+      self.assertEqual(program.last_step_result.num_rollouts, 8)
+      self.assertEqual(program.last_step_result.num_microbatches, 4)
+
+    asyncio.run(_run())
+
+  def test_full_batch_size_must_be_divisible_by_mini_batch_size(self):
+    self.mock_algo.mini_batch_size = 2
+    with self.assertRaisesRegex(ValueError, "batch_size must be divisible"):
+      self._create_program(batch_size=3)
+
   def test_train_stage_mid_step_dataset_exhaustion_flushes_and_saves_checkpoint(
       self,
   ):
@@ -811,7 +907,9 @@ class RLProgramTest(absltest.TestCase):
       # Flushed and trained the partial microbatch with apply_optimizer=True
       self.assertEqual(self.mock_engine.train_step.call_count, 1)
       self.assertTrue(
-          self.mock_engine.train_step.call_args_list[0].kwargs["apply_optimizer"]
+          self.mock_engine.train_step.call_args_list[0].kwargs[
+              "apply_optimizer"
+          ]
       )
       # Checkpoint and metrics are executed on the flushed batch
       self.mock_engine.get_metrics.assert_called_once_with(
@@ -820,6 +918,112 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.save_checkpoint.assert_called_once()
       self.assertEqual(program.last_step_result.num_microbatches, 1)
       self.assertEqual(program.last_step_result.num_rollouts, 3)
+
+    asyncio.run(_run())
+
+  def test_train_stage_mid_step_dataset_exhaustion_on_mini_batch_boundary_saves_checkpoint(
+      self,
+  ):
+    async def _run():
+      self.mock_algo.group_size = 1
+      self.mock_algo.mini_batch_size = 2
+      padded_assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          group_size=1,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          group_size=1,
+          mini_batch_size=2,
+          batch_size=4,
+          reward_fns=[lambda x: 1.0],
+          assembler=padded_assembler,
+          sync_weights=False,
+      )
+      program.engine = self.mock_engine
+
+      def _make_item(group_idx):
+        payload = datatypes.RLTrainerPayload(
+            prompt_ids=np.array([1, 2], dtype=np.int32),
+            prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+            completion_ids=np.array([3, 4], dtype=np.int32),
+            completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+            advantages=np.array([1.0, 1.0], dtype=np.float32),
+        )
+        item = datatypes.TrajectoryItem(
+            group_index=0,
+            prompt_id=f"prompt_{group_idx}",
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = payload
+        return item
+
+      # 2 groups available = exactly 1 mini-batch (mini_batch_size=2).
+      # full_batch_size=4, so groups_consumed (2) < full_batch_size (4).
+      # On the next iteration, queue is empty, flush() returns [], and
+      # save_checkpoint must still be called.
+      for g in range(2):
+        await program.scored_q.put(_make_item(g))
+      await program.scored_q.close()
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      await program.train_stage()
+
+      self.mock_engine.train_step.assert_called_once()
+      self.assertTrue(
+          self.mock_engine.train_step.call_args.kwargs["apply_optimizer"]
+      )
+      self.mock_engine.save_checkpoint.assert_called_once()
+      checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
+          "metadata"
+      ]
+      self.assertEqual(checkpoint_metadata["step"], 1)
+      self.assertEqual(checkpoint_metadata["global_step"], 1)
+      self.assertEqual(checkpoint_metadata["num_rollouts"], 2)
+      self.assertEqual(checkpoint_metadata["num_microbatches"], 1)
+
+    asyncio.run(_run())
+
+  def test_train_stage_save_checkpoint_handles_none_train_step(self):
+    async def _run():
+      self.mock_algo.group_size = 1
+      self.mock_algo.mini_batch_size = 1
+      self.mock_engine.train_step.return_value = {"train_step": None}
+      program = self._create_program(batch_size=1)
+      program.engine = self.mock_engine
+
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      item = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="prompt_0",
+          start_step=0,
+          traj=datatypes.Trajectory(reward=1.0),
+      )
+      item.payload = payload
+      await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      await program.train_stage()
+
+      self.mock_engine.save_checkpoint.assert_called_once()
+      checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
+          "metadata"
+      ]
+      self.assertEqual(checkpoint_metadata["step"], 1)
 
     asyncio.run(_run())
 
@@ -941,7 +1145,9 @@ class RLProgramTest(absltest.TestCase):
       # Combined into 1 packed sequence (4 + 6 = 10 tokens <= 16)
       self.assertEqual(self.mock_engine.train_step.call_count, 1)
       self.assertTrue(
-          self.mock_engine.train_step.call_args_list[0].kwargs["apply_optimizer"]
+          self.mock_engine.train_step.call_args_list[0].kwargs[
+              "apply_optimizer"
+          ]
       )
       self.assertEqual(program.last_step_result.num_microbatches, 1)
       self.assertEqual(program.last_step_result.num_rollouts, 4)

@@ -330,7 +330,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # Feed 2 (4 + 5 = 9 tokens < 10): still held back, cannot fill a chunk yet.
     self.assertEmpty(assembler.feed([p2]))
 
-    # Feed 3 reaches total_step_rollouts=3 -> drains the whole buffer (12
+    # Feed 3 reaches rollouts_per_optimizer_update=3 -> drains the whole buffer (12
     # tokens) into a full chunk plus a final remainder chunk.
     batches3 = assembler.feed([p3])
     self.assertLen(batches3, 2)
@@ -461,7 +461,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
   def test_streaming_feed_emits_full_chunk_mid_step(self):
     # batch_size=1, max_packed_len=6 -> a full chunk holds 6 tokens.
-    # mini_batch_size is large so the step boundary is never reached here.
+    # mini_batch_size is large, so the optimizer-update boundary is not reached.
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1,
         group_size=1,
@@ -534,7 +534,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=16,
         pad_id=0,
         group_size=1,
-        mini_batch_size=3,  # total_step_rollouts = 3
+        mini_batch_size=3,  # rollouts_per_optimizer_update = 3
     )
     # 3 groups with 4 tokens each (total 12 tokens < 16)
     # Group 1: 4 tokens -> buffers
@@ -545,7 +545,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     res2 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=2)])
     self.assertEmpty(res2)
 
-    # Group 3: 4 tokens -> hits total_step_rollouts = 3, auto-flushes!
+    # Group 3: 4 tokens -> hits rollouts_per_optimizer_update = 3, auto-flushes!
     res3 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=3)])
     self.assertLen(res3, 1)
     batch = res3[0]
@@ -564,20 +564,20 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=16,
         pad_id=0,
         group_size=1,
-        mini_batch_size=3,  # total_step_rollouts = 3
+        mini_batch_size=3,  # rollouts_per_optimizer_update = 3
     )
     # Item 1: 8 tokens -> buffers (8 < 16)
     res1 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=1)])
     self.assertEmpty(res1)
 
     # Item 2: 8 tokens -> 8 + 8 = 16 tokens >= 16 (chunk capacity)!
-    # Emits early before step boundary
+    # Emits early before the optimizer-update boundary.
     res2 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=2)])
     self.assertLen(res2, 1)
     self.assertFalse(res2[0].is_final_batch)
     self.assertEqual(res2[0].payload.completion_ids.shape, (1, 16))
 
-    # Item 3: 4 tokens -> hits step boundary (rollouts = 3), auto-flushes open bin
+    # Item 3 hits the optimizer-update boundary and auto-flushes the open bin.
     res3 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=3)])
     self.assertLen(res3, 1)
     self.assertTrue(res3[0].is_final_batch)
@@ -597,7 +597,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
     # Item 2 has 8 tokens (10 + 8 = 18 > 16, cannot fit!)
     # Should place Item 1 in bin 1 and Item 2 in bin 2.
-    # Reaching total_step_rollouts = 2 auto-flushes bin 2!
+    # Reaching rollouts_per_optimizer_update = 2 auto-flushes bin 2!
     # With batch_size=2, the 2 bins form 1 microbatch of shape [2, 16]!
     res2 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=2)])
     self.assertLen(res2, 1)
@@ -641,7 +641,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=16,
         pad_id=0,
         group_size=2,
-        mini_batch_size=2,  # total_step_rollouts = 4
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Group 1: 2 items of 4 tokens each (8 tokens total) -> buffers
     res1 = assembler.feed([
@@ -650,7 +650,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     ])
     self.assertEmpty(res1)
 
-    # Group 2: 2 items of 4 tokens each (8 tokens total). Reaches step boundary.
+    # Group 2: 2 items of 4 tokens each (8 tokens total). Reaches the optimizer-update boundary.
     res2 = assembler.feed([
         self._make_streaming_payload(prompt_length=2, completion_length=2, prompt_id="p1", group_index=0),
         self._make_streaming_payload(
@@ -712,7 +712,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         completion_mask=np.ones(3, dtype=np.float32),
         advantages=np.array([1.5, 1.5, 1.5], dtype=np.float32),
     )
-    # Total rollouts = 2 + 2 = 4 == total_step_rollouts; reaches step boundary!
+    # Total rollouts = 2 + 2 = 4 == rollouts_per_optimizer_update.
     res2 = assembler.feed([item3, item4])
     self.assertLen(res2, 1)
     batch = res2[0]
@@ -752,7 +752,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=16,
         pad_id=0,
         group_size=2,
-        mini_batch_size=2,  # total_step_rollouts = 4
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
 
     # Group 1 (2 items, 6 tokens each = 12 tokens): buffered (12 < 16)
@@ -767,7 +767,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # Total tokens = 12 + 12 = 24 tokens.
     # Chunk 1 packs 2 items (12 tokens <= 16).
     # Chunk 2 packs remaining 2 items (12 tokens <= 16).
-    # Reaching step rollouts = 4 -> drains entire buffer!
+    # Reaching the optimizer-update boundary drains the entire buffer.
     group2 = [
         self._make_streaming_payload(prompt_length=3, completion_length=3, val=2),
         self._make_streaming_payload(prompt_length=3, completion_length=3, val=2),
@@ -825,7 +825,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=16,
         pad_id=0,
         group_size=1,
-        mini_batch_size=4,  # total_step_rollouts = 4
+        mini_batch_size=4,  # rollouts_per_optimizer_update = 4
     )
     # chunk_capacity = batch_size * max_packed_len = 2 * 16 = 32 tokens.
     # Item 1: 16 tokens -> buffers (16 < 32)
@@ -1796,9 +1796,9 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_response_length=2,
         pad_id=0,
         group_size=2,
-        mini_batch_size=2,  # total_step_rollouts = 4
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
-    # Feed 2 items (half step): should buffer and return empty list
+    # Feed half an optimizer update: should buffer and return an empty list.
     items_group1 = [
         self._make_streaming_payload(1),
         self._make_streaming_payload(2),
@@ -1806,7 +1806,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     res1 = assembler.feed(items_group1)
     self.assertEmpty(res1)
 
-    # Feed 2 items (second half): reaches total_step_rollouts = 4 and batch_size = 4
+    # Feed 2 items (second half): reaches rollouts_per_optimizer_update = 4.
     items_group2 = [
         self._make_streaming_payload(3),
         self._make_streaming_payload(4),
@@ -1825,16 +1825,16 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_response_length=2,
         pad_id=0,
         group_size=2,
-        mini_batch_size=2,  # total_step_rollouts = 4, emits 2 microbatches
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
-    # Feed 2 items: reaches batch_size=2, but total_step_rollouts is 4, so is_final_batch=False
+    # Feed 2 items: reaches batch_size=2, but not the optimizer-update boundary.
     res1 = assembler.feed(
         [self._make_streaming_payload(1), self._make_streaming_payload(2)]
     )
     self.assertLen(res1, 1)
     self.assertFalse(res1[0].is_final_batch)
 
-    # Feed 2 items: reaches total_step_rollouts=4, so is_final_batch=True
+    # Feed 2 items: reaches rollouts_per_optimizer_update=4, so is_final_batch=True
     res2 = assembler.feed(
         [self._make_streaming_payload(3), self._make_streaming_payload(4)]
     )
@@ -1848,9 +1848,9 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_response_length=2,
         pad_id=0,
         group_size=3,
-        mini_batch_size=1,  # total_step_rollouts = 3 (less than batch_size=4!)
+        mini_batch_size=1,  # rollouts_per_optimizer_update = 3
     )
-    # Feed 3 items: hits total_step_rollouts=3, auto-flushes with 1 padded row
+    # Feed 3 items: hits rollouts_per_optimizer_update=3 and auto-flushes.
     res = assembler.feed([
         self._make_streaming_payload(1),
         self._make_streaming_payload(2),
@@ -1871,7 +1871,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_response_length=2,
         pad_id=0,
         group_size=2,
-        mini_batch_size=2,  # total_step_rollouts = 4
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Feed only 2 items mid-step
     res1 = assembler.feed(
@@ -1909,7 +1909,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_response_length=2,
         pad_id=0,
         group_size=2,
-        mini_batch_size=2,  # total_step_rollouts = 4
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     items = [
         self._make_streaming_payload(1, prompt_id="p0", group_index=0),

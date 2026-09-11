@@ -42,6 +42,25 @@ _extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
 
 
+def _extract_reward(item: Any) -> float:
+  """Safely extracts scalar reward from a TrajectoryItem or trajectory payload."""
+  if item is None:
+    return 0.0
+  traj = getattr(item, "traj", item)
+  if isinstance(traj, dict):
+    return float(traj.get("reward", 0.0))
+  if hasattr(traj, "reward"):
+    return float(getattr(traj, "reward", 0.0))
+  if isinstance(item, dict):
+    return float(item.get("reward", 0.0))
+  if hasattr(item, "reward"):
+    try:
+      return float(item.reward)
+    except (AttributeError, TypeError):
+      pass
+  return 0.0
+
+
 @dataclasses.dataclass(kw_only=True)
 class RLStepResult:
   """Summary of a completed RL training step."""
@@ -105,6 +124,7 @@ class StandardRLProgram(RLProgram):
       batch_config: batch_assembly.BatchConfig | None = None,
       generation_args: datatypes.GenerationArgs | None = None,
       group_size: int = 8,
+      batch_size: int | None = None,
       mini_batch_size: int = 4,
       max_staleness: int = 0,
       sync_weights: bool = True,
@@ -138,6 +158,19 @@ class StandardRLProgram(RLProgram):
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
+    self.full_batch_size = (
+        self.mini_batch_size if batch_size is None else batch_size
+    )
+    # Keep batch_size as a public alias for callers that use recipe naming.
+    self.batch_size = self.full_batch_size
+    if self.full_batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+    if self.full_batch_size % self.mini_batch_size != 0:
+      raise ValueError(
+          "batch_size must be divisible by mini_batch_size; got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
     self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
@@ -197,11 +230,9 @@ class StandardRLProgram(RLProgram):
     to skip (resumed `_step` if any).
     """
     assert self.engine is not None
-    restored_step = (
-        await self.engine.resume_from_checkpoint(
-            role=datatypes.Role.ACTOR,
-            resync_rollout_weights=self.sync_weights,
-        )
+    restored_step = await self.engine.resume_from_checkpoint(
+        role=datatypes.Role.ACTOR,
+        resync_rollout_weights=self.sync_weights,
     )
     if restored_step <= 0:
       return
@@ -212,7 +243,7 @@ class StandardRLProgram(RLProgram):
         " already-trained dataset items).",
         restored_step,
         self.policy_version,
-        self._step * self.mini_batch_size,
+        self._step * self.full_batch_size,
     )
 
   async def rollout_dispatch_stage(self) -> None:
@@ -227,10 +258,7 @@ class StandardRLProgram(RLProgram):
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
-    # TODO(tunix-dev): current skip logic assumes mini_batch_size is the same as
-    # global batch size. We should support the case that one global batch
-    # contains multiple mini-batches.
-    already_consumed = self._step * self.mini_batch_size
+    already_consumed = self._step * self.full_batch_size
 
     try:
       for prompt_idx, prompt_item in enumerate(self.dataset):
@@ -299,7 +327,7 @@ class StandardRLProgram(RLProgram):
           if self.reward_fns:
             r = sum(fn(item) for fn in self.reward_fns)
           else:
-            r = item.traj.get("reward", 0.0) if item.traj else 0.0
+            r = _extract_reward(item)
           rewards.append(float(r))
 
         trainer_payloads = self.algo.create_trainer_payloads(
@@ -308,8 +336,19 @@ class StandardRLProgram(RLProgram):
         for idx, payload in enumerate(trainer_payloads):
           reward_val = rewards[idx] if idx < len(rewards) else 0.0
           src_item = group[idx] if idx < len(group) else None
-          src_traj = getattr(src_item, "traj", None) or {}
-          raw_status = src_traj.get("status") or getattr(src_item, "status", None)
+          src_traj = getattr(src_item, "traj", None)
+          if isinstance(src_traj, dict):
+            raw_status = src_traj.get("status") or getattr(src_item, "status", None)
+            raw_steps = src_traj.get("steps")
+            traj_dict = dict(src_traj)
+          elif src_traj is not None:
+            raw_status = getattr(src_traj, "status", None) or getattr(src_item, "status", None)
+            raw_steps = getattr(src_traj, "steps", None)
+            traj_dict = src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+          else:
+            raw_status = getattr(src_item, "status", None)
+            raw_steps = []
+            traj_dict = {}
           if isinstance(raw_status, datatypes.TrajectoryStatus):
             status = raw_status
           elif isinstance(raw_status, str):
@@ -322,11 +361,9 @@ class StandardRLProgram(RLProgram):
             )
           else:
             status = datatypes.TrajectoryStatus.RUNNING
-          raw_steps = src_traj.get("steps")
           steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
-          traj_dict = dict(src_traj)
           traj_dict["reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
@@ -422,12 +459,18 @@ class StandardRLProgram(RLProgram):
       if p_len is not None and c_len is not None:
         total_lengths.append(p_len + c_len)
 
-      traj = getattr(item, "traj", None) or {}
-      steps = traj.get("steps")
+      traj = getattr(item, "traj", None)
+      if isinstance(traj, dict):
+        steps = traj.get("steps")
+        status = traj.get("status") or getattr(item, "status", None)
+      elif traj is not None:
+        steps = getattr(traj, "steps", None)
+        status = getattr(traj, "status", None) or getattr(item, "status", None)
+      else:
+        steps = getattr(item, "steps", None)
+        status = getattr(item, "status", None)
       if steps and len(steps) > 0:
         turns_list.append(len(steps))
-
-      status = traj.get("status") or getattr(item, "status", None)
       if status is not None:
         if isinstance(status, datatypes.TrajectoryStatus):
           if status != datatypes.TrajectoryStatus.RUNNING:
@@ -693,8 +736,30 @@ class StandardRLProgram(RLProgram):
       all_step_items = []
       scored_items = []
       groups_consumed = 0
+      checkpoint_saved = False
+      final_minibatch_completed = False
 
-      while groups_consumed < self.mini_batch_size:
+      async def _maybe_save_checkpoint() -> None:
+        nonlocal checkpoint_saved
+        optimizer_step = self.step + 1
+        if (
+            isinstance(step_result, dict)
+            and step_result.get("train_step") is not None
+        ):
+          optimizer_step = int(step_result["train_step"])
+        await self.engine.save_checkpoint(
+            role=datatypes.Role.ACTOR,
+            metadata={
+                "step": optimizer_step,
+                "global_step": self.step + 1,
+                "policy_version": self.policy_version + 1,
+                "num_rollouts": num_rollouts,
+                "num_microbatches": num_microbatches,
+            },
+        )
+        checkpoint_saved = True
+
+      while groups_consumed < self.full_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
           assembled_batches = self.assembler.flush()
@@ -707,9 +772,7 @@ class StandardRLProgram(RLProgram):
           all_step_items.extend(scored_items)
           num_rollouts += len(scored_items)
           for item in scored_items:
-            step_rewards.append(
-                float(item.traj.get("reward", 0.0) if item.traj else 0.0)
-            )
+            step_rewards.append(_extract_reward(item))
             payload = getattr(item, "payload", None)
             if payload is not None and payload.advantages is not None:
               step_advantages.append(float(np.mean(payload.advantages)))
@@ -755,33 +818,27 @@ class StandardRLProgram(RLProgram):
               apply_optimizer=mb.is_final_batch,
           )
           if mb.is_final_batch:
-            # TODO(tunix-dev): Current checkpoint and metrics logic only works
-            # for fully on-policy. We need to come up with a solution for
-            # semi-off-policy where a single full batch has multiple mini
-            # batches.
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
             )
+            final_minibatch_completed = True
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
+            # Save only at a resumable full-batch boundary. An optimizer step
+            # can occur earlier when a full batch contains multiple mini
+            # batches, but the dataset resume cursor advances in full batches.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
             # abort the entire program. Make it configurable on whether to fail
             # or continue.
-            await self.engine.save_checkpoint(
-                role=datatypes.Role.ACTOR,
-                metadata={
-                    "step": self.step + 1,
-                    # TODO(tunix-dev): Current implementation assumes that
-                    # policy_version is the same as the step. We need to
-                    # decouple them once the global batch and mini batch
-                    # alignment is fixed.
-                    "policy_version": self.policy_version + 1,
-                    "num_rollouts": num_rollouts,
-                    "num_microbatches": num_microbatches,
-                },
+            full_batch_complete = (
+                groups_consumed >= self.full_batch_size or not scored_items
             )
+            if full_batch_complete:
+              await _maybe_save_checkpoint()
 
         if not scored_items:
+          if not checkpoint_saved and final_minibatch_completed:
+            await _maybe_save_checkpoint()
           break
 
       if not all_step_items:
@@ -876,7 +933,7 @@ class StandardRLProgram(RLProgram):
           policy_version=self.policy_version,
       )
 
-    max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
+    max_groups_ahead = self.full_batch_size * (self.max_staleness + 1)
     self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
     train_task = asyncio.create_task(self.train_stage())

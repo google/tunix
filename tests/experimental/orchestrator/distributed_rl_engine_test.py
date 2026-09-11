@@ -88,9 +88,7 @@ class _FakeWeightSyncCoordinator:
     del kwargs
     self.calls.append(policy_version)
     version = (
-        policy_version
-        if self._forced_version is None
-        else self._forced_version
+        policy_version if self._forced_version is None else self._forced_version
     )
     return _FakeSyncResult(version)
 
@@ -199,6 +197,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "return_logprobs": False,
           },
       )
+
     asyncio.run(_run())
 
   def test_generate_rejects_legacy_generation_kwargs(self):
@@ -207,6 +206,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         await self.engine.generate(
             [{"prompt": "p1", "prompt_id": "prompt_1"}], temperature=0.5
         )
+
     asyncio.run(_run())
 
   def test_generate_routes_rollout_requests(self):
@@ -337,10 +337,10 @@ class DistributedRLEngineTest(absltest.TestCase):
       res = await self.engine.save_checkpoint(
           role=datatypes.Role.ACTOR, metadata=metadata
       )
-      self.assertEqual(res, datatypes.Response(metadata={"checkpoint_saved": True}))
-      self.mock_actor.save_checkpoint.assert_called_once_with(
-          metadata=metadata
+      self.assertEqual(
+          res, datatypes.Response(metadata={"checkpoint_saved": True})
       )
+      self.mock_actor.save_checkpoint.assert_called_once_with(metadata=metadata)
 
     asyncio.run(_run())
 
@@ -437,6 +437,23 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_resume_uses_global_step_when_optimizer_step_is_different(self):
+
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 12,
+          "global_step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+      result = await engine.resume_from_checkpoint()
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
   def test_resume_from_checkpoint_uses_step_boundary_policy_version(self):
     async def _run():
       # Recorded mid-step policy_version is ignored in favor of the step.
@@ -471,6 +488,7 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_resume_from_checkpoint_tolerates_bad_metadata(self):
     for bad_value in (None, "not-a-dict", {"step": "bogus"}):
       with self.subTest(bad_value=bad_value):
+
         async def _run(bad_value=bad_value):
           self.mock_actor.restore_checkpoint.return_value = bad_value
           coordinator = _FakeWeightSyncCoordinator()
@@ -581,9 +599,7 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_get_metrics_propagates_optional_kwargs(self):
     async def _run():
       self.mock_actor.get_metrics.return_value = {"metric_a": 1.0}
-      res = await self.engine.get_metrics(
-          datatypes.Role.ACTOR, reset=True
-      )
+      res = await self.engine.get_metrics(datatypes.Role.ACTOR, reset=True)
       self.assertEqual(res, {"metric_a": 1.0})
       self.mock_actor.get_metrics.assert_called_once_with(reset=True)
 
@@ -783,7 +799,9 @@ class DistributedRLEngineTest(absltest.TestCase):
           {r.metadata["group_index"] for r in all_dispatched},
           {0, 1},
       )
-      self.assertTrue(all(r.metadata["group_size"] == 2 for r in all_dispatched))
+      self.assertTrue(
+          all(r.metadata["group_size"] == 2 for r in all_dispatched)
+      )
       self.assertEqual(
           {r.metadata["env_config"]["group_index"] for r in all_dispatched},
           {0, 1},
@@ -805,13 +823,11 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_build_rollout_requests_deep_injects_env_config_for_mappings(self):
     original_env_config = {"env_name": "math_arena", "timeout_s": 30}
-    prompts = [
-        {
-            "prompt": "Solve 2+2",
-            "prompt_id": "math_p1",
-            "metadata": {"env_config": original_env_config},
-        }
-    ]
+    prompts = [{
+        "prompt": "Solve 2+2",
+        "prompt_id": "math_p1",
+        "metadata": {"env_config": original_env_config},
+    }]
     requests = self.engine._build_rollout_requests(
         prompts, group_size=3, policy_version=4
     )

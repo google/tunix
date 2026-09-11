@@ -16,7 +16,8 @@
 
 Contains:
 - WorkerPoolBalancer: Load balancing, queue tracking, and prefix-cache affinity.
-- DistributedRLEngine: Worker-backed compute router implementing AbstractRLEngine.
+- DistributedRLEngine: Worker-backed compute router implementing
+AbstractRLEngine.
 """
 
 import asyncio
@@ -37,7 +38,6 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
-
 
 _summarize_list = logging_utils.summarize_list
 
@@ -505,9 +505,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           r for r in results if not isinstance(r, Exception) and r is not None
       ]
     else:
-      worker = self._trainer_workers.get(
+      worker = self._trainer_workers.get(role) or self._inference_workers.get(
           role
-      ) or self._inference_workers.get(role)
+      )
       if worker is None:
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
@@ -691,12 +691,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return 0
     metadata = dict(metadata)
     try:
-      restored_step = int(metadata.get("step", 0) or 0)
+      restored_optimizer_step = int(metadata.get("step", 0) or 0)
+      restored_step = int(
+          metadata.get("global_step", restored_optimizer_step) or 0
+      )
     except (TypeError, ValueError):
       logging.warning(
           "restore_checkpoint returned a non-integer step %r; starting from"
           " fresh run.",
-          metadata.get("step"),
+          metadata.get("global_step", metadata.get("step")),
       )
       return 0
     if restored_step <= 0:
@@ -704,6 +707,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return 0
 
     # Resume at the step boundary; the policy version tracks the restored step.
+    # New checkpoints record optimizer and global steps separately. Legacy
+    # checkpoints have only `step`, for which both values are identical.
     restored_policy_version = restored_step
     recorded_version = metadata.get("policy_version")
     # TODO(tunix-dev): this is a force-fit for fully on-policy RL. Remove when
@@ -717,8 +722,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
     self._policy_version = restored_policy_version
     logging.info(
-        "Resuming from checkpoint: step=%d policy_version=%d. Metadata: %s",
+        "Resuming from checkpoint: global_step=%d optimizer_step=%d "
+        "policy_version=%d. Metadata: %s",
         restored_step,
+        restored_optimizer_step,
         restored_policy_version,
         metadata,
     )

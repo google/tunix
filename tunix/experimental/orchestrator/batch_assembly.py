@@ -41,7 +41,7 @@ _BATCH_ID_PREFIX: str = "batch"
 
 
 class AssembledBatch(NamedTuple):
-  """Microbatch payload paired with global step completion status."""
+  """Microbatch payload paired with optimizer-update completion status."""
 
   payload: datatypes.RLTrainerPayload
   is_final_batch: bool
@@ -93,15 +93,15 @@ class BatchAssembler(Generic[T], Protocol):
   mini_batch_size: int
 
   @property
-  def total_step_rollouts(self) -> int:
-    """Total number of rollouts expected per global training step."""
+  def rollouts_per_optimizer_update(self) -> int:
+    """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.group_size
 
   def feed(
       self,
       items: Sequence[T],
   ) -> list[AssembledBatch]:
-    """Ingests rollouts, emitting ready microbatches and auto-flushing at step end."""
+    """Ingests rollouts and flushes at the optimizer-update boundary."""
     ...
 
   def flush(
@@ -112,12 +112,12 @@ class BatchAssembler(Generic[T], Protocol):
 
   # TODO (tunix-dev): we should not allow `start_batch_index` to be None once failure recovery logic is implemented.
   def reset(self, *, start_batch_index: int | None = None) -> None:
-    """Resets internal state, discarding buffered rollouts and step progress.
+    """Resets internal state and discards optimizer-update progress.
 
     Unlike `flush()`, which emits remaining items as padded microbatches,
     `reset()` unconditionally drops any partially accumulated items or bins
-    without packing or emitting them, and resets the step rollout counter back
-    to zero.
+    without packing or emitting them, and resets the optimizer-update rollout
+    counter back to zero.
 
     This is typically invoked during pipeline aborts or error recovery (e.g.,
     when an RL program stage encounters an exception and incomplete rollouts
@@ -461,11 +461,11 @@ class SequencePackedBatchAssembler:
     self._buffer: list[
         tuple[packing.PackItem, str, datatypes.RLTrainerPayload]
     ] = []
-    self._step_rollouts: int = 0
+    self._rollouts_since_update: int = 0
 
   @property
-  def total_step_rollouts(self) -> int:
-    """Total number of rollouts expected per global training step."""
+  def rollouts_per_optimizer_update(self) -> int:
+    """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.group_size
 
   def _emit_one_chunk(
@@ -523,8 +523,9 @@ class SequencePackedBatchAssembler:
 
     When `drain_all` is False, only whole chunks whose token mass can fill a
     full microbatch are emitted, so the streaming tail is held back until more
-    rollouts arrive. When `drain_all` is True (step boundary or `flush`), the
-    buffer is drained completely and the last chunk is marked final.
+    rollouts arrive. When `drain_all` is True (optimizer-update boundary or
+    `flush`), the buffer is drained completely and the last chunk is marked
+    final.
     """
     out: list[AssembledBatch] = []
     max_segments = packing.effective_max_segments(
@@ -545,37 +546,38 @@ class SequencePackedBatchAssembler:
       self,
       items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[AssembledBatch]:
-    """Ingests items into the buffer, auto-flushing on the step boundary."""
+    """Ingests items and flushes at the optimizer-update boundary."""
     for item in items:
       pack_item = to_pack_item(item)
       packing.validate_items([pack_item], self.max_packed_len)
       self._buffer.append((pack_item, _extract_trajectory_id(item), item))
-    self._step_rollouts += len(items)
-    is_step_done = self._step_rollouts >= self.total_step_rollouts
-
-    out = self._drain_buffer(drain_all=is_step_done)
-    if is_step_done:
-      self._step_rollouts %= self.total_step_rollouts
+    self._rollouts_since_update += len(items)
+    is_update_done = (
+        self._rollouts_since_update >= self.rollouts_per_optimizer_update
+    )
+    out = self._drain_buffer(drain_all=is_update_done)
+    if is_update_done:
+      self._rollouts_since_update %= self.rollouts_per_optimizer_update
     return out
 
   def flush(
       self,
   ) -> list[AssembledBatch]:
     """Flushes any remaining buffered items, marking the last chunk final."""
-    self._step_rollouts = 0
+    self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
-    """Resets internal buffer and resets step rollouts counter.
+    """Resets the internal buffer and optimizer-update rollout counter.
 
     Unlike `flush()`, which emits remaining items as padded microbatches,
     `reset()` unconditionally drops any partially accumulated items or bins
-    without packing or emitting them, and resets the step rollout counter back
-    to zero.
+    without packing or emitting them, and resets the optimizer-update rollout
+    counter back to zero.
 
     This is typically invoked during pipeline aborts or error recovery (e.g.,
     in `RLProgram` when a stage encounters an exception and in-flight
-    rollouts must be dropped to avoid cross-step contamination) or when
+    rollouts must be dropped to avoid cross-update contamination) or when
     restarting the assembler.
 
     Args:
@@ -585,7 +587,7 @@ class SequencePackedBatchAssembler:
         tracking IDs across step boundaries.
     """
     self._buffer.clear()
-    self._step_rollouts = 0
+    self._rollouts_since_update = 0
     if start_batch_index is not None:
       self._batch_counter = start_batch_index
 
@@ -613,7 +615,7 @@ class PaddedBatchAssembler:
       max_response_length: Maximum padded response sequence length.
       pad_id: Token ID used for padding prompts and completions.
       group_size: Number of rollout generations per prompt group (G).
-      mini_batch_size: Number of prompt groups per global training step.
+      mini_batch_size: Number of prompt groups per optimizer update.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -643,11 +645,11 @@ class PaddedBatchAssembler:
     self._buffer: collections.deque[datatypes.RLTrainerPayload] = (
         collections.deque()
     )
-    self._step_rollouts: int = 0
+    self._rollouts_since_update: int = 0
 
   @property
-  def total_step_rollouts(self) -> int:
-    """Total number of rollouts expected per global training step."""
+  def rollouts_per_optimizer_update(self) -> int:
+    """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.group_size
 
   @property
@@ -658,16 +660,18 @@ class PaddedBatchAssembler:
       self,
       items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[AssembledBatch]:
-    """Ingests items, emitting full microbatches and auto-flushing at step end."""
+    """Ingests items and flushes at the optimizer-update boundary."""
     self._buffer.extend(items)
-    self._step_rollouts += len(items)
+    self._rollouts_since_update += len(items)
 
     out: list[AssembledBatch] = []
 
     while len(self._buffer) >= self.batch_size:
-      is_step_done = self._step_rollouts >= self.total_step_rollouts
+      is_update_done = (
+          self._rollouts_since_update >= self.rollouts_per_optimizer_update
+      )
       will_be_empty = len(self._buffer) == self.batch_size
-      is_final = is_step_done and will_be_empty
+      is_final = is_update_done and will_be_empty
 
       chunk = [self._buffer.popleft() for _ in range(self.batch_size)]
       traj_ids = tuple(_extract_trajectory_id(it) for it in chunk)
@@ -680,7 +684,7 @@ class PaddedBatchAssembler:
           )
       )
 
-    if self._step_rollouts >= self.total_step_rollouts:
+    if self._rollouts_since_update >= self.rollouts_per_optimizer_update:
       if self._buffer:
         remainder = list(self._buffer)
         self._buffer.clear()
@@ -699,7 +703,7 @@ class PaddedBatchAssembler:
             is_final_batch=True,
             trajectory_ids=out[-1].trajectory_ids,
         )
-      self._step_rollouts %= self.total_step_rollouts
+      self._rollouts_since_update %= self.rollouts_per_optimizer_update
 
     return out
 
@@ -711,7 +715,7 @@ class PaddedBatchAssembler:
       return []
     remainder = list(self._buffer)
     self._buffer.clear()
-    self._step_rollouts = 0
+    self._rollouts_since_update = 0
     traj_ids = tuple(_extract_trajectory_id(it) for it in remainder)
     return [
         AssembledBatch(
@@ -726,12 +730,12 @@ class PaddedBatchAssembler:
 
     Unlike `flush()`, which packs and emits buffered items as a padded batch,
     `reset()` unconditionally clears the internal rollout buffer without
-    emitting any batches. It also resets the step rollout counter
-    (`_step_rollouts`) back to zero.
+    emitting any batches. It also resets the optimizer-update rollout counter
+    (`_rollouts_since_update`) back to zero.
 
     This is typically invoked during pipeline aborts or error recovery (e.g.,
     in `RLProgram` when a stage encounters an exception and in-flight
-    rollouts must be dropped to avoid cross-step contamination) or when
+    rollouts must be dropped to avoid cross-update contamination) or when
     restarting the assembler.
 
     Args:
@@ -741,7 +745,7 @@ class PaddedBatchAssembler:
         tracking IDs across step boundaries.
     """
     self._buffer.clear()
-    self._step_rollouts = 0
+    self._rollouts_since_update = 0
     if start_batch_index is not None:
       self._batch_counter = start_batch_index
 
