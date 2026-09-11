@@ -310,9 +310,7 @@ class UtilsTest(parameterized.TestCase):
     new_tgt_state = utils.transfer_state_with_mappings(
         src, dst, mappings, reshard_fn=mock_reshard_fn
     )
-    self.assertTrue(
-        jnp.allclose(new_tgt_state["decoder.layer_0"], 3.0)
-    )
+    self.assertTrue(jnp.allclose(new_tgt_state["decoder.layer_0"], 3.0))
 
   def test_transfer_state_with_padding(self):
     # Create source module with smaller head dim
@@ -548,11 +546,11 @@ class UtilsTest(parameterized.TestCase):
     dst_state = MockState(dst_params)
 
     # Apply preprocessing if it exists in mapping
-    if 'preprocess_src_state' in VLLM_JAX_MAPPING:
-      src_state = VLLM_JAX_MAPPING['preprocess_src_state'](src_state)
+    if "preprocess_src_state" in VLLM_JAX_MAPPING:
+      src_state = VLLM_JAX_MAPPING["preprocess_src_state"](src_state)
 
-    key_mappings = VLLM_JAX_MAPPING['to_hf_mappings']
-    transpose_keys = VLLM_JAX_MAPPING['to_hf_transpose_keys']
+    key_mappings = VLLM_JAX_MAPPING["to_hf_mappings"]
+    transpose_keys = VLLM_JAX_MAPPING["to_hf_transpose_keys"]
 
     new_tgt_state = utils.transfer_state_with_mappings(
         src_state,
@@ -579,27 +577,35 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["language_model.layers.0.self_attn.qkv_proj.weight"],
+            new_tgt_state.params[
+                "language_model.layers.0.self_attn.qkv_proj.weight"
+            ],
             expected_qkv,
         )
     )
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["language_model.layers.0.mlp.gate_up_proj.weight"],
+            new_tgt_state.params[
+                "language_model.layers.0.mlp.gate_up_proj.weight"
+            ],
             expected_gate_up,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["language_model.layers.0.experts.kernel_gating_upproj_EDF"],
+            new_tgt_state.params[
+                "language_model.layers.0.experts.kernel_gating_upproj_EDF"
+            ],
             src_params["layers.0.moe.gating_einsum"].value,
         )
     )
 
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["language_model.layers.0.experts.kernel_down_proj_EFD"],
+            new_tgt_state.params[
+                "language_model.layers.0.experts.kernel_down_proj_EFD"
+            ],
             src_params["layers.0.moe.linear"].value,
         )
     )
@@ -880,17 +886,21 @@ class UtilsTest(parameterized.TestCase):
   def test_transfer_state_directly_simple_transfer(self):
     """Tests direct state transfer with matching structures."""
     src_state = nnx.Dict(
-        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0]))))
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0])))
+        )
     )
     dst_state = nnx.Dict(
-        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0]))))
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0])))
+        )
     )
 
     mock_reshard = lambda source, target: source
     utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
     np.testing.assert_array_equal(
-        dst_state['decoder']['layer0']['weight'][...],
+        dst_state["decoder"]["layer0"]["weight"][...],
         jnp.array([1.0, 2.0]),
     )
 
@@ -913,7 +923,7 @@ class UtilsTest(parameterized.TestCase):
     utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
     np.testing.assert_array_equal(
-        dst_state['model']['decoder']['layer0']['weight'][...],
+        dst_state["model"]["decoder"]["layer0"]["weight"][...],
         jnp.array(1.0),
     )
 
@@ -941,14 +951,14 @@ class UtilsTest(parameterized.TestCase):
     )
 
     np.testing.assert_array_equal(
-        dst_state_fewer_keys['decoder']['layer0']['weight'][...],
+        dst_state_fewer_keys["decoder"]["layer0"]["weight"][...],
         jnp.array(1.0),
     )
     np.testing.assert_array_equal(
-        dst_state_fewer_keys['decoder']['layer1']['weight'][...],
+        dst_state_fewer_keys["decoder"]["layer1"]["weight"][...],
         jnp.array(2.0),
     )
-    self.assertFalse(hasattr(dst_state_fewer_keys['decoder'], 'layer2'))
+    self.assertFalse(hasattr(dst_state_fewer_keys["decoder"], "layer2"))
 
     # Scenario 2: Destination has more keys than source, with no unique keys in source
     src_state_fewer_keys = nnx.Dict(
@@ -969,16 +979,16 @@ class UtilsTest(parameterized.TestCase):
     )
 
     np.testing.assert_array_equal(
-        dst_state_more_keys['decoder']['layer0']['weight'][...],
+        dst_state_more_keys["decoder"]["layer0"]["weight"][...],
         jnp.array(10.0),
     )
     # Extra keys in dst should be preserved
     np.testing.assert_array_equal(
-        dst_state_more_keys['decoder']['layer1']['weight'][...],
+        dst_state_more_keys["decoder"]["layer1"]["weight"][...],
         jnp.array(20.0),
     )
     np.testing.assert_array_equal(
-        dst_state_more_keys['decoder']['layer2']['weight'][...],
+        dst_state_more_keys["decoder"]["layer2"]["weight"][...],
         jnp.array(30.0),
     )
 
@@ -1001,73 +1011,63 @@ class UtilsTest(parameterized.TestCase):
 
     # Common key should be updated
     np.testing.assert_array_equal(
-        dst_state_mixed['decoder']['layer0']['weight'][...], jnp.array(1.0)
+        dst_state_mixed["decoder"]["layer0"]["weight"][...], jnp.array(1.0)
     )
     # Extra key in dst should be preserved
-    self.assertIn('kv_cache', dst_state_mixed)
+    self.assertIn("kv_cache", dst_state_mixed)
     # Extra key in src ('layer1') should NOT be added to dst.
-    self.assertFalse(hasattr(dst_state_mixed['decoder'], 'layer1'))
+    self.assertFalse(hasattr(dst_state_mixed["decoder"], "layer1"))
 
   def test_transfer_state_directly_with_plain_dicts(self):
     """Tests transfer with plain dicts and various variables."""
     src_state = {
-        'decoder': {
-            'layer0': {
-                    'weight': nnx.Param(jnp.array(1.0)),
-                    'some_variable': nnx.Variable(jnp.array([1, 2])),
-                },
-            'extra_layer': {
-                'sub': {
-                    'value': nnx.Param(jnp.array(3.0))
-                }
+        "decoder": {
+            "layer0": {
+                "weight": nnx.Param(jnp.array(1.0)),
+                "some_variable": nnx.Variable(jnp.array([1, 2])),
             },
+            "extra_layer": {"sub": {"value": nnx.Param(jnp.array(3.0))}},
         },
-        'some_other_variable': nnx.Variable(jnp.array(42)),
+        "some_other_variable": nnx.Variable(jnp.array(42)),
     }
     dst_state = {
-        'decoder': {
-            'layer0': {
-                    'weight': nnx.Param(jnp.array(0.0)),
-                    'some_variable': nnx.Variable(jnp.array([0, 0])),
-                },
-            'layer1': {
-                'weight': nnx.Param(jnp.array(0.0))
-            },  # untouched
-            'extra_layer': {
-                'sub': {
-                    'value': nnx.Param(jnp.array(0.0))
-                }
+        "decoder": {
+            "layer0": {
+                "weight": nnx.Param(jnp.array(0.0)),
+                "some_variable": nnx.Variable(jnp.array([0, 0])),
             },
+            "layer1": {"weight": nnx.Param(jnp.array(0.0))},  # untouched
+            "extra_layer": {"sub": {"value": nnx.Param(jnp.array(0.0))}},
         },
-        'some_other_variable': nnx.Variable(jnp.array(0)),
-        'untouched_variable': nnx.Variable(jnp.array(-1)),  # untouched
+        "some_other_variable": nnx.Variable(jnp.array(0)),
+        "untouched_variable": nnx.Variable(jnp.array(-1)),  # untouched
     }
 
     mock_reshard = lambda source, target: source
     utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
     np.testing.assert_array_equal(
-        dst_state['decoder']['layer0']['weight'][...], jnp.array(1.0)
+        dst_state["decoder"]["layer0"]["weight"][...], jnp.array(1.0)
     )
     np.testing.assert_array_equal(
-        dst_state['decoder']['layer0']['some_variable'][...], jnp.array([1, 2])
+        dst_state["decoder"]["layer0"]["some_variable"][...], jnp.array([1, 2])
     )
 
     np.testing.assert_array_equal(
-        dst_state['decoder']['extra_layer']['sub']['value'][...],
+        dst_state["decoder"]["extra_layer"]["sub"]["value"][...],
         jnp.array(3.0),
     )
     np.testing.assert_array_equal(
-        dst_state['some_other_variable'][...], jnp.array(42)
+        dst_state["some_other_variable"][...], jnp.array(42)
     )
 
     # Check that layer1 was not touched
     np.testing.assert_array_equal(
-        dst_state['decoder']['layer1']['weight'][...], jnp.array(0.0)
+        dst_state["decoder"]["layer1"]["weight"][...], jnp.array(0.0)
     )
     # Check that untouched_variable was not touched
     np.testing.assert_array_equal(
-        dst_state['untouched_variable'][...], jnp.array(-1)
+        dst_state["untouched_variable"][...], jnp.array(-1)
     )
 
   def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
@@ -1290,7 +1290,7 @@ class UtilsTest(parameterized.TestCase):
             decoder=nnx.Dict(
                 layers=nnx.Dict(
                     mlp=nnx.Dict(
-                         # Stacked weight for 2 layers: 0->10.0, 1->20.0
+                        # Stacked weight for 2 layers: 0->10.0, 1->20.0
                         weight=nnx.Param(jnp.array([10.0, 20.0]))
                     )
                 )
@@ -1301,21 +1301,31 @@ class UtilsTest(parameterized.TestCase):
     dst_state = nnx.Dict(
         model=nnx.Dict(
             decoder=nnx.Dict(
-                layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
-                layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+                layers_0=nnx.Dict(
+                    mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))
+                ),
+                layers_1=nnx.Dict(
+                    mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))
+                ),
             )
         )
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
 
     np.testing.assert_array_equal(
-        dst_state['model']['decoder']['layers_0']['mlp']['weight'][...], # Use [...]
+        dst_state["model"]["decoder"]["layers_0"]["mlp"]["weight"][
+            ...
+        ],  # Use [...]
         jnp.array(10.0),
     )
     np.testing.assert_array_equal(
-        dst_state['model']['decoder']['layers_1']['mlp']['weight'][...], # Use [...]
+        dst_state["model"]["decoder"]["layers_1"]["mlp"]["weight"][
+            ...
+        ],  # Use [...]
         jnp.array(20.0),
     )
 
@@ -1336,14 +1346,16 @@ class UtilsTest(parameterized.TestCase):
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
 
     np.testing.assert_array_equal(
-        dst_state['layers']['layers_0']['mlp']['weight'][...],
+        dst_state["layers"]["layers_0"]["mlp"]["weight"][...],
         jnp.array(100.0),
     )
     np.testing.assert_array_equal(
-        dst_state['layers']['layers_1']['mlp']['weight'][...],
+        dst_state["layers"]["layers_1"]["mlp"]["weight"][...],
         jnp.array(200.0),
     )
 
@@ -1358,9 +1370,13 @@ class UtilsTest(parameterized.TestCase):
             # Scanned layers in float32
             layers=nnx.Dict(
                 mlp=nnx.Dict(
-                    weight=nnx.Param(jnp.array([[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32))
+                    weight=nnx.Param(
+                        jnp.array(
+                            [[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32
+                        )
+                    )
                 )
-            )
+            ),
         )
     )
 
@@ -1372,37 +1388,49 @@ class UtilsTest(parameterized.TestCase):
             ),
             # Unrolled layers in bfloat16
             layers_0=nnx.Dict(
-                mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16)))
+                mlp=nnx.Dict(
+                    weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16))
+                )
             ),
             layers_1=nnx.Dict(
-                mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16)))
-            )
+                mlp=nnx.Dict(
+                    weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16))
+                )
+            ),
         )
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
 
     # Verify direct mapping cast
-    self.assertEqual(dst_state['decoder']['layer0']['weight'].dtype, jnp.bfloat16)
+    self.assertEqual(
+        dst_state["decoder"]["layer0"]["weight"].dtype, jnp.bfloat16
+    )
     np.testing.assert_allclose(
-        dst_state['decoder']['layer0']['weight'][...],
+        dst_state["decoder"]["layer0"]["weight"][...],
         jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16),
-        atol=1e-2
+        atol=1e-2,
     )
 
     # Verify scanned layer mapping cast
-    self.assertEqual(dst_state['decoder']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
-    np.testing.assert_allclose(
-        dst_state['decoder']['layers_0']['mlp']['weight'][...],
-        jnp.array([10.0, 11.0], dtype=jnp.bfloat16),
-        atol=1e-2
+    self.assertEqual(
+        dst_state["decoder"]["layers_0"]["mlp"]["weight"].dtype, jnp.bfloat16
     )
-    self.assertEqual(dst_state['decoder']['layers_1']['mlp']['weight'].dtype, jnp.bfloat16)
     np.testing.assert_allclose(
-        dst_state['decoder']['layers_1']['mlp']['weight'][...],
+        dst_state["decoder"]["layers_0"]["mlp"]["weight"][...],
+        jnp.array([10.0, 11.0], dtype=jnp.bfloat16),
+        atol=1e-2,
+    )
+    self.assertEqual(
+        dst_state["decoder"]["layers_1"]["mlp"]["weight"].dtype, jnp.bfloat16
+    )
+    np.testing.assert_allclose(
+        dst_state["decoder"]["layers_1"]["mlp"]["weight"][...],
         jnp.array([20.0, 21.0], dtype=jnp.bfloat16),
-        atol=1e-2
+        atol=1e-2,
     )
 
   def test_transfer_state_directly_scanned_layers_casting(self):
@@ -1419,41 +1447,54 @@ class UtilsTest(parameterized.TestCase):
     # Destination has unrolled layers_X in bfloat16
     dst_state = nnx.Dict(
         layers=nnx.Dict(
-            layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16)))),
-            layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16)))),
+            layers_0=nnx.Dict(
+                mlp=nnx.Dict(
+                    weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16))
+                )
+            ),
+            layers_1=nnx.Dict(
+                mlp=nnx.Dict(
+                    weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16))
+                )
+            ),
         )
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
 
     # Verify casting and slicing for implicit layers
-    self.assertEqual(dst_state['layers']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
-    np.testing.assert_allclose(
-        dst_state['layers']['layers_0']['mlp']['weight'][...],
-        jnp.array(100.0, dtype=jnp.bfloat16),
-        atol=1e-2
+    self.assertEqual(
+        dst_state["layers"]["layers_0"]["mlp"]["weight"].dtype, jnp.bfloat16
     )
-    self.assertEqual(dst_state['layers']['layers_1']['mlp']['weight'].dtype, jnp.bfloat16)
     np.testing.assert_allclose(
-        dst_state['layers']['layers_1']['mlp']['weight'][...],
+        dst_state["layers"]["layers_0"]["mlp"]["weight"][...],
+        jnp.array(100.0, dtype=jnp.bfloat16),
+        atol=1e-2,
+    )
+    self.assertEqual(
+        dst_state["layers"]["layers_1"]["mlp"]["weight"].dtype, jnp.bfloat16
+    )
+    np.testing.assert_allclose(
+        dst_state["layers"]["layers_1"]["mlp"]["weight"][...],
         jnp.array(200.0, dtype=jnp.bfloat16),
-        atol=1e-2
+        atol=1e-2,
     )
 
   def test_transfer_state_directly_repeats_kv_heads(self):
     """Tests that direct-match weights are repeated when dst has more heads."""
-    src = jnp.array([[1., 2., 3., 4., 5., 6., 7., 8.],
-                     [3., 4., 5., 6., 7., 8., 9., 10.]], dtype=jnp.float32)
-    src_state = nnx.Dict(
-        attn=nnx.Dict(
-            kv_weight=nnx.Param(src)
-        )
+    src = jnp.array(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        ],
+        dtype=jnp.float32,
     )
+    src_state = nnx.Dict(attn=nnx.Dict(kv_weight=nnx.Param(src)))
     dst_state = nnx.Dict(
-        attn=nnx.Dict(
-            kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
-        )
+        attn=nnx.Dict(kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32)))
     )
 
     mock_reshard = lambda source, target: source
@@ -1461,7 +1502,7 @@ class UtilsTest(parameterized.TestCase):
 
     expected = jnp.repeat(src, 2, axis=0)
     np.testing.assert_array_equal(
-        dst_state['attn']['kv_weight'][...],
+        dst_state["attn"]["kv_weight"][...],
         expected,
     )
 
@@ -1490,15 +1531,17 @@ class UtilsTest(parameterized.TestCase):
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
 
     expected = jnp.repeat(jnp.ones((2, 8), dtype=jnp.float32), 2, axis=0)
     np.testing.assert_array_equal(
-        dst_state['layers_0']['attn']['kv_weight'][...],
+        dst_state["layers_0"]["attn"]["kv_weight"][...],
         expected,
     )
     np.testing.assert_array_equal(
-        dst_state['layers_1']['attn']['kv_weight'][...],
+        dst_state["layers_1"]["attn"]["kv_weight"][...],
         expected,
     )
 
@@ -1508,7 +1551,7 @@ class UtilsTest(parameterized.TestCase):
     # tgt: (embed=4, kv_heads=4, head_dim=8) — 2x repeat on kv_heads axis
     src = jnp.arange(4 * 3 * 2 * 8, dtype=jnp.float32).reshape(4, 3, 2, 8)
     tgt = jnp.zeros((4, 4, 8), dtype=jnp.float32)
-    result = utils._unstack_scanned_param(src, tgt, key_path='test')[1]
+    result = utils._unstack_scanned_param(src, tgt, key_path="test")[1]
     # Should return layer 1 slice: shape (4, 2, 8)
     np.testing.assert_equal(result.shape, (4, 2, 8))
     np.testing.assert_array_equal(result, src[:, 1, :, :])
@@ -1518,16 +1561,16 @@ class UtilsTest(parameterized.TestCase):
     # src: scanned, shape (2, 2, 4) = (embed, layers, kv_heads*head_dim combined)
     # Use small shapes: embed=4, layers=2, kv_heads=2, head_dim=4
     # scanned param shape: (4, 2, 2, 4)
-    layer0 = jnp.array([[1., 2., 3., 4.], [5., 6., 7., 8.]], dtype=jnp.float32)  # (2, 4)
-    layer1 = jnp.array([[9., 10., 11., 12.], [13., 14., 15., 16.]], dtype=jnp.float32)
+    layer0 = jnp.array(
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype=jnp.float32
+    )  # (2, 4)
+    layer1 = jnp.array(
+        [[9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]], dtype=jnp.float32
+    )
     # Stack into scanned shape (2, 2, 4): [layer0, layer1] on axis 0
     scanned = jnp.stack([layer0, layer1], axis=0)  # (2, 2, 4)
     src_state = nnx.Dict(
-        layers=nnx.Dict(
-            attn=nnx.Dict(
-                kv_weight=nnx.Param(scanned)
-            )
-        )
+        layers=nnx.Dict(attn=nnx.Dict(kv_weight=nnx.Param(scanned)))
     )
     # dst: unrolled, each layer has (4, 4) — 2x repeat on kv_heads axis
     dst_state = nnx.Dict(
@@ -1543,21 +1586,25 @@ class UtilsTest(parameterized.TestCase):
         ),
     )
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
 
     expected_0 = jnp.repeat(layer0, 2, axis=0)  # (4, 4)
     expected_1 = jnp.repeat(layer1, 2, axis=0)
-    np.testing.assert_array_equal(dst_state['layers_0']['attn']['kv_weight'][...], expected_0)
-    np.testing.assert_array_equal(dst_state['layers_1']['attn']['kv_weight'][...], expected_1)
+    np.testing.assert_array_equal(
+        dst_state["layers_0"]["attn"]["kv_weight"][...], expected_0
+    )
+    np.testing.assert_array_equal(
+        dst_state["layers_1"]["attn"]["kv_weight"][...], expected_1
+    )
 
   def test_sglang_jax_1d_kv_bias_alignment(self):
     """Test 1-D KV bias alignment for sglang_jax rollout engine."""
     src_key = "layers.0.attn.k_bias"
     src_k_bias = jnp.arange(128, dtype=jnp.float32)
     src = MockState({src_key: MockParam(src_k_bias)})
-    dst = MockState(
-        {src_key: MockParam(jnp.zeros((1024,), dtype=jnp.float32))}
-    )
+    dst = MockState({src_key: MockParam(jnp.zeros((1024,), dtype=jnp.float32))})
     mappings = {src_key: (src_key, None)}
 
     result = utils.transfer_state_with_mappings(
@@ -1586,9 +1633,7 @@ class UtilsTest(parameterized.TestCase):
     )
 
     dst_state = nnx.Dict(
-        layers=nnx.Dict(
-            wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))
-        )
+        layers=nnx.Dict(wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32)))
     )
 
     mock_reshard = lambda source, target: source
@@ -1596,7 +1641,7 @@ class UtilsTest(parameterized.TestCase):
 
     expected_wi = jnp.concatenate([wi_0_val, wi_1_val], axis=-1)
     np.testing.assert_array_equal(
-        dst_state['layers']['wi'][...],
+        dst_state["layers"]["wi"][...],
         expected_wi,
     )
 
@@ -1610,15 +1655,19 @@ class UtilsTest(parameterized.TestCase):
     """
     # Layout: [experts=3, num_layers=2, features=2] (scan_axis=1).
     wi_0_val = jnp.array(
-        [[[1., 2.], [10., 20.]],
-         [[3., 4.], [30., 40.]],
-         [[5., 6.], [50., 60.]]],
+        [
+            [[1.0, 2.0], [10.0, 20.0]],
+            [[3.0, 4.0], [30.0, 40.0]],
+            [[5.0, 6.0], [50.0, 60.0]],
+        ],
         dtype=jnp.float32,
     )
     wi_1_val = jnp.array(
-        [[[100., 200.], [1000., 2000.]],
-         [[300., 400.], [3000., 4000.]],
-         [[500., 600.], [5000., 6000.]]],
+        [
+            [[100.0, 200.0], [1000.0, 2000.0]],
+            [[300.0, 400.0], [3000.0, 4000.0]],
+            [[500.0, 600.0], [5000.0, 6000.0]],
+        ],
         dtype=jnp.float32,
     )
 
@@ -1629,19 +1678,23 @@ class UtilsTest(parameterized.TestCase):
         )
     )
     dst_state = nnx.Dict(**{
-        'layers_0': nnx.Dict(wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))),
-        'layers_1': nnx.Dict(wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))),
+        "layers_0": nnx.Dict(
+            wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))
+        ),
+        "layers_1": nnx.Dict(
+            wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))
+        ),
     })
 
     mock_reshard = lambda source, target: source
     utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
     np.testing.assert_array_equal(
-        dst_state['layers_0']['wi'][...],
+        dst_state["layers_0"]["wi"][...],
         jnp.concatenate([wi_0_val[:, 0, :], wi_1_val[:, 0, :]], axis=-1),
     )
     np.testing.assert_array_equal(
-        dst_state['layers_1']['wi'][...],
+        dst_state["layers_1"]["wi"][...],
         jnp.concatenate([wi_0_val[:, 1, :], wi_1_val[:, 1, :]], axis=-1),
     )
 
@@ -1674,20 +1727,20 @@ class UtilsTest(parameterized.TestCase):
           leaf, (NamedSharding, sharding.SingleDeviceSharding)
       )
     np.testing.assert_array_equal(
-        dst_state['decoder']['layer0']['weight'][...], src_val
+        dst_state["decoder"]["layer0"]["weight"][...], src_val
     )
 
   def test_transfer_state_directly_delete_dst_buffers_chunked(self):
     """delete_dst_buffers=True works through the chunked path too."""
     src_state = nnx.Dict(
         decoder=nnx.Dict(**{
-            f'layer{i}': nnx.Dict(weight=nnx.Param(jnp.array([float(i + 1)])))
+            f"layer{i}": nnx.Dict(weight=nnx.Param(jnp.array([float(i + 1)])))
             for i in range(4)
         })
     )
     dst_state = nnx.Dict(
         decoder=nnx.Dict(**{
-            f'layer{i}': nnx.Dict(weight=nnx.Param(jnp.array([0.0])))
+            f"layer{i}": nnx.Dict(weight=nnx.Param(jnp.array([0.0])))
             for i in range(4)
         })
     )
@@ -1713,7 +1766,7 @@ class UtilsTest(parameterized.TestCase):
       )
     for i in range(4):
       np.testing.assert_array_equal(
-          dst_state['decoder'][f'layer{i}']['weight'][...],
+          dst_state["decoder"][f"layer{i}"]["weight"][...],
           jnp.array([float(i + 1)]),
       )
 
@@ -1742,7 +1795,7 @@ class UtilsTest(parameterized.TestCase):
     # If deletion misfired the next access raises "Array has been deleted".
     np.testing.assert_array_equal(np.asarray(shared), [1.0, 2.0, 3.0])
     np.testing.assert_array_equal(
-        dst_state['decoder']['layer0']['weight'][...], [1.0, 2.0, 3.0]
+        dst_state["decoder"]["layer0"]["weight"][...], [1.0, 2.0, 3.0]
     )
 
   def test_transfer_state_directly_delete_dst_buffers_scanned_layers(self):
@@ -1750,12 +1803,8 @@ class UtilsTest(parameterized.TestCase):
     scanned = jnp.arange(8, dtype=jnp.float32).reshape(2, 4)
     src_state = nnx.Dict(layers=nnx.Dict(weight=nnx.Param(scanned)))
     dst_state = nnx.Dict(**{
-        'layers_0': nnx.Dict(
-            weight=nnx.Param(jnp.zeros(4, dtype=jnp.float32))
-        ),
-        'layers_1': nnx.Dict(
-            weight=nnx.Param(jnp.zeros(4, dtype=jnp.float32))
-        ),
+        "layers_0": nnx.Dict(weight=nnx.Param(jnp.zeros(4, dtype=jnp.float32))),
+        "layers_1": nnx.Dict(weight=nnx.Param(jnp.zeros(4, dtype=jnp.float32))),
     })
 
     mock_reshard = lambda source, target: source
@@ -1768,10 +1817,10 @@ class UtilsTest(parameterized.TestCase):
     )
 
     np.testing.assert_array_equal(
-        dst_state['layers_0']['weight'][...], scanned[0]
+        dst_state["layers_0"]["weight"][...], scanned[0]
     )
     np.testing.assert_array_equal(
-        dst_state['layers_1']['weight'][...], scanned[1]
+        dst_state["layers_1"]["weight"][...], scanned[1]
     )
 
   def test_transfer_state_directly_fuses_moe_weights_with_padding(self):
@@ -1832,15 +1881,19 @@ class UtilsTest(parameterized.TestCase):
     """
     # Source: scanned [experts=3, num_layers=2, features=2] with scan_axis=1.
     wi_0_val = jnp.array(
-        [[[1., 2.], [10., 20.]],
-         [[3., 4.], [30., 40.]],
-         [[5., 6.], [50., 60.]]],
+        [
+            [[1.0, 2.0], [10.0, 20.0]],
+            [[3.0, 4.0], [30.0, 40.0]],
+            [[5.0, 6.0], [50.0, 60.0]],
+        ],
         dtype=jnp.float32,
     )
     wi_1_val = jnp.array(
-        [[[100., 200.], [1000., 2000.]],
-         [[300., 400.], [3000., 4000.]],
-         [[500., 600.], [5000., 6000.]]],
+        [
+            [[100.0, 200.0], [1000.0, 2000.0]],
+            [[300.0, 400.0], [3000.0, 4000.0]],
+            [[500.0, 600.0], [5000.0, 6000.0]],
+        ],
         dtype=jnp.float32,
     )
 
@@ -1860,12 +1913,12 @@ class UtilsTest(parameterized.TestCase):
 
     # Per-layer fused target: (3 experts, 8 features). Two layers, unrolled dst.
     dst_state = nnx.Dict(**{
-        'layers_0': nnx.Dict(
+        "layers_0": nnx.Dict(
             wi=nnx.Param(
                 jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharding)
             )
         ),
-        'layers_1': nnx.Dict(
+        "layers_1": nnx.Dict(
             wi=nnx.Param(
                 jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharding)
             )
@@ -1881,17 +1934,17 @@ class UtilsTest(parameterized.TestCase):
     # gives [a, 0, c, 0, b, 0, d, 0].
     expected_layers_0 = jnp.array(
         [
-            [1., 0., 100., 0., 2., 0., 200., 0.],
-            [3., 0., 300., 0., 4., 0., 400., 0.],
-            [5., 0., 500., 0., 6., 0., 600., 0.],
+            [1.0, 0.0, 100.0, 0.0, 2.0, 0.0, 200.0, 0.0],
+            [3.0, 0.0, 300.0, 0.0, 4.0, 0.0, 400.0, 0.0],
+            [5.0, 0.0, 500.0, 0.0, 6.0, 0.0, 600.0, 0.0],
         ],
         dtype=jnp.float32,
     )
     expected_layers_1 = jnp.array(
         [
-            [10., 0., 1000., 0., 20., 0., 2000., 0.],
-            [30., 0., 3000., 0., 40., 0., 4000., 0.],
-            [50., 0., 5000., 0., 60., 0., 6000., 0.],
+            [10.0, 0.0, 1000.0, 0.0, 20.0, 0.0, 2000.0, 0.0],
+            [30.0, 0.0, 3000.0, 0.0, 40.0, 0.0, 4000.0, 0.0],
+            [50.0, 0.0, 5000.0, 0.0, 60.0, 0.0, 6000.0, 0.0],
         ],
         dtype=jnp.float32,
     )
@@ -1921,24 +1974,22 @@ class UtilsTest(parameterized.TestCase):
     sharded = NamedSharding(mesh, PartitionSpec(None, "model"))
 
     wi_0_val = jnp.array(
-        [[1., 2., 3., 4.],
-         [5., 6., 7., 8.],
-         [9., 10., 11., 12.]],
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
         dtype=jnp.float32,
     )
     src_wi_0 = jax.device_put(wi_0_val, replicated)
 
     src_state = nnx.Dict(layers=nnx.Dict(wi_0=nnx.Param(src_wi_0)))
-    dst_state = nnx.Dict(layers=nnx.Dict(
-        wi_0=nnx.Param(
-            jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(
+                jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
+            )
         )
-    ))
+    )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(
-        src_state, dst_state, reshard_fn=mock_reshard
-    )
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
     result = dst_state["layers"]["wi_0"][...]
 
     self.assertEqual(result.shape, (3, 8))
@@ -1948,9 +1999,11 @@ class UtilsTest(parameterized.TestCase):
     # -> [1, 2, 0, 0, 3, 4, 0, 0]. Device 0 sees [1, 2, 0, 0]; device 1
     # sees [3, 4, 0, 0] — no data shifts across the shard boundary.
     expected = jnp.array(
-        [[1., 2., 0., 0., 3., 4., 0., 0.],
-         [5., 6., 0., 0., 7., 8., 0., 0.],
-         [9., 10., 0., 0., 11., 12., 0., 0.]],
+        [
+            [1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0],
+            [5.0, 6.0, 0.0, 0.0, 7.0, 8.0, 0.0, 0.0],
+            [9.0, 10.0, 0.0, 0.0, 11.0, 12.0, 0.0, 0.0],
+        ],
         dtype=jnp.float32,
     )
     np.testing.assert_array_equal(result, expected)
@@ -1974,19 +2027,21 @@ class UtilsTest(parameterized.TestCase):
     sharded = NamedSharding(mesh, PartitionSpec(None, "model"))
 
     wi_0_val = jnp.array(
-        [[1., 2., 3., 4.],
-         [5., 6., 7., 8.],
-         [9., 10., 11., 12.]],
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
         dtype=jnp.float32,
     )
-    src_state = nnx.Dict(layers=nnx.Dict(
-        wi_0=nnx.Param(jax.device_put(wi_0_val, replicated)),
-    ))
-    dst_state = nnx.Dict(layers=nnx.Dict(
-        wi_0=nnx.Param(
-            jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
-        ),
-    ))
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(jax.device_put(wi_0_val, replicated)),
+        )
+    )
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(
+                jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
+            ),
+        )
+    )
     mock_reshard = lambda source, target: source
     utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
@@ -1994,9 +2049,11 @@ class UtilsTest(parameterized.TestCase):
     # gets 2 trailing zeros, then chunks flatten — so device 0 owns
     # `[a, b, 0, 0]` and device 1 owns `[c, d, 0, 0]` for each row.
     expected = jnp.array(
-        [[1., 2., 0., 0., 3., 4., 0., 0.],
-         [5., 6., 0., 0., 7., 8., 0., 0.],
-         [9., 10., 0., 0., 11., 12., 0., 0.]],
+        [
+            [1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0],
+            [5.0, 6.0, 0.0, 0.0, 7.0, 8.0, 0.0, 0.0],
+            [9.0, 10.0, 0.0, 0.0, 11.0, 12.0, 0.0, 0.0],
+        ],
         dtype=jnp.float32,
     )
     self.assertEqual(dst_state["layers"]["wi_0"][...].shape, (3, 8))
@@ -2020,14 +2077,18 @@ class UtilsTest(parameterized.TestCase):
 
     # Scanned replicated source: (experts=3, num_layers=2, features=4) at scan_axis=1.
     wi_0_unsharded = jnp.array(
-        [[[1., 2., 3., 4.], [10., 20., 30., 40.]],
-         [[5., 6., 7., 8.], [50., 60., 70., 80.]],
-         [[9., 10., 11., 12.], [90., 100., 110., 120.]]],
+        [
+            [[1.0, 2.0, 3.0, 4.0], [10.0, 20.0, 30.0, 40.0]],
+            [[5.0, 6.0, 7.0, 8.0], [50.0, 60.0, 70.0, 80.0]],
+            [[9.0, 10.0, 11.0, 12.0], [90.0, 100.0, 110.0, 120.0]],
+        ],
         dtype=jnp.float32,
     )
-    src_state = nnx.Dict(layers=nnx.Dict(
-        wi_0=nnx.Param(jax.device_put(wi_0_unsharded, replicated)),
-    ))
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(jax.device_put(wi_0_unsharded, replicated)),
+        )
+    )
 
     def _zeros():
       return jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
@@ -2045,15 +2106,19 @@ class UtilsTest(parameterized.TestCase):
     # so the per-row layout becomes [a, b, 0, 0, c, d, 0, 0] — aligned with
     # the target's 2-shard split on the last axis.
     expected_layer_0 = jnp.array(
-        [[1., 2., 0., 0., 3., 4., 0., 0.],
-         [5., 6., 0., 0., 7., 8., 0., 0.],
-         [9., 10., 0., 0., 11., 12., 0., 0.]],
+        [
+            [1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0],
+            [5.0, 6.0, 0.0, 0.0, 7.0, 8.0, 0.0, 0.0],
+            [9.0, 10.0, 0.0, 0.0, 11.0, 12.0, 0.0, 0.0],
+        ],
         dtype=jnp.float32,
     )
     expected_layer_1 = jnp.array(
-        [[10., 20., 0., 0., 30., 40., 0., 0.],
-         [50., 60., 0., 0., 70., 80., 0., 0.],
-         [90., 100., 0., 0., 110., 120., 0., 0.]],
+        [
+            [10.0, 20.0, 0.0, 0.0, 30.0, 40.0, 0.0, 0.0],
+            [50.0, 60.0, 0.0, 0.0, 70.0, 80.0, 0.0, 0.0],
+            [90.0, 100.0, 0.0, 0.0, 110.0, 120.0, 0.0, 0.0],
+        ],
         dtype=jnp.float32,
     )
     self.assertEqual(dst_state["layers_0"]["wi_0"][...].shape, (3, 8))
@@ -2073,7 +2138,7 @@ class UtilsTest(parameterized.TestCase):
     attention keys take the repeat-only path. This pins that contract.
     """
     src = jnp.array(
-        [[1., 2., 3., 4.], [5., 6., 7., 8.]], dtype=jnp.float32
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype=jnp.float32
     )  # shape (2, 4) — kv_heads=2, head_dim=4
     tgt_shape = (8, 4)  # 4x KV-head expansion only.
     result = utils._align_per_axis(
@@ -2104,7 +2169,7 @@ class UtilsTest(parameterized.TestCase):
     mismatched axis. This test exercises a synthetic case to pin that down.
     """
     src = jnp.array(
-        [[[1., 2.], [3., 4.]]],  # (1, 2, 2)
+        [[[1.0, 2.0], [3.0, 4.0]]],  # (1, 2, 2)
         dtype=jnp.float32,
     )
     result = utils._align_per_axis(
@@ -2114,67 +2179,83 @@ class UtilsTest(parameterized.TestCase):
     expected = jnp.pad(src, ((0, 1), (0, 0), (0, 2)))
     np.testing.assert_array_equal(np.asarray(result), expected)
 
-
-
   def test_unroll_scanned_layers_dict_state(self):
-    src_state = {'layer_0.weight': jnp.ones((2, 4))}
+    src_state = {"layer_0.weight": jnp.ones((2, 4))}
     src_to_tgt_map = {
-        'layer_0.weight': (MockParam(jnp.zeros((2, 4))), 'decoder.layer_0.weight', None)
+        "layer_0.weight": (
+            MockParam(jnp.zeros((2, 4))),
+            "decoder.layer_0.weight",
+            None,
+        )
     }
     result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
-    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
-    self.assertTrue(jnp.array_equal(result[('layer_0.weight', 'decoder.layer_0.weight')][0], jnp.ones((2, 4))))
+    self.assertIn(("layer_0.weight", "decoder.layer_0.weight"), result)
+    self.assertTrue(
+        jnp.array_equal(
+            result[("layer_0.weight", "decoder.layer_0.weight")][0],
+            jnp.ones((2, 4)),
+        )
+    )
 
   def test_unroll_scanned_layers_flat_state(self):
-    src_state = MockState({'layer_0.weight': MockParam(jnp.ones((2, 4)))})
+    src_state = MockState({"layer_0.weight": MockParam(jnp.ones((2, 4)))})
     src_to_tgt_map = {
-        'layer_0.weight': (MockParam(jnp.zeros((2, 4))), 'decoder.layer_0.weight', None)
+        "layer_0.weight": (
+            MockParam(jnp.zeros((2, 4))),
+            "decoder.layer_0.weight",
+            None,
+        )
     }
     result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
-    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
+    self.assertIn(("layer_0.weight", "decoder.layer_0.weight"), result)
 
   def test_unroll_scanned_layers_skips_rng(self):
-    src_state = {'rng_seed': jnp.zeros(1), 'layer_0.weight': jnp.zeros((2, 4))}
+    src_state = {"rng_seed": jnp.zeros(1), "layer_0.weight": jnp.zeros((2, 4))}
     src_to_tgt_map = {
-        'layer_0.weight': (MockParam(jnp.zeros((2, 4))), 'decoder.layer_0.weight', None),
-        'rng_seed': (MockParam(jnp.zeros(1)), 'decoder.rng_seed', None)
+        "layer_0.weight": (
+            MockParam(jnp.zeros((2, 4))),
+            "decoder.layer_0.weight",
+            None,
+        ),
+        "rng_seed": (MockParam(jnp.zeros(1)), "decoder.rng_seed", None),
     }
     result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
-    self.assertNotIn(('rng_seed', 'decoder.rng_seed'), result)
-    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
+    self.assertNotIn(("rng_seed", "decoder.rng_seed"), result)
+    self.assertIn(("layer_0.weight", "decoder.layer_0.weight"), result)
 
   def test_unroll_scanned_layers_skips_missing_mapping(self):
-    src_state = {'missing.weight': jnp.zeros((2, 4))}
+    src_state = {"missing.weight": jnp.zeros((2, 4))}
     src_to_tgt_map = {}
     result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
     self.assertEmpty(result)
 
   def test_unroll_scanned_layers_unrolls_with_layer_axis(self):
-    sharding_spec = ('layer', 'model')
-    src_state = {'scanned.weight': jnp.ones((2, 4))}
+    sharding_spec = ("layer", "model")
+    src_state = {"scanned.weight": jnp.ones((2, 4))}
     tgt_param = [MockParam(jnp.zeros((4,))), MockParam(jnp.zeros((4,)))]
-    tgt_path = ['layer_0.weight', 'layer_1.weight']
-    src_to_tgt_map = {
-        'scanned.weight': (tgt_param, tgt_path, sharding_spec)
-    }
+    tgt_path = ["layer_0.weight", "layer_1.weight"]
+    src_to_tgt_map = {"scanned.weight": (tgt_param, tgt_path, sharding_spec)}
     result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
-    self.assertIn(('scanned.weight', 'layer_0.weight'), result)
-    self.assertIn(('scanned.weight', 'layer_1.weight'), result)
-    val0, param0 = result[('scanned.weight', 'layer_0.weight')]
+    self.assertIn(("scanned.weight", "layer_0.weight"), result)
+    self.assertIn(("scanned.weight", "layer_1.weight"), result)
+    val0, param0 = result[("scanned.weight", "layer_0.weight")]
     self.assertTrue(jnp.array_equal(val0, jnp.ones((4,))))
     self.assertIs(param0, tgt_param[0])
 
-  @mock.patch('tunix.generate.utils.nnx.to_flat_state')
+  @mock.patch("tunix.generate.utils.nnx.to_flat_state")
   def test_unroll_scanned_layers_nnx_fallback(self, mock_to_flat_state):
     src_state = "dummy_state"
-    mock_to_flat_state.return_value = [(('layer_0', 'weight'), jnp.ones((2, 4)))]
+    mock_to_flat_state.return_value = [(
+        ("layer_0", "weight"),
+        jnp.ones((2, 4)),
+    )]
     tgt_param = MockParam(jnp.zeros((2, 4)))
     src_to_tgt_map = {
-        'layer_0.weight': (tgt_param, 'decoder.layer_0.weight', None)
+        "layer_0.weight": (tgt_param, "decoder.layer_0.weight", None)
     }
     result = utils._unroll_scanned_layers(src_state, src_to_tgt_map)
-    self.assertIn(('layer_0.weight', 'decoder.layer_0.weight'), result)
-    val, p = result[('layer_0.weight', 'decoder.layer_0.weight')]
+    self.assertIn(("layer_0.weight", "decoder.layer_0.weight"), result)
+    val, p = result[("layer_0.weight", "decoder.layer_0.weight")]
     self.assertTrue(jnp.array_equal(val, jnp.ones((2, 4))))
     mock_to_flat_state.assert_called_once_with("dummy_state")
 
@@ -2248,6 +2329,77 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
         res["vllm_model.lm_head.weight"],
         jnp.ones((4, 8), dtype=jnp.float32),
     )
+
+  def test_interleave_moe_weights_lane_interleaving(self):
+    """Tests 128-lane interleaving of wi_0 and wi_1 per shard."""
+    lane_size = 128
+    n_shards = 2
+    chunk_size = 2 * lane_size  # 256
+    dim = n_shards * chunk_size  # 512
+    wi_0 = jnp.arange(dim, dtype=jnp.float32).reshape(1, dim)
+    wi_1 = (jnp.arange(dim, dtype=jnp.float32) + 10000.0).reshape(1, dim)
+    tgt_shape = (1, dim * 2)
+
+    interleaved = utils._interleave_moe_weights(
+        wi_0,
+        wi_1,
+        tgt_shape=tgt_shape,
+        n_shards=n_shards,
+        axis=-1,
+        lane_size=lane_size,
+    )
+
+    self.assertEqual(interleaved.shape, tgt_shape)
+    reshaped = interleaved.reshape(1, n_shards, 2, 2, lane_size)
+    np.testing.assert_array_equal(reshaped[0, 0, 0, 0], wi_0[0, :lane_size])
+    np.testing.assert_array_equal(reshaped[0, 0, 0, 1], wi_1[0, :lane_size])
+    np.testing.assert_array_equal(
+        reshaped[0, 0, 1, 0], wi_0[0, lane_size : 2 * lane_size]
+    )
+    np.testing.assert_array_equal(
+        reshaped[0, 0, 1, 1], wi_1[0, lane_size : 2 * lane_size]
+    )
+
+  def test_interleave_moe_weights_fallback_when_lane_size_zero(self):
+    """Verifies standard concatenation when lane_size is 0 (e.g.
+
+    non-v5p TPU).
+    """
+    dim = 256
+    wi_0 = jnp.arange(dim, dtype=jnp.float32).reshape(1, dim)
+    wi_1 = (jnp.arange(dim, dtype=jnp.float32) + 1000.0).reshape(1, dim)
+    tgt_shape = (1, dim * 2)
+
+    interleaved = utils._interleave_moe_weights(
+        wi_0,
+        wi_1,
+        tgt_shape=tgt_shape,
+        n_shards=1,
+        axis=-1,
+        lane_size=0,
+    )
+    self.assertEqual(interleaved.shape, tgt_shape)
+    expected = jnp.concatenate([wi_0, wi_1], axis=-1)
+    np.testing.assert_array_equal(interleaved, expected)
+
+  def test_interleave_moe_weights_fallback_when_lane_size_none(self):
+    """Verifies standard concatenation when lane_size is None."""
+    dim = 256
+    wi_0 = jnp.arange(dim, dtype=jnp.float32).reshape(1, dim)
+    wi_1 = (jnp.arange(dim, dtype=jnp.float32) + 1000.0).reshape(1, dim)
+    tgt_shape = (1, dim * 2)
+
+    interleaved = utils._interleave_moe_weights(
+        wi_0,
+        wi_1,
+        tgt_shape=tgt_shape,
+        n_shards=1,
+        axis=-1,
+        lane_size=None,
+    )
+    self.assertEqual(interleaved.shape, tgt_shape)
+    expected = jnp.concatenate([wi_0, wi_1], axis=-1)
+    np.testing.assert_array_equal(interleaved, expected)
 
 
 if __name__ == "__main__":
