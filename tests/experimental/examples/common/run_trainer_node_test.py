@@ -125,6 +125,16 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
     self.mock_mesh.__exit__.assert_called_once()
 
+  def test_per_token_logps_runs_within_mesh(self):
+    self.mock_trainer.per_token_logps.return_value = "logps"
+    res = self.mesh_trainer.per_token_logps("logps_payload", temp=1.0)
+    self.assertEqual(res, "logps")
+    self.mock_mesh.__enter__.assert_called_once()
+    self.mock_trainer.per_token_logps.assert_called_once_with(
+        "logps_payload", temp=1.0
+    )
+    self.mock_mesh.__exit__.assert_called_once()
+
   def test_eval_context_runs_within_mesh(self):
     mock_ctx = mock.MagicMock()
     self.mock_trainer.eval_context.return_value = mock_ctx

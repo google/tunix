@@ -139,6 +139,25 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
+  def per_token_logps(
+      self,
+      payload: datatypes.LogprobsRequest,
+      **kwargs: Any,
+  ) -> Any:
+    """Evaluates per-token log probabilities on a given LogprobsRequest.
+
+    Args:
+      payload: A datatypes.LogprobsRequest containing tokens/segments.
+      **kwargs: Implementation-specific options.
+
+    Returns:
+      Array-like per-token log probabilities.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement per_token_logps."
+    )
+
+  @abc.abstractmethod
   def save_checkpoint(self, metadata: Any, **kwargs) -> None:
     """Force the trainer to serialize its state (model + optimizer).
 

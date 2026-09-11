@@ -1742,6 +1742,112 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_trainer_per_token_logps_and_agreement_in_train_stage(self):
+    async def _run():
+      mock_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[3, 4]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          ref_per_token_logps=None,
+          old_per_token_logps=np.array([[-0.5, -1.0]], dtype=np.float32),
+      )
+      self.assembler.feed = mock.MagicMock(
+          return_value=[
+              batch_assembly.AssembledBatch(
+                  payload=mock_payload,
+                  is_final_batch=True,
+                  trajectory_ids=(),
+              )
+          ]
+      )
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          return_value=np.array([[-0.6, -0.9]], dtype=np.float32)
+      )
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(dataset=["prompt_0"])
+
+      await program.run_async(self.mock_engine)
+
+      self.mock_engine.per_token_logps.assert_called_once()
+      call_args = self.mock_engine.per_token_logps.call_args
+      self.assertEqual(call_args[0][0], datatypes.Role.ACTOR)
+      req = call_args[1]["items"]
+      self.assertIsInstance(req, datatypes.LogprobsRequest)
+      np.testing.assert_array_equal(req.prompt_tokens, [[1, 2]])
+      np.testing.assert_array_equal(req.completion_tokens, [[3, 4]])
+      self.assertEqual(req.model_role, "actor")
+
+      logger = program.metrics_logger
+      self.assertTrue(
+          logger.metric_exists("", "sampler_trainer/logp_diff_mean", "train")
+      )
+      self.assertTrue(
+          logger.metric_exists("", "sampler_trainer/logp_diff_max", "train")
+      )
+      self.assertTrue(
+          logger.metric_exists("", "sampler_trainer/prob_diff_mean", "train")
+      )
+      self.assertTrue(
+          logger.metric_exists("", "sampler_trainer/probs_pearson_corr", "train")
+      )
+
+    asyncio.run(_run())
+
+  def test_trainer_per_token_logps_with_sampler_is_token(self):
+    async def _run():
+      self.mock_algo.sampler_is = "token"
+      self.mock_algo.sampler_is_threshold = 2.0
+      mock_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[3, 4]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          ref_per_token_logps=None,
+          old_per_token_logps=np.array([[-0.5, -1.0]], dtype=np.float32),
+      )
+      self.assembler.feed = mock.MagicMock(
+          return_value=[
+              batch_assembly.AssembledBatch(
+                  payload=mock_payload,
+                  is_final_batch=True,
+                  trajectory_ids=(),
+              )
+          ]
+      )
+      trainer_logps = np.array([[-0.6, -0.9]], dtype=np.float32)
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          return_value=trainer_logps
+      )
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(dataset=["prompt_0"])
+
+      await program.run_async(self.mock_engine)
+
+      # Verify train_step received batch with updated old_per_token_logps and sampler_is_weights
+      train_batch = self.mock_engine.train_step.call_args[0][0]
+      self.assertIsNotNone(train_batch.sampler_is_weights)
+      np.testing.assert_allclose(train_batch.old_per_token_logps, trainer_logps)
+
+      logger = program.metrics_logger
+      self.assertTrue(
+          logger.metric_exists("", "sampler_is/weight_mean", "train")
+      )
+      self.assertTrue(
+          logger.metric_exists("", "sampler_is/weight_max", "train")
+      )
+      self.assertTrue(
+          logger.metric_exists(
+              "", "sampler_is/frac_clipped_at_threshold", "train"
+          )
+      )
+
+    asyncio.run(_run())
+
   def test_run_async_handles_early_dispatch_completion(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())

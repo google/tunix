@@ -41,6 +41,8 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
+from tunix.rl import common as rl_common
+from tunix.rl import utils as rl_utils
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -104,6 +106,11 @@ class TrainingConfig:
   # needs no tuning. Set a smaller value only to shrink the loss buckets at very
   # large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
+
+  # TODO(linchai): it's a little weird to have inference configs in a trainer
+  # config. Clean it up later.
+  # Chunk size used for computing per-token log-probabilities. 0 disables chunking.
+  compute_logps_chunk_size: int = 0
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -1143,6 +1150,136 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         if self._buffered_eval_metrics is not None:
           self._write_metrics(self._buffered_eval_metrics)
           self._buffered_eval_metrics = None
+
+  @override
+  def per_token_logps(
+      self,
+      payload: datatypes.LogprobsRequest,
+      **kwargs: Any,
+  ) -> np.ndarray:
+    """Evaluates per-token log probabilities on the actor model.
+
+    Args:
+      payload: A datatypes.LogprobsRequest containing tokens and metadata.
+      **kwargs: Optional overrides: temperature, pad_id, eos_id,
+        micro_batch_size, chunk_size.
+
+    Returns:
+      Numpy array of per-token log probabilities with shape [B, completion_len]
+      or [B, packed_len].
+    """
+    assert isinstance(payload, datatypes.LogprobsRequest), (
+        f"Expected payload to be datatypes.LogprobsRequest, got"
+        f" {type(payload).__name__}."
+    )
+
+    prompt_tokens = payload.prompt_tokens
+    completion_tokens = payload.completion_tokens
+    temperature = kwargs.get("temperature", payload.temperature)
+    pad_id = kwargs.get("pad_id", payload.pad_id)
+    pad_id = pad_id if pad_id is not None else 0
+    eos_id = kwargs.get("eos_id", payload.eos_id)
+    eos_id = eos_id if eos_id is not None else pad_id
+    segment_ids = payload.segment_ids
+    segment_positions = payload.segment_positions
+    routed_experts = payload.routed_experts
+    micro_batch_size = kwargs.get("micro_batch_size", payload.micro_batch_size)
+    images = getattr(payload, "images", None)
+    chunk_size = kwargs.get(
+        "chunk_size", getattr(self.config, "compute_logps_chunk_size", 0)
+    )
+
+    if prompt_tokens is None or completion_tokens is None:
+      raise ValueError(
+          "per_token_logps requires prompt_tokens and completion_tokens."
+      )
+
+    prompt_tokens = jnp.asarray(prompt_tokens)
+    completion_tokens = jnp.asarray(completion_tokens)
+    batch_size = completion_tokens.shape[0]
+    if batch_size == 0:
+      raise ValueError("Cannot get log probabilities from an empty batch.")
+
+    micro_batch_size = micro_batch_size or batch_size
+
+    dest_prompt_tokens = sharding_utils.shard_input(
+        prompt_tokens,
+        self.config.data_sharding_axis,
+    )
+    dest_completion_tokens = sharding_utils.shard_input(
+        completion_tokens,
+        self.config.data_sharding_axis,
+    )
+    dest_segment_ids = (
+        None
+        if segment_ids is None
+        else sharding_utils.shard_input(
+            jnp.asarray(segment_ids),
+            self.config.data_sharding_axis,
+        )
+    )
+    dest_segment_positions = (
+        None
+        if segment_positions is None
+        else sharding_utils.shard_input(
+            jnp.asarray(segment_positions),
+            self.config.data_sharding_axis,
+        )
+    )
+    dest_routed_experts = (
+        None
+        if routed_experts is None
+        else sharding_utils.shard_input(
+            jnp.asarray(routed_experts),
+            self.config.data_sharding_axis,
+        )
+    )
+    dest_images = (
+        None
+        if images is None
+        else sharding_utils.shard_input(
+            jnp.asarray(images),
+            self.config.data_sharding_axis,
+        )
+    )
+
+    graphdef, state = nnx.split(self.model)
+
+    outs = []
+    for batch_slice in rl_utils.chunk_slices_by_size(
+        stop=batch_size, step=micro_batch_size
+    ):
+      outs.append(
+          rl_common.compute_per_token_logps(
+              graphdef,
+              state,
+              prompt_tokens=dest_prompt_tokens[batch_slice],
+              completion_tokens=dest_completion_tokens[batch_slice],
+              pad_id=pad_id,
+              eos_id=eos_id,
+              images=None if dest_images is None else dest_images[batch_slice],
+              stop_gradient=True,
+              temperature=temperature,
+              chunk_size=chunk_size,
+              segment_ids=(
+                  None
+                  if dest_segment_ids is None
+                  else dest_segment_ids[batch_slice]
+              ),
+              segment_positions=(
+                  None
+                  if dest_segment_positions is None
+                  else dest_segment_positions[batch_slice]
+              ),
+              routed_experts=(
+                  None
+                  if dest_routed_experts is None
+                  else dest_routed_experts[batch_slice]
+              ),
+          )
+      )
+    per_token_logps = jnp.concatenate(outs, axis=0)
+    return np.asarray(jax.device_get(per_token_logps), dtype=np.float32)
 
   @override
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
