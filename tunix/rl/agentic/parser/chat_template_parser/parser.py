@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from tunix.utils import token_sanitization
@@ -160,6 +160,55 @@ class BaseChatTemplateParser(ABC):
       tokens: np.ndarray,
   ) -> Tuple[np.ndarray, int]:
     """Ensures the assistant response ends with the correct tokens."""
+    return tokens, 0
+
+
+# TODO(tunix-dev): Merge into `BaseChatTemplateParser` so the rollout path has
+# a single parser hierarchy. This needs `TokenConfig` to become optional (or to
+# grow an empty "no template" variant) so raw text can subclass it instead of
+# duck-typing the interface.
+class RawTextParser:
+  """Prompt parser that applies no chat template at all.
+
+  Joins message contents with newlines, so the model continues the prompt
+  verbatim instead of being handed a fresh assistant turn. Recipes that build
+  a completion-style prompt -- one that deliberately ends mid-structure, e.g.
+  with an opened tag the model is expected to close -- need this: a chat
+  template would terminate the user turn and re-open an assistant turn,
+  orphaning whatever the prompt left open.
+
+  Duck-types the chat-parser interface used by the rollout path (``parse`` /
+  ``update_assistant_end_tokens``) without deriving from
+  ``BaseChatTemplateParser``, which is built around a ``TokenConfig`` that raw
+  text has no use for.
+  """
+
+  def __init__(self, tokenizer: Any = None, enable_thinking: bool = False):
+    # enable_thinking is accepted for interface parity with the template
+    # parsers; raw text has no thinking block to open or suppress.
+    del enable_thinking
+    self.tokenizer = tokenizer
+
+  def parse(
+      self,
+      messages: List[Dict[str, str]],
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    """Joins the message contents with newlines, applying no chat template."""
+    del add_generation_prompt, is_first_msg
+    parts = []
+    for message in messages:
+      role = message.get("role")
+      content = message.get("content", "")
+      if role in ("system", "user", "assistant") and content:
+        parts.append(content)
+    return "\n".join(parts)
+
+  def update_assistant_end_tokens(
+      self, tokens: np.ndarray
+  ) -> Tuple[np.ndarray, int]:
+    """No end-of-turn tokens to add for raw text."""
     return tokens, 0
 
 

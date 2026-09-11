@@ -65,9 +65,25 @@ def _import_vllm_sampler():
 
 
 def _chat_parser_for(
-    model_id: str, tokenizer: Any, *, enable_thinking: bool = False
+    model_id: str,
+    tokenizer: Any,
+    mode: str = "auto",
+    *,
+    enable_thinking: bool = False,
 ):
-  """Selects the chat template parser by model family."""
+  """Selects the chat parser: `raw` text, or the model family's template.
+
+  Args:
+    model_id: Model name used to pick the family-specific template parser.
+    tokenizer: Tokenizer handed to the parser.
+    mode: Either `auto` (model family's template) or `raw` (no template).
+    enable_thinking: Whether the template parser opens a thinking block.
+
+  Returns:
+    The chat parser to use for this rollout worker.
+  """
+  if mode == "raw":
+    return chat_parser_lib.RawTextParser(tokenizer)
   name = model_id.lower()
   for family, parser_cls in CHAT_PARSERS.items():
     if family in name:
@@ -131,6 +147,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Override MaxText inference attention kernel (e.g."
           " vllm_batched_rpa)."
+      ),
+  )
+  parser.add_argument(
+      "--chat_parser",
+      type=str,
+      default=os.getenv("CHAT_PARSER", "auto"),
+      choices=["auto", "raw"],
+      help=(
+          "auto: the model family's chat template parser (Qwen/Llama/Gemma);"
+          " raw: feed message contents verbatim with no template, for"
+          " completion-style prompts the model is meant to continue."
       ),
   )
   parser.add_argument(
@@ -304,6 +331,7 @@ def _create_vanilla_worker(args, tokenizer):
   chat_parser = _chat_parser_for(
       args.model_id or args.model_name,
       tokenizer,
+      args.chat_parser,
       enable_thinking=args.enable_thinking,
   )
   return rollout_worker.RolloutWorker(
@@ -336,6 +364,7 @@ def _create_vllm_worker(args, tokenizer):
   chat_parser = _chat_parser_for(
       args.model_id or args.model_name,
       tokenizer,
+      args.chat_parser,
       enable_thinking=args.enable_thinking,
   )
   logging.info("Creating RolloutWorker wrapper...")

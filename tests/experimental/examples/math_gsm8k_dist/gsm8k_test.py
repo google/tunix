@@ -56,48 +56,56 @@ class GSM8KTest(absltest.TestCase):
     self.assertTrue(info["correct"])
     self.assertTrue(info["format_correct"])
 
-  def test_format_parity_with_non_experimental_recipe(self):
-    """is_gsm8k_format_correct must match examples/math_gsm8k's predicate.
+  def test_format_parity_with_qwen3_grpo_demo(self):
+    """is_gsm8k_format_correct must match qwen3_grpo_demo's is_vtc_format_correct.
 
-    Reasoning is satisfied by <reasoning>..</reasoning> OR native <think>..
-    </think>; the answer by \\boxed OR <answer>..</answer>.
+    Exactly one </reasoning>, exactly one <answer>..</answer>, in that order.
+    The opening <reasoning> tag is not required: the prompt template opens it,
+    so a completion that follows the prompt only carries the closing tag.
     """
-    # Qwen-native shape: <think> reasoning + \boxed answer, no custom tags.
+    # A completion that follows the prompt (closing tag only) is well-formed.
     self.assertTrue(
         gsm8k.is_gsm8k_format_correct(
-            "<think>2+2=4</think>The answer is \\boxed{4}"
+            "2+2=4\n</reasoning>\n<answer>\\boxed{4}</answer>"
         )
     )
-    # Explicit reasoning tags + <answer> block, no \boxed.
+    # Re-emitting the opening tag is also fine.
     self.assertTrue(
         gsm8k.is_gsm8k_format_correct(
-            "<reasoning>work</reasoning><answer>4</answer>"
+            "<reasoning>work</reasoning><answer>\\boxed{4}</answer>"
         )
     )
-    # Answer present but no reasoning of either kind -> not format-correct.
-    self.assertFalse(gsm8k.is_gsm8k_format_correct("The answer is \\boxed{4}"))
-    # Reasoning present but no answer of either kind -> not format-correct.
+    # Tags out of order, duplicated, or missing are not well-formed.
     self.assertFalse(
-        gsm8k.is_gsm8k_format_correct("<think>2+2=4</think> so it is four")
+        gsm8k.is_gsm8k_format_correct("<answer>\\boxed{4}</answer></reasoning>")
+    )
+    self.assertFalse(
+        gsm8k.is_gsm8k_format_correct(
+            "</reasoning></reasoning><answer>\\boxed{4}</answer>"
+        )
+    )
+    self.assertFalse(gsm8k.is_gsm8k_format_correct("The answer is \\boxed{4}"))
+    # Qwen-native <think> is not the recipe's format.
+    self.assertFalse(
+        gsm8k.is_gsm8k_format_correct("<think>2+2=4</think>\\boxed{4}")
     )
 
-  def test_extract_boxed_answer_falls_back_to_answer_block(self):
-    # No \boxed anywhere, but a non-empty <answer> block: use its contents.
-    self.assertEqual(
-        gsm8k.extract_boxed_answer("<answer>42</answer>"), "42"
-    )
-    # \boxed still wins when present.
+  def test_extract_boxed_answer_requires_boxed(self):
+    # Parity with examples/math_gsm8k/qwen3_grpo_demo.py: an <answer> block
+    # without \boxed{} is not an answer.
+    self.assertIsNone(gsm8k.extract_boxed_answer("<answer>42</answer>"))
     self.assertEqual(
         gsm8k.extract_boxed_answer("<answer>\\boxed{7}</answer>"), "7"
     )
 
-  def test_think_and_boxed_scores_as_correct(self):
-    # The real Qwen thinking-mode shape end to end: format + answer -> 1.0.
+  def test_think_and_boxed_scores_as_answer_only(self):
+    # Qwen thinking-mode shape: right answer, but not the recipe's format,
+    # so 0.5.
     reward, info = gsm8k.score_gsm8k_completion(
         "<think>2+2=4</think>\\boxed{4}", "4"
     )
-    self.assertEqual(reward, 1.0)
-    self.assertTrue(info["format_correct"])
+    self.assertEqual(reward, 0.5)
+    self.assertFalse(info["format_correct"])
     self.assertTrue(info["answer_correct"])
 
   def test_scores_formatted_wrong_answer_with_format_reward(self):
