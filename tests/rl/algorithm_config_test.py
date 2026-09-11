@@ -15,6 +15,7 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 
 class AlgorithmConfigTest(parameterized.TestCase):
 
@@ -156,6 +157,46 @@ class AlgorithmConfigTest(parameterized.TestCase):
     """`kl_clamp_value` is stored as-set on the config."""
     config = algorithm_config.AlgorithmConfig(kl_clamp_value=value)
     self.assertEqual(config.kl_clamp_value, value)
+
+  def test_grpo_config_defaults(self):
+    """Verifies GRPOConfig default values."""
+    config = algorithm_config.GRPOConfig()
+    self.assertEqual(config.algo_variant, "grpo")
+    self.assertEqual(config.num_generations, 2)
+    self.assertEqual(config.beta, 0.04)
+    self.assertEqual(config.epsilon, 0.2)
+    self.assertEqual(config.epsilon_high, 0.2)
+    self.assertIsNone(config.epsilon_c)
+    self.assertEqual(config.kl_loss_mode, "kl")
+    self.assertEqual(config.loss_agg_mode, "sequence-mean-token-mean")
+
+  def test_grpo_config_validation(self):
+    """Verifies GRPOConfig parameter validation."""
+    with self.assertRaisesRegex(
+        ValueError, "num_generations must be greater than 1"
+    ):
+      algorithm_config.GRPOConfig(num_generations=1)
+
+    with self.assertRaisesRegex(ValueError, "loss_algo should be either"):
+      algorithm_config.GRPOConfig(loss_algo="invalid_algo")
+
+    with self.assertRaisesRegex(ValueError, "sampler_is should be either"):
+      algorithm_config.GRPOConfig(sampler_is="invalid_is")
+
+  def test_grpo_config_custom_policy_loss_and_advantage(self):
+    """Verifies GRPOConfig supports dynamically registered custom functions."""
+    function_registry.register_policy_loss_fn("chicken_loss_custom_123")(
+        lambda *args, **kwargs: None
+    )
+    function_registry.register_advantage_estimator("chicken_adv_custom_456")(
+        lambda *args, **kwargs: None
+    )
+    config = algorithm_config.GRPOConfig(
+        policy_loss_fn="chicken_loss_custom_123",
+        advantage_estimator="chicken_adv_custom_456",
+    )
+    self.assertEqual(config.policy_loss_fn, "chicken_loss_custom_123")
+    self.assertEqual(config.advantage_estimator, "chicken_adv_custom_456")
 
 
 if __name__ == "__main__":

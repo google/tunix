@@ -153,6 +153,23 @@ class StandardRLProgram(RLProgram):
       )
     else:
       self.generation_args = generation_args
+    algo_config = getattr(self.algo, "algo_config", None)
+    if algo_config is not None:
+      algo_temp = getattr(algo_config, "temperature", None)
+      gen_temp = getattr(self.generation_args, "temperature", None)
+      if algo_temp is not None and gen_temp is not None:
+        if algo_temp != gen_temp:
+          raise ValueError(
+              "Conflicting temperature: generation_args.temperature="
+              f"{gen_temp} does not match"
+              f" algo.algo_config.temperature={algo_temp}."
+          )
+      elif gen_temp is not None and algo_temp is None:
+        algo_config.temperature = gen_temp
+      elif algo_temp is not None and gen_temp is None:
+        self.generation_args = dataclasses.replace(
+            self.generation_args, temperature=algo_temp
+        )
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
