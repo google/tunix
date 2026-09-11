@@ -93,6 +93,31 @@ def _weighted_metric_mean(values: Iterable[Any]) -> float:
   return numerator / denominator if denominator else 0.0
 
 
+def _addressable_scalar(value: Any) -> Any:
+  """Returns a host-fetchable view of a (replicated) scalar metric.
+
+  Scalar metrics such as loss and learning rate are replicated across the mesh.
+  Under a multi-process / multi-host mesh the resulting ``jax.Array`` spans
+  non-process-local (non-addressable) devices, and ``jax.device_get`` /
+  ``np.asarray`` on it raises ``RuntimeError: Fetching value for jax.Array that
+  spans non-addressable ... devices``. Since the value is replicated, this
+  process's local addressable shard holds the correct scalar, so reduce to it
+  before the host fetch.
+
+  Only reduces to the local shard when the array is a *replicated scalar* (a
+  local shard whose shape matches the global shape) -- so a genuinely sharded,
+  non-scalar array is never silently truncated to a partial shard. Fully
+  addressable arrays and plain Python / NumPy scalars pass through unchanged.
+  """
+  if isinstance(value, jax.Array) and not getattr(
+      value, "is_fully_addressable", True
+  ):
+    shards = value.addressable_shards
+    if shards and shards[0].data.shape == value.shape:
+      return shards[0].data
+  return value
+
+
 def _metric_reducer(
     metric: _MetricValue,
 ) -> _MetricReducer:
@@ -133,7 +158,9 @@ class MetricsBuffer:
       if not all(weighted):
         raise TypeError("loss values must not mix weighted and scalar metrics")
       return _weighted_metric_mean(self.losses)
-    return np.mean(np.array([np.array(x) for x in self.losses]))
+    return np.mean(
+        np.array([np.asarray(_addressable_scalar(x)) for x in self.losses])
+    )
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -751,7 +778,7 @@ class PeftTrainer:
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
-    perplexity = np.exp(jax.device_get(loss))
+    perplexity = np.exp(jax.device_get(_addressable_scalar(loss)))
     self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)  # pyrefly: ignore[missing-attribute]
     self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
@@ -761,7 +788,7 @@ class PeftTrainer:
       self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
           self.metrics_prefix,
           "learning_rate",
-          jax.device_get(learning_rate),
+          jax.device_get(_addressable_scalar(learning_rate)),
           self._mode,
           step,
       )
@@ -836,7 +863,7 @@ class PeftTrainer:
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
     def _to_np_array(v):
       if isinstance(v, jax.Array):
-        return np.asarray(v, dtype=np.float32)
+        return np.asarray(_addressable_scalar(v), dtype=np.float32)
       elif isinstance(v, list):
         return [_to_np_array(x) for x in v]
       return v
