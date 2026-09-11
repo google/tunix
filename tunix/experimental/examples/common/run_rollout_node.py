@@ -371,7 +371,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   logging.info("Creating vLLM mapping config...")
   mapping_config = mappings_lib.MappingConfig(
-      lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
+      **mapping_vllm_jax.VLLM_JAX_MAPPING
   )
   vllm_model = (
       args.model_dir
