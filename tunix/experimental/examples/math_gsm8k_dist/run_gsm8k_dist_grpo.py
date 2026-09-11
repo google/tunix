@@ -47,6 +47,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
+from tunix.experimental.common import otel_setup  # pylint: disable=g-import-not-at-top
 from tunix.experimental.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
@@ -378,6 +379,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   algo = _build_algo(args)
 
+  # OpenTelemetry export is opt-in via OTEL_EXPORTER_OTLP_ENDPOINT. The
+  # orchestrator logs its own metrics plus the relayed trainer/rollout ones, so
+  # this single provider exports the whole batch-attributed view; the default
+  # backends (W&B / TensorBoard) are unchanged either way.
+  otel_enabled = otel_setup.setup_metrics(
+      default_service_name="tunix-orchestrator"
+  )
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
       project_name=args.wandb_project,
@@ -388,6 +396,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
               "config": vars(args),
           }
       },
+      enable_opentelemetry=otel_enabled,
   )
 
   reward_fns = (
