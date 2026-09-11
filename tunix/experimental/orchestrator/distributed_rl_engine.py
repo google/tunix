@@ -52,8 +52,16 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
 
   if resp.error is not None:
     metadata = dict(resp.metadata) if resp.metadata else {}
-    prompt_id = metadata.get("prompt_id", "")
-    group_index = metadata.get("group_index", 0)
+    prompt_id = (
+        metadata.get("prompt_id", "")
+        or getattr(resp, "prompt_id", "")
+        or ""
+    )
+    group_index = (
+        metadata.get("group_index", 0)
+        or getattr(resp, "group_index", 0)
+        or 0
+    )
     metadata["error"] = str(resp.error)
     return datatypes.TrajectoryItem(
         prompt_id=prompt_id,

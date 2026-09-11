@@ -74,6 +74,7 @@ class RLStepResult:
   advantage_mean: float = 0.0
   advantage_std: float = 0.0
   train_result: Any = None
+  trajectories: Sequence[Any] | None = None
 
 
 class RLProgram(abc.ABC):
@@ -132,7 +133,8 @@ class StandardRLProgram(RLProgram):
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       on_step_begin: Callable[[int], None] | None = None,
-      on_step_end: Callable[[int, Any], None] | None = None,
+      on_step_end: Callable[..., Any] | None = None,
+      on_rollouts_ready: Callable[[int, Sequence[Any]], None] | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -195,6 +197,7 @@ class StandardRLProgram(RLProgram):
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
+    self.on_rollouts_ready = on_rollouts_ready
     self._in_flight_rollouts = 0
     self._dispatch_capacity: asyncio.Semaphore | None = None
     self._dispatch_done = asyncio.Event()
@@ -265,6 +268,7 @@ class StandardRLProgram(RLProgram):
         if prompt_idx < already_consumed:
           continue
         await self._wait_for_dispatch_window()
+
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
           prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
@@ -771,6 +775,11 @@ class StandardRLProgram(RLProgram):
           uncommitted_groups.append(scored_items)
           all_step_items.extend(scored_items)
           num_rollouts += len(scored_items)
+          if self.on_rollouts_ready:
+            try:
+              self.on_rollouts_ready(current_step, scored_items)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+              logging.warning("on_rollouts_ready callback failed: %s", e)
           for item in scored_items:
             step_rewards.append(_extract_reward(item))
             payload = getattr(item, "payload", None)
@@ -886,6 +895,7 @@ class StandardRLProgram(RLProgram):
           advantage_mean=metrics_summary["advantage_mean"],
           advantage_std=metrics_summary["advantage_std"],
           train_result=step_result,
+          trajectories=all_step_items,
       )
 
       loss_val = metrics_summary["loss_val"]
@@ -903,7 +913,12 @@ class StandardRLProgram(RLProgram):
         )
 
       if self.on_step_end:
-        self.on_step_end(current_step, step_result)
+        try:
+          self.on_step_end(
+              current_step, step_result, trajectories=all_step_items
+          )
+        except TypeError:
+          self.on_step_end(current_step, step_result)
       self._step += 1
 
   async def run_async(

@@ -14,10 +14,21 @@
 # limitations under the License.
 
 COMMAND=""
-TUNIX_IMAGE=${TUNIX_IMAGE:-}
+TUNIX_IMAGE=${TUNIX_IMAGE:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813}
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TUNIX_ROOT="$(cd "${DIR}/../../.." && pwd)"
+PYTHON_BIN=${PYTHON_BIN:-python3}
+if ! command -v "$PYTHON_BIN" &>/dev/null && command -v python &>/dev/null; then
+  PYTHON_BIN="python"
+fi
+YAML_GENERATOR="${YAML_GENERATOR:-${TUNIX_ROOT}/experimental/distributed/deployment/yaml_generator.py}"
+YAML_DIR="${YAML_DIR:-${TUNIX_ROOT}/experimental/distributed/deployment/yamls}"
+
+BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
+
+export MODEL_NAME=${MODEL_NAME:-Qwen3-4B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-4B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
 # which can cause stale config/shape mismatches if shared across models.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
@@ -25,12 +36,12 @@ export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
 # instead of failing on an initially empty local MODEL_DIR.
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096}
 export BATCH_SIZE=${BATCH_SIZE:-1}
-export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export MAX_TURNS=${MAX_TURNS:-3}
+export NUM_GENERATIONS=${NUM_GENERATIONS:-4}
+export MAX_STEPS=${MAX_STEPS:-10}
+export MAX_TURNS=${MAX_TURNS:-20}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
@@ -49,6 +60,9 @@ export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
+export REMAT_CONFIG=${REMAT_CONFIG:-decoder}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -59,7 +73,7 @@ export SHUFFLE=${SHUFFLE:-true}
 export SEED=${SEED:-42}
 export ENV_BACKEND=${ENV_BACKEND:-kubernetes}
 export SCAFFOLD=${SCAFFOLD:-r2egym}
-export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}
+export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-1}
 export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
 export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
@@ -67,6 +81,7 @@ export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
 export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
+export MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-4}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -111,6 +126,7 @@ export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+export KUEUE_QUEUE=${KUEUE_QUEUE:-}
 
 if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   echo "Error: this first DeepSWE distributed launcher only wires trainer+rollout."
@@ -118,8 +134,16 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   exit 1
 fi
 
+apply_manifest() {
+  if [[ -n "${KUEUE_QUEUE}" ]]; then
+    sed -e "s|^metadata:|metadata:\n  labels:\n    kueue.x-k8s.io/queue-name: ${KUEUE_QUEUE}|" | kubectl apply -f -
+  else
+    kubectl apply -f -
+  fi
+}
+
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" --ignore-not-found=true
 }
 
 start_orchestrator() {
@@ -131,21 +155,27 @@ start_orchestrator() {
   if [[ "${SHUFFLE}" == "0" || "${SHUFFLE}" == "false" || "${SHUFFLE}" == "False" ]]; then
     shuffle_arg="--no-shuffle"
   fi
+  local sandbox_env=""
   local sandbox_arg=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"}"
     sandbox_arg="--use_agent_sandbox"
   fi
 
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
+  "$PYTHON_BIN" "$YAML_GENERATOR" \
+    "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ${sandbox_env} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      PYTHONUNBUFFERED=1 \
+      TUNIX_IS_INTERNAL_ENV=false \
+      ${BOOTSTRAP_CMD} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -181,13 +211,15 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
+        ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         ${DEBUG:+--debug} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" --ignore-not-found=true
 }
 
 start_trainer() {
@@ -206,8 +238,8 @@ start_trainer() {
   if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
     lora_args="--use_lora"
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
+  "$PYTHON_BIN" "$YAML_GENERATOR" \
+    "${YAML_DIR}/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
@@ -215,6 +247,9 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
+      PYTHONUNBUFFERED=1 \
+      TUNIX_IS_INTERNAL_ENV=false \
+      ${BOOTSTRAP_CMD} \
       VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -237,15 +272,19 @@ start_trainer() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --sampler=${SAMPLER} \
+        --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
+        --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
+        --remat_config=${REMAT_CONFIG} \
         ${lora_args} \
         ${maxtext_args} \
         ${DEBUG:+--debug} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  kubectl delete jobset "${ROLLOUT_ID}" --ignore-not-found=true
+  kubectl delete jobset "${ROLLOUT_ID}-0" --ignore-not-found=true
 }
 
 start_rollout() {
@@ -270,13 +309,16 @@ start_rollout() {
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"}"
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
+  "$PYTHON_BIN" "$YAML_GENERATOR" \
+    "${YAML_DIR}/jobset.tpu.yaml" \
     --jobset_name="${ROLLOUT_ID}" \
     --tpu_slice=${ROLLOUT_TPU_SLICE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
+      PYTHONUNBUFFERED=1 \
+      TUNIX_IS_INTERNAL_ENV=false \
+      ${BOOTSTRAP_CMD} \
       SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -304,13 +346,60 @@ start_rollout() {
         ${vllm_args} \
         ${DEBUG:+--debug} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
-if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
-  source tunix/experimental/examples/common/enter_kube_context.sh
-elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
-  source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh"
+start_mock_trainer() {
+  "$PYTHON_BIN" "$YAML_GENERATOR" \
+    "${YAML_DIR}/jobset.cpu.yaml" \
+    --jobset_name="${TRAINER_ID}" \
+    --cpu_machine="${CPU_MACHINE}" \
+    --worker_container_image="${TUNIX_IMAGE}" \
+    --worker_container_port="${TRAINER_PORT}" \
+    --worker_startup_command=" \
+      TUNIX_IS_INTERNAL_ENV=false \
+      python -m tunix.experimental.distributed.runtime.main \
+        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.examples.common.run_mock_trainer_node.main \
+        --worker_id=${TRAINER_ID} \
+        --port=${TRAINER_PORT} \
+    " \
+    | apply_manifest
+}
+
+start_mock_rollout() {
+  "$PYTHON_BIN" "$YAML_GENERATOR" \
+    "${YAML_DIR}/jobset.cpu.yaml" \
+    --jobset_name="${ROLLOUT_ID}" \
+    --cpu_machine="${CPU_MACHINE}" \
+    --worker_container_image="${TUNIX_IMAGE}" \
+    --worker_container_port="${ROLLOUT_PORT}" \
+    --worker_startup_command=" \
+      TUNIX_IS_INTERNAL_ENV=false \
+      python -m tunix.experimental.distributed.runtime.main \
+        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+        --process_main=tunix.experimental.examples.common.run_mock_rollout_node.main \
+        --worker_id=${ROLLOUT_ID} \
+        --port=${ROLLOUT_PORT} \
+    " \
+    | apply_manifest
+}
+
+if [[ -z "${KUBECONFIG:-}" ]]; then
+  if [[ -f "$HOME/.kube/config" ]]; then
+    export KUBECONFIG="$HOME/.kube/config"
+  else
+    export KUBECONFIG="$HOME/.kube/config.cloud-tpu-multipod-dev.us-central1.trellis-demo-0810"
+  fi
+fi
+if ! kubectl get nodes &>/dev/null; then
+  if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
+    source tunix/experimental/examples/common/enter_kube_context.sh || true
+  elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" || true
+  fi
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -329,6 +418,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image=*)
       TUNIX_IMAGE="${1#*=}"
+      shift
+      ;;
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout)
+      COMMAND="$1"
       shift
       ;;
     *)
@@ -351,6 +444,13 @@ if [[ "$COMMAND" == "start" ]]; then
   start_orchestrator
   start_trainer
   start_rollout
+elif [[ "$COMMAND" == "test_orchestrator" ]]; then
+  stop_orchestrator
+  stop_trainer
+  stop_rollout
+  start_orchestrator
+  start_mock_trainer
+  start_mock_rollout
 elif [[ "$COMMAND" == "stop" ]]; then
   stop_orchestrator
   stop_trainer
@@ -359,9 +459,14 @@ elif [[ "$COMMAND" == "orchestrator" ]]; then
   stop_orchestrator; start_orchestrator
 elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
+elif [[ "$COMMAND" == "mock_trainer" ]]; then
+  stop_trainer; start_mock_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "mock_rollout" ]]; then
+  stop_rollout; start_mock_rollout
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout'."
   exit 1
 fi
+

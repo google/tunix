@@ -411,6 +411,16 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_lora_rank": args.lora_rank,
         "max_loras": 1,
     }
+  init_with_random = os.getenv("INIT_WITH_RANDOM_WEIGHTS", "").lower()
+  if init_with_random in ("true", "1", "yes"):
+    init_with_random_weights = True
+  elif init_with_random in ("false", "0", "no"):
+    init_with_random_weights = False
+  else:
+    init_with_random_weights = (
+        args.weight_sync_mode != weight_sync_lib.WeightSyncMode.NONE
+    )
+
   vllm_config = vllm_sampler.VllmConfig(
       server_mode=server_mode,
       mesh=rollout_mesh,
@@ -419,6 +429,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
+      init_with_random_weights=init_with_random_weights,
       engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(

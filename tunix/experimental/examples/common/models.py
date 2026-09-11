@@ -28,23 +28,44 @@ from tunix.models.qwen3 import model as qwen3_model_lib
 from tunix.models.qwen3 import params as qwen3_params_lib
 
 
-def _gemma_config(model_name: str) -> gemma_model_lib.ModelConfig:
+def _gemma_config(
+    model_name: str, remat_config: str | None = None
+) -> gemma_model_lib.ModelConfig:
+  """Constructs Gemma model configuration."""
   normalized = model_name.lower().replace("_", "-")
   if "gemma-2-2b" in normalized or "gemma2-2b" in normalized:
-    return gemma_model_lib.ModelConfig.gemma2_2b()
-  if "gemma-2b" in normalized:
-    return gemma_model_lib.ModelConfig.gemma_2b()
-  raise ValueError(f"Unsupported gemma model_name: {model_name!r}")
+    config = gemma_model_lib.ModelConfig.gemma2_2b()
+  elif "gemma-2b" in normalized:
+    config = gemma_model_lib.ModelConfig.gemma_2b()
+  else:
+    raise ValueError(f"Unsupported gemma model_name: {model_name!r}")
+  if remat_config is not None:
+    remat_map = {
+        "none": gemma_model_lib.RematConfig.NONE,
+        "block": gemma_model_lib.RematConfig.BLOCK,
+        "decoder": gemma_model_lib.RematConfig.DECODER,
+    }
+    if remat_config.lower() not in remat_map:
+      raise ValueError(f"Unsupported remat_config: {remat_config!r}")
+    config.remat_config = remat_map[remat_config.lower()]
+  return config
 
 
-def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
+def _qwen3_config(
+    model_name: str, remat_config: str | None = None
+) -> qwen3_model_lib.ModelConfig:
+  """Constructs Qwen3 model configuration."""
   normalized = model_name.lower().replace("_", "-")
   if "0.6b" in normalized or "0p6b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_0p6b()
   elif "1.7b" in normalized or "1p7b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
+  elif "4b" in normalized:
+    config = qwen3_model_lib.ModelConfig.qwen3_4b()
   elif "8b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_8b()
+  elif "14b" in normalized:
+    config = qwen3_model_lib.ModelConfig.qwen3_14b()
   elif "32b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_32b()
   else:
@@ -52,16 +73,32 @@ def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
   config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
+  if remat_config is not None:
+    remat_map = {
+        "none": qwen3_model_lib.RematConfig.NONE,
+        "block": qwen3_model_lib.RematConfig.BLOCK,
+        "decoder": qwen3_model_lib.RematConfig.DECODER,
+    }
+    if remat_config.lower() not in remat_map:
+      raise ValueError(f"Unsupported remat_config: {remat_config!r}")
+    config.remat_config = remat_map[remat_config.lower()]
   return config
 
 
-def create_model(model_name: str, model_dir: str, mesh: Mesh):
+def create_model(
+    model_name: str,
+    model_dir: str,
+    mesh: Mesh,
+    remat_config: str | None = None,
+):
   """Builds the demo model on the given mesh.
 
   Args:
     model_name: Demo model selector, e.g. "gemma-2-2b" or "Qwen3-1.7B".
     model_dir: Directory holding the safetensors shards.
     mesh: Device mesh the parameters are sharded over.
+    remat_config: Optional rematerialization strategy ('none', 'block', or
+      'decoder').
 
   Returns:
     An nnx module ready for training or serving.
@@ -69,10 +106,15 @@ def create_model(model_name: str, model_dir: str, mesh: Mesh):
   normalized = model_name.lower().replace("_", "-")
   if "gemma" in normalized:
     return gemma_params_lib.create_model_from_safe_tensors(
-        model_dir, _gemma_config(model_name), mesh=mesh
+        model_dir,
+        _gemma_config(model_name, remat_config=remat_config),
+        mesh=mesh,
     )
   if "qwen3" in normalized:
     return qwen3_params_lib.create_model_from_safe_tensors(
-        model_dir, _qwen3_config(model_name), mesh, dtype=jnp.bfloat16
+        model_dir,
+        _qwen3_config(model_name, remat_config=remat_config),
+        mesh,
+        dtype=jnp.bfloat16,
     )
   raise ValueError(f"Unsupported demo model_name: {model_name!r}")

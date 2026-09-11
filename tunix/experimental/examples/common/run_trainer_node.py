@@ -130,6 +130,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=64)
   parser.add_argument("--lora_alpha", type=float, default=64.0)
+  parser.add_argument(
+      "--remat_config",
+      type=str,
+      default=os.getenv("REMAT_CONFIG", "decoder"),
+      choices=("none", "block", "decoder"),
+      help=(
+          "Activation rematerialization strategy ('none', 'block', or"
+          " 'decoder')."
+      ),
+  )
   parser.add_argument("--checkpoint_save_interval_steps", type=int, default=1)
   parser.add_argument("--checkpoint_max_to_keep", type=int, default=10)
   parser.add_argument(
@@ -303,7 +313,9 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
         " --model_dir=/path/to/local/safetensors."
     )
-  model = models.create_model(args.model_name, args.model_dir, mesh)
+  model = models.create_model(
+      args.model_name, args.model_dir, mesh, remat_config=args.remat_config
+  )
   if not lora:
     return model
   lora_config = {
