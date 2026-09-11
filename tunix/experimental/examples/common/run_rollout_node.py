@@ -28,8 +28,13 @@ import sys
 from typing import Any
 
 from tunix.experimental.examples.common import models
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+
+
+# Import Raiden before any other libraries to ensure correct JAX compilation.
+raiden_preload.import_raiden()
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
