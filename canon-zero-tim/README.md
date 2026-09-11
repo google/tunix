@@ -1,7 +1,8 @@
 # canon-zero-tim
 
 > **New here? Read `START_HERE.md`.** This file explains the mechanism; that one tells you
-> what to do.
+> what to do. For the blog experiment, start with
+> [Reproduce the blog training curves](#reproduce-the-blog-training-curves).
 
 Make the rollout engine, its re-scorer, and the training forward produce **bit-identical**
 logprobs — then keep them that way while the model trains.
@@ -12,6 +13,126 @@ B = engine prefill re-score     the same engine, same tokens, scored in one pass
 C = differentiable training forward
 goal: A = B = C, bitwise, over the full distribution
 ```
+
+---
+
+## Reproduce the blog training curves
+
+The current blog figure compares **three treatments on P45 FrozenLake**, with
+two panels: sampler–trainer logprob difference and **training** solve rate.
+M15 is a separate workload, not another curve in this figure. No training-code
+or YAML edits are needed to select the existing treatments.
+
+### Reference runs and recipe
+
+The archives below contain `config.yaml`, `history.csv`, and raw console exports.
+They are available at archive commit
+`a7255cfc4b15a29ed9cabcd67a54cac416cd8b74`; this is the **archive revision**, not
+the execution revision of all three runs.
+
+| Blog label / archived run | Executed source prefix | Frozen policy-ratio denominator | Extra TIS weight | Tokens / evaluation |
+|---|---|---|---|---|
+| [Standard — jff877lt](../wandb_exports/jff877lt_canon-p57-fl-stan-r01-567c96d5/) | `567c96d5` | Trainer-old | None | Legacy / every 50 updates |
+| [Token-level TIS — 8zjz4li7](../wandb_exports/8zjz4li7_canon-p57-fl-is-i45g-ccbcf572/) | `ccbcf572` | Trainer-old | Truncated trainer-old / rollout probability ratio, cap 2 | Legacy / every 50 updates |
+| [Zero-TIM — tybj4xr0](../wandb_exports/tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9/) | `06a0fdb9` | Rollout-old | None | Exact TiTO, record-full / off |
+
+**Use `standard`, not `native`, for the gray curve.** The historical
+`native`/`mismatch` arm uses rollout-old as its denominator and is not plotted.
+“No TIS” does not disable GSPO-token's policy-ratio clipping. Trainer-old means
+trainer recomputation frozen before the update; rollout-old means the logprobs
+recorded when sampling. See [the Standard handoff](tasks/p57-frozenlake-tim-causal-study/STANDARD64.md).
+
+Shared recipe: Qwen3-8B, **64 v5p chips / DP8×TP8**, 32 prompts × 8 generations
+= 256 trajectories per update, GSPO-token + RLOO, one optimizer iteration per
+fresh batch, seed 42, learning rate 1e-6, clipping 0.003/0.005, temperature 0.7,
+top-p 1, top-k 0. P45 uses grid sides 2–9, at most 5 turns, prompt limit 4096
+and generation limit 2048. Each recipe specifies **300 updates**; the figure
+uses only the first **200** training observations. Preserve the archived model,
+tokenizer, dataset, optimizer and batch settings as well as these headline values.
+The 32-chip / 128-trajectory option is a different experiment.
+
+### Render the existing recipes
+
+Run from the **repository root**, one directory above `canon-zero-tim/`.
+First select a clean checkout of an approved, published **full source SHA**;
+pin the registry image digest and model/checkpoint, tokenizer and dataset
+identities using the linked handoffs. Supply your cluster/evidence access
+outside Git. Do not hand-edit generated YAML or its autoscale/exclusive-topology
+placement settings.
+
+These commands render the current registered recipes, not three historical
+source trees. Compare the rendered configuration with each archived config and
+record any drift before describing a rerun as a historical reproduction.
+Replace every placeholder; use fresh run IDs and fresh output directories
+**outside the source worktree**. Rendering does not launch jobs.
+
+```bash
+SOURCE="<approved-published-40-character-sha>"
+OUT="<absolute-fresh-output-parent-outside-worktree>"
+P57="canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts"
+V1="canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts"
+
+bash "$P57/render_three_arm_wave.sh" standard "$SOURCE" "$OUT/standard" \
+  "<fresh-standard-p45-id>" "<unused-standard-m15-id>" "<fresh-standard-campaign>"
+bash "$P57/render_three_arm_wave.sh" is "$SOURCE" "$OUT/is" \
+  "<fresh-is-p45-id>" "<unused-is-m15-id>" "<fresh-is-campaign>"
+bash "$V1/prepare_p67_frozenlake_two_full_wave.sh" \
+  "$SOURCE" "$OUT/zero" "<fresh-zero-campaign>" \
+  "<fresh-zero-p45-id>" "<unused-zero-m15-id>" \
+  --token-continuity both-exact --token-continuity-debug-mode record-full \
+  --train-geometry dp8-tp8-b256
+```
+
+The wrappers reject dirty or mismatched source and reused output directories.
+Require `P57_THREE_ARM_WAVE_PASS` for Standard/IS and
+`V1_P67_FROZENLAKE_WAVE_READY` with `token_continuity=both-exact` and
+`token_continuity_debug=record-full` for Zero; retain the generated manifests
+and SHA receipts. These are preparation receipts, not target certification.
+
+Both wrappers also generate M15 manifests: **do not apply the whole output
+directory**. The three P45 manifests for this figure are:
+
+```text
+<OUT>/standard/p45/jobset-p57-frozenlake-standard-300.yaml
+<OUT>/is/p45/jobset-p57-frozenlake-is-300.yaml
+<OUT>/zero/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml
+```
+
+Before a separately approved launch, start one persistent worker-log collector
+per JobSet (16 workers per run), following
+[RUNBOOK: External worker-log collection](tasks/p57-frozenlake-tim-causal-study/RUNBOOK.md#external-worker-log-collection).
+Follow the [TiTO handoff](tasks/multiturn-tito-cross-workload/HANDOFF.md) for
+record-full witness, trajectory/sidecar and evidence-upload checks. Launch only
+the intended P45 files, without a trailing shell pipeline. Three simultaneous
+runs need 192 chips; they may instead run sequentially. Preserve failed runs.
+
+### Check the result, not just the launch
+
+Keep source/image/config identities, raw worker logs, runtime admission and
+optimizer receipts, and the W&B history/config export for each run. Standard
+must report `old_logps=trainer tis_weights=absent`; IS must retain the registered
+token-level correction; Zero must report exact TiTO and its selected numerical
+profile. Check finite gradient/update diagnostics independently of forward
+alignment. A complete 300-update run and a 200-observation plot are distinct checks.
+
+To compare with the figure, select W&B `_step=0..199` from training rows, reject
+missing or duplicate steps, and display them as steps 1–200. Plot
+`sampler_trainer/train/logp_diff_mean` directly (mean **absolute** difference on
+action tokens), and `rewards/train/solve_ratio` as raw observations with a trailing
+10-observation average, using the available prefix at the start. Do not substitute
+evaluation reward or fill missing values with zero. The archived final-ten means
+are **62.7% / 66.9% / 88.2%** for Standard / TIS / Zero, not promised rerun targets.
+The blog's figure builder is maintained separately; it is not bundled by this README.
+
+Evidence boundary: all 200 exported Zero mean-difference observations are zero,
+but sampled raw receipts use warning-only admission and do not cover every step
+continuously. This is measured telemetry, **not a signed strict full-run certificate**.
+Strict Zero-TIM requires both decode A–independent prefill B and B–trainer C to
+have zero differing bytes on the sampled action mask; missing receipts are not
+zeros. The historical arms differ in TiTO, evaluation, execution revision and
+backward implementation, so this is a comparison of complete configurations,
+not an isolated causal ablation. Equal seeds do not guarantee identical sampled
+trajectories, gradient bits, or training curves.
 
 ---
 
