@@ -7,12 +7,8 @@ import time
 from typing import Any, Optional, cast
 import numpy as np
 
-try:
-  from examples.deepswe import openhands_utils
-  from examples.deepswe import template as template_mod
-except ImportError:
-  import openhands_utils  # pytype: disable=import-error
-  import template as template_mod  # pytype: disable=import-error
+from examples.deepswe import openhands_utils
+from examples.deepswe import template as template_mod
 
 
 _GLOBAL_FLEET = None
@@ -88,14 +84,7 @@ def _patch_r2egym_for_agent_sandbox() -> None:
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
 
-def _get_image_rewrite_fn(image_rewrite: Any | None = None) -> Any | None:
-  """Retrieve or construct the image rewrite function from prefix if configured."""
-  if image_rewrite is not None:
-    return image_rewrite
-  if os.getenv("IMAGE_REWRITE_PREFIX"):
-    prefix = os.environ["IMAGE_REWRITE_PREFIX"].rstrip("/")
-    return lambda img: f"{prefix}/{img.split('/')[-1]}"
-  return None
+_get_image_rewrite_fn = openhands_utils.get_image_rewrite_fn
 
 
 def _normalize_tasks_for_fleet(
@@ -251,7 +240,7 @@ class PrewarmDatasetIterator:
     self.current_batch = None
     self.next_batch = None
     self.in_flight_batches: list[list[str]] = []
-    self.buffer_size = 2
+    self.max_in_flight_batches = 2
 
     # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
     try:
@@ -344,7 +333,7 @@ class PrewarmDatasetIterator:
     self.in_flight_batches.append(current_images)
 
     # 3. 🧹 Only unwarm batches that have truly exited the in-flight window
-    if len(self.in_flight_batches) > self.buffer_size:
+    if len(self.in_flight_batches) > self.max_in_flight_batches:
       retired_images = self.in_flight_batches.pop(0)
       active_images = set()
       for b in self.in_flight_batches:
@@ -496,6 +485,10 @@ class SWEEnv(BaseTaskEnv):
   def _init_agent_sandbox_env(self) -> None:
     _patch_r2egym_for_agent_sandbox()
     from agent_sandbox_rl import Task  # pytype: disable=import-error
+    from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
+        make_fleet_repo_env,
+        r2egym_command_files,
+    )
 
     fleet = self.fleet or _get_global_fleet()
     msg = (
@@ -551,11 +544,6 @@ class SWEEnv(BaseTaskEnv):
           "OPENHANDS_WORKING_DIR", "/testbed"
       )
       self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
-
-    from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
-        make_fleet_repo_env,
-        r2egym_command_files,
-    )
     cmd_files = r2egym_command_files()
     self.env = make_fleet_repo_env(
         self.handle,

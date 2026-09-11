@@ -495,3 +495,48 @@ def test_openhands_utils_step_openhands_direct():
   assert env.total_steps == 6
 
 
+def test_openhands_utils_get_image_rewrite_fn():
+  """Verify get_image_rewrite_fn in openhands_utils."""
+  def custom_fn(img):
+    return f"custom/{img}"
+
+  assert openhands_utils.get_image_rewrite_fn(custom_fn) is custom_fn
+
+  with mock.patch.dict(os.environ, {"IMAGE_REWRITE_PREFIX": "gcr.io/mirror"}):
+    rewrite = openhands_utils.get_image_rewrite_fn()
+    assert rewrite("swebench/test:v1") == "gcr.io/mirror/test:v1"
+
+  with mock.patch.dict(os.environ, {}, clear=True):
+    assert openhands_utils.get_image_rewrite_fn() is None
+
+
+def test_prewarm_dataset_iterator_max_in_flight_batches():
+  """Verify that PrewarmDatasetIterator unwarming honors max_in_flight_batches."""
+  mock_fleet = mock.MagicMock()
+  mock_fleet._image_rewrite_fn = None
+  dataset = [
+      [{"docker_image": "img1"}],
+      [{"docker_image": "img2"}],
+      [{"docker_image": "img3"}],
+      [{"docker_image": "img4"}],
+  ]
+  it = swe_env.PrewarmDatasetIterator(dataset, fleet=mock_fleet)
+  assert it.max_in_flight_batches == 2
+
+  b1 = next(it)
+  assert b1[0]["docker_image"] == "img1"
+  assert len(it.in_flight_batches) == 1
+  mock_fleet.unwarm_image.assert_not_called()
+
+  b2 = next(it)
+  assert b2[0]["docker_image"] == "img2"
+  assert len(it.in_flight_batches) == 2
+  mock_fleet.unwarm_image.assert_not_called()
+
+  b3 = next(it)
+  assert b3[0]["docker_image"] == "img3"
+  assert len(it.in_flight_batches) == 2
+  mock_fleet.unwarm_image.assert_called_with("img1")
+
+
+

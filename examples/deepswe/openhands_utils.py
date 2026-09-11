@@ -15,9 +15,23 @@
 """Utility functions for OpenHands workspace and environment setup."""
 
 import logging
+import os
 from typing import Any, Optional
 
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
+
+
+def get_image_rewrite_fn(image_rewrite: Any | None = None) -> Any | None:
+  """Retrieve or construct the image rewrite function from prefix if configured."""
+  if image_rewrite is not None:
+    return image_rewrite
+  if os.getenv("IMAGE_REWRITE_PREFIX"):
+    prefix = os.environ["IMAGE_REWRITE_PREFIX"].rstrip("/")
+    return lambda img: f"{prefix}/{img.split('/')[-1]}"
+  return None
+
+
+_get_image_rewrite_fn = get_image_rewrite_fn
 
 
 def setup_openhands_workspace(
