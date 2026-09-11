@@ -184,21 +184,22 @@ def _metric_reducer(metric: Any) -> Any:
   return np.mean
 
 
-def _aux_to_additional_metrics(aux: Any) -> dict[str, Any] | None:
-  """Routes a loss function's auxiliary metrics dict into buffer form.
+def _aux_to_additional_metrics(
+    aux_metrics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+  """Routes ``LossOutput.aux_metrics`` into metrics-buffer form.
 
-  Auto-forwards ``LossOutput.aux_metrics`` (already unwrapped to a dict upstream
-  by ``_fwd_bwd_step``) so scalars and WeightedMetrics the shared loss emits --
-  e.g. ``kl``, ``entropy``, ``pg_clipfrac`` from ``tunix.rl.algo_core`` -- reach
-  the metrics logger without every trainer subclass overriding
+  Auto-forwards the scalars and WeightedMetrics the shared loss emits -- e.g.
+  ``kl``, ``entropy``, ``pg_clipfrac`` from ``tunix.rl.algo_core`` -- so they
+  reach the metrics logger without every trainer subclass overriding
   ``_post_process_*_step``. Mirrors the non-experimental
-  ``tunix.sft.peft_trainer`` train/eval loops. Returns ``None`` when ``aux`` is
-  not a non-empty dict so non-metric auxiliary payloads are left untouched.
+  ``tunix.sft.peft_trainer`` train/eval loops.
   """
-  if not isinstance(aux, dict) or not aux:
+  if not aux_metrics:
     return None
   return {
-      name: (metric, _metric_reducer(metric)) for name, metric in aux.items()
+      name: (metric, _metric_reducer(metric))
+      for name, metric in aux_metrics.items()
   }
 
 
@@ -1117,16 +1118,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     metrics must still reach the logger. Subclass hooks keep receiving the
     ``aux_metrics`` dict, as before.
 
-    With ``has_aux=True`` and a loss that returns a plain ``(loss, aux)``
-    tuple, ``aux`` is arbitrary legacy state that may nest arrays under
-    non-metric keys; it is handed to the hooks untouched and never
-    auto-logged.
+    Anything else is either a legacy ``has_aux=True`` payload -- arbitrary
+    state that may nest arrays under non-metric keys -- or ``None``; both are
+    handed to the hooks untouched and never auto-logged. ``has_aux`` therefore
+    says only what shape ``value_and_grad`` returns, never whether metrics are
+    logged.
     """
     if isinstance(aux, utils.LossOutput):
       return _aux_to_additional_metrics(aux.aux_metrics), aux.aux_metrics
-    if self._has_aux:
-      return None, aux
-    return _aux_to_additional_metrics(aux), aux
+    return None, aux
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
