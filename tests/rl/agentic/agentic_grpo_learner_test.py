@@ -279,6 +279,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           ),
           num_generations: int = 1,
           collect_mode: str = "Token",
+          apply_sub_batch_skip: bool = False,
       ):
         i = 0
         if hasattr(prompt_iterator, "__aiter__"):
