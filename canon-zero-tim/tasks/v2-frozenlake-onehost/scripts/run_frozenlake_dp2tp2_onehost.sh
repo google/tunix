@@ -91,7 +91,8 @@ case "$repo" in
   /mnt/disks/tunix-data/worktrees/gsm8k_rescore_fix_0828|\
   /mnt/disks/tunix-data/worktrees/v2_integrate_launch2|\
   /mnt/disks/tunix-data/worktrees/zero_tim_perf_launch|\
-  /mnt/disks/tunix-data/worktrees/zero_tim_perf2_launch) ;;
+  /mnt/disks/tunix-data/worktrees/zero_tim_perf2_launch|\
+  /mnt/disks/tunix-data/worktrees/zero_tim_perf3_launch) ;;
   *) echo "[V2.FL.ONEHOST] physical worktree mismatch: $repo" >&2; exit 2 ;;
 esac
 if [ "$(realpath "$repo")" != "$repo" ]; then
