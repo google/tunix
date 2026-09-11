@@ -114,7 +114,6 @@ def _extract_old_logps(
   return old_lp
 
 
-
 class AlgorithmAdapter(abc.ABC):
   """Abstract algorithm adapter for returns math, advantages, and loss functions."""
 
@@ -175,29 +174,27 @@ class GRPOAdapter(AlgorithmAdapter):
       self,
       algo_config: algorithm_config.GRPOConfig | None = None,
       *,
-      group_size: int | None = None,
       mini_batch_size: int = 4,
       train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
       max_response_length: int = 1024,
   ):
-    if algo_config is not None:
-      if (
-          group_size is not None
-          and getattr(algo_config, "num_generations", None) != group_size
-      ):
-        raise ValueError(
-            f"Conflicting group_size values: kwarg group_size={group_size} "
-            f"does not match algo_config.num_generations="
-            f"{getattr(algo_config, 'num_generations', None)}."
-        )
-      self.algo_config = algo_config
-    else:
-      config_kwargs = {}
-      if group_size is not None:
-        config_kwargs["num_generations"] = group_size
-      self.algo_config = algorithm_config.GRPOConfig(**config_kwargs)
+    """Initializes the adapter.
+
+    Args:
+      algo_config: Canonical GRPO configuration. It is the single source of
+        truth for all algorithm hyperparameters, including the group size
+        (`num_generations`). Defaults to `GRPOConfig()` when omitted.
+      mini_batch_size: Number of prompt groups per optimizer step.
+      train_micro_batch_size: Number of sequences per trainer forward pass.
+      max_turns: Maximum number of environment turns per rollout.
+      max_packed_len: Maximum packed sequence length.
+      max_response_length: Maximum number of generated response tokens.
+    """
+    if algo_config is None:
+      algo_config = algorithm_config.GRPOConfig()
+    self.algo_config = algo_config
 
     super().__init__(
         group_size=self.algo_config.num_generations,

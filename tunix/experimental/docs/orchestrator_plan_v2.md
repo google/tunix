@@ -792,7 +792,7 @@ class ClusterOrchestrator:
 ```python
 orchestrator = ClusterOrchestrator(config)
 orchestrator.run(
-    algo=GRPOAdapter(group_size=8, mini_batch_size=4),
+    algo=GRPOAdapter(GRPOConfig(num_generations=8), mini_batch_size=4),
     dataset=math_prompts,
     reward_fns=[math_rule_verifier],
 )
@@ -800,7 +800,7 @@ orchestrator.run(
 
 ### Case 2: GRPO with Neural PRM & Reference Model KL
 ```python
-algo = GRPOAdapter(group_size=8, mini_batch_size=4)
+algo = GRPOAdapter(GRPOConfig(num_generations=8), mini_batch_size=4)
 algo.requires_reference_kl = True  # Automatically evaluates Role.REFERENCE logprobs!
 
 orchestrator.run(
@@ -822,7 +822,7 @@ orchestrator.run(
 ### Case 4: Multi-Turn Agentic Tool Calling (Docker Sandbox)
 ```python
 orchestrator.run(
-    algo=GRPOAdapter(group_size=4, max_turns=10),  # Auto-masks observations with action_mask=0!
+    algo=GRPOAdapter(GRPOConfig(num_generations=4), max_turns=10),  # Auto-masks observations with action_mask=0!
     dataset=web_browser_tasks,
     reward_fns=[task_success_evaluator],
 )

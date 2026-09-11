@@ -103,7 +103,9 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
 
   def test_grpo_create_trainer_payloads_with_rollout_logprobs(self):
-    adapter = algorithm_adapter.GRPOAdapter(group_size=2)
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(num_generations=2)
+    )
     item1 = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -173,7 +175,9 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertIsNone(payloads[1].old_per_token_logps)
 
   def test_grpo_create_trainer_payloads_with_mismatched_logps_length(self):
-    adapter = algorithm_adapter.GRPOAdapter(group_size=2)
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(num_generations=2)
+    )
     item1 = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -388,7 +392,9 @@ class AlgorithmAdapterTest(absltest.TestCase):
 
   def test_empty_tokens_handling(self):
     for adapter in [
-        algorithm_adapter.GRPOAdapter(group_size=2),
+        algorithm_adapter.GRPOAdapter(
+            algo_config=algorithm_config.GRPOConfig(num_generations=2)
+        ),
         algorithm_adapter.PPOAdapter(group_size=1),
     ]:
       g = adapter.group_size
@@ -553,7 +559,6 @@ class AlgorithmAdapterTest(absltest.TestCase):
     gen_fn = adapter.build_gen_model_input_fn(pad_id=0, eos_id=1)
     model_inputs = gen_fn({"fake": "batch"})
     self.assertEqual(model_inputs["algo_config"].temperature, 0.8)
-
 
 
 _ROUTING_LAYERS = 2
