@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -41,6 +41,10 @@ class PackItem:
   advantages: np.ndarray
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
+  # Opaque caller tag. Rides the item through FFD sorting and leftover
+  # carry-over so a packed row's segments can be attributed afterwards (see
+  # the `pack_sequences` hooks). Never read by the packer itself.
+  tag: Any = None
 
   def __post_init__(self):
     for name in (

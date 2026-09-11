@@ -754,6 +754,118 @@ class UtilsTest(absltest.TestCase):
     )
 
 
+class PackSequencesTagHooksTest(absltest.TestCase):
+  """`item_tagger` / `on_chunk_tags`: a tag stamped at consumption must report
+  every chunk's exact composition, surviving FFD sorting, bin placement and
+  leftover carry-over across chunks."""
+
+  def _example(self, n_tokens, marker):
+    # One-row padded TrainExample: no prompt, `n_tokens` real completion
+    # tokens all equal to `marker`, so packed content identifies its source
+    # item after the packer has reordered everything.
+    width = 8
+    ids = np.zeros(width, dtype=np.int32)
+    ids[:n_tokens] = marker
+    mask = np.zeros(width, dtype=np.int32)
+    mask[:n_tokens] = 1
+    return common.TrainExample(
+        prompt_ids=jnp.zeros((1, 0), dtype=jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), dtype=jnp.int32),
+        completion_ids=jnp.asarray(ids)[None, :],
+        completion_mask=jnp.asarray(mask)[None, :],
+        advantages=jnp.full((1,), 1.0, dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        segment_ids=None,
+        segment_positions=None,
+    )
+
+  def _run(self, lengths, *, budget, pack_size, sequences_per_update):
+    # Tag = the item's 1-based arrival index; token content = the same value.
+    tags = iter(range(1, len(lengths) + 1))
+    reports = []
+    chunks = [
+        chunk_list[0]
+        for chunk_list in utils.pack_sequences(
+            iter([[self._example(n, marker=i + 1)]
+                  for i, n in enumerate(lengths)]),
+            max_token_budget=budget,
+            sequences_per_update=sequences_per_update,
+            pack_size=pack_size,
+            item_tagger=lambda: next(tags),
+            on_chunk_tags=reports.append,
+        )
+    ]
+    self.assertRaises(StopIteration, next, tags)  # one tag per item
+    return chunks, reports
+
+  def _assert_tags_match_content(self, lengths, chunks, reports):
+    self.assertEqual(len(chunks), len(reports))
+    seen = []
+    for chunk, bins in zip(chunks, reports):
+      seg = np.asarray(chunk.segment_ids)
+      ids = np.asarray(chunk.completion_ids)
+      self.assertLen(bins, seg.shape[0])  # one tag list per row
+      for b, row_tags in enumerate(bins):
+        self.assertEqual(int(seg[b].max()), len(row_tags))
+        for i, tag in enumerate(row_tags, start=1):
+          span = seg[b] == i
+          # Segment i's tokens are the tagged item's, with its real length.
+          self.assertTrue((ids[b][span] == tag).all())
+          self.assertEqual(int(span.sum()), lengths[tag - 1])
+        seen.extend(row_tags)
+    self.assertCountEqual(seen, range(1, len(lengths) + 1))
+
+  def test_tags_match_packed_content_exactly(self):
+    # Lengths chosen so FFD's descending sort differs from arrival order and
+    # pack_size=2 spreads items across rows.
+    lengths = [2, 5, 3, 4, 1, 3]
+    chunks, reports = self._run(
+        lengths, budget=8, pack_size=2, sequences_per_update=len(lengths)
+    )
+    self._assert_tags_match_content(lengths, chunks, reports)
+
+  def test_tags_follow_leftover_carry_over(self):
+    # budget=8, pack_size=1, streamed one item at a time:
+    #   [5]      -> 5 < 8, buffered
+    #   [5,5]    -> 10 >= 8: FFD fits one 5, the OTHER 5 is leftover -> chunk 1
+    #   [5,3]    -> 8 >= 8: chunk 2 = [5 (carried), 3]
+    #   [3]      -> boundary: chunk 3 = [3], is_update.
+    # The carried item must be reported in the chunk it actually lands in.
+    lengths = [5, 5, 3, 3]
+    chunks, reports = self._run(
+        lengths, budget=8, pack_size=1, sequences_per_update=4
+    )
+    self.assertLen(chunks, 3)
+    self._assert_tags_match_content(lengths, chunks, reports)
+    self.assertEqual([len(r[0]) for r in reports], [1, 2, 1])
+    self.assertEqual(reports[1][0][1], 3)  # the 3 arrived after the carry
+    flags = [bool(np.asarray(c.is_update_step).item()) for c in chunks]
+    self.assertEqual(flags, [False, False, True])
+
+  def test_dummy_rows_report_empty_tag_lists(self):
+    # pack_size=2 with a single small item: row 1 is an all-padding dummy
+    # row, and its tag list is empty (no segment to attribute).
+    chunks, reports = self._run(
+        [3], budget=8, pack_size=2, sequences_per_update=1
+    )
+    self.assertLen(chunks, 1)
+    self.assertEqual(reports, [[[1], []]])
+    self.assertEqual(int(np.asarray(chunks[0].segment_ids)[1].max()), 0)
+
+  def test_no_hooks_leaves_tag_unset(self):
+    # Without hooks packing is unchanged and no tag machinery runs.
+    example = self._example(3, marker=1)
+    [[pack]] = list(
+        utils.pack_sequences(
+            iter([[example]]), max_token_budget=8, sequences_per_update=1
+        )
+    )
+    self.assertEqual(int(np.asarray(pack.segment_ids).max()), 1)
+    [item] = utils.train_example_to_pack_items(example)
+    self.assertIsNone(item.tag)
+
+
 class IsPositiveIntegerTest(absltest.TestCase):
   """Tests for `utils.is_positive_integer`."""
 

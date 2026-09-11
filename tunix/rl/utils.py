@@ -14,9 +14,10 @@
 
 """Simple utils used by RL algorithms."""
 
+import dataclasses
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from absl import logging
 from flax import nnx
@@ -520,6 +521,8 @@ def pack_sequences(
     pad_id: int = 0,
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
+    item_tagger: Callable[[], Any] | None = None,
+    on_chunk_tags: Callable[[list[list[Any]]], None] | None = None,
 ) -> Iterator[list[common.TrainExample]]:
   """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
@@ -540,6 +543,15 @@ def pack_sequences(
     pad_id: Padding vocabulary id.
     pack_size: Rows per chunk (= fsdp * dp); each chunk is [pack_size,
       max_token_budget].
+    max_segments_per_packed_row: Optional cap on sequences per packed row.
+    item_tagger: Optional; called once per consumed sequence, in unpad (row)
+      order, and its return value is stamped on that item as `PackItem.tag`.
+    on_chunk_tags: Optional; called once per emitted chunk, right before it
+      is yielded, with the chunk's per-row tag lists (`[[row0 tags...],
+      [row1 tags...]]`; segment `i` of a row is that row's `i-1`-th tag, an
+      empty (dummy) row has an empty list). Together the two hooks let a
+      caller recover each chunk's exact composition after FFD sorting and
+      leftover carry-over have reordered the stream.
 
   Yields:
     Single-element lists, each one [pack_size, max_token_budget] TrainExample.
@@ -574,6 +586,8 @@ def pack_sequences(
     rows = packing.pack_chunk(
         bins, budget=max_token_budget, pad_id=pad_id, carried=carried
     )
+    if on_chunk_tags is not None:
+      on_chunk_tags([[it.tag for it in b] for b in bins])
     return [
         pack_rows_to_train_examples(
             rows,
@@ -622,6 +636,8 @@ def pack_sequences(
       if getattr(example, "completion_mask", None) is not None:
         mask_dtype = np.asarray(example.completion_mask).dtype
       for item in train_example_to_pack_items(example):
+        if item_tagger is not None:
+          item = dataclasses.replace(item, tag=item_tagger())
         n = item.num_tokens
         if n > max_token_budget:
           raise ValueError(
