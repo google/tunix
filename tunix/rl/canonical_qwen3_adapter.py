@@ -3164,6 +3164,18 @@ def _make_processed_target_logprob_vjp(compute_and_gather, max_logprobs):
         flush=True,
     )
     logits, token_ids = residual
+    if logprob_vjp_kernel_enabled():
+      # tasks/zero_tim_perf3 E2b: one tiled pass instead of a materialized
+      # f32 softmax; sound but not bitwise against the XLA path.
+      print(
+          f"[PATHTRACE] {LOGPROB_VJP_KERNEL_ENV}=1 target-logprob VJP via "
+          "canon_logprob_grad (fused tiled pass)",
+          flush=True,
+      )
+      d_logits = canonical_logsoftmax.target_logprob_grad(
+          logits, token_ids, cotangent
+      )
+      return d_logits, None
     probabilities = jax.nn.softmax(logits, axis=-1)
     selected = jax.nn.one_hot(
         token_ids, logits.shape[-1], dtype=logits.dtype
@@ -3183,6 +3195,21 @@ def _make_processed_target_logprob_vjp(compute_and_gather, max_logprobs):
 # target logprobs alone; adding a zero cotangent contribution never changes a
 # finite gradient's bytes (x + 0.0 == x, signed zeros aside).  Default 1
 # keeps the historical program.
+# tasks/zero_tim_perf3 E2b: fused tiled target-logprob gradient kernel
+# (canonical_logsoftmax.target_logprob_grad) instead of the materialized f32
+# softmax backward.  Default 0 keeps the historical program.
+LOGPROB_VJP_KERNEL_ENV = "CANON_LOGPROB_VJP_KERNEL"
+
+
+def logprob_vjp_kernel_enabled() -> bool:
+  value = os.environ.get(LOGPROB_VJP_KERNEL_ENV, "0")
+  if value not in ("0", "1"):
+    raise ValueError(
+        f"{LOGPROB_VJP_KERNEL_ENV} must be unset, 0 or 1, got {value!r}"
+    )
+  return value == "1"
+
+
 ENTROPY_VJP_ENV = "CANON_ENTROPY_VJP"
 _ENTROPY_VJP_RECEIPT = set()
 

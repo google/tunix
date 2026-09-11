@@ -283,6 +283,82 @@ def log_softmax(logits, *, interpret: bool = False):
   return op(logits)
 
 
+# tasks/zero_tim_perf3 E2b.  The trainer's target-logprob VJP materialized
+# jax.nn.softmax over the full vocabulary in f32 and then formed
+# (onehot - probs) * cotangent, several HBM passes over [rows, 151936] f32
+# per chunk (the f32 vocabulary slab fusions were 38% of the 1.7B reverse
+# chunk in the 2026-09-10 update-window capture).  target_logprob_grad
+# reuses the canonical normalizer (stages 1+2, the same fixed-order row
+# log-sum-exp the forward uses) and writes the gradient tile by tile in one
+# pass: d = (onehot - exp(x - lognorm)) * cotangent.  Rows are independent
+# and the tile pass is elementwise, so the per-row arithmetic does not depend
+# on the row block; the backward is only required to be sound, not bitwise
+# against the XLA path, and anchors that move are re-pinned.
+def target_logprob_grad(logits, token_ids, cotangent, *, interpret: bool = False):
+  """d logprob(token)/d logits as one tiled pass: (onehot - softmax) * cot."""
+  (
+      m,
+      vocab,
+      vocab_groups,
+      padded_vocab,
+      block_rows,
+      grouped_logits,
+      log_normalizer,
+  ) = _pallas_normalizer(logits, interpret=interpret)
+  group_width = TILES_PER_GROUP * VOCAB_TILE
+  lognorm = log_normalizer[:, 0, 0, 0].astype(jnp.float32)
+  # The normalizer already padded the vocabulary with f32 min (exp -> 0).
+  x = grouped_logits.reshape(m, padded_vocab).astype(jnp.float32)
+  # Per-row scalars ride along as lane-broadcast (m, SUMMARY_ALIGN) tiles so
+  # every operand keeps a TPU-friendly last dimension.
+  lognorm_tile = jnp.broadcast_to(lognorm[:, None], (m, SUMMARY_ALIGN))
+  cot_tile = jnp.broadcast_to(
+      cotangent.astype(jnp.float32)[:, None], (m, SUMMARY_ALIGN)
+  )
+  ids_tile = jnp.broadcast_to(
+      token_ids.astype(jnp.int32)[:, None], (m, SUMMARY_ALIGN)
+  )
+
+  def grad_kernel(x_ref, ln_ref, cot_ref, ids_ref, out_ref):
+    group = pl.program_id(1)
+    x_block = x_ref[...]
+    ln = ln_ref[:, 0:1]
+    cot = cot_ref[:, 0:1]
+    ids = ids_ref[:, 0:1]
+    columns = group * group_width + jax.lax.broadcasted_iota(
+        jnp.int32, x_block.shape, 1
+    )
+    onehot = (columns == ids).astype(jnp.float32)
+    probability = jnp.exp(x_block - ln)
+    out_ref[...] = ((onehot - probability) * cot).astype(out_ref.dtype)
+
+  padded_grad = pl.pallas_call(
+      grad_kernel,
+      out_shape=jax.ShapeDtypeStruct((m, padded_vocab), logits.dtype),
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=0,
+          in_specs=[
+              pl.BlockSpec((block_rows, group_width), lambda row, group: (row, group)),
+              pl.BlockSpec((block_rows, SUMMARY_ALIGN), lambda row, group: (row, 0)),
+              pl.BlockSpec((block_rows, SUMMARY_ALIGN), lambda row, group: (row, 0)),
+              pl.BlockSpec((block_rows, SUMMARY_ALIGN), lambda row, group: (row, 0)),
+          ],
+          out_specs=pl.BlockSpec(
+              (block_rows, group_width), lambda row, group: (row, group)
+          ),
+          grid=(m // block_rows, vocab_groups),
+      ),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel", "parallel"),
+          allow_input_fusion=(False, False, False, False),
+          shape_invariant_numerics=True,
+      ),
+      interpret=interpret,
+      name=f"canon_logprob_grad_m{m}_v{vocab}_vp{padded_vocab}",
+  )(x, lognorm_tile, cot_tile, ids_tile)
+  return padded_grad[:, :vocab]
+
+
 def gathered_logprobs(logits, token_ids, *, interpret: bool = False):
   """Sampled-token logprob, top-1, and rank without the row materialize.
 
