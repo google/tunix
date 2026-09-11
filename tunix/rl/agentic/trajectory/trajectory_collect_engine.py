@@ -133,6 +133,16 @@ class TrajectoryCollectEngine:
             0.0
         ),  # Wall-clock time (Total real-world time elapsed)
     }
+    self.model_time = {
+        # Per-turn wall-clock time in model_call, ordered by step index. This
+        # is the generation cost; env_time covers only reset/step/close, so
+        # without it an episode's wall time is unattributable.
+        "generate_latency": [],
+        # Total wall-clock time of the episode, measured from the end of
+        # env.reset (self._start_ts) — the same clock self.timeout is
+        # enforced against.
+        "episode_latency": 0.0,
+    }
 
     if self.max_response_length is not None and not (
         self.tokenizer and self.chat_parser
@@ -217,6 +227,10 @@ class TrajectoryCollectEngine:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
 
+    # Measured over the same span self.timeout gates, so this is directly
+    # comparable to the configured episode timeout.
+    self.model_time["episode_latency"] = time.perf_counter() - self._start_ts
+
     masked_out = (
         self.overlong_filter
         and self.agent.trajectory.status in self.filter_statuses
@@ -238,6 +252,7 @@ class TrajectoryCollectEngine:
     if mode == "Trajectory":
       self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
       self.agent.trajectory.reward_time = self.reward_time
+      self.agent.trajectory.model_time = self.model_time  # pyrefly: ignore[bad-assignment]
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -253,6 +268,7 @@ class TrajectoryCollectEngine:
               "mc_return": step.mc_return,
               "env_time": self.env_time,
               "reward_time": self.reward_time,
+              "model_time": self.model_time,
           }
           for step in self.agent.trajectory.steps
       ]
@@ -323,6 +339,7 @@ class TrajectoryCollectEngine:
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
           "reward_time": self.reward_time,
+          "model_time": self.model_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -511,33 +528,41 @@ class TrajectoryCollectEngine:
             getattr(model_call_fn, "__call__")
         )
     )
-    if is_async:
-      try:
-        rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
-            self.agent.chat_completions,
-            self.env,
-            max_generation_steps=max_generation_steps,
-            **self.model_call_kwargs,
-        )
-      except Exception as e:
-        logging.exception("Caught exception inside async model_call: %s", e)
-        raise
-    else:
-      def _safe_model_call():
+    generate_start = time.perf_counter()
+    try:
+      if is_async:
         try:
-          return model_call_fn(
+          rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
               self.agent.chat_completions,
               self.env,
               max_generation_steps=max_generation_steps,
               **self.model_call_kwargs,
           )
         except Exception as e:
-          logging.exception("Caught exception inside model_call: %s", e)
+          logging.exception("Caught exception inside async model_call: %s", e)
           raise
+      else:
+        def _safe_model_call():
+          try:
+            return model_call_fn(
+                self.agent.chat_completions,
+                self.env,
+                max_generation_steps=max_generation_steps,
+                **self.model_call_kwargs,
+            )
+          except Exception as e:
+            logging.exception("Caught exception inside model_call: %s", e)
+            raise
 
-      rollout_output = await asyncio.get_running_loop().run_in_executor(
-          None,
-          _safe_model_call,
+        rollout_output = await asyncio.get_running_loop().run_in_executor(
+            None,
+            _safe_model_call,
+        )
+    finally:
+      # Recorded even when model_call raises, so a slow-then-failing turn is
+      # still visible in the latency distribution.
+      self.model_time["generate_latency"].append(
+          time.perf_counter() - generate_start
       )
     logging.debug("%s model_call done", self._debug_prefix)
 

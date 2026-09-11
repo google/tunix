@@ -117,6 +117,7 @@ class Trajectory:
     reward: Total episode reward (cumulative or final environment score).
     status: Status of the trajectory (e.g., "success", "truncated").
     env_time: Dictionary of environment latency metrics (reset_latency: float, step_latency: list[float] ordered by step index, close_latency: float).
+    model_time: Dictionary of generation latency metrics (generate_latency: list[float] ordered by step index, episode_latency: float measured over the span the episode timeout gates).
   """
 
   task: Any = None
@@ -125,6 +126,7 @@ class Trajectory:
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  model_time: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -142,6 +144,7 @@ class Trajectory:
         "status": self.status.name,
         "env_time": self.env_time,
         "reward_time": self.reward_time,
+        "model_time": self.model_time,
     }
 
 

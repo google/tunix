@@ -955,8 +955,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     metrics_to_log.update(agreement_metrics)
 
-    # Extract time metrics (env_time and reward_time)
-    for time_key in ["env_time", "reward_time"]:
+    # Extract time metrics (env_time, reward_time and model_time)
+    for time_key in ["env_time", "reward_time", "model_time"]:
       prefix = f"trajectory/{time_key}"
       time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
 
@@ -976,11 +976,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"{prefix}/{sub_key}/max": (np.max(flat_vals), np.max),
             f"{prefix}/{sub_key}/min": (np.min(flat_vals), np.min),
         })
-      self.rl_engine.buffer_metrics_async(
-          metrics_to_log,  # pyrefly: ignore[bad-argument-type]
-          mode=mode,
-          step=expected_step,  # pyrefly: ignore[bad-argument-type]
-      )
+
+    # Buffer once, after every time_key has contributed. This call used to sit
+    # inside the loop above, re-buffering the same accumulating dict on each
+    # iteration.
+    self.rl_engine.buffer_metrics_async(
+        metrics_to_log,  # pyrefly: ignore[bad-argument-type]
+        mode=mode,
+        step=expected_step,  # pyrefly: ignore[bad-argument-type]
+    )
 
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(

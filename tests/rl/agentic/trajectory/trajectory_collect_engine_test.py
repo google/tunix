@@ -207,6 +207,18 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertIsInstance(result_traj.reward_time, dict)
     self.assertGreaterEqual(result_traj.reward_time['reward_latency'], 0.0)
 
+    # model_time: one generate_latency entry per model_call, plus the episode
+    # total. env_time covers only reset/step/close, so these are the only
+    # signals that attribute an episode's wall clock to generation.
+    self.assertIsInstance(result_traj.model_time, dict)
+    self.assertLen(
+        result_traj.model_time['generate_latency'],
+        self.mock_model_call.call_count,
+    )
+    for latency in result_traj.model_time['generate_latency']:
+      self.assertGreaterEqual(latency, 0.0)
+    self.assertGreaterEqual(result_traj.model_time['episode_latency'], 0.0)
+
     # Check returns (gamma=0.9)
     # G_2 = 2.5
     # G_1 = 1.0 + 0.9 * 2.5 = 1.0 + 2.25 = 3.25
@@ -582,18 +594,25 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   def test_collect_timeout(self):
     self.mock_env.max_steps = 10
     with mock.patch.object(time, 'perf_counter') as mock_perf:
-      # Reset: 3 calls
-      # Step 1: 3 calls
-      # Final reward: 2 calls
-      # Close: 2 calls
+      # One value per time.perf_counter() call, in order:
+      #   _reset:               2 (_run_with_timing) + 1 (_start_ts)
+      #   _one_step:            2 (model_call timing) + 1 (remaining_time)
+      #                       + 2 (_run_with_timing on env.step)
+      #                       + 1 (step_timed_out)
+      #   collect:              1 (episode_latency)
+      #   _append_final_reward: 2 (_run_with_timing)
+      #   _close:               2 (_run_with_timing)
       mock_perf.side_effect = [
           100.0,
           100.01,
-          100.02,  # _reset
+          100.02,  # _reset, _start_ts = 100.02
           100.03,
-          100.04,
-          100.2,  # _one_step: 100.2 - 100.02 = 0.18 > 0.1
-          100.21,
+          100.04,  # _one_step: model_call
+          100.05,  # _one_step: remaining_time = 0.1 - 0.03 = 0.07 > 0
+          100.06,
+          100.2,  # _one_step: env.step
+          100.2,  # _one_step: 100.2 - 100.02 = 0.18 > 0.1 -> TIMEOUT
+          100.21,  # collect: episode_latency
           100.22,
           100.23,  # _append_final_reward
           100.24,
