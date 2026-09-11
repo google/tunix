@@ -359,6 +359,59 @@ def target_logprob_grad(logits, token_ids, cotangent, *, interpret: bool = False
   return padded_grad[:, :vocab]
 
 
+def target_logprob_grad_row_plan(rows: int) -> tuple[tuple[int, int], ...]:
+  """(rows, program rows) per block: PRODUCTION_M-row blocks, tail bucketed."""
+  plan = []
+  for start in range(0, rows, PRODUCTION_M):
+    block = min(PRODUCTION_M, rows - start)
+    if row_bucket_admitted(block):
+      target = block
+    elif row_bucket_enabled():
+      target = row_bucket(block)
+    else:
+      target = PRODUCTION_M
+    plan.append((block, target))
+  return tuple(plan)
+
+
+def target_logprob_grad_rows(
+    logits, token_ids, cotangent, *, interpret: bool = False
+):
+  """target_logprob_grad over any row count.
+
+  The trainer's custom VJP sees the whole chunk (512 rows at DP2) while the
+  kernel admits one row bucket of at most PRODUCTION_M rows -- the forward
+  never meets this because its shard_map hands each DP rank its own 256-row
+  slice.  Every stage of the kernel is row-independent, so running the rows
+  as PRODUCTION_M-row blocks leaves each row's arithmetic unchanged; a short
+  tail runs at its admitted bucket with inert rows (zero logits, token 0,
+  zero cotangent) appended and discarded, the way the forward's short slices
+  do.
+  """
+  rows = int(logits.shape[0])
+  plan = target_logprob_grad_row_plan(rows)
+  if plan == ((rows, rows),):
+    return target_logprob_grad(logits, token_ids, cotangent, interpret=interpret)
+  pieces = []
+  start = 0
+  for block, target in plan:
+    stop = start + block
+    block_logits = logits[start:stop]
+    block_ids = token_ids[start:stop]
+    block_cot = cotangent[start:stop]
+    if target != block:
+      pad = target - block
+      block_logits = jnp.pad(block_logits, ((0, pad), (0, 0)))
+      block_ids = jnp.pad(block_ids, ((0, pad),))
+      block_cot = jnp.pad(block_cot, ((0, pad),))
+    piece = target_logprob_grad(
+        block_logits, block_ids, block_cot, interpret=interpret
+    )
+    pieces.append(piece[:block] if target != block else piece)
+    start = stop
+  return jnp.concatenate(pieces, axis=0)
+
+
 def gathered_logprobs(logits, token_ids, *, interpret: bool = False):
   """Sampled-token logprob, top-1, and rank without the row materialize.
 

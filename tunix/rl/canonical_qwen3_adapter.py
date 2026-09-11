@@ -3167,12 +3167,16 @@ def _make_processed_target_logprob_vjp(compute_and_gather, max_logprobs):
     if logprob_vjp_kernel_enabled():
       # tasks/zero_tim_perf3 E2b: one tiled pass instead of a materialized
       # f32 softmax; sound but not bitwise against the XLA path.
+      plan = canonical_logsoftmax.target_logprob_grad_row_plan(
+          int(logits.shape[0])
+      )
       print(
           f"[PATHTRACE] {LOGPROB_VJP_KERNEL_ENV}=1 target-logprob VJP via "
-          "canon_logprob_grad (fused tiled pass)",
+          f"canon_logprob_grad (fused tiled pass) rows={int(logits.shape[0])} "
+          f"blocks={list(plan)}",
           flush=True,
       )
-      d_logits = canonical_logsoftmax.target_logprob_grad(
+      d_logits = canonical_logsoftmax.target_logprob_grad_rows(
           logits, token_ids, cotangent
       )
       return d_logits, None
