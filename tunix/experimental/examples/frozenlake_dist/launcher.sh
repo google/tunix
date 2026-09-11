@@ -72,6 +72,8 @@ CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-frozenlake}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
+LOG_DIR=${LOG_DIR:-}
+TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 DEBUG=${DEBUG:-0}
 
 # Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
@@ -313,6 +315,8 @@ is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
 is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)
 is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-use_multistep_prompt)
 is_true "$USE_ROLLOUT_LOGPS" && cmd+=(--use_rollout_logps) || cmd+=(--no-use_rollout_logps)
+[[ -n "$LOG_DIR" ]] && cmd+=(--log_dir="$LOG_DIR")
+[[ -n "$TRAJECTORY_LOG_DIR" ]] && cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
 is_true "$DEBUG" && cmd+=(--debug)
 
 export JAX_PLATFORMS=cpu
