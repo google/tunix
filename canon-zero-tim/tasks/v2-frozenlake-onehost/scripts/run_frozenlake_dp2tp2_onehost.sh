@@ -165,11 +165,14 @@ if [ "${V2_FL_XPROF_PHASE:-}" = step ]; then
   xprof_steps=1
   xprof_phase=step
   xprof_host_tracer=1
-  xprof_python_tracer=0
+  # tasks/zero_tim_perf3 D1.2: the Python tracer names the host frames behind
+  # the device gaps; keep it off by default (a full-step window overflowed the
+  # 2 GB xplane cap before) and enable it only for short windows.
+  xprof_python_tracer="${V2_FL_XPROF_PYTHON_TRACER:-0}"
   xprof_tpu_trace_mode=
   xprof_labels=1
   : "${V2_FL_XPROF_STEP_DELAY:=60}"; : "${V2_FL_XPROF_STEP_SECONDS:=20}"
-  echo "[V2.FL.ONEHOST] DIAG xprof phase=step on a live measure run (rollout window; delay=${V2_FL_XPROF_STEP_DELAY}s seconds=${V2_FL_XPROF_STEP_SECONDS}s; not certification)"
+  echo "[V2.FL.ONEHOST] DIAG xprof phase=step on a live measure run (rollout window; delay=${V2_FL_XPROF_STEP_DELAY}s seconds=${V2_FL_XPROF_STEP_SECONDS}s python_tracer=${xprof_python_tracer}; not certification)"
 fi
 seal_evidence() {
   find "$root" -type f ! -name SHA256SUMS -print0 \
