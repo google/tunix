@@ -427,6 +427,11 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     "sh",
     "-c",
     (
+        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; "
+        "([ -d /testbed ] && [ ! -e /workspace ] && ln -s /testbed /workspace 2>/dev/null || true); "
+        "([ -d /workspace ] && [ ! -e /testbed ] && ln -s /workspace /testbed 2>/dev/null || true); "
+        "git config --global --add safe.directory '*' 2>/dev/null || true; "
+        "[ -d /testbed ] && cd /testbed; "
         "if [ -x /oh/openhands-agent-server ]; then "
         "exec /oh/openhands-agent-server --host 0.0.0.0 --port 8000; "
         "elif [ -x /usr/local/bin/openhands-agent-server ]; then "
@@ -463,17 +468,21 @@ def get_openhands_pod_template(
   else:
     keepalive_cmd = list(DEFAULT_OPENHANDS_KEEPALIVE_CMD)
 
-  server_image = (
-      os.getenv("OPENHANDS_SERVER_IMAGE")
-      or os.getenv("AGENT_SERVER_IMAGE")
-      or "ghcr.io/openhands/agent-server:1.44.1-python"
+  server_image = os.getenv(
+      "OPENHANDS_SERVER_IMAGE",
+      "gcr.io/cloud-tpu-multipod-dev/sanbao/openhands-agent-server:1.44.1",
   )
 
   extra_pod_spec = {
       "initContainers": [{
           "name": "oh-server",
           "image": server_image,
-          "command": ["cp", "/usr/local/bin/openhands-agent-server", "/oh/"],
+          "command": [
+              "sh",
+              "-c",
+              "cp -a /opt/oh/. /oh/ 2>/dev/null || cp -a"
+              " /usr/local/bin/openhands-agent-server /oh/",
+          ],
           "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
       }],
       "volumes": [{"name": "oh", "emptyDir": {}}],

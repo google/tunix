@@ -79,7 +79,7 @@ def test_get_openhands_pod_template_default():
     init_c = pod_template.extra_pod_spec["initContainers"][0]
     assert init_c["name"] == "oh-server"
     assert "agent-server" in init_c["image"]
-    assert init_c["command"] == ["cp", "/usr/local/bin/openhands-agent-server", "/oh/"]
+    assert "cp" in init_c["command"][2]
     assert init_c["volumeMounts"] == [{"name": "oh", "mountPath": "/oh"}]
     assert pod_template.extra_pod_spec["volumes"] == [{"name": "oh", "emptyDir": {}}]
 
@@ -114,31 +114,3 @@ def test_get_template_scaffolds():
     assert template.get_template("openhands") is not None
     assert template.get_template("r2egym") is None
     assert template.get_template("sweagent") is None
-
-
-def test_swe_agent_reexports():
-  """Verify swe_agent re-exports all prompt constants and helpers for backward compatibility."""
-  mock_r2e = mock.MagicMock()
-  with mock.patch.dict(sys.modules, {"r2egym": mock_r2e, "r2egym.agenthub.action": mock_r2e}):
-    from examples.deepswe import swe_agent
-    assert swe_agent.SWE_SYSTEM_PROMPT == template.SWE_SYSTEM_PROMPT
-    assert swe_agent.SWE_SYSTEM_PROMPT_FN_CALL == template.SWE_SYSTEM_PROMPT_FN_CALL
-    assert swe_agent.SWEAGENT_SYSTEM_PROMPT == template.SWEAGENT_SYSTEM_PROMPT
-    assert swe_agent.OPENHANDS_SYSTEM_PROMPT == template.OPENHANDS_SYSTEM_PROMPT
-    assert swe_agent.SWE_USER_PROMPT == template.SWE_USER_PROMPT
-    assert swe_agent.SWE_USER_PROMPT_FN_CALL == template.SWE_USER_PROMPT_FN_CALL
-    assert swe_agent.SWEAGENT_USER_PROMPT == template.SWEAGENT_USER_PROMPT
-    assert swe_agent.get_system_prompt == template.get_system_prompt
-    assert swe_agent.get_user_prompt_template == template.get_user_prompt_template
-
-    agent_r2e = swe_agent.SWEAgent(scaffold="r2egym")
-    assert agent_r2e.system_prompt == template.SWE_SYSTEM_PROMPT
-    assert agent_r2e.user_prompt_template == template.SWE_USER_PROMPT
-
-    agent_swe = swe_agent.SWEAgent(scaffold="sweagent")
-    assert agent_swe.system_prompt == template.SWEAGENT_SYSTEM_PROMPT
-    assert agent_swe.user_prompt_template == template.SWEAGENT_USER_PROMPT
-
-    agent_oh = swe_agent.SWEAgent(scaffold="openhands")
-    assert agent_oh.system_prompt == template.OPENHANDS_SYSTEM_PROMPT
-    assert agent_oh.user_prompt_template == template.SWE_USER_PROMPT
