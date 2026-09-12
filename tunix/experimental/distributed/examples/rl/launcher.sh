@@ -22,6 +22,8 @@ LOCAL_MODE=false
 ROLE=""
 # set by --image
 TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:latest"
+# set by --otel_endpoint
+OTEL_ENDPOINT='http://$(NODE_IP):4317'
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +45,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image=*)
       TUNIX_IMAGE="${1#*=}"
+      shift
+      ;;
+    --otel_endpoint)
+      OTEL_ENDPOINT="$2"
+      shift 2
+      ;;
+    --otel_endpoint=*)
+      OTEL_ENDPOINT="${1#*=}"
       shift
       ;;
     *)
@@ -93,6 +103,7 @@ launch_orchestrator() {
       --cpu_machine=n2-standard-64 \
       --worker_container_image="$TUNIX_IMAGE" \
       --worker_container_port=12345 \
+      --otel_exporter_otlp_endpoint="$OTEL_ENDPOINT" \
       --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=orchestrator \
         --discovery_port=12345 \
@@ -124,6 +135,7 @@ launch_rollout() {
         --tpu_slice=tpuv5e:4x4 \
         --worker_container_image="$TUNIX_IMAGE" \
         --worker_container_port=$((10000+i)) \
+        --otel_exporter_otlp_endpoint="$OTEL_ENDPOINT" \
         --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=orchestrator:12345 \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -152,6 +164,7 @@ launch_trainer() {
       --tpu_slice=tpuv5e:4x4 \
       --worker_container_image="$TUNIX_IMAGE" \
       --worker_container_port=20000 \
+      --otel_exporter_otlp_endpoint="$OTEL_ENDPOINT" \
       --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=orchestrator:12345 \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
