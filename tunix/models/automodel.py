@@ -486,6 +486,7 @@ class AutoModel:
       valid_keys.update({
           'checkpoint_storage_use_ocdbt',
           'checkpoint_storage_use_zarr3',
+          'checkpoint_storage_concurrent_gb',
       })
 
       for k, v in kwargs.items():
