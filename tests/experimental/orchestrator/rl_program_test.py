@@ -2584,15 +2584,8 @@ class RLProgramTest(absltest.TestCase):
       mock_wandb.run = mock.Mock()
       mock_wandb.run.url = "https://wandb.ai/my-org/my-project/runs/mock123"
 
-      real_import = builtins.__import__
-
-      def _mock_import(name, *args, **kwargs):
-        if name == "wandb":
-          return mock_wandb
-        return real_import(name, *args, **kwargs)
-
-      with mock.patch("jax.process_index", return_value=0), mock.patch(
-          "builtins.__import__", side_effect=_mock_import
+      with mock.patch("jax.process_index", return_value=0), mock.patch.dict(
+          "sys.modules", {"wandb": mock_wandb}
       ):
         wandb_backend = metrax_logging.WandbBackend(
             project="test-rl-project", name="rl-run-1"
@@ -3059,6 +3052,142 @@ class RLProgramTest(absltest.TestCase):
         program.assembler, batch_assembly.SequencePackedBatchAssembler
     )
     self.assertEqual(program.assembler.max_packed_len, 8192)
+
+  def test_trajectory_logger_initialization(self):
+    with mock.patch("tunix.utils.trajectory_logger.AsyncTrajectoryLogger") as mock_logger_cls:
+      mock_logger_inst = mock.MagicMock()
+      mock_logger_cls.return_value = mock_logger_inst
+
+      # Case 1: derived from metrics_logging_options.log_dir
+      program1 = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          max_steps=1,
+          algo=self.mock_algo,
+          metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
+              log_dir="/tmp/metrics_dir"
+          ),
+      )
+      mock_logger_cls.assert_called_with("/tmp/metrics_dir/trajectories")
+      self.assertIs(program1.trajectory_logger, mock_logger_inst)
+
+      # Case 2: explicit trajectory_log_dir
+      mock_logger_cls.reset_mock()
+      program2 = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          max_steps=1,
+          algo=self.mock_algo,
+          trajectory_log_dir="/custom/trajectories",
+      )
+      mock_logger_cls.assert_called_with("/custom/trajectories")
+      self.assertIs(program2.trajectory_logger, mock_logger_inst)
+
+      # Case 3: disabled when no log_dir provided
+      program3 = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          max_steps=1,
+          algo=self.mock_algo,
+      )
+      self.assertIsNone(program3.trajectory_logger)
+
+  def test_log_consumed_trajectories(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        trajectory_log_dir="/tmp/trajectories",
+    )
+    mock_traj_logger = mock.MagicMock()
+    program.trajectory_logger = mock_traj_logger
+
+    mock_traj = mock.MagicMock()
+    mock_traj.status = datatypes.TrajectoryStatus.SUCCEEDED
+    mock_traj.reward = 1.0
+    item = datatypes.TrajectoryItem(
+        traj_id="traj_1",
+        prompt_id="prompt_1",
+        group_index=0,
+        policy_version=2,
+        prompt_tokens=[1, 2],
+        completion_tokens=[3, 4],
+        metadata={
+            "question": "What is 2+2?",
+            "prompt": "Q: What is 2+2?\nA:",
+            "text": "4",
+            "gold_answer": "4",
+        },
+        traj=mock_traj,
+    )
+
+    program._log_consumed_trajectories(
+        [item],
+        log_step=3,
+        consumed_policy_version=3,
+    )
+
+    mock_traj_logger.log_item_async.assert_called_once()
+    row = mock_traj_logger.log_item_async.call_args[0][0]
+    self.assertEqual(row["global_step"], 3)
+    self.assertEqual(row["consumed_policy_version"], 3)
+    self.assertEqual(row["prompt_id"], "prompt_1")
+    self.assertEqual(row["group_index"], 0)
+    self.assertEqual(row["rollout_policy_version"], 2)
+    self.assertEqual(row["status"], "SUCCEEDED")
+    self.assertEqual(row["reward"], 1.0)
+    self.assertEqual(row["question"], "What is 2+2?")
+    self.assertEqual(row["prompt"], "Q: What is 2+2?\nA:")
+    self.assertEqual(row["completion"], "4")
+    self.assertEqual(row["gold_answer"], "4")
+    self.assertEqual(row["prompt_tokens"], [1, 2])
+    self.assertEqual(row["completion_tokens"], [3, 4])
+    self.assertEqual(row["metadata"], item.metadata)
+    self.assertEqual(row["trajectory"], mock_traj)
+
+    program.close()
+    mock_traj_logger.stop.assert_called_once()
+
+  def test_log_consumed_trajectories_reward_distinction(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        trajectory_log_dir="/tmp/trajectories",
+    )
+    mock_traj_logger = mock.MagicMock()
+    program.trajectory_logger = mock_traj_logger
+
+    # Case 1: Actual zero reward (should log 0.0)
+    zero_reward_item = datatypes.TrajectoryItem(
+        prompt_id="p_zero",
+        group_index=0,
+        traj={"status": "FAILED", "reward": 0.0},
+    )
+    # Case 2: Reward not available / None (should log None, not 0.0)
+    none_reward_item = datatypes.TrajectoryItem(
+        prompt_id="p_none",
+        group_index=1,
+        traj={"status": "RUNNING"},
+    )
+    # Case 3: No traj object at all (should log None, not 0.0)
+    no_traj_item = datatypes.TrajectoryItem(
+        prompt_id="p_notraj",
+        group_index=2,
+        traj=None,
+    )
+
+    program._log_consumed_trajectories(
+        [zero_reward_item, none_reward_item, no_traj_item],
+        log_step=1,
+        consumed_policy_version=1,
+    )
+
+    self.assertEqual(mock_traj_logger.log_item_async.call_count, 3)
+    rows = [call[0][0] for call in mock_traj_logger.log_item_async.call_args_list]
+
+    self.assertEqual(rows[0]["reward"], 0.0)
+    self.assertIsNone(rows[1]["reward"])
+    self.assertIsNone(rows[2]["reward"])
+
+    program.close()
 
 
 if __name__ == "__main__":
