@@ -16,6 +16,7 @@ for name, val in (("CANON_QWEN3_HIDDEN_SIZE", "4096"), ("CANON_QWEN3_INTERMEDIAT
                   ("CANON_QWEN3_NUM_ATTENTION_HEADS", "32"), ("CANON_QWEN3_NUM_KV_HEADS", "8"),
                   ("CANON_QWEN3_HEAD_DIM", "128"), ("CANON_QWEN3_TP_SIZE", "2")):
   os.environ.setdefault(name, val)
+os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")  # the checked-shard_map test
 import jax
 import jax.numpy as jnp
 
@@ -54,3 +55,36 @@ def test_switch(monkeypatch):
   monkeypatch.setenv(ops.PLAIN_VJP_ENV, "2")
   with pytest.raises(ValueError):
     ops.plain_matmul_vjp_enabled()
+
+
+def test_plain_pullback_keeps_the_tp_psum_inside_a_checked_shard_map(monkeypatch):
+  """Column-parallel projection under check_vma=True: dX must come back invariant over model with the TP sum applied."""
+  from jax.sharding import Mesh, PartitionSpec as P
+  devices = jax.devices()
+  if len(devices) < 2:
+    pytest.skip("needs --xla_force_host_platform_device_count=2")
+  mesh = Mesh(np.array(devices[:2]).reshape(1, 2), axis_names=("data", "model"))
+  m, k, n = 64, 256, 512
+  a = (jax.random.normal(jax.random.PRNGKey(3), (m, k)) * 0.5).astype(jnp.bfloat16)
+  b = (jax.random.normal(jax.random.PRNGKey(4), (k, n)) * 0.05).astype(jnp.bfloat16)
+  cot = (jax.random.normal(jax.random.PRNGKey(5), (m, n)) * 0.1).astype(jnp.bfloat16)
+  # the coat's own custom_vjp shape (primal = the Pallas forward, bwd = the plain pullback) without its preflight
+  @jax.custom_vjp
+  def coat(x, y):
+    return jnp.dot(x, y, preferred_element_type=jnp.bfloat16)
+
+  coat.defvjp(lambda x, y: (coat(x, y), (x, y)), lambda res, ct: ops.plain_matmul_pullback(res[0], res[1], ct))
+
+  def local(a_local, b_local, cot_local):
+    # the activation is replicated over model, the weight shard and cotangent vary over it
+    _, pullback = jax.vjp(coat, a_local, b_local)
+    da, db = pullback(cot_local)
+    return da, db
+
+  mapped = jax.shard_map(local, mesh=mesh, in_specs=(P(None, None), P(None, "model"), P(None, "model")),
+                         out_specs=(P(None, None), P(None, "model")), check_vma=True)
+  da, db = mapped(a, b, cot)
+  da_ref = jnp.dot(cot, b.T, preferred_element_type=jnp.float32)
+  db_ref = jnp.dot(a.T, cot, preferred_element_type=jnp.float32)
+  np.testing.assert_allclose(np.asarray(da, np.float32), np.asarray(da_ref), rtol=2e-2, atol=2e-3)
+  np.testing.assert_allclose(np.asarray(db, np.float32), np.asarray(db_ref), rtol=2e-2, atol=2e-3)

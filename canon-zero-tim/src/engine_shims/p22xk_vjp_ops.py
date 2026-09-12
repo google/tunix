@@ -68,14 +68,34 @@ def plain_matmul_vjp_enabled():
     return value == "1"
 
 
-def plain_matmul_pullback(a, b, cotangent):
-    """dX, dW of X @ W for bf16 operands with f32 accumulation."""
+def plain_matmul(x, y):
+    """One plain bf16 dot (f32 MXU accumulation, rounded once to bf16).
+
+    Only its transpose is ever executed: the E2d pullback is JAX's own
+    transpose of this dot, two plain bf16 dots.
+    """
     import jax.numpy as jnp
 
-    cot = cotangent.astype(jnp.bfloat16)
-    da = jnp.dot(cot, b.T, preferred_element_type=jnp.float32).astype(a.dtype)
-    db = jnp.dot(a.T, cot, preferred_element_type=jnp.float32).astype(b.dtype)
-    return da, db
+    return jnp.dot(x, y, preferred_element_type=jnp.bfloat16)
+
+
+def plain_matmul_pullback(a, b, cotangent):
+    """dX, dW of X @ W through JAX's transpose of one plain dot.
+
+    Going through jax.vjp instead of writing the two dots by hand keeps the
+    manual-axis typing of the canonical path: under check_vma=True the
+    replicated projection input is implicitly cast to varying over TP inside
+    the dot, and JAX transposes that cast into the TP psum, so dX comes back
+    invariant over model like the primal input.  A hand-written dot(cot, W^T)
+    is typed varying over model and carries only this rank's partial sum
+    (ztp3_e2d_v_20260911_r1: "Custom VJP bwd rule must produce an output with
+    the same type as the args tuple ... bfloat16[256,4096]{V:(data,model)}
+    corresponding to an input of type bfloat16[256,4096]{V:data}").
+    """
+    import jax
+
+    _, pullback = jax.vjp(plain_matmul, a, b)
+    return pullback(cotangent)
 
 
 def matmul(x, y, *, forward):
