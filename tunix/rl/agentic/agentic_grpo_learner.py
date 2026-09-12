@@ -556,7 +556,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "Processing results to compute advantage for %d items.",
         len(trajectories),
     )
-    # With a full group, sorting by pair_index is not necessary as they all
+    # With a full group, sorting by group_index is not necessary as they all
     # originate from the same initial prompt.
     pad_value = self.rl_engine.rollout.pad_id()
     eos_value = self.rl_engine.rollout.eos_id()
@@ -763,16 +763,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # Collect perf tags
     traj = trajectories[0].traj
-    group_id = traj.get("group_id")
-    if group_id is None:
+    prompt_id = traj.get("prompt_id")
+    if prompt_id is None:
       original_input = traj.get("original_input", {})
-      group_id = original_input.get("group_id")
+      prompt_id = original_input.get("prompt_id")
 
     perf_tags = {
         perf_constants.STEP: expected_step,
     }
-    if group_id is not None:
-      perf_tags[perf_constants.GROUP_ID] = group_id
+    if prompt_id is not None:
+      perf_tags[perf_constants.PROMPT_ID] = prompt_id
 
     if (
         self.algo_config.force_compute_kl or self.algo_config.beta != 0.0

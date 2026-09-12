@@ -30,9 +30,21 @@ class MockEnv(base_environment.BaseTaskEnv):
   """A mock environment."""
 
   def __init__(
-      self, task: Mapping[str, Any] | None = None, env_id: int = 0, **kwargs
+      self,
+      task: Mapping[str, Any] | None = None,
+      env_id: int = 0,
+      prompt_id: int = 0,
+      group_index: int | None = None,
+      **kwargs,
   ):
-    super().__init__(task=task, **kwargs)
+    if group_index is None:
+      group_index = env_id
+    super().__init__(
+        task=task,
+        prompt_id=prompt_id,
+        group_index=group_index,
+        **kwargs,
+    )
     self.env_id = env_id
 
   def _initial_observation(self):
@@ -106,7 +118,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
 
     def pair_generator():
       for i in range(num_pairs):
-        yield MockAgent(), MockEnv(env_id=i, group_id=0, pair_index=i)
+        yield MockAgent(), MockEnv(env_id=i, prompt_id=0, group_index=i)
 
     async def side_effect_fn(*args, **kwargs):
       env = args[1]
@@ -135,8 +147,8 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       if group_size > 1 and batch_size <= group_size:
         # If group_size > 1 and batch_size <= group_size, items in a batch
         # are expected to come from the same group.
-        group_ids = set(item.prompt_id for item in batch)
-        self.assertLen(group_ids, 1)
+        prompt_ids = set(item.prompt_id for item in batch)
+        self.assertLen(prompt_ids, 1)
 
     all_items = []
     for batch in batches:
@@ -144,8 +156,8 @@ class RolloutOrchestratorTest(parameterized.TestCase):
 
     self.assertLen(all_items, num_pairs)
 
-    pair_indices = sorted([item.group_index for item in all_items])
-    self.assertEqual(pair_indices, list(range(num_pairs)))
+    group_indices = sorted([item.group_index for item in all_items])
+    self.assertEqual(group_indices, list(range(num_pairs)))
 
     items_by_group = {}
     for item in all_items:
@@ -158,18 +170,18 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       items_by_group[item.prompt_id].append(item)
 
     self.assertLen(items_by_group, num_pairs // group_size)
-    for group_id in items_by_group:
-      self.assertLen(items_by_group[group_id], group_size)
-      pair_indices_in_group = sorted(
-          [item.group_index for item in items_by_group[group_id]]
+    for prompt_id in items_by_group:
+      self.assertLen(items_by_group[prompt_id], group_size)
+      group_indices_in_group = sorted(
+          [item.group_index for item in items_by_group[prompt_id]]
       )
-      expected_pair_indices = list(
+      expected_group_indices = list(
           range(
-              group_id * group_size,
-              group_id * group_size + group_size,
+              prompt_id * group_size,
+              prompt_id * group_size + group_size,
           )
       )
-      self.assertEqual(pair_indices_in_group, expected_pair_indices)
+      self.assertEqual(group_indices_in_group, expected_group_indices)
 
   def test_streaming_producer_runner_exception(self):
     asyncio.run(self._test_streaming_producer_runner_exception())
@@ -180,15 +192,15 @@ class RolloutOrchestratorTest(parameterized.TestCase):
         rollout_sync_lock=utils.RolloutSyncLock(),
     )
     num_pairs = 5
-    failing_pair_index = 2
+    failing_group_index = 2
 
     def pair_generator():
       for i in range(num_pairs):
-        yield MockAgent(), MockEnv(env_id=i, group_id=0, pair_index=i)
+        yield MockAgent(), MockEnv(env_id=i, prompt_id=0, group_index=i)
 
     async def failing_side_effect(*args, **kwargs):
       env = args[1]
-      if env.env_id == failing_pair_index:
+      if env.env_id == failing_group_index:
         raise ValueError('Collection failed!')
       return {'trajectory': [f'traj_for_env_{env.env_id}']}
 
@@ -217,13 +229,13 @@ class RolloutOrchestratorTest(parameterized.TestCase):
         max_concurrency=2,
         rollout_sync_lock=utils.RolloutSyncLock(),
     )
-    failing_pair_index = 2
+    failing_group_index = 2
 
     def faulty_generator():
       for i in range(5):
-        if i == failing_pair_index:
+        if i == failing_group_index:
           raise ValueError('Generator failed!')
-        yield MockAgent(), MockEnv(env_id=i, group_id=0, pair_index=i)
+        yield MockAgent(), MockEnv(env_id=i, prompt_id=0, group_index=i)
 
     self.mock_collect.side_effect = None
     self.mock_collect.return_value = {'trajectory': ['mock_traj']}
