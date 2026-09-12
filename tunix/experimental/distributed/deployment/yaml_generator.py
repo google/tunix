@@ -74,7 +74,7 @@ def main() -> None:
   )
   parser.add_argument(
       "--pathways_proxy_memory_limit",
-      default="100G",
+      default="250G",
       help="Memory limit of the Pathways proxy container",
   )
 

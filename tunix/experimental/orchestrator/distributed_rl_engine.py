@@ -142,7 +142,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           group_index,
           req.request_id,
       )
-      route_key = (req.metadata or {}).get("prefix_hash", req.prompt_id)
+      route_key = req.request_id
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )
@@ -381,7 +381,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         collections.defaultdict(list)
     )
     for req in requests:
-      route_key = req.metadata.get("prefix_hash", req.prompt_id)
+      route_key = req.request_id
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )

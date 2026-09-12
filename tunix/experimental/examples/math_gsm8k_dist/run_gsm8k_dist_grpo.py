@@ -230,6 +230,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
       mini_batch_size=args.batch_size,
+      train_micro_batch_size=args.train_micro_batch_size,
       max_packed_len=(
           args.max_seq_token_per_tpu
           if args.max_seq_token_per_tpu is not None

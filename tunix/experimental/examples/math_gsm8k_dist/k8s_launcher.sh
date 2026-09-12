@@ -132,8 +132,8 @@ export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 
 # Kubernetes Cluster & Scheduling Options
-export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
-export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${QUEUE_NAME:-}}
+export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-trellis}}
+export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${QUEUE_NAME:-default}}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {
@@ -331,13 +331,14 @@ stop_rollout_instance() {
 }
 
 stop_rollout() {
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
-    local target_id="${ROLLOUT_ID}"
-    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
-      target_id="${ROLLOUT_ID}-${i}"
-    fi
-    stop_rollout_instance "${target_id}"
+  local count="${ROLLOUT_REPLICAS:-1}"
+  if [[ "$count" -lt 16 ]]; then
+    count=16
+  fi
+  for ((i = 0; i < count; i++)); do
+    stop_rollout_instance "${ROLLOUT_ID}-${i}"
   done
+  stop_rollout_instance "${ROLLOUT_ID}"
 }
 
 start_rollout_instance() {
@@ -490,6 +491,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DRY_RUN" != "true" ]]; then
+  export PROJECT=${PROJECT:-cloud-tpu-shared-capacity}
+  export CLUSTER=${CLUSTER:-bodaborg-v5p-nap}
+  export LOCATION_NAME=${LOCATION_NAME:-europe-west4}
   ENTER_KUBE_CONTEXT=${ENTER_KUBE_CONTEXT:-"${LAUNCHER_DIR}/../common/enter_kube_context.sh"}
   source "${ENTER_KUBE_CONTEXT}"
 fi

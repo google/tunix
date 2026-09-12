@@ -1,0 +1,4 @@
+FROM gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-pr-tunix-2202-09120021
+
+# Copy patched tunix into /app/tunix
+COPY tunix /app/tunix
