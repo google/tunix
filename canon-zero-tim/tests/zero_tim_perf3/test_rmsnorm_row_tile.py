@@ -2,7 +2,7 @@
 
 Pure-host checks: the policy only widens the row block (the parallel axis) to
 256 for shapes inside the probed envelope, never changes BF (the reduction
-block), keeps the contract BM elsewhere, and is fully disabled by v1.
+block), and keeps the contract BM elsewhere (Phase H removed the v1 path).
 """
 from __future__ import annotations
 
@@ -21,11 +21,6 @@ sys.path.insert(0, str(SHIMS))  # the module imports its sibling contract module
 _spec = importlib.util.spec_from_file_location("p22rms", SHIMS / "p22_pallas_rmsnorm.py")
 rms = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rms)
-
-
-@pytest.fixture(autouse=True)
-def _v2(monkeypatch):
-    monkeypatch.delenv(rms.ROW_TILES_ENV, raising=False)
 
 
 @pytest.mark.parametrize(
@@ -47,12 +42,6 @@ def test_row_tile_policy(rows, features, expected):
     assert got == expected
     assert rows % got == 0
     assert got % rms.BM == 0
-
-
-def test_v1_restores_the_contract_block(monkeypatch):
-    monkeypatch.setenv(rms.ROW_TILES_ENV, "v1")
-    assert rms.row_tile(8192, 128) == rms.BM
-    assert rms.row_tile(512, 4096) == rms.BM
 
 
 def test_reduction_block_is_untouched():

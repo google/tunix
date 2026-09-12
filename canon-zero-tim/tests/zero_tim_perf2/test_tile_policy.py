@@ -26,11 +26,6 @@ TP2 = (128, 256, 256)
 TP8 = (128, 128, 128)
 
 
-@pytest.fixture(autouse=True)
-def _v2(monkeypatch):
-    monkeypatch.delenv(mm.TILES_ENV, raising=False)
-
-
 @pytest.mark.parametrize(
     "shape,tiles,expected",
     [
@@ -57,13 +52,6 @@ def test_policy_widens_m_and_n_only(shape, tiles, expected):
     assert got == expected
     assert got[2] == tiles[2]
     assert m % got[0] == 0 and n % got[1] == 0 and k % got[2] == 0
-
-
-@pytest.mark.parametrize("tiles", [TP2, TP8])
-def test_v1_returns_the_callers_tiles(monkeypatch, tiles):
-    monkeypatch.setenv(mm.TILES_ENV, "v1")
-    assert mm.tile_policy(512, 4096, 6144, tiles) == tiles
-    assert mm.tile_policy(512, 4096, 1536, tiles) == tiles
 
 
 def test_default_tiles_are_the_tp2_contract():

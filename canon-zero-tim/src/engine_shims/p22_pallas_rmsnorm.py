@@ -19,7 +19,7 @@ from p22_pallas_matmul import p66_vma_output_manual_axis_type
 # 2026-09-11: bm 8/64/256/512 all == BM8 on 12 shapes; [8192,128] 242 -> 58 us,
 # [8192,4096] 272 -> 84 us).  bm=512 exhausts scoped VMEM at F=4096, so the
 # policy stops at 256 and at the probed feature widths.
-ROW_TILES_ENV = "CANON_PALLAS_RMSNORM_TILES"
+ROW_TILE_POLICY = "v2"  # tasks/zero_tim_perf3 Phase H: the only policy; v1 (always BM) is gone
 ROW_TILE_WIDE = 256
 ROW_TILE_MAX_FEATURES = 4096
 _ROW_RECEIPTS: set[tuple[int, int]] = set()
@@ -27,9 +27,7 @@ _ROW_RECEIPTS: set[tuple[int, int]] = set()
 
 def row_tile(m: int, f: int) -> int:
     """Return block_m for an [m, f] rmsnorm: 256 when m divides by 256 and f is
-    within the probed width, else the contract BM.  v1 always returns BM."""
-    if os.environ.get(ROW_TILES_ENV, "v2") == "v1":
-        return BM
+    within the probed width, else the contract BM."""
     if m % ROW_TILE_WIDE == 0 and f <= ROW_TILE_MAX_FEATURES:
         return ROW_TILE_WIDE
     return BM
@@ -41,7 +39,7 @@ def _row_receipt(m: int, f: int, block_m: int) -> None:
         return
     _ROW_RECEIPTS.add(key)
     print(
-        f"[PATHTRACE] {ROW_TILES_ENV}={os.environ.get(ROW_TILES_ENV, 'v2')} "
+        f"[PATHTRACE] rmsnorm_row_tile={ROW_TILE_POLICY} "
         f"rows={m} F={f} bm={block_m} bf={BF}",
         flush=True,
     )

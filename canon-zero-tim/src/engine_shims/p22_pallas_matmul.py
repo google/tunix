@@ -29,9 +29,9 @@ BK = 256
 # 2026-09-10: [128,4096]x[4096,6144] 118 -> 58 us at (128,2048|1024,256);
 # [512,4096]x[4096,6144] 439 -> 107 us at (256,1024,256); every variant
 # bitwise == production).  Small block_m (8-64) is slower (weight streaming),
-# so rows are never sub-tiled.  CANON_PALLAS_MATMUL_TILES=v1 restores the
-# fixed tiles for A/B runs.
-TILES_ENV = "CANON_PALLAS_MATMUL_TILES"
+# so rows are never sub-tiled.  tasks/zero_tim_perf3 Phase H removed the v1
+# (fixed tiles) A/B path; the policy below is the only one.
+TILE_POLICY = "v2"
 _TILE_RECEIPTS: set[tuple[int, int, int]] = set()
 # The fixed tile triples the P22.XF model contracts pass explicitly
 # (models/*/p22xf_contract.py: tp1/tp2/1.7B 128/256/256, tp8 128/128/128).
@@ -45,15 +45,12 @@ def tile_policy(
 ) -> tuple[int, int, int]:
     """Return (block_m, block_n, block_k) for a [m,k]@[k,n] bf16 matmul.
 
-    v2 (default): block_m 256 when m divides by 256 else the caller's;
-    block_n the largest of 1024/512 dividing n else the caller's; block_k
-    always the caller's, so the per-element accumulation order never
-    changes (the tp8 contract accumulates in 128-wide k blocks).  v1: the
-    caller's tiles unchanged.
+    block_m 256 when m divides by 256 else the caller's; block_n the largest
+    of 1024/512 dividing n else the caller's; block_k always the caller's, so
+    the per-element accumulation order never changes (the tp8 contract
+    accumulates in 128-wide k blocks).
     """
     block_m, block_n, block_k = tiles
-    if os.environ.get(TILES_ENV, "v2") == "v1":
-        return block_m, block_n, block_k
     if m % 256 == 0:
         block_m = 256
     for candidate in (1024, 512):
@@ -69,7 +66,7 @@ def _tile_receipt(m: int, k: int, n: int, tiles: tuple[int, int, int]) -> None:
         return
     _TILE_RECEIPTS.add(key)
     print(
-        f"[PATHTRACE] {TILES_ENV}={os.environ.get(TILES_ENV, 'v2')} "
+        f"[PATHTRACE] matmul_tile_policy={TILE_POLICY} "
         f"M={m} K={k} N={n} bm={tiles[0]} bn={tiles[1]} bk={tiles[2]}",
         flush=True,
     )
