@@ -25,11 +25,13 @@ from `79fe3572`. Scope is default FrozenLake E2B Native/TIS/Zero
 preparation, five updates, one shared DP1xTP4 host; P45/M15/E4B are deferred.
 Native/TIS carriers and CPU reference/cache gates are implemented. Zero
 production adapter and B/D are not implemented, and its execution refuses.
-The user approved commit/push on 2026-09-12 for development handoff; delivery
-requires latest-tip integration and fresh gates. No TPU launch is authorized.
+The user approved commit/push on 2026-09-12 for development handoff. Runtime
+source `0f184305` is integrated onto `3b7771f9`; the receiving agent owns the
+remaining code, not only TPU experiments. No TPU launch is authorized.
 See `tasks/gemma4-e2b-default-three-arm/HANDOFF.md`
 and the external `tasks/zero_tim_gemma_frozenlake_eval` phase ledger.
 
-Offline checkpoint r11 is GREEN: Gemma37/37, existing GRPO49/49,
-canonical3/3, E4B3/3 and flags410/410. This does not close the active E2
-engine-adapter phase or admit any TPU launch.
+Fresh integrated checkpoint r14 is GREEN: Gemma37/37, GRPO57/57,
+canonical3/3, E4B3/3 and flags440/440; P57 263/263, V1 108/108 and
+E4B host12/12 also pass. Portable raw logs/SHA are beside the handoff.
+This does not close active E2 or admit any TPU launch.

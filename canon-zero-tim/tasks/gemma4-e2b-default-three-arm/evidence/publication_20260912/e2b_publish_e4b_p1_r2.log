@@ -1,0 +1,17 @@
+test_classifier_requires_every_receipt_and_hbm_headroom (test_p1_recipe.P1RecipeTest.test_classifier_requires_every_receipt_and_hbm_headroom) ... ok
+test_e4b_it_config_matches_architecture_but_not_artifact_identity (test_p1_recipe.P1RecipeTest.test_e4b_it_config_matches_architecture_but_not_artifact_identity) ... ok
+test_launch_preflight_trio_is_closed_and_detects_drift (test_p1_recipe.P1RecipeTest.test_launch_preflight_trio_is_closed_and_detects_drift) ... ok
+test_live_weight_gate_mirrors_gemma_preprocessing (test_p1_recipe.P1RecipeTest.test_live_weight_gate_mirrors_gemma_preprocessing) ... ok
+test_loaded_tokenizer_semantics_are_frozen (test_p1_recipe.P1RecipeTest.test_loaded_tokenizer_semantics_are_frozen) ... ok
+test_p1_rejects_training_overrides_and_canonical_kernels (test_p1_recipe.P1RecipeTest.test_p1_rejects_training_overrides_and_canonical_kernels) ... ok
+test_profile_is_stock_bounded_and_default_off (test_p1_recipe.P1RecipeTest.test_profile_is_stock_bounded_and_default_off) ... ok
+test_renderer_pins_image_and_hashes_complete_runtime_tree (test_p1_recipe.P1RecipeTest.test_renderer_pins_image_and_hashes_complete_runtime_tree) ... ok
+test_runtime_contract_accepts_only_real_target_geometry (test_p1_recipe.P1RecipeTest.test_runtime_contract_accepts_only_real_target_geometry) ... ok
+test_selector_is_default_off_and_closed (test_p1_recipe.P1RecipeTest.test_selector_is_default_off_and_closed) ... ok
+test_shape_ledger_preserves_p45_and_m15_hard_caps (test_p1_recipe.P1RecipeTest.test_shape_ledger_preserves_p45_and_m15_hard_caps) ... ok
+test_snapshot_verifier_checks_bytes_and_hashes (test_p1_recipe.P1RecipeTest.test_snapshot_verifier_checks_bytes_and_hashes) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 11.317s
+
+OK

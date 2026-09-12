@@ -292,3 +292,29 @@ The installed-method PLE difference is469 elements/max4.76837158203125e-7;
 the probe detects stock disagreement, not parity. Zero adapter/B/D, real
 weights, HBM, TPU RPA and target training remain unimplemented or untested,
 as enumerated in the handoff. Source is still an uncommitted local delta.
+
+## Gemma E2B development publication checkpoint — 2026-09-12
+
+The earlier uncommitted labels describe historical r11/r12 evidence. The
+user now approved commit/push for another agent to take over implementation.
+The stack was rebased onto `3b7771f978e3cff10e25c8f8fede4f3af7c1a253`;
+E4B foundation `00931905`, E2B carrier `1fc94e46`, test-only branch-fixture
+repair `0f1843059ce969aa482abb005b06d0ac9c5903e8`. Upstream registry history
+and Standard/Native64 learner checks are preserved.
+
+Portable package: `tasks/gemma4-e2b-default-three-arm/evidence/publication_20260912/`.
+Its receipt binds38 code/test files and all raw logs. Clean-source pinned CPU
+r14 on `1fc94e46` passes Gemma37/37, GRPO57/57, canonical3/3, E4B3/3,
+host recipe10/10, artifacts5/5 and flags440/440; inner manifest11/11 verify,
+SHA256 `3a1d816ab91dd1bd44b0513cd52da97d9bf6e3eaa439a4530fe2e054ba5a80d2`.
+P57 host263/263 and V1 host108/108 PASS. E4B host r1 RED is retained: its
+unit fixture assumed the original branch. Test-only repair r2 passes12/12
+with a wrong-branch negative; production branch guard and all image-consumed
+code are unchanged from r14. Syntax, secret scan and range diff check PASS.
+
+Classification: **CPU PASS / TARGET NOT RUN / IN-PROGRESS DEVELOPMENT HANDOFF**.
+Zero adapter/B/D and real cache integration remain open code work. No launch,
+image publication, loaded-weight equality, HBM, training, recovery or throughput
+claim. The E2B handoff's current phase ladder supersedes historical E4B launch
+instructions and requires three Zero updates plus fresh-process resume before
+the five-update comparison.

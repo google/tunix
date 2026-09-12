@@ -16,8 +16,10 @@ publication. The older Qwen/E4B launch approvals do not apply.
 Source worktree: `/home/yuxuan/code_rl_repro/worktrees/gemma4_e2b_default_three_arm_0911`.
 Branch: `local/gemma4-e2b-default-three-arm-0911`.
 Historical development base: `79fe3572220415c03c46661c6a09d41b1523383f`.
-The delivery stack must be rebased onto the latest shared branch and tested
-again. Use the clean delivered commit, not that historical base, for new work.
+Delivery integration base: `3b7771f978e3cff10e25c8f8fede4f3af7c1a253`.
+Clean runtime source: `0f1843059ce969aa482abb005b06d0ac9c5903e8`, rebased
+and locally verified as described in the publication checkpoint below.
+Use the delivered full checkout, not the historical development base.
 Authoritative phase ledger, outside Git:
 `/home/yuxuan/code_rl_repro/tasks/zero_tim_gemma_frozenlake_eval/`.
 Read this revision's `canon-zero-tim/AGENTS.md` and canonical branch/flag skills.
@@ -52,6 +54,35 @@ portable current scope and gates if that directory is unavailable remotely.
 
 The first safe command after checkout is the CPU-only `run_cpu_gate.py`
 command below. A plan printed by the Zero script is not an executable adapter.
+
+## 2026-09-12 publication checkpoint
+
+The stack retains the previously local, default-off E4B foundation as
+`00931905`, adds the E2B carrier as `1fc94e46`, then fixes only an E4B unit
+fixture in `0f184305`. E4B launch remains deferred; its original runtime branch
+guard is unchanged. The Gemma learner observer was merged without removing
+the latest Standard/Native64 checks or other upstream training changes.
+
+Fresh pinned CPU receipt r14 was taken on clean `1fc94e46`: Gemma37/37,
+GRPO57/57, canonical3/3, E4B routing3/3, recipe10/10, artifacts5/5 and
+flags440/440 PASS. Separate host P57 is263/263 and V1 is108/108 PASS.
+E4B P1 initially had one branch-bound fixture failure; that raw RED is retained.
+The test-only repair reruns12/12 including a wrong-branch negative. All
+image-consumed code remains byte-identical; no production branch gate changed.
+
+Portable raw logs and source hashes are in
+`evidence/publication_20260912/receipt.json` and its sibling SHA256SUMS.
+`rebased_cpu_r14.tar.gz` preserves the complete original r14 directory,
+including its11-member manifest (SHA256
+`3a1d816ab91dd1bd44b0513cd52da97d9bf6e3eaa439a4530fe2e054ba5a80d2`).
+Validate the outer SHA256SUMS, unpack into a fresh scratch directory, then
+validate the inner SHA256SUMS before reading results. Historical r1-r13
+remain on the originating machine; their availability is not required to
+rerun the portable CPU gate. The gate now accepts `--changed-base` (default
+HEAD) instead of assuming an unpublished, pre-rebase commit exists remotely.
+
+This checkpoint is **CPU PASS / TARGET NOT RUN**. It transfers development
+ownership; it does not complete E2/E3 or authorize any TPU operation.
 
 ## Locked comparison
 
