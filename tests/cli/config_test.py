@@ -212,8 +212,8 @@ class ConfigTest(parameterized.TestCase):
               "optimizer_config.opt_type=unknown",
               "optimizer_config.learning_rate=0.01",
           ],
-          expected_error=AttributeError,
-          error_regex="module 'optax' has no attribute 'unknown'",
+          expected_error=ValueError,
+          error_regex="Optimizer type 'unknown' not supported",
       ),
   )
   def test_create_optimizer_invalid(
@@ -223,6 +223,104 @@ class ConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(expected_error, error_regex):
       hp = self.initialize_config(overrides)
       hp.create_optimizer("optimizer_config")
+
+  def test_create_optimizer_prefers_schedule_over_scalar_learning_rate(self):
+    """A configured schedule wins over a scalar `learning_rate` in the block."""
+    hp = self.initialize_config([
+        "optimizer_config.opt_type=adamw",
+        "optimizer_config.learning_rate=1e-5",
+        "optimizer_config.schedule_type=warmup_cosine_decay_schedule",
+        "optimizer_config.init_value=0.0",
+        "optimizer_config.peak_value=3e-5",
+        "optimizer_config.end_value=0.0",
+        "optimizer_config.warmup_steps=5",
+        "optimizer_config.decay_steps=10",
+    ])
+    optimizer = hp.create_optimizer("optimizer_config")
+
+    state = optimizer.init({"w": jax.numpy.zeros((2,))})
+    # `inject_hyperparams` resolves the schedule at the current step, so step 0
+    # reports the schedule's `init_value` rather than the scalar learning rate.
+    self.assertEqual(float(state.hyperparams["learning_rate"]), 0.0)
+
+  def test_create_optimizer_builds_non_optimizer_transformation(self):
+    """`opt_type` resolves any optax factory, not just optimizers.
+
+    This is what lets callers build gradient clipping with the same helper and
+    `optax.chain` it around an optimizer, instead of a bespoke code path.
+    """
+    clipping = config.create_optimizer(
+        {"opt_type": "clip_by_global_norm", "max_norm": 1.0},
+        "test_config_path",
+    )
+
+    params = {"w": jax.numpy.zeros((2,))}
+    # A gradient with global norm 100, far above the configured limit of 1.0.
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    updates, _ = clipping.update(grads, clipping.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 1.0, places=4)
+
+  def test_create_optimizer_reports_missing_transformation_kwarg(self):
+    # `max_norm` has no default, so omitting it must be reported rather than
+    # falling through to a bare TypeError.
+    with self.assertRaisesRegex(ValueError, "max_norm"):
+      config.create_optimizer(
+          {"opt_type": "clip_by_global_norm"}, "test_config_path"
+      )
+
+  def test_create_optimizer_chains_opt_chain_type(self):
+    """`opt_chain_type` is built from `chain_kwargs` and chained first."""
+    optimizer = config.create_optimizer(
+        {
+            "opt_type": "sgd",
+            "learning_rate": 1.0,
+            "opt_chain_type": "clip_by_global_norm",
+            "chain_kwargs": {"max_norm": 1.0},
+        },
+        "test_config_path",
+    )
+
+    params = {"w": jax.numpy.zeros((2,))}
+    # A gradient with global norm 100, far above the configured limit of 1.0.
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    # sgd(learning_rate=1.0) negates the clipped gradient, so the update norm
+    # equals the clipped gradient norm.
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 1.0, places=4)
+
+  def test_create_optimizer_without_opt_chain_type_is_unchained(self):
+    """`opt_chain_type` defaults to None, which leaves gradients untouched."""
+    optimizer = config.create_optimizer(
+        {"opt_type": "sgd", "learning_rate": 1.0}, "test_config_path"
+    )
+
+    params = {"w": jax.numpy.zeros((2,))}
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 100.0, places=4)
+
+  def test_create_optimizer_rejects_unknown_opt_chain_type(self):
+    with self.assertRaisesRegex(ValueError, "not_a_transformation"):
+      config.create_optimizer(
+          {
+              "opt_type": "sgd",
+              "learning_rate": 1.0,
+              "opt_chain_type": "not_a_transformation",
+          },
+          "test_config_path",
+      )
+
+  def test_create_optimizer_reports_missing_chain_kwarg(self):
+    # `max_norm` has no default, so omitting `chain_kwargs` must be reported.
+    with self.assertRaisesRegex(ValueError, "max_norm"):
+      config.create_optimizer(
+          {
+              "opt_type": "sgd",
+              "learning_rate": 1.0,
+              "opt_chain_type": "clip_by_global_norm",
+          },
+          "test_config_path",
+      )
 
   #  --- Tests for learning_rate_schedule ---
   @parameterized.named_parameters(
@@ -257,7 +355,7 @@ class ConfigTest(parameterized.TestCase):
   )
   def test_learning_rate_schedule_valid(self, overrides):
     hp = self.initialize_config(overrides)
-    lr_schedule = hp._create_learning_rate(
+    lr_schedule = config.create_learning_rate(
         hp.config["optimizer_config"], "test_config_path"
     )
     self.assertIsNotNone(lr_schedule)

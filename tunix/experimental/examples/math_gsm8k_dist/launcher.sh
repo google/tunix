@@ -42,11 +42,21 @@ MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
+OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 ADAM_B1=${ADAM_B1:-0.9}
-ADAM_B2=${ADAM_B2:-0.99}
+ADAM_B2=${ADAM_B2:-0.999}
+ADAM_EPS=${ADAM_EPS:-1.0e-8}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
+# The default is applied with `-` rather than `:-` so that an explicitly empty
+# SCHEDULE_TYPE selects the constant learning rate instead of the default.
+SCHEDULE_TYPE=${SCHEDULE_TYPE-warmup_cosine_decay_schedule}
+LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
+LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
+LR_END_VALUE=${LR_END_VALUE:-0.0}
+LR_DECAY_STEPS=${LR_DECAY_STEPS:-500}
+WARMUP_STEPS=${WARMUP_STEPS:-$(((LR_DECAY_STEPS + 9) / 10))}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
@@ -356,6 +366,7 @@ echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
 echo "  learning rate:  $LEARNING_RATE"
+echo "  lr schedule:    ${SCHEDULE_TYPE:-<constant>} (warmup $WARMUP_STEPS, decay $LR_DECAY_STEPS)"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
@@ -449,11 +460,19 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
-    --max_grad_norm="$MAX_GRAD_NORM"
-    --adam_b1="$ADAM_B1"
-    --adam_b2="$ADAM_B2"
-    --weight_decay="$WEIGHT_DECAY"
-    --learning_rate="$LEARNING_RATE"
+    --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
+    --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
+    --optimizer_b1="$ADAM_B1"
+    --optimizer_b2="$ADAM_B2"
+    --optimizer_eps="$ADAM_EPS"
+    --optimizer_weight_decay="$WEIGHT_DECAY"
+    --optimizer_learning_rate="$LEARNING_RATE"
+    --optimizer_schedule_type="$SCHEDULE_TYPE"
+    --optimizer_init_value="$LR_INIT_VALUE"
+    --optimizer_peak_value="$LR_PEAK_VALUE"
+    --optimizer_end_value="$LR_END_VALUE"
+    --optimizer_warmup_steps="$WARMUP_STEPS"
+    --optimizer_decay_steps="$LR_DECAY_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --trainer_backend="$TRAINER_BACKEND"

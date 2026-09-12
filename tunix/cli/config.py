@@ -167,6 +167,211 @@ def _dict_to_cli_args(
         yield f"{new_key}={v}"
 
 
+def _extract_kwargs(
+    func: Callable[..., Any],
+    config: Dict[str, Any],
+    config_path_info: str,
+    learning_rate: Any | None = None,
+) -> Dict[str, Any]:
+  """Extracts and validates kwargs for a function from a config dictionary.
+
+  Args:
+    func: The callable whose signature selects the keys to extract.
+    config: The config block to pull the keyword values from.
+    config_path_info: The path to the config file, used for error reporting.
+    learning_rate: An already resolved learning rate. It takes precedence over
+      `config["learning_rate"]`, because it is the value a `schedule_type` was
+      resolved into; the raw scalar would otherwise silently shadow it.
+
+  Returns:
+    The keyword arguments to call `func` with.
+
+  Raises:
+    ValueError: If a parameter without a default is missing from the config.
+  """
+  sig = inspect.signature(func)
+  kwargs = {}
+  for param in sig.parameters.values():
+    param_name = param.name
+    if learning_rate is not None and param_name == "learning_rate":
+      kwargs[param_name] = learning_rate
+    elif param_name in config:
+      kwargs[param_name] = config[param_name]
+    elif param.default is param.empty:
+      # Safely get a name or representation for the callable
+      func_name = getattr(func, "__name__", repr(func))
+      raise ValueError(
+          f"Missing required argument '{param_name}' for {func_name} "
+          f"in config at {config_path_info}."
+      )
+  return kwargs
+
+
+def get_schedule_fn(
+    schedule_type: str, config_path_info: str = ""
+) -> Callable[..., Any]:
+  """Dynamically imports a schedule function from optax.schedules.
+
+  Args:
+    schedule_type: The type of schedule (e.g., "constant_schedule",
+      "warmup_cosine_decay_schedule").
+    config_path_info: The path to the config file, used for error reporting.
+
+  Returns:
+    The corresponding function from optax.schedules.
+
+  Raises:
+    AttributeError: If the schedule type does not correspond to a valid
+                    function in optax.schedules.
+  """
+  try:
+    schedule_fn = getattr(optax.schedules, schedule_type)
+    return schedule_fn
+  except AttributeError as exc:
+    raise AttributeError(
+        f"Config {config_path_info}: '{schedule_type}' is not a valid"
+        " function in optax.schedules."
+    ) from exc
+
+
+def create_learning_rate(
+    optimizer_config: Dict[str, Any], config_path_info: str = ""
+) -> Any:
+  """Creates a learning rate schedule based on the optimizer config.
+
+  Args:
+    optimizer_config: Optimizer settings. When it holds a `schedule_type` key,
+      the remaining keys are passed as kwargs to the matching
+      `optax.schedules` function; otherwise `learning_rate` is used as a
+      constant.
+    config_path_info: The path to the config file, used for error reporting.
+
+  Returns:
+    An `optax` schedule callable, or the scalar learning rate when no schedule
+    is configured.
+
+  Raises:
+    TypeError: If no schedule is configured and `learning_rate` is not a
+      scalar.
+  """
+  schedule_type = optimizer_config.get("schedule_type")
+  if schedule_type:
+    schedule_func = get_schedule_fn(schedule_type, config_path_info)
+    schedule_kwargs = _extract_kwargs(
+        schedule_func, optimizer_config, config_path_info
+    )
+    logging.info(
+        "Creating learning rate with schedule_type: %s, and following"
+        " kwargs: %s",
+        schedule_type,
+        schedule_kwargs,
+    )
+    return schedule_func(**schedule_kwargs)
+
+  # Default: No schedule, learning_rate should be a scalar
+  learning_rate = optimizer_config.get("learning_rate")
+  if learning_rate is not None and not isinstance(learning_rate, (float, int)):
+    raise TypeError(
+        "learning_rate must be a scalar when no schedule_type is specified, "
+        f"got {type(learning_rate)} in config at {config_path_info}."
+    )
+  logging.info("Creating learning rate with learning_rate: %s", learning_rate)
+  return learning_rate
+
+
+_OPT_CHAIN_TYPE_KEY = "opt_chain_type"
+_CHAIN_KWARGS_KEY = "chain_kwargs"
+
+
+def create_optimizer(
+    optimizer_config: Dict[str, Any], config_path_info: str = ""
+) -> optax.GradientTransformation:
+  """Creates an optimizer from a dictionary of optimizer settings.
+
+  Args:
+    optimizer_config: Optimizer settings. `opt_type` names a function in
+      `optax`, and the remaining keys are forwarded to it when they match its
+      signature; unrelated keys are ignored. Any `optax` factory can be named,
+      including plain gradient transformations such as `clip_by_global_norm`.
+      The learning rate is resolved by `create_learning_rate`. The optional
+      `opt_chain_type` names a further `optax` factory (e.g.
+      `clip_by_global_norm`) built from `chain_kwargs` (e.g.
+      `{"max_norm": 0.1}`) and chained ahead of the optimizer; it defaults to
+      `None`, which leaves the optimizer unchained.
+    config_path_info: The path to the config file, used for error reporting.
+
+  Returns:
+    An optimizer instance, preceded by `opt_chain_type` when it is set.
+
+  Raises:
+    ValueError: If the config is not a dictionary, `opt_type` is missing or
+      unsupported, or the optimizer requires a learning rate that the config
+      does not provide.
+    TypeError: If the extracted kwargs do not match the optimizer signature.
+  """
+  if not isinstance(optimizer_config, omegaconf.dictconfig.DictConfig | dict):
+    raise ValueError("optimizer_config must be a dictionary")
+
+  opt_type = optimizer_config.get("opt_type")
+  if not opt_type:
+    raise ValueError("Optimizer name is required")
+
+  try:
+    opt_func = getattr(optax, opt_type.lower())
+  except (AttributeError, ValueError) as e:
+    # `getattr` raises AttributeError for an unknown name, and `opt_type.lower`
+    # raises AttributeError when `opt_type` is not a string.
+    raise ValueError(
+        f"Optimizer type '{opt_type}' not supported from {config_path_info}."
+        " Available options, see"
+        " https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers"
+    ) from e
+
+  # Handle learning rate, potentially creating a schedule
+  learning_rate_val = create_learning_rate(optimizer_config, config_path_info)
+  if learning_rate_val is None and (
+      "learning_rate" in inspect.signature(opt_func).parameters
+      and inspect.signature(opt_func).parameters["learning_rate"].default
+      is inspect.Parameter.empty
+  ):
+    # learning_rate is required by opt_func but not provided and no schedule
+    raise ValueError(
+        "Missing required argument 'learning_rate' for optimizer"
+        f" '{opt_type}' and no schedule defined in config at"
+        f" {config_path_info}."
+    )
+
+  opt_kwargs = _extract_kwargs(
+      opt_func, optimizer_config, config_path_info, learning_rate_val
+  )
+  # Wrap the optimizer function with inject_hyperparams so that
+  # the learning rate can be tracked and logged during training.
+  injected_opt_func = optax.inject_hyperparams(
+      opt_func, hyperparam_dtype=jax.numpy.float32
+  )
+  # Call the optimizer function with the extracted kwargs
+  try:
+    optimizer = injected_opt_func(**opt_kwargs)
+  except TypeError as e:
+    raise TypeError(
+        f"Error calling {opt_type} with arguments {opt_kwargs}. "
+        f"Check if the arguments match the signature of optax.{opt_type}: {e}"
+    ) from e
+
+  # `opt_chain_type` is built by this same helper, since `opt_type` resolves any
+  # `optax` factory, and is chained ahead of the optimizer. Gradient clipping
+  # reaches the optimizer this way rather than as an optimizer keyword, which
+  # `optax` optimizers do not declare.
+  opt_chain_type = optimizer_config.get(_OPT_CHAIN_TYPE_KEY)
+  if not opt_chain_type:
+    return optimizer
+  chain_kwargs = optimizer_config.get(_CHAIN_KWARGS_KEY) or {}
+  chained = create_optimizer(
+      {"opt_type": opt_chain_type, **chain_kwargs}, config_path_info
+  )
+  return optax.chain(chained, optimizer)
+
+
 class HyperParameters:
   """Loads, merges, overrides, validates, and prepares the configuration for pipeline execution.
 
@@ -518,85 +723,6 @@ class HyperParameters:
         ) from exc
     return current_level
 
-  def _extract_kwargs(
-      self,
-      func: Callable[..., Any],
-      config: Dict[str, Any],
-      config_path_info: str,
-      learning_rate: Any | None = None,
-  ) -> Dict[str, Any]:
-    """Extracts and validates kwargs for a function from a config dictionary."""
-    sig = inspect.signature(func)
-    kwargs = {}
-    for param in sig.parameters.values():
-      param_name = param.name
-      if param_name in config:
-        kwargs[param_name] = config[param_name]
-      elif learning_rate is not None and param_name == "learning_rate":
-        kwargs[param_name] = learning_rate
-      elif param.default is param.empty:
-        # Safely get a name or representation for the callable
-        func_name = getattr(func, "__name__", repr(func))
-        raise ValueError(
-            f"Missing required argument '{param_name}' for {func_name} "
-            f"in config at {config_path_info}."
-        )
-    return kwargs
-
-  def _get_schedule_fn(self, schedule_type: str, config_path_info: str):
-    """Dynamically imports a schedule function from optax.schedules.
-
-    Args:
-      schedule_type: The type of schedule (e.g., "constant_schedule",
-        "warmup_cosine_decay_schedule").
-      config_path_info: The path to the config file, used for error reporting.
-
-    Returns:
-      The corresponding function from optax.schedules.
-
-    Raises:
-      AttributeError: If the schedule type does not correspond to a valid
-                      function in optax.schedules.
-    """
-    try:
-      schedule_fn = getattr(optax.schedules, schedule_type)
-      return schedule_fn
-    except AttributeError as exc:
-      raise AttributeError(
-          f"Config {config_path_info}: '{schedule_type}' is not a valid"
-          " function in optax.schedules."
-      ) from exc
-
-  def _create_learning_rate(
-      self, optimizer_config: Dict[str, Any], config_path_info: str
-  ) -> Any:
-    """Creates a learning rate schedule based on the optimizer config."""
-    schedule_type = optimizer_config.get("schedule_type")
-    if schedule_type:
-      schedule_func = self._get_schedule_fn(schedule_type, config_path_info)
-      schedule_kwargs = self._extract_kwargs(
-          schedule_func, optimizer_config, config_path_info
-      )
-      logging.info(
-          "Creating learning rate with schedule_type: %s, and following"
-          " kwargs: %s",
-          schedule_type,
-          schedule_kwargs,
-      )
-      return schedule_func(**schedule_kwargs)
-
-    # Default: No schedule, learning_rate should be a scalar
-    learning_rate = optimizer_config.get("learning_rate")
-    if learning_rate is not None and not isinstance(
-        learning_rate, (float, int)
-    ):
-      raise TypeError(
-          "learning_rate must be a scalar when no schedule_type is specified, "
-          f"got {type(learning_rate)} in config at {config_path_info}."
-      )
-    logging.info("Creating learning rate with learning_rate: %d", learning_rate)
-    return learning_rate
-
   def create_optimizer(
       self, *optimizer_keys: str
   ) -> optax.GradientTransformation:
@@ -626,54 +752,8 @@ class HyperParameters:
     except KeyError as e:
       raise KeyError(f"Could not resolve optimizer config path: {e}") from e
 
-    if not isinstance(optimizer_config, omegaconf.dictconfig.DictConfig | dict):
-      raise ValueError("optimizer_config must be a dictionary")
-
-    opt_type = optimizer_config.get("opt_type")
-    if not opt_type:
-      raise ValueError("Optimizer name is required")
-
-    try:
-      opt_func = getattr(optax, opt_type.lower())
-    except ValueError as e:
-      raise ValueError(
-          f"Optimizer type '{opt_type}' not supported from {config_path_info}."
-          " Available options, see"
-          " https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers"
-      ) from e
-
-    # Handle learning rate, potentially creating a schedule
-    learning_rate_val = self._create_learning_rate(
-        optimizer_config, config_path_info  # pyrefly: ignore[bad-argument-type]
-    )
-    if learning_rate_val is None and (
-        "learning_rate" in inspect.signature(opt_func).parameters
-        and inspect.signature(opt_func).parameters["learning_rate"].default
-        is inspect.Parameter.empty
-    ):
-      # learning_rate is required by opt_func but not provided and no schedule
-      raise ValueError(
-          "Missing required argument 'learning_rate' for optimizer"
-          f" '{opt_type}' and no schedule defined in config at"
-          f" {config_path_info}."
-      )
-
-    opt_kwargs = self._extract_kwargs(
-        opt_func, optimizer_config, config_path_info, learning_rate_val  # pyrefly: ignore[bad-argument-type]
-    )
-    # Wrap the optimizer function with inject_hyperparams so that
-    # the learning rate can be tracked and logged during training.
-    injected_opt_func = optax.inject_hyperparams(
-        opt_func, hyperparam_dtype=jax.numpy.float32
-    )
-    # Call the optimizer function with the extracted kwargs
-    try:
-      return injected_opt_func(**opt_kwargs)
-    except TypeError as e:
-      raise TypeError(
-          f"Error calling {opt_type} with arguments {opt_kwargs}. "
-          f"Check if the arguments match the signature of optax.{opt_type}: {e}"
-      ) from e
+    # Use module-level helper.
+    return create_optimizer(optimizer_config, config_path_info)
 
   def parse_mesh_config(
       self, model_key: str
