@@ -21,6 +21,8 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import config as trajectory_config_lib
+from tunix.experimental.trajectory import factory as trajectory_factory
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
@@ -40,6 +42,9 @@ class RolloutConfig(base_rollout.RolloutConfig):
     agent_name: Registered name of agent class in AGENT_REGISTRY.
     env_config: Configuration dictionary passed to environment constructor.
     agent_config: Configuration dictionary passed to agent constructor.
+    trajectory_store_config: Optional Trajectory Store configuration. When
+      unset (or `enabled=False`), this worker never constructs a Trajectory
+      Store.
   """
 
   sampler_type: str = "vanilla"
@@ -48,6 +53,9 @@ class RolloutConfig(base_rollout.RolloutConfig):
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  trajectory_store_config: trajectory_config_lib.TrajectoryStoreConfig | None = (
+      None
+  )
 
 
 TrajectoryOrError = Union[
@@ -95,6 +103,10 @@ class RolloutWorker(abstract_worker.Worker):
         max_concurrency=max_concurrency,
         tokenizer=tokenizer,
         chat_parser=chat_parser,
+    )
+    self._trajectory_store = trajectory_factory.build_trajectory_store(
+        config.trajectory_store_config if config is not None else None,
+        owner=worker_id,
     )
 
   @property
@@ -163,6 +175,8 @@ class RolloutWorker(abstract_worker.Worker):
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
     self.manager.cancel_all()
+    if self._trajectory_store is not None:
+      self._trajectory_store.close()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:

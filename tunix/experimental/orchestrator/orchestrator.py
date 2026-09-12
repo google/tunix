@@ -33,6 +33,8 @@ from tunix.experimental.orchestrator import lifecycle
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.trajectory import config as trajectory_config_lib
+from tunix.experimental.trajectory import factory as trajectory_factory
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -49,6 +51,9 @@ class ClusterOrchestrator:
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
+      trajectory_store_config: (
+          trajectory_config_lib.TrajectoryStoreConfig | None
+      ) = None,
   ):
     """Initializes ClusterOrchestrator."""
     self.config = config
@@ -67,6 +72,9 @@ class ClusterOrchestrator:
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
+    self.trajectory_store = trajectory_factory.build_trajectory_store(
+        trajectory_store_config, owner="orchestrator"
+    )
 
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
@@ -258,6 +266,8 @@ class ClusterOrchestrator:
     self.monitor.close()
     self._shutdown_remote_workers()
     self.lifecycle_driver.shutdown()
+    if self.trajectory_store is not None:
+      self.trajectory_store.close()
     logging.info("Shutdown complete.")
 
   def validate_startup(self, alg_config: Any, training_config: Any) -> None:
