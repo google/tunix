@@ -3143,53 +3143,8 @@ def _install_shared_logprob_pipeline(
   return canonical
 
 
-def _make_processed_target_logprob_vjp(
-    compute_and_gather, max_logprobs, mesh=None
-):
-  """Keeps the exact engine primal while supplying the analytic logp VJP.
-
-  ``mesh`` is the execution mesh the forward's canonical kernels are bound
-  to; the fused gradient kernel (CANON_LOGPROB_VJP_KERNEL=1) runs inside a
-  shard_map over its data axis, one row slice per DP rank, exactly like the
-  forward -- a Mosaic kernel cannot be SPMD-partitioned automatically.
-  """
-  data_size = 1
-  if mesh is not None and "data" in tuple(mesh.axis_names):
-    data_size = int(mesh.shape["data"])
-
-  def kernel_grad(logits, token_ids, cotangent):
-    if data_size == 1 and (
-        mesh is None or "data" not in tuple(mesh.axis_names)
-    ):
-      return canonical_logsoftmax.target_logprob_grad_rows(
-          logits, token_ids, cotangent
-      )
-    row_spec = _canonical_logprob_row_spec(mesh)
-    vector_spec = jax.sharding.PartitionSpec("data")
-    # check_vma=False, as the forward's canonical log-softmax shard_map: the
-    # Pallas out_shapes carry no varying-axis type, so check_vma=True rejects
-    # them at trace time ("manual_axis_type ... must not be None", jax
-    # 0.10.2).  The mapped function is a pure per-rank kernel with no
-    # collectives and is never differentiated through (it is the custom
-    # VJP's backward), so there is no psum placement for the check to guard;
-    # the outputs are plain global arrays once the shard_map returns.
-    try:
-      mapped = jax.shard_map(
-          canonical_logsoftmax.target_logprob_grad_rows,
-          mesh=mesh,
-          in_specs=(row_spec, vector_spec, vector_spec),
-          out_specs=row_spec,
-          check_vma=False,
-      )
-    except TypeError:
-      mapped = jax.shard_map(
-          canonical_logsoftmax.target_logprob_grad_rows,
-          mesh=mesh,
-          in_specs=(row_spec, vector_spec, vector_spec),
-          out_specs=row_spec,
-          check_rep=False,
-      )
-    return mapped(logits, token_ids, cotangent)
+def _make_processed_target_logprob_vjp(compute_and_gather, max_logprobs):
+  """Keeps the exact engine primal while supplying the analytic logp VJP."""
 
   def exact_value(logits, token_ids):
     return compute_and_gather(
@@ -3209,20 +3164,6 @@ def _make_processed_target_logprob_vjp(
         flush=True,
     )
     logits, token_ids = residual
-    if logprob_vjp_kernel_enabled():
-      # tasks/zero_tim_perf3 E2b: one tiled pass instead of a materialized
-      # f32 softmax; sound but not bitwise against the XLA path.
-      rows = int(logits.shape[0])
-      plan = canonical_logsoftmax.target_logprob_grad_row_plan(
-          rows // data_size
-      )
-      print(
-          f"[PATHTRACE] {LOGPROB_VJP_KERNEL_ENV}=1 target-logprob VJP via "
-          f"canon_logprob_grad (fused tiled pass) rows={rows} "
-          f"data={data_size} local_blocks={list(plan)}",
-          flush=True,
-      )
-      return kernel_grad(logits, token_ids, cotangent), None
     probabilities = jax.nn.softmax(logits, axis=-1)
     selected = jax.nn.one_hot(
         token_ids, logits.shape[-1], dtype=logits.dtype
@@ -3232,52 +3173,6 @@ def _make_processed_target_logprob_vjp(
 
   target_logprobs.defvjp(forward, backward)
   return target_logprobs
-
-
-# tasks/zero_tim_perf3 E2a.  The processed-rows pullback differentiates the
-# full-vocabulary entropy alongside the target logprobs; when the loss has no
-# entropy term the entropy cotangent is an all-zero array and that whole
-# f32 vocabulary backward is dead work (38% of the 1.7B reverse chunk in the
-# 2026-09-10 update-window capture).  CANON_ENTROPY_VJP=0 differentiates the
-# target logprobs alone; adding a zero cotangent contribution never changes a
-# finite gradient's bytes (x + 0.0 == x, signed zeros aside).  Default 1
-# keeps the historical program.
-# tasks/zero_tim_perf3 E2b: fused tiled target-logprob gradient kernel
-# (canonical_logsoftmax.target_logprob_grad) instead of the materialized f32
-# softmax backward.  Default 0 keeps the historical program.
-LOGPROB_VJP_KERNEL_ENV = "CANON_LOGPROB_VJP_KERNEL"
-
-
-def logprob_vjp_kernel_enabled() -> bool:
-  value = os.environ.get(LOGPROB_VJP_KERNEL_ENV, "0")
-  if value not in ("0", "1"):
-    raise ValueError(
-        f"{LOGPROB_VJP_KERNEL_ENV} must be unset, 0 or 1, got {value!r}"
-    )
-  return value == "1"
-
-
-ENTROPY_VJP_ENV = "CANON_ENTROPY_VJP"
-_ENTROPY_VJP_RECEIPT = set()
-
-
-def entropy_vjp_enabled() -> bool:
-  value = os.environ.get(ENTROPY_VJP_ENV, "1")
-  if value not in ("0", "1"):
-    raise ValueError(f"{ENTROPY_VJP_ENV} must be unset, 0 or 1, got {value!r}")
-  return value == "1"
-
-
-def check_entropy_vjp_contract(algo_config) -> None:
-  """Fail closed: the entropy VJP may be skipped only for an entropy-free loss."""
-  if entropy_vjp_enabled():
-    return
-  coef = getattr(algo_config, "entropy_coef", None)
-  if coef is not None and float(coef) != 0.0:
-    raise FunctionalMappingError(
-        f"{ENTROPY_VJP_ENV}=0 requires an entropy-free loss, got "
-        f"entropy_coef={coef!r}"
-    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -6942,9 +6837,7 @@ class Qwen3EngineForwardAdapter:
       self._compute_and_gather_logprobs = serving_compute_and_gather
     self._max_logprobs = int(runner.model_config.max_logprobs)
     self._processed_target_logprobs = _make_processed_target_logprob_vjp(
-        self._compute_and_gather_logprobs,
-        self._max_logprobs,
-        mesh=self._execution_mesh,
+        self._compute_and_gather_logprobs, self._max_logprobs
     )
 
     g5c_shared_logsoftmax = os.environ.get(
@@ -6956,9 +6849,7 @@ class Qwen3EngineForwardAdapter:
       )
     self._p28_g5c_shared_logsoftmax = g5c_shared_logsoftmax == "1"
     stock_target_logprobs = _make_processed_target_logprob_vjp(
-        compute_and_gather_logprobs,
-        self._max_logprobs,
-        mesh=self._execution_mesh,
+        compute_and_gather_logprobs, self._max_logprobs
     )
     p28_target_logprobs = (
         self._processed_target_logprobs
@@ -7001,24 +6892,8 @@ class Qwen3EngineForwardAdapter:
       def primal(values):
         return fwd_logprob_rows(values, target_ids, temperature)
 
-      if entropy_vjp_enabled():
-        _, pullback = jax.vjp(primal, logits)
-        return pullback((dtarget_logprobs, dentropy))[0]
-      # E2a: entropy-free loss, the entropy cotangent is identically zero;
-      # differentiate the target logprobs alone (dentropy is ignored).
-      if "skip" not in _ENTROPY_VJP_RECEIPT:
-        _ENTROPY_VJP_RECEIPT.add("skip")
-        print(
-            f"[PATHTRACE] {ENTROPY_VJP_ENV}=0 processed-rows pullback "
-            "differentiates target logprobs only (entropy cotangent dropped)",
-            flush=True,
-        )
-
-      def primal_logps(values):
-        return primal(values)[0]
-
-      _, pullback = jax.vjp(primal_logps, logits)
-      return pullback(dtarget_logprobs)[0]
+      _, pullback = jax.vjp(primal, logits)
+      return pullback((dtarget_logprobs, dentropy))[0]
 
     self._p28_processed_rows_fn = _xprof_jit(
         fwd_logprob_rows,
@@ -12430,8 +12305,6 @@ class Qwen3EngineForwardAdapter:
 
     from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
 
-    check_entropy_vjp_contract(algo_config)
-
     def unreduced_loss(logps, entropy):
       return algo_core.grpo_loss_from_precomputed_logps(
           logps, entropy, train_example, algo_config
@@ -13878,8 +13751,6 @@ class Qwen3EngineForwardAdapter:
       )
 
     from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
-
-    check_entropy_vjp_contract(algo_config)
 
     def unreduced_loss(logps, entropy):
       return algo_core.grpo_loss_from_precomputed_logps(
