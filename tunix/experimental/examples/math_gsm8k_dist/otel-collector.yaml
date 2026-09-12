@@ -1,0 +1,69 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Minimal OpenTelemetry Collector (contrib) config for the experimental
+# orchestrator's metrics export (Phase O1).
+#
+# Run next to the orchestrator -- a node-local DaemonSet on GKE (every jobset
+# template uses hostNetwork: true) or a local process under launcher.sh:
+#
+#   otelcol-contrib --config tunix/experimental/examples/math_gsm8k_dist/otel-collector.yaml
+#
+# then point the orchestrator at it with
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+#
+# The collector only transports. Aggregation that needs RL semantics (batch
+# attribution, percentiles) is done in the orchestrator before export.
+
+extensions:
+  # Durable sending queue: data received by the collector survives a backend
+  # outage or collector restart.
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 5s
+  # Phase O2: once workers export directly, drop the orchestrator's relayed
+  # copy of trainer metrics so the trainer's own stream is the single source.
+  # filter/relayed_trainer:
+  #   metrics:
+  #     datapoint:
+  #       - 'resource.attributes["service.name"] == "tunix-orchestrator" and IsMatch(metric.name, "^tunix\\.trainer\\.")'
+
+exporters:
+  # Local verification: prints every export to the collector's stdout.
+  debug:
+    verbosity: basic
+  googlecloud:
+    sending_queue:
+      enabled: true
+      storage: file_storage
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      # Use [debug] alone to verify locally; add googlecloud to ship to Cloud
+      # Monitoring.
+      exporters: [debug, googlecloud]
