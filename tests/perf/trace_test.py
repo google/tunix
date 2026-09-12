@@ -361,5 +361,169 @@ class TracerTest(parameterized.TestCase):
       self.assertEmpty(group_b.inner)
 
 
+class ThreadSafetyTest(parameterized.TestCase):
+  """Tests that verify thread-safe access to shared tracer state."""
+
+  def test_concurrent_span_group_begin_end(self):
+    """Multiple threads calling span_group_begin/end should not corrupt the stack."""
+    timeline = Timeline("test", 0.0)
+    errors = []
+    iterations = 50
+
+    def worker():
+      try:
+        for i in range(iterations):
+          group = timeline.span_group_begin(f"group_{i}", float(i))
+          timeline.span_group_end(float(i) + 0.5)
+      except Exception as e:
+        errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    self.assertEmpty(errors, f"Errors during concurrent access: {errors}")
+    # After all threads complete, only root should remain on the stack.
+    self.assertLen(timeline.stack, 1)
+    self.assertEqual(timeline.stack[0].name, "root")
+
+  def test_concurrent_device_span(self):
+    """Multiple threads recording device spans should not lose data."""
+    timeline = DeviceTimeline("tpu0", 0.0)
+    num_threads = 4
+    spans_per_thread = 20
+    errors = []
+
+    def worker(thread_id):
+      try:
+        for i in range(spans_per_thread):
+          t = float(thread_id * spans_per_thread + i)
+          timeline.device_span(
+              f"span_{thread_id}_{i}",
+              thread_begin=t,
+              end=t + 0.1,
+          )
+      except Exception as e:
+        errors.append(e)
+
+    threads = [
+        threading.Thread(target=worker, args=(tid,))
+        for tid in range(num_threads)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    self.assertEmpty(errors, f"Errors during concurrent access: {errors}")
+    # All spans should be recorded (none lost).
+    total_spans = len(timeline.root.inner)
+    self.assertEqual(total_spans, num_threads * spans_per_thread)
+
+  def test_concurrent_get_or_create_thread_timeline(self):
+    """Concurrent creation of thread timelines should not cause duplicates or errors."""
+    tracer = PerfTracer()
+    errors = []
+    results = {}
+
+    def worker(thread_id):
+      try:
+        tid = f"thread-{thread_id}"
+        tl = tracer._get_or_create_thread_timeline(tid)
+        results[thread_id] = tl
+      except Exception as e:
+        errors.append(e)
+
+    threads = [
+        threading.Thread(target=worker, args=(i,)) for i in range(10)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    self.assertEmpty(errors, f"Errors during concurrent access: {errors}")
+    # Each thread_id should map to a unique timeline.
+    self.assertLen(results, 10)
+    # No two different thread_ids should share the same timeline object.
+    timeline_ids = [tl.id for tl in results.values()]
+    self.assertLen(set(timeline_ids), 10)
+
+  def test_concurrent_get_or_create_device_timeline(self):
+    """Concurrent creation of device timelines should be safe."""
+    tracer = PerfTracer()
+    errors = []
+    results = {}
+
+    def worker(device_id):
+      try:
+        tl = tracer._get_or_create_device_timeline(f"tpu{device_id}")
+        results[device_id] = tl
+      except Exception as e:
+        errors.append(e)
+
+    threads = [
+        threading.Thread(target=worker, args=(i,)) for i in range(10)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    self.assertEmpty(errors, f"Errors during concurrent access: {errors}")
+    self.assertLen(results, 10)
+
+  def test_concurrent_span_from_multiple_threads(self):
+    """PerfTracer.span() called from different threads should be safe."""
+    tracer = PerfTracer()
+    errors = []
+    num_threads = 4
+    spans_per_thread = 10
+
+    def worker():
+      try:
+        for i in range(spans_per_thread):
+          with tracer.span(f"work_{i}"):
+            pass  # simulate some work
+      except Exception as e:
+        errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    self.assertEmpty(errors, f"Errors during concurrent access: {errors}")
+    # Each thread should have its own timeline with the correct number of spans.
+    timelines = tracer._get_timelines()
+    total_spans = 0
+    for tl in timelines.values():
+      total_spans += len(tl.root.inner)
+    self.assertEqual(total_spans, num_threads * spans_per_thread)
+
+  def test_device_timeline_wait_pending_spans_thread_safe(self):
+    """wait_pending_spans should safely snapshot threads list."""
+    timeline = DeviceTimeline("tpu0", 0.0)
+    completed = []
+
+    def fake_wait():
+      time.sleep(0.01)
+
+    # Add some mock threads.
+    for _ in range(5):
+      t = threading.Thread(target=fake_wait)
+      t.start()
+      timeline._threads.append(t)
+
+    # wait_pending_spans should join all without error.
+    timeline.wait_pending_spans()
+
+    for t in timeline._threads:
+      self.assertFalse(t.is_alive())
+
+
 if __name__ == "__main__":
   absltest.main()
