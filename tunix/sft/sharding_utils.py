@@ -73,11 +73,35 @@ def shard_input(
     )
 
 
+def filter_spec(spec: shd.PartitionSpec, mesh: shd.Mesh) -> shd.PartitionSpec:
+  """Filters out axes from PartitionSpec that are not present in the mesh."""
+  new_partitions = []
+  for p in spec.partitions:
+    if p is None or p is shd.PartitionSpec.UNCONSTRAINED:
+      new_partitions.append(p)
+    elif isinstance(p, tuple):
+      filtered = tuple(axis for axis in p if axis in mesh.shape)
+      if len(filtered) == 0:
+        new_partitions.append(None)
+      elif len(filtered) == 1:
+        new_partitions.append(filtered[0])
+      else:
+        new_partitions.append(filtered)
+    else:
+      if p in mesh.shape:
+        new_partitions.append(p)
+      else:
+        new_partitions.append(None)
+  return shd.PartitionSpec(*new_partitions)
+
+
 def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
   """Get a sharding for an tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
   if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
+
+  pspec = filter_spec(pspec, mesh)
 
   # Don't shard if rank is not sufficient.
   if x.ndim < len(pspec):
@@ -95,3 +119,4 @@ def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
           # Replicate if not evenly divisible.
           return shd.NamedSharding(mesh, shd.PartitionSpec())
   return shd.NamedSharding(mesh, pspec)
+
