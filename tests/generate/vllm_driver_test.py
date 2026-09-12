@@ -206,6 +206,31 @@ class VllmDriverAsyncTest(absltest.TestCase):
     self.assertEqual(finished_order, completion_order)
     self.assertNotEqual(finished_order, request_ids)
 
+  def test_perf_snapshot_counts_steps_finished_and_tokens(self):
+    engine = _FakeLLMEngine(completion_order=["a", "b"])
+    driver = VLLMInProcessDriver(engine, poll_interval_s=0.001)
+    try:
+      futures = driver.submit_requests([
+          {"request_id": "a", "prompt": "p", "params": None},
+          {"request_id": "b", "prompt": "p", "params": None},
+      ])
+      for future in futures:
+        future.result(timeout=5)
+      snap = driver.perf_snapshot(reset=False)
+      # One completion per engine step: two finished requests, one token each.
+      self.assertGreaterEqual(snap["steps"], 2)
+      self.assertEqual(snap["finished"], 2)
+      self.assertEqual(snap["gen_tok"], 2)
+      self.assertGreater(snap["window_s"], 0.0)
+      self.assertGreaterEqual(snap["step_ms_max"], snap["step_ms_p50"])
+      # The reset variant hands back the same window once, then starts fresh.
+      again = driver.perf_snapshot(reset=True)
+      self.assertEqual(again["finished"], 2)
+      fresh = driver.perf_snapshot(reset=False)
+      self.assertEqual(fresh["finished"], 0)
+    finally:
+      driver.shutdown()
+
   def test_log_thread_calls_do_log_stats(self):
     engine = _FakeLLMEngine([])
     driver = VLLMInProcessDriver(

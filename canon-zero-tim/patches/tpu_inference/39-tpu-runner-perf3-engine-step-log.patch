@@ -1,0 +1,351 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -14,6 +14,7 @@
+ 
+ import functools
+ import os  # P18.0 capture helper needs it; upstream file does not import os
++import time  # perf3 engine step log: diagnostic clocks only
+ import logging
+ import random
+ import sys
+@@ -150,6 +151,240 @@
+ _CANON_LOGPROB_MULTI_CHUNK_ANNOUNCED = False
+ 
+ 
++# perf3 engine step log -- one receipt per engine step so a 64-chip run can be accounted
++# from raw.log without xprof.  Diagnostic only: it reads shapes and clocks; it never touches
++# the programs, their inputs, or the sampled tokens.  CANON_ENGINE_STEP_LOG=0 disables it.
++#   CANON_ENGINE_STEP_LOG_FULL           first N steps print a full [ENGINE_STEP] line
++#   CANON_ENGINE_STEP_LOG_EVERY          after that, every K-th step prints one
++#   CANON_ENGINE_STEP_LOG_SUMMARY_EVERY  [ENGINE_STEP_SUMMARY] window size in steps
++#   CANON_ENGINE_STEP_LOG_ALL_PROCS      1 = every JAX process prints (default: process 0)
++_ENGINE_STEP_LOG_ENABLED = os.environ.get("CANON_ENGINE_STEP_LOG", "1") == "1"
++_ENGINE_STEP_LOG_FULL = int(os.environ.get("CANON_ENGINE_STEP_LOG_FULL", "5000") or "5000")
++_ENGINE_STEP_LOG_EVERY = int(os.environ.get("CANON_ENGINE_STEP_LOG_EVERY", "20") or "20")
++_ENGINE_STEP_LOG_SUMMARY_EVERY = int(
++    os.environ.get("CANON_ENGINE_STEP_LOG_SUMMARY_EVERY", "500") or "500")
++_ENGINE_STEP_LOG_ALL_PROCS = os.environ.get("CANON_ENGINE_STEP_LOG_ALL_PROCS", "0") == "1"
++_ENGINE_STEP_STATE = {"n": 0, "prev_end": None, "t0": None, "announced": False,
++                      "proc": None, "win": None}
++
++
++def _engine_step_log_active() -> bool:
++    if not _ENGINE_STEP_LOG_ENABLED:
++        return False
++    proc = _ENGINE_STEP_STATE["proc"]
++    if proc is None:
++        try:
++            proc = (int(jax.process_index()), int(jax.process_count()))
++        except Exception:  # pylint: disable=broad-except
++            proc = (0, 1)
++        _ENGINE_STEP_STATE["proc"] = proc
++    return _ENGINE_STEP_LOG_ALL_PROCS or proc[0] == 0
++
++
++def _engine_step_new_window():
++    return {"steps": 0, "by_path": {}, "exec_ms": [], "gap_ms": [], "sync_ms": [],
++            "sample_ms": [], "sched_tok": 0, "pad_tok": 0, "reqs": 0, "gen_tok": 0,
++            "mixed": 0, "prefill_steps": 0, "cd_steps": 0, "cd_launches": 0,
++            "t_start": time.perf_counter()}
++
++
++def _engine_step_pct(values, q):
++    if not values:
++        return 0.0
++    ordered = sorted(values)
++    idx = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
++    return ordered[idx]
++
++
++def _engine_step_begin(runner, scheduler_output):
++    """Opens the receipt for one engine step; None when logging is off."""
++    try:
++        if not _engine_step_log_active():
++            return None
++        now = time.perf_counter()
++        st = _ENGINE_STEP_STATE
++        if st["t0"] is None:
++            st["t0"] = now
++        rec = {
++            "path": "std", "t_begin": now,
++            "gap_ms": (now - st["prev_end"]) * 1e3 if st["prev_end"] is not None else 0.0,
++            "reqs": int(runner.input_batch.num_reqs),
++            "sched_tok": int(scheduler_output.total_num_scheduled_tokens),
++            "prefill_reqs": 0, "pad_tok": 0, "pad_reqs": 0, "pad_per_rank": 0,
++            "per_rank_reqs": [], "per_rank_tok": [], "per_rank_prefill": [],
++            "exec_ms": 0.0, "sample_ms": 0.0, "sync_ms": 0.0,
++            "cd_steps": 0, "cd_max": 0, "cd_eos": 0, "gen_tok": 0,
++        }
++        nst = scheduler_output.num_scheduled_tokens
++        rec["prefill_reqs"] = sum(1 for v in nst.values() if int(v) > 1)
++        return rec
++    except Exception:  # pylint: disable=broad-except
++        return None
++
++
++def _engine_step_set_path(rec, path):
++    if rec is not None:
++        rec["path"] = path
++
++
++def _engine_step_shapes(rec, runner, scheduler_output, req_ids_dp, padded_num_reqs,
++                        padded_per_rank, pad_tok, path):
++    """Records the padded program shape and the per-DP-rank request/token split."""
++    if rec is None:
++        return
++    try:
++        rec["path"] = path
++        rec["pad_tok"] = int(pad_tok)
++        rec["pad_reqs"] = int(padded_num_reqs) if padded_num_reqs is not None else 0
++        rec["pad_per_rank"] = int(padded_per_rank) if padded_per_rank is not None else 0
++        nst = scheduler_output.num_scheduled_tokens
++        per_reqs, per_tok, per_pref = [], [], []
++        for rank in range(int(runner.dp_size)):
++            ids = list(req_ids_dp[rank]) if req_ids_dp is not None else []
++            toks = [int(nst.get(req_id, 0)) for req_id in ids]
++            per_reqs.append(len(ids))
++            per_tok.append(sum(toks))
++            per_pref.append(sum(1 for t in toks if t > 1))
++        rec["per_rank_reqs"], rec["per_rank_tok"], rec["per_rank_prefill"] = (
++            per_reqs, per_tok, per_pref)
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_count_tokens(sampled):
++    try:
++        return int(sum(len(ids) for ids in sampled))
++    except Exception:  # pylint: disable=broad-except
++        return 0
++
++
++def _engine_step_cd_result(rec, actual_steps, max_steps, eos_hits, sampled):
++    if rec is None:
++        return
++    try:
++        rec["cd_steps"] = int(actual_steps)
++        rec["cd_max"] = int(max_steps)
++        rec["cd_eos"] = int(eos_hits)
++        rec["gen_tok"] = _engine_step_count_tokens(sampled)
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_sample_done(runner, t_sample, async_output=None, sampled=None):
++    """Closes sample_tokens: async outputs carry the receipt to get_output()."""
++    rec = getattr(runner, "_perf3_step_rec", None)
++    if rec is None:
++        return
++    try:
++        rec["sample_ms"] = ((time.perf_counter() - t_sample) * 1e3
++                            if t_sample is not None else 0.0)
++        runner._perf3_step_rec = None
++        if async_output is not None:
++            async_output._perf3_rec = rec
++            return
++        rec["gen_tok"] = _engine_step_count_tokens(sampled or [])
++        _engine_step_emit(rec)
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_sync_done(rec, t_sync, sampled):
++    if rec is None:
++        return
++    try:
++        rec["sync_ms"] = (time.perf_counter() - t_sync) * 1e3
++        rec["gen_tok"] = _engine_step_count_tokens(sampled or [])
++        _engine_step_emit(rec)
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_emit(rec):
++    """Prints the (sampled) per-step receipt and folds it into the window summary."""
++    if rec is None:
++        return
++    try:
++        st = _ENGINE_STEP_STATE
++        now = time.perf_counter()
++        st["prev_end"] = now
++        st["n"] += 1
++        n = st["n"]
++        win = st["win"]
++        if win is None:
++            win = st["win"] = _engine_step_new_window()
++        if not st["announced"]:
++            st["announced"] = True
++            print("[ENGINE_STEP_LOG] on full=%d every=%d summary_every=%d proc=%d/%d "
++                  "paths=std|cd|empty t=seconds_since_first_step gap_ms=host_time_between_"
++                  "steps exec_ms=execute_model_wall sample_ms=sample_tokens_wall "
++                  "sync_ms=get_output_wall per_rank_*=slash_separated_per_dp_rank"
++                  % (_ENGINE_STEP_LOG_FULL, _ENGINE_STEP_LOG_EVERY,
++                     _ENGINE_STEP_LOG_SUMMARY_EVERY, st["proc"][0], st["proc"][1]),
++                  flush=True)
++        path = rec["path"]
++        mixed = 0
++        if rec["per_rank_prefill"]:
++            pref = [p > 0 for p in rec["per_rank_prefill"]]
++            active = [r > 0 for r in rec["per_rank_reqs"]]
++            mixed = int(any(pref) and any((not p) and a for p, a in zip(pref, active)))
++        win["steps"] += 1
++        win["by_path"][path] = win["by_path"].get(path, 0) + 1
++        win["exec_ms"].append(rec["exec_ms"])
++        win["gap_ms"].append(rec["gap_ms"])
++        win["sync_ms"].append(rec["sync_ms"])
++        win["sample_ms"].append(rec["sample_ms"])
++        win["sched_tok"] += rec["sched_tok"]
++        win["pad_tok"] += rec["pad_tok"]
++        win["reqs"] += rec["reqs"]
++        win["gen_tok"] += rec["gen_tok"]
++        win["mixed"] += mixed
++        win["prefill_steps"] += int(rec["prefill_reqs"] > 0)
++        if path == "cd":
++            win["cd_launches"] += 1
++            win["cd_steps"] += rec["cd_steps"]
++        if n <= _ENGINE_STEP_LOG_FULL or (
++                _ENGINE_STEP_LOG_EVERY > 0 and n % _ENGINE_STEP_LOG_EVERY == 0):
++            fmt = lambda xs: "/".join(str(x) for x in xs) if xs else "-"
++            print("[ENGINE_STEP] n=%d t=%.3f path=%s reqs=%d prefill_reqs=%d sched_tok=%d "
++                  "pad_tok=%d pad_reqs=%d pad_per_rank=%d per_rank_reqs=%s per_rank_tok=%s "
++                  "per_rank_prefill=%s mixed=%d gap_ms=%.2f exec_ms=%.2f sample_ms=%.2f "
++                  "sync_ms=%.2f cd_steps=%d cd_max=%d cd_eos=%d gen_tok=%d"
++                  % (n, now - st["t0"], path, rec["reqs"], rec["prefill_reqs"],
++                     rec["sched_tok"], rec["pad_tok"], rec["pad_reqs"], rec["pad_per_rank"],
++                     fmt(rec["per_rank_reqs"]), fmt(rec["per_rank_tok"]),
++                     fmt(rec["per_rank_prefill"]), mixed, rec["gap_ms"], rec["exec_ms"],
++                     rec["sample_ms"], rec["sync_ms"], rec["cd_steps"], rec["cd_max"],
++                     rec["cd_eos"], rec["gen_tok"]), flush=True)
++        if _ENGINE_STEP_LOG_SUMMARY_EVERY > 0 and win["steps"] >= _ENGINE_STEP_LOG_SUMMARY_EVERY:
++            _engine_step_print_summary(win, n, now)
++            st["win"] = None
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_print_summary(win, n, now):
++    window_s = max(now - win["t_start"], 1e-9)
++    steps = max(win["steps"], 1)
++    by_path = ",".join("%s=%d" % (k, v) for k, v in sorted(win["by_path"].items()))
++    fill = win["sched_tok"] / win["pad_tok"] if win["pad_tok"] else 0.0
++    print("[ENGINE_STEP_SUMMARY] n=%d window_s=%.2f steps=%d by_path=%s mixed=%d "
++          "prefill_steps=%d reqs_mean=%.1f sched_tok=%d pad_tok=%d fill=%.3f "
++          "exec_ms_p50=%.1f exec_ms_p90=%.1f exec_ms_max=%.1f exec_ms_sum=%.0f "
++          "gap_ms_p50=%.1f gap_ms_p90=%.1f gap_ms_max=%.1f gap_ms_sum=%.0f "
++          "sample_ms_sum=%.0f sync_ms_sum=%.0f gen_tok=%d tok_per_s=%.1f "
++          "cd_launches=%d cd_steps_per_launch=%.2f"
++          % (n, window_s, win["steps"], by_path, win["mixed"], win["prefill_steps"],
++             win["reqs"] / steps, win["sched_tok"], win["pad_tok"], fill,
++             _engine_step_pct(win["exec_ms"], 0.5), _engine_step_pct(win["exec_ms"], 0.9),
++             max(win["exec_ms"] or [0.0]), sum(win["exec_ms"]),
++             _engine_step_pct(win["gap_ms"], 0.5), _engine_step_pct(win["gap_ms"], 0.9),
++             max(win["gap_ms"] or [0.0]), sum(win["gap_ms"]),
++             sum(win["sample_ms"]), sum(win["sync_ms"]), win["gen_tok"],
++             win["gen_tok"] / window_s, win["cd_launches"],
++             win["cd_steps"] / win["cd_launches"] if win["cd_launches"] else 0.0),
++          flush=True)
++
++
+ def _canon_logprob_m() -> Optional[int]:
+     """Return the opt-in canonical logprob row count, failing closed on bad input."""
+     raw = os.environ.get("CANON_LOGPROB_M", "")
+@@ -711,6 +946,7 @@
+         self._runner = runner
+ 
+     def get_output(self) -> ModelRunnerOutput:
++        _perf3_t_sync = time.perf_counter()
+         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+             self._runner, self._spec_decode_metadata, self._next_tokens,
+             self.logits_indices_selector,
+@@ -748,6 +984,8 @@
+                 )
+                 self._model_runner_output.routed_experts = routed_experts
+ 
++        _engine_step_sync_done(getattr(self, "_perf3_rec", None), _perf3_t_sync,
++                               valid_sampled_token_ids)
+         return self._model_runner_output
+ 
+ 
+@@ -4635,16 +4873,25 @@
+             req_id_kwargs = runner_utils.extract_request_ids_for_tracing(
+                 self.input_batch, scheduler_output)
+ 
++        _perf3_rec = _engine_step_begin(self, scheduler_output)
++        self._perf3_step_rec = _perf3_rec
+         with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(
+                 f"execute_model: {reqs} reqs, {toks} toks", **req_id_kwargs):
+             output = self._execute_model(scheduler_output,
+                                          intermediate_tensors)
++        if _perf3_rec is not None:
++            _perf3_rec["exec_ms"] = (time.perf_counter() - _perf3_rec["t_begin"]) * 1e3
++            if _perf3_rec["path"] in ("cd", "empty"):
++                # continue-decode already synced on device_get; nothing left to time.
++                self._perf3_step_rec = None
++                _engine_step_emit(_perf3_rec)
+         return output
+ 
+     def sample_tokens(
+         self,
+         grammar_output: "GrammarOutput | None",
+     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
++        self._perf3_t_sample = time.perf_counter()
+         if self._continue_decode_output is not None:
+             output = self._continue_decode_output
+             self._continue_decode_output = None
+@@ -4846,6 +5093,7 @@
+                     "Should not schedule a request that does nothing!")
+                 # raise Exception(
+                 #     "Should not schedule a request that does nothing!")
++            _engine_step_set_path(getattr(self, "_perf3_step_rec", None), "empty")
+             return EMPTY_MODEL_RUNNER_OUTPUT
+ 
+         # Check if the entire batch is in the decode phase.
+@@ -4869,6 +5117,10 @@
+             padded_num_scheduled_tokens_per_dp_rank,
+             _,
+         ) = self._prepare_inputs(scheduler_output)
++        _engine_step_shapes(getattr(self, "_perf3_step_rec", None), self, scheduler_output,
++                            req_ids_dp, padded_num_reqs,
++                            padded_num_scheduled_tokens_per_dp_rank,
++                            getattr(input_ids, "shape", (0,))[0], "std")
+ 
+         try:
+             p38_serving_seq = _p38_serving_begin(
+@@ -5210,6 +5462,10 @@
+             padded_num_scheduled_tokens_per_dp_rank,
+             tokens_indices_selector,
+         ) = self._prepare_inputs(scheduler_output)
++        _engine_step_shapes(getattr(self, "_perf3_step_rec", None), self, scheduler_output,
++                            req_ids_dp, padded_num_reqs,
++                            padded_num_scheduled_tokens_per_dp_rank,
++                            getattr(input_ids, "shape", (0,))[0], "cd")
+ 
+         init_tokens = input_ids
+         # Map active rows correctly across DP buckets by checking valid query locations.
+@@ -5505,6 +5761,8 @@
+             "continue_decode finished: actual steps: %d, reason: %s, initial_active_reqs: %d (max_steps: %d, EOS hits: %d)",
+             actual_steps, termination_reason, num_reqs, max_decode_steps,
+             num_eos_hits)
++        _engine_step_cd_result(getattr(self, "_perf3_step_rec", None), actual_steps,
++                               max_decode_steps, num_eos_hits, sampled_token_ids)
+ 
+         output = ModelRunnerOutput(
+             req_ids=self.input_batch.req_ids[:num_reqs],
+@@ -5908,6 +6166,8 @@
+                 padded_num_scheduled_tokens_per_dp_rank=
+                 padded_num_scheduled_tokens_per_dp_rank,
+                 runner=self)
++            _engine_step_sample_done(self, getattr(self, "_perf3_t_sample", None),
++                                     async_output=async_model_runner_output)
+             return async_model_runner_output
+ 
+         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+@@ -5970,6 +6230,8 @@
+             )
+             model_runner_output.routed_experts = routed_experts
+ 
++        _engine_step_sample_done(self, getattr(self, "_perf3_t_sample", None),
++                                 sampled=valid_sampled_token_ids)
+         return model_runner_output
+ 
+     @staticmethod

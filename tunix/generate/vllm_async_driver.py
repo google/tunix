@@ -85,6 +85,12 @@ class VLLMInProcessDriver:
 
     self._pending: Dict[str, RequestFuture] = {}
     self._submission_queue: list[QueuedRequest] = []
+    # perf3 engine-driver receipt: per-step wall clock and token counts, summarised
+    # every log interval as one [ENGINE_DRIVER] line.  Diagnostic only.
+    self._perf_log_enabled = os.environ.get("CANON_ENGINE_DRIVER_LOG", "1") == "1"
+    self._perf_lock = threading.Lock()
+    self._perf_window = self._new_perf_window()
+    self._perf_last_token_count: Dict[str, int] = {}
     # Monotonic (``time.perf_counter``) timestamp of the first request in the
     # current submission window; used to flush a partial batch once
     # ``submission_timeout_s`` elapses. Reset to ``None`` on each drain.
@@ -345,6 +351,7 @@ class VLLMInProcessDriver:
         self._llm_engine.do_log_stats()
       except Exception:  # pylint: disable=broad-exception-caught
         logging.exception("log_stats failed")
+      self._perf_log_line()
       self._stop_event.wait(self._log_stats_interval_s)
 
   def cancel(self, request_id: str) -> None:
@@ -401,12 +408,101 @@ class VLLMInProcessDriver:
   def resume(self) -> None:
     raise RuntimeError("Resume feature WIP")
 
+  def _new_perf_window(self) -> Dict[str, Any]:
+    return {
+        "t_start": time.perf_counter(),
+        "steps": 0,
+        "idle_polls": 0,
+        "step_ms": [],
+        "outputs": 0,
+        "finished": 0,
+        "gen_tok": 0,
+    }
+
+  def _perf_record_step(self, step_seconds: float, outputs: Sequence[Any]) -> None:
+    if not self._perf_log_enabled:
+      return
+    try:
+      with self._perf_lock:
+        window = self._perf_window
+        window["steps"] += 1
+        window["step_ms"].append(step_seconds * 1e3)
+        if not outputs:
+          window["idle_polls"] += 1
+          return
+        window["outputs"] += len(outputs)
+        for output in outputs:
+          request_id = output.request_id
+          completions = getattr(output, "outputs", None) or []
+          count = sum(len(getattr(c, "token_ids", None) or ()) for c in completions)
+          previous = self._perf_last_token_count.get(request_id, 0)
+          window["gen_tok"] += max(count - previous, 0)
+          if getattr(output, "finished", False):
+            window["finished"] += 1
+            self._perf_last_token_count.pop(request_id, None)
+          else:
+            self._perf_last_token_count[request_id] = max(count, previous)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.debug("perf window update failed", exc_info=True)
+
+  def perf_snapshot(self, reset: bool = True) -> Dict[str, Any]:
+    """Returns the current [ENGINE_DRIVER] window; resets it unless told not to."""
+    with self._perf_lock:
+      window = self._perf_window
+      if reset:
+        self._perf_window = self._new_perf_window()
+    now = time.perf_counter()
+    step_ms = sorted(window["step_ms"])
+    def pct(q: float) -> float:
+      if not step_ms:
+        return 0.0
+      return step_ms[min(len(step_ms) - 1, max(0, int(round(q * (len(step_ms) - 1)))))]
+    window_s = max(now - window["t_start"], 1e-9)
+    busy_s = sum(step_ms) / 1e3
+    return {
+        "window_s": window_s,
+        "steps": window["steps"],
+        "idle_polls": window["idle_polls"],
+        "step_ms_p50": pct(0.5),
+        "step_ms_p90": pct(0.9),
+        "step_ms_max": step_ms[-1] if step_ms else 0.0,
+        "busy_pct": 100.0 * busy_s / window_s,
+        "outputs": window["outputs"],
+        "finished": window["finished"],
+        "gen_tok": window["gen_tok"],
+        "tok_per_s": window["gen_tok"] / window_s,
+    }
+
+  def _perf_log_line(self) -> None:
+    if not self._perf_log_enabled:
+      return
+    try:
+      snap = self.perf_snapshot(reset=True)
+      if snap["steps"] == 0 and not self._pending:
+        return
+      print(
+          "[ENGINE_DRIVER] window_s=%.1f steps=%d idle_polls=%d step_ms_p50=%.1f"
+          " step_ms_p90=%.1f step_ms_max=%.1f busy_pct=%.1f outputs=%d finished=%d"
+          " gen_tok=%d tok_per_s=%.1f pending=%d"
+          % (
+              snap["window_s"], snap["steps"], snap["idle_polls"],
+              snap["step_ms_p50"], snap["step_ms_p90"], snap["step_ms_max"],
+              snap["busy_pct"], snap["outputs"], snap["finished"],
+              snap["gen_tok"], snap["tok_per_s"], len(self._pending),
+          ),
+          flush=True,
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.debug("perf log line failed", exc_info=True)
+
   def _loop(self) -> None:
     try:
       while not self._stop_event.is_set():
         if not self._wait_for_work():
           continue
+        step_started = time.perf_counter()
         outputs = self._step_engine()
+        self._perf_record_step(time.perf_counter() - step_started, outputs)
         logging.log_every_n(
             logging.DEBUG,
             "VLLMInProcessDriver loop step outputs:"
