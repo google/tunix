@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Any, Dict, List, Mapping, Sequence, Type, TypeVar
+from typing import Any, Callable, Dict, List, Mapping, Sequence, Type, TypeVar
 
 from absl import logging
 from flax import nnx
@@ -615,6 +615,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           base_environment.BaseTaskEnv
       ] = task_environment.TaskEnvironment,
       env_kwargs: Dict[str, Any] | None = None,
+      processed_batch_observer: Callable[..., None] | None = None,
   ):
     """Initializes the `GRPOTrainer`.
 
@@ -644,7 +645,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       agent_kwargs: Keyword arguments to pass to the agent class.
       env_class: The class of the environment to be used.
       env_kwargs: Keyword arguments to pass to the environment class.
+      processed_batch_observer: Optional host-side observer of the constructed
+        batch and its actual rollout/trainer logprob sources. Its return value
+        is ignored; it must not replace any loss input. Absent by default.
     """  # fmt: skip
+    self._processed_batch_observer = processed_batch_observer
     super().__init__(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
@@ -1663,6 +1668,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_weights=sampler_is_weights,
         completion_valid_mask=completion_valid_mask,
     )
+    observer = getattr(self, "_processed_batch_observer", None)
+    if observer is not None:
+      observer(
+          batch=combined_batch,
+          s_decode=rollout_per_token_logps,
+          t_old=trainer_per_token_logps,
+          completion_lengths=np.asarray(raw_completion_lengths, dtype=np.int32),
+          trajectory_ids=tuple((int(item.group_id), int(item.pair_index)) for item in trajectories),
+          mode=mode,
+          step=expected_step,
+      )
     if _p57_tim_standard_enabled(os.environ):
       _validate_p57_tim_standard(
           old_logps_source=getattr(self.algo_config, "old_logps_source", "auto"),

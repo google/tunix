@@ -828,3 +828,17 @@ Phase 9 归因捕获剩下的 3,200 次/update 里可折的 host 胶水、零值
 - **host 行长度进每组 spec(CL e0d7b1ba)**:update 开头对两条 mask 各 D2H 一次(紧跟已有的 action-mask 子集同步)求行和,按 split 程序同一 rank-major 分组后作 `host_prompt_length/host_completion_length` 传入,每组的 `group_lengths` 程序与 `device_get` 同步消失;pack 程序仍产 `lengths_match`,update 末一次同步校验(不匹配 fatal)。−32 次、−32 次同步。
 - **train example 一次 commit 到引擎 mesh(CL 7ac9338b)**:`_p32_commit_example` 把 loss 读的 9 个叶 replicated 放到引擎 mesh(新对象,调用者的 example 不动),`_p32_group_index_scalar` 给 stream_step 一个按值缓存的 committed 组索引;stream/oracle/split 每组的 `jit__multi_slice` 与 host 拷贝消失。
   收据:`…dp2tp2-v2disp_p11_dp2_20260907_r1`(lane 7ac9338b)vs control `…v2disp_p9_dp2_20260907_r1`:派发 **3,200 → 3,040**(`jit__multi_slice` 67 → 2、`jit__lambda` 96 → 32、`jit_group_lengths` 32 → 0、`jit_fwd_glue_zeros` 32 → 0、`jit_forward_zeros` 32),锚三值逐位,A=B=C 96/96,普查全 GREEN(classifier 只余惯例 trace 红),HBM 39.48 → 39.51 GiB(+0.1%),warm 5.48 → 5.44 s。反向侧嵌套两类(Phase 7、Phase 10)封存后,dp2-tp2 每 pass 47.5 次里 28 次是必要的 mapped pullback,剩余为每 chunk 一次的命名程序与每组的累加/检查。
+
+## Gemma E2B default three-arm preparation (2026-09-11)
+
+No new CANON runtime name. The isolated example owns one required CLI arm
+enum native/tis/zero; it derives the treatment from the checked-in default
+YAML and rejects foreign CANON/FL/T environment keys even when empty or 0.
+The worker consumes the immutable resolved contract. Native selects rollout
+old-logps without IS; TIS selects trainer-old plus detached token IS. Zero is
+planned and explicitly refuses execution until its Gemma adapter and B/D
+collectors exist. No Qwen, E4B, P45 or M15 selector certifies E2B.
+CPU tests cover opposite-arm/unknown/duplicate input rejection and actual
+learner old-logps ownership. Details and missing target work:
+`tasks/gemma4-e2b-default-three-arm/HANDOFF.md`. This is construction only,
+not a new certified default or a flag retirement.

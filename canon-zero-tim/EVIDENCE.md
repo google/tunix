@@ -260,3 +260,35 @@ no new-geometry full-model gradient, convergence, speed or GCS/Orbax claim.
 - Post-rebase host logs under `/home/yuxuan/code_rl_repro/tasks/check_is_importance/evidence/`: `publication_p57_r1.log`,263/263 PASS,SHA256 `394833a2e41e0c0c3e326c0ab6721b06625628286624a9a60861a946a1fe8e4a`; `publication_v1_r1.log`,108/108 PASS,SHA256 `b29facd8c700ad085c878743f244fd784f0dc88fbf76fd4c21340929b330a4e2`; `publication_flags_r1.log`,439/439 PASS,SHA256 `6b49fd1c7bae151a2edda03883228d6524234f45c83c5ebecec57b8167fc354d`. Clean preflight also passed before this docs-only audit amendment (raw path/SHA in audit).
 - All code-CL tracked blobs outside the 14 incoming log files match the pre-rebase code CL. No runtime/image/mesh drift; prior complete and final-focused pinned-image receipts still apply at their CPU-only claim level. Base YAML scheduling, algo_core, engine shims and overlay MANIFEST unchanged. No TPU rerun and **TARGET NOT RUN**.
 - Next operator uses STANDARD64.md from the clean full published SHA after exact remote readback; production source/image/model/data binding and any launch still require their own gate/approval. This is the trainer-old/no-TIS baseline, not a Zero-TIM claim or a relabel of historical Native.
+## Gemma E2B default preparation — CPU construction, not target
+
+External evidence root:
+`/home/yuxuan/code_rl_repro/tasks/zero_tim_gemma_frozenlake_eval/evidence/`.
+`e2b_default_cpu_r3`: initial17/17 image gate, SHA256SUMS digest
+`3180f18d814d1a15e56ed5d0475bdc749a328485bdb9869275648098cf8a0fe7`.
+`e2b_default_cpu_r7`: expanded Gemma34/34, flags410/410, T0 18/18 pass;
+aggregate RED for two pre-existing P33 fixture errors plus CPU W&B login.
+Its SHA256SUMS digest is
+`2560d9a3659429313966532d3cd34cd0ea328ebee605aa496f50430039eae96e`.
+The fixture and CPU offline logging are repaired, pending full rerun.
+All failed receipts remain immutable. See the E2B handoff for scope.
+No production Gemma canonical adapter, target arithmetic, TPU capacity,
+optimizer, checkpoint/resume, throughput or TARGET PASS is certified here.
+
+Expanded `e2b_default_cpu_r10` again passes Gemma37/37 and flags410/410;
+aggregate RED is retained for two stale existing P33 fixture fields. Its
+manifest SHA is
+`3789e023a3d8315e781d8b579c748412f4672a17fba31af01e2536942633f647`.
+The complete registered GSM8K spec and fake global counter replace those
+incomplete test objects; the isolated `p33_fixture_probe_r1.log` is2/2 PASS.
+No P33 runtime, geometry registry or arithmetic was altered.
+
+Final offline `e2b_default_cpu_r11`: GREEN for Gemma37/37, existing GRPO49/49,
+canonical3/3, E4B3/3, host recipe10/10, artifacts5/5, flags410/410 and diff
+check. All11 manifest members verify; SHA256SUMS digest
+`996b9ed3514838116ccd93b6fbc6df72ae9d5bba7b7518d17d927efeca1c2b98`.
+R1–R10 manifests also reverified without changing their classifications.
+The installed-method PLE difference is469 elements/max4.76837158203125e-7;
+the probe detects stock disagreement, not parity. Zero adapter/B/D, real
+weights, HBM, TPU RPA and target training remain unimplemented or untested,
+as enumerated in the handoff. Source is still an uncommitted local delta.

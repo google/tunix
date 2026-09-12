@@ -45,6 +45,7 @@ from tunix.generate import tokenizer_adapter
 from tunix.rl import algo_core
 from tunix.rl import alignment
 from tunix.rl import common as rl_common
+from tunix.rl import dp_workloads
 from tunix.rl import function_registry
 from tunix.rl.inference import inference_worker
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -437,6 +438,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
                   local_index + 16 * rank for rank in range(16)
               ),
               "gradient_nonzero": 256,
+              "gradient_finite": True,
           })
         return {
             "loss": jnp.asarray(1.0, jnp.float32),
@@ -470,6 +472,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         reference=None,
         inference_worker=None,
         buffer_metrics_async=lambda *args, **kwargs: None,
+        global_steps=0,
         _get_mesh_and_logical_axis_rules_cm=lambda role: contextlib.nullcontext(),
     )
     learner = object.__new__(agentic_grpo_learner.GRPOLearner)
@@ -479,9 +482,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         completion_ids=jnp.zeros((256, 2), jnp.int32)
     )
     sidecar = {"value": jnp.zeros((256, 2), jnp.float32)}
-    workload = types.SimpleNamespace(
-        name="gsm8k", global_trajectories=256, local_trajectories=16
-    )
+    workload = dp_workloads.get_workload("gsm8k")
     env = {
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_ALIGNMENT_TRAIN": "1",
@@ -494,6 +495,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P33_RUN_STAGE": "one-update",
+        "CANON_LOCAL_TRAJECTORIES": "16",
         "CANON_P29_FULL_TRAIN": "0",
     }
     with tempfile.TemporaryDirectory() as directory:
@@ -763,6 +765,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
                   local_index + 16 * rank for rank in range(16)
               ),
               "gradient_nonzero": 256,
+              "gradient_finite": True,
           })
         return {
             "loss": jnp.asarray(1.0, jnp.float32),
@@ -814,9 +817,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         completion_ids=jnp.zeros((256, 2), jnp.int32)
     )
     sidecar = {"value": jnp.zeros((256, 2), jnp.float32)}
-    workload = types.SimpleNamespace(
-        global_trajectories=256, local_trajectories=16
-    )
+    workload = dp_workloads.get_workload("gsm8k")
     env = {
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
@@ -824,6 +825,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P33_NO_COMMIT": "1",
         "CANON_P29_FULL_TRAIN": "1",
+        "CANON_LOCAL_TRAJECTORIES": "16",
     }
     with tempfile.TemporaryDirectory() as directory:
       report_path = os.path.join(directory, "no_commit.json")
@@ -2983,6 +2985,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertIsNone(prompt_queue.get_nowait())
 
   def test_trajectory_logging(self):
+    # The installed W&B backend registers process-global JAX listeners. This
+    # logging test must not leave callbacks into a finished run for later tests.
+    register_scalar = jax.monitoring.register_scalar_listener
+    def register_owned_scalar(callback):
+      register_scalar(callback)
+      self.addCleanup(jax.monitoring.unregister_scalar_listener, callback)
+    self.enterContext(mock.patch.object(
+        jax.monitoring, "register_scalar_listener", side_effect=register_owned_scalar
+    ))
     log_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, log_dir)
     vocab = _mock_vocab()
