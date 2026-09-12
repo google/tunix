@@ -341,6 +341,18 @@ class P1RecipeTest(unittest.TestCase):
   def test_launch_preflight_trio_is_closed_and_detects_drift(self):
     preflight = _load_script("preflight_p1_launch.py")
     renderer = _load_script("render_p1_onehost_stock_admission.py")
+    real_git = preflight._git
+
+    def admitted_branch(repo, *args):
+      if args == ("branch", "--show-current"):
+        return preflight.EXPECTED_BRANCH
+      return real_git(repo, *args)
+
+    # The runtime branch guard remains unchanged. A unit test of its admitted
+    # identity must not depend on the branch hosting the test checkout.
+    self.enterContext(mock.patch.object(
+        preflight, "_git", side_effect=admitted_branch
+    ))
     manifest = renderer.render(REPO, "p45", renderer.PINNED_IMAGE_DIGEST)
     env = {
         **preflight.EXPECTED_ENV,
@@ -359,6 +371,10 @@ class P1RecipeTest(unittest.TestCase):
     failed = preflight.evaluate(REPO, "p45", drifted, env)
     self.assertIn("intent_diff", failed["failures"])
     self.assertEqual(failed["intent_diff"]["status"], "FAIL")
+    with mock.patch.object(preflight, "_git", return_value="local/wrong-branch"):
+      wrong_branch = preflight.evaluate(REPO, "p45", manifest, env)
+    self.assertEqual(wrong_branch["verdict"], "FAIL")
+    self.assertIn("branch", wrong_branch["intent_diff"]["failures"])
 
   def test_classifier_requires_every_receipt_and_hbm_headroom(self):
     classifier = _load_script("classify_p1_admission.py")
