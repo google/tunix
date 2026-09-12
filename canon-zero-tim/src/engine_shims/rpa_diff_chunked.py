@@ -31,10 +31,24 @@ def _varying_like(value, *refs):
     """
     axes = set()
     for ref in refs:
-        axes |= set(getattr(jax.typeof(ref), "vma", ()) or ())
+        axes |= _varying_axes(jax.typeof(ref))
     if not axes:
         return value
     return jax.lax.pcast(value, tuple(sorted(axes)), to="varying")
+
+
+def _varying_axes(aval):
+    """Mesh axes an abstract value varies over, across the two JAX spellings.
+
+    jax 0.10 (the container) types values with ``manual_axis_type.varying``;
+    jax 0.9 (the host venv) exposes the same set as ``vma``.  Reading only
+    ``vma`` on 0.10 finds nothing and leaves a carry replicated, which is
+    exactly the failure ztp3_e2c_v_20260911_r3 reproduced.
+    """
+    mat = getattr(aval, "manual_axis_type", None)
+    if mat is not None:
+        return frozenset(getattr(mat, "varying", ()) or ())
+    return frozenset(getattr(aval, "vma", ()) or ())
 
 
 def blockwise_vjp_enabled():

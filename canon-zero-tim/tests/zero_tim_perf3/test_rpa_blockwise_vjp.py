@@ -91,3 +91,23 @@ def test_blockwise_runs_inside_a_checked_shard_map_one_head_slice_per_rank():
   got = mapped(q, k, v, cache, kv_len, q_len_a, tbl, g_out)
   for name, a, b in zip(("dq", "dk", "dv", "dcache"), got, ref):
     np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6, err_msg=name)
+
+
+def test_varying_axes_reads_both_jax_spellings():
+  class _Mat:
+    varying = frozenset({"data", "model"})
+
+  class _New:  # jax >= 0.10: ShapedArray.manual_axis_type
+    manual_axis_type = _Mat()
+
+  class _Old:  # jax <= 0.9: ShapedArray.vma
+    vma = frozenset({"data"})
+
+  class _Plain:
+    pass
+
+  assert rdc._varying_axes(_New()) == frozenset({"data", "model"})
+  assert rdc._varying_axes(_Old()) == frozenset({"data"})
+  assert rdc._varying_axes(_Plain()) == frozenset()
+  # the live aval on this host reports the axes the checked shard_map test relies on
+  assert rdc._varying_axes(jax.typeof(jnp.zeros((2,), jnp.float32))) == frozenset()
