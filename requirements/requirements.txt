@@ -1,1 +1,2 @@
-vllm @ git+https://github.com/vllm-project/vllm.git@d626108b1841888ec90aced33367149a6bbc7e4b
+# TODO (tunix-dev): Re-align tpu-inference pin (requirements/special_requirements.txt) and the container image tag on the next nightly image bump.
+vllm @ git+https://github.com/vllm-project/vllm.git@51da0ca66c8065619c79e35dff97aa99aeaf5644
