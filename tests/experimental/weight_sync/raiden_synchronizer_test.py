@@ -419,7 +419,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
     def _dev(task_id):
       # Pathways: one client process drives every worker, so process_index is
       # 0 on every proxy device and only task_id separates the hosts.
-      return mock.Mock(task_id=task_id, process_index=0)
+      return mock.Mock(task_id=task_id, process_index=0, slice_index=None)
 
     with mock.patch.dict("os.environ", {}, clear=True):
       # 8 devices over 2 hosts -> 4 per host, despite a single process_index.
@@ -438,15 +438,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
           raiden_synchronizer._devices_per_host([object(), object()]), 2
       )
 
-    # Explicit override wins when it divides the device count, and is ignored
-    # when it does not.
-    devices = [_dev(t) for t in (0, 0, 1, 1)]
-    with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "4"}):
-      self.assertEqual(raiden_synchronizer._devices_per_host(devices), 4)
-    with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "3"}):
-      self.assertEqual(raiden_synchronizer._devices_per_host(devices), 2)
-
-  def test_devices_per_host_proxy_defaults_and_env_override(self):
+  def test_devices_per_host_proxy_defaults(self):
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
       sync = raiden_synchronizer.RaidenSynchronizer("trainer")
       mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
@@ -471,16 +463,33 @@ class RaidenSynchronizerTest(absltest.TestCase):
             1,
         )
 
-        # An override that does not divide the device count is refused rather
-        # than overstating num_shards.
-        with mock.patch.dict("os.environ", {"RAIDEN_DEVICES_PER_HOST": "8"}):
-          sync._init_ffi_transport(is_d2h=True)
-          self.assertEqual(
-              ffi.init_weight_synchronizer_and_d2h.call_args.kwargs[
-                  "num_shards"
-              ],
-              1,
-          )
+  def test_devices_per_host_pathways_logical_task(self):
+    class FakePathwaysDevice:
+
+      def __init__(self, logical_task, slice_id=0):
+        self.slice_index = slice_id
+        self.process_index = 0
+        self._logical_task = logical_task
+        self._slice_id = slice_id
+
+      def __repr__(self):
+        return (
+            "device(0,TPU,coords=[0,0,0],logical_task="
+            f"{self._logical_task},slice={self._slice_id})"
+        )
+
+    with mock.patch.object(
+        raiden_synchronizer.mesh.topology,
+        "_is_pathways_backend_used",
+        return_value=True,
+    ):
+      # TPU v4/v5p: 4 devices per host across 2 hosts
+      v5p_devices = [FakePathwaysDevice(t) for t in (0, 0, 0, 0, 1, 1, 1, 1)]
+      self.assertEqual(raiden_synchronizer._devices_per_host(v5p_devices), 4)
+
+      # TPU v7x: 8 devices per host across 2 hosts
+      v7x_devices = [FakePathwaysDevice(t) for t in [0] * 8 + [1] * 8]
+      self.assertEqual(raiden_synchronizer._devices_per_host(v7x_devices), 8)
 
   def test_metadata_transport_mode_follows_platform(self):
     fake_wheel = mock.MagicMock()

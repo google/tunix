@@ -198,10 +198,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
-      default=True,
+      default=False,
       nargs="?",
       const=True,
-      help="Prefuse MoE weights for MaxText training.",
+      help=(
+          "Prefuse MoE weights (w0/w1). Off for the trainer."
+      ),
   )
   parser.add_argument(
       "--use_weight_converter",
@@ -368,16 +370,37 @@ class _MeshBoundTrainer:
       self._trainer.close()
 
 
+def _checkpointing_options(args) -> Any:
+  """Builds the Orbax options; `save_interval_steps=0` means "never save".
+
+  Orbax's FixedIntervalPolicy takes `step % save_interval_steps`, so 0 has to
+  become `read_only` rather than being passed through. Restoring is a separate
+  path and keeps working, which is what makes 0 usable for short smoke tests.
+  """
+  if args.checkpoint_save_interval_steps < 0:
+    raise ValueError(
+        "checkpoint_save_interval_steps must be non-negative, got"
+        f" {args.checkpoint_save_interval_steps}."
+    )
+  if args.checkpoint_save_interval_steps == 0:
+    logging.info(
+        "checkpoint_save_interval_steps=0; checkpoint saving is disabled "
+        "(restore is unaffected)."
+    )
+    return ocp.CheckpointManagerOptions(read_only=True)
+  return ocp.CheckpointManagerOptions(
+      save_interval_steps=args.checkpoint_save_interval_steps,
+      max_to_keep=args.checkpoint_max_to_keep,
+  )
+
+
 def _create_maxtext_trainer_factory(args) -> Any:
   """Creates the trainer factory function for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
   )
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=args.checkpoint_save_interval_steps,
-      max_to_keep=args.checkpoint_max_to_keep,
-  )
+  checkpointing_options = _checkpointing_options(args)
   grad_accumulation_steps = max(
       1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
   )
@@ -463,10 +486,7 @@ def _create_tunix_trainer_factory(args) -> Any:
   actor_model = _load_actor_model(args, mesh, lora=args.use_lora)
 
   logging.info("Building PeftTrainer v2 config...")
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=args.checkpoint_save_interval_steps,
-      max_to_keep=args.checkpoint_max_to_keep,
-  )
+  checkpointing_options = _checkpointing_options(args)
   training_config = peft_trainer_v2.TrainingConfig(
       eval_every_n_steps=args.eval_every_n_steps,
       gradient_accumulation_steps=grad_accumulation_steps,

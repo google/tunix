@@ -45,6 +45,50 @@ def get_tokenizer_pad_id(
   return int(pad_id) if pad_id is not None else 0
 
 
+# vLLM instantiates a model class by the HF `architectures` entry, so this is
+# what selects maxtext_vllm_adapter's `MaxTextForCausalLM` over the stock
+# vLLM implementation. Pass it as the engine's `hf_overrides`.
+VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
+
+
+def build_vllm_maxtext_additional_config(
+    model_name: str,
+    *,
+    attention: str = "",
+    prefuse_moe_weights: bool | None = None,
+) -> dict[str, Any]:
+  """Builds the vLLM `additional_config` a MaxText rollout model reads.
+
+  `MaxTextForCausalLM` builds its own MaxText config from
+  `additional_config["maxtext_config"]`; these are the inference-side overrides
+  that make it match the trainer's model. Kept here so the in-process and
+  server-mode samplers cannot drift apart.
+
+  Args:
+    model_name: MaxText model name, e.g. `qwen3-1.7b`.
+    attention: MaxText attention kernel override; MaxText's default is used
+      when empty.
+    prefuse_moe_weights: Whether the rollout expects w0/w1 pre-fused into the
+      TPU GMM layout. None leaves MaxText's default in place.
+
+  Returns:
+    The `additional_config` mapping to hand to the vLLM engine.
+  """
+  overrides: dict[str, Any] = {
+      "model_name": model_name,
+      "model_call_mode": "inference",
+      "enable_dp_attention": False,
+      "allow_split_physical_axes": True,
+      "log_config": False,
+      "weight_dtype": "bfloat16",
+  }
+  if prefuse_moe_weights is not None:
+    overrides["prefuse_moe_weights"] = prefuse_moe_weights
+  if attention:
+    overrides["attention"] = attention
+  return {"maxtext_config": overrides}
+
+
 def build_maxtext_config(
     model_name: str,
     worker_id: str = "",
@@ -210,13 +254,26 @@ def build_maxtext_config(
   ]
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
-  # Checkpointing configs
-  if checkpointing_options:
+  # Checkpointing configs. `save_interval_steps=0` means "never save"
+  save_interval_steps = int(
+      getattr(checkpointing_options, "save_interval_steps", 0) or 0
+  )
+  if checkpointing_options is not None and save_interval_steps < 0:
+    raise ValueError(
+        f"checkpoint save_interval_steps must be non-negative, got {save_interval_steps}."
+    )
+  if checkpointing_options is not None and save_interval_steps > 0:
     argv.extend([
         "enable_checkpointing=True",
-        f"checkpoint_period={checkpointing_options.save_interval_steps}",
+        f"checkpoint_period={save_interval_steps}",
         f"max_num_checkpoints_to_keep={checkpointing_options.max_to_keep}",
     ])
+  elif checkpointing_options is not None:
+    logging.info(
+        "checkpoint save_interval_steps=0; disabling checkpoint saving "
+        "(load_parameters_path still restores)."
+    )
+    argv.append("enable_checkpointing=False")
   elif load_parameters_path:
     argv.append("enable_checkpointing=True")
   else:
@@ -267,6 +324,19 @@ def build_maxtext_config(
           else []
       ),
   ])
+  # Pathways persistence: let the TPU workers write the checkpoint themselves
+  # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
+  # default (see maxtext/common/checkpoint_context.py), so both must be off
+  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
+    logging.info(
+        "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
+        "persistence handler can save directly from the TPU workers."
+    )
+    argv.extend([
+        "checkpoint_storage_use_ocdbt=false",
+        "checkpoint_storage_use_zarr3=false",
+    ])
+
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
 

@@ -30,6 +30,7 @@ import jax
 from jax.experimental import compute_on
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
+from tunix.utils import mesh
 
 
 def _log_rss(tag: str) -> None:
@@ -224,10 +225,26 @@ def _bindable(arr: Any, *, allow_proxy: bool = False) -> bool:
     return False
 
 
+_KV_CACHE_SEGMENTS = frozenset(
+    {"cache", "cached_prefill_key", "cached_prefill_value"}
+)
+
+
+def _is_kv_cache(name: str) -> bool:
+  """True for inference KV-cache buffers, which are not weights.
+
+  The rollout's MaxText model carries per-layer KV cache arrays
+  (`...['attention']['cache']['cached_prefill_key']`). They are floating point
+  and rank>=1, so `_bindable` accepts them, but the trainer has no counterpart
+  and manifest preflight then rejects them as destination-only variables.
+  """
+  return any(seg in _KV_CACHE_SEGMENTS for seg in _param_key(name).split("."))
+
+
 def _filter_bindable(
     names: List[str], arrays: List[Any], *, allow_proxy: bool = False
 ) -> Tuple[List[str], List[Any]]:
-  """Drops leaves _bindable rejects."""
+  """Drops leaves _bindable rejects, plus inference-only KV cache buffers."""
   logging.vlog(
       1,
       "raiden bind census: %s",
@@ -238,13 +255,22 @@ def _filter_bindable(
   keep_names: List[str] = []
   keep_arrays: List[Any] = []
   dropped = []
+  cache_dropped = []
   for name, arr in zip(names, arrays):
-    if _bindable(arr, allow_proxy=allow_proxy):
+    if _is_kv_cache(name):
+      cache_dropped.append(name)
+    elif _bindable(arr, allow_proxy=allow_proxy):
       arr.block_until_ready()
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
       dropped.append(name)
+  if cache_dropped:
+    logging.debug(
+        "raiden bind skipped %d KV-cache leaves: %s",
+        len(cache_dropped),
+        cache_dropped[:5],
+    )
   if dropped:
     logging.warning(
         "raiden bind dropped %d unbindable leaves: %s", len(dropped), dropped[:5]
@@ -270,35 +296,29 @@ def _devices_per_host(devices: List[Any]) -> int:
   -1 -- the transfer then completes green while delivering only the shards one
   host happened to own.
 
-  Groups by `task_id`: under Pathways one client process drives every worker,
-  so all proxy devices report `process_index == 0` and anything derived from it
-  collapses to len(devices) -- the overstatement above.
+  Groups by host key (resolving Pathways `logical_task` or `process_index` via
+  mesh topology).
   """
-  env = os.environ.get("RAIDEN_DEVICES_PER_HOST")
-  if env:
-    n = int(env)
-    if n > 0 and len(devices) % n == 0:
-      return n
-    logging.warning(
-        "ignoring RAIDEN_DEVICES_PER_HOST=%s: not a divisor of %d devices",
-        env,
-        len(devices),
-    )
+  host_keys = [mesh.device_host_key(d) for d in devices]
+  per_host = collections.Counter(k for k in host_keys if k is not None)
   per_task = collections.Counter(getattr(d, "task_id", None) for d in devices)
   del per_task[None]
-  if not per_task:
+  if len(per_task) > len(per_host):
+    per_host = per_task
+
+  if not per_host:
     logging.warning(
-        "no task_id on any of %d device(s); assuming a single host",
+        "no host or task metadata on any of %d device(s); assuming a single host",
         len(devices),
     )
     return len(devices)
-  counts = set(per_task.values())
+  counts = set(per_host.values())
   if len(counts) > 1:
     # No right answer for a ragged slice; understating only wastes staging,
     # overstating drops another host's shards.
     logging.warning(
-        "uneven devices per task_id %s; using the smallest (%d)",
-        dict(per_task),
+        "uneven devices per host %s; using the smallest (%d)",
+        dict(per_host),
         min(counts),
     )
     return min(counts)
@@ -795,8 +815,13 @@ class RaidenSynchronizer:
       # Advertise the same mesh the shards were built on.
       mesh_axes = tuple(mesh.axis_names)
       mesh_shape = tuple(int(mesh.shape[a]) for a in mesh.axis_names)
+    # Publish the canonical key, not the raw keystr: the controller pairs
+    # variables by EXACT name, and the two sides root the same tree
+    # differently (trainer `['base'][...]` vs rollout `['model'][...]`, plus
+    # the nnx `.value` leaf). `_param_key` already normalises both away, so
+    # canonicalising here is what makes the manifests line up.
     variables = tuple(
-        _tensor_metadata(name, arr, idx)
+        _tensor_metadata(_param_key(name), arr, idx)
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
     if self._is_proxy:

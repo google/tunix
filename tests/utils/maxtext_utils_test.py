@@ -374,6 +374,49 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("Could not import compute_padded_moe_mlp_dim", log_text)
       self.assertIn("Skipping automatic MoE dimension padding", log_text)
 
+  def _build_config_argv(self, **kwargs):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      maxtext_utils.build_maxtext_config(model_name="gemma2-9b", **kwargs)
+    return mock_pyconfig.initialize.call_args[0][0]
+
+  def test_checkpoint_save_interval_zero_disables_saving(self):
+    # Saving off, but the warm start from load_parameters_path is untouched.
+    argv = self._build_config_argv(
+        load_parameters_path="gs://bucket/ckpt",
+        checkpointing_options=mock.MagicMock(
+            save_interval_steps=0, max_to_keep=10
+        ),
+    )
+    self.assertIn("enable_checkpointing=False", argv)
+    self.assertIn("load_parameters_path=gs://bucket/ckpt", argv)
+    self.assertNotIn("enable_checkpointing=True", argv)
+
+  def test_checkpoint_save_interval_positive_enables_saving(self):
+    argv = self._build_config_argv(
+        checkpointing_options=mock.MagicMock(
+            save_interval_steps=5, max_to_keep=3
+        ),
+    )
+    self.assertIn("enable_checkpointing=True", argv)
+    self.assertIn("checkpoint_period=5", argv)
+    self.assertIn("max_num_checkpoints_to_keep=3", argv)
+
+  def test_checkpoint_save_interval_negative_raises(self):
+    with self.assertRaisesRegex(ValueError, "must be non-negative"):
+      self._build_config_argv(
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=-1, max_to_keep=3
+          ),
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
