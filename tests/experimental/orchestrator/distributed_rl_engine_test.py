@@ -989,6 +989,19 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_rollouts_distributes_round_robin_without_prefix_hash(self):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [{"prompt": "Hello", "prompt_id": "p_123"}],
+          group_size=2,
+          policy_version=1,
+      )
+      self.assertEqual(req_ids, ["req_p_123_g0_v1", "req_p_123_g1_v1"])
+      self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
+      self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
+
+    asyncio.run(_run())
+
   def test_dispatch_rollouts_handles_none_metadata(self):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(

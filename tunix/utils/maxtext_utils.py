@@ -273,7 +273,13 @@ def build_maxtext_config(
         "checkpoint save_interval_steps=0; disabling checkpoint saving "
         "(load_parameters_path still restores)."
     )
-    argv.append("enable_checkpointing=False")
+    if load_parameters_path:
+      # MaxText config validation requires enable_checkpointing=True when
+      # load_parameters_path is set. We initialize with True and disable saving
+      # via config._flat_config post-initialization.
+      argv.append("enable_checkpointing=True")
+    else:
+      argv.append("enable_checkpointing=False")
   elif load_parameters_path:
     argv.append("enable_checkpointing=True")
   else:
@@ -338,7 +344,21 @@ def build_maxtext_config(
     ])
 
   logging.info("MaxText config argv: %s", argv)
-  return pyconfig.initialize(argv)
+  config = pyconfig.initialize(argv)
+
+  # When save_interval_steps=0 or DISABLE_CHECKPOINTING is set, disable checkpoint saving
+  # post-initialization. MaxText requires enable_checkpointing=True at initialization time
+  # when load_parameters_path is set to restore weights.
+  if (
+      checkpointing_options is not None and save_interval_steps == 0
+  ) or os.environ.get("DISABLE_CHECKPOINTING", "").lower() in (
+      "1",
+      "true",
+      "yes",
+  ):
+    config._flat_config["enable_checkpointing"] = False  # pylint: disable=protected-access
+
+  return config
 
 
 def create_maxtext_mesh(maxtext_config: Any) -> Any:

@@ -142,9 +142,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           group_index,
           req.request_id,
       )
-      route_key = req.request_id
+      route_key = (req.metadata or {}).get("prefix_hash")
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+          kwargs={"route_key": route_key} if route_key is not None else {}
       )
       res = worker.dispatch_task(method_name="generate", requests=[req])
       if inspect.isawaitable(res):
@@ -219,7 +219,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         request_metadata.update(item_metadata)
         request_metadata["group_index"] = group_index
         request_metadata["group_size"] = group_size
-        request_metadata.setdefault("prefix_hash", prompt_id)
         if isinstance(request_metadata.get("env_config"), Mapping):
           env_config = dict(request_metadata["env_config"])
           env_config["group_index"] = group_index
@@ -381,9 +380,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         collections.defaultdict(list)
     )
     for req in requests:
-      route_key = req.request_id
+      route_key = (req.metadata or {}).get("prefix_hash")
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
+          kwargs={"route_key": route_key} if route_key is not None else {}
       )
       worker_to_requests[worker].append(req)
 

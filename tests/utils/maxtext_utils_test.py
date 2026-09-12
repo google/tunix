@@ -388,16 +388,24 @@ class MaxTextUtilsTest(absltest.TestCase):
     return mock_pyconfig.initialize.call_args[0][0]
 
   def test_checkpoint_save_interval_zero_disables_saving(self):
-    # Saving off, but the warm start from load_parameters_path is untouched.
-    argv = self._build_config_argv(
+    # MaxText config validation requires enable_checkpointing=True when
+    # load_parameters_path is set. Saving is disabled post-initialization.
+    argv_with_load = self._build_config_argv(
         load_parameters_path="gs://bucket/ckpt",
         checkpointing_options=mock.MagicMock(
             save_interval_steps=0, max_to_keep=10
         ),
     )
-    self.assertIn("enable_checkpointing=False", argv)
-    self.assertIn("load_parameters_path=gs://bucket/ckpt", argv)
-    self.assertNotIn("enable_checkpointing=True", argv)
+    self.assertIn("enable_checkpointing=True", argv_with_load)
+    self.assertIn("load_parameters_path=gs://bucket/ckpt", argv_with_load)
+
+    # Without load_parameters_path, enable_checkpointing=False is passed directly.
+    argv_no_load = self._build_config_argv(
+        checkpointing_options=mock.MagicMock(
+            save_interval_steps=0, max_to_keep=10
+        ),
+    )
+    self.assertIn("enable_checkpointing=False", argv_no_load)
 
   def test_checkpoint_save_interval_positive_enables_saving(self):
     argv = self._build_config_argv(
