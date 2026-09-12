@@ -49,7 +49,9 @@ def test_plain_pullback_matches_replica(m, k, n):
 
 def test_switch(monkeypatch):
   monkeypatch.delenv(ops.PLAIN_VJP_ENV, raising=False)
-  assert not ops.plain_matmul_vjp_enabled()
+  assert ops.plain_matmul_vjp_enabled()  # Phase H: the plain pullback is the default
+  monkeypatch.setenv(ops.PLAIN_VJP_ENV, "0")
+  assert not ops.plain_matmul_vjp_enabled()  # explicit A/B path: the K-block replica pullback
   monkeypatch.setenv(ops.PLAIN_VJP_ENV, "1")
   assert ops.plain_matmul_vjp_enabled()
   monkeypatch.setenv(ops.PLAIN_VJP_ENV, "2")

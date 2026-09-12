@@ -56,15 +56,20 @@ _PLAIN_RECEIPT = set()
 
 
 def plain_matmul_vjp_enabled():
+    """Default on (tasks/zero_tim_perf3 Phase H): the projection pullbacks are
+    JAX's transposes of one plain bf16 dot.  ``CANON_MATMUL_VJP_PLAIN=0`` keeps
+    the K-block replica pullback as an explicit A/B path until the plain
+    pullback has been exercised at tp8 on the 64-chip wave."""
     import os
 
-    value = os.environ.get(PLAIN_VJP_ENV, "0")
+    value = os.environ.get(PLAIN_VJP_ENV, "1")
     if value not in ("0", "1"):
         raise ValueError(f"{PLAIN_VJP_ENV} must be unset, 0 or 1, got {value!r}")
-    if value == "1" and "on" not in _PLAIN_RECEIPT:
-        _PLAIN_RECEIPT.add("on")
-        print(f"[PATHTRACE] {PLAIN_VJP_ENV}=1 projection VJPs use plain f32 dots "
-              "(dX = cot.W^T, dW = X^T.cot)", flush=True)
+    if value not in _PLAIN_RECEIPT:
+        _PLAIN_RECEIPT.add(value)
+        print(f"[PATHTRACE] {PLAIN_VJP_ENV}={value} projection VJPs use "
+              + ("plain bf16 dots (dX = cot.W^T, dW = X^T.cot; default)" if value == "1"
+                 else "the K-block replica pullback (explicit A/B path)"), flush=True)
     return value == "1"
 
 
