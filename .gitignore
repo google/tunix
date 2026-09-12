@@ -10,8 +10,10 @@
 .idea
 .vscode
 .envrc
+tmp/
 
 # virtualenv/venv directories
+**/.venv/
 /venv/
 /bin/
 /include/
