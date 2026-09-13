@@ -951,15 +951,58 @@ if ROLLOUT_ENGINE == "vllm":
           MODEL_PATH,
           SCAN_LAYERS,
       )
-      model, _ = AutoModel.from_pretrained(
-          model_id=MODEL_VERSION,
-          mesh=mesh,
-          model_source=ModelSource.MAXTEXT,
-          model_path=MODEL_PATH,
-          enable_checkpointing=True,
-          allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
-          scan_layers=SCAN_LAYERS,
-          checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
+      from maxtext.configs import pyconfig
+      from maxtext import model_creation_utils
+
+      base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
+      model_name_slug = MODEL_VERSION.lower().split("/")[-1]
+
+      trainer_config = pyconfig.initialize(
+          [
+              "",
+              base_yml,
+              "num_slices=1",
+              f"model_name={model_name_slug}",
+              f"load_parameters_path={MODEL_PATH}",
+              f"ici_fsdp_parallelism={MESH_FSDP}",
+              f"ici_tensor_parallelism={MESH_TP}",
+              f"scan_layers={SCAN_LAYERS}",
+              f"max_target_length={MAX_MODEL_LEN}",
+              f"max_prefill_predict_length={MAX_PREFILL_LENGTH}",
+              "remat_policy=none",
+              f"dtype={WEIGHT_DTYPE}",
+              f"attention={'flash' if MAXTEXT_ATTENTION == 'flash' else 'dot_product'}",
+              f"prefuse_moe_weights={PREFUSE_MOE_WEIGHTS}",
+              f"checkpoint_storage_use_ocdbt={CHECKPOINT_STORAGE_USE_OCDBT}",
+              f"checkpoint_storage_use_zarr3={CHECKPOINT_STORAGE_USE_ZARR3}",
+              f"checkpoint_storage_concurrent_gb={CHECKPOINT_STORAGE_CONCURRENT_GB}",
+              f"allow_split_physical_axes={ALLOW_SPLIT_PHYSICAL_AXES}",
+              "skip_jax_distributed_system=True",
+              "load_checkpoint_only_once=True",
+              "use_standalone_converter=False",
+              "log_config=False",
+          ],
+          vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
+      )
+
+      try:
+        from etils import epath
+        from orbax.checkpoint._src.serialization import jax_array_handlers
+        from orbax.checkpoint._src.serialization import type_handler_registry
+
+        if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
+          type_handler_registry.register_type_handler(
+              jax.Array, jax_array_handlers.ArrayHandler(), override=True
+          )
+          logger.info("Registered standard ArrayHandler for OCDBT checkpoint.")
+      except Exception as e:
+        logger.warning("Could not register ArrayHandler for OCDBT: %s", e)
+
+      model, _ = model_creation_utils.from_pretrained(
+          trainer_config,
+          devices=devices[:total_mesh_devices],
+          wrap_with_tunix_adapter=True,
+          tokenizer_pad_id=tokenizer.pad_token_id,
       )
     elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
       model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
