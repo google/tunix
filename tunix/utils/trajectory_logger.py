@@ -169,12 +169,15 @@ class AsyncTrajectoryLogger:
 
         # Batching: drain the queue to log items in groups
         items = [item]
+        stop_received = False
         while not self._logging_queue.empty():
           try:
             next_item = self._logging_queue.get_nowait()
             if next_item is None:
-              # Put back the sentinel so the loop terminates next time
-              self._logging_queue.put(None)
+              # Acknowledge the sentinel and terminate after logging current 
+              # batch.
+              self._logging_queue.task_done()
+              stop_received = True
               break
             items.append(next_item)
           except queue.Empty:
@@ -187,6 +190,8 @@ class AsyncTrajectoryLogger:
         finally:
           for _ in range(len(items)):
             self._logging_queue.task_done()
+        if stop_received:
+          break
 
     self._logging_thread = threading.Thread(target=_worker, daemon=True)
     self._logging_thread.start()

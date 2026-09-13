@@ -86,6 +86,76 @@ class TrajectoryLoggerTest(absltest.TestCase):
       self.assertEqual(df['prompt'][2], 'a prompt with\na newline')
       self.assertEqual(df['value'].tolist(), [0, 1, 2])
 
+  def test_async_trajectory_logger_logs_and_stops(self):
+    """Tests that AsyncTrajectoryLogger writes items asynchronously and stops cleanly."""
+    try:
+      temp_dir = self.create_tempdir().full_path
+    except Exception:
+      temp_dir = tempfile.TemporaryDirectory().name
+
+    logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+    for i in range(5):
+      logger.log_item_async({
+          'global_step': i,
+          'prompt_id': f'prompt_{i}',
+          'reward': float(i),
+      })
+    logger.stop()
+
+    csv_files = [f for f in os.listdir(temp_dir) if f.endswith('.csv')]
+    self.assertLen(csv_files, 1)
+    df = pd.read_csv(os.path.join(temp_dir, csv_files[0]))
+    self.assertLen(df, 5)
+    self.assertEqual(df['global_step'].tolist(), list(range(5)))
+    self.assertEqual(df['reward'].tolist(), [float(i) for i in range(5)])
+
+  def test_async_trajectory_logger_stop_drain_race_condition(self):
+    """Tests that stop() cleanly terminates without deadlock when queue has items and sentinel."""
+    try:
+      temp_dir = self.create_tempdir().full_path
+    except Exception:
+      temp_dir = tempfile.TemporaryDirectory().name
+
+    logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+    # Rapidly enqueue multiple items and immediately call stop to stress the queue batch-drain path
+    for i in range(20):
+      logger.log_item_async({'step': i, 'value': i * 2})
+    logger.stop()
+
+    self.assertTrue(logger._stopped)
+    self.assertFalse(logger._logging_thread.is_alive())
+
+    csv_files = [f for f in os.listdir(temp_dir) if f.endswith('.csv')]
+    self.assertLen(csv_files, 1)
+    df = pd.read_csv(os.path.join(temp_dir, csv_files[0]))
+    self.assertLen(df, 20)
+
+  def test_async_trajectory_logger_stop_idempotent(self):
+    """Tests that calling stop() multiple times is safe and idempotent."""
+    try:
+      temp_dir = self.create_tempdir().full_path
+    except Exception:
+      temp_dir = tempfile.TemporaryDirectory().name
+
+    logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+    logger.log_item_async({'step': 0})
+    logger.stop()
+    # Calling stop again should be a no-op
+    logger.stop()
+    self.assertTrue(logger._stopped)
+
+  def test_async_trajectory_logger_log_after_stop(self):
+    """Tests that logging after stop() does not crash."""
+    try:
+      temp_dir = self.create_tempdir().full_path
+    except Exception:
+      temp_dir = tempfile.TemporaryDirectory().name
+
+    logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+    logger.stop()
+    # Should not raise exception
+    logger.log_item_async({'step': 1})
+
 
 if __name__ == '__main__':
   absltest.main()
