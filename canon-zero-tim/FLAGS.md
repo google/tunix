@@ -258,7 +258,7 @@ batch/data budget when compared with historical Native/IS curves.
 | CANON_FROZENLAKE_CKPT_INTERVAL / CANON_FROZENLAKE_CKPT_MAX_TO_KEEP | FrozenLake 保存频率与滚动保留数；active optimized Zero P45/300 与 M15-main/300 必须 mode=`disabled` 且 root/tag/interval/retention/milestone 全空；Native/IS 以及相应 eval carrier 仍固定 `300/1`，legacy P45、calibration、M15-selection/200 保持 `10/1`。checkpoint-free 身份只允许 exact `frozenlake-v1-hp` Zero/no-eval full，profile、resolved-env、Python parser、renderer 四层必须一致 | 基建合同；效率概念验证结束后再决定是否恢复 Zero 最终 checkpoint |
 | CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL | FrozenLake 额外证据 checkpoint 保留间隔；optimized Zero fast train 必须为空（整个 checkpoint 合同 disabled），Native/IS active 300-step arms 为 `0` 并只保留 `LatestN(1)`；历史 `50` 仅用于已归档的旧 isolated-eval 设计，不能重新用于 active Zero | 试验、默认 `0`；旧 milestone evidence 清理完成后退役正值路径 |
 | CANON_P58_DEEPSWE_TIM / TIM_ADMITTED / TIM_ARM / TOPOLOGY / EXPECTED_UPDATES / DEBUG_DIR / NATIVE_STOCK_PROMPT_OBSERVER / ONEHOST_XPROF_ARM / one-host provenance 族 | P58 Qwen3-4B-Instruct native-vs-zero 因果训练身份；B8xG16、16K、compact filter、TPU optimizer 与完整 trajectory journal 保持不变。`TOPOLOGY=128|64split` 选择基础设施/工作量合同：为兼容既有已渲染任务，仅 P58 active 且变量完全缺席时等价于历史 `128`；显式空值、`none`、未知值或 P58 inactive 时出现该变量都拒绝。`64split` 是单 4x4x4 slice 上 rollout/trainer 各 DP4xTP8 的严格非-HP 合同；在 target A=B=C、反向与 HBM 证据归档前，不得继承 128-only Zero-HP/P59/P63 或 finite A-B warning admission。`TIM_ARM=native|zero` 选择 numerical runtime。Native 的 sampler recipe 另由既有 `CANON_P34_DISABLE_SAMPLER_IS:CANON_P34_DISABLE_TIS` 闭集选择：`1:1`=raw，`0:0`=token TIS(threshold 2.0)，混合 tuple 拒绝；Zero/Zero-HP 必须 `1:1`。Native-IS 是 mitigation arm，不改变原生 numerical program，且 group filter 仍关；Native 保留完整 stock serving/trainer program，所有 shape-valid finite A/B/T_old/T_current mismatch 只观测，Zero 全边界 exact；`NATIVE_STOCK_PROMPT_OBSERVER=1` 只为 native arm 的 rollout 后 B 观察值提供 processed prompt logprobs，不进入采样、trainer、loss、反向或 optimizer，且与 canonical `PROMPT_PROCESSED_LOGPROBS` 互斥；production full 自 P58.37 起强制无 XProf/Perfetto，保持完整高性能 backward/optimizer bundle；`ONEHOST_XPROF_ARM=native|zero-hp` 仅准入 DP1xTP4、两次相同输入、固定 `[-1,1]` 诊断 cotangent、零 optimizer commit 的 update-profile 载具，缺省空，不能认证 DP8xTP8/P59/4B-TP8 fixed-head 或生产轨迹；`EXPECT_HOSTNAME/MODEL_SNAPSHOT/R2EGYM_COMMIT/TASK_IMAGE_ID/RUNNER_SHA256/SOURCE_DIFF_SHA256` 是该载具的字符串/路径 provenance receipts，缺省空且不改变数值 | 试验、默认关；64split B target evidence 完成后，若 A 胜出则随 B 退役；one-host matched XProf package 归档后先退役 one-host selector/provenance 族，P58 production 族在完整 campaign 归档后整体退役 |
-| CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_KIND / CANON_P59_REQUIRE_XPROF | P59 单次载具的证据目的地、冻结内层命令、臂身份与 XProf 完整性要求 | 试验；仅 P59 renderer/one-host wrapper 设置 | P59 证据载具归档后整体退役 |
+| CANON_P59_KIND | P59 载具的臂身份(one-host dp4 wrapper 与 exact-image 探针仍读) | 试验;P59 one-host wrapper 设置 | 同行原有的证据目的地 / 冻结内层命令 / XProf 要求三名已于 2026-09-13 随 P59 backward A/B 证据发射器退役(wrapup_v2_default W3.8) |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
 ### T9f record-full empty-response boundary
@@ -304,6 +304,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | CANON_KV_UNIFIED 作为修复 | 生产红,非修复 | p38u1 |
 | C3 延迟写回 | 净零 +4.5±4.1s(PCIe 争用),机制留备胎默认关 | P49 |
 | truncated-cache backward | 丢 97.5% Wv,结构错 | R4 裁决 |
+| CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_REQUIRE_XPROF | 退役:P59 backward A/B 证据发射器(`cluster/render_p59_backward_ab.py` + `tasks/p59-dp16-parallel-backward/scripts/run_and_persist.sh` 及其两个测试)删除;三名零运行时读者;`CANON_P59_KIND` 保留 | wrapup_v2_default W3.8,2026-09-13 |
 
 ## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
 
@@ -674,12 +675,9 @@ CANON_P58_TIM_ARM
 CANON_P58_TOPOLOGY
 CANON_P59_DP4_SERIAL_MESH_BRIDGE
 CANON_P59_DP4_TAIL8
-CANON_P59_GCS_PREFIX
-CANON_P59_INNER_RUN_CMD
 CANON_P59_KIND
 CANON_P59_RANK_PARALLEL_BACKWARD
 CANON_P59_CHECKED_VMA
-CANON_P59_REQUIRE_XPROF
 CANON_P59_XPROF_BACKWARD_DIR
 CANON_P60_DETERMINISTIC_AB
 CANON_P61_BACKWARD_NUMERICAL_DIR
@@ -789,7 +787,7 @@ CANON_XPROF_STEP_IMMEDIATE_DELAY
 CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 458 settable names (appendix inventory above; exclusions: none).
+Count: 455 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

@@ -33,7 +33,6 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
-  canon-zero-tim/tasks/p59-dp16-parallel-backward/scripts/run_and_persist.sh \
   canon-zero-tim/tasks/p59-dp16-parallel-backward/scripts/run_dp4_inner.sh \
   canon-zero-tim/tasks/p59-dp16-parallel-backward/scripts/run_onehost_dp4.sh \
   canon-zero-tim/tests/p59_backward/run_dp4_exact_image.sh \
