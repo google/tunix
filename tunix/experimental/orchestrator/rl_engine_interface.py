@@ -137,6 +137,19 @@ class AbstractRLEngine(Protocol):
     """Retrieves step metrics from the worker for the specified role."""
     ...
 
+  async def flush_metrics(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> (
+      exp_metrics.MetricsBuffer
+      | Sequence[exp_metrics.MetricsBuffer]
+      | dict[str, Any]
+      | None
+  ):
+    """Drains the trainer worker's final buffered step metrics (end of run)."""
+    ...
+
   def configure_worker(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
