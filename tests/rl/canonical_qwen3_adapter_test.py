@@ -5429,7 +5429,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     env = {
         "CANON_P28_SEGMENTED_FORWARD": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "1",
     }
     mapped = canonical_qwen3_adapter.FunctionalEngineLeaves(
         paths=(), leaves=engine_leaves, source_to_target=()
@@ -5565,7 +5564,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
 
     streamed = []
     g6_env = dict(env)
-    g6_env["CANON_P28_G5C_ONLY"] = "0"
     g6_env["CANON_P28_G6_UPDATE"] = "1"
     g6_env["CANON_P30_REUSE_SEGMENTED_ENGINE"] = "1"
     g6_env["CANON_P30_RELEASE_CAPTURED_STATE"] = "1"
@@ -5663,7 +5661,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     p31_aggregate_env = {
         **env,
         "CANON_P31_CONVERGENCE": "1",
-        "CANON_P28_G5C_ONLY": "1",
         "CANON_P28_G6_UPDATE": "0",
         "CANON_P30_REUSE_SEGMENTED_ENGINE": "0",
         "CANON_P30_RELEASE_CAPTURED_STATE": "0",
@@ -5686,7 +5683,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     p31_streamed = []
     p31_stream_env = {
         **p31_aggregate_env,
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
     }
     with (

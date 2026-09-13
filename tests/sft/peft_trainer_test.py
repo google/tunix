@@ -118,7 +118,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "1",
         "CANON_GSM8K_L3": "1",
         "CANON_GSM8K_UPDATE_CANARY": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
         "CANON_P31_CONVERGENCE": "0",
@@ -1215,7 +1214,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_GATE_ONLY": "0",
         "CANON_ALIGNMENT_TRAIN": "0",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
     }
     with mock.patch.dict(os.environ, env, clear=False):
@@ -1246,14 +1244,6 @@ class PeftTrainerTest(parameterized.TestCase):
     for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
       np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
 
-    with mock.patch.dict(
-        os.environ, {**env, "CANON_P28_G5C_ONLY": "1"}, clear=False
-    ):
-      with self.assertRaisesRegex(ValueError, "exclusive P28 G6"):
-        trainer.apply_precomputed_gradient_microbatches(
-            gradient_microbatches
-        )
-
   def test_p58_precomputed_all_filtered_discard_resets_without_commit(self):
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=100,
@@ -1281,7 +1271,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_GATE_ONLY": "0",
         "CANON_ALIGNMENT_TRAIN": "0",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P58_DEEPSWE_TIM": "1",
     }
@@ -1328,7 +1317,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_GATE_ONLY": "0",
         "CANON_ALIGNMENT_TRAIN": "0",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P58_DEEPSWE_TIM": "0",
         "CANON_P62_BACKWARD_NUMERIC_DEBUG": "1",
@@ -1376,7 +1364,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_GATE_ONLY": "0",
         "CANON_ALIGNMENT_TRAIN": "0",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P58_DEEPSWE_TIM": "0",
         "CANON_P62_BACKWARD_NUMERIC_DEBUG": "0",
@@ -1411,7 +1398,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_GATE_ONLY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
         "CANON_LOCAL_TRAJECTORIES": "32",
@@ -1527,7 +1513,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P31_CONVERGENCE": "1",
     }
@@ -1566,7 +1551,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
@@ -1645,7 +1629,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
@@ -1740,7 +1723,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
         "CANON_LOCAL_TRAJECTORIES": "2",
@@ -1783,7 +1765,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
         "CANON_P33_NO_COMMIT": "1",
@@ -1863,7 +1844,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
@@ -2049,7 +2029,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
         "CANON_P28_G6_UPDATE": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
         "CANON_LOCAL_TRAJECTORIES": "16",
         "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
@@ -2118,7 +2097,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_UPDATE_CANARY": "0",
         "CANON_ALIGNMENT_TRAIN": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P31_CONVERGENCE": "0",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
@@ -2217,7 +2195,6 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_ALIGNMENT_GATE_ONLY": "0",
         "CANON_ALIGNMENT_TRAIN": "0",
         "CANON_P28_SEGMENTED_TRAIN": "1",
-        "CANON_P28_G5C_ONLY": "0",
         "CANON_P28_G6_UPDATE": "1",
     }
     device_step_impl_ids = []
@@ -2435,7 +2412,6 @@ class PeftTrainerTest(parameterized.TestCase):
           "CANON_ALIGNMENT_GATE_ONLY": "0",
           "CANON_ALIGNMENT_TRAIN": "0",
           "CANON_P28_SEGMENTED_TRAIN": "1",
-          "CANON_P28_G5C_ONLY": "0",
           "CANON_P28_G6_UPDATE": "1",
       }
       for scales in ((1.0, 2.0, 3.0, 4.0), (-2.0, -1.0, 1.0, 3.0)):

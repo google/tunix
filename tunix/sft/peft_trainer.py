@@ -1149,7 +1149,7 @@ class PeftTrainer:
         key for key, value in required_env.items()
         if os.environ.get(key, "") != value
     ]
-    if missing or os.environ.get("CANON_P28_G5C_ONLY", "") == "1":
+    if missing:
       raise ValueError(
           "precomputed gradient update requires the exclusive P28 G6 "
           f"canary contract; invalid keys={missing}"

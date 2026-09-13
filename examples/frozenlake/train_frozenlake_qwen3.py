@@ -193,9 +193,6 @@ CANON_P3_APC_BOUNDARY_REPORT = os.getenv(
 _CANON_PRELEARNER_ONLY = (
     os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
     or os.getenv("CANON_L3_A3_ONLY", "") == "1"
-    or os.getenv("CANON_P28_G3_ONLY", "") == "1"
-    or os.getenv("CANON_P28_G4_ONLY", "") == "1"
-    or os.getenv("CANON_P28_G5_ONLY", "") == "1"
     or os.getenv("CANON_P38_FROZENLAKE_REPLAY", "") == "1"
     or bool(CANON_P3_APC_BOUNDARY_REPORT)
 )
@@ -462,10 +459,6 @@ CANON_L3 = os.getenv("CANON_FROZENLAKE_L3", "") == "1"
 CANON_P27 = os.getenv("CANON_FROZENLAKE_P27", "") == "1"
 CANON_CONTRACT_ONLY = os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
 CANON_A3_ONLY = os.getenv("CANON_L3_A3_ONLY", "") == "1"
-CANON_P28_G3_ONLY = os.getenv("CANON_P28_G3_ONLY", "") == "1"
-CANON_P28_G4_ONLY = os.getenv("CANON_P28_G4_ONLY", "") == "1"
-CANON_P28_G5_ONLY = os.getenv("CANON_P28_G5_ONLY", "") == "1"
-CANON_P28_G5C_ONLY = os.getenv("CANON_P28_G5C_ONLY", "") == "1"
 CANON_P28_G6_UPDATE = os.getenv("CANON_P28_G6_UPDATE", "") == "1"
 CANON_P38_FROZENLAKE_REPLAY = (
     os.getenv("CANON_P38_FROZENLAKE_REPLAY", "") == "1"
@@ -560,9 +553,6 @@ CANON_P30_OPT_STATE_OFFLOAD = (
 prelearner_modes = {
     "contract-only": CANON_CONTRACT_ONLY,
     "A3-only": CANON_A3_ONLY,
-    "P28-G3-only": CANON_P28_G3_ONLY,
-    "P28-G4-only": CANON_P28_G4_ONLY,
-    "P28-G5-only": CANON_P28_G5_ONLY,
     "P38-FrozenLake-replay": CANON_P38_FROZENLAKE_REPLAY,
 }
 active_prelearner_modes = [
@@ -581,10 +571,6 @@ if CANON_P27 and not CANON_L3:
   raise ValueError("CANON_FROZENLAKE_P27=1 requires CANON_FROZENLAKE_L3=1")
 if CANON_P27 and active_prelearner_modes:
   raise ValueError("P27 cannot be combined with prelearner-only modes")
-if CANON_P28_G5C_ONLY and (CANON_P27 or active_prelearner_modes):
-  raise ValueError("P28 G5c cannot be combined with P27/prelearner modes")
-if CANON_P28_G5C_ONLY and not CANON_L3:
-  raise ValueError("P28 G5c requires CANON_FROZENLAKE_L3=1")
 if CANON_P28_G6_UPDATE and not CANON_P27:
   raise ValueError("P28 G6 requires CANON_FROZENLAKE_P27=1")
 if CANON_P28_G6_UPDATE and os.getenv(
@@ -608,13 +594,7 @@ if CANON_P29_FULL_TRAIN and not CANON_P28_G6_UPDATE:
   raise ValueError("P29 full train requires the attested P28 G6 update path")
 if CANON_P30_OPT_STATE_OFFLOAD and not CANON_P29_FULL_TRAIN:
   raise ValueError("P30 optimizer offload requires the P29 full-train path")
-if (
-    CANON_P28_G3_ONLY
-    or CANON_P28_G4_ONLY
-    or CANON_P28_G5_ONLY
-    or CANON_P28_G5C_ONLY
-    or (CANON_P28_G6_UPDATE and not CANON_ALIGNMENT_TRAIN_MODE)
-):
+if CANON_P28_G6_UPDATE and not CANON_ALIGNMENT_TRAIN_MODE:
   expected_p28_geometry = {
       "batch_size": (args.batch_size, 4),
       "mini_batch_size": (args.mini_batch_size, 4),
@@ -1900,22 +1880,6 @@ if CANON_L3:
         temperature=TEMPERATURE,
     )
     print("[CANON_L3] A3_ONLY_PASS", flush=True)
-    raise SystemExit(0)
-  if CANON_P28_G3_ONLY:
-    rl_cluster.rollout.run_p28_segmented_forward_gate()
-    print("[P28.G3] FORWARD_ONLY_PASS no_backward=1 no_optimizer=1", flush=True)
-    raise SystemExit(0)
-  if CANON_P28_G4_ONLY:
-    layer_index = int(os.getenv("CANON_P28_G4_LAYER_INDEX", "0"))
-    rl_cluster.rollout.run_p28_block_vjp_gate(layer_index=layer_index)
-    print("[P28.G4] BLOCK_VJP_ONLY_PASS no_optimizer=1", flush=True)
-    raise SystemExit(0)
-  if CANON_P28_G5_ONLY:
-    rl_cluster.rollout.run_p28_full_chain_gate()
-    print(
-        "[P28.G5B] CHAIN_ONLY_PASS no_loss=1 no_optimizer=1",
-        flush=True,
-    )
     raise SystemExit(0)
   if CANON_P3_APC_BOUNDARY_REPORT:
     if not CANON_P38_PRECHECK_ONLY:

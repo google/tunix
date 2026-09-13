@@ -310,6 +310,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | CANON_CLUSTER / CANON_ENV / CANON_OUT | 退役:`CANON_CLUSTER` 的唯一赋值(`cluster/entrypoint.sh`)删除、无读者;`CANON_ENV`/`CANON_OUT` 只是 `run_p35_onehost.sh` 的本地 bash 变量,从未是环境合同名 | wrapup_v2_default W3.11,2026-09-13 |
 | CANON_L3_A3_DIAG | 退役:`compute_per_token_diagnostics` 的环境门删除;方法本身只有 adapter 测试调用、无生产入口,保留为测试用诊断 | wrapup_v2_default W3.12,2026-09-13 |
 | CANON_P30_DONATE_MODEL / CANON_P30_FUSED_PAIR_ACCUMULATION / CANON_P30_POST_COMMIT_GC | 退役:三个从未准入的 P30 臂(model 捐赠、成对累加、提交后 gc)连同 peft_trainer 的成对累加路径、learner 的 consume_pair、adapter 的 gradient_pair_sink 一起删除;所有 profile/载具/合同里的 `=0` 钉子同 CL 停写 | wrapup_v2_default W3.7,2026-09-13 |
+| CANON_P28_SEGMENTED_PULLBACK / CANON_P28_G4_EXTENSION / CANON_P28_G4_BLOCK_CAP_SECONDS / CANON_P28_G5_ONLY / CANON_P28_G5_FIRST_CAP_SECONDS / CANON_P28_G5_REPEAT_CAP_SECONDS / CANON_P28_G5_TOTAL_CAP_SECONDS / CANON_P28_G5C_ONLY(+ 未登记的 CANON_P28_G3_ONLY / G4_ONLY / G4_LAYER_INDEX) | 退役:P28 历史门模式(G3 前向门、G4 单层 VJP 门、G5 全链门、G5c 无优化器门)及其 adapter 方法、learner 门、example 预学习模式删除;`segmented_grpo_value_and_grad` 改为 “G6=1 ⇒ 恰一个流式 sink,G6 未设 ⇒ 聚合梯度(测试 oracle)”;所有 profile/载具/合同的 `=0` 钉子同 CL 停写;`CANON_P28_SEGMENTED_VJP` 不退役:它唯一的运行时读者(G4 门)已删,但 P57 stock 臂的 zero-switch attestation(`dp_workloads.P57_STOCK_*_ZERO_SWITCHES`、`classify_stock_discovery._ZERO_SWITCHES`,26 名收据合同)要求 stock profile 显式钉 `=0`,故名字、profile export 与合同项原样保留,归“历史/attestation”类 | wrapup_v2_default W3.6a,2026-09-13 |
 
 ## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
 
@@ -448,17 +449,9 @@ CANON_OPT_STATE_RESIDENT
 CANON_OUT_BYTES
 CANON_P28_BATCHED_REPORT
 CANON_P28_BATCHED_REVERSE
-CANON_P28_G4_BLOCK_CAP_SECONDS
-CANON_P28_G4_EXTENSION
-CANON_P28_G5C_ONLY
-CANON_P28_G5_FIRST_CAP_SECONDS
-CANON_P28_G5_ONLY
-CANON_P28_G5_REPEAT_CAP_SECONDS
-CANON_P28_G5_TOTAL_CAP_SECONDS
 CANON_P28_G6_UPDATE
 CANON_P28_LAYER_SCAN
 CANON_P28_SEGMENTED_FORWARD
-CANON_P28_SEGMENTED_PULLBACK
 CANON_P28_SEGMENTED_TRAIN
 CANON_P28_SEGMENTED_VJP
 CANON_P29_FULL_TRAIN
@@ -780,7 +773,7 @@ CANON_XPROF_STEP_IMMEDIATE_DELAY
 CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 443 settable names (appendix inventory above; exclusions: none).
+Count: 435 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

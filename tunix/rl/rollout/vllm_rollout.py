@@ -185,20 +185,6 @@ class VllmRollout(base_rollout.BaseRollout):
       )
     return self._canonical_engine_adapter.run_p28_segmented_forward_gate()
 
-  def run_p28_block_vjp_gate(self, *, layer_index=0):
-    """Runs the default-off P28 one-real-layer VJP probe."""
-    if self._canonical_engine_adapter is None:
-      raise RuntimeError("P28 block VJP requires the canonical engine adapter")
-    return self._canonical_engine_adapter.run_p28_block_vjp_gate(
-        layer_index=layer_index
-    )
-
-  def run_p28_full_chain_gate(self):
-    """Runs the default-off P28 36-layer staged-pullback capacity gate."""
-    if self._canonical_engine_adapter is None:
-      raise RuntimeError("P28 full chain requires the canonical engine adapter")
-    return self._canonical_engine_adapter.run_p28_full_chain_gate()
-
   @property
   def mesh(self) -> jax.sharding.Mesh:
     return self._sampler.mesh

@@ -25,11 +25,12 @@ CHANGED_FLAG_PATHS = (
     ":(exclude,glob)**/debug_logs/**",
 )
 
-# These are module-local booleans derived from registered P57 environment
-# flags.  Their CANON_* spelling denotes canonical mode state, not another
+# These are module-local booleans derived from registered environment
+# flags (the FrozenLake example's alignment train mode and P57 run kinds).  Their CANON_* spelling denotes canonical mode state, not another
 # settable name.  Keep the exception exact so a new identifier still fails
 # closed until it is registered or deliberately classified here.
 NON_SETTABLE_CANON_IDENTIFIERS = frozenset({
+    "CANON_ALIGNMENT_TRAIN_MODE",
     "CANON_P57_CALIBRATION",
     "CANON_P57_EVALUATION",
     "CANON_P57_NO_UPDATE",
