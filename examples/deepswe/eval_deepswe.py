@@ -73,10 +73,12 @@ import numpy as np
 from transformers import AutoTokenizer
 
 try:
+  import swe_env
   from guarded_swe_env import GuardedSWEEnv
   from swe_agent import SWEAgent
   from swe_env import SWEEnv
 except ImportError:
+  from examples.deepswe import swe_env  # pytype: disable=import-error
   from examples.deepswe.guarded_swe_env import GuardedSWEEnv  # pytype: disable=import-error
   from examples.deepswe.swe_agent import SWEAgent  # pytype: disable=import-error
   from examples.deepswe.swe_env import SWEEnv  # pytype: disable=import-error
@@ -423,6 +425,32 @@ parser_cli.add_argument(
     default=os.getenv("LOGGING_LEVEL", "INFO"),
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
 )
+parser_cli.add_argument(
+    "--use_agent_sandbox",
+    type=str2bool,
+    nargs="?",
+    const=True,
+    default=os.getenv("USE_AGENT_SANDBOX", "false").lower() == "true",
+    help=(
+        "Whether to use Kubernetes Agent Sandbox runtime instead of local"
+        " Docker socket."
+    ),
+)
+parser_cli.add_argument(
+    "--max_warmpool_replicas",
+    "--max_warmpool_size",
+    dest="max_warmpool_replicas",
+    type=int,
+    default=(
+        int(os.getenv("MAX_WARMPOOL_SIZE", os.getenv("MAX_WARMPOOL_REPLICAS")))
+        if os.getenv("MAX_WARMPOOL_SIZE") or os.getenv("MAX_WARMPOOL_REPLICAS")
+        else None
+    ),
+    help=(
+        "Max warmpool replicas per task/image. Defaults to"
+        " num_rollouts_per_instance."
+    ),
+)
 
 args, _ = parser_cli.parse_known_args()
 
@@ -492,6 +520,8 @@ DOCKER_IMAGE_PREFIX = args.docker_image_prefix
 
 NODE_SELECTOR_VAL = args.node_selector_val
 OUTPUT_DIR = args.output_dir
+USE_AGENT_SANDBOX = args.use_agent_sandbox
+MAX_WARMPOOL_REPLICAS = args.max_warmpool_replicas
 
 ANSI_RED = "\033[31m"
 ANSI_RESET = "\033[0m"
@@ -691,6 +721,17 @@ try:
   logger.info("Kubernetes connection verified.")
 except Exception as e:
   logger.warning("Kubernetes config loading note: %s", e)
+
+fleet = None
+if USE_AGENT_SANDBOX:
+  fleet = swe_env._init_global_fleet(
+      tasks=entries,
+      max_concurrency=MAX_CONCURRENT,
+      num_generations=NUM_ROLLOUTS_PER_INSTANCE,
+      batch_size=min(MAX_CONCURRENT, 8),
+      max_warmpool_replicas=MAX_WARMPOOL_REPLICAS,
+      scaffold=SCAFFOLD,
+  )
 
 # ========================== Model & Mesh ==========================
 
@@ -1193,6 +1234,8 @@ def pairs_generator():
         scaffold=SCAFFOLD,
         step_timeout=STEP_TIMEOUT_SECS,
         reward_timeout=REWARD_TIMEOUT_SECS,
+        use_agent_sandbox=USE_AGENT_SANDBOX,
+        fleet=fleet,
     )
     yield agent, env
 
@@ -1449,6 +1492,14 @@ if __name__ == "__main__":
       MESH_TP,
   )
 
-  eval_results = asyncio.run(run_evaluation())
-  compute_pass_at_k(eval_results)
-  save_results(eval_results)
+  try:
+    eval_results = asyncio.run(run_evaluation())
+    compute_pass_at_k(eval_results)
+    save_results(eval_results)
+  finally:
+    if USE_AGENT_SANDBOX and fleet is not None:
+      logger.info(
+          "[Main] Explicitly tearing down SandboxFleet on clean exit..."
+      )
+      fleet.teardown()
+
