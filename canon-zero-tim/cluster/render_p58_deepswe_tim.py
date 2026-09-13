@@ -46,21 +46,30 @@ MAX_CONCURRENCY = GLOBAL_PROMPTS * GENERATIONS
 FIXED_SEED = 42
 _STAGE_STEPS = {"three-update": 3, "full": 1000}
 _ARMS = ("native", "zero")
-_KUEUE_MANAGED_WORKER_POOLS = frozenset({
-    "auto",
-    "none",
-    "tpu-v5p-slice",
-    "any",
-})
+# Single source of truth: p34 owns the sentinel set so that the P44 parity
+# renderer (which delegates to p34.render) and this renderer can never disagree
+# about which values mean "do not pin the worker node pool".
+_KUEUE_MANAGED_WORKER_POOLS = p34.KUEUE_MANAGED_WORKER_POOLS
 _EXCLUSIVE_TOPOLOGY_ANNOTATION = (
     "alpha.jobset.sigs.k8s.io/exclusive-topology"
 )
 _KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+# Admission is fail-closed: only the pools listed here may be selected, and an
+# unlisted value still raises.  "cpu-np" is admitted for the bodaborg-v5p-nap
+# cluster, where neither "canon-cpu-pool" nor "deepswe-cpu-pool-2" exists and
+# workload users cannot create node pools.  Evidence for the sandbox side:
+# cpu-np has 30 nodes (25 of them effectively empty) with 1738 free vCPU and
+# 6434 GiB free memory by pod requests, which strict per-node bin-packing turns
+# into 847 concurrent 2-vCPU/4-GiB R2E sandboxes against a peak demand of 128
+# (CANON_GLOBAL_TRAJECTORIES).  It is also the built-in default of
+# examples/deepswe/r2egym_runtime_patch.py::_DEFAULT_NODE_SELECTOR_VAL.
 _ADMITTED_CPU_NODEPOOLS = frozenset({
     "canon-cpu-pool",
+    "cpu-np",
 })
 _ADMITTED_SANDBOX_NODEPOOLS = frozenset({
     "deepswe-cpu-pool-2",
+    "cpu-np",
 })
 _DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
 _DEFAULT_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
@@ -372,9 +381,18 @@ def render(
       whitelist_sha256=whitelist_sha256,
       fixed_lm_head=False,
   )
-  document["metadata"].setdefault("annotations", {})[
-      _EXCLUSIVE_TOPOLOGY_ANNOTATION
-  ] = "cloud.google.com/gke-nodepool"
+  # The exclusive-topology annotation deliberately stays on the worker Pod
+  # template (where jobset-64chip.yaml already carries it) instead of being
+  # hoisted to JobSet metadata.  A JobSet-scoped annotation applies to *every*
+  # replicatedJob, so the head would also be given the
+  # "no other JobSet's pods may share this node pool" anti-affinity -- against
+  # the shared cpu-np pool that hosts other tenants' orchestrator Pods and all
+  # 128 of our own R2E sandboxes.  Measured on bodaborg-v5p-nap: the only four
+  # JobSets using the JobSet-scoped form are single-replicatedJob slice jobs
+  # with no running pods, whereas all fifteen head+worker JobSets that do run
+  # (including canon-p57-fl-zero-m15-r10/r11, both head and worker
+  # ready=1 failed=0) use the Pod-template form.  See the K03 correction note
+  # in P58_DEEPSWE_TIM_RUNBOOK.md for why the earlier contract said otherwise.
 
   hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
       seam_localization
@@ -402,10 +420,21 @@ def render(
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
   )
   if topology == "64split":
-    name = name.replace("canon-p58-ds4b-", "canon-p58-ds4b-64s-", 1)
+    # Compact tokens for the 64split row.  The long form
+    # "canon-p58-ds4b-64s-zero-systemopt-three-" is already 40 characters
+    # before the run id, which always exceeds the 36-character budget that
+    # MAX_JOBSET_NAME_LEN documents, so this row could never be applied.
+    # Nothing identifying is lost: the model, arm and system-optimization arm
+    # are all pinned by the signed recipe and by the JobSet labels, not by the
+    # name.  "64s" = 64split, "zsopt" = zero + system-optimization control.
+    name = name.replace("canon-p58-ds4b-", "canon-p58-64s-", 1)
+    name = name.replace("-zero-systemopt-", "-zsopt-", 1)
 
-  if len(name) > 63:
-    raise ValueError("rendered P58 JobSet name exceeds 63 characters")
+  if len(name) > p34.MAX_JOBSET_NAME_LEN:
+    raise ValueError(
+        "rendered P58 JobSet name exceeds "
+        f"{p34.MAX_JOBSET_NAME_LEN} characters: {name}"
+    )
   run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
   document["metadata"]["name"] = name
   document["metadata"]["labels"].update({
@@ -667,15 +696,17 @@ def render(
   worker["completions"] = spec.workers
   worker["parallelism"] = spec.workers
   worker_template_metadata = worker["template"].setdefault("metadata", {})
-  worker_template_annotations = worker_template_metadata.get("annotations", {})
-  worker_template_annotations.pop(_EXCLUSIVE_TOPOLOGY_ANNOTATION, None)
-  if not worker_template_annotations:
-    worker_template_metadata.pop("annotations", None)
+  # Set it explicitly rather than inheriting it, so the render never silently
+  # depends on the base manifest still carrying the annotation.
+  worker_template_metadata.setdefault("annotations", {})[
+      _EXCLUSIVE_TOPOLOGY_ANNOTATION
+  ] = "cloud.google.com/gke-nodepool"
   worker_pod = worker["template"]["spec"]
   if worker_nodepool in _KUEUE_MANAGED_WORKER_POOLS:
-    # JobSet-level exclusive topology coordinates the selected/NAP-created
-    # node pool across all indexed followers.  A Pod-template annotation does
-    # not provide that context and caused K03's follower webhook rejection.
+    # Node-Auto-Provisioning creates the v5p slice pool on demand with an
+    # unpredictable name, so no literal pin is possible.  The exclusive
+    # topology annotation above still keys on gke-nodepool, which is what
+    # keeps all indexed followers on the single NAP-created pool.
     worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
   else:
     worker_pod["nodeSelector"][
@@ -1164,17 +1195,22 @@ def validate(
           f"expected={expected_res} actual={target_c.get('resources')}"
       )
   worker_pod = worker["template"]["spec"]
-  annotations = document.get("metadata", {}).get("annotations", {})
-  if annotations.get(_EXCLUSIVE_TOPOLOGY_ANNOTATION) != (
-      "cloud.google.com/gke-nodepool"
-  ):
-    raise ValueError("P58 JobSet lost its exclusive-topology annotation")
   worker_template_annotations = worker["template"].get(
       "metadata", {}
   ).get("annotations", {})
-  if _EXCLUSIVE_TOPOLOGY_ANNOTATION in worker_template_annotations:
+  if worker_template_annotations.get(_EXCLUSIVE_TOPOLOGY_ANNOTATION) != (
+      "cloud.google.com/gke-nodepool"
+  ):
     raise ValueError(
-        "P58 exclusive-topology annotation must not be on the Pod template"
+        "P58 worker Pod template lost its exclusive-topology annotation"
+    )
+  annotations = document.get("metadata", {}).get("annotations", {})
+  if _EXCLUSIVE_TOPOLOGY_ANNOTATION in annotations:
+    # At JobSet scope the annotation also applies to pathways-head, which would
+    # demand exclusive use of the shared cpu-np pool and make the head
+    # unschedulable alongside our own R2E sandboxes.
+    raise ValueError(
+        "P58 exclusive-topology annotation must not be at JobSet scope"
     )
   if (
       worker_pod.get("hostNetwork") is not True

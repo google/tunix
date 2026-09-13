@@ -27,7 +27,11 @@ metadata:
   name: canon-zero-tim-v5p-64
   namespace: default
   labels:
-    kueue.x-k8s.io/queue-name: multislice-queue
+    # bodaborg-v5p-nap routes single-slice work (<= 128 TPU chips) through the
+    # "default" LocalQueue; "multislice-queue" is reserved for 256+ chip
+    # multi-slice jobs and is measured at 0 admitted workloads on that cluster.
+    # This JobSet is a single 4x4x4 (64-chip) slice.
+    kueue.x-k8s.io/queue-name: default
 spec:
   failurePolicy:
     # WARNING -- read this before believing a green run.
@@ -67,9 +71,13 @@ spec:
         template:
           metadata:
             labels:
-              kueue.x-k8s.io/queue-name: multislice-queue
+              kueue.x-k8s.io/queue-name: default
           spec:
-            priorityClassName: very-high
+            # "very-high" is not defined on bodaborg-v5p-nap and workload users
+            # cannot create PriorityClasses there.  "medium" is the shared
+            # cluster's house rule and matches every other tenant's TPU pods,
+            # so this job cannot preempt anybody.
+            priorityClassName: medium
             nodeSelector:
               cloud.google.com/gke-nodepool: cpu-np
             hostNetwork: true
@@ -98,7 +106,15 @@ spec:
                 - name: XLA_FLAGS
                   value: --xla_allow_excess_precision=false
               resources:
-                requests: {cpu: '32', memory: 200Gi}
+                # Sidecar (restartPolicy: Always initContainer) requests are
+                # summed with the main container for scheduling.  A cpu-np node
+                # exposes 63.77 CPU / 239.9 GiB allocatable, so the original
+                # 32 CPU / 200 Gi here plus pathways-rm (8/32Gi) plus jax-tpu
+                # (16/64Gi) totalled 56 CPU / 296 GiB and left the head pod
+                # permanently unschedulable.  These are the values proven in
+                # production by canon-p57-fl-zero-m15-r11 on this same cluster.
+                # Limits are deliberately left untouched to minimise deviation.
+                requests: {cpu: '8', memory: 16Gi}
                 limits:   {cpu: '32', memory: 350G}
               restartPolicy: Always
             - name: pathways-rm
@@ -117,7 +133,10 @@ spec:
                 - name: TPU_SKIP_MDS_QUERY
                   value: 'true'
               resources:
-                requests: {cpu: '8', memory: 32Gi}
+                # See the pathways-proxy note above.  Head pod total requests
+                # are now 8 + 4 + 16 = 28 CPU and 16 + 16 + 64 = 96 GiB, which
+                # fits a cpu-np node (63.77 CPU / 239.9 GiB allocatable).
+                requests: {cpu: '4', memory: 16Gi}
                 limits:   {cpu: '16', memory: 150G}
               restartPolicy: Always
             containers:
@@ -227,9 +246,11 @@ spec:
             annotations:
               alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
             labels:
-              kueue.x-k8s.io/queue-name: multislice-queue
+              kueue.x-k8s.io/queue-name: default
           spec:
-            priorityClassName: very-high
+            # Must match the head pod: render_p34_jobset.py hard-checks that
+            # both replicated jobs carry _PRIORITY_CLASS and raises otherwise.
+            priorityClassName: medium
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
               cloud.google.com/gke-tpu-topology: 4x4x4

@@ -102,18 +102,34 @@ esac
     self.assertIs(spec["automountServiceAccountToken"], False)
 
   def test_probe_rejects_unsigned_queue_or_nodepool(self):
-    with self.assertRaisesRegex(ValueError, "requires queue"):
+    with self.assertRaisesRegex(ValueError, "admitted queue"):
       probe.render(
           run_id="p58f13",
           task_image="example.invalid/r2e-task:reviewed",
           queue_name="other-queue",
       )
-    with self.assertRaisesRegex(ValueError, "requires node pool"):
+    with self.assertRaisesRegex(ValueError, "admitted node pool"):
       probe.render(
           run_id="p58f13",
           task_image="example.invalid/r2e-task:reviewed",
           sandbox_nodepool="other-pool",
       )
+
+  def test_probe_admits_the_bodaborg_pairing(self):
+    """default + cpu-np is the only reachable pairing on bodaborg-v5p-nap."""
+    document = probe.render(
+        run_id="p58f13",
+        task_image="example.invalid/r2e-task:reviewed",
+        queue_name="default",
+        sandbox_nodepool="cpu-np",
+    )
+    self.assertEqual(
+        document["metadata"]["labels"]["kueue.x-k8s.io/queue-name"], "default"
+    )
+    self.assertEqual(
+        document["spec"]["nodeSelector"]["cloud.google.com/gke-nodepool"],
+        "cpu-np",
+    )
 
   def test_runtime_selector_is_fail_closed_only_for_p58(self):
     from examples.deepswe import r2egym_runtime_patch
@@ -127,18 +143,29 @@ esac
         }),
         "some-other-pool",
     )
-    with self.assertRaisesRegex(ValueError, "deepswe-cpu-pool-2"):
+    # Still fail-closed: an unadmitted pool must raise under the P58 marker.
+    with self.assertRaisesRegex(ValueError, "P58 requires NODE_SELECTOR_VAL"):
       r2egym_runtime_patch.resolve_node_selector_value({
           "CANON_P58_DEEPSWE_TIM": "1",
-          "NODE_SELECTOR_VAL": "cpu-np",
+          "NODE_SELECTOR_VAL": "sandbox-cpu-pool",
       })
-    self.assertEqual(
-        r2egym_runtime_patch.resolve_node_selector_value({
-            "CANON_P58_DEEPSWE_TIM": "1",
-            "NODE_SELECTOR_VAL": "deepswe-cpu-pool-2",
-        }),
-        "deepswe-cpu-pool-2",
-    )
+    with self.assertRaisesRegex(ValueError, "P58 requires NODE_SELECTOR_VAL"):
+      r2egym_runtime_patch.resolve_node_selector_value({
+          "CANON_P58_DEEPSWE_TIM": "1",
+      })
+    # Both admitted pools must pass.  cpu-np is what bodaborg-v5p-nap renders;
+    # pinning only deepswe-cpu-pool-2 here used to make the rendered 64split
+    # job raise on its first sandbox spawn even though the render and the
+    # server-side dry-run both succeeded.
+    for pool in ("deepswe-cpu-pool-2", "cpu-np"):
+      with self.subTest(pool=pool):
+        self.assertEqual(
+            r2egym_runtime_patch.resolve_node_selector_value({
+                "CANON_P58_DEEPSWE_TIM": "1",
+                "NODE_SELECTOR_VAL": pool,
+            }),
+            pool,
+        )
 
   def test_probe_rejects_invalid_identity_or_image(self):
     with self.assertRaisesRegex(ValueError, "run_id"):

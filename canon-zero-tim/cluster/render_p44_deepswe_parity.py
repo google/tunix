@@ -178,8 +178,11 @@ def render(
       "three-update": "three",
   }[stage]
   name = f"canon-p44-ds4b-t{topology}-{short_stage}-{run_id}"
-  if len(name) > 63:
-    raise ValueError("rendered P44 JobSet name exceeds 63 characters")
+  if len(name) > p34.MAX_JOBSET_NAME_LEN:
+    raise ValueError(
+        "rendered P44 JobSet name exceeds "
+        f"{p34.MAX_JOBSET_NAME_LEN} characters: {name}"
+    )
   run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
   document["metadata"]["name"] = name
   document["metadata"]["labels"].update({

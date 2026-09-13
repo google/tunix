@@ -36,7 +36,7 @@ class P58RendererTest(unittest.TestCase):
         source_commit="1" * 40,
         source_branch="yuxzhang/canon-zero-tim",
         client_image="registry.example/tunix@sha256:" + "2" * 64,
-        run_id="pair-test",
+        run_id="ptest",
         stage=stage,
         arm=arm,
         cpu_nodepool="canon-cpu-pool",
@@ -45,6 +45,42 @@ class P58RendererTest(unittest.TestCase):
     )
     kwargs.update(overrides)
     return renderer.render(base, **kwargs)
+
+  def test_rendered_names_fit_the_generated_pod_name_budget(self):
+    # The vjobset.kb.io webhook validates the *generated* pod names, which for
+    # this Pathways shape are 27 characters longer than the JobSet name.  The
+    # budget was measured on bodaborg-v5p-nap by server-side dry-run: a
+    # 36-character JobSet name is accepted and a 37-character one is rejected.
+    # Before this was enforced the 64split row rendered a 40-character name
+    # and could only fail at apply time.
+    self.assertEqual(renderer.p34.MAX_JOBSET_NAME_LEN, 36)
+    longest_generated_suffix = len("-pathways-worker-0-15-abcde")
+    self.assertEqual(
+        renderer.p34.MAX_JOBSET_NAME_LEN + longest_generated_suffix, 63
+    )
+
+    document = self._render(
+        "zero",
+        "three-update",
+        topology="64split",
+        system_optimization_arm="control",
+        sandbox_nodepool="cpu-np",
+    )
+    name = document["metadata"]["name"]
+    self.assertEqual(name, "canon-p58-64s-zsopt-three-ptest")
+    self.assertLessEqual(len(name), renderer.p34.MAX_JOBSET_NAME_LEN)
+
+    # A run id that pushes the name past the budget must be rejected by the
+    # renderer rather than by the cluster.
+    with self.assertRaisesRegex(ValueError, "exceeds 36 characters"):
+      self._render(
+          "zero",
+          "three-update",
+          topology="64split",
+          system_optimization_arm="control",
+          sandbox_nodepool="cpu-np",
+          run_id="a" * 11,
+      )
 
   def test_both_arms_and_horizons_render_on_128_chips(self):
     for arm in ("native", "zero"):
@@ -110,7 +146,11 @@ class P58RendererTest(unittest.TestCase):
                   "kueue.x-k8s.io/queue-name"
               ],
           )
-          self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
+          # Single-slice routing: bodaborg-v5p-nap admits <=128-chip work on
+          # the "default" LocalQueue and reserves "multislice-queue" for 256+
+          # chip multi-slice carriers.  The assertion above already pins the
+          # env var to the JobSet label; this pins the label itself.
+          self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "default")
           self.assertEqual(env["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
 
   def test_64split_render_is_one_4x4x4_with_two_dp4_tp8_roles(self):
@@ -435,7 +475,7 @@ class P58RendererTest(unittest.TestCase):
       )
 
     document = self._render(
-        "zero", "full", high_performance=True, run_id="hp-not-deepswe"
+        "zero", "full", high_performance=True, run_id="hpnotds"
     )
     renderer.p34._set_env(
         renderer.p34._container(
@@ -773,23 +813,27 @@ class P58RendererTest(unittest.TestCase):
           worker_nodepool="tpu-pool",
       )
 
-  def test_kueue_managed_pool_uses_jobset_level_exclusive_topology(self):
+  def test_kueue_managed_pool_keeps_pod_level_exclusive_topology(self):
     for worker_nodepool in ("auto", "none", "tpu-v5p-slice", "any"):
       with self.subTest(worker_nodepool=worker_nodepool):
         document = self._render(
             "native", "full", worker_nodepool=worker_nodepool
         )
+        # Pod-template scope, matching canon-p57-fl-zero-m15-r10/r11, the only
+        # head+worker JobSets observed running on bodaborg-v5p-nap.  At JobSet
+        # scope the annotation would also bind pathways-head and demand
+        # exclusive use of the shared cpu-np pool.
+        worker = renderer.p34._worker(document)
+        worker_metadata = worker["template"].get("metadata", {})
         self.assertEqual(
-            document["metadata"]["annotations"][
+            worker_metadata["annotations"][
                 renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION
             ],
             "cloud.google.com/gke-nodepool",
         )
-        worker = renderer.p34._worker(document)
-        worker_metadata = worker["template"].get("metadata", {})
         self.assertNotIn(
             renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION,
-            worker_metadata.get("annotations", {}),
+            document["metadata"].get("annotations", {}),
         )
         self.assertNotIn(
             "cloud.google.com/gke-nodepool",
@@ -807,8 +851,9 @@ class P58RendererTest(unittest.TestCase):
     )
 
   def test_exclusive_topology_annotation_scope_is_fail_closed(self):
+    # Losing the Pod-template annotation must raise.
     document = self._render("native", "full", worker_nodepool="auto")
-    document["metadata"]["annotations"].pop(
+    renderer.p34._worker(document)["template"]["metadata"]["annotations"].pop(
         renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION
     )
     with self.assertRaisesRegex(ValueError, "lost its exclusive-topology"):
@@ -821,14 +866,13 @@ class P58RendererTest(unittest.TestCase):
           worker_nodepool="auto",
       )
 
+    # Adding a JobSet-scope copy must also raise: it would bind pathways-head
+    # to the same exclusive-node-pool anti-affinity.
     document = self._render("native", "full", worker_nodepool="auto")
-    worker = renderer.p34._worker(document)
-    worker["template"].setdefault("metadata", {}).setdefault(
-        "annotations", {}
-    )[renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION] = (
-        "cloud.google.com/gke-nodepool"
-    )
-    with self.assertRaisesRegex(ValueError, "must not be on the Pod template"):
+    document["metadata"].setdefault("annotations", {})[
+        renderer._EXCLUSIVE_TOPOLOGY_ANNOTATION
+    ] = "cloud.google.com/gke-nodepool"
+    with self.assertRaisesRegex(ValueError, "must not be at JobSet scope"):
       renderer.validate(
           document,
           source_commit="1" * 40,
@@ -904,14 +948,29 @@ class P58RendererTest(unittest.TestCase):
       )
 
   def test_legacy_nodepools_are_rejected(self):
-    for cpu_nodepool in ("cpu-np", "deepswe-cpu-pool-2"):
+    # "cpu-np" moved out of this list when it was admitted for
+    # bodaborg-v5p-nap; see test_cpu_np_is_admitted_for_both_roles below.
+    # Admission stays fail-closed for everything else, and crucially each pool
+    # is still rejected for the *other* role.
+    for cpu_nodepool in ("deepswe-cpu-pool-2", "sandbox-cpu-pool"):
       with self.subTest(cpu_nodepool=cpu_nodepool):
         with self.assertRaisesRegex(ValueError, "admitted CPU node pool"):
           self._render("native", cpu_nodepool=cpu_nodepool)
-    for sandbox_nodepool in ("cpu-np", "deepswe-cpu-pool"):
+    for sandbox_nodepool in ("deepswe-cpu-pool", "sandbox-cpu-pool"):
       with self.subTest(sandbox_nodepool=sandbox_nodepool):
         with self.assertRaisesRegex(ValueError, "admitted sandbox node pool"):
           self._render("native", sandbox_nodepool=sandbox_nodepool)
+
+  def test_cpu_np_is_admitted_for_both_roles(self):
+    """bodaborg-v5p-nap has no canon-cpu-pool/deepswe-cpu-pool-2 node pool.
+
+    Workload users cannot create node pools there, so "cpu-np" is the only
+    reachable CPU/sandbox target and must render without raising.
+    """
+    for role in ("cpu_nodepool", "sandbox_nodepool"):
+      with self.subTest(role=role):
+        document = self._render("native", **{role: "cpu-np"})
+        self.assertIsNotNone(document)
 
   def test_head_host_network_regression_is_rejected(self):
     document = self._render("native", "full")

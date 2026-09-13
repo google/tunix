@@ -71,7 +71,11 @@ spec:
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
-            priorityClassName: very-high
+            # Must track render_p34_jobset._PRIORITY_CLASS, which is a single
+            # global constant and is hard-checked at render time.  The queue
+            # stays "multislice-queue" because this base is a 4x8x8 (256-chip)
+            # multi-slice carrier, unlike the single-slice jobset-64chip.yaml.
+            priorityClassName: medium
             nodeSelector:
               cloud.google.com/gke-nodepool: cpu-np
             hostNetwork: true
@@ -211,7 +215,8 @@ spec:
             labels:
               kueue.x-k8s.io/queue-name: multislice-queue
           spec:
-            priorityClassName: very-high
+            # Must match the head pod; render_p34_jobset checks both.
+            priorityClassName: medium
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
               cloud.google.com/gke-tpu-topology: 4x8x8

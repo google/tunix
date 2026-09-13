@@ -319,8 +319,8 @@ class P58EnvironmentContractTest(unittest.TestCase):
     # source left the renderer's CANON_LOGPROB_M=256 alive in the parent.
     self.assertNotIn("CANON_LOGPROB_M", values)
     self.assertNotIn("CANON_FIXED_AR", values)
-    self.assertIn("export R2E_K8S_QUEUE_NAME=multislice-queue", resolved)
-    self.assertEqual(values["R2E_K8S_QUEUE_NAME"], "multislice-queue")
+    self.assertIn("export R2E_K8S_QUEUE_NAME=default", resolved)
+    self.assertEqual(values["R2E_K8S_QUEUE_NAME"], "default")
     self.assertEqual(values["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
@@ -620,9 +620,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
           workload = deepswe_contract.active_workload(values)
           self.assertEqual(workload.global_trajectories, 128)
           self.assertEqual(workload.local_trajectories, 16)
-          self.assertEqual(
-              values["R2E_K8S_QUEUE_NAME"], "multislice-queue"
-          )
+          self.assertEqual(values["R2E_K8S_QUEUE_NAME"], "default")
           if arm == "native":
             self.assertNotIn("CANON_FIXED_AR", values)
             self.assertNotIn("CANON_LOGPROB_M", values)

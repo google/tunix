@@ -12,10 +12,23 @@ case "$namespace:$queue_name:$sandbox_nodepool:$probe_pod" in
     exit 2
     ;;
 esac
-if [[ "$queue_name" != "multislice-queue" || "$sandbox_nodepool" != "deepswe-cpu-pool-2" ]]; then
-  echo "P58_SANDBOX_CAPACITY_BLOCKED reason=unsigned_queue_or_nodepool" >&2
-  exit 2
-fi
+# Fail-closed: only admitted queue/node-pool pairs may be probed.  "default" +
+# "cpu-np" is the bodaborg-v5p-nap pairing; "multislice-queue" +
+# "deepswe-cpu-pool-2" is the original mlperf-v5p pairing.
+case "$queue_name" in
+  multislice-queue|default) ;;
+  *)
+    echo "P58_SANDBOX_CAPACITY_BLOCKED reason=unsigned_queue queue=$queue_name" >&2
+    exit 2
+    ;;
+esac
+case "$sandbox_nodepool" in
+  deepswe-cpu-pool-2|cpu-np) ;;
+  *)
+    echo "P58_SANDBOX_CAPACITY_BLOCKED reason=unsigned_nodepool nodepool=$sandbox_nodepool" >&2
+    exit 2
+    ;;
+esac
 command -v kubectl >/dev/null || {
   echo "P58_SANDBOX_CAPACITY_BLOCKED reason=kubectl_missing" >&2
   exit 2

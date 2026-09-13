@@ -18,7 +18,37 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DIGEST_IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _RUN_ID = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
 DEFAULT_SOURCE_BRANCH = "yuxzhang/canon-zero-tim"
-_PRIORITY_CLASS = "very-high"
+# bodaborg-v5p-nap does not define a "very-high" PriorityClass and workload
+# users cannot create one (verified: `kubectl auth can-i create priorityclass`
+# is denied). The shared-capacity house rule is "medium"; every other tenant's
+# TPU pod on that cluster runs at "medium" or at the default priority, so this
+# value keeps us from preempting anybody.
+PRIORITY_CLASS = "medium"
+# Kept as the historical private spelling used throughout this module.
+_PRIORITY_CLASS = PRIORITY_CLASS
+# Worker node-pool sentinels meaning "do not pin cloud.google.com/gke-nodepool".
+# On Node-Auto-Provisioning clusters such as bodaborg-v5p-nap the TPU slice pool
+# is created on demand with an unpredictable name (observed:
+# "nap-ct5p-hightp-4t-btbx4rgu"), so pinning any literal makes every worker Pod
+# unschedulable.  JobSet-level exclusive topology still coordinates the slice
+# across all indexed followers.  Anything outside this set is still pinned
+# verbatim, so admission stays fail-closed.
+KUEUE_MANAGED_WORKER_POOLS = frozenset({
+    "auto",
+    "none",
+    "tpu-v5p-slice",
+    "any",
+})
+# The vjobset.kb.io admission webhook rejects a JobSet whose *generated pod*
+# names would exceed the 63-character DNS-1035 limit, not merely the JobSet
+# name itself.  For the Pathways shape the longest generated pod name is
+#   "<jobset>-pathways-worker-0-<podIndex>-<5-char suffix>"
+# which is 27 characters longer than the JobSet name, leaving a 36-character
+# budget.  Measured on bodaborg-v5p-nap by server-side dry-run of an otherwise
+# identical manifest: length 36 accepted, length 37 rejected.  The previous
+# guard of 63 was 27 characters too permissive, so it never fired and the
+# rejection only surfaced at apply time.
+MAX_JOBSET_NAME_LEN = 36
 P34_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
 P34_DATASET_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
 P34_DATASET_SPLIT = "train"
@@ -254,8 +284,10 @@ def render(
 
   document = copy.deepcopy(base)
   name = f"canon-p34-{stage.replace('-update', '').replace('-no-commit', '')}-{run_id}"
-  if len(name) > 63:
-    raise ValueError("rendered JobSet name exceeds 63 characters")
+  if len(name) > MAX_JOBSET_NAME_LEN:
+    raise ValueError(
+        f"rendered JobSet name exceeds {MAX_JOBSET_NAME_LEN} characters: {name}"
+    )
   run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
   document["metadata"]["name"] = name
   document["metadata"].setdefault("labels", {}).update({
@@ -386,7 +418,16 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
   worker_job["parallelism"] = 64
   worker_pod = worker_job["template"]["spec"]
   worker_pod["restartPolicy"] = "Never"
-  worker_pod["nodeSelector"]["cloud.google.com/gke-nodepool"] = worker_nodepool
+  if worker_nodepool in KUEUE_MANAGED_WORKER_POOLS:
+    # Leave the pool to Kueue / Node-Auto-Provisioning.  JobSet-level exclusive
+    # topology coordinates the selected (or NAP-created) slice across every
+    # indexed follower, so no per-Pod pin is needed -- and a pin would be wrong
+    # because the NAP pool name is generated per slice.
+    worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
+  else:
+    worker_pod["nodeSelector"][
+        "cloud.google.com/gke-nodepool"
+    ] = worker_nodepool
   worker_container = _container(worker_pod["containers"], "pathways-worker")
   address = f"{name}-pathways-head-0-0.{name}"
   _replace_arg(

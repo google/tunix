@@ -13,6 +13,11 @@ import yaml
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _QUEUE = "multislice-queue"
 _SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
+# Fail-closed admission sets.  Anything outside these still raises; the extra
+# members exist because bodaborg-v5p-nap has no "deepswe-cpu-pool-2" and routes
+# single-slice work through the "default" LocalQueue.
+_ADMITTED_QUEUES = frozenset({"multislice-queue", "default"})
+_ADMITTED_SANDBOX_NODEPOOLS = frozenset({"deepswe-cpu-pool-2", "cpu-np"})
 
 
 def _label(value: str, *, field: str) -> str:
@@ -40,11 +45,15 @@ def render(
   image_pull_secret = _label(
       image_pull_secret, field="image_pull_secret"
   )
-  if queue_name != _QUEUE:
-    raise ValueError(f"P58 sandbox probe requires queue {_QUEUE!r}")
-  if sandbox_nodepool != _SANDBOX_NODEPOOL:
+  if queue_name not in _ADMITTED_QUEUES:
     raise ValueError(
-        f"P58 sandbox probe requires node pool {_SANDBOX_NODEPOOL!r}"
+        "P58 sandbox probe requires an admitted queue "
+        f"({sorted(_ADMITTED_QUEUES)}), got {queue_name!r}"
+    )
+  if sandbox_nodepool not in _ADMITTED_SANDBOX_NODEPOOLS:
+    raise ValueError(
+        "P58 sandbox probe requires an admitted node pool "
+        f"({sorted(_ADMITTED_SANDBOX_NODEPOOLS)}), got {sandbox_nodepool!r}"
     )
   if not task_image or any(char.isspace() for char in task_image):
     raise ValueError("task_image must be a non-empty container image reference")

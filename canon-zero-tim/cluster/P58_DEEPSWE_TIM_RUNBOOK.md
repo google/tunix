@@ -99,9 +99,16 @@ strict numerical contract; its B4xG4 batch is not P58 admission.
 ```bash
 SOURCE_SHA=<published-readback-40-char-sha>
 CLIENT_IMAGE_DIGEST=<matching-image@sha256:digest>
-CPU_NODEPOOL=canon-cpu-pool
-SANDBOX_NODEPOOL=deepswe-cpu-pool-2
-TPU_NODEPOOL=<one-4x4x4-v5p-worker-pool-or-auto>
+# bodaborg-v5p-nap: neither "canon-cpu-pool" nor "deepswe-cpu-pool-2" exists
+# there, and "sandbox-cpu-flavor" is attached only to the "trellis"
+# ClusterQueue, so "cpu-np" is the one pool our "default" queue can reach for
+# both the head and the R2E sandboxes.
+CPU_NODEPOOL=cpu-np
+SANDBOX_NODEPOOL=cpu-np
+# Leave the v5p slice to Node-Auto-Provisioning; the created pool name carries
+# a random suffix (observed: nap-ct5p-hightp-4t-btbx4rgu) and must not be
+# pinned.
+TPU_NODEPOOL=auto
 MODEL_PVC=haoyugao-cpu-np-pvc
 CLEAN_WHITELIST=canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
 CLEAN_WHITELIST_SHA256=2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
@@ -723,19 +730,53 @@ implementation onto exact operator parent
 embedder-sharding update; render only from the final clean remote readback SHA
 containing this entry, never from the older evidence SHA.
 
-## K03 correction: exclusive topology belongs on the JobSet
+## K03 correction: exclusive topology belongs on the worker Pod template
+
+> SUPERSEDED 2026-09-13. This section previously required the annotation on
+> JobSet metadata and forbade the worker-Pod copy. That is now reversed. The
+> original K03 note and the evidence that overturned it are both kept below.
 
 K03 failed before rollout when `vpod.kb.io` rejected indexed worker followers.
 The manifest placed
 `alpha.jobset.sigs.k8s.io/exclusive-topology=cloud.google.com/gke-nodepool`
-on the worker Pod template instead of JobSet metadata, so follower admission
-lacked the JobSet-level placement context.
+on the worker Pod template instead of JobSet metadata, and at the time that
+was read as the cause, so P58 was changed to hoist the annotation to JobSet
+metadata.
 
-P58 now requires that annotation exactly once on JobSet metadata and forbids
-the worker-Pod copy. Kueue-managed values `auto`, `none`, `any`, and
+Measurement on `bodaborg-v5p-nap` contradicts that reading. A JobSet-scoped
+annotation applies to *every* replicatedJob, so `pathways-head` also receives
+the injected `podAntiAffinity` with
+`topologyKey: cloud.google.com/gke-nodepool` and
+`jobset.sigs.k8s.io/job-key NotIn [own key]` -- that is, "no other
+JobSet-managed Pod anywhere on this node pool". The head runs on the shared
+`cpu-np` pool, which already hosts other tenants' orchestrator Pods and which
+is also where all 128 of our own R2E sandboxes land, so the head would be
+unschedulable or mutually exclusive with its own sandboxes.
+
+Cluster survey backing this:
+
+```text
+JobSet-scoped annotation : 4 JobSets, all q38-v5p-e2e-*, all single
+                           replicatedJob "slice-job", all active=0
+Pod-template annotation  : 15 JobSets, including
+                           canon-p57-fl-zero-m15-r10-06a0fdb9 and
+                           canon-p57-fl-zero-m15-r11-3f95bdc7, both of which
+                           report head and worker ready=1 failed=0
+```
+
+No head+worker JobSet has ever been observed running on this cluster with the
+JobSet-scoped form. `jobset-64chip.yaml` carries the annotation on the worker
+Pod template, and `render_p33_jobsets.py` preserves it there; P57 is therefore
+the only shape with end-to-end evidence.
+
+P58 now requires that annotation exactly once on the worker Pod template and
+forbids a JobSet-metadata copy. Both directions are fail-closed in
+`validate()`. Kueue-managed values `auto`, `none`, `any`, and
 `tpu-v5p-slice` omit literal nodepool affinity and let the selected flavor or
-NAP pool satisfy the JobSet placement contract. A concrete pool remains legal
-and exact. Every render retains:
+NAP pool satisfy the placement contract; the Pod-template annotation still
+keys on `gke-nodepool`, which is what holds all indexed followers on the one
+NAP-created pool. A concrete pool remains legal and exact. Every render
+retains:
 
 ```text
 cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice

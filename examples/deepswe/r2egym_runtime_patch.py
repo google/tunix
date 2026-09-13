@@ -12,17 +12,30 @@ _KUBERNETES_DNS_LABEL = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
 )
 _DEFAULT_NODE_SELECTOR_VAL = "cpu-np"
-_P58_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
+# Admission stays fail-closed: the P58 production lane accepts only the pools
+# listed here and anything else still raises.  "cpu-np" is admitted for
+# bodaborg-v5p-nap, where "deepswe-cpu-pool-2" does not exist and the
+# "sandbox-cpu-flavor" ResourceFlavor is attached only to the "trellis"
+# ClusterQueue, so a sandbox Pod submitted from our "default" queue can never
+# be admitted onto sandbox-cpu-pool.  This mirrors
+# _ADMITTED_SANDBOX_NODEPOOLS in
+# canon-zero-tim/cluster/render_p58_deepswe_tim.py; the two must stay in sync,
+# otherwise a render passes, `kubectl apply --dry-run=server` passes, and the
+# run dies here when it spawns its first sandbox.
+_P58_SANDBOX_NODEPOOLS = frozenset({
+    "deepswe-cpu-pool-2",
+    "cpu-np",
+})
 
 
 def resolve_node_selector_value(environ: dict[str, str]) -> str:
   """Returns the sandbox pool, failing closed for the P58 production lane."""
   value = environ.get("NODE_SELECTOR_VAL", "")
   if environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1":
-    if value != _P58_SANDBOX_NODEPOOL:
+    if value not in _P58_SANDBOX_NODEPOOLS:
       raise ValueError(
-          "P58 requires NODE_SELECTOR_VAL=deepswe-cpu-pool-2; "
-          f"got {value!r}"
+          "P58 requires NODE_SELECTOR_VAL to be one of "
+          f"{sorted(_P58_SANDBOX_NODEPOOLS)}; got {value!r}"
       )
     return value
   return value or _DEFAULT_NODE_SELECTOR_VAL

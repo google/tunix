@@ -86,9 +86,12 @@ class RenderP34JobSetTest(unittest.TestCase):
     worker = jobs[1]["template"]["spec"]
     self.assertEqual((worker["backoffLimit"], worker["completions"], worker["parallelism"]), (0, 64, 64))
     self.assertEqual(worker["template"]["spec"]["restartPolicy"], "Never")
-    self.assertEqual(renderer._head(document)["priorityClassName"], "very-high")
+    # Pinned literal on purpose: this is the contract guard against priority
+    # drift.  "medium" is the bodaborg-v5p-nap house rule ("very-high" is not
+    # defined there and workload users cannot create PriorityClasses).
+    self.assertEqual(renderer._head(document)["priorityClassName"], "medium")
     self.assertEqual(
-        worker["template"]["spec"]["priorityClassName"], "very-high"
+        worker["template"]["spec"]["priorityClassName"], "medium"
     )
 
   def test_rejects_missing_or_mismatched_priority_class(self):

@@ -13,13 +13,19 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 
+import render_p34_jobset as p34
+
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RUN_ID_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,14}[a-z0-9])?")
 _BRANCH = "yuxzhang/canon-zero-tim"
 _SCRATCH_ROOT = "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33"
 _GSM8K_FULL_MAX_RESTARTS = 3
-_PRIORITY_CLASS = "very-high"
+# Single source of truth: p34 owns the PriorityClass.  This used to be a
+# second literal "very-high" copy, which meant that retargeting the base
+# JobSets at bodaborg-v5p-nap (where "very-high" does not exist and workload
+# users cannot create it) made this validator reject every P33 and P57 render.
+_PRIORITY_CLASS = p34.PRIORITY_CLASS
 
 
 def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:

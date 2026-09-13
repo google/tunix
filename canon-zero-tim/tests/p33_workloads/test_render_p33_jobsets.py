@@ -122,8 +122,13 @@ class RenderP33JobSetsTest(unittest.TestCase):
         worker = document["spec"]["replicatedJobs"][1]["template"]["spec"][
             "template"
         ]["spec"]
-        self.assertEqual(head["priorityClassName"], "very-high")
-        self.assertEqual(worker["priorityClassName"], "very-high")
+        # Asserted against the shared constant on purpose: a third literal
+        # copy here is what let the "very-high" drift survive undetected.
+        self.assertEqual(head["priorityClassName"], renderer.p34.PRIORITY_CLASS)
+        self.assertEqual(
+            worker["priorityClassName"], renderer.p34.PRIORITY_CLASS
+        )
+        self.assertEqual(renderer.p34.PRIORITY_CLASS, "medium")
         scratches.append(tuple(
             arg
             for container in head["initContainers"]
