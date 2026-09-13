@@ -76,6 +76,7 @@ class FakeSource:
       hosts: int = 1,
       variables: Sequence[weight_sync.TensorMetadata] = (),
       prepare_delay: float = 0.0,
+      transport_mode: Optional[str] = None,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ACTOR.value})
@@ -84,6 +85,7 @@ class FakeSource:
     self._log = log
     self._hosts = hosts
     self._variables = tuple(variables)
+    self._transport_mode = transport_mode
     self.release_gate = None
     self.release_entered = None
     self._prepare_delay = prepare_delay
@@ -116,6 +118,7 @@ class FakeSource:
             layout=(0,),
             item_size=4,
             variables=self._variables,
+            transport_mode=self._transport_mode,
         )
         for host in range(self._hosts)
     ]
@@ -159,6 +162,7 @@ class FakeDestination:
       crash_after_publish: bool = False,
       raise_after_complete_once: Optional[str] = None,
       status_unreachable: bool = False,
+      transport_mode: Optional[str] = None,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ROLLOUT.value})
@@ -167,6 +171,7 @@ class FakeDestination:
     self._variables = tuple(variables)
     self._global_shape = global_shape
     self._item_size = item_size
+    self._transport_mode = transport_mode
     self._fail_on = fail_on
     self._fail_persistently = fail_persistently
     self._failed_once: set[str] = set()
@@ -247,6 +252,7 @@ class FakeDestination:
               shards=(f"10.0.0.2:{self.port}",),
               control_plane_rpc_address=f"10.0.0.2:{self.port + 500}",
               variables=self._variables,
+              transport_mode=self._transport_mode,
           )
       ]
     return [
@@ -258,6 +264,7 @@ class FakeDestination:
             mesh_shape=(1,),
             layout=(0,),
             item_size=self._item_size,
+            transport_mode=self._transport_mode,
         )
     ]
 
@@ -651,6 +658,32 @@ class ManifestPreflightTest(CoordinatorTestBase):
     self.assertNotIn("abort", self.phases("sampler"))
     self.assertIsNone(self.coordinator.poisoned)
 
+  def test_failure_log_shows_both_manifests(self):
+    """Verifies failure logs sample both manifests on mismatch.
+
+    WeightSyncError renders only its outer message, and the problem list is
+    name-sorted, so a naming-convention mismatch shows one side unless the log
+    samples both.
+    """
+
+    def var(name):
+      return weight_sync.TensorMetadata(
+          name=name, shape=(4,), mesh_shape=(1,), layout=(0,), item_size=4
+      )
+
+    dest = FakeDestination("sampler", [], variables=(var("rollout_w"),))
+    source = FakeSource("trainer", Wire(), [], variables=(var("trainer_w"),))
+    self.make(dest, sources=[source])
+
+    with self.assertLogs(level="ERROR") as logs:
+      with self.assertRaises(WeightSyncError):
+        self.sync()
+
+    blob = "\n".join(logs.output)
+    self.assertIn("manifest preflight failed", blob)
+    self.assertIn("trainer_w", blob)
+    self.assertIn("rollout_w", blob)
+
   def test_shape_mismatch_fails_before_any_downtime(self):
     dest = FakeDestination("sampler", [], global_shape=(8,))
     self.make(dest)  # source's global shape is (4,)
@@ -663,6 +696,15 @@ class ManifestPreflightTest(CoordinatorTestBase):
     )
     self.assertNotIn("pre", self.phases("sampler"))
     # Source staging is still released on this exit path.
+    self.assertEqual(self.sources[0].release_calls, 1)
+
+  def test_asymmetric_transport_mode_ffi_to_tcp_succeeds(self):
+    dest = FakeDestination("sampler", [], transport_mode="tcp")
+    source = FakeSource("trainer", Wire(), [], transport_mode="ffi")
+    self.make(dest, sources=[source])
+
+    result = self.sync()
+    self.assertIs(result.state, RoundState.COMMITTED)
     self.assertEqual(self.sources[0].release_calls, 1)
 
 

@@ -85,6 +85,22 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     )
     self.assertTrue(adapter.enable_raiden)
 
+  def test_real_raiden_delegate_instantiation(self):
+    raiden_config = mock.MagicMock()
+    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_raiden_slice",
+        tokenizer=self.mock_tokenizer,
+        config=raiden_config,
+    )
+    self.assertTrue(adapter.enable_raiden)
+    self.assertIsNotNone(adapter.raiden_sync_delegate)
+    self.assertEqual(
+        adapter.raiden_sync_delegate._synchronizers[0].job_name,
+        "vllm_raiden_slice",
+    )
+    self.assertFalse(adapter.raiden_sync_delegate.is_bounded())
+
   def test_lifecycle_methods(self):
     self.assertTrue(asyncio.run(self.sampler_adapter.start()))
     self.assertTrue(asyncio.run(self.sampler_adapter.pause()))
@@ -173,6 +189,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.weight_sync = mock.AsyncMock(return_value=5)
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
 
     fake_transformer_state = {"param": "tensor"}
     self.mock_vllm_sampler.transformer_state = fake_transformer_state
@@ -192,7 +209,9 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     # 1. bind_weight_sync
     asyncio.run(raiden_adapter.bind_weight_sync(sync_req))
     mock_delegate.bind_weight_sync.assert_awaited_once_with(
-        sync_request=sync_req, state=fake_transformer_state
+        sync_request=sync_req,
+        state=fake_transformer_state,
+        sampler=self.mock_vllm_sampler,
     )
     mock_delegate.is_bounded.return_value = True
 

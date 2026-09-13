@@ -163,6 +163,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.weight_sync = mock.AsyncMock(return_value=10)
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
 
     sampler_with_raiden = vanilla_sampler_adapter.VanillaSamplerAdapter(
         server_id="tpu_slice_raiden",
@@ -183,6 +184,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     mock_delegate.bind_weight_sync.assert_awaited_once_with(
         sync_request=sync_req,
         state=sampler_with_raiden.sampler.transformer_state,
+        sampler=sampler_with_raiden.sampler,
     )
     mock_delegate.is_bounded.return_value = True
 
@@ -206,6 +208,25 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     mock_delegate.post_weight_sync.assert_awaited_once_with(
         sync_request=sync_req
     )
+
+  def test_real_raiden_delegate_instantiation_and_sync(self):
+    sampler_with_raiden = vanilla_sampler_adapter.VanillaSamplerAdapter(
+        server_id="tpu_slice_raiden",
+        transformer=self.transformer,
+        tokenizer=self.vocab,
+        cache_config=self.cache_config,
+        config=types.SimpleNamespace(
+            weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
+        ),
+    )
+    sampler_with_raiden.initialize()
+    self.assertTrue(sampler_with_raiden.enable_raiden)
+    self.assertIsNotNone(sampler_with_raiden.raiden_sync_delegate)
+    self.assertEqual(
+        sampler_with_raiden.raiden_sync_delegate._synchronizers[0].job_name,
+        "tpu_slice_raiden",
+    )
+    self.assertFalse(sampler_with_raiden.raiden_sync_delegate.is_bounded())
 
 
 if __name__ == "__main__":

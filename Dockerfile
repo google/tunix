@@ -48,27 +48,19 @@ RUN uv pip install --upgrade flax && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
     uv pip install --no-deps git+https://github.com/google/maxtext.git
 
-# Build argument to conditionally install MaxText dependencies
-ARG INSTALL_MAXTEXT=false
+# Build argument to conditionally install Kubernetes tools
+ARG INSTALL_K8S_TOOLS=false
 
-# Install MaxText specific dependencies conditionally
-RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
-      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+# Install gcloud, kubectl, k9s
+RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
+      apt-get update && \
+      apt-get install -y vim lsof procps apt-transport-https ca-certificates gnupg && \
+      (echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list) && \
+      (curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --batch --yes --no-tty --dearmor -o /usr/share/keyrings/cloud.google.gpg) && \
+      apt-get update && apt-get install -y google-cloud-cli google-cloud-cli-gke-gcloud-auth-plugin kubectl && \
+      (curl -sS https://webinstall.dev/k9s | bash) && \
+      rm -rf /var/lib/apt/lists/*; \
     fi
-
-# Build argument to conditionally install Raiden weight sync dependencies
-ARG INSTALL_RAIDEN=false
-ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
-
-# Install Raiden specific dependencies conditionally
-RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
-    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
-      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
-    else \
-      pip install keyrings.google-artifactregistry-auth && \
-      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
-    fi; \
-fi
 
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
@@ -83,11 +75,43 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
     fi
 
+# Build argument to conditionally install MaxText dependencies
+ARG INSTALL_MAXTEXT=false
+
+# Install MaxText specific dependencies conditionally
+RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
+      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+fi
+
+# Build argument to conditionally install Raiden weight sync dependencies
+ARG INSTALL_RAIDEN=false
+ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
+
+# Install Raiden specific dependencies conditionally
+COPY raiden_wheels/ ${RAIDEN_WHEEL_DIR}/
+RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
+    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
+      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
+    else \
+      pip install keyrings.google-artifactregistry-auth && \
+      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
+    fi; \
+fi
+
+# Force install numpy version to avoid version conflicts.
+RUN uv pip install numpy==2.3.5
+
 # Copy the rest of the project files
 COPY . .
 
+# Compile proto buffer for discovery service, this has to be the last step.
+RUN uv pip install grpcio-tools
+RUN cd /app && find tunix/experimental/distributed -name "*.proto" -exec python -m grpc_tools.protoc -I/app --python_out=/app --grpc_python_out=/app {} +
+
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .
+
+
 
 # Set the default command to bash
 CMD ["bash"]

@@ -45,6 +45,50 @@ def get_tokenizer_pad_id(
   return int(pad_id) if pad_id is not None else 0
 
 
+# vLLM instantiates a model class by the HF `architectures` entry, so this is
+# what selects maxtext_vllm_adapter's `MaxTextForCausalLM` over the stock
+# vLLM implementation. Pass it as the engine's `hf_overrides`.
+VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
+
+
+def build_vllm_maxtext_additional_config(
+    model_name: str,
+    *,
+    attention: str = "",
+    prefuse_moe_weights: bool | None = None,
+) -> dict[str, Any]:
+  """Builds the vLLM `additional_config` a MaxText rollout model reads.
+
+  `MaxTextForCausalLM` builds its own MaxText config from
+  `additional_config["maxtext_config"]`; these are the inference-side overrides
+  that make it match the trainer's model. Kept here so the in-process and
+  server-mode samplers cannot drift apart.
+
+  Args:
+    model_name: MaxText model name, e.g. `qwen3-1.7b`.
+    attention: MaxText attention kernel override; MaxText's default is used when
+      empty.
+    prefuse_moe_weights: Whether the rollout expects w0/w1 pre-fused into the
+      TPU GMM layout. None leaves MaxText's default in place.
+
+  Returns:
+    The `additional_config` mapping to hand to the vLLM engine.
+  """
+  overrides: dict[str, Any] = {
+      "model_name": model_name,
+      "model_call_mode": "inference",
+      "enable_dp_attention": False,
+      "allow_split_physical_axes": True,
+      "log_config": False,
+      "weight_dtype": "bfloat16",
+  }
+  if prefuse_moe_weights is not None:
+    overrides["prefuse_moe_weights"] = prefuse_moe_weights
+  if attention:
+    overrides["attention"] = attention
+  return {"maxtext_config": overrides}
+
+
 def build_maxtext_config(
     model_name: str,
     worker_id: str = "",
@@ -60,9 +104,51 @@ def build_maxtext_config(
     load_parameters_path: str = "",
     padded_moe_mlp_dim: int = 0,
     base_output_directory: str = "",
+    gradient_accumulation_steps: int = 1,
+    checkpointing_options: Any = None,
+    *,
+    base_num_kv_heads: int = 0,
+    kv_tp_size: int = 0,
+    moe_mlp_tp_size: int = 0,
+    rollout_mesh_tp: int = 0,
+    prefuse_moe_weights: bool = False,
+    use_weight_converter: bool = True,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
+
+  # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
+  if rollout_mesh_tp > 0:
+    if kv_tp_size == 0:
+      logging.info(
+          "Overriding kv_tp_size from 0 to rollout_mesh_tp=%d", rollout_mesh_tp
+      )
+      kv_tp_size = rollout_mesh_tp
+    if moe_mlp_tp_size == 0:
+      logging.info(
+          "Overriding moe_mlp_tp_size from 0 to rollout_mesh_tp=%d",
+          rollout_mesh_tp,
+      )
+      moe_mlp_tp_size = rollout_mesh_tp
+
+  if padded_moe_mlp_dim < 0:
+    raise ValueError(
+        f"padded_moe_mlp_dim must be non-negative, got {padded_moe_mlp_dim}"
+    )
+  if base_num_kv_heads < 0:
+    raise ValueError(
+        f"base_num_kv_heads must be non-negative, got {base_num_kv_heads}"
+    )
+  if kv_tp_size < 0:
+    raise ValueError(f"kv_tp_size must be non-negative, got {kv_tp_size}")
+  if moe_mlp_tp_size < 0:
+    raise ValueError(
+        f"moe_mlp_tp_size must be non-negative, got {moe_mlp_tp_size}"
+    )
+  if rollout_mesh_tp < 0:
+    raise ValueError(
+        f"rollout_mesh_tp must be non-negative, got {rollout_mesh_tp}"
+    )
 
   if train_micro_batch_size % mesh_fsdp:
     raise ValueError(
@@ -77,32 +163,146 @@ def build_maxtext_config(
   if not os.path.exists(base_yml):
     raise FileNotFoundError(f"MaxText base.yml not found at {base_yml}")
 
+  effective_kv_heads = base_num_kv_heads
+  effective_padded_moe_mlp_dim = padded_moe_mlp_dim
+
+  # Determine if we need to inspect the model's YAML configuration
+  needs_model_yml = (effective_kv_heads <= 0 and kv_tp_size > 0) or (
+      not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0
+  )
+  model_data = None
+  if needs_model_yml:
+    models_dir = os.path.join(os.path.dirname(base_yml), "models")
+    model_yml = os.path.join(models_dir, f"{model_name}.yml")
+    if os.path.exists(model_yml):
+      try:
+        import yaml
+
+        with open(model_yml, "r") as f:
+          data = yaml.safe_load(f)
+        if isinstance(data, dict):
+          model_data = data
+        else:
+          logging.warning(
+              "Expected dict in model config %s, got %s",
+              model_yml,
+              type(data).__name__,
+          )
+      except Exception as e:
+        logging.warning("Failed to load model config from %s: %s", model_yml, e)
+    else:
+      logging.warning("Model config file not found at %s", model_yml)
+
+  # 1. Resolve KV head replication:
+  if effective_kv_heads <= 0 and kv_tp_size > 0:
+    if model_data:
+      effective_kv_heads = int(model_data.get("base_num_kv_heads") or 0)
+    if effective_kv_heads <= 0:
+      raise ValueError(
+          f"kv_tp_size ({kv_tp_size}) requires base_num_kv_heads > 0, but could"
+          f" not determine base_num_kv_heads from config or {model_name}.yml."
+          " Please specify --base_num_kv_heads."
+      )
+
+  if effective_kv_heads > 0 and kv_tp_size > effective_kv_heads:
+    if kv_tp_size % effective_kv_heads != 0:
+      raise ValueError(
+          f"kv_tp_size ({kv_tp_size}) must be cleanly divisible by "
+          f"base_num_kv_heads ({effective_kv_heads})."
+      )
+    effective_kv_heads = kv_tp_size
+
+  # 2. Resolve padded MoE MLP dimension before pyconfig initialization:
+  if not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0:
+    compute_padded_moe_mlp_dim = None
+    try:
+      from maxtext.integration.vllm.convert_utils import compute_padded_moe_mlp_dim
+    except (ImportError, ModuleNotFoundError) as e:
+      logging.warning(
+          "Could not import compute_padded_moe_mlp_dim: %s. Skipping automatic"
+          " MoE dimension padding.",
+          e,
+      )
+
+    if compute_padded_moe_mlp_dim is not None and model_data:
+      base_dim = model_data.get("base_moe_mlp_dim") or model_data.get(
+          "moe_intermediate_size"
+      )
+      if base_dim:
+        try:
+          effective_padded_moe_mlp_dim = compute_padded_moe_mlp_dim(
+              base_dim, moe_mlp_tp_size
+          )
+          logging.info(
+              "Auto-computed padded_base_moe_mlp_dim=%d for moe_mlp_tp_size=%d",
+              effective_padded_moe_mlp_dim,
+              moe_mlp_tp_size,
+          )
+        except Exception as e:
+          raise RuntimeError(
+              "Failed to auto-compute padded_base_moe_mlp_dim for"
+              f" moe_mlp_tp_size={moe_mlp_tp_size}: {e}"
+          ) from e
+
   output_dir = base_output_directory or "/tmp/maxtext"
-  enable_checkpointing = bool(load_parameters_path)
   argv = [
       "maxtext_trainer",
       base_yml,
       f"model_name={model_name}",
       f"run_name={worker_id or 'tunix_maxtext'}",
       f"base_output_directory={output_dir}",
-      f"enable_checkpointing={enable_checkpointing}",
   ]
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
+  # Checkpointing configs. `save_interval_steps=0` means "never save"
+  save_interval_steps = int(
+      getattr(checkpointing_options, "save_interval_steps", 0) or 0
+  )
+  if checkpointing_options is not None and save_interval_steps < 0:
+    raise ValueError(
+        "checkpoint save_interval_steps must be non-negative, got"
+        f" {save_interval_steps}."
+    )
+  if checkpointing_options is not None and save_interval_steps > 0:
+    argv.extend([
+        "enable_checkpointing=True",
+        f"checkpoint_period={save_interval_steps}",
+        f"max_num_checkpoints_to_keep={checkpointing_options.max_to_keep}",
+    ])
+  elif checkpointing_options is not None:
+    logging.info(
+        "checkpoint save_interval_steps=0; disabling checkpoint saving "
+        "(load_parameters_path still restores)."
+    )
+    argv.append("enable_checkpointing=False")
+  elif load_parameters_path:
+    argv.append("enable_checkpointing=True")
+  else:
+    argv.append("enable_checkpointing=False")
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
-      "gradient_accumulation_steps=1",
+      f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_prompt_length + max_response_length}",
       "attention=dot_product",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
       *(
-          [f"padded_base_moe_mlp_dim={padded_moe_mlp_dim}"]
-          if padded_moe_mlp_dim
+          [f"padded_base_moe_mlp_dim={effective_padded_moe_mlp_dim}"]
+          if effective_padded_moe_mlp_dim
+          else []
+      ),
+      # The vLLM rollout replicates KV heads up to kv_tp_size (tp*ep) when the
+      # model has fewer -- see maxtext_vllm_adapter. Weight sync pairs by name,
+      # so the trainer must build the same shape. Prefer attention DP on the
+      # rollout instead, which avoids the replication entirely; this is the
+      # fallback when that is not available.
+      *(
+          [f"base_num_kv_heads={effective_kv_heads}"]
+          if effective_kv_heads
           else []
       ),
       f"ici_tensor_parallelism={mesh_tp}",
@@ -115,7 +315,29 @@ def build_maxtext_config(
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
+      f"prefuse_moe_weights={prefuse_moe_weights}",
+      f"use_weight_converter={use_weight_converter}",
+      *(
+          [
+              f"rollout_tensor_parallelism={rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size}"
+          ]
+          if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
+          else []
+      ),
   ])
+  # Pathways persistence: let the TPU workers write the checkpoint themselves
+  # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
+  # default (see maxtext/common/checkpoint_context.py), so both must be off
+  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
+    logging.info(
+        "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
+        "persistence handler can save directly from the TPU workers."
+    )
+    argv.extend([
+        "checkpoint_storage_use_ocdbt=false",
+        "checkpoint_storage_use_zarr3=false",
+    ])
+
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
 

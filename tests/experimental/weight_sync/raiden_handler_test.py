@@ -26,11 +26,11 @@ stylistic: the handler calls the controller directly now, so a kwarg the real
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Optional
 from unittest import mock
 
 from absl.testing import absltest
-
 from tunix.experimental.weight_sync import raiden_handler
 from tunix.experimental.weight_sync import weight_sync
 
@@ -128,6 +128,7 @@ class RaidenHandlerTest(absltest.TestCase):
 
     self.server_cls.return_value.start.return_value = 15000
     self.controller = self.controller_cls.return_value
+    self.controller.worker_rpc_client = mock.MagicMock()
 
     # A fresh future per call, kept so a test can assert which way it was
     # driven. `start_transfer` returning a bare Mock would not do: the
@@ -258,6 +259,7 @@ class RaidenHandlerTest(absltest.TestCase):
     # outbound calls to worker control-plane addresses through its
     # WeightSyncWorkerRpcClient, and that client needs the resolver too.
     resolver = object()
+    self.rpc_client_cls.reset_mock()
     raiden_handler.RaidenHandler(port=0, name_resolver=resolver)
 
     self.rpc_client_cls.assert_called_once_with(name_resolver=resolver)
@@ -399,6 +401,63 @@ class RaidenHandlerTest(absltest.TestCase):
       self.handler.register_work_unit(
           make_metadata(SRC, variables=(variable,))
       )
+
+  def test_variable_composite_product_mesh_axes_validation(self):
+    # Physical mesh: fsdp=2, tp=2 (total product 4)
+    variable = weight_sync.TensorMetadata(
+        name="w",
+        shape=(8, 4),
+        mesh_shape=(4, 1),
+        layout=(1, 0),
+        item_size=4,
+        sharding_spec=("fsdp,tp", ""),
+    )
+    meta = make_metadata(
+        SRC,
+        mesh_shape=(2, 2),
+        mesh_axes=("fsdp", "tp"),
+        variables=(variable,),
+    )
+    # Should validate and register successfully
+    self.handler.register_work_unit(meta)
+    self.assertIn(SRC, self.handler.registered_units)
+
+  def test_variable_composite_product_mesh_axes_failure_cases(self):
+    # Unknown sub-axis in composite axis
+    var_unknown = weight_sync.TensorMetadata(
+        name="w",
+        shape=(8, 4),
+        mesh_shape=(4, 1),
+        layout=(1, 0),
+        item_size=4,
+        sharding_spec=("fsdp,nonexistent", ""),
+    )
+    meta_unknown = make_metadata(
+        SRC,
+        mesh_shape=(2, 2),
+        mesh_axes=("fsdp", "tp"),
+        variables=(var_unknown,),
+    )
+    with self.assertRaisesRegex(ValueError, "unknown mesh axis"):
+      self.handler.register_work_unit(meta_unknown)
+
+    # Size mismatch between logical size (8) and composite physical size (2*2=4)
+    var_mismatch = weight_sync.TensorMetadata(
+        name="w",
+        shape=(8, 4),
+        mesh_shape=(8, 1),
+        layout=(1, 0),
+        item_size=4,
+        sharding_spec=("fsdp,tp", ""),
+    )
+    meta_mismatch = make_metadata(
+        SRC,
+        mesh_shape=(2, 2),
+        mesh_axes=("fsdp", "tp"),
+        variables=(var_mismatch,),
+    )
+    with self.assertRaisesRegex(ValueError, "physical mesh has size 4"):
+      self.handler.register_work_unit(meta_mismatch)
 
   def test_no_variables_sends_none_rather_than_an_empty_list(self):
     self.handler.register_work_unit(make_metadata(SRC))

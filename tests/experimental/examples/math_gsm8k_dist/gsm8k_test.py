@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -47,7 +48,7 @@ class GSM8KTest(absltest.TestCase):
     obs, _ = env.reset()
     self.assertEqual(obs, {"prompts": "What is 2+2?"})
     next_obs, reward, done, info = env.step(
-        "2+2=4.</reasoning><answer>\\boxed{4}</answer>"
+        "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>"
     )
     self.assertEqual(next_obs["gold_answer"], "4")
     self.assertEqual(reward, 1.0)
@@ -55,9 +56,61 @@ class GSM8KTest(absltest.TestCase):
     self.assertTrue(info["correct"])
     self.assertTrue(info["format_correct"])
 
+  def test_format_parity_with_qwen3_grpo_demo(self):
+    """is_gsm8k_format_correct must match qwen3_grpo_demo's is_vtc_format_correct.
+
+    Exactly one </reasoning>, exactly one <answer>..</answer>, in that order.
+    The opening <reasoning> tag is not required: the prompt template opens it,
+    so a completion that follows the prompt only carries the closing tag.
+    """
+    # A completion that follows the prompt (closing tag only) is well-formed.
+    self.assertTrue(
+        gsm8k.is_gsm8k_format_correct(
+            "2+2=4\n</reasoning>\n<answer>\\boxed{4}</answer>"
+        )
+    )
+    # Re-emitting the opening tag is also fine.
+    self.assertTrue(
+        gsm8k.is_gsm8k_format_correct(
+            "<reasoning>work</reasoning><answer>\\boxed{4}</answer>"
+        )
+    )
+    # Tags out of order, duplicated, or missing are not well-formed.
+    self.assertFalse(
+        gsm8k.is_gsm8k_format_correct("<answer>\\boxed{4}</answer></reasoning>")
+    )
+    self.assertFalse(
+        gsm8k.is_gsm8k_format_correct(
+            "</reasoning></reasoning><answer>\\boxed{4}</answer>"
+        )
+    )
+    self.assertFalse(gsm8k.is_gsm8k_format_correct("The answer is \\boxed{4}"))
+    # Qwen-native <think> is not the recipe's format.
+    self.assertFalse(
+        gsm8k.is_gsm8k_format_correct("<think>2+2=4</think>\\boxed{4}")
+    )
+
+  def test_extract_boxed_answer_requires_boxed(self):
+    # Parity with examples/math_gsm8k/qwen3_grpo_demo.py: an <answer> block
+    # without \boxed{} is not an answer.
+    self.assertIsNone(gsm8k.extract_boxed_answer("<answer>42</answer>"))
+    self.assertEqual(
+        gsm8k.extract_boxed_answer("<answer>\\boxed{7}</answer>"), "7"
+    )
+
+  def test_think_and_boxed_scores_as_answer_only(self):
+    # Qwen thinking-mode shape: right answer, but not the recipe's format,
+    # so 0.5.
+    reward, info = gsm8k.score_gsm8k_completion(
+        "<think>2+2=4</think>\\boxed{4}", "4"
+    )
+    self.assertEqual(reward, 0.5)
+    self.assertFalse(info["format_correct"])
+    self.assertTrue(info["answer_correct"])
+
   def test_scores_formatted_wrong_answer_with_format_reward(self):
     reward, info = gsm8k.score_gsm8k_completion(
-        "2+2=5.</reasoning><answer>\\boxed{5}</answer>", "4"
+        "<reasoning>2+2=5.</reasoning><answer>\\boxed{5}</answer>", "4"
     )
     self.assertEqual(reward, 0.1)
     self.assertTrue(info["format_correct"])
@@ -142,6 +195,58 @@ class GSM8KTest(absltest.TestCase):
     second_item = dataset[1]
     self.assertEqual(second_item["question"], "What is 3 * 7?")
     self.assertEqual(second_item["answer"], "21")
+
+  def test_make_gsm8k_reward_fn(self):
+    reward_fn = gsm8k.make_gsm8k_reward_fn(debug=True)
+
+    # 1. Format correct and answer correct -> reward 1.0
+    item1 = types.SimpleNamespace(
+        metadata={
+            "text": "<reasoning>Reasoning step.</reasoning><answer>\\boxed{42}</answer>",
+            "gold_answer": "42",
+            "prompt_id": "p1",
+        }
+    )
+    self.assertEqual(reward_fn(item1), 1.0)
+
+    # 2. Format correct, wrong answer -> reward 0.1
+    item2 = types.SimpleNamespace(
+        metadata={
+            "text": "<reasoning>Reasoning step.</reasoning><answer>\\boxed{100}</answer>",
+            "gold_answer": "42",
+            "prompt_id": "p2",
+        }
+    )
+    self.assertEqual(reward_fn(item2), 0.1)
+
+    # 3. Format incorrect, right answer -> reward 0.5
+    item3 = types.SimpleNamespace(
+        metadata={
+            "text": "The answer is \\boxed{42}",
+            "gold_answer": "42",
+            "prompt_id": "p3",
+        }
+    )
+    self.assertEqual(reward_fn(item3), 0.5)
+
+    # 4. Format incorrect, wrong answer -> reward 0.0
+    item4 = types.SimpleNamespace(
+        metadata={
+            "text": "No answer here",
+            "gold_answer": "42",
+            "prompt_id": "p4",
+        }
+    )
+    self.assertEqual(reward_fn(item4), 0.0)
+
+    # 5. Uses 'answer' key in metadata fallback
+    item5 = types.SimpleNamespace(
+        metadata={
+            "text": "<reasoning>Reasoning.</reasoning><answer>\\boxed{15}</answer>",
+            "answer": "15",
+        }
+    )
+    self.assertEqual(reward_fn(item5), 1.0)
 
 
 if __name__ == "__main__":

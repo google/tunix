@@ -113,25 +113,8 @@ class SamplingResponse(datatypes.Response):
       )
 
 
-@dataclasses.dataclass(kw_only=True)
-class WeightSyncRequest(datatypes.Request):
-  """Configuration and routing metadata for synchronizing policy model weights.
-
-  Attributes:
-    controller_id: Optional identifier for transport controllers (e.g., TPU
-      Raiden).
-    policy_version: Target policy version identifier of the weights to sync.
-    weights: Optional source weights payload for non-Raiden / fallback sync.
-    source_metadata: Optional transport/layout metadata describing source
-      weights.
-    extra_config: Optional backend-specific configuration parameters.
-  """
-
-  controller_id: str = ""
-  policy_version: int = 0
-  weights: Any = None
-  source_metadata: Any = None
-  extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+# Alias canonical DTO from datatypes module for backwards compatibility.
+WeightSyncRequest = datatypes.WeightSyncRequest
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -218,6 +201,12 @@ class Sampler(Protocol):
       self, sync_request: WeightSyncRequest | Any = None, **kwargs
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
+    ...
+
+  async def abort_weight_sync(
+      self, sync_request: WeightSyncRequest | Any = None, **kwargs
+  ) -> str | None | Any:
+    """Discards staging and restores serving the previous policy weights."""
     ...
 
   async def get_transfer_status(

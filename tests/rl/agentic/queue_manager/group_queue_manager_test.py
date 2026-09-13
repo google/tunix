@@ -22,12 +22,12 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 
 def _create_item(
-    group_id: str, pair_index: int = 0
+    prompt_id: str, group_index: int = 0
 ) -> agent_types.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   return agent_types.TrajectoryItem(
-      pair_index=pair_index,
-      group_id=group_id,
+      group_index=group_index,
+      prompt_id=prompt_id,
       start_step=0,
       traj=None,
   )
@@ -36,7 +36,7 @@ def _create_item(
 def _create_manager(group_size: int) -> group_queue_manager.GroupQueueManager:
   """Helper to create a GroupQueueManager with the default test key_fn."""
   return group_queue_manager.GroupQueueManager(
-      key_fn=lambda x: getattr(x, "group_id", getattr(x, "prompt_id", id(x))),
+      key_fn=lambda x: getattr(x, "prompt_id", id(x)),
       group_size=group_size,
   )
 
@@ -63,13 +63,13 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
-  def test_falsy_integer_group_id_grouping(self):
-    """Tests that group_id=0 (integer zero) is correctly grouped and not treated as falsy fallback."""
+  def test_falsy_integer_prompt_id_grouping(self):
+    """Tests that prompt_id=0 (integer zero) is correctly grouped and not treated as falsy fallback."""
 
     async def _run_test():
       manager = _create_manager(group_size=2)
-      item1 = _create_item(group_id=0, pair_index=0)
-      item2 = _create_item(group_id=0, pair_index=1)
+      item1 = _create_item(prompt_id=0, group_index=0)
+      item2 = _create_item(prompt_id=0, group_index=1)
 
       await manager.put(item1)
       self.assertEmpty(manager._ready_groups)

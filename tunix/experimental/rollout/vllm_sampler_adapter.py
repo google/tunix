@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 from typing import Any, List, Mapping, Sequence
@@ -32,18 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 def _get_rl_vllm_sampler_cls():
-  """Lazy import of tpu_inference.rl.RLVllmSampler.
+  """Lazy import of tunix.experimental.rollout.vllm_sampler_v2.RLVllmSampler.
 
-  Resolved through importlib so static analyzers do not try to follow the
-  tpu-inference dependency, which is not available in every environment.
+  Deferred because `vllm_sampler_v2` imports vLLM at module scope, while
+  `rollout/__init__.py` imports this module eagerly and vLLM is not a
+  dependency of the base `google-tunix` install. Importing it at module scope
+  would break `import tunix.experimental.rollout` wherever vLLM is absent.
   """
-  try:
-    return getattr(importlib.import_module("tpu_inference.rl"), "RLVllmSampler")
-  except (ImportError, AttributeError) as e:
-    raise ImportError(
-        "tpu_inference.rl.RLVllmSampler is not available. Please ensure"
-        " tpu-inference is installed."
-    ) from e
+  from tunix.experimental.rollout import vllm_sampler_v2  # pylint: disable=g-import-not-at-top
+
+  return vllm_sampler_v2.RLVllmSampler
 
 
 # Hooks RLVllmSampler must expose for Raiden weight sync; verified once at
@@ -103,6 +100,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self.model_name = model_name or (engine_args.model if engine_args else "")
     self.sampler = sampler_instance
     self.worker_index = worker_index
+    # Raiden treats units sharing a job_name as hosts of ONE job and splits the
+    # weights across them (`num_dst_physical_hosts` in raiden_controller), so
+    # independent rollout replicas each need their own job_name to be sent a
+    # full copy. server_id already has that granularity; worker_index stays the
+    # host index *within* one replica.
+    self.raiden_job_name = f"replica_{self.server_id}"
     self._parallelism = parallelism
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
@@ -184,6 +187,34 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Starts the underlying sampler engine."""
     return await self._require_sampler().start(**kwargs)
 
+  async def _ensure_started(self) -> None:
+    """Brings the engine up if nothing has needed it yet.
+
+    RLVllmSampler builds its AsyncLLM lazily and `sample()` is the only caller
+    of `start()`. Weight sync needs the engine too -- it owns the TPU worker,
+    and therefore the Raiden binding -- and the first sync lands before the
+    first sample, because `prepare_rollout_policy` syncs ahead of dispatch.
+    Without this the round finds no worker, reports an empty destination
+    manifest, and deadlocks: the engine waits for a sample that dispatch is
+    waiting on the sync to allow. Guarded on `_is_running` rather than calling
+    `start()` unconditionally, because `start()` warns when the engine is
+    already up and this runs on every sync round.
+
+    TODO(tunix-dev): drop this once the orchestrator owns rollout-worker
+    lifecycle and can guarantee the engine is up before it issues any phase
+    call; the ordering belongs there, not in a guard on each entry point.
+    """
+    if self.sampler is None:
+      self.initialize()
+    sampler = self._require_sampler()
+    if not getattr(sampler, "_is_running", False):
+      logger.info(
+          "VllmSamplerAdapter [%s] starting engine for weight sync (no"
+          " sample has forced it up yet).",
+          self.server_id,
+      )
+      await sampler.start()
+
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
     return await self._require_sampler().stop(**kwargs)
@@ -243,8 +274,11 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     del sync_request, kwargs
     if not self.enable_raiden:
       return None
+    await self._ensure_started()
     return await self._require_sampler().bind_raiden_sync(
-        worker_index=self.worker_index, parallelism=self._parallelism
+        worker_index=self.worker_index,
+        parallelism=self._parallelism,
+        job_name=self.raiden_job_name,
     )
 
   async def get_weight_sync_metadata(
@@ -259,6 +293,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           " get_weight_sync_metadata when Raiden is disabled"
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
+    await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
     return [weight_sync.WorkUnitMetadata.from_dict(m) for m in meta or []]
 
@@ -306,6 +341,16 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         result = sampler.refresh_model_state_leaves()
         if asyncio.iscoroutine(result):
           await result
+      else:
+        # Never silently skip this: the sampler's runner dispatches through a
+        # `state_leaves` view derived from `state` at load time, so without the
+        # refresh it keeps serving pre-sync weights and the only symptom is
+        # garbage completions.
+        logger.warning(
+            "sampler %s has no refresh_model_state_leaves(); the rollout's"
+            " state_leaves are not re-pointed after h2d.",
+            type(sampler).__name__,
+        )
 
       self._tracker.complete(sync_request, "h2d_done")
       return True
@@ -381,6 +426,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     if hasattr(sampler, "get_transfer_status"):
       return await sampler.get_transfer_status(req_id, **kwargs)
     return "UNKNOWN"
+
+  def get_target_state(self) -> Any:
+    """Returns target state shape/dtype pytree for weight conversion."""
+    sampler = self._require_sampler()
+    if hasattr(sampler, "get_target_state"):
+      return sampler.get_target_state()
+    return None
 
   async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
     """Returns load information from the underlying engine."""

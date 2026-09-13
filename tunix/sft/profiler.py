@@ -70,10 +70,22 @@ class Profiler:
     )
     # We use >= instead of > because last_profile_step is step number + 1.
     if self._first_profile_step >= self._last_profile_step:
-      raise ValueError(
-          f"First profile step {self._first_profile_step} cannot be greater"
-          f" than the last profile step {self._last_profile_step}."
+      # An empty profiling window is a misconfiguration of the profiler, not
+      # of the training run: warn and skip profiling rather than abort a run
+      # that would otherwise train fine.
+      logging.warning(
+          "Profiler disabled: first profile step %d is not before the last"
+          " profile step %d (initial_step=%d, max_step=%d,"
+          " skip_first_n_steps=%d, profiler_steps=%d).",
+          self._first_profile_step,
+          self._last_profile_step,
+          initial_step,
+          max_step,
+          profiler_options.skip_first_n_steps,
+          profiler_options.profiler_steps,
       )
+      self._do_not_profile = True
+      return
     self._started_by_this_instance = False
 
   def _check_if_max_num_hosts_supported(self) -> bool:

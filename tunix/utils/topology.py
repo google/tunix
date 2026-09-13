@@ -41,6 +41,7 @@ Source references:
 import ast
 import functools
 import math
+import os
 import re
 from typing import Any, Sequence
 
@@ -239,6 +240,8 @@ def _is_pathways_backend_used() -> bool:
   Returns:
     True if a Pathways backend is used, otherwise False.
   """
+  if "proxy" in os.environ.get("JAX_PLATFORMS", ""):
+    return True
   try:
     import pathwaysutils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
 

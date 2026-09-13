@@ -554,9 +554,9 @@ else:
 
 cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={  # pyrefly: ignore[bad-argument-type]
-        rl_engine_lib.Role.ACTOR: trainer_mesh,
-        rl_engine_lib.Role.REFERENCE: trainer_mesh,
-        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: trainer_mesh,  # pyrefly: ignore[bad-assignment]
+        rl_engine_lib.Role.REFERENCE: trainer_mesh,  # pyrefly: ignore[bad-assignment]
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,  # pyrefly: ignore[bad-assignment]
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,

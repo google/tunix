@@ -109,10 +109,13 @@ def _mock_generate(
     else:
       prompt_tokens.append(tokenizer.encode(" ".join(m["content"] for m in p)))
   max_p_len = max(len(pt) for pt in prompt_tokens)
-  padded_prompts = np.array([
-      np.pad(pt, (max(0, max_p_len - len(pt)), 0), constant_values=0)
-      for pt in prompt_tokens
-  ], dtype=np.int32)
+  padded_prompts = np.array(
+      [
+          np.pad(pt, (max(0, max_p_len - len(pt)), 0), constant_values=0)
+          for pt in prompt_tokens
+      ],
+      dtype=np.int32,
+  )
   return base_rollout.RolloutOutput(
       text=text,
       tokens=tokens,
@@ -585,9 +588,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         chat_parser=MockChatParser(),
     )
 
-    train_ds = _dummy_dataset(
-        MySource(data=["1", "2"], repeat=1), batch_size=2
-    )
+    train_ds = _dummy_dataset(MySource(data=["1", "2"], repeat=1), batch_size=2)
 
     with (
         mock.patch.object(
@@ -639,9 +640,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       def __init__(self, *, rngs: nnx.Rngs):
         self.lm_head = 1
 
-      def __call__(
-          self, inputs, positions, cache, attention_mask, **kwargs
-      ):
+      def __call__(self, inputs, positions, cache, attention_mask, **kwargs):
         del kwargs
         return (
             jnp.full(
@@ -703,9 +702,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       def __init__(self, *, rngs: nnx.Rngs):
         self.lm_head = 1
 
-      def __call__(
-          self, inputs, positions, cache, attention_mask, **kwargs
-      ):
+      def __call__(self, inputs, positions, cache, attention_mask, **kwargs):
         del kwargs
         return (
             jnp.full(
@@ -2374,6 +2371,122 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertEqual(
         decoded_completion.count("Assistant:"), 2
     )  # 3 turns but terminal env obs does not append generation msg
+
+  def test_force_on_policy_ratio_bypasses_actor_recompute(self):
+    """Verifies force_on_policy_ratio=True sets old_logps to None with 0 extra passes."""
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        force_compute_kl=False,
+        max_response_length=10,
+        num_generations=2,
+        num_iterations=1,
+        use_rollout_logps=True,
+        force_on_policy_ratio=True,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+
+    class MockTraj:
+
+      def __init__(self, index):
+        self.traj = {
+            "conversation_text": [
+                {"role": "assistant", "content": f"msg {index}"}
+            ],
+            "conversation_tokens": np.array([1, 2, 3]),
+            "conversation_masks": np.array([1, 1, 1]),
+            "old_logprobs": np.full(3, 1.0, dtype=np.float32),
+            "policy_version": 0,
+            "trajectory_reward": 1.0,
+            "prompt_tokens": np.array([4, 5]),
+            "original_input": {"prompts": "hello"},
+            "group_id": "test_group",
+        }
+
+    trajectories = [MockTraj(0), MockTraj(1)]
+
+    with mock.patch.object(
+        rl_engine,
+        "get_actor_per_token_logps",
+        return_value=jnp.full((2, 10), -1.0),
+        autospec=True,
+    ) as mock_get_actor_logps:
+      results = learner._process_results(trajectories, expected_step=1)
+      self.assertLen(results, 1)
+      train_example = results[0]
+
+      # 1. Asserts 0 extra trainer forward passes!
+      mock_get_actor_logps.assert_not_called()
+
+      # 2. Asserts old_per_token_logps is None (forces ratio to 1.0 via stop_gradient in loss)
+      self.assertIsNone(train_example.old_per_token_logps)
+
+  def test_force_on_policy_ratio_config_validation(self):
+    """force_on_policy_ratio rejects multi-iteration, allows stale trajectories."""
+    # num_iterations > 1 raises ValueError: old_logp is re-derived from the current
+    # policy on every inner epoch, so the trust region vanishes after the first.
+    with self.assertRaisesRegex(
+        ValueError, "can only be True when num_iterations == 1"
+    ):
+      agentic_grpo_learner.GRPOConfig(
+          num_generations=2,
+          num_iterations=2,
+          force_on_policy_ratio=True,
+      )
+
+    # off_policy_steps > 0 is a supported trade-off (near-on-policy training on
+    # slightly stale trajectories), so it warns rather than raising.
+    with mock.patch.object(
+        agentic_grpo_learner.logging, "warning"
+    ) as mock_warn:
+      config = agentic_grpo_learner.GRPOConfig(
+          num_generations=2,
+          num_iterations=1,
+          off_policy_steps=1,
+          force_on_policy_ratio=True,
+      )
+    mock_warn.assert_called_once()
+    self.assertIn("off_policy_steps", mock_warn.call_args[0][0])
 
 
 if __name__ == "__main__":

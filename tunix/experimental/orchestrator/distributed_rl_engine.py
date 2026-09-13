@@ -16,12 +16,14 @@
 
 Contains:
 - WorkerPoolBalancer: Load balancing, queue tracking, and prefix-cache affinity.
-- DistributedRLEngine: Worker-backed compute router implementing AbstractRLEngine.
+- DistributedRLEngine: Worker-backed compute router implementing
+AbstractRLEngine.
 """
 
 import asyncio
 import collections
 from collections.abc import Mapping, Sequence
+import concurrent.futures
 import inspect
 from typing import Any
 import uuid
@@ -32,83 +34,39 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.common import logging_utils
 from tunix.experimental.metrics import metrics as exp_metrics
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
-
 
 _summarize_list = logging_utils.summarize_list
 
 
-# TODO: this multi step conversions seem excessive we convert from trajecotry to response then to trajectory item. we should simplify
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
-  """Converts a worker rollout response to an TrajectoryItem."""
-  if isinstance(resp, datatypes.TrajectoryItem):
-    return resp
+  """Converts a worker rollout response to a TrajectoryItem."""
+  if not isinstance(resp, datatypes.RolloutResponse):
+    raise TypeError(f"Unsupported response type: {type(resp)}")
 
-  if isinstance(resp, datatypes.RolloutResponse):
+  if resp.payload is not None:
+    return resp.payload
+
+  if resp.error is not None:
     metadata = dict(resp.metadata) if resp.metadata else {}
-    success_statuses = {"COMPLETED", "SUCCEEDED"}
-    traj = datatypes.Trajectory(
-        reward=resp.env_reward,
-        status=(
-            datatypes.TrajectoryStatus.SUCCEEDED
-            if resp.status in success_statuses
-            else datatypes.TrajectoryStatus.FAILED
-        ),
-    )
-    prompt_tokens = (
-        np.asarray(resp.prompt_tokens, dtype=np.int32)
-        if resp.prompt_tokens is not None
-        else np.zeros(0, dtype=np.int32)
-    )
-    item = datatypes.TrajectoryItem(
-        prompt_id=resp.prompt_id,
-        group_index=resp.group_index,
-        start_step=0,
-        traj=traj,
+    prompt_id = metadata.get("prompt_id", "")
+    group_index = metadata.get("group_index", 0)
+    metadata["error"] = str(resp.error)
+    return datatypes.TrajectoryItem(
+        prompt_id=prompt_id,
+        group_index=group_index,
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED,
+            "reward": 0.0,
+        },
         metadata=metadata,
-        prompt_tokens=prompt_tokens,
-        policy_version=resp.policy_version,
     )
 
-    assistant_tokens = []
-    assistant_masks = []
-    for seg in resp.segments:
-      seg_any: Any = seg
-      source = (
-          seg.source
-          if isinstance(seg, datatypes.TokenSegment)
-          else seg_any.get("source")
-      )
-      tokens = (
-          seg.tokens
-          if isinstance(seg, datatypes.TokenSegment)
-          else seg_any.get("tokens")
-      )
-      loss_mask = (
-          seg.loss_mask
-          if isinstance(seg, datatypes.TokenSegment)
-          else seg_any.get("loss_mask")
-      )
-      if source == "assistant" and tokens is not None:
-        token_arr = np.asarray(tokens)
-        assistant_tokens.append(token_arr)
-        if loss_mask is not None:
-          assistant_masks.append(np.asarray(loss_mask))
-        else:
-          assistant_masks.append(np.ones_like(token_arr, dtype=np.float32))
+  raise ValueError("RolloutResponse payload is None.")
 
-    if assistant_tokens:
-      item.completion_tokens = np.concatenate(assistant_tokens)
-      item.action_mask = np.concatenate(assistant_masks)
-    else:
-      item.completion_tokens = np.zeros(0, dtype=np.int32)
-      item.action_mask = np.zeros(0, dtype=np.float32)
-    return item
-
-  raise TypeError(
-      f"Unsupported response type for trajectory conversion: {type(resp)}"
-  )
 
 
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
@@ -131,6 +89,25 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+
+  async def _maybe_configure_trainer_target_state(
+      self,
+      role: datatypes.Role,
+  ) -> None:
+    """Seeds trainer-side weight sync with the rollout target-state skeleton."""
+    trainer = self._trainer_workers.get(role)
+    if trainer is None or not self._rollout_workers:
+      return
+
+    rollout = self._rollout_workers[0]
+    try:
+      target_state = await self._invoke_worker(rollout, "get_target_state")
+      await self._invoke_worker(
+          trainer, "set_target_state", target_state=target_state
+      )
+    except (AttributeError, RuntimeError) as exc:
+      if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
+        raise
 
   async def _invoke_worker(
       self,
@@ -339,8 +316,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     responses = await asyncio.gather(*tasks, return_exceptions=True)
     completed: list[datatypes.TrajectoryItem] = []
 
-    for resp in responses:
-      if isinstance(resp, Exception) or resp is None:
+    for idx, resp in enumerate(responses):
+      if isinstance(resp, Exception):
+        logging.error(
+            "Failed polling rollout worker %s: %s",
+            self._rollout_workers[idx],
+            resp,
+        )
+        continue
+      if resp is None:
         continue
       unwrap_fn = getattr(resp, "unwrap", None)
       res = (
@@ -540,12 +524,78 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           r for r in results if not isinstance(r, Exception) and r is not None
       ]
     else:
-      worker = self._trainer_workers.get(
+      worker = self._trainer_workers.get(role) or self._inference_workers.get(
           role
-      ) or self._inference_workers.get(role)
+      )
       if worker is None:
         raise ValueError(f"No worker registered for role {role}")
       return await self._invoke_worker(worker, "get_metrics", **kwargs)
+
+  def configure_worker(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      *,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      assembler: batch_assembly.BatchAssembler[Any],
+      **kwargs: Any,
+  ) -> None:
+    """Configures worker(s) under the specified role with algorithm or runtime settings."""
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    if algo is None:
+      raise ValueError(
+          f"algo is required to configure worker for role {role_name}"
+      )
+    if assembler is None:
+      raise ValueError(
+          f"assembler is required to configure worker for role {role_name}"
+      )
+    match role:
+      case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
+        worker = self._trainer_workers.get(role)
+        if worker is None:
+          raise ValueError(f"No trainer worker registered for role {role_name}")
+        logging.info(
+            "Auto-configuring trainer loss and model input fn on %s worker...",
+            role_name,
+        )
+        pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
+        eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        gen_fn = algo.build_gen_model_input_fn(
+            pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
+            eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
+        )
+
+        def _configure():
+          assert worker is not None
+          worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+          worker.submit("with_gen_model_input_fn", gen_fn)
+
+        try:
+          loop = asyncio.get_running_loop()
+        except RuntimeError:
+          loop = None
+
+        if loop is not None and loop.is_running():
+          with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_configure).result()
+        else:
+          _configure()
+
+      case datatypes.Role.ROLLOUT:
+        if not self._rollout_workers:
+          raise ValueError("No rollout workers registered on engine.")
+        logging.info("Configuring rollout workers...")
+
+      case datatypes.Role.REFERENCE:
+        worker = self._inference_workers.get(role)
+        if worker is None:
+          raise ValueError(
+              f"No inference worker registered for role {role_name}"
+          )
+        logging.info("Configuring reference inference worker...")
+
+      case _:
+        raise ValueError(f"Unsupported role for configure_worker: {role_name}")
 
   async def prepare_rollout_policy(
       self,
@@ -560,16 +610,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if trainer is None:
       raise ValueError(f"No trainer worker registered for role {role}")
 
-    if self._rollout_workers:
-      rollout = self._rollout_workers[0]
-      try:
-        target_state = await self._invoke_worker(rollout, "get_target_state")
-        await self._invoke_worker(
-            trainer, "set_target_state", target_state=target_state
-        )
-      except (AttributeError, RuntimeError) as exc:
-        if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
-          raise
+    await self._maybe_configure_trainer_target_state(role)
 
     if not sync_weights:
       return None
@@ -628,3 +669,91 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return await self._invoke_worker(
         worker, "save_checkpoint", metadata=metadata, **kwargs
     )
+
+  async def _restore_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> Any:
+    role_name = role.name
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role_name}")
+    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)
+
+  async def resume_from_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      resync_rollout_weights: bool = True,
+  ) -> int:
+    """Restores a checkpoint and realigns the mesh to the restored state.
+
+    See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
+    """
+    metadata = await self._restore_checkpoint(role=role)
+    if not isinstance(metadata, Mapping):
+      if metadata is not None:
+        logging.warning(
+            "restore_checkpoint returned %s, not a mapping; starting from"
+            " fresh run.",
+            type(metadata).__name__,
+        )
+      return 0
+    metadata = dict(metadata)
+    try:
+      restored_optimizer_step = int(metadata.get("step", 0) or 0)
+      restored_step = int(
+          metadata.get("global_step", restored_optimizer_step) or 0
+      )
+    except (TypeError, ValueError):
+      logging.warning(
+          "restore_checkpoint returned a non-integer step %r; starting from"
+          " fresh run.",
+          metadata.get("global_step", metadata.get("step")),
+      )
+      return 0
+    if restored_step <= 0:
+      logging.info("No checkpoint to resume from; starting from step 0.")
+      return 0
+
+    # Resume at the step boundary; the policy version tracks the restored step.
+    # New checkpoints record optimizer and global steps separately. Legacy
+    # checkpoints have only `step`, for which both values are identical.
+    restored_policy_version = restored_step
+    recorded_version = metadata.get("policy_version")
+    # TODO(tunix-dev): this is a force-fit for fully on-policy RL. Remove when
+    # async off-policy is supported.
+    if recorded_version is not None and recorded_version != restored_step:
+      logging.warning(
+          "Checkpoint recorded mid-step policy_version=%s; resuming at the"
+          " step-boundary value %d",
+          recorded_version,
+          restored_step,
+      )
+    self._policy_version = restored_policy_version
+    logging.info(
+        "Resuming from checkpoint: global_step=%d optimizer_step=%d "
+        "policy_version=%d. Metadata: %s",
+        restored_step,
+        restored_optimizer_step,
+        restored_policy_version,
+        metadata,
+    )
+    if resync_rollout_weights:
+      await self._maybe_configure_trainer_target_state(role)
+      synced_version = await self.sync_weights(
+          role=role,
+          policy_version=restored_policy_version,
+      )
+      if synced_version != restored_policy_version:
+        raise RuntimeError(
+            "Resumed policy_version=%d does not match synced version=%d"
+            % (restored_policy_version, synced_version)
+        )
+    else:
+      logging.warning(
+          "resync_rollout_weights is False. Resumed rollout workers will use"
+          " base weights instead of restored checkpoint version %d.",
+          restored_policy_version,
+      )
+    return restored_step

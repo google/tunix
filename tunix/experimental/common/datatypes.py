@@ -36,32 +36,13 @@ from tunix.rl.agentic.agents import agent_types
 Trajectory = agent_types.Trajectory
 Step = agent_types.Step
 TrajectoryStatus = agent_types.TrajectoryStatus
+TrajectoryItem = agent_types.TrajectoryItem
+format_traj_id = agent_types.format_traj_id
 Role = common_datatypes.Role
 
 # Marks a router-replay slot the trainer must not replay, so the model falls
 # back to its own gate there. Matches what MaxText's replay path expects.
 UNSET_ROUTED_EXPERT = -1
-
-
-# TODO(tunix-dev): Unify this extended TrajectoryItem back into
-# agent_types.TrajectoryItem so that all agentic workflows share the same strict
-# token array fields. Also standardize to prompt_id, group_index
-@dataclasses.dataclass(kw_only=True)
-class TrajectoryItem:
-  """Extended TrajectoryItem for Orchestrator with token arrays."""
-
-  prompt_id: str = ""
-  group_index: int = 0
-  start_step: int = 0
-  traj: Any = None
-  prompt_tokens: np.ndarray | None = None
-  completion_tokens: np.ndarray | None = None
-  action_mask: np.ndarray | None = None
-  # `[len(prompt_tokens) + len(completion_tokens), num_layers, top_k]` expert
-  # ids from the rollout, for replaying its routing during training.
-  routed_experts: np.ndarray | None = None
-  policy_version: int = 0
-  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -224,6 +205,7 @@ class WorkerInfo:
 class GenerationArgs:
   """Typed generation arguments used by the orchestrator generate API."""
   max_generation_steps: int | None = None
+  max_response_length: int | None = None
   temperature: float | None = None
   top_p: float | None = None
   top_k: int | None = None
@@ -265,7 +247,7 @@ class RolloutRequest(Request):
   @property
   def traj_id(self) -> str:
     """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
-    return f"traj_{self.prompt_id}_g{self.group_index}"
+    return format_traj_id(self.prompt_id, self.group_index)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -320,150 +302,17 @@ class TokenSegment:
 
 @dataclasses.dataclass(kw_only=True)
 class RolloutResponse(Response):
-  """Serializable result of a generation request.
-
-  This is the wire-facing counterpart to RolloutRequest (and to the
-  worker-internal Trajectory): it carries only primitives and numpy
-  arrays, so it can cross a process boundary. A failed request is reported as a
-  result with `error` set and a non-success `status`, never as a dropped
-  response.
+  """Serializable result of a rollout generation request carrying a TrajectoryItem payload.
 
   Attributes:
-    prompt_id: Unique identifier for this prompt within a task or dataset.
-    group_index: Optional index within a group for group-based algorithms (e.g.,
-      GRPO). If None, the rollout is ungrouped.
-    status: Terminal status name (e.g. a rollout trajectory status, or
-      "CANCELLED").
-    prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
-      worker.
-    segments: Ordered conversation turns (segments) from the assistant (model
-      call) and environment; concatenated they form the full generated stream.
-    env_reward: Scalar environment reward for the trajectory.
-    policy_version: Weight version used to generate the trajectory.
-    error: Failure details when the request did not succeed, else None.
+    status: Terminal status name (e.g. "COMPLETED", "ERROR", "TIMEOUT", "CANCELLED").
+    payload: TrajectoryItem carrying episode trajectory, token arrays, masks,
+      and metadata.
   """
 
-  prompt_id: str = ""
-  group_index: int = 0
-  status: str
-  prompt_tokens: np.ndarray = dataclasses.field(
-      default_factory=lambda: np.zeros(0, dtype=np.int32)
-  )
-  segments: list[TokenSegment] = dataclasses.field(default_factory=list)
-  env_reward: float = 0.0
-  policy_version: int = 0
-  # TODO(b/532722981): capture rollout metrics, e.g., env time.
+  status: str = "COMPLETED"
+  payload: TrajectoryItem | None = None
 
-  @classmethod
-  def from_trajectory(
-      cls,
-      request_id: str,
-      traj: Trajectory,
-      prompt_tokens: np.ndarray,
-      policy_version: int,
-      metadata: dict[str, Any] | None = None,
-  ) -> "RolloutResponse":
-    """Constructs a wire-safe RolloutResponse from an internal Trajectory.
-
-    Extracts only the required arrays (tokens, masks, logprobs) from the
-    semantic steps, discarding string metadata and unpicklable objects.
-
-    Args:
-      request_id: The ID of the original rollout request.
-      traj: The internal trajectory to convert.
-      prompt_tokens: Array of prompt token ids.
-      policy_version: Weight version used to generate the trajectory.
-      metadata: Optional response metadata dictionary to attach.
-
-    Returns:
-      A wire-safe RolloutResponse.
-    """
-
-    def _get_step_attr(step, attr):
-      val = getattr(step, attr, None)
-      if val is not None:
-        return val
-      extra = getattr(step, "extra", None)
-      if isinstance(extra, dict):
-        return extra.get(attr)
-      return None
-
-    segments = []
-    for step in traj.steps:
-      assistant_tokens = _get_step_attr(step, "assistant_tokens")
-      if assistant_tokens is not None:
-        segments.append(
-            TokenSegment(
-                source="assistant",
-                tokens=assistant_tokens,
-                loss_mask=_get_step_attr(step, "assistant_masks"),
-                logps=_get_step_attr(step, "logprobs"),
-            )
-        )
-      env_tokens = _get_step_attr(step, "env_tokens")
-      if env_tokens is not None:
-        segments.append(
-            TokenSegment(
-                source="env",
-                tokens=env_tokens,
-                loss_mask=_get_step_attr(step, "env_masks"),
-                logps=None,
-            )
-        )
-    if hasattr(traj, "status") and traj.status is not None:
-      status_val = getattr(traj.status, "name", str(traj.status))
-    else:
-      status_val = "COMPLETED"
-
-    resp_metadata = {}
-    extra = getattr(traj, "extra", None)
-    if isinstance(extra, dict):
-      resp_metadata.update(extra)
-    if hasattr(traj, "metadata") and isinstance(traj.metadata, dict):
-      resp_metadata.update(traj.metadata)
-    if metadata:
-      resp_metadata.update(metadata)
-
-    raw_prompt_id = resp_metadata.get("prompt_id")
-    if raw_prompt_id is None:
-      raw_prompt_id = getattr(traj, "task", "")
-    prompt_id = "" if raw_prompt_id is None else str(raw_prompt_id)
-
-    if (
-        "group_index" not in resp_metadata
-        or resp_metadata["group_index"] is None
-    ):
-      raise ValueError(
-          f"Rollout response for request '{request_id}'"
-          f" (prompt_id='{prompt_id}') lacks 'group_index'."
-      )
-    try:
-      group_index = int(resp_metadata["group_index"])
-    except (ValueError, TypeError) as exc:
-      raise ValueError(
-          f"Invalid group_index '{resp_metadata['group_index']}' for request"
-          f" '{request_id}': must be an integer."
-      ) from exc
-
-    raw_reward = resp_metadata.get("reward")
-    if raw_reward is None:
-      raw_reward = getattr(traj, "reward", 0.0)
-    try:
-      env_reward = float(raw_reward or 0.0)
-    except (ValueError, TypeError):
-      env_reward = 0.0
-
-    return cls(
-        request_id=request_id,
-        prompt_id=prompt_id,
-        group_index=group_index,
-        status=status_val,
-        prompt_tokens=prompt_tokens,
-        segments=segments,
-        env_reward=env_reward,
-        policy_version=policy_version,
-        metadata=resp_metadata,
-    )
 
 
 ##### Weight Sync DTOs #####
@@ -548,23 +397,7 @@ class WeightSyncMetadata:
 
 @flax.struct.dataclass(frozen=True, kw_only=True)
 class TrainerPayload:
-  """Base class for generic trainer payloads.
-
-  Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
-      right-padded completion tokens.
-    token_mask: [B, T] token mask to differentiate padding tokens from valid
-      tokens.
-    segment_ids: Optional [B, T] packing segment ids.
-    segment_positions: Optional [B, T] position indices within each segment.
-  """
-  # TODO(tunix-dev): We need to remove the dependency on token_ids and
-  # token_mask as they are not used in RL training.
-  token_ids: ArrayLike | None = None
-  token_mask: ArrayLike | None = None
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
+  """Base abstract class for generic trainer payloads. """
 
 
 @flax.struct.dataclass(frozen=True, kw_only=True)
@@ -572,8 +405,8 @@ class SFTTrainerPayload(TrainerPayload):
   """Supervised Fine-Tuning (SFT) trainer payload.
 
   Attributes:
-    token_ids: [B, T] token IDs for a batched trainer payload. By default,
-      each row is structured as left-padded prompt tokens concatenated with
+    token_ids: [B, T] token IDs for a batched trainer payload. By default, each
+      row is structured as left-padded prompt tokens concatenated with
       right-padded completion tokens.
     token_mask: [B, T] token mask to differentiate padding tokens from valid
       tokens.
@@ -583,6 +416,8 @@ class SFTTrainerPayload(TrainerPayload):
 
   token_ids: ArrayLike
   token_mask: ArrayLike
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
 
 
 # TODO(tunix-dev): Introduce PPOTrainerPayload to replace generic
@@ -593,14 +428,15 @@ class RLTrainerPayload(TrainerPayload):
 
   Attributes:
     advantages: [B] or [B, C] advantages.
-    loss_mask: [B, T], 1 where the position contributes to the loss.
-    action_mask: Optional [B, T] or [B, C] mask of policy actions.
     prompt_ids: Optional prompt token ids for GRPO-style losses. Unbatched
       payloads may carry 1D unpadded rows; batch assembly pads them to [B, P].
     prompt_mask: Optional [B, P] prompt mask.
     completion_ids: Optional completion token ids. Unbatched payloads may carry
       1D unpadded rows; batch assembly pads them to [B, C].
     completion_mask: Optional [B, C] completion/action mask.
+    segment_ids: Optional [B, T] or [B, C] packing segment ids.
+    segment_positions: Optional [B, T] or [B, C] position indices within each
+      segment.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
@@ -611,24 +447,25 @@ class RLTrainerPayload(TrainerPayload):
       padded or unused slot.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
+    num_segments: Optional static upper bound on number of segments in packed
+      rows.
     metadata: Extra payload metadata dictionary.
   """
 
-  advantages: ArrayLike | None = None
-  loss_mask: ArrayLike | None = None
-  action_mask: ArrayLike | None = None
-  # TODO(tunix-dev): make prompt_ids/mask and completion_ids/mask required after
-  # SequencePackedBatchAssembler refactor is done.
-  prompt_ids: ArrayLike | None = None
-  prompt_mask: ArrayLike | None = None
-  completion_ids: ArrayLike | None = None
-  completion_mask: ArrayLike | None = None
+  prompt_ids: ArrayLike
+  prompt_mask: ArrayLike
+  completion_ids: ArrayLike
+  completion_mask: ArrayLike
+  advantages: ArrayLike
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
   routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
+  num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
   metadata: dict[str, Any] = flax.struct.field(
       default_factory=dict, pytree_node=False
   )

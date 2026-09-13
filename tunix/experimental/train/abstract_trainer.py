@@ -152,11 +152,15 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def restore_checkpoint(self, **kwargs) -> Any:
-    """Restore state from latest checkpoint and return the metadata pytree.
+  def restore_checkpoint(
+      self, step: int | None = None, **kwargs
+  ) -> Any:
+    """Restore state from checkpoint and return the metadata pytree.
 
     The metadata is the same as what is used on save_checkpoint.
     Args:
+      step: Checkpoint step to restore. If None, restores from the latest
+        checkpoint.
       **kwargs: Implementation-specific options.
 
     Returns:

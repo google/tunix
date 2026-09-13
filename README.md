@@ -84,17 +84,18 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
     -   [Checkpointing and Fault Tolerance](https://tunix.readthedocs.io/en/latest/reliability.html)
 
 ## Getting Started
+
 **Installation:** Jump to [Installation](https://tunix.readthedocs.io/en/latest/quickstart.html#installation) to install Tunix and run your first training
 job.
 
 For TPU users integrating `vllm` and `tpu-inference`, there are two supported
 setup paths:
 
-- Docker image builds use [Dockerfile](/usr/local/google/home/lancewang/github/tunix/Dockerfile) and install
+- Docker image builds use [Dockerfile](https://github.com/google/tunix/blob/main/Dockerfile) and install
     the pinned dependencies directly from `requirements/requirements.txt` and
     `requirements/special_requirements.txt`.
 - Local TPU VM or developer-machine installs can use
-    [scripts/install_tunix_vllm_requirement.sh](/usr/local/google/home/lancewang/github/tunix/scripts/install_tunix_vllm_requirement.sh),
+    [scripts/install_tunix_vllm_requirement.sh](https://github.com/google/tunix/blob/main/scripts/install_tunix_vllm_requirement.sh),
     which installs the same requirement files outside Docker.
 
 These are separate entry points. If you are building the Docker image, you do

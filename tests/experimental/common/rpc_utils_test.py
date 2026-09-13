@@ -8,25 +8,23 @@ from tunix.experimental.common import rpc_utils
 
 
 def _sample_response() -> datatypes.RolloutResponse:
+  item = datatypes.TrajectoryItem(
+      prompt_id="req-rollout-42",
+      group_index=1,
+      start_step=0,
+      traj={
+          "reward": 1.25,
+          "status": datatypes.TrajectoryStatus.SUCCEEDED,
+          "prompt_tokens": np.array([10, 11, 12], dtype=np.int32),
+          "completion_tokens": np.array([20, 21], dtype=np.int32),
+          "action_mask": np.array([1, 1], dtype=np.float32),
+          "policy_version": 7,
+      },
+  )
   return datatypes.RolloutResponse(
       request_id="req-1",
       status="SUCCEEDED",
-      prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
-      segments=[
-          datatypes.TokenSegment(
-              source="assistant",
-              tokens=np.array([20, 21], dtype=np.int32),
-              loss_mask=np.array([1, 1], dtype=np.int32),
-              logps=np.array([-0.5, -1.5], dtype=np.float32),
-          ),
-          datatypes.TokenSegment(
-              source="env",
-              tokens=np.array([30], dtype=np.int32),
-              loss_mask=np.array([0], dtype=np.int32),
-          ),
-      ],
-      env_reward=1.25,
-      policy_version=7,
+      payload=item,
   )
 
 
@@ -36,18 +34,18 @@ class RpcUtilsTest(absltest.TestCase):
     rpc_utils.validate_wire_safe(_sample_response())  # Should not raise.
 
   def test_validate_wire_safe_rejects_top_level_device_array(self):
+    with self.assertRaises(TypeError):
+      rpc_utils.validate_wire_safe(jnp.asarray([10, 11, 12]))
+
+  def test_validate_wire_safe_rejects_device_array_in_payload(self):
     result = _sample_response()
-    result.prompt_tokens = jnp.asarray(result.prompt_tokens)
+    result.payload.traj["completion_tokens"] = jnp.asarray(
+        result.payload.completion_tokens
+    )
 
     with self.assertRaises(TypeError):
       rpc_utils.validate_wire_safe(result)
 
-  def test_validate_wire_safe_rejects_device_array_in_segment(self):
-    result = _sample_response()
-    result.segments[0].tokens = jnp.asarray(result.segments[0].tokens)
-
-    with self.assertRaises(TypeError):
-      rpc_utils.validate_wire_safe(result)
 
   def test_validate_wire_safe_catches_cycles(self):
     cyclic_list = []

@@ -68,12 +68,13 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_single",
           prompt="Solve task X",
-          generation_kwargs={"delay_seconds": 0.02},
+          generation_kwargs={"delay_seconds": 0.02, "max_generation_steps": 64},
           max_turns=5,
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
       self.assertEqual(trajectory.request_id, "traj_prompt_single_g0")
-      self.assertNotEmpty(trajectory.segments)
+      self.assertIsInstance(trajectory.payload, datatypes.TrajectoryItem)
+      self.assertNotEmpty(trajectory.payload.conversation_tokens)
 
     asyncio.run(_run_test())
 
@@ -84,7 +85,11 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_async",
           prompt="Solve task Y",
-          generation_kwargs={"delay_seconds": 0.01, "force_finish": True},
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "force_finish": True,
+              "max_generation_steps": 64,
+          },
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
       self.assertIsInstance(trajectory, datatypes.RolloutResponse)
@@ -99,6 +104,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_error",
           prompt="Solve failing task",
+          generation_kwargs={"max_generation_steps": 64},
       )
       with mock.patch.object(
           collector.TrajectoryCollectorEngine,
@@ -109,7 +115,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       self.assertIsInstance(res, datatypes.RolloutResponse)
       self.assertEqual(res.request_id, "traj_prompt_error_g0")
       self.assertEqual(res.status, "ERROR")
-      self.assertEqual(res.error, "Simulated episode execution error")
+      self.assertEqual(res.error.message, "Simulated episode execution error")
 
     asyncio.run(_run_test())
 
@@ -120,17 +126,21 @@ class RolloutWorkerTest(parameterized.TestCase):
       req_a = datatypes.RolloutRequest(
           prompt_id="slow_A",
           prompt="Task A",
-          generation_kwargs={"delay_seconds": 0.15},
+          generation_kwargs={"delay_seconds": 0.15, "max_generation_steps": 64},
       )
       req_b = datatypes.RolloutRequest(
           prompt_id="fast_B",
           prompt="Task B",
-          generation_kwargs={"delay_seconds": 0.01, "force_finish": True},
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "force_finish": True,
+              "max_generation_steps": 64,
+          },
       )
       req_c = datatypes.RolloutRequest(
           prompt_id="med_C",
           prompt="Task C",
-          generation_kwargs={"delay_seconds": 0.05},
+          generation_kwargs={"delay_seconds": 0.05, "max_generation_steps": 64},
       )
 
       _ = asyncio.create_task(
@@ -190,6 +200,7 @@ class RolloutWorkerTest(parameterized.TestCase):
               "delay_seconds": 0.02,
               "force_finish": True,
               "answer": "Solution_A",
+              "max_generation_steps": 64,
           },
       )
       req_2 = datatypes.RolloutRequest(
@@ -199,6 +210,7 @@ class RolloutWorkerTest(parameterized.TestCase):
               "delay_seconds": 0.04,
               "force_finish": True,
               "answer": "Solution_B",
+              "max_generation_steps": 64,
           },
       )
 
@@ -219,8 +231,10 @@ class RolloutWorkerTest(parameterized.TestCase):
       traj_1 = received_trajectories["traj_req_worker_1_g0"]
       traj_2 = received_trajectories["traj_req_worker_2_g0"]
 
-      self.assertNotEmpty(traj_1.segments)
-      self.assertNotEmpty(traj_2.segments)
+      self.assertIsInstance(traj_1.payload, datatypes.TrajectoryItem)
+      self.assertNotEmpty(traj_1.payload.conversation_tokens)
+      self.assertIsInstance(traj_2.payload, datatypes.TrajectoryItem)
+      self.assertNotEmpty(traj_2.payload.conversation_tokens)
 
     asyncio.run(_run_test())
 
@@ -247,7 +261,11 @@ class RolloutWorkerTest(parameterized.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="prompt_native_actor",
           prompt="Solve native actor task",
-          generation_kwargs={"delay_seconds": 0.01, "force_finish": True},
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "force_finish": True,
+              "max_generation_steps": 64,
+          },
       )
       traj = await handle.asubmit("generate", req)
       self.assertIsInstance(traj, datatypes.RolloutResponse)

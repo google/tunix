@@ -20,8 +20,9 @@ The TPU worker processes host the expensive pieces:
   3. optionally an InferenceWorker for frozen reference log-probs.
 
 This process only owns Orchestrator V2 control flow. It registers remote worker
-handles with ClusterOrchestrator, configures the GRPO loss on the trainer worker,
-and executes StandardRLProgram through ClusterOrchestrator.run_program().
+handles with ClusterOrchestrator, configures the GRPO loss on the trainer
+worker,
+and executes StandardRLProgram through ClusterOrchestrator.run().
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ import functools
 import logging
 import os
 import sys
-from types import SimpleNamespace
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -55,9 +55,11 @@ from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-im
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
+from tunix.rl import algorithm_config  # pylint: disable=g-import-not-at-top
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
 ProcessContext = runtime_context.ProcessContext
+
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
@@ -74,6 +76,41 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
+  parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=None,
+      help=(
+          "Maximum sequence tokens per TPU for sequence packing. When"
+          " configured, SequencePackedBatchAssembler is used instead of"
+          " PaddedBatchAssembler."
+      ),
+  )
+  parser.add_argument(
+      "--max_segments_per_packed_row",
+      type=int,
+      default=None,
+      help="Maximum segments per packed row when sequence packing is enabled.",
+  )
+  # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
+  parser.add_argument(
+      "--trainer_fsdp",
+      type=int,
+      default=None,
+      help=(
+          "Trainer FSDP mesh dimension size for sequence packing pack_size"
+          " computation."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_dp",
+      type=int,
+      default=None,
+      help=(
+          "Trainer DP mesh dimension size for sequence packing pack_size"
+          " computation."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -99,6 +136,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Maximum policy-version lag accepted by the async rollout queue. "
           "0 means queue-level on-policy training."
       ),
+  )
+  parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=1,
+      help="Number of rollout worker replicas to wait for.",
   )
   parser.add_argument(
       "--weight_sync_mode",
@@ -136,6 +179,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Directory for local event logging (TensorBoard/CLU).",
   )
   parser.add_argument(
+      "--flush_metrics_every_n_steps",
+      type=int,
+      default=1,
+      help="Frequency in steps to flush metrics logger.",
+  )
+  parser.add_argument(
       "--wandb_project",
       type=str,
       default=os.getenv("WANDB_PROJECT", "trellis-gsm8k"),
@@ -152,6 +201,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
+      "--use_rollout_logps",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Use rollout sampler log-probs as old_per_token_logps (off-policy /"
+          " sampler importance ratio). Default True matches the"
+          " non-experimental GRPOConfig; pass --no-use_rollout_logps for"
+          " on-policy ratio=1."
+      ),
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -159,109 +219,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _make_reward_fn(mode: str, debug: bool = False):
-  """Creates the optional orchestrator-side reward function."""
-  if mode == "env":
-    return None
-
-  def reward_fn(item: datatypes.TrajectoryItem) -> float:
-    metadata = dict(item.metadata or {})
-    text = str(metadata.get("text", ""))
-    reward, _ = gsm8k.score_gsm8k_completion(
-        text, metadata.get("answer", metadata.get("gold_answer"))
-    )
-    if debug:
-      prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
-      gold_answer = metadata.get("gold_answer")
-      logging.debug(
-          "[Orchestrator] Sampler response for %s:\n"
-          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-          "Gold Answer: %s, Extracted Answer: %s",
-          prompt_id,
-          text,
-          gold_answer,
-          gsm8k.extract_boxed_answer(text),
-      )
-    return reward
-
-  return reward_fn
-
-
-def _grpo_model_input(
-    train_example: Any,
-    *,
-    algo_config: Any,
-    pad_id: int,
-    eos_id: int,
-) -> dict[str, Any]:
-  """Maps an RLTrainerPayload microbatch to algo_core.grpo_loss_fn kwargs."""
-  return {
-      "train_example": train_example,
-      "algo_config": algo_config,
-      "pad_id": pad_id,
-      "eos_id": eos_id,
-  }
-
-
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  algo = algorithm_adapter.GRPOAdapter(
-      group_size=args.num_generations,
-      # StandardRLProgram consumes this many prompt groups per trainer update.
-      mini_batch_size=args.batch_size,
-      max_packed_len=args.max_prompt_length + args.max_response_length,
-      clip_epsilon=args.epsilon,
-      beta_kl=args.beta,
-  )
-  return algo
-
-
-def _get_config_attr(config: Any, key: str, default: Any = None) -> Any:
-  if config is None:
-    return default
-  if isinstance(config, dict):
-    return config.get(key, default)
-  return getattr(config, key, default)
-
-
-def _build_grpo_config(args: argparse.Namespace) -> Any:
-  return SimpleNamespace(
-      beta=args.beta,
+  algo_config = algorithm_config.GRPOConfig(
+      num_generations=args.num_generations,
       epsilon=args.epsilon,
-      loss_algo="grpo",
-      loss_agg_mode="sequence-mean-token-mean",
+      beta=args.beta,
       temperature=args.temperature,
-      kl_loss_mode="mse_kl",
-      kl_clamp_value=None,
+      use_rollout_logps=args.use_rollout_logps,
   )
-
-
-def _configure_trainer_loss(
-    trainer_handle: remote_execution.ActorHandle,
-    *,
-    algo: algorithm_adapter.GRPOAdapter,
-    grpo_config: Any,
-    pad_id: int,
-    eos_id: int,
-) -> None:
-  beta = _get_config_attr(grpo_config, "beta", "N/A")
-  epsilon = _get_config_attr(grpo_config, "epsilon", "N/A")
-  loss_algo = _get_config_attr(grpo_config, "loss_algo", "N/A")
-  logging.info(
-      "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
-      "epsilon=%s, loss_algo=%s).",
-      beta,
-      epsilon,
-      loss_algo,
-  )
-  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
-  trainer_handle.submit(
-      "with_gen_model_input_fn",
-      functools.partial(
-          _grpo_model_input,
-          algo_config=grpo_config,
-          pad_id=pad_id,
-          eos_id=eos_id,
+  return algorithm_adapter.GRPOAdapter(
+      algo_config=algo_config,
+      mini_batch_size=args.batch_size,
+      max_packed_len=(
+          args.max_seq_token_per_tpu
+          if args.max_seq_token_per_tpu is not None
+          else args.max_prompt_length + args.max_response_length
       ),
+      max_response_length=args.max_response_length,
   )
 
 
@@ -269,10 +243,6 @@ def _build_prompt_item(
     *,
     example: dict[str, Any],
     prompt_idx: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
 ) -> dict[str, Any]:
   prompt = gsm8k.as_text(example["prompts"])
   question = gsm8k.as_text(example["question"])
@@ -281,13 +251,6 @@ def _build_prompt_item(
   return {
       "prompt": prompt,
       "prompt_id": prompt_id,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
       "metadata": {
           "answer": answer,
           "gold_answer": answer,
@@ -296,6 +259,7 @@ def _build_prompt_item(
           "env_config": {
               "prompt": prompt,
               "prompts": prompt,
+              "prompt_id": prompt_id,
               "question": question,
               "answer": answer,
               "gold_answer": answer,
@@ -308,7 +272,6 @@ def _build_prompt_item(
 def _iter_prompt_items(
     args: argparse.Namespace,
 ) -> Iterator[dict[str, Any]]:
-  top_k = None if args.top_k < 0 else args.top_k
   dataset = gsm8k.load_gsm8k_dataset(
       split=args.tfds_split,
       data_dir=args.tfds_data_dir,
@@ -324,10 +287,6 @@ def _iter_prompt_items(
     yield _build_prompt_item(
         example=example,
         prompt_idx=prompt_idx,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
     )
 
 
@@ -343,6 +302,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   args = _parse_args(argv)
+  if args.debug:
+    # Enable canonical debug logging and print full sampler responses
+    logging.getLogger().setLevel(logging.DEBUG)
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:
@@ -378,12 +340,18 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.reward_mode,
   )
 
-  tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+  tokenizer_path = (
+      args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
+  )
+  tokenizer = AutoTokenizer.from_pretrained(
+      tokenizer_path, trust_remote_code=True
+  )
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token
   pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-  eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+  eos_id = (
+      tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+  )
   logging.info(
       "Loaded tokenizer from %s (vocab_size=%d, pad_id=%d, eos_id=%d).",
       tokenizer_path,
@@ -406,7 +374,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
@@ -415,24 +383,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
-  grpo_config = _build_grpo_config(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  assert (
-      len(trainer_handles) == 1
-  ), f"Expected 1 trainer worker, got {len(trainer_handles)}."
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      grpo_config=grpo_config,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
-      flush_every_n_steps=1,
+      flush_every_n_steps=args.flush_metrics_every_n_steps,
       backend_kwargs={
           "wandb": {
               "config": vars(args),
@@ -440,19 +396,32 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       },
   )
 
-  reward_fn = _make_reward_fn(args.reward_mode, debug=args.debug)
-  reward_fns = [reward_fn] if reward_fn is not None else []
+  reward_fns = (
+      [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
+      if args.reward_mode == "exact"
+      else []
+  )
+  generation_args = datatypes.GenerationArgs(
+      max_response_length=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=None if args.top_k < 0 else args.top_k,
+      return_logprobs=True,
+  )
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
-      assembler=batch_assembly.PaddedBatchAssembler(
-          batch_size=args.train_micro_batch_size,
+      generation_args=generation_args,
+      batch_config=batch_assembly.BatchConfig(
+          pad_id=pad_id,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
-          pad_id=pad_id,
-          group_size=algo.group_size,
+          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+          max_segments_per_packed_row=args.max_segments_per_packed_row,
+          trainer_fsdp=args.trainer_fsdp,
+          trainer_dp=args.trainer_dp,
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,
@@ -476,11 +445,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         "Cluster workers ready: %s. Starting StandardRLProgram execution...",
         [w.worker_id for w in cluster.worker_infos()],
     )
-    cluster.run_program(
+    cluster.run(
         program=program,
         num_steps=args.max_steps,
         bring_up=False,
     )
+  except BaseException as exc:
+    logging.exception("FATAL: StandardRLProgram execution failed: %s", exc)
+    raise
   finally:
     program.close()
     if args.stop_workers_on_exit:

@@ -88,7 +88,7 @@ class _SamplingState:
   sampling_mode: str = flax.struct.field(pytree_node=False)
 
   # Number of input tokens with padding.
-  num_input_tokens: jnp.int32 = flax.struct.field(pytree_node=False)
+  num_input_tokens: int = flax.struct.field(pytree_node=False)
 
   # Tempurature for top_p sampling.
   temperature: float = flax.struct.field(pytree_node=False)
@@ -483,7 +483,7 @@ class Sampler(base_sampler.BaseSampler):
 
     return _SamplingState(
         decoding_step=num_input_tokens - 1,
-        num_input_tokens=jnp.array(num_input_tokens, dtype=jnp.int32),
+        num_input_tokens=int(num_input_tokens),
         token_buffer=token_buffer,
         positions=positions,
         logits_buffer=logits_buffer,

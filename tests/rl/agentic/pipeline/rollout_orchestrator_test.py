@@ -135,7 +135,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       if group_size > 1 and batch_size <= group_size:
         # If group_size > 1 and batch_size <= group_size, items in a batch
         # are expected to come from the same group.
-        group_ids = set(item.group_id for item in batch)
+        group_ids = set(item.prompt_id for item in batch)
         self.assertLen(group_ids, 1)
 
     all_items = []
@@ -144,24 +144,24 @@ class RolloutOrchestratorTest(parameterized.TestCase):
 
     self.assertLen(all_items, num_pairs)
 
-    pair_indices = sorted([item.pair_index for item in all_items])
+    pair_indices = sorted([item.group_index for item in all_items])
     self.assertEqual(pair_indices, list(range(num_pairs)))
 
     items_by_group = {}
     for item in all_items:
       self.assertEqual(
-          item.traj, {'trajectory': [f'traj_for_env_{item.pair_index}']}
+          item.traj, {'trajectory': [f'traj_for_env_{item.group_index}']}
       )
-      self.assertEqual(item.group_id, item.pair_index // group_size)
-      if item.group_id not in items_by_group:
-        items_by_group[item.group_id] = []
-      items_by_group[item.group_id].append(item)
+      self.assertEqual(item.prompt_id, item.group_index // group_size)
+      if item.prompt_id not in items_by_group:
+        items_by_group[item.prompt_id] = []
+      items_by_group[item.prompt_id].append(item)
 
     self.assertLen(items_by_group, num_pairs // group_size)
     for group_id in items_by_group:
       self.assertLen(items_by_group[group_id], group_size)
       pair_indices_in_group = sorted(
-          [item.pair_index for item in items_by_group[group_id]]
+          [item.group_index for item in items_by_group[group_id]]
       )
       expected_pair_indices = list(
           range(

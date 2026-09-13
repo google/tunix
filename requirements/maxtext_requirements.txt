@@ -1,3 +1,4 @@
+# TODO(maxtext-dev): Update the commits after all code changes land.
 maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@8c2e29218c01b6287ba85e8d0dc9555561f7634c
 maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@8c2e29218c01b6287ba85e8d0dc9555561f7634c#subdirectory=src/maxtext/integration/vllm
 aqtp

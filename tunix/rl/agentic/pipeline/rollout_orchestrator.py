@@ -119,8 +119,8 @@ class RolloutOrchestrator:
     gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
     item = TrajectoryItem(
-        pair_index=pair_idx,
-        group_id=gid,
+        prompt_id=gid,
+        group_index=pair_idx,
         start_step=start_step,
         traj=traj,
         metadata={"generation_id": pair_idx},
@@ -250,7 +250,7 @@ class RolloutOrchestrator:
       raise RuntimeError("Orchestrator is already running.")
 
     self._group_queue_manager = GroupQueueManager(
-        key_fn=lambda x: getattr(x, "group_id", getattr(x, "prompt_id", id(x))),
+        key_fn=lambda x: getattr(x, "prompt_id", id(x)),
         group_size=group_size,
     )
     self._stop.clear()

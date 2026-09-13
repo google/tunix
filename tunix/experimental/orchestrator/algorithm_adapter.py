@@ -21,12 +21,42 @@ computations directly to `tunix.rl.algo_core`.
 
 import abc
 from collections.abc import Callable, Sequence
+import functools
+import types
 from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
-from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import function_registry
+
+
+def _algo_model_input(
+    train_example: Any,
+    *,
+    algo_config: Any,
+    pad_id: int,
+    eos_id: int,
+) -> dict[str, Any]:
+  """Maps an RLTrainerPayload microbatch to algorithm loss kwargs."""
+  return {
+      "train_example": train_example,
+      "algo_config": algo_config,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+  }
+
+
+def _extract_tokens_and_masks(
+    item: datatypes.TrajectoryItem,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
+  return (
+      np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1),
+      np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
+      np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
+  )
 
 
 def _routed_experts_for(
@@ -45,22 +75,43 @@ def _routed_experts_for(
     model falls back to its own gate there rather than replaying a wrong
     expert.
   """
-  if item.routed_experts is None:
+  routed = getattr(item, "routed_experts", None)
+  if routed is None and isinstance(item.traj, dict):
+    routed = item.traj.get("routed_experts")
+  if routed is None:
+    routed = item.metadata.get("routed_experts")
+  if routed is None:
     return None
-  routed = np.asarray(item.routed_experts, dtype=np.int32)
-  if routed.ndim != 3:
+  routed_arr = np.asarray(routed, dtype=np.int32)
+  if routed_arr.ndim != 3:
     raise ValueError(
         "routed_experts must be [length, num_layers, top_k]; got shape"
-        f" {routed.shape}"
+        f" {routed_arr.shape}"
     )
-  if routed.shape[0] >= seq_len:
-    return routed[:seq_len]
+  if routed_arr.shape[0] >= seq_len:
+    return routed_arr[:seq_len]
   pad = np.full(
-      (seq_len - routed.shape[0],) + routed.shape[1:],
+      (seq_len - routed_arr.shape[0],) + routed_arr.shape[1:],
       datatypes.UNSET_ROUTED_EXPERT,
       dtype=np.int32,
   )
-  return np.concatenate([routed, pad], axis=0)
+  return np.concatenate([routed_arr, pad], axis=0)
+
+
+def _extract_old_logps(
+    item: datatypes.TrajectoryItem, completion_len: int
+) -> np.ndarray | None:
+  """Extracts old_per_token_logps from TrajectoryItem."""
+  old_lp = item.traj.get("old_logprobs")
+  if old_lp is None:
+    return None
+  old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
+  if len(old_lp) != completion_len:
+    raise ValueError(
+        f"old_logprobs length {len(old_lp)} does not match completion length"
+        f" {completion_len}"
+    )
+  return old_lp
 
 
 class AlgorithmAdapter(abc.ABC):
@@ -70,13 +121,17 @@ class AlgorithmAdapter(abc.ABC):
       self,
       group_size: int = 8,
       mini_batch_size: int = 4,
+      train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
+      max_response_length: int = 1024,
   ):
     self.group_size = group_size
     self.mini_batch_size = mini_batch_size
+    self.train_micro_batch_size = train_micro_batch_size
     self.max_turns = max_turns
     self.max_packed_len = max_packed_len
+    self.max_response_length = max_response_length
     self.requires_reference_kl = False
     self.has_critic = False
     self.requires_old_logprobs = False
@@ -104,29 +159,56 @@ class AlgorithmAdapter(abc.ABC):
     """Returns the loss function executed on TrainerWorker."""
     ...
 
+  @abc.abstractmethod
+  def build_gen_model_input_fn(
+      self, pad_id: int, eos_id: int
+  ) -> Callable[[Any], dict[str, Any]]:
+    """Returns a model input generator function executed on TrainerWorker."""
+    ...
 
-# TODO: Align adapter classes with current path and try to refactor and reuse directly instead of copying.
+
 class GRPOAdapter(AlgorithmAdapter):
   """Group Relative Policy Optimization (GRPO) adapter."""
 
   def __init__(
       self,
-      group_size: int = 8,
+      algo_config: algorithm_config.GRPOConfig | None = None,
+      *,
       mini_batch_size: int = 4,
+      train_micro_batch_size: int = 1,
       max_turns: int = 1,
       max_packed_len: int = 8192,
-      clip_epsilon: float = 0.2,
-      beta_kl: float = 0.04,
+      max_response_length: int = 1024,
   ):
+    """Initializes the adapter.
+
+    Args:
+      algo_config: Canonical GRPO configuration. It is the single source of
+        truth for all algorithm hyperparameters, including the group size
+        (`num_generations`). Defaults to `GRPOConfig()` when omitted.
+      mini_batch_size: Number of prompt groups per optimizer step.
+      train_micro_batch_size: Number of sequences per trainer forward pass.
+      max_turns: Maximum number of environment turns per rollout.
+      max_packed_len: Maximum packed sequence length.
+      max_response_length: Maximum number of generated response tokens.
+    """
+    if algo_config is None:
+      algo_config = algorithm_config.GRPOConfig()
+    self.algo_config = algo_config
+
     super().__init__(
-        group_size=group_size,
+        group_size=self.algo_config.num_generations,
         mini_batch_size=mini_batch_size,
+        train_micro_batch_size=train_micro_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,
+        max_response_length=max_response_length,
     )
-    self.clip_epsilon = clip_epsilon
-    self.beta_kl = beta_kl
-    self.requires_reference_kl = beta_kl != 0.0
+    self.requires_reference_kl = (
+        getattr(self.algo_config, "beta", 0.0) != 0.0
+        or getattr(self.algo_config, "force_compute_kl", False)
+    )
+    self.use_rollout_logps = getattr(self.algo_config, "use_rollout_logps", True)
 
   def compute_advantages(
       self,
@@ -134,14 +216,14 @@ class GRPOAdapter(AlgorithmAdapter):
       num_generations: int | None = None,
       **kwargs: Any,
   ) -> jnp.ndarray:
-    """Computes group-normalized advantages: (r - mean(group)) / (std(group) + 1e-6)."""
+    """Computes returns and advantages using the registered advantage estimator."""
     del kwargs
     g = num_generations or self.group_size
-    r = jnp.asarray(rewards, dtype=jnp.float32).reshape(-1, g)
-    mean = jnp.mean(r, axis=-1, keepdims=True)
-    std = jnp.std(r, axis=-1, keepdims=True)
-    advs = (r - mean) / (std + 1e-6)
-    return advs.reshape(-1)
+    estimator = function_registry.get_advantage_estimator(
+        self.algo_config.advantage_estimator
+    )
+    r = np.asarray(rewards, dtype=np.float32).reshape(-1)
+    return jnp.asarray(estimator(rewards=r, num_generations=g))
 
   def create_trainer_payloads(
       self,
@@ -156,31 +238,30 @@ class GRPOAdapter(AlgorithmAdapter):
     payloads = []
 
     for i, item in enumerate(group):
-      prompt_tokens = item.prompt_tokens if item.prompt_tokens is not None else np.zeros(0, dtype=np.int32)
-      completion_tokens = item.completion_tokens if item.completion_tokens is not None else np.zeros(0, dtype=np.int32)
-      action_mask = item.action_mask if item.action_mask is not None else np.zeros(0, dtype=np.float32)
-
+      p_arr, c_arr, act_arr = _extract_tokens_and_masks(item)
       adv_val = float(advs[i]) if i < len(advs) else 0.0
-      ref_lp = ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      ref_lp = (
+          ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      )
 
-      p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
-      c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
-      act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
-
-      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
-      seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
-      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
-
+      seq_tokens = (
+          np.concatenate([p_arr, c_arr])
+          if (len(p_arr) > 0 or len(c_arr) > 0)
+          else np.zeros(0, dtype=np.int32)
+      )
+      seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
+      old_lp = (
+          _extract_old_logps(item, len(c_arr))
+          if self.use_rollout_logps
+          else None
+      )
       payload = datatypes.RLTrainerPayload(
-          token_ids=seq_tokens,
-          token_mask=np.ones_like(seq_tokens, dtype=np.float32),
-          loss_mask=seq_loss_mask,
-          advantages=seq_adv,
-          action_mask=seq_loss_mask,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
+          advantages=seq_adv,
+          old_per_token_logps=old_lp,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,
@@ -190,8 +271,30 @@ class GRPOAdapter(AlgorithmAdapter):
     return payloads
 
   def loss_fn(self) -> Callable[..., Any]:
-    """GRPO loss function executed on TrainerWorker."""
-    return algo_core.grpo_loss_fn
+    """Policy loss resolved by name via the function registry."""
+    return function_registry.get_policy_loss_fn(
+        self.algo_config.policy_loss_fn
+    )
+
+  def build_gen_model_input_fn(
+      self, pad_id: int, eos_id: int
+  ) -> Callable[[Any], dict[str, Any]]:
+    """Returns a model input generator function for TrainerWorker."""
+    if (
+        not hasattr(self.algo_config, "temperature")
+        or self.algo_config.temperature is None
+    ):
+      raise ValueError(
+          "Trainer temperature must be explicitly set on algo_config to match"
+          " rollout generation temperature. Running with an unset temperature"
+          " biases policy gradient importance ratios."
+      )
+    return functools.partial(
+        _algo_model_input,
+        algo_config=self.algo_config,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
 
 
 class PPOAdapter(AlgorithmAdapter):
@@ -203,22 +306,30 @@ class PPOAdapter(AlgorithmAdapter):
       mini_batch_size: int = 4,
       max_turns: int = 1,
       max_packed_len: int = 8192,
+      max_response_length: int = 1024,
       gamma: float = 0.99,
       lam: float = 0.95,
       clip_epsilon: float = 0.2,
+      entropy_coef: float = 0.0,
+      policy_loss_fn: str = "ppo",
+      use_rollout_logps: bool = True,
   ):
     super().__init__(
         group_size=group_size,
         mini_batch_size=mini_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,
+        max_response_length=max_response_length,
     )
     self.gamma = gamma
+    self.policy_loss_fn = policy_loss_fn
     self.lam = lam
     self.clip_epsilon = clip_epsilon
+    self.entropy_coef = entropy_coef
     self.has_critic = True
     self.requires_reference_kl = True
     self.requires_old_logprobs = True
+    self.use_rollout_logps = use_rollout_logps
 
   def compute_advantages(
       self,
@@ -258,40 +369,61 @@ class PPOAdapter(AlgorithmAdapter):
     )
 
     for i, item in enumerate(trajectories):
-      prompt_tokens = item.prompt_tokens if item.prompt_tokens is not None else np.zeros(0, dtype=np.int32)
-      completion_tokens = item.completion_tokens if item.completion_tokens is not None else np.zeros(0, dtype=np.int32)
-      action_mask = item.action_mask if item.action_mask is not None else np.ones(len(completion_tokens), dtype=np.float32)
+      p_arr, c_arr, act_arr = _extract_tokens_and_masks(item)
 
       adv_val = float(advs[i]) if i < len(advs) else 0.0
       vt_val = float(val_targets[i]) if i < len(val_targets) else 0.0
-      ref_lp = ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
-      old_lp = old_logps[i] if old_logps is not None and i < len(old_logps) else None
+      ref_lp = (
+          ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+      )
+      old_lp = (
+          old_logps[i] if old_logps is not None and i < len(old_logps) else None
+      )
+      if old_lp is None and self.use_rollout_logps:
+        old_lp = _extract_old_logps(item, len(c_arr))
 
-      p_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
-      c_arr = np.asarray(completion_tokens, dtype=np.int32).reshape(-1)
-      act_arr = np.asarray(action_mask, dtype=np.float32).reshape(-1)
-
-      seq_tokens = np.concatenate([p_arr, c_arr]) if (len(p_arr) > 0 or len(c_arr) > 0) else np.zeros(0, dtype=np.int32)
-      seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
-      seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
+      seq_tokens = (
+          np.concatenate([p_arr, c_arr])
+          if (len(p_arr) > 0 or len(c_arr) > 0)
+          else np.zeros(0, dtype=np.int32)
+      )
+      seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
 
       payload = datatypes.RLTrainerPayload(
-          token_ids=seq_tokens,
-          token_mask=np.ones_like(seq_tokens, dtype=np.float32),
-          loss_mask=seq_loss_mask,
-          advantages=seq_adv,
-          action_mask=seq_loss_mask,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
           completion_mask=act_arr,
-          old_per_token_logps=np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None,
-          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
+          advantages=seq_adv,
+          old_per_token_logps=np.asarray(old_lp, dtype=np.float32)
+          if old_lp is not None
+          else None,
+          ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
+          if ref_lp is not None
+          else None,
           returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
       )
       payloads.append(payload)
     return payloads
 
   def loss_fn(self) -> Callable[..., Any]:
-    """PPO policy loss function delegating directly to `algo_core.ppo_policy_loss_fn`."""
-    return algo_core.ppo_policy_loss_fn
+    """Policy loss resolved by name via the function registry."""
+    return function_registry.get_policy_loss_fn(self.policy_loss_fn)
+
+  def build_gen_model_input_fn(
+      self, pad_id: int, eos_id: int
+  ) -> Callable[[Any], dict[str, Any]]:
+    """Returns a model input generator function for TrainerWorker."""
+    algo_config = types.SimpleNamespace(
+        epsilon_low=getattr(self, "epsilon_low", self.clip_epsilon),
+        epsilon_high=getattr(self, "epsilon_high", self.clip_epsilon),
+        entropy_coef=self.entropy_coef,
+        gamma=self.gamma,
+        lam=self.lam,
+    )
+    return functools.partial(
+        _algo_model_input,
+        algo_config=algo_config,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )

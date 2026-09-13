@@ -34,15 +34,35 @@ MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
+MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
+OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+ADAM_B1=${ADAM_B1:-0.9}
+ADAM_B2=${ADAM_B2:-0.999}
+ADAM_EPS=${ADAM_EPS:-1.0e-8}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
+# The default is applied with `-` rather than `:-` so that an explicitly empty
+# SCHEDULE_TYPE selects the constant learning rate instead of the default.
+SCHEDULE_TYPE=${SCHEDULE_TYPE-warmup_cosine_decay_schedule}
+LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
+LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
+LR_END_VALUE=${LR_END_VALUE:-0.0}
+LR_DECAY_STEPS=${LR_DECAY_STEPS:-500}
+WARMUP_STEPS=${WARMUP_STEPS:-$(((LR_DECAY_STEPS + 9) / 10))}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
+CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 REWARD_MODE=${REWARD_MODE:-env}
 TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
 TFDS_SPLIT=${TFDS_SPLIT:-train}
@@ -50,11 +70,21 @@ SEED=${SEED:-42}
 SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
+FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+CHAT_PARSER=${CHAT_PARSER:-auto}
+# Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
+# both the trainer and the rollout, so the two cannot drift. A disagreement is
+# not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
+# against a non-MaxText rollout matches zero of them. Set it explicitly to
+# override, or empty to put the rollout back on tpu-inference's own model.
+MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -73,6 +103,22 @@ FORCE_KILL=0
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
+
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText shards the batch dimension of every loss input across the fsdp
+  # axis, so the microbatch has to be a multiple of it. The trainer node
+  # enforces this too.
+  if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
+    TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
+  fi
+  if [[ -z "$MAXTEXT_CKPT" ]]; then
+    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+    exit 1
+  fi
+fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
@@ -319,8 +365,12 @@ echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
+echo "  learning rate:  $LEARNING_RATE"
+echo "  lr schedule:    ${SCHEDULE_TYPE:-<constant>} (warmup $WARMUP_STEPS, decay $LR_DECAY_STEPS)"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
+echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
+echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  beta:           $BETA"
@@ -330,8 +380,14 @@ echo "  tfds split:     $TFDS_SPLIT"
 echo "  tfds data dir:  $TFDS_DATA_DIR"
 echo "  shuffle:        $SHUFFLE"
 echo "  use lora:       $USE_LORA"
+echo "  ckpt interval:  $CHECKPOINT_SAVE_INTERVAL_STEPS"
+echo "  ckpt max keep:  $CHECKPOINT_MAX_TO_KEEP"
+echo "  ckpt root dir:  $CHECKPOINT_ROOT_DIRECTORY"
 echo "  sampler:        $SAMPLER"
 echo "  weight sync:    $WEIGHT_SYNC_MODE"
+echo "  trainer backend:$TRAINER_BACKEND"
+echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
+echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -389,7 +445,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   TRAINER_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main
+    --process_main=tunix.experimental.examples.common.run_trainer_node.main
 
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
@@ -397,15 +453,39 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
+    --sampler_type="$SAMPLER"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
+    --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
+    --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
+    --optimizer_b1="$ADAM_B1"
+    --optimizer_b2="$ADAM_B2"
+    --optimizer_eps="$ADAM_EPS"
+    --optimizer_weight_decay="$WEIGHT_DECAY"
+    --optimizer_learning_rate="$LEARNING_RATE"
+    --optimizer_schedule_type="$SCHEDULE_TYPE"
+    --optimizer_init_value="$LR_INIT_VALUE"
+    --optimizer_peak_value="$LR_PEAK_VALUE"
+    --optimizer_end_value="$LR_END_VALUE"
+    --optimizer_warmup_steps="$WARMUP_STEPS"
+    --optimizer_decay_steps="$LR_DECAY_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --trainer_backend="$TRAINER_BACKEND"
+    --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
+    --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
+    --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
+  fi
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
@@ -439,7 +519,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   ROLLOUT_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main
+    --process_main=tunix.experimental.examples.common.run_rollout_node.main
 
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
@@ -454,7 +534,14 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --chat_parser="$CHAT_PARSER"
   )
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
+  fi
+  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
+    ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
@@ -577,7 +664,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     INFERENCE_CMD=(
       "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
       --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-      --process_main=tunix.experimental.examples.math_gsm8k_dist.run_inference_node.main
+      --process_main=tunix.experimental.examples.common.run_inference_node.main
 
       --port="$INFERENCE_PORT"
       --model_name="$MODEL_NAME"
@@ -633,6 +720,7 @@ echo "Launching CPU orchestrator..."
     --beta="$BETA"
     --epsilon="$EPSILON"
     --reward_mode="$REWARD_MODE"
+    --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
     --seed="$SEED"
@@ -646,6 +734,20 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
+    ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
+  else
+    ORCHESTRATOR_CMD+=(--use_rollout_logps)
+  fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    ORCHESTRATOR_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
+  if [[ -n "$MAX_SEGMENTS_PER_PACKED_ROW" ]]; then
+    ORCHESTRATOR_CMD+=(--max_segments_per_packed_row="$MAX_SEGMENTS_PER_PACKED_ROW")
+  fi
+  if [[ -n "$TRAINER_FSDP" ]]; then
+    ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
   fi
 
   export JAX_PLATFORMS=cpu

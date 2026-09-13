@@ -55,6 +55,13 @@ class _FakeManager:
     self.calls.append("metadata")
     return [{"unit": "u0"}]
 
+  async def abort_weight_sync(self, sync_request=None, **kwargs):
+    del sync_request, kwargs
+    self.calls.append("abort")
+    self.resume_all()
+    self.reopen_admission()
+    return None
+
   def resume_all(self):
     self.calls.append("resume")
 

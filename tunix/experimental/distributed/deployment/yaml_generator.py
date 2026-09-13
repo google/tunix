@@ -44,6 +44,16 @@ def main() -> None:
       default=None,
       help="CPU machine type (e.g. n2-standard-64)",
   )
+  parser.add_argument(
+      "--namespace",
+      default=os.environ.get("K8S_NAMESPACE", "default"),
+      help="Kubernetes namespace to deploy into.",
+  )
+  parser.add_argument(
+      "--queue_name",
+      default=os.environ.get("KUEUE_QUEUE_NAME", ""),
+      help="Kueue local queue name for scheduling (optional).",
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -110,7 +120,7 @@ def main() -> None:
       tpu_machine = "tpu7x-standard-4t"
       tpu_type = "tpu7x"
       pw_instance_type = "tpu7x"
-    elif tpu_type in ("tpuv5", "tpu-v5p-slice"):
+    elif tpu_type in ("tpuv5", "tpuv5p", "tpu-v5p-slice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct5p-hightpu-4t"
@@ -141,11 +151,20 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  queue_label = (
+      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
+      if args.queue_name
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
         JOBSET_NAME=jobset_name,
         USER=os.environ.get("USER"),
+        NAMESPACE=args.namespace,
+        QUEUE_NAME=args.queue_name,
+        QUEUE_LABEL=queue_label,
         SERVER_IMAGE=args.pathways_server_image,
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,

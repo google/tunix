@@ -26,6 +26,7 @@ from collections.abc import Callable
 import concurrent.futures
 import dataclasses
 import logging
+import threading
 import time
 
 from tunix.experimental.common import datatypes
@@ -111,8 +112,11 @@ class HealthMonitor:
     reports: dict[str, datatypes.HealthReport] = {}
     worker_ids = self._registry.worker_ids()
     live_ids = set(worker_ids)
+    abort_event = threading.Event()
 
     def _poll_worker(wid: str) -> tuple[str, datatypes.HealthReport | None]:
+      if abort_event.is_set():
+        return wid, None
       try:
         worker = self._registry.get(wid)
       except KeyError:
@@ -120,7 +124,11 @@ class HealthMonitor:
             "Worker %r unregistered concurrently, skipping poll.", wid
         )
         return wid, None
-      return wid, worker.heartbeat()
+      try:
+        return wid, worker.heartbeat()
+      except BaseException:
+        abort_event.set()
+        raise
 
     futures = [
         self._executor.submit(_poll_worker, wid) for wid in worker_ids
@@ -135,6 +143,7 @@ class HealthMonitor:
         if previous is None or previous[0] != report.state:
           self._state_since[wid] = (report.state, self._clock())
     finally:
+      abort_event.set()
       for future in futures:
         future.cancel()
 

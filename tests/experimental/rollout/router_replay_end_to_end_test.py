@@ -190,7 +190,6 @@ class SamplerToPayloadTest(absltest.TestCase):
 
     payload = datatypes.RLTrainerPayload(
         advantages=np.zeros(GEN_LEN, dtype=np.float32),
-        loss_mask=np.ones(GEN_LEN, dtype=np.float32),
         prompt_ids=np.asarray(response.prompt_token_ids, dtype=np.int32),
         prompt_mask=np.ones(PROMPT_LEN, dtype=np.float32),
         completion_ids=np.asarray(response.token_ids, dtype=np.int32),
@@ -203,6 +202,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         max_response_length=GEN_LEN,
         pad_id=0,
         group_size=1,
+        mini_batch_size=1,
     ).pack([payload])
 
     routed = packed[0].routed_experts

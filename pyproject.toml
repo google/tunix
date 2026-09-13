@@ -42,6 +42,7 @@ dependencies = [
   "qwix>=0.1.6",
   "sentencepiece",
   "safetensors<0.8", # higher versions breaks with jax >=0.9
+  "sqlalchemy",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",

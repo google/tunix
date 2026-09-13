@@ -27,7 +27,8 @@ from tunix.experimental.worker import traffic_controller as traffic_controller_l
 from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
-    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+    datatypes.TrajectoryItem,
+    trajectory_lib.TrajectoryError,
 ]
 
 
@@ -66,7 +67,7 @@ class RolloutManager:
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
+          config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
       )
 
       if sampler_type == "vllm":
@@ -85,7 +86,9 @@ class RolloutManager:
           from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
           raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                  server_id="inprocess_vllm_sampler"
+              )
           )
 
         sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
@@ -101,7 +104,9 @@ class RolloutManager:
           from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
           raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+                  server_id="vanilla_sampler"
+              )
           )
 
         sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
@@ -168,9 +173,13 @@ class RolloutManager:
     env_name = getattr(self.config, "env_name", "")
     if env_name and registry.ENV_REGISTRY.contains(env_name):
       env_cls = registry.ENV_REGISTRY.get(env_name)
-      env_config = request.metadata.get(
-          "env_config", getattr(self.config, "env_config", {})
-      )
+      request_metadata = dict(request.metadata or {})
+      env_config = dict(getattr(self.config, "env_config", {}))
+      if isinstance(request_metadata.get("env_config"), dict):
+        env_config.update(request_metadata["env_config"])
+      env_config.setdefault("group_index", request.group_index)
+      env_config.setdefault("policy_version", request.target_policy_version)
+
       env_client = env_cls(**env_config)
     elif self.env_pool and hasattr(self.env_pool, "acquire_env"):
       env_client = self.env_pool.acquire_env(request.metadata.get("env_config"))
@@ -180,7 +189,9 @@ class RolloutManager:
     agent_name = getattr(self.config, "agent_name", "")
     if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
       agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = getattr(self.config, "agent_config", {})
+      agent_config = request.metadata.get(
+          "agent_config", getattr(self.config, "agent_config", {})
+      )
       agent = agent_cls(**agent_config)
     elif self.agent_factory and callable(self.agent_factory):
       agent = self.agent_factory()
@@ -335,6 +346,20 @@ class RolloutManager:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
+    return res
+
+  async def abort_weight_sync(
+      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Discards the round, delegates to sampler if available, and resumes serving."""
+    res = None
+    if self.sampler:
+      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    # TODO(tunix-dev): It might be better to fail hard if weight sync failed
+    # right now instead of letting it proceed silently, otherwise it may mess
+    # up with the policy version.
+    self.resume_all()
+    self.reopen_admission()
     return res
 
   def reopen_admission(self) -> bool:

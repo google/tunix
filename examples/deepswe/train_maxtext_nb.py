@@ -349,6 +349,16 @@ parser.add_argument(
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="Logging level for the script and relevant libraries.",
 )
+parser.add_argument(
+    "--scaffold",
+    type=str,
+    default="r2egym",
+    choices=["r2egym", "sweagent", "openhands"],
+    help=(
+        "Agent scaffold/sandbox toolset to use ('r2egym', 'sweagent', or"
+        " 'openhands')."
+    ),
+)
 
 args, _ = parser.parse_known_args()
 
@@ -762,6 +772,7 @@ if USE_AGENT_SANDBOX:
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
       max_warmpool_replicas=args.max_warmpool_replicas,
+      scaffold=args.scaffold,
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,
@@ -769,6 +780,7 @@ if USE_AGENT_SANDBOX:
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
       max_warmpool_replicas=args.max_warmpool_replicas,
+      scaffold=args.scaffold,
   )
 
 
@@ -890,13 +902,41 @@ trainer_devices = devices[
 # ==========================================
 # 7. Model Initialization via MaxText
 # ==========================================
+from etils import epath
 from orbax.checkpoint._src.serialization import jax_array_handlers
 from orbax.checkpoint._src.serialization import type_handler_registry
 
-# Ensure standard ArrayHandler is used for OCDBT base model restore
-type_handler_registry.register_type_handler(
-    jax.Array, jax_array_handlers.ArrayHandler(), override=True
-)
+# pathwaysutils registers CloudPathwaysArrayHandler on init, which reads
+# checkpoint shards on the Pathways workers. It does not support OCDBT yet
+# (b/365549911), so an OCDBT checkpoint has to fall back to the standard
+# ArrayHandler -- but that one reads on the client and materializes whole arrays
+# in the head container's host RAM.
+#
+# So only pay that cost when the checkpoint really is OCDBT. The client-side
+# restore scales with the largest single array rather than with model size,
+# which is why it goes unnoticed at 35B ([256, 10, 2048, 512] = 5.4 GiB, ~18 GB
+# peak) and is fatal at 397B: the scan axis makes every MoE tensor
+# [512, 15, 4096, 1024] = 64 GiB with ~12 in flight, so the head needs ~690 GB
+# and is OOMKilled. Keeping the reads on the workers peaks at 22 GB instead.
+# Note that checkpoint_storage_concurrent_gb does not bound this path.
+#
+# Outside Pathways this is a no-op either way: ArrayHandler is already the
+# default handler for jax.Array.
+if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
+  print(
+      "Base checkpoint is OCDBT, using the standard ArrayHandler:"
+      f" {MODEL_PATH}",
+      flush=True,
+  )
+  type_handler_registry.register_type_handler(
+      jax.Array, jax_array_handlers.ArrayHandler(), override=True
+  )
+else:
+  print(
+      "Base checkpoint is not OCDBT, keeping the registered handler so reads"
+      f" stay on the Pathways workers: {MODEL_PATH}",
+      flush=True,
+  )
 
 (
     qwen_reference,
@@ -1153,13 +1193,14 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine=rl_engine,
     reward_fns=None,
     agent_class=swe_agent.SWEAgent,
-    agent_kwargs={},
+    agent_kwargs={"scaffold": args.scaffold},
     env_class=swe_env.SWEEnv,
     env_kwargs={
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
         "verbose": True,
+        "scaffold": args.scaffold,
         "use_agent_sandbox": USE_AGENT_SANDBOX,
         "fleet": fleet,
     },
@@ -1220,4 +1261,12 @@ if (
   )
 
 print("Starting training...", flush=True)
-agentic_grpo_learner.train(train_dataset=train_dataset)
+try:
+  agentic_grpo_learner.train(train_dataset=train_dataset)
+finally:
+  if USE_AGENT_SANDBOX:
+    print("Tearing down agent sandbox fleet...", flush=True)
+    try:
+      swe_env._teardown_global_fleet()
+    except Exception as teardown_e:
+      print(f"Failed to teardown agent sandbox fleet: {teardown_e}", flush=True)

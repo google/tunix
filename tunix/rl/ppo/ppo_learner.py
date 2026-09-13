@@ -202,7 +202,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
         lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
-            "algo_config": self.algo_config,
+            "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
     )
 
@@ -236,8 +236,8 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     )
 
     self.rl_engine.critic_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
-        "vpred_mean": common.mean_of_means,
-        "vf_clipfrac": common.mean_of_means,
+        "vpred_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "vf_clipfrac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
     })
 
   def _generate_and_compute_advantage(

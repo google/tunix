@@ -21,7 +21,9 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
+from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.worker import abstract_worker
+from tunix.rl import algorithm_config
 
 
 class SimulatedRolloutWorker(abstract_worker.Worker):
@@ -58,15 +60,19 @@ class SimulatedRolloutWorker(abstract_worker.Worker):
           datatypes.RolloutResponse(
               request_id=f"req_{idx}",
               status="COMPLETED",
-              env_reward=1.0,
-              prompt_tokens=np.array([10, 11], dtype=np.int32),
-              segments=[
-                  datatypes.TokenSegment(
-                      source="assistant",
-                      tokens=np.array([20, 21], dtype=np.int32),
-                      loss_mask=np.array([1, 1], dtype=np.int32),
-                  )
-              ],
+              payload=datatypes.TrajectoryItem(
+                  prompt_id=f"prompt_{idx}",
+                  group_index=0,
+                  start_step=0,
+                  traj={
+                      "reward": 1.0,
+                      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  },
+                  prompt_tokens=np.array([10, 11], dtype=np.int32),
+                  completion_tokens=np.array([20, 21], dtype=np.int32),
+                  action_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  metadata={"prompt_id": f"prompt_{idx}"},
+              ),
               metadata={"prompt_id": f"prompt_{idx}"},
           )
       )
@@ -133,9 +139,17 @@ def main():
 
   print(f"Registered roles in cluster: {orch.registry.roles()}")
 
-  algo = algorithm_adapter.GRPOAdapter(group_size=2, mini_batch_size=1, max_packed_len=32)
+  algo_config = algorithm_config.GRPOConfig(
+      num_generations=2,
+      temperature=1.0,
+  )
+  algo = algorithm_adapter.GRPOAdapter(
+      algo_config=algo_config,
+      mini_batch_size=1,
+      max_packed_len=32,
+  )
   assembler = batch_assembly.SequencePackedBatchAssembler(
-      group_size=2, max_packed_len=32
+      batch_size=1, group_size=2, mini_batch_size=1, max_packed_len=32
   )
 
   train_dataset = [
@@ -143,14 +157,15 @@ def main():
       ["Solve 10 / 2", "Solve 7 - 5"],
   ]
 
-  print("Executing Tier 1 Managed Run via ClusterOrchestrator...")
-  orch.run(
+  print("Executing Run via ClusterOrchestrator...")
+  program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=train_dataset,
       reward_fns=[lambda x: 1.0],
       assembler=assembler,
       max_steps=2,
   )
+  orch.run(program=program)
   print("Execution completed successfully!")
 
 

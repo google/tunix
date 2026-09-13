@@ -16,19 +16,69 @@
 
 Generic tensor packing utility for unbatched `RLTrainerPayload` objects (or
 custom objects with token arrays). Supports:
-- 1D Sequence Packing (`SequencePackedBatchAssembler`) for Flash/FlexAttention (>90% MXU).
+- 1D Sequence Packing (`SequencePackedBatchAssembler`) for Flash/FlexAttention
+(>90% MXU).
 - Simple 2D Rectangular Padding (`PaddedBatchAssembler`).
 
-# TODO: Align SequencePackedBatchAssembler with the rest of the ecosystem and potentially move to a common library.
+# TODO: Align SequencePackedBatchAssembler with the rest of the ecosystem and
+potentially move to a common library.
 """
 
+import collections
+from collections.abc import Mapping, Sequence
 import dataclasses
+from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
-from typing import Any, Generic, Protocol, Sequence, TypeVar
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
+from tunix.rl import packing
+from tunix.rl import utils as rl_utils
 
 T = TypeVar("T")
+
+_BATCH_ID_PREFIX: str = "batch"
+
+
+class AssembledBatch(NamedTuple):
+  """Microbatch payload paired with optimizer-update completion status."""
+
+  payload: datatypes.RLTrainerPayload
+  is_final_batch: bool
+  trajectory_ids: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass
+class BatchConfig:
+  """Configuration for batch assembly.
+
+  Attributes:
+    pad_id: Token ID used for padding prompts and completions.
+    max_prompt_length: Maximum prompt length for padding or budget validation.
+    max_response_length: Maximum response length for padding or budget
+      validation.
+    max_seq_token_per_tpu: Maximum packed sequence tokens per TPU. When
+      configured, SequencePackedBatchAssembler is used instead of
+      PaddedBatchAssembler.
+    max_segments_per_packed_row: Maximum segments per packed row when sequence
+      packing is enabled.
+    trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
+    trainer_dp: Trainer DP mesh dimension size for sequence packing.
+  """
+
+  pad_id: int = 0
+  max_prompt_length: int | None = None
+  max_response_length: int | None = None
+  max_seq_token_per_tpu: int | None = None
+  max_segments_per_packed_row: int | None = None
+  trainer_fsdp: int | None = None
+  trainer_dp: int | None = None
+
+
+def _extract_trajectory_id(item: Any) -> str:
+  """Extracts the standardized trajectory id from payload metadata."""
+  metadata = getattr(item, "metadata", None) or {}
+  return str(metadata.get("traj_id", ""))
 
 
 class BatchAssembler(Generic[T], Protocol):
@@ -40,32 +90,45 @@ class BatchAssembler(Generic[T], Protocol):
   """
 
   group_size: int
+  mini_batch_size: int
 
   @property
-  def groups_per_assembly_batch(self) -> int:
-    """Number of prompt groups to fetch before pack().
+  def rollouts_per_optimizer_update(self) -> int:
+    """Total number of rollouts expected per optimizer update."""
+    return self.mini_batch_size * self.group_size
 
-    Determines queue batching granularity so that `pack()` receives complete
-    prompt groups matching the assembler's packing strategy.
-    """
-    # TODO(tunix-dev): we can remove this once we move to streaming fashion
-    # packing as we will be sending one group at a time to the assembler.
+  def feed(
+      self,
+      items: Sequence[T],
+  ) -> list[AssembledBatch]:
+    """Ingests rollouts and flushes at the optimizer-update boundary."""
     ...
 
-  @property
-  def assembly_batch_size(self) -> int:
-    """Total rollouts (groups_per_assembly_batch * group_size) per pack() call."""
-    return self.groups_per_assembly_batch * self.group_size
+  def flush(
+      self,
+  ) -> list[AssembledBatch]:
+    """Drains remaining buffered items, padding to the required static tensor shape."""
+    ...
 
-  def pack(self, items: Sequence[T]) -> list[Any]:
-    """Packs items into hardware-sized microbatch trainer payloads.
+  # TODO (tunix-dev): we should not allow `start_batch_index` to be None once failure recovery logic is implemented.
+  def reset(self, *, start_batch_index: int | None = None) -> None:
+    """Resets internal state and discards optimizer-update progress.
+
+    Unlike `flush()`, which emits remaining items as padded microbatches,
+    `reset()` unconditionally drops any partially accumulated items or bins
+    without packing or emitting them, and resets the optimizer-update rollout
+    counter back to zero.
+
+    This is typically invoked during pipeline aborts or error recovery (e.g.,
+    when an RL program stage encounters an exception and incomplete rollouts
+    must be purged to prevent state leakage into subsequent steps) or when
+    restarting the orchestrator.
 
     Args:
-      items: Sequence of items to pack. Assumes `items` contains an integer
-        multiple of `group_size` rollouts, ordered contiguously by prompt group.
-
-    Returns:
-      List of packed microbatch payloads.
+      start_batch_index: Optional batch index to reset the microbatch lineage
+        tracking counter (e.g., when resuming from a checkpoint). If None, the
+        existing batch counter is preserved to maintain monotonic lineage
+        tracking IDs.
     """
     ...
 
@@ -80,8 +143,8 @@ def _left_pad(
   out = np.full(length, pad_id, dtype=np.int32)
   mask = np.zeros(length, dtype=np.float32)
   if arr.size:
-    out[-arr.size:] = arr
-    mask[-arr.size:] = 1.0
+    out[-arr.size :] = arr
+    mask[-arr.size :] = 1.0
   return out, mask
 
 
@@ -141,8 +204,8 @@ def _right_pad(
   out = np.full(length, pad_value, dtype=dtype)
   mask = np.zeros(length, dtype=np.float32)
   if arr.size:
-    out[:arr.size] = arr
-    mask[:arr.size] = 1.0
+    out[: arr.size] = arr
+    mask[: arr.size] = 1.0
   return out, mask
 
 
@@ -170,9 +233,7 @@ def _completion_aligned(
     if arr.size >= completion_len:
       arr = arr[:completion_len]
     else:
-      arr = np.pad(
-          arr, (0, completion_len - arr.size), constant_values=0.0
-      )
+      arr = np.pad(arr, (0, completion_len - arr.size), constant_values=0.0)
   out, _ = _right_pad(
       arr,
       max_response_length,
@@ -206,170 +267,329 @@ def with_ref_per_token_logps(
   return dataclasses.replace(batch, ref_per_token_logps=ref_logps_arr)
 
 
-class SequencePackedBatchAssembler:
-  """1D Sequence Packing: Concatenates items into dense [1, max_packed_len] buffers."""
+def _as_1d(values: Any, dtype: Any) -> np.ndarray:
+  return np.asarray(values, dtype=dtype).reshape(-1)
 
-  # TODO(tunix-dev): Support dynamic token-budget sequence packing across
-  # multiple prompt groups and streaming microbatch assembly to overlap packing
-  # with trainer execution.
+
+def _require_unbatched(item: datatypes.RLTrainerPayload) -> None:
+  """Requires that the given RLTrainerPayload is unbatched."""
+  if item.completion_ids is None:
+    raise ValueError(
+        "RLTrainerPayload.completion_ids is required for sequence packing."
+    )
+  for name in (
+      "prompt_ids",
+      "prompt_mask",
+      "completion_ids",
+      "completion_mask",
+  ):
+    value = getattr(item, name)
+    if value is None:
+      continue
+    rank = np.asarray(value).ndim
+    if rank != 1:
+      raise ValueError(
+          f"RLTrainerPayload.{name} has rank {rank}; sequence packing takes"
+          " UNBATCHED payloads -- pass the unbatched payloads that produced it."
+      )
+
+
+def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
+  """Converts an RLTrainerPayload to a packing.PackItem."""
+  _require_unbatched(item)
+  prompt = (
+      np.zeros(0, dtype=np.int32)
+      if item.prompt_ids is None
+      else _as_1d(item.prompt_ids, np.int32)
+  )
+  completion = _as_1d(item.completion_ids, np.int32)
+  p_len = prompt.shape[0]
+  c_len = completion.shape[0]
+
+  def resolve(values: Any, *, fill: float, name: str) -> np.ndarray:
+    if values is None:
+      return np.full(c_len, fill, dtype=np.float32)
+    arr = _as_1d(values, np.float32)
+    if arr.size == 1:
+      return np.full(c_len, float(arr[0]), dtype=np.float32)
+    if arr.size == p_len + c_len:
+      arr = arr[p_len:]
+    if arr.size == c_len:
+      return arr
+    raise ValueError(
+        f"RLTrainerPayload.{name} has unexpected size {arr.size} which doesn't"
+        f" match either completion length {c_len}; or whole sequence length"
+        f" {p_len + c_len}."
+    )
+
+  completion_mask = resolve(
+      item.completion_mask, fill=1.0, name="completion_mask"
+  )
+
+  per_token = {
+      name: resolve(getattr(item, name), fill=0.0, name=name)
+      for name in packing.PER_TOKEN_FIELDS
+      if getattr(item, name) is not None
+  }
+
+  return packing.PackItem(
+      prompt_ids=prompt,
+      completion_ids=completion,
+      completion_mask=completion_mask,
+      advantages=resolve(item.advantages, fill=0.0, name="advantages"),
+      per_token=per_token,
+  )
+
+
+def to_rl_trainer_payload(
+    rows: Sequence[packing.PackedRow],
+    *,
+    max_segments: int,
+    trajectory_ids: tuple[str, ...] = (),
+    lineage_context: lineage.LineageContext | None = None,
+) -> datatypes.RLTrainerPayload:
+  """Converts a sequence of packing.PackedRow to an RLTrainerPayload."""
+  stack = lambda attr: np.stack([getattr(r, attr) for r in rows])
+  per_token_kwargs = {
+      name: np.stack([r.per_token[name] for r in rows])
+      for name in rows[0].per_token
+  }
+  metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
+  if lineage_context is not None:
+    metadata["lineage"] = lineage_context
+  return datatypes.RLTrainerPayload(
+      prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
+      prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
+      completion_ids=stack("ids"),
+      completion_mask=stack("completion_mask"),
+      advantages=stack("advantages"),
+      segment_ids=stack("segment_ids"),
+      segment_positions=stack("segment_positions"),
+      num_segments=max_segments + 1,
+      metadata=metadata,
+      **per_token_kwargs,  # pyrefly: ignore[bad-argument-type]
+  )
+
+
+def _merge_batch_lineage(
+    items: Sequence[Any],
+    *,
+    batch_id: str,
+    attributes: Mapping[str, Any] | None = None,
+) -> lineage.LineageContext | None:
+  """Extracts and merges lineage contexts from a sequence of batch items.
+
+  Args:
+    items: Sequence of items that may carry lineage context in their metadata.
+    batch_id: Tracking ID to assign to the merged batch context.
+    attributes: Optional key-value metadata attached to the merge event.
+
+  Returns:
+    The merged LineageContext, or None if no upstream lineage contexts exist.
+  """
+  lineages = [
+      it.metadata["lineage"]
+      for it in items
+      if isinstance(getattr(it, "metadata", None), Mapping)
+      and it.metadata.get("lineage") is not None
+  ]
+  if not lineages:
+    return None
+
+  return lineage.LineageContext.merge(
+      batch_id=batch_id,
+      contexts=lineages,
+      component="orchestrator.assembler",
+      operation="pack",
+      attributes=dict(attributes) if attributes else None,
+  )
+
+
+class SequencePackedBatchAssembler:
+  """Sequence Packing: Concatenates items into dense `[B, max_packed_len]` buffers."""
+
   def __init__(
       self,
       *,
+      batch_size: int,
       group_size: int,
+      mini_batch_size: int,
       max_packed_len: int = 8192,
       pad_id: int = 0,
+      max_segments_per_packed_row: int | None = None,
+      start_batch_index: int = 0,
   ):
     """Initializes SequencePackedBatchAssembler.
 
     Args:
+      batch_size: Target batch dim for packed sequences.
       group_size: Number of rollout generations per prompt group (G).
-      max_packed_len: Maximum packed sequence length.
+      mini_batch_size: Number of prompt groups per model update.
+      max_packed_len: Maximum packed sequence length per row.
       pad_id: Token ID used for padding.
+      max_segments_per_packed_row: Upper bound on the number of real segments
+        that may be packed into a single row.
+      start_batch_index: Initial microbatch index offset for tracking IDs.
     """
+    if batch_size <= 0:
+      raise ValueError(f"batch_size must be positive, got {batch_size}.")
     if group_size <= 0:
       raise ValueError(f"group_size must be positive, got {group_size}.")
-    self.group_size = group_size
+    if mini_batch_size <= 0:
+      raise ValueError(
+          f"mini_batch_size must be positive, got {mini_batch_size}."
+      )
+    if max_packed_len <= 0:
+      raise ValueError(f"max_packed_len must be positive, got {max_packed_len}")
+    if (
+        max_segments_per_packed_row is not None
+        and max_segments_per_packed_row <= 0
+    ):
+      raise ValueError(
+          "max_segments_per_packed_row must be positive or None, got"
+          f" {max_segments_per_packed_row}."
+      )
+    self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+    self.group_size = group_size
+    self.mini_batch_size = mini_batch_size
+    self.max_segments_per_packed_row = max_segments_per_packed_row
+    self._batch_counter = start_batch_index
+
+    # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at ingest.
+    self._buffer: list[
+        tuple[packing.PackItem, str, datatypes.RLTrainerPayload]
+    ] = []
+    self._rollouts_since_update: int = 0
 
   @property
-  def groups_per_assembly_batch(self) -> int:
-    """Number of prompt groups fetched per assembly batch.
+  def rollouts_per_optimizer_update(self) -> int:
+    """Total number of rollouts expected per optimizer update."""
+    return self.mini_batch_size * self.group_size
 
-    Currently returns 1 because sequence packing operates on one prompt group
-    at a time. Multi-group dynamic token-budget packing will expand this in
-    future iterations.
+  def _emit_one_chunk(
+      self, *, max_segments: int, drain_all: bool
+  ) -> AssembledBatch:
+    """Packs the head of the buffer into one microbatch, keeping leftovers."""
+    pack_items = [item for item, _, _ in self._buffer]
+    carried = packing.carried_per_token_fields(pack_items)
+    id_to_entry = {
+        id(item): entry for entry, item in zip(self._buffer, pack_items)
+    }
+    bins, leftover = packing.fill_one_chunk(
+        pack_items,
+        pack_size=self.batch_size,
+        budget=self.max_packed_len,
+        max_segments=max_segments,
+    )
+    placed = []
+    for bin_items in bins:
+      placed.extend(bin_items)
+    traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
+    placed_items = [id_to_entry[id(item)][2] for item in placed]
+    rows = packing.pack_chunk(
+        bins,
+        budget=self.max_packed_len,
+        pad_id=self.pad_id,
+        carried=carried,
+    )
+    batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
+    merged_lineage = _merge_batch_lineage(
+        placed_items,
+        batch_id=batch_tracking_id,
+        attributes={
+            "packing_type": "sequence_packed",
+            "num_items": len(placed_items),
+            "packed_len": self.max_packed_len,
+        },
+    )
+    self._batch_counter += 1
+    payload = to_rl_trainer_payload(
+        rows,
+        max_segments=max_segments,
+        trajectory_ids=traj_ids,
+        lineage_context=merged_lineage,
+    )
+    self._buffer = [id_to_entry[id(item)] for item in leftover]
+    return AssembledBatch(
+        payload=payload,
+        is_final_batch=drain_all and not self._buffer,
+        trajectory_ids=traj_ids,
+    )
+
+  def _drain_buffer(self, *, drain_all: bool) -> list[AssembledBatch]:
+    """Drains buffered items into microbatches using FFD packing.
+
+    When `drain_all` is False, only whole chunks whose token mass can fill a
+    full microbatch are emitted, so the streaming tail is held back until more
+    rollouts arrive. When `drain_all` is True (optimizer-update boundary or
+    `flush`), the buffer is drained completely and the last chunk is marked
+    final.
     """
-    return 1
-
-  @property
-  def assembly_batch_size(self) -> int:
-    """Total rollouts (groups_per_assembly_batch * group_size) per pack() call."""
-    return self.groups_per_assembly_batch * self.group_size
-
-  def pack(self, items: Sequence[datatypes.RLTrainerPayload]) -> list[datatypes.RLTrainerPayload]:
-    """Bin-packs items into dense 1D buffers with segment boundaries."""
-    if not items:
-      return []
-
-    # Calculate token lengths from explicit fields
-    item_lengths = []
-    for it in items:
-      item_lengths.append(len(it.token_ids) if it.token_ids is not None else 0)  # pyrefly: ignore[bad-argument-type]
-
-    item_list = sorted(zip(items, item_lengths), key=lambda x: x[1], reverse=True)
-
-    bins: list[list[datatypes.RLTrainerPayload]] = []
-    bin_lengths: list[int] = []
-
-    for item, length in item_list:
-      placed = False
-      for b_idx, current_len in enumerate(bin_lengths):
-        if current_len + length <= self.max_packed_len:
-          bins[b_idx].append(item)
-          bin_lengths[b_idx] += length
-          placed = True
+    out: list[AssembledBatch] = []
+    max_segments = packing.effective_max_segments(
+        self.max_packed_len, self.max_segments_per_packed_row
+    )
+    chunk_capacity = self.batch_size * self.max_packed_len
+    while self._buffer:
+      if not drain_all:
+        buffered_tokens = sum(item[0].num_tokens for item in self._buffer)
+        if buffered_tokens < chunk_capacity:
           break
-      if not placed:
-        bins.append([item])
-        bin_lengths.append(length)
-
-    payloads: list[datatypes.RLTrainerPayload] = []
-    for b_items in bins:
-      all_tokens = []
-      all_loss_masks = []
-      all_action_masks = []
-      all_segment_ids = []
-      all_segment_positions = []
-      all_advantages = []
-      all_old_logprobs = []
-      all_ref_logprobs = []
-
-      for seg_idx, it in enumerate(b_items, start=1):
-        toks = (
-            np.asarray(it.token_ids, dtype=np.int32).reshape(-1)
-            if it.token_ids is not None
-            else np.zeros(0, dtype=np.int32)
-        )
-        seq_len = len(toks)
-
-        all_tokens.append(toks)
-
-        loss_mask = (
-            it.loss_mask
-            if it.loss_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_loss_masks.append(np.asarray(loss_mask, dtype=np.float32).reshape(-1))
-
-        action_mask = (
-            it.action_mask
-            if it.action_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_action_masks.append(
-            np.asarray(action_mask, dtype=np.float32).reshape(-1)
-        )
-
-        adv_arr = (
-            np.asarray(it.advantages, dtype=np.float32).reshape(-1)
-            if it.advantages is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        all_advantages.append(adv_arr)
-
-        all_segment_ids.append(np.full(seq_len, seg_idx, dtype=np.int32))
-        all_segment_positions.append(np.arange(seq_len, dtype=np.int32))
-
-        if it.old_per_token_logps is not None:
-          all_old_logprobs.append(
-              np.asarray(it.old_per_token_logps, dtype=np.float32).reshape(-1)
-          )
-
-        if it.ref_per_token_logps is not None:
-          all_ref_logprobs.append(
-              np.asarray(it.ref_per_token_logps, dtype=np.float32).reshape(-1)
-          )
-
-      concat_tokens = np.concatenate(all_tokens)
-      concat_loss_masks = np.concatenate(all_loss_masks)
-      concat_action_masks = np.concatenate(all_action_masks)
-      concat_segment_ids = np.concatenate(all_segment_ids)
-      concat_segment_positions = np.concatenate(all_segment_positions)
-      concat_advantages = np.concatenate(all_advantages)
-
-      pad_len = max(0, self.max_packed_len - len(concat_tokens))
-      padded_tokens = np.pad(concat_tokens[: self.max_packed_len], (0, pad_len), constant_values=self.pad_id)
-      padded_loss_mask = np.pad(concat_loss_masks[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-      padded_action_mask = np.pad(concat_action_masks[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-      padded_segment_ids = np.pad(concat_segment_ids[: self.max_packed_len], (0, pad_len), constant_values=0)
-      padded_segment_positions = np.pad(concat_segment_positions[: self.max_packed_len], (0, pad_len), constant_values=0)
-      padded_advantages = np.pad(concat_advantages[: self.max_packed_len], (0, pad_len), constant_values=0.0)
-
-      batch_old_lp = None
-      if all_old_logprobs:
-        concat_old = np.concatenate(all_old_logprobs)
-        batch_old_lp = np.pad(concat_old[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
-
-      batch_ref_lp = None
-      if all_ref_logprobs:
-        concat_ref = np.concatenate(all_ref_logprobs)
-        batch_ref_lp = np.pad(concat_ref[: self.max_packed_len], (0, pad_len), constant_values=0.0)[np.newaxis, :]
-
-      payload = datatypes.RLTrainerPayload(
-          token_ids=padded_tokens[np.newaxis, :],
-          token_mask=padded_segment_ids[np.newaxis, :],
-          loss_mask=padded_loss_mask[np.newaxis, :],
-          advantages=padded_advantages[np.newaxis, :],
-          action_mask=padded_action_mask[np.newaxis, :],
-          old_per_token_logps=batch_old_lp,
-          ref_per_token_logps=batch_ref_lp,
-          segment_ids=padded_segment_ids[np.newaxis, :],
-          segment_positions=padded_segment_positions[np.newaxis, :],
+      out.append(
+          self._emit_one_chunk(max_segments=max_segments, drain_all=drain_all)
       )
-      payloads.append(payload)
+    return out
 
-    return payloads
+  def feed(
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
+  ) -> list[AssembledBatch]:
+    """Ingests items and flushes at the optimizer-update boundary."""
+    for item in items:
+      pack_item = to_pack_item(item)
+      packing.validate_items([pack_item], self.max_packed_len)
+      self._buffer.append((pack_item, _extract_trajectory_id(item), item))
+    self._rollouts_since_update += len(items)
+    is_update_done = (
+        self._rollouts_since_update >= self.rollouts_per_optimizer_update
+    )
+    out = self._drain_buffer(drain_all=is_update_done)
+    if is_update_done:
+      self._rollouts_since_update %= self.rollouts_per_optimizer_update
+    return out
+
+  def flush(
+      self,
+  ) -> list[AssembledBatch]:
+    """Flushes any remaining buffered items, marking the last chunk final."""
+    self._rollouts_since_update = 0
+    return self._drain_buffer(drain_all=True)
+
+  def reset(self, *, start_batch_index: int | None = None) -> None:
+    """Resets the internal buffer and optimizer-update rollout counter.
+
+    Unlike `flush()`, which emits remaining items as padded microbatches,
+    `reset()` unconditionally drops any partially accumulated items or bins
+    without packing or emitting them, and resets the optimizer-update rollout
+    counter back to zero.
+
+    This is typically invoked during pipeline aborts or error recovery (e.g.,
+    in `RLProgram` when a stage encounters an exception and in-flight
+    rollouts must be dropped to avoid cross-update contamination) or when
+    restarting the assembler.
+
+    Args:
+      start_batch_index: Optional batch index to reset the microbatch lineage
+        tracking counter (e.g., when resuming from a checkpoint). If None, the
+        existing `_batch_counter` is preserved to maintain monotonic lineage
+        tracking IDs across step boundaries.
+    """
+    self._buffer.clear()
+    self._rollouts_since_update = 0
+    if start_batch_index is not None:
+      self._batch_counter = start_batch_index
 
 
 class PaddedBatchAssembler:
@@ -383,6 +603,8 @@ class PaddedBatchAssembler:
       max_response_length: int,
       pad_id: int,
       group_size: int,
+      mini_batch_size: int,
+      start_batch_index: int = 0,
   ):
     """Initializes PaddedBatchAssembler.
 
@@ -393,6 +615,8 @@ class PaddedBatchAssembler:
       max_response_length: Maximum padded response sequence length.
       pad_id: Token ID used for padding prompts and completions.
       group_size: Number of rollout generations per prompt group (G).
+      mini_batch_size: Number of prompt groups per optimizer update.
+      start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
@@ -406,36 +630,128 @@ class PaddedBatchAssembler:
       )
     if group_size <= 0:
       raise ValueError(f"group_size must be positive, got {group_size}.")
+    if mini_batch_size <= 0:
+      raise ValueError(
+          f"mini_batch_size must be positive, got {mini_batch_size}."
+      )
     self.batch_size = batch_size
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
     self.group_size = group_size
+    self.mini_batch_size = mini_batch_size
+    self._batch_counter = start_batch_index
+
+    self._buffer: collections.deque[datatypes.RLTrainerPayload] = (
+        collections.deque()
+    )
+    self._rollouts_since_update: int = 0
 
   @property
-  def groups_per_assembly_batch(self) -> int:
-    """Number of prompt groups fetched per assembly batch.
-
-    - Multi-prompt microbatching (`batch_size >= group_size`): Accumulates
-      `batch_size // group_size` prompt groups so one `pack()` call yields one
-      or more full microbatches.
-    - Sub-prompt microbatching (`batch_size < group_size`): Fetches 1 prompt
-      group (`group_size` rollouts) which `pack()` then slices into multiple
-      sub-group microbatches of size `batch_size`.
-    """
-    return max(1, self.batch_size // self.group_size)
-
-  @property
-  def assembly_batch_size(self) -> int:
-    """Total rollouts (groups_per_assembly_batch * group_size) per pack() call."""
-    return self.groups_per_assembly_batch * self.group_size
+  def rollouts_per_optimizer_update(self) -> int:
+    """Total number of rollouts expected per optimizer update."""
+    return self.mini_batch_size * self.group_size
 
   @property
   def max_seq_len(self) -> int:
     return self.max_prompt_length + self.max_response_length
 
+  def feed(
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
+  ) -> list[AssembledBatch]:
+    """Ingests items and flushes at the optimizer-update boundary."""
+    self._buffer.extend(items)
+    self._rollouts_since_update += len(items)
+
+    out: list[AssembledBatch] = []
+
+    while len(self._buffer) >= self.batch_size:
+      is_update_done = (
+          self._rollouts_since_update >= self.rollouts_per_optimizer_update
+      )
+      will_be_empty = len(self._buffer) == self.batch_size
+      is_final = is_update_done and will_be_empty
+
+      chunk = [self._buffer.popleft() for _ in range(self.batch_size)]
+      traj_ids = tuple(_extract_trajectory_id(it) for it in chunk)
+      payload = self.pack(chunk)[0]
+      out.append(
+          AssembledBatch(
+              payload=payload,
+              is_final_batch=is_final,
+              trajectory_ids=traj_ids,
+          )
+      )
+
+    if self._rollouts_since_update >= self.rollouts_per_optimizer_update:
+      if self._buffer:
+        remainder = list(self._buffer)
+        self._buffer.clear()
+        traj_ids = tuple(_extract_trajectory_id(it) for it in remainder)
+        payload = self.pack(remainder)[0]
+        out.append(
+            AssembledBatch(
+                payload=payload,
+                is_final_batch=True,
+                trajectory_ids=traj_ids,
+            )
+        )
+      elif out:
+        out[-1] = AssembledBatch(
+            payload=out[-1].payload,
+            is_final_batch=True,
+            trajectory_ids=out[-1].trajectory_ids,
+        )
+      self._rollouts_since_update %= self.rollouts_per_optimizer_update
+
+    return out
+
+  def flush(
+      self,
+  ) -> list[AssembledBatch]:
+    """Flushes any remaining items padded to batch_size."""
+    if not self._buffer:
+      return []
+    remainder = list(self._buffer)
+    self._buffer.clear()
+    self._rollouts_since_update = 0
+    traj_ids = tuple(_extract_trajectory_id(it) for it in remainder)
+    return [
+        AssembledBatch(
+            payload=self.pack(remainder)[0],
+            is_final_batch=True,
+            trajectory_ids=traj_ids,
+        )
+    ]
+
+  def reset(self, *, start_batch_index: int | None = None) -> None:
+    """Resets internal buffering state, discarding all pending rollouts.
+
+    Unlike `flush()`, which packs and emits buffered items as a padded batch,
+    `reset()` unconditionally clears the internal rollout buffer without
+    emitting any batches. It also resets the optimizer-update rollout counter
+    (`_rollouts_since_update`) back to zero.
+
+    This is typically invoked during pipeline aborts or error recovery (e.g.,
+    in `RLProgram` when a stage encounters an exception and in-flight
+    rollouts must be dropped to avoid cross-update contamination) or when
+    restarting the assembler.
+
+    Args:
+      start_batch_index: Optional batch index to reset the microbatch lineage
+        tracking counter (e.g., when resuming from a checkpoint). If None, the
+        existing `_batch_counter` is preserved to maintain monotonic lineage
+        tracking IDs across step boundaries.
+    """
+    self._buffer.clear()
+    self._rollouts_since_update = 0
+    if start_batch_index is not None:
+      self._batch_counter = start_batch_index
+
   def pack(
-      self, items: Sequence[datatypes.RLTrainerPayload]
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[datatypes.RLTrainerPayload]:
     """Pads items into rectangular 2D batches `[B, P + C]`."""
     item_list = list(items)
@@ -444,7 +760,8 @@ class PaddedBatchAssembler:
 
     payloads: list[datatypes.RLTrainerPayload] = []
     for i in range(0, len(item_list), self.batch_size):
-      payloads.append(self._pack_chunk(item_list[i : i + self.batch_size]))
+      chunk = item_list[i : i + self.batch_size]
+      payloads.append(self._pack_chunk(chunk))
     return payloads
 
   def _pack_chunk(
@@ -476,7 +793,7 @@ class PaddedBatchAssembler:
       )
 
     prompt_ids, prompt_mask = [], []
-    completion_ids, completion_mask, completion_valid = [], [], []
+    completion_ids, completion_mask = [], []
     advantages = []
     optional_rows: dict[str, list[np.ndarray]] = {
         name: [] for name in present_fields
@@ -502,7 +819,6 @@ class PaddedBatchAssembler:
       )
       prompt_ids.append(p_ids)
       completion_ids.append(c_ids)
-      completion_valid.append(c_valid)
 
       # A caller-supplied prompt mask is prompt-aligned, so it must be
       # left-padded exactly like the prompt ids to stay in register. If its
@@ -518,18 +834,7 @@ class PaddedBatchAssembler:
             p_mask[-src.size :] = src
       prompt_mask.append(p_mask)
 
-      # Action mask over the completion: prefer an explicit action_mask, fall
-      # back to completion_mask, then to "every generated token is an action".
-      # completion_mask will be used in the loss_fn that's defined in
-      # algo_core.py which masks out the non-action tokens so here we make sure
-      # that completion_mask is aligned with the action masks.
-      # TODO(tunix-dev): either deprecate action_mask or completion_mask as now
-      # they are identical.
-      action_source = (
-          item.action_mask
-          if item.action_mask is not None
-          else item.completion_mask
-      )
+      action_source = item.completion_mask
       if action_source is None:
         c_mask = c_valid.copy()
       else:
@@ -603,7 +908,6 @@ class PaddedBatchAssembler:
           np.full(self.max_response_length, self.pad_id, dtype=np.int32)
       )
       completion_mask.append(np.zeros(self.max_response_length, np.float32))
-      completion_valid.append(np.zeros(self.max_response_length, np.float32))
       advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
       for rows in optional_rows.values():
         rows.append(np.zeros(self.max_response_length, dtype=np.float32))
@@ -617,18 +921,27 @@ class PaddedBatchAssembler:
     batched_completion_ids = np.stack(completion_ids)
     batched_completion_mask = np.stack(completion_mask)
 
-    # loss_mask tracks the trainable tokens including prompt and completion
-    # tokens.
-    loss_mask = np.concatenate(
-        [np.zeros_like(batched_prompt_mask), batched_completion_mask], axis=1
-    )
-
     stacked_optional = {
         name: np.stack(rows) for name, rows in optional_rows.items()
     }
+    batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
+    merged_lineage = _merge_batch_lineage(
+        chunk,
+        batch_id=batch_tracking_id,
+        attributes={
+            "packing_type": "padded",
+            "num_items": len(chunk),
+            "batch_size": self.batch_size,
+        },
+    )
+    self._batch_counter += 1
+    payload_metadata: dict[str, Any] = {
+        "trajectory_ids": tuple(_extract_trajectory_id(it) for it in chunk)
+    }
+    if merged_lineage:
+      payload_metadata["lineage"] = merged_lineage
+
     return datatypes.RLTrainerPayload(
-        loss_mask=loss_mask,
-        action_mask=loss_mask,
         advantages=np.stack(advantages),
         prompt_ids=batched_prompt_ids,
         prompt_mask=batched_prompt_mask,
@@ -642,4 +955,100 @@ class PaddedBatchAssembler:
         routed_experts=(
             np.stack(routed_experts_rows) if routed_experts_rows else None
         ),
+        metadata=payload_metadata,
     )
+
+
+def create_batch_assembler(
+    *,
+    group_size: int,
+    mini_batch_size: int,
+    train_micro_batch_size: int,
+    batch_config: BatchConfig,
+) -> BatchAssembler:
+  """Builds the batch assembler based on sequence packing or padding parameters.
+
+  If `batch_config.max_seq_token_per_tpu` is provided, a
+  `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
+  is computed from `batch_config.trainer_fsdp` and `batch_config.trainer_dp`
+  (or defaults to `train_micro_batch_size` with a warning if neither is set).
+  The packing budget is validated against `batch_config.max_prompt_length` and
+  `max_response_length`.
+
+  If `batch_config.max_seq_token_per_tpu` is None and
+  `batch_config.max_prompt_length` is specified, a `PaddedBatchAssembler` is
+  used.
+
+  Otherwise, falls back to `SequencePackedBatchAssembler`.
+
+  Args:
+    group_size: Number of rollout generations per prompt group (G).
+    mini_batch_size: Number of prompt groups per model update.
+    train_micro_batch_size: Micro-batch size for training.
+    batch_config: BatchConfig containing packing, padding, and mesh dimension
+      settings.
+
+  Returns:
+    A BatchAssembler instance.
+  """
+  if batch_config.max_seq_token_per_tpu is not None:
+    if batch_config.trainer_fsdp is None and batch_config.trainer_dp is None:
+      logging.warning(
+          "trainer_fsdp and trainer_dp are not set, defaulting pack_size to "
+          "train_micro_batch_size=%d.",
+          train_micro_batch_size,
+      )
+      pack_size = train_micro_batch_size
+    else:
+      pack_size = (batch_config.trainer_fsdp or 1) * (
+          batch_config.trainer_dp or 1
+      )
+
+    if (
+        batch_config.max_prompt_length is not None
+        and batch_config.max_response_length is not None
+    ):
+      rl_utils.validate_packing_budget(
+          batch_config.max_seq_token_per_tpu,
+          batch_config.max_prompt_length,
+          batch_config.max_response_length,
+      )
+
+    logging.info(
+        "Using SequencePackedBatchAssembler with max_seq_token_per_tpu: %d, "
+        "max_segments_per_packed_row: %s, pack_size: %d",
+        batch_config.max_seq_token_per_tpu,
+        batch_config.max_segments_per_packed_row,
+        pack_size,
+    )
+    return SequencePackedBatchAssembler(
+        batch_size=pack_size,
+        group_size=group_size,
+        mini_batch_size=mini_batch_size,
+        max_packed_len=batch_config.max_seq_token_per_tpu,
+        pad_id=batch_config.pad_id,
+        max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+    )
+
+  if batch_config.max_prompt_length is not None:
+    if batch_config.max_response_length is None:
+      raise ValueError(
+          "max_response_length must be specified in batch_config when"
+          " max_prompt_length is set for PaddedBatchAssembler."
+      )
+    return PaddedBatchAssembler(
+        batch_size=train_micro_batch_size,
+        max_prompt_length=batch_config.max_prompt_length,
+        max_response_length=batch_config.max_response_length,
+        pad_id=batch_config.pad_id,
+        group_size=group_size,
+        mini_batch_size=mini_batch_size,
+    )
+
+  return SequencePackedBatchAssembler(
+      batch_size=train_micro_batch_size,
+      group_size=group_size,
+      mini_batch_size=mini_batch_size,
+      pad_id=batch_config.pad_id,
+      max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+  )

@@ -18,6 +18,8 @@ import unittest
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
+from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.weight_sync import weight_sync
@@ -74,6 +76,93 @@ class _FakeSyncSampler(_FakeSampler):
     return "ok"
 
 
+class _CaptureEnv:
+
+  last_init_kwargs = None
+
+  def __init__(self, **kwargs):
+    self.init_kwargs = dict(kwargs)
+    _CaptureEnv.last_init_kwargs = self.init_kwargs
+
+
+if not registry.ENV_REGISTRY.contains("manager_capture_env"):
+  registry.ENV_REGISTRY.register("manager_capture_env")(_CaptureEnv)
+
+
+class _NoopCollector:
+
+  def __init__(
+      self,
+      traj_id,
+      request,
+      sampler,
+      env_client,
+      agent,
+      tokenizer,
+      chat_parser,
+  ):
+    del request, sampler, agent, tokenizer, chat_parser
+    self.traj_id = traj_id
+    self.env = env_client
+
+  async def run_episode(self):
+    return datatypes.TrajectoryItem(
+        prompt_id=self.traj_id,
+        group_index=0,
+        traj={},
+    )
+
+
+class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_generate_forwards_request_metadata_to_registered_env(self):
+    _CaptureEnv.last_init_kwargs = None
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(env_name="manager_capture_env"),
+        sampler=_FakeSyncSampler([]),
+        agent_factory=lambda: object(),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_1",
+        prompt="prompt text",
+        prompt_id="prompt_1",
+        group_index=2,
+        target_policy_version=7,
+        metadata={
+            "question": "ignored top level",
+            "answer": "ignored top level",
+            "gold_answer": "ignored top level",
+            "env_config": {
+                "prompt": "prompt text",
+                "prompt_id": "prompt_1",
+                "question": "How many?",
+                "answer": "42",
+                "gold_answer": "42",
+                "max_steps": 3,
+            },
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      await manager.generate(request)
+
+    self.assertIsNotNone(_CaptureEnv.last_init_kwargs)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["prompt"], "prompt text")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["prompt_id"], "prompt_1")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["group_index"], 2)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["policy_version"], 7)
+    self.assertEqual(_CaptureEnv.last_init_kwargs["question"], "How many?")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["answer"], "42")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["gold_answer"], "42")
+    self.assertEqual(_CaptureEnv.last_init_kwargs["max_steps"], 3)
+
+
 class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
   def _manager(self, **kwargs):
@@ -106,6 +195,18 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     manager = manager_lib.RolloutManager(
         sampler=sampler, tokenizer="mock", chat_parser="mock")
     await manager.bind_weight_sync()
+
+  async def test_abort_weight_sync_delegates_and_reopens_admission(self):
+    sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
+    sampler.abort_weight_sync.return_value = "aborted"
+    manager = manager_lib.RolloutManager(
+        sampler=sampler, tokenizer="mock", chat_parser="mock"
+    )
+    manager._traffic.transition_to_syncing()
+    res = await manager.abort_weight_sync()
+    self.assertEqual(res, "aborted")
+    sampler.abort_weight_sync.assert_awaited_once()
+    self.assertTrue(manager._traffic.is_admission_open())
 
   async def test_repeated_pre_is_allowed(self):
     manager = self._manager()
@@ -141,9 +242,119 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     manager._active_tasks.pop("t0", None)
 
 
+class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_request_agent_config_overrides_worker_config(self):
+    created_configs = []
+
+    class FakeAgent:
+
+      def __init__(self, **kwargs):
+        created_configs.append(kwargs)
+
+    class FakeEnv:
+
+      def __init__(self, **kwargs):
+        del kwargs
+
+    config = types.SimpleNamespace(
+        agent_name="fake_agent_for_manager_test",
+        agent_config={"source": "worker"},
+        env_name="fake_env_for_manager_test",
+        env_config={},
+    )
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="p0",
+        metadata={
+            "agent_config": {"source": "request", "scaffold": "r2egym"},
+        },
+    )
+
+    with mock.patch.object(
+        registry.AGENT_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.AGENT_REGISTRY, "get", return_value=FakeAgent
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "get", return_value=FakeEnv
+    ), mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+
+      result = await manager._generate_one(request)
+
+    self.assertEqual(result, "trajectory")
+    self.assertEqual(
+        created_configs, [{"source": "request", "scaffold": "r2egym"}]
+    )
+
+  async def test_worker_agent_config_is_fallback(self):
+    created_configs = []
+
+    class FakeAgent:
+
+      def __init__(self, **kwargs):
+        created_configs.append(kwargs)
+
+    class FakeEnv:
+
+      def __init__(self, **kwargs):
+        del kwargs
+
+    config = types.SimpleNamespace(
+        agent_name="fake_agent_for_manager_test",
+        agent_config={"source": "worker"},
+        env_name="fake_env_for_manager_test",
+        env_config={},
+    )
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    with mock.patch.object(
+        registry.AGENT_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.AGENT_REGISTRY, "get", return_value=FakeAgent
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "contains", return_value=True
+    ), mock.patch.object(
+        registry.ENV_REGISTRY, "get", return_value=FakeEnv
+    ), mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+
+      result = await manager._generate_one(request)
+
+    self.assertEqual(result, "trajectory")
+    self.assertEqual(created_configs, [{"source": "worker"}])
+
+
 class WeightSyncModeTest(absltest.TestCase):
 
-  def test_config_weight_sync_mode_raiden(self):
+  @mock.patch(
+      "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
+  )
+  def test_config_weight_sync_mode_raiden(self, mock_delegate_cls):
     config = types.SimpleNamespace(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
@@ -152,7 +363,9 @@ class WeightSyncModeTest(absltest.TestCase):
         config=config, tokenizer="mock", chat_parser="mock"
     )
     self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    self.assertIsNotNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
+    self.assertIsNotNone(delegate)
+    mock_delegate_cls.assert_called_once_with(server_id="vanilla_sampler")
 
   def test_config_weight_sync_mode_fallback(self):
     config = types.SimpleNamespace(
@@ -166,9 +379,14 @@ class WeightSyncModeTest(absltest.TestCase):
     self.assertIsNone(getattr(manager.sampler, "raiden_sync_delegate", None))
 
   @mock.patch(
+      "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
+  )
+  @mock.patch(
       "tunix.experimental.rollout.inprocess_vllm_sampler_adapter._get_vllm_sampler_cls"
   )
-  def test_config_weight_sync_mode_inprocess_vllm_raiden(self, mock_get_vllm):
+  def test_config_weight_sync_mode_inprocess_vllm_raiden(
+      self, mock_get_vllm, mock_delegate_cls
+  ):
     mock_lib = mock.MagicMock()
     mock_lib.VllmSampler.return_value = mock.MagicMock()
     mock_get_vllm.return_value = mock_lib
@@ -180,7 +398,11 @@ class WeightSyncModeTest(absltest.TestCase):
         config=config, tokenizer="mock", chat_parser="mock"
     )
     self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    self.assertIsNotNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
+    self.assertIsNotNone(delegate)
+    mock_delegate_cls.assert_called_once_with(
+        server_id="inprocess_vllm_sampler"
+    )
 
 
 if __name__ == "__main__":

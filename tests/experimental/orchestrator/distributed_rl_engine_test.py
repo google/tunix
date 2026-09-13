@@ -22,6 +22,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import distributed_rl_engine
+from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
 
@@ -53,6 +54,12 @@ class MockActorHandle(mock.MagicMock):
     self.get_metrics = mock.AsyncMock(return_value={})
     self.get_target_state = mock.AsyncMock(return_value={"params": 1})
     self.set_target_state = mock.AsyncMock()
+    self.with_loss_fn = mock.MagicMock()
+    self.with_gen_model_input_fn = mock.MagicMock()
+
+  def submit(self, method_name: str, *args, **kwargs):
+    method = getattr(self, method_name)
+    return method(*args, **kwargs)
 
   async def asubmit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -61,6 +68,29 @@ class MockActorHandle(mock.MagicMock):
   async def dispatch_task(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
     return await method(*args, **kwargs)
+
+
+class _FakeSyncResult:
+  """Minimal result object exposing a `policy_version` attribute."""
+
+  def __init__(self, policy_version: int):
+    self.policy_version = policy_version
+
+
+class _FakeWeightSyncCoordinator:
+  """Records sync calls and echoes (or forces) the resulting policy version."""
+
+  def __init__(self, forced_version: int | None = None):
+    self.calls: list[int] = []
+    self._forced_version = forced_version
+
+  async def sync(self, policy_version: int = 0, **kwargs):
+    del kwargs
+    self.calls.append(policy_version)
+    version = (
+        policy_version if self._forced_version is None else self._forced_version
+    )
+    return _FakeSyncResult(version)
 
 
 class DistributedRLEngineTest(absltest.TestCase):
@@ -81,10 +111,28 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_generate_load_balances_across_rollout_workers(self):
     async def _run():
       resp1 = datatypes.RolloutResponse(
-          request_id="r1", status="COMPLETED", env_reward=1.0
+          request_id="r1",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       resp2 = datatypes.RolloutResponse(
-          request_id="r2", status="COMPLETED", env_reward=2.0
+          request_id="r2",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p2",
+              group_index=0,
+              traj={
+                  "reward": 2.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
 
       self.mock_rollout_1.generate.return_value = [resp1]
@@ -95,7 +143,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           {"prompt": "p2", "prompt_id": "p2", "metadata": {"prefix_hash": 1}},
       ])
       self.assertLen(results, 2)
-      rewards = {res.traj.reward for res in results}
+      rewards = {res.traj["reward"] for res in results}
       self.assertEqual(rewards, {1.0, 2.0})
 
       # Verify underlying logical methods were called correctly
@@ -114,7 +162,16 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_generate_uses_explicit_generation_args(self):
     async def _run():
       resp = datatypes.RolloutResponse(
-          request_id="r1", status="COMPLETED", env_reward=1.0
+          request_id="r1",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
       results = await self.engine.generate(
@@ -140,6 +197,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "return_logprobs": False,
           },
       )
+
     asyncio.run(_run())
 
   def test_generate_rejects_legacy_generation_kwargs(self):
@@ -148,6 +206,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         await self.engine.generate(
             [{"prompt": "p1", "prompt_id": "prompt_1"}], temperature=0.5
         )
+
     asyncio.run(_run())
 
   def test_generate_routes_rollout_requests(self):
@@ -161,9 +220,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="prompt_1",
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
 
@@ -182,14 +247,21 @@ class DistributedRLEngineTest(absltest.TestCase):
       resp1 = datatypes.RolloutResponse(
           request_id="r1",
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.poll_responses.return_value = [resp1]
       self.mock_rollout_2.poll_responses.return_value = []
 
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
-      self.assertEqual(results[0].traj.reward, 1.0)
+      self.assertEqual(results[0].traj["reward"], 1.0)
 
       self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
       self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
@@ -265,10 +337,10 @@ class DistributedRLEngineTest(absltest.TestCase):
       res = await self.engine.save_checkpoint(
           role=datatypes.Role.ACTOR, metadata=metadata
       )
-      self.assertEqual(res, datatypes.Response(metadata={"checkpoint_saved": True}))
-      self.mock_actor.save_checkpoint.assert_called_once_with(
-          metadata=metadata
+      self.assertEqual(
+          res, datatypes.Response(metadata={"checkpoint_saved": True})
       )
+      self.mock_actor.save_checkpoint.assert_called_once_with(metadata=metadata)
 
     asyncio.run(_run())
 
@@ -311,6 +383,164 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.save_checkpoint.assert_called_once_with(
           metadata=None, step=42, force=True
       )
+
+    asyncio.run(_run())
+
+  def test_sync_weights_accepts_explicit_policy_version(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+      version = await engine.sync_weights(policy_version=5)
+      self.assertEqual(version, 5)
+      self.assertEqual(coordinator.calls, [5])
+
+    asyncio.run(_run())
+
+  def test_sync_weights_accepts_role_and_target_roles(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      version = await engine.sync_weights(
+          role=datatypes.Role.CRITIC,
+          target_roles=[datatypes.Role.ACTOR],
+      )
+      self.assertEqual(version, 1)
+      self.assertEqual(coordinator.calls, [1])
+
+    asyncio.run(_run())
+
+  def _engine_with_coordinator(self, coordinator):
+    return distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+        weight_sync_coordinator=coordinator,
+    )
+
+  def test_resume_from_checkpoint_returns_step_and_resyncs_weights(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint(role=datatypes.Role.ACTOR)
+
+      self.assertEqual(result, 3)
+      # Engine aligns its own policy version and resyncs rollout weights.
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+      self.mock_actor.restore_checkpoint.assert_called_once_with()
+      self.mock_rollout_1.get_target_state.assert_called_once_with()
+      self.mock_actor.set_target_state.assert_called_once_with(
+          target_state={"params": 1}
+      )
+
+    asyncio.run(_run())
+
+  def test_resume_uses_global_step_when_optimizer_step_is_different(self):
+
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 12,
+          "global_step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+      result = await engine.resume_from_checkpoint()
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_uses_step_boundary_policy_version(self):
+    async def _run():
+      # Recorded mid-step policy_version is ignored in favor of the step.
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 2,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 3)
+      self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_no_checkpoint_does_not_resync(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {"step": 0}
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 0)
+      self.assertEqual(coordinator.calls, [])
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_tolerates_bad_metadata(self):
+    for bad_value in (None, "not-a-dict", {"step": "bogus"}):
+      with self.subTest(bad_value=bad_value):
+
+        async def _run(bad_value=bad_value):
+          self.mock_actor.restore_checkpoint.return_value = bad_value
+          coordinator = _FakeWeightSyncCoordinator()
+          engine = self._engine_with_coordinator(coordinator)
+
+          result = await engine.resume_from_checkpoint()
+
+          self.assertEqual(result, 0)
+          self.assertEqual(coordinator.calls, [])
+
+        asyncio.run(_run())
+
+  def test_resume_from_checkpoint_skips_resync_when_disabled(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 2,
+          "policy_version": 2,
+      }
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = self._engine_with_coordinator(coordinator)
+
+      with self.assertLogs(level="WARNING") as logs:
+        result = await engine.resume_from_checkpoint(
+            resync_rollout_weights=False
+        )
+
+      self.assertEqual(result, 2)
+      self.assertEqual(engine._policy_version, 2)
+      self.assertEqual(coordinator.calls, [])
+      self.assertTrue(
+          any("base weights" in line for line in logs.output), logs.output
+      )
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_raises_on_version_mismatch(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 3,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=1)
+      engine = self._engine_with_coordinator(coordinator)
+
+      with self.assertRaisesRegex(
+          RuntimeError, "does not match synced version"
+      ):
+        await engine.resume_from_checkpoint()
 
     asyncio.run(_run())
 
@@ -373,9 +603,7 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_get_metrics_propagates_optional_kwargs(self):
     async def _run():
       self.mock_actor.get_metrics.return_value = {"metric_a": 1.0}
-      res = await self.engine.get_metrics(
-          datatypes.Role.ACTOR, reset=True
-      )
+      res = await self.engine.get_metrics(datatypes.Role.ACTOR, reset=True)
       self.assertEqual(res, {"metric_a": 1.0})
       self.mock_actor.get_metrics.assert_called_once_with(reset=True)
 
@@ -450,6 +678,67 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(coordinator.calls, [0])
 
     asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_no_trainer_or_rollout_workers(
+      self,
+  ):
+    async def _run():
+      engine_no_rollout = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+      )
+      await engine_no_rollout._maybe_configure_trainer_target_state(
+          datatypes.Role.ACTOR
+      )
+      self.mock_actor.set_target_state.assert_not_called()
+
+      # Role with no registered trainer
+      await self.engine._maybe_configure_trainer_target_state(
+          datatypes.Role.CRITIC
+      )
+      self.mock_rollout_1.get_target_state.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_tolerates_attribute_error(self):
+    async def _run():
+      # Direct AttributeError
+      self.mock_rollout_1.get_target_state.side_effect = AttributeError(
+          "Worker has no method get_target_state"
+      )
+      await self.engine._maybe_configure_trainer_target_state(
+          datatypes.Role.ACTOR
+      )
+      self.mock_actor.set_target_state.assert_not_called()
+
+      # Remote RuntimeError wrapping an AttributeError
+      self.mock_rollout_1.get_target_state.side_effect = RuntimeError(
+          "Actor method call failed with AttributeError: 'Worker' object has no"
+          " attribute 'get_target_state'"
+      )
+      await self.engine._maybe_configure_trainer_target_state(
+          datatypes.Role.ACTOR
+      )
+      self.mock_actor.set_target_state.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_maybe_configure_trainer_target_state_raises_unrelated_runtime_error(
+      self,
+  ):
+    async def _run():
+      self.mock_rollout_1.get_target_state.side_effect = RuntimeError(
+          "Worker connection timed out"
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "Worker connection timed out"
+      ):
+        await self.engine._maybe_configure_trainer_target_state(
+            datatypes.Role.ACTOR
+        )
+
+    asyncio.run(_run())
+
 
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
@@ -575,7 +864,9 @@ class DistributedRLEngineTest(absltest.TestCase):
           {r.metadata["group_index"] for r in all_dispatched},
           {0, 1},
       )
-      self.assertTrue(all(r.metadata["group_size"] == 2 for r in all_dispatched))
+      self.assertTrue(
+          all(r.metadata["group_size"] == 2 for r in all_dispatched)
+      )
       self.assertEqual(
           {r.metadata["env_config"]["group_index"] for r in all_dispatched},
           {0, 1},
@@ -597,13 +888,11 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_build_rollout_requests_deep_injects_env_config_for_mappings(self):
     original_env_config = {"env_name": "math_arena", "timeout_s": 30}
-    prompts = [
-        {
-            "prompt": "Solve 2+2",
-            "prompt_id": "math_p1",
-            "metadata": {"env_config": original_env_config},
-        }
-    ]
+    prompts = [{
+        "prompt": "Solve 2+2",
+        "prompt_id": "math_p1",
+        "metadata": {"env_config": original_env_config},
+    }]
     requests = self.engine._build_rollout_requests(
         prompts, group_size=3, policy_version=4
     )
@@ -766,10 +1055,16 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="p1",
-          group_index=0,
           status="COMPLETED",
-          env_reward=1.5,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=0,
+              traj={
+                  "reward": 1.5,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+              metadata={"lineage": ctx},
+          ),
           metadata={"lineage": ctx},
       )
       self.mock_rollout_1.poll_responses.return_value = [resp]
@@ -868,9 +1163,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="prompt_1",
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
       self.mock_rollout_2.generate.return_value = [resp]
@@ -901,10 +1202,15 @@ class DistributedRLEngineTest(absltest.TestCase):
       }
       resp = datatypes.RolloutResponse(
           request_id="r1",
-          prompt_id="prompt_dict_1",
-          group_index=2,
           status="COMPLETED",
-          env_reward=1.0,
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_dict_1",
+              group_index=2,
+              traj={
+                  "reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
       )
       self.mock_rollout_1.generate.return_value = [resp]
       self.mock_rollout_2.generate.return_value = [resp]
@@ -933,25 +1239,28 @@ class DistributedRLEngineTest(absltest.TestCase):
     ctx = lineage.LineageContext(
         tracking_id="traj_p_extra_g1", parent_tracking_ids=["p_extra"]
     )
-    resp = datatypes.RolloutResponse(
-        request_id="req_1",
+    traj_item = datatypes.TrajectoryItem(
         prompt_id="p_extra",
         group_index=1,
         policy_version=2,
-        status="COMPLETED",
-        env_reward=2.0,
+        traj={
+            "reward": 2.0,
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        },
         prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            datatypes.TokenSegment(
-                source="assistant",
-                tokens=np.array([1, 2], dtype=np.int32),
-                loss_mask=np.array([1, 1], dtype=np.float32),
-            )
-        ],
+        completion_tokens=np.array([1, 2], dtype=np.int32),
+        action_mask=np.array([1.0, 1.0], dtype=np.float32),
+        metadata={"lineage": ctx},
+    )
+    resp = datatypes.RolloutResponse(
+        request_id="req_1",
+        status="COMPLETED",
+        payload=traj_item,
         metadata={"lineage": ctx},
     )
 
     item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertIs(item, traj_item)
     self.assertEqual(item.prompt_id, "p_extra")
     self.assertEqual(item.group_index, 1)
     self.assertEqual(item.policy_version, 2)
@@ -963,6 +1272,54 @@ class DistributedRLEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(
         item.action_mask, np.array([1, 1], dtype=np.float32)
     )
+    self.assertIsNone(getattr(item, "logprobs", None))
+
+  def test_response_to_trajectory_item_collects_aligned_logps(self):
+    traj_item = datatypes.TrajectoryItem(
+        prompt_id="p_lp",
+        group_index=0,
+        policy_version=1,
+        traj={"reward": 1.0},
+        prompt_tokens=np.array([10], dtype=np.int32),
+        completion_tokens=np.array([1, 2, 3], dtype=np.int32),
+        action_mask=np.array([1.0, 1.0, 1.0], dtype=np.float32),
+        logprobs=np.array([-0.1, -0.2, -0.3], dtype=np.float32),
+    )
+    resp = datatypes.RolloutResponse(
+        request_id="req_lp_ok",
+        status="COMPLETED",
+        payload=traj_item,
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    np.testing.assert_allclose(
+        item.logprobs,
+        np.array([-0.1, -0.2, -0.3], dtype=np.float32),
+    )
+
+  def test_response_to_trajectory_item_with_error(self):
+    err = datatypes.ErrorInfo(error_type="Timeout", message="Timed out")
+    resp = datatypes.RolloutResponse(
+        request_id="req_err",
+        status="ERROR",
+        error=err,
+        metadata={"prompt_id": "p_err", "group_index": 1},
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertEqual(item.prompt_id, "p_err")
+    self.assertEqual(item.group_index, 1)
+    self.assertIsInstance(item.traj, dict)
+    self.assertEqual(item.traj["status"], datatypes.TrajectoryStatus.FAILED)
+    self.assertEqual(item.status, datatypes.TrajectoryStatus.FAILED)
+    self.assertIn("Timed out", item.metadata["error"])
+
+  def test_response_to_trajectory_item_none_payload_raises(self):
+    resp = datatypes.RolloutResponse(
+        request_id="req_none",
+        status="COMPLETED",
+        payload=None,
+    )
+    with self.assertRaises(ValueError):
+      distributed_rl_engine._response_to_trajectory_item(resp)
 
   def test_response_to_trajectory_item_rejects_unsupported_type(self):
     with self.assertRaises(TypeError):
@@ -1014,101 +1371,238 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_response_to_trajectory_item_with_dict_segments(self):
-    ctx = lineage.LineageContext(
-        tracking_id="traj_p_dict_g0", parent_tracking_ids=["p_dict"]
-    )
+  def test_response_to_trajectory_item_handles_error_response(self):
     resp = datatypes.RolloutResponse(
-        request_id="req_dict_seg",
-        prompt_id="p_dict",
-        group_index=0,
-        policy_version=1,
-        status="COMPLETED",
-        env_reward=1.0,
-        prompt_tokens=np.array([10], dtype=np.int32),
-        segments=[
-            {
-                "source": "assistant",
-                "tokens": [1, 2],
-                "loss_mask": [1.0, 1.0],
-            },
-            {
-                "source": "env",
-                "tokens": [3],
-            },
-        ],  # pyrefly: ignore[bad-argument-type]
-        metadata={"lineage": ctx},
+        request_id="req_err",
+        status="FAILED",
+        error=datatypes.ErrorInfo(
+            error_type="WorkerTimeout",
+            message="timed out",
+        ),
+        payload=None,
     )
-
     item = distributed_rl_engine._response_to_trajectory_item(resp)
-    self.assertEqual(item.prompt_id, "p_dict")
-    self.assertEqual(item.group_index, 0)
-    self.assertIn("lineage", item.metadata)
-    np.testing.assert_array_equal(
-        item.completion_tokens, np.array([1, 2], dtype=np.int32)
-    )
-    np.testing.assert_array_equal(
-        item.action_mask, np.array([1, 1], dtype=np.float32)
-    )
+    self.assertIsInstance(item.traj, dict)
+    self.assertEqual(item.traj["status"], datatypes.TrajectoryStatus.FAILED)
+    self.assertEqual(item.status, datatypes.TrajectoryStatus.FAILED)
+    self.assertIn("WorkerTimeout", item.metadata.get("error", ""))
 
-  def test_response_to_trajectory_item_with_dict_segments_missing_loss_mask(
+  def test_response_to_trajectory_item_raises_when_payload_none_without_error(
       self,
   ):
     resp = datatypes.RolloutResponse(
-        request_id="req_dict_no_mask",
-        prompt_id="p_dict",
-        group_index=0,
-        policy_version=1,
+        request_id="req_none",
         status="COMPLETED",
-        segments=[{
-            "source": "assistant",
-            "tokens": [5, 6],
-        }],  # pyrefly: ignore[bad-argument-type]
+        payload=None,
     )
-    item = distributed_rl_engine._response_to_trajectory_item(resp)
-    np.testing.assert_array_equal(
-        item.completion_tokens, np.array([5, 6], dtype=np.int32)
+    with self.assertRaisesRegex(ValueError, "RolloutResponse payload is None"):
+      distributed_rl_engine._response_to_trajectory_item(resp)
+
+  def test_response_to_trajectory_item_rejects_trajectory_item(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="direct_item", group_index=0, traj={}
     )
-    np.testing.assert_array_equal(
-        item.action_mask, np.array([1.0, 1.0], dtype=np.float32)
+    with self.assertRaises(TypeError):
+      distributed_rl_engine._response_to_trajectory_item(item)
+
+  def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 10
+    mock_assembler.eos_id = 20
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler,
     )
 
-  def test_poll_rollouts_deserializes_dict_responses_with_dict_segments(self):
-    async def _run():
-      raw_dict_response = {
-          "request_id": "r_deserialized",
-          "prompt_id": "p_raw",
-          "group_index": 0,
-          "policy_version": 1,
-          "status": "COMPLETED",
-          "env_reward": 2.5,
-          "prompt_tokens": [10, 20],
-          "segments": [{
-              "source": "assistant",
-              "tokens": [30, 40],
-              "loss_mask": [1.0, 1.0],
-          }],
-          "metadata": {},
-      }
-      self.mock_rollout_1.poll_responses.return_value = [raw_dict_response]
-      self.mock_rollout_2.poll_responses.return_value = []
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        mock_loss, has_aux=True
+    )
+    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=10, eos_id=20
+    )
 
-      items = await self.engine.poll_rollouts()
-      self.assertLen(items, 1)
-      item = items[0]
-      self.assertEqual(item.prompt_id, "p_raw")
-      self.assertEqual(item.traj.reward, 2.5)
-      np.testing.assert_array_equal(
-          item.prompt_tokens, np.array([10, 20], dtype=np.int32)
-      )
-      np.testing.assert_array_equal(
-          item.completion_tokens, np.array([30, 40], dtype=np.int32)
-      )
-      np.testing.assert_array_equal(
-          item.action_mask, np.array([1.0, 1.0], dtype=np.float32)
+  def test_configure_worker_actor_raises_when_algo_none(self):
+    with self.assertRaisesRegex(ValueError, "algo is required"):
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=None,
+          assembler=mock.MagicMock(),
       )
 
-    asyncio.run(_run())
+  def test_configure_worker_actor_raises_when_assembler_none(self):
+    with self.assertRaisesRegex(ValueError, "assembler is required"):
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock.MagicMock(),
+          assembler=None,
+      )
+
+  def test_configure_worker_critic_configures_loss_and_gen_model_input_fn(self):
+    mock_critic = MockActorHandle()
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 5
+    mock_assembler.eos_id = 6
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1],
+        trainer_workers={datatypes.Role.CRITIC: mock_critic},
+    )
+    engine.configure_worker(
+        role=datatypes.Role.CRITIC,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    mock_critic.with_loss_fn.assert_called_once_with(mock_loss, has_aux=True)
+    mock_critic.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=5, eos_id=6
+    )
+
+  def test_configure_worker_fallback_pad_and_eos_kwargs(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock.MagicMock(spec=[]),
+        pad_id=42,
+        eos_id=43,
+    )
+
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=42, eos_id=43
+    )
+
+  def test_configure_worker_raises_on_missing_worker(self):
+    mock_algo = mock.MagicMock()
+    with self.assertRaises(ValueError):
+      self.engine.configure_worker(
+          role=datatypes.Role.CRITIC,
+          algo=mock_algo,
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_rollout_and_reference(self):
+    mock_algo = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    self.engine.configure_worker(
+        role=datatypes.Role.ROLLOUT,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+    self.engine.configure_worker(
+        role=datatypes.Role.REFERENCE,
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    engine_no_workers = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+    )
+    with self.assertRaises(ValueError):
+      engine_no_workers.configure_worker(
+          role=datatypes.Role.ROLLOUT,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+    with self.assertRaises(ValueError):
+      engine_no_workers.configure_worker(
+          role=datatypes.Role.REFERENCE,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+  def test_configure_worker_unsupported_role(self):
+    mock_algo = mock.MagicMock()
+    mock_assembler = mock.MagicMock()
+    with self.assertRaises(ValueError):
+      self.engine.configure_worker(
+          role="unsupported_role",
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+  def test_distributed_rl_engine_implements_protocol(self):
+    self.assertIsInstance(self.engine, rl_engine_interface.AbstractRLEngine)
+
+  def test_configure_worker_default_role_is_actor(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_assembler = mock.MagicMock(pad_id=1, eos_id=2)
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    self.engine.configure_worker(
+        algo=mock_algo,
+        assembler=mock_assembler,
+    )
+
+    self.mock_actor.with_loss_fn.assert_called_once_with(
+        mock_loss, has_aux=True
+    )
+    self.mock_actor.with_gen_model_input_fn.assert_called_once_with(mock_gen_fn)
+    mock_algo.build_gen_model_input_fn.assert_called_once_with(
+        pad_id=1, eos_id=2
+    )
+
+  def test_configure_worker_actor_raises_when_no_actor_worker(self):
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1],
+        trainer_workers={},
+    )
+    with self.assertRaisesRegex(
+        ValueError, "No trainer worker registered for role actor"
+    ):
+      engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock.MagicMock(),
+          assembler=mock.MagicMock(),
+      )
+
+  def test_configure_worker_pad_and_eos_defaults(self):
+    mock_algo = mock.MagicMock()
+    mock_loss = mock.MagicMock()
+    mock_gen_fn = mock.MagicMock()
+    mock_algo.loss_fn.return_value = mock_loss
+    mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+
+    # 1. Zero defaults when neither assembler nor kwargs define pad/eos
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock.MagicMock(spec=[]),
+    )
+    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=0, eos_id=0)
+
+    # 2. eos_id defaults to pad_id when only pad_id is set on assembler
+    mock_assembler_pad_only = mock.MagicMock(spec=["pad_id"])
+    mock_assembler_pad_only.pad_id = 7
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler_pad_only,
+    )
+    mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=7, eos_id=7)
 
 
 if __name__ == "__main__":
