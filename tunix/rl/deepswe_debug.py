@@ -182,6 +182,31 @@ def enabled(values: Mapping[str, str] | None = None) -> bool:
   return environ.get(key, "0") == "1"
 
 
+def p58_complete_batch_runtime_contract(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Selects P58 runs that require complete 8x16 batch runtime receipts.
+
+  Historical P58 full runs keep their existing behavior.  The new 64-chip
+  split-role three-update pilot also needs the same shared deadline, partial
+  producer failure propagation, and lifecycle timing so its target evidence is
+  comparable to a full run.  Historical 128-chip three-update canaries are
+  intentionally not broadened.
+  """
+  environ = os.environ if values is None else values
+  signed = (
+      environ.get("CANON_P34_DEEPSWE") == "1"
+      and environ.get("CANON_P58_DEEPSWE_TIM") == "1"
+      and environ.get("CANON_P58_TIM_ADMITTED") == "1"
+      and environ.get("CANON_P58_TIM_ARM") in ("native", "zero")
+  )
+  if not signed:
+    return False
+  stage = environ.get("CANON_P34_RUN_STAGE", "")
+  topology = environ.get("CANON_P58_TOPOLOGY", "128")
+  return stage == "full" or (topology == "64split" and stage == "three-update")
+
+
 def onehost(values: Mapping[str, str] | None = None) -> bool:
   """Returns whether the default-off local integration contract is active."""
   environ = os.environ if values is None else values
@@ -1156,6 +1181,7 @@ def _manifest(
     if stage != "full":
       raise ValueError("P34 production artifacts require the full stage")
   elif mode == "p58":
+    from tunix.rl import deepswe_contract  # pylint: disable=g-import-not-at-top
     q4_tp4_admission = False
     q4_tp4_seam_arm = ""
     q4_tp4_continue_kv = False
@@ -1170,9 +1196,19 @@ def _manifest(
     arm = values.get("CANON_P58_TIM_ARM", "")
     if arm not in ("native", "zero"):
       raise ValueError("P58 artifact arm must be native or zero")
-    contract_name = "p58-qwen4b-tim-128"
-    slice_topology = "4x4x8"
-    role_topology = {"dp": 8, "tp": 8, "devices": 64}
+    workload = deepswe_contract.active_workload(values)
+    if not deepswe_contract.is_p58_q4_tim_workload(workload):
+      raise ValueError("P58 artifact mode requires a registered P58 workload")
+    contract_name = workload.contract_name
+    if contract_name == "p58-qwen4b-tim-128":
+      slice_topology = "4x4x8"
+    else:
+      slice_topology = "4x4x4"
+    role_topology = {
+        "dp": workload.dp_size,
+        "tp": workload.tp_size,
+        "devices": workload.devices_per_role,
+    }
     global_prompts = 8
     generations = 16
     max_turns = 50
@@ -1606,11 +1642,7 @@ def persist_batch(
     groups[group_id].append(record)
 
   timing = None
-  p58_full_timing = (
-      _mode(environ) == "p58"
-      and environ.get("CANON_P58_TIM_ADMITTED") == "1"
-      and environ.get("CANON_P34_RUN_STAGE") == "full"
-  )
+  p58_full_timing = p58_complete_batch_runtime_contract(environ)
   if p58_full_timing:
     stage_fields = {
         "sandbox_acquire": ("sandbox_time", "sandbox_acquire_latency"),

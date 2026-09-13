@@ -116,6 +116,7 @@ def render(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    sandbox_nodepool: str | None = None,
     fixed_lm_head: bool = False,
     system_optimization_arm: str | None = None,
 ) -> dict[str, Any]:
@@ -149,6 +150,11 @@ def render(
         "P44 parity requires the reviewed 1851-image clean whitelist path "
         "and SHA-256"
     )
+  effective_sandbox_nodepool = (
+      cpu_nodepool if sandbox_nodepool is None else sandbox_nodepool
+  )
+  if not effective_sandbox_nodepool:
+    raise ValueError("sandbox_nodepool must be nonempty when provided")
   base_stage = "one-update" if stage == "rollout-only" else stage
   effective_fixed_lm_head = fixed_lm_head or system_optimization_arm is not None
   document = p34.render(
@@ -254,6 +260,7 @@ def render(
       "CANON_WANDB_GROUP": f"qwen3-4b-parity-{topology}chip",
       "MIN_TOKEN_BUCKET": str(topology_spec["global_m"]),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
+      "NODE_SELECTOR_VAL": effective_sandbox_nodepool,
   }
   if system_optimization_arm is not None:
     environment.update(
@@ -306,6 +313,7 @@ def render(
       client_image=client_image,
       stage=stage,
       topology=topology,
+      sandbox_nodepool=effective_sandbox_nodepool,
       fixed_lm_head=effective_fixed_lm_head,
       system_optimization_arm=system_optimization_arm,
   )
@@ -353,6 +361,7 @@ def validate(
     client_image: str,
     stage: str,
     topology: str,
+    sandbox_nodepool: str | None = None,
     fixed_lm_head: bool = False,
     system_optimization_arm: str | None = None,
 ) -> None:
@@ -376,6 +385,13 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
+  effective_sandbox_nodepool = (
+      head.get("nodeSelector", {}).get("cloud.google.com/gke-nodepool")
+      if sandbox_nodepool is None
+      else sandbox_nodepool
+  )
+  if not effective_sandbox_nodepool:
+    raise ValueError("P44 sandbox nodepool identity is missing")
   if document["spec"]["failurePolicy"]["maxRestarts"] != 0:
     raise ValueError("P44 parity must remain attempt-zero")
   if (
@@ -414,6 +430,7 @@ def validate(
       "MIN_TOKEN_BUCKET": str(topology_spec["global_m"]),
       "CANON_LOGPROB_M": "256",
       "CANON_P38_FIXED_LM_HEAD": "1" if fixed_lm_head else "0",
+      "NODE_SELECTOR_VAL": effective_sandbox_nodepool,
   }
   if system_optimization_arm is not None:
     expected.update(
@@ -506,6 +523,13 @@ def main() -> None:
   parser.add_argument("--stage", choices=tuple(_STAGE_STEPS), required=True)
   parser.add_argument("--topology", choices=tuple(_TOPOLOGIES), required=True)
   parser.add_argument("--cpu-nodepool", required=True)
+  parser.add_argument(
+      "--sandbox-nodepool",
+      help=(
+          "R2E sandbox nodepool; defaults to --cpu-nodepool for backward "
+          "compatibility"
+      ),
+  )
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--model-pvc", required=True)
   parser.add_argument("--whitelist", required=True)
@@ -539,6 +563,7 @@ def main() -> None:
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
+      sandbox_nodepool=args.sandbox_nodepool,
       fixed_lm_head=args.fixed_lm_head,
       system_optimization_arm=args.system_optimization_arm,
   )

@@ -61,8 +61,21 @@ def _records(path: Path) -> list[dict[str, Any]]:
 
 
 def _artifact_checks(
-    debug_dir: Path, *, arm: str, stage: str
+    debug_dir: Path, *, arm: str, stage: str, topology: str
 ) -> tuple[dict[str, bool], list[dict[str, Any]]]:
+  specs = {
+      "128": (
+          "p58-qwen4b-tim-128", "4x4x8",
+          {"dp": 8, "tp": 8, "devices": 64},
+      ),
+      "64split": (
+          "p58-qwen4b-tim-64split", "4x4x4",
+          {"dp": 4, "tp": 8, "devices": 32},
+      ),
+  }
+  if topology not in specs:
+    raise ValueError("P58 classifier topology must be 128 or 64split")
+  contract_name, slice_topology, role_topology = specs[topology]
   manifest_path = debug_dir / "run_manifest.json"
   metrics_path = debug_dir / "batch_metrics.jsonl"
   try:
@@ -155,9 +168,9 @@ def _artifact_checks(
       and manifest.get("stage") == stage
       and manifest.get("tim_arm") == arm
       and manifest.get("model_id") == "Qwen/Qwen3-4B-Instruct-2507"
-      and manifest.get("contract_name") == "p58-qwen4b-tim-128"
-      and manifest.get("slice_topology") == "4x4x8"
-      and manifest.get("role_topology") == {"dp": 8, "tp": 8, "devices": 64}
+      and manifest.get("contract_name") == contract_name
+      and manifest.get("slice_topology") == slice_topology
+      and manifest.get("role_topology") == role_topology
       and manifest.get("global_prompts") == 8
       and manifest.get("generations") == 16
       and manifest.get("global_trajectories") == 128
@@ -217,12 +230,25 @@ def classify(
     pre_alignment: list[dict[str, Any]],
     alignment: list[dict[str, Any]],
     updates: list[dict[str, Any]],
+    topology: str = "128",
 ) -> dict[str, Any]:
   if arm not in ("native", "zero") or stage not in _STAGE_UPDATES:
     raise ValueError("P58 classifier requires a signed arm and stage")
   expected_commits = _STAGE_UPDATES[stage]
+  geometry = {
+      "128": {
+          "contract": "p58-qwen4b-tim-128", "dp": 8, "tp": 8,
+          "global_m": 2048, "transactions": 16,
+      },
+      "64split": {
+          "contract": "p58-qwen4b-tim-64split", "dp": 4, "tp": 8,
+          "global_m": 1024, "transactions": 32,
+      },
+  }.get(topology)
+  if geometry is None:
+    raise ValueError("P58 classifier topology must be 128 or 64split")
   artifact_checks, metrics = _artifact_checks(
-      debug_dir, arm=arm, stage=stage
+      debug_dir, arm=arm, stage=stage, topology=topology
   )
   committed = [record for record in updates if record.get("commits") == 1]
   skipped = [record for record in updates if record.get("commits") == 0]
@@ -257,7 +283,7 @@ def classify(
           for record in alignment
       )
   )
-  zero_ab_warning_policy = stage == "full" and bool(all_alignment) and all(
+  zero_ab_warning_policy = topology == "128" and stage == "full" and bool(all_alignment) and all(
       _zero_hp_ab_policy_valid(record) for record in all_alignment
   )
   zero_ab_warning_dose = any(
@@ -279,10 +305,10 @@ def classify(
       for record in alignment
   )
   common_update_geometry = all(
-      record.get("contract_name") == "p58-qwen4b-tim-128"
-      and record.get("dp_size") == 8
-      and record.get("tp_size") == 8
-      and record.get("global_m") == 2048
+      record.get("contract_name") == geometry["contract"]
+      and record.get("dp_size") == geometry["dp"]
+      and record.get("tp_size") == geometry["tp"]
+      and record.get("global_m") == geometry["global_m"]
       and record.get("verdict") == "PASS"
       and record.get("gradient_finite") is True
       and record.get("optimizer_placement") == "device-resident"
@@ -296,9 +322,9 @@ def classify(
   else:
     update_geometry = common_update_geometry and all(
         record.get("dp_replicas_exact") is True
-        and record.get("dp_reduction_transactions") == 16
+        and record.get("dp_reduction_transactions") == geometry["transactions"]
         and record.get("dp_reduction_rounds_per_transaction") == 6
-        and record.get("dp_rank_pullbacks_per_transaction") == 8
+        and record.get("dp_rank_pullbacks_per_transaction") == geometry["dp"]
         for record in updates
     )
   committed_steps = [record.get("train_steps_after") for record in committed]
@@ -356,6 +382,7 @@ def classify(
       "schema": "canon.p58.deepswe-tim.run.v1",
       "arm": arm,
       "stage": stage,
+      "topology": topology,
       "verdict": "PASS" if not failed else "FAIL",
       "claim_level": (
           "alignment-degraded-convergence-canary"
@@ -390,6 +417,7 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--arm", choices=("native", "zero"), required=True)
   parser.add_argument("--stage", choices=tuple(_STAGE_UPDATES), required=True)
+  parser.add_argument("--topology", choices=("128", "64split"), default="128")
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--debug-dir", type=Path, required=True)
   parser.add_argument("--weight-report", type=Path, required=True)
@@ -407,6 +435,7 @@ def main() -> None:
       pre_alignment=_records(args.pre_alignment_report),
       alignment=_records(args.alignment_report),
       updates=_records(args.update_report),
+      topology=args.topology,
   )
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite P58 evidence: {args.output}")

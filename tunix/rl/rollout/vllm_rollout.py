@@ -364,7 +364,11 @@ class VllmRollout(base_rollout.BaseRollout):
                 and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
                 and os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
                 and os.environ.get("CANON_PROFILE_FILE", "")
-                == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+                in (
+                    "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env",
+                    "cluster/profiles/"
+                    "qwen3-4b-dp4-tp8-deepswe-tim-split.env",
+                )
             )
             or p58_onehost_stock_observer
         )

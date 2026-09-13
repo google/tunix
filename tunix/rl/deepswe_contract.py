@@ -151,6 +151,10 @@ class DeepSWEWorkload:
             "Qwen/Qwen3-4B-Instruct-2507", 8, 16, 8, 8, 64, 16, 2048, 16,
             16384, 50, 1000,
         ),
+        "p58-qwen4b-tim-64split": (
+            "Qwen/Qwen3-4B-Instruct-2507", 8, 16, 4, 8, 32, 32, 1024, 32,
+            16384, 50, 1000,
+        ),
     }
     try:
       (
@@ -232,7 +236,7 @@ class DeepSWEWorkload:
           f"{self.contract_name} signed optimization campaign changed"
       )
     parity = self.contract_name.startswith("p44-qwen4b-parity-")
-    bounded_q4 = parity or self.contract_name == "p58-qwen4b-tim-128"
+    bounded_q4 = parity or self.contract_name.startswith("p58-qwen4b-tim-")
     expected_timeouts = (
         (300, 3000, 600, 600, 300, 3600, 3300)
         if bounded_q4
@@ -367,6 +371,14 @@ P58_Q4_TIM_128_WORKLOAD = dataclasses.replace(
     max_steps=1000,
     max_num_seqs_per_dp=16,
 )
+P58_Q4_TIM_64SPLIT_WORKLOAD = dataclasses.replace(
+    P44_PARITY_64_WORKLOAD,
+    contract_name="p58-qwen4b-tim-64split",
+    global_prompts=8,
+    generations=16,
+    max_steps=1000,
+    max_num_seqs_per_dp=32,
+)
 
 
 def p44_workload(topology: str) -> DeepSWEWorkload:
@@ -391,6 +403,28 @@ def p44_recipe_signature(workload: DeepSWEWorkload) -> dict[str, Any]:
       for key, value in dataclasses.asdict(workload).items()
       if key not in P44_TOPOLOGY_FIELDS
   }
+
+
+def p58_q4_tim_workload(topology: str) -> DeepSWEWorkload:
+  """Returns one exact P58 Qwen3-4B topology.
+
+  The historical environment predates this selector.  Callers implement that
+  compatibility by supplying ``128`` when the variable is absent; an explicit
+  empty or unknown value is never accepted.
+  """
+  if topology == "128":
+    return P58_Q4_TIM_128_WORKLOAD
+  if topology == "64split":
+    return P58_Q4_TIM_64SPLIT_WORKLOAD
+  raise ValueError("CANON_P58_TOPOLOGY must be exactly 128 or 64split")
+
+
+def is_p58_q4_tim_workload(workload: DeepSWEWorkload) -> bool:
+  """Whether ``workload`` is one of the registered P58 Q4 contracts."""
+  return workload.contract_name in (
+      "p58-qwen4b-tim-128",
+      "p58-qwen4b-tim-64split",
+  )
 
 
 def p46_q32_workload(topology: str) -> DeepSWEWorkload:
@@ -431,7 +465,16 @@ def active_workload(
         "P39, P43, P44, P46, and P58 DeepSWE modes are mutually exclusive"
     )
   if p58_raw == "1":
-    workload = P58_Q4_TIM_128_WORKLOAD
+    p58_topology = (
+        environ["CANON_P58_TOPOLOGY"]
+        if "CANON_P58_TOPOLOGY" in environ
+        else "128"
+    )
+    workload = p58_q4_tim_workload(p58_topology)
+  elif "CANON_P58_TOPOLOGY" in environ:
+    raise ValueError(
+        "CANON_P58_TOPOLOGY requires CANON_P58_DEEPSWE_TIM=1"
+    )
   elif p46_raw == "1":
     workload = p46_q32_workload(environ.get("CANON_P46_TOPOLOGY", ""))
   elif parity_raw == "1":
@@ -814,7 +857,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "p46-qwen32b-train-64",
       "p46-qwen32b-train-256",
   )
-  p58_tim = workload.contract_name == "p58-qwen4b-tim-128"
+  p58_tim = is_p58_q4_tim_workload(workload)
   p58_arm = values.get("CANON_P58_TIM_ARM", "")
   if p58_tim and p58_arm not in ("native", "zero"):
     raise ValueError("CANON_P58_TIM_ARM must be native or zero")
@@ -1246,7 +1289,7 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
         "P44 Qwen3-4B parity admits only rollout-only, one-update, or "
       "three-update"
     )
-  if workload.contract_name == "p58-qwen4b-tim-128" and stage not in (
+  if is_p58_q4_tim_workload(workload) and stage not in (
       "three-update",
       "full",
   ):

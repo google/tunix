@@ -31,6 +31,7 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
 from tunix.rl import alignment
+from tunix.rl import deepswe_contract
 
 
 class Trainer(peft_trainer.PeftTrainer):
@@ -365,12 +366,17 @@ class Trainer(peft_trainer.PeftTrainer):
                 and loss_denominator > 0.0
                 and not changed["accumulator"]
             )
+            workload = deepswe_contract.active_workload(os.environ)
+            if not deepswe_contract.is_p58_q4_tim_workload(workload):
+              raise alignment.AlignmentGateError(
+                  "P58 native update requires a registered P58 workload"
+              )
             update_record = {
-                "contract_name": "p58-qwen4b-tim-128",
+                "contract_name": workload.contract_name,
                 "tim_arm": "native",
-                "dp_size": 8,
-                "tp_size": 8,
-                "global_m": 2048,
+                "dp_size": workload.dp_size,
+                "tp_size": workload.tp_size,
+                "global_m": workload.global_m,
                 "verdict": (
                     "PASS" if committed_valid or unchanged_skip else "FAIL"
                 ),

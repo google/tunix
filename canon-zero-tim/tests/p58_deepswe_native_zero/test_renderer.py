@@ -113,6 +113,73 @@ class P58RendererTest(unittest.TestCase):
           self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
           self.assertEqual(env["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
 
+  def test_64split_render_is_one_4x4x4_with_two_dp4_tp8_roles(self):
+    for arm in ("native", "zero"):
+      with self.subTest(arm=arm):
+        document = self._render(arm, "full", topology="64split")
+        env = renderer.p34._env(document)
+        worker = renderer.p34._worker(document)
+        args = shlex.split(env["CANON_RUN_CMD"])
+        self.assertEqual(
+            document["metadata"]["labels"]["canon.zero-tim/topology"],
+            "64split",
+        )
+        self.assertEqual(worker["completions"], 16)
+        self.assertEqual(worker["parallelism"], 16)
+        self.assertEqual(
+            worker["template"]["spec"]["nodeSelector"][
+                "cloud.google.com/gke-tpu-topology"
+            ],
+            "4x4x4",
+        )
+        self.assertEqual(env["CANON_P58_TOPOLOGY"], "64split")
+        self.assertEqual(env["CANON_PROFILE_FILE"], renderer.SPLIT_PROFILE)
+        self.assertEqual(env["MIN_TOKEN_BUCKET"], "1024")
+        for expected in (
+            "--batch_size=8",
+            "--num_generations=16",
+            "--rollout_mesh_dp=4",
+            "--rollout_mesh_tp=8",
+            "--train_mesh_dp=4",
+            "--train_mesh_tp=8",
+            "--rollout_vllm_max_num_seqs=32",
+            "--max_num_batched_tokens=256",
+            "--max_concurrency=128",
+        ):
+          self.assertIn(expected, args)
+
+  def test_64split_rejects_unadmitted_bundle_and_mixed_instance(self):
+    with self.assertRaisesRegex(ValueError, "no admitted high-performance"):
+      self._render(
+          "zero", "full", topology="64split", high_performance=True
+      )
+    with self.assertRaisesRegex(ValueError, "must match"):
+      self._render(
+          "zero", "full", topology="64split", instance_type="4x4x8"
+      )
+
+  def test_default_render_preserves_historical_128_identity(self):
+    document = self._render("zero", "full")
+    env = renderer.p34._env(document)
+    self.assertNotIn("CANON_P58_TOPOLOGY", env)
+    self.assertEqual(
+        document["metadata"]["labels"]["canon.zero-tim/topology"], "128"
+    )
+
+  def test_topology_label_drift_is_rejected(self):
+    document = self._render("zero", "full", topology="64split")
+    document["metadata"]["labels"]["canon.zero-tim/topology"] = "128"
+    with self.assertRaisesRegex(ValueError, "topology label drifted"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="zero",
+          worker_nodepool="tpu-pool",
+          topology="64split",
+      )
+
   def test_production_render_does_not_reenable_retired_device_probe(self):
     for arm in ("native", "zero"):
       for stage in ("three-update", "full"):

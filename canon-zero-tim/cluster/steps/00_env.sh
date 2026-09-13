@@ -297,8 +297,10 @@ if [ "$P57_STOCK_FAST" = "1" ] && \
   esac
 fi
 P58_NATIVE=0
-if [ "${CANON_PROFILE_FILE:-}" = \
-     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] && \
+if { [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] || \
+     [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env" ]; } && \
    [ "${CANON_P58_DEEPSWE_TIM:-}" = "1" ] && \
    [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
   P58_NATIVE=1
@@ -2174,6 +2176,11 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
       ;;
   esac
+  if [ "${CANON_P58_DEEPSWE_TIM:-}" != "1" ] && \
+     [ "${CANON_P58_TOPOLOGY+x}" = "x" ]; then
+    echo "[env] CANON_P58_TOPOLOGY requires CANON_P58_DEEPSWE_TIM=1" >&2
+    fail=1
+  fi
   if [ "${CANON_P44_DEEPSWE_PARITY:-}" != "1" ]; then
     [ "${CANON_P44_PARITY_ADMITTED:-}" = "0" ] || {
       echo "[env] non-P44 runs require CANON_P44_PARITY_ADMITTED=0" >&2
@@ -2209,15 +2216,47 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         fail=1
         ;;
     esac
-    p34_expected_dp=8
-    p34_expected_devices=64
     p34_expected_prompts=8
     p34_expected_generations=16
     p34_expected_global_trajectories=128
-    p34_expected_local_trajectories=16
-    p34_expected_global_m=2048
-    p34_expected_max_seqs=16
-    p34_expected_mesh=8,8
+    case "${CANON_P58_TOPOLOGY-__absent__}" in
+      __absent__|128)
+        p34_expected_dp=8
+        p34_expected_devices=64
+        p34_expected_local_trajectories=16
+        p34_expected_global_m=2048
+        p34_expected_max_seqs=16
+        p34_expected_mesh=8,8
+        ;;
+      64split)
+        p34_expected_dp=4
+        p34_expected_devices=32
+        p34_expected_local_trajectories=32
+        p34_expected_global_m=1024
+        p34_expected_max_seqs=32
+        p34_expected_mesh=4,8
+        [ "${CANON_PROFILE_FILE:-}" = \
+          "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env" ] && \
+        [ "${CANON_PROFILE:-}" = \
+          "qwen3-4b-dp4-tp8-deepswe-tim-split" ] && \
+        [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+        [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ] && \
+        [ -z "${CANON_P58_SEAM_LOCALIZATION:-}" ] || {
+          echo "[env] P58 64split requires its strict non-HP profile" >&2
+          fail=1
+        }
+        ;;
+      *)
+        echo "[env] P58 topology must be absent, 128, or 64split" >&2
+        fail=1
+        p34_expected_dp=0
+        p34_expected_devices=0
+        p34_expected_local_trajectories=0
+        p34_expected_global_m=0
+        p34_expected_max_seqs=0
+        p34_expected_mesh=invalid
+        ;;
+    esac
     [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
       echo "[env] P58 requires a TPU-resident optimizer" >&2
       fail=1

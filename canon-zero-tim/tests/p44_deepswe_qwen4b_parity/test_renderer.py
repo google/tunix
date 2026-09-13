@@ -158,6 +158,47 @@ class P44RendererTest(unittest.TestCase):
         large = renderer.recipe_signature(self._render("128", stage))
         self.assertEqual(small, large)
 
+  def test_sandbox_nodepool_is_optional_independent_infrastructure(self):
+    historical = self._render("64")
+    self.assertEqual(
+        renderer.p34._env(historical)["NODE_SELECTOR_VAL"], "cpu-pool"
+    )
+    explicit_historical = self._render(
+        "64", sandbox_nodepool="cpu-pool"
+    )
+    self.assertEqual(
+        renderer.p34.dump_jobset(historical),
+        renderer.p34.dump_jobset(explicit_historical),
+    )
+
+    separated = self._render("64", sandbox_nodepool="sandbox-pool")
+    separated_env = renderer.p34._env(separated)
+    self.assertEqual(separated_env["NODE_SELECTOR_VAL"], "sandbox-pool")
+    self.assertEqual(
+        renderer.p34._head(separated)["nodeSelector"],
+        {"cloud.google.com/gke-nodepool": "cpu-pool"},
+    )
+    self.assertEqual(
+        renderer.recipe_signature(historical),
+        renderer.recipe_signature(separated),
+    )
+
+    separated_main = renderer.p34._container(
+        renderer.p34._head(separated)["containers"], "jax-tpu"
+    )
+    renderer.p34._set_env(
+        separated_main, {"NODE_SELECTOR_VAL": "wrong-pool"}
+    )
+    with self.assertRaisesRegex(ValueError, "environment mismatch"):
+      renderer.validate(
+          separated,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="three-update",
+          topology="64",
+          sandbox_nodepool="sandbox-pool",
+      )
+
   def test_invalid_topology_and_unbounded_stage_are_rejected(self):
     with self.assertRaisesRegex(ValueError, "exactly 64 or 128"):
       self._render("256")

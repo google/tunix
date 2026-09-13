@@ -13,6 +13,9 @@ PKG = ROOT / "canon-zero-tim"
 PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
 CANON = PKG / "cluster/profiles/_canonical_engine.env"
 HP_PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+SPLIT_PROFILE = (
+    PKG / "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
+)
 RUN_STEP = PKG / "cluster/steps/90_run.sh"
 
 
@@ -70,6 +73,54 @@ printf 'checked_vma=%s p59_only=%s first_update=%s p63_clip=%s\\n' \
 
 
 class P58ProfileTest(unittest.TestCase):
+
+  def test_postflight_forwards_selected_topology_to_classifier(self):
+    text = RUN_STEP.read_text(encoding="utf-8")
+    self.assertIn(
+        '--topology "${CANON_P58_TOPOLOGY:-128}"', text
+    )
+
+  def test_64split_profile_resolves_exact_dp4_role_geometry(self):
+    for arm, warning in (("native", "1"), ("zero", "0")):
+      with self.subTest(arm=arm):
+        script = f"""
+set -euo pipefail
+source {CANON}
+export CANON_P58_TOPOLOGY=64split
+export CANON_P58_TIM_ARM={arm}
+export CANON_P34_DISABLE_SAMPLER_IS=1
+export CANON_P34_DISABLE_TIS=1
+export CANON_P34_RUN_STAGE=full
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+source {SPLIT_PROFILE}
+printf '%s\n' "$CANON_PROFILE|$CANON_P58_TOPOLOGY|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_TOTAL_DEVICES|$CANON_LOCAL_TRAJECTORIES|$CANON_GLOBAL_TRAJECTORIES|$MIN_TOKEN_BUCKET|$CANON_P34_MAX_NUM_SEQS|$FL_SHARED_MESH|$CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"
+"""
+        output = subprocess.run(
+            ["bash", "-c", script], check=True, text=True,
+            capture_output=True,
+        ).stdout
+        self.assertIn(
+            "qwen3-4b-dp4-tp8-deepswe-tim-split|64split|4|8|32|"
+            f"32|128|1024|32|4,8|{warning}",
+            output,
+        )
+
+  def test_64split_profile_rejects_dp8_high_performance_bundle(self):
+    script = f"""
+set -euo pipefail
+export CANON_P58_TOPOLOGY=64split
+export CANON_V1_HP_FULL=1
+export CANON_P58_TIM_ARM=zero
+source {SPLIT_PROFILE}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], check=False, text=True,
+        capture_output=True,
+    )
+    self.assertNotEqual(result.returncode, 0)
 
   def test_native_removes_complete_numerical_bundle(self):
     output = _source("native")

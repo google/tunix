@@ -407,6 +407,26 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     with self.assertRaisesRegex(TimeoutError, "32/128"):
       next(batches)
 
+  def test_p58_complete_batch_runtime_is_scoped_to_64split_canary(self):
+    values = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "zero",
+        "CANON_P34_RUN_STAGE": "three-update",
+    }
+    self.assertFalse(
+        agentic_rl_learner._p58_full_batch_runtime_contract(values)
+    )
+    values["CANON_P58_TOPOLOGY"] = "64split"
+    self.assertTrue(
+        agentic_rl_learner._p58_full_batch_runtime_contract(values)
+    )
+    values["CANON_P34_RUN_STAGE"] = "full"
+    self.assertTrue(
+        agentic_rl_learner._p58_full_batch_runtime_contract(values)
+    )
+
   def test_p58_full_batch_group_contract_rejects_missing_generation(self):
     groups = []
     for group_id in range(8):

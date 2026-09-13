@@ -28,8 +28,10 @@ SPEC.loader.exec_module(classifier)
 _WANDB_PASS = "[CANON_" "P34_WANDB] ONLINE_RUN_PASS\n"
 
 
-def _values(root: Path, arm: str) -> dict[str, str]:
-  return {
+def _values(
+    root: Path, arm: str, topology: str = "128"
+) -> dict[str, str]:
+  values = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P58_DEEPSWE_TIM": "1",
       "CANON_P58_TIM_ARM": arm,
@@ -41,6 +43,9 @@ def _values(root: Path, arm: str) -> dict[str, str]:
       "CANON_P34_CLEAN_ROWS": "1012",
       "CANON_P34_WHITELIST_SHA256": classifier._WHITELIST_SHA256,
   }
+  if topology != "128":
+    values["CANON_P58_TOPOLOGY"] = topology
+  return values
 
 
 def _batch():
@@ -92,21 +97,24 @@ def _post(arm: str) -> dict:
   }
 
 
-def _update(step: int, arm: str) -> dict:
+def _update(step: int, arm: str, topology: str = "128") -> dict:
+  split = topology == "64split"
   record = {
-      "contract_name": "p58-qwen4b-tim-128",
-      "dp_size": 8,
+      "contract_name": (
+          "p58-qwen4b-tim-64split" if split else "p58-qwen4b-tim-128"
+      ),
+      "dp_size": 4 if split else 8,
       "tp_size": 8,
-      "global_m": 2048,
+      "global_m": 1024 if split else 2048,
       "verdict": "PASS",
       "commits": 1,
       "train_steps_before": step,
       "train_steps_after": step + 1,
       "gradient_finite": True,
       "dp_replicas_exact": True,
-      "dp_reduction_transactions": 16,
+      "dp_reduction_transactions": 32 if split else 16,
       "dp_reduction_rounds_per_transaction": 6,
-      "dp_rank_pullbacks_per_transaction": 8,
+      "dp_rank_pullbacks_per_transaction": 4 if split else 8,
       "optimizer_placement": "device-resident",
   }
   if arm == "native":
@@ -114,16 +122,16 @@ def _update(step: int, arm: str) -> dict:
   else:
     record.update({
         "dp_replicas_exact": True,
-        "dp_reduction_transactions": 16,
+        "dp_reduction_transactions": 32 if split else 16,
         "dp_reduction_rounds_per_transaction": 6,
-        "dp_rank_pullbacks_per_transaction": 8,
+        "dp_rank_pullbacks_per_transaction": 4 if split else 8,
     })
   return record
 
 
 class P58ClassifierTest(unittest.TestCase):
 
-  def _classify(self, root: Path, arm: str):
+  def _classify(self, root: Path, arm: str, topology: str = "128"):
     with contextlib.redirect_stdout(io.StringIO()):
       for step in range(3):
         deepswe_debug.persist_batch(
@@ -132,7 +140,7 @@ class P58ClassifierTest(unittest.TestCase):
             optimizer_step=step,
             output_dir=root,
             model_id="Qwen/Qwen3-4B-Instruct-2507",
-            values=_values(root, arm),
+            values=_values(root, arm, topology),
         )
     return classifier.classify(
         arm=arm,
@@ -142,8 +150,16 @@ class P58ClassifierTest(unittest.TestCase):
         weights=[{"verdict": "PASS", "equal": True}],
         pre_alignment=[_pre(arm)],
         alignment=[_post(arm)],
-        updates=[_update(step, arm) for step in range(3)],
+        updates=[_update(step, arm, topology) for step in range(3)],
+        topology=topology,
     )
+
+  def test_64split_native_and_zero_use_split_evidence_geometry(self):
+    for arm in ("native", "zero"):
+      with self.subTest(arm=arm), tempfile.TemporaryDirectory() as directory:
+        report = self._classify(Path(directory), arm, topology="64split")
+        self.assertEqual(report["verdict"], "PASS")
+        self.assertEqual(report["topology"], "64split")
 
   def test_native_requires_a_finite_nonzero_treatment_dose(self):
     with tempfile.TemporaryDirectory() as directory:

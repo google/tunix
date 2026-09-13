@@ -1,5 +1,182 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
+## P58.64split P2 — one 64-chip slice, split roles (unpublished until approved)
+
+This lane compresses the P58 Qwen3-4B Zero-TIM workload onto one physical
+v5p `4x4x4` slice. It is configuration B in `deepswe_4b_64chip`: rollout and
+trainer own disjoint, exhaustive 32-device halves; each role is DP4xTP8. The
+scientific batch remains B8xG16 = 128 trajectories. This is not colocated;
+colocated DP8xTP8 is a later phase and must not be inferred from this section.
+
+The selector is exact:
+
+```text
+CANON_P58_TOPOLOGY=64split
+contract=p58-qwen4b-tim-64split
+physical=4x4x4 workers=16
+rollout=DP4xTP8/32 devices trainer=DP4xTP8/32 devices
+local_trajectories=32 global_trajectories=128
+local_M=256 global_M=1024 max_num_seqs_per_dp=32
+```
+
+Selector absence preserves historical P58-128. Present-but-empty or any value
+other than `128|64split` fails closed. `64split` deliberately rejects
+`--high-performance`, checked-VMA, and seam-localization bundles because those
+are admitted only for the existing DP8 role. Do not work around that rejection
+with environment edits. Prefix cache stays off, TiTO stays on, sampler IS/TIS
+stay off, the optimizer is TPU-resident, and checkpointing is disabled
+(`--ckpt_dir=none`, no save cadence).
+
+Local evidence is only a claim-limited prerequisite. The executable tree at
+run start (`3f95bdc762b93b59ad2c8fb2f7a332ea5b3548d4` plus diff
+`c92b4787c8fa38069c420c955cf24cd87b17bb0e42efcb3c9a9371f185050b1b`)
+passed. The only tracked post-run change was this runbook evidence update;
+the final unpublished full-worktree diff hash is recorded in the outer task
+HANDOFF so this tracked file does not make that hash self-referential.
+
+- DP2xTP2 P59 mechanics:
+  `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p2r1_20260913_0316`;
+- Qwen3-4B DP1xTP4 recorded-trajectory backward-no-commit:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_d4b64_p2r1_20260913_0321`.
+
+Both checksum gates passed. The DeepSWE run had A=B=C zero bytes over 1,254
+action tokens, two repeat-exact finite/nonzero gradients, device-resident
+optimizer state, zero commits, and peak HBM 56,636,814,336 /
+102,803,437,568 bytes. This does not certify TP8, Pathways, split ownership,
+or 64-chip HBM. The 64-chip target is `TARGET NOT RUN` until the user
+explicitly approves publication and separately applies the rendered JobSet.
+
+### P2.1 — existing P44 64-chip carrier first
+
+After publication, read back one clean 40-character SHA from
+`yuxzhang/canon-zero-tim` and use the matching digest-pinned client image. Run
+the existing P44 parity-64 three-update scientific carrier before P58. Its
+recipe is unchanged; the optional infrastructure-only sandbox argument makes
+the documented head/sandbox placement explicit. This proves the one-slice
+split-role transport; its warning-only policy and B4xG4 batch are not P58
+Zero-TIM admission.
+
+```bash
+SOURCE_SHA=<published-readback-40-char-sha>
+CLIENT_IMAGE_DIGEST=<matching-image@sha256:digest>
+CPU_NODEPOOL=canon-cpu-pool
+SANDBOX_NODEPOOL=deepswe-cpu-pool-2
+TPU_NODEPOOL=<one-4x4x4-v5p-worker-pool-or-auto>
+MODEL_PVC=haoyugao-cpu-np-pvc
+CLEAN_WHITELIST=canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
+CLEAN_WHITELIST_SHA256=2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
+P44_RUN_ID=<fresh-p44-64-id>
+P44_OUTPUT="/tmp/p44-64-three-${P44_RUN_ID}.yaml"
+
+python3 canon-zero-tim/cluster/render_p44_deepswe_parity.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output "$P44_OUTPUT" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$P44_RUN_ID" \
+  --stage three-update \
+  --topology 64 \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --sandbox-nodepool "$SANDBOX_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --whitelist "$CLEAN_WHITELIST" \
+  --whitelist-sha256 "$CLEAN_WHITELIST_SHA256"
+sha256sum "$P44_OUTPUT"
+kubectl apply --server-side --dry-run=server -f "$P44_OUTPUT"
+```
+
+Rendering and applying are separate stop points. Never hand-edit the YAML.
+The user performs `kubectl apply`; the evidence agent only reads the complete
+pod-0 raw log and durable artifacts. Do not proceed if `haoyugao-cpu-np-pvc`
+cannot mount on `canon-cpu-pool`, or if sandbox pods do not target
+`deepswe-cpu-pool-2`.
+
+### P2.2 — P58 64split Zero three-update
+
+Only after P44 carrier evidence is accepted, render one P58 Zero attempt:
+
+```bash
+P58_RUN_ID=<fresh-p58-64split-zero-id>
+P58_OUTPUT="/tmp/p58-64split-zero-three-${P58_RUN_ID}.yaml"
+
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output "$P58_OUTPUT" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$P58_RUN_ID" \
+  --stage three-update \
+  --arm zero \
+  --topology 64split \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --sandbox-nodepool "$SANDBOX_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC"
+sha256sum "$P58_OUTPUT"
+kubectl apply --server-side --dry-run=server -f "$P58_OUTPUT"
+```
+
+Before the user applies it, inspect the rendered file and require all of:
+
+- topology label `64split`, worker completions/parallelism 16, TPU topology
+  `4x4x4`, and exclusive-topology at JobSet scope;
+- split profile, exact clean-list digest/1,012 rows, B8xG16, DP4xTP8 for both
+  roles, max concurrency 128, 32 sequences/DP, local/global M 256/1024;
+- `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=0`, TiTO, prefix cache off, sampler IS/TIS
+  off, device-resident optimizer, and checkpoint disabled;
+- exact 3,000/3,300/3,600 trajectory/sandbox/batch deadline ladder and the
+  admitted CPU/sandbox node pools.
+
+The first run must finish all three updates before a second same-seed run is
+requested. A valid run has 128 durable trajectory rows per batch, eight prompt
+groups, no ALIGN FAIL, A=B=C zero bytes, finite nonzero gradients, one and only
+one optimizer transaction per update, device optimizer placement, complete
+HBM/engine-step/timing receipts, and no partial-rollout handoff. Because P58
+checkpointing is disabled, `updates.jsonl` and the debug artifacts—not a
+checkpoint—are the determinism source. Compare two fresh same-seed runs
+byte-for-byte only after each independently passes its classifier.
+
+The exact `64split:three-update:zero` postflight also runs the branch-contained
+DeepSWE accountant and must emit:
+
+```text
+[P58.64SPLIT.ACCOUNT] PASS report=<state>/p58_deepswe_64split_accounting.json sha256=<sha256>
+```
+
+That JSON is the authoritative single-run R32/U32/S, lifecycle, solve-signal,
+trainer-HBM, and engine-receipt summary. Missing timing or receipt data is
+`INCONCLUSIVE`, not a performance PASS. In particular, trainer HBM must be
+present and retain at least 8 GiB below the minimum reported device limit;
+rollout-engine HBM remains a separate target receipt and must also be entered
+in the phase ledger. Do not use the outer
+`tasks/zero_tim_perf3/scripts/p03_account.py`: its CLI and solve thresholds are
+FrozenLake-specific and it is not included when this branch is pulled.
+
+After the second independently classified run, add the first run as a strict
+bytewise reference and write a new comparison receipt (never overwrite the
+automatic report):
+
+```bash
+python3 canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/account_64split_pilot.py \
+  --classification "$SECOND_STATE/p58_deepswe_zero_three-update.classification.json" \
+  --run-log "$SECOND_STATE/run.log" \
+  --debug-dir "$SECOND_STATE/debug" \
+  --update-report "$SECOND_STATE/updates.jsonl" \
+  --reference-update-report "$FIRST_STATE/updates.jsonl" \
+  --output "$SECOND_STATE/p58_deepswe_64split_repeat_accounting.json"
+```
+
+Require `checks.repeat_updates_bytewise_equal=true`. This comparison is valid
+only between two fresh runs from the same published SHA, image digest, model,
+clean-list digest, seed, and rendered recipe.
+
+Do not begin the colocated phase from a construction PASS or from one-host
+evidence. P3 starts only after the P2 target evidence is entered in the task
+ledger.
+
 ## P58.37 K29 observer failure and profiler-free K30
 
 K29 completed the full P58.36 Step-1 rollout boundary: 128/128 trajectories,

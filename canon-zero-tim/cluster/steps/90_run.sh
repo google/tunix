@@ -1756,6 +1756,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       python3 "$CANON_PKG/tests/p58_deepswe_native_zero/classify_run.py" \
         --arm "$CANON_P58_TIM_ARM" \
         --stage "$CANON_P34_RUN_STAGE" \
+        --topology "${CANON_P58_TOPOLOGY:-128}" \
         --run-log "$LOG" \
         --debug-dir "$CANON_P58_DEBUG_DIR" \
         --weight-report "$CANON_P34_WEIGHT_REPORT" \
@@ -1763,6 +1764,19 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --update-report "$CANON_UPDATE_REPORT" \
         --alignment-report "$CANON_ALIGN_REPORT" \
         --output "$classification" || exit 1
+    if [ "${CANON_P58_TOPOLOGY:-128}:${CANON_P34_RUN_STAGE}:${CANON_P58_TIM_ARM}" = \
+         "64split:three-update:zero" ]; then
+      p58_64split_accounting="$CANON_STATE/p58_deepswe_64split_accounting.json"
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/account_64split_pilot.py" \
+          --classification "$classification" \
+          --run-log "$LOG" \
+          --debug-dir "$CANON_P58_DEBUG_DIR" \
+          --update-report "$CANON_UPDATE_REPORT" \
+          --output "$p58_64split_accounting" || exit 1
+      p58_64split_accounting_sha="$(sha256sum "$p58_64split_accounting" | awk '{print $1}')"
+      echo "[P58.64SPLIT.ACCOUNT] PASS report=$p58_64split_accounting sha256=$p58_64split_accounting_sha"
+    fi
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
       p58_hp_classification="$CANON_STATE/p58_zero_hp_full.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

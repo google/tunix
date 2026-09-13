@@ -95,6 +95,54 @@ def _batch(
 
 class P58ArtifactTest(unittest.TestCase):
 
+  def test_complete_batch_runtime_contract_is_topology_and_stage_scoped(self):
+    values = _values(Path("/tmp/unused-p58-artifact-test"))
+    self.assertTrue(deepswe_debug.p58_complete_batch_runtime_contract(values))
+
+    values["CANON_P34_RUN_STAGE"] = "three-update"
+    self.assertFalse(deepswe_debug.p58_complete_batch_runtime_contract(values))
+
+    values["CANON_P58_TOPOLOGY"] = "64split"
+    self.assertTrue(deepswe_debug.p58_complete_batch_runtime_contract(values))
+
+    values["CANON_P34_RUN_STAGE"] = "full"
+    self.assertTrue(deepswe_debug.p58_complete_batch_runtime_contract(values))
+
+    values["CANON_P58_TIM_ADMITTED"] = "0"
+    self.assertFalse(deepswe_debug.p58_complete_batch_runtime_contract(values))
+
+  def test_64split_three_update_persists_full_lifecycle_timing(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      values = _values(root)
+      values["CANON_P34_RUN_STAGE"] = "three-update"
+      values["CANON_P58_TOPOLOGY"] = "64split"
+      metrics = deepswe_debug.persist_batch(
+          *_batch(),
+          expected_step=0,
+          optimizer_step=0,
+          output_dir=root,
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          values=values,
+      )
+      self.assertIn("timing", metrics)
+      self.assertEqual(len(metrics["timing"]["group_completion_seconds"]), 8)
+
+  def test_128_three_update_preserves_historical_timing_behavior(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      values = _values(root)
+      values["CANON_P34_RUN_STAGE"] = "three-update"
+      metrics = deepswe_debug.persist_batch(
+          *_batch(),
+          expected_step=0,
+          optimizer_step=0,
+          output_dir=root,
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          values=values,
+      )
+      self.assertNotIn("timing", metrics)
+
   def test_sandbox_start_timeouts_are_bounded_wandb_metrics(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)

@@ -4,8 +4,10 @@
 set -euo pipefail
 source "$CANON_STATE/env.sh"
 
-if [ "${CANON_PROFILE_FILE:-}" != \
-     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] || \
+if ! { [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] || \
+      [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env" ]; } || \
    [ "${CANON_P58_DEEPSWE_TIM:-}" != "1" ] || \
    [ "${CANON_P58_TIM_ARM:-}" != "native" ]; then
   echo "[P58.NATIVE] FATAL: stock verification used outside the native arm" >&2

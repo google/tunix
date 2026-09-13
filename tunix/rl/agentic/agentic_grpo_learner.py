@@ -254,12 +254,19 @@ def _p57_tim_is_enabled(env: Mapping[str, str]) -> bool:
 
 def _p58_native_sampler_recipe(env: Mapping[str, str]) -> str | None:
   """Returns the signed P58 native sampler recipe, if active."""
+  topology = env.get("CANON_P58_TOPOLOGY", "128")
+  expected_profile = {
+      "128": "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env",
+      "64split": (
+          "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
+      ),
+  }.get(topology)
   if not (
       env.get("CANON_P58_DEEPSWE_TIM") == "1"
       and env.get("CANON_P58_TIM_ADMITTED") == "1"
       and env.get("CANON_P58_TIM_ARM") == "native"
-      and env.get("CANON_PROFILE_FILE")
-      == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+      and expected_profile is not None
+      and env.get("CANON_PROFILE_FILE") == expected_profile
   ):
     return None
   sampler_tuple = (
@@ -1327,12 +1334,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "p46-qwen32b-train-64",
             "p46-qwen32b-train-256",
             "p58-qwen4b-tim-128",
+            "p58-qwen4b-tim-64split",
         ):
           raise ValueError(
               "DeepSWE artifacts require P34 production, P43, or P44"
           )
         artifact_model_id = workload.model_id
-        p58_artifacts = workload.contract_name == "p58-qwen4b-tim-128"
+        p58_artifacts = deepswe_contract.is_p58_q4_tim_workload(workload)
       artifact_step = int(expected_step)
       optimizer_step = None
       if p58_artifacts:

@@ -85,6 +85,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
       seam_localization: str = "",
+      topology: str = "128",
   ) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     document = renderer.render(
@@ -103,6 +104,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         checked_vma_off_diagnostic=checked_vma_off_diagnostic,
         checked_vma_on_diagnostic=checked_vma_on_diagnostic,
         seam_localization=seam_localization,
+        topology=topology,
     )
     return dict(renderer.p34._env(document))
 
@@ -116,6 +118,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
       seam_localization: str = "",
+      topology: str = "128",
   ) -> dict[str, str]:
     supplied = os.environ.copy()
     supplied.update(
@@ -127,6 +130,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
             checked_vma_off_diagnostic=checked_vma_off_diagnostic,
             checked_vma_on_diagnostic=checked_vma_on_diagnostic,
             seam_localization=seam_localization,
+            topology=topology,
         )
     )
     profile = supplied["CANON_PROFILE_FILE"]
@@ -147,6 +151,41 @@ class P58EnvironmentContractTest(unittest.TestCase):
         for item in completed.stdout.decode().split("\0")
         if "=" in item
     }
+
+  def test_p58_64split_contract_and_real_env_are_exact(self):
+    values = self._resolved("zero", "full", topology="64split")
+    workload = deepswe_contract.active_workload(values)
+    self.assertIs(workload, deepswe_contract.P58_Q4_TIM_64SPLIT_WORKLOAD)
+    workload.validate()
+    self.assertEqual(
+        (
+            workload.contract_name,
+            workload.dp_size,
+            workload.tp_size,
+            workload.devices_per_role,
+            workload.local_trajectories,
+            workload.global_m,
+            workload.max_num_seqs_per_dp,
+        ),
+        ("p58-qwen4b-tim-64split", 4, 8, 32, 32, 1024, 32),
+    )
+    deepswe_contract.validate_environment(values)
+
+  def test_p58_selector_is_fail_closed_and_128_absence_is_compatible(self):
+    self.assertIs(
+        deepswe_contract.active_workload({"CANON_P58_DEEPSWE_TIM": "1"}),
+        deepswe_contract.P58_Q4_TIM_128_WORKLOAD,
+    )
+    for bad in ("", "none", "64", "64co"):
+      with self.subTest(bad=bad), self.assertRaisesRegex(
+          ValueError, "exactly 128 or 64split"
+      ):
+        deepswe_contract.active_workload({
+            "CANON_P58_DEEPSWE_TIM": "1",
+            "CANON_P58_TOPOLOGY": bad,
+        })
+    with self.assertRaisesRegex(ValueError, "requires"):
+      deepswe_contract.active_workload({"CANON_P58_TOPOLOGY": "64split"})
 
   def _persisted(
       self,

@@ -760,13 +760,7 @@ def _p58_all_filtered_no_commit_contract(
 
 def _p58_full_batch_runtime_contract(values: Mapping[str, str]) -> bool:
   """Selects the exact P58 training geometry that requires 128-row batches."""
-  return (
-      values.get("CANON_P34_DEEPSWE") == "1"
-      and values.get("CANON_P58_DEEPSWE_TIM") == "1"
-      and values.get("CANON_P58_TIM_ADMITTED") == "1"
-      and values.get("CANON_P58_TIM_ARM") in ("native", "zero")
-      and values.get("CANON_P34_RUN_STAGE") == "full"
-  )
+  return deepswe_debug.p58_complete_batch_runtime_contract(values)
 
 
 def _validate_p58_full_batch_groups(
@@ -2333,7 +2327,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     p58_all_filtered = (
         p34_workload
-        and workload.contract_name == "p58-qwen4b-tim-128"
+        and deepswe_contract.is_p58_q4_tim_workload(workload)
         and float(np.asarray(
             result["loss_output"].primary_loss.denominator
         )) == 0.0

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 from pathlib import Path
 import re
 import shlex
@@ -30,6 +31,7 @@ CLEAN_WHITELIST_SHA256 = (
 CLEAN_ROWS = 1012
 PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
 HP_PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+SPLIT_PROFILE = "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
 TOPOLOGY = "4x4x8"
 WORKERS = 32
 ROLE_DP = 8
@@ -103,6 +105,55 @@ _SEAM_CAPTURE_BOUNDS = (1686, 2512, 3072, 3584, 4096)
 _RETIRED_DEVICE_PROBE_TRIGGER = "CANON_EXPECTED_SLICE_DEVICES"
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _TopologySpec:
+  selector: str
+  instance_type: str
+  workers: int
+  role_dp: int
+  role_tp: int
+  devices_per_role: int
+  local_trajectories: int
+  global_m: int
+  max_num_seqs: int
+  profile: str
+
+
+_TOPOLOGY_SPECS = {
+    "128": _TopologySpec(
+        selector="128",
+        instance_type=TOPOLOGY,
+        workers=WORKERS,
+        role_dp=ROLE_DP,
+        role_tp=ROLE_TP,
+        devices_per_role=64,
+        local_trajectories=16,
+        global_m=2048,
+        max_num_seqs=16,
+        profile=PROFILE,
+    ),
+    "64split": _TopologySpec(
+        selector="64split",
+        instance_type="4x4x4",
+        workers=16,
+        role_dp=4,
+        role_tp=8,
+        devices_per_role=32,
+        local_trajectories=32,
+        global_m=1024,
+        max_num_seqs=32,
+        profile=SPLIT_PROFILE,
+    ),
+}
+
+
+def _topology_spec(topology: str) -> _TopologySpec:
+  try:
+    return _TOPOLOGY_SPECS[topology]
+  except KeyError as exc:
+    raise ValueError("P58 topology must be exactly 128 or 64split") from exc
+
+
 def _service_containers(head: Mapping[str, Any]) -> list[dict[str, Any]]:
   return list(head.get("initContainers", [])) + list(head["containers"])
 
@@ -132,9 +183,11 @@ def _command(
     run_root: str,
     whitelist: str,
     sampler_is: bool = False,
+    topology: str = "128",
 ) -> tuple[str, ...]:
   if stage not in _STAGE_STEPS:
     raise ValueError("P58 admits only three-update or full")
+  spec = _topology_spec(topology)
   args = list(
       p34._command("three-update", run_root=run_root, whitelist=whitelist)
   )
@@ -146,9 +199,11 @@ def _command(
       "--reward_timeout_secs=1800": "--reward_timeout_secs=600",
       "--rollout_batch_timeout_secs=5400": "--rollout_batch_timeout_secs=3600",
       "--max_concurrency=64": f"--max_concurrency={MAX_CONCURRENCY}",
-      "--rollout_mesh_dp=16": "--rollout_mesh_dp=8",
-      "--train_mesh_dp=16": "--train_mesh_dp=8",
-      "--rollout_vllm_max_num_seqs=4": "--rollout_vllm_max_num_seqs=16",
+      "--rollout_mesh_dp=16": f"--rollout_mesh_dp={spec.role_dp}",
+      "--train_mesh_dp=16": f"--train_mesh_dp={spec.role_dp}",
+      "--rollout_vllm_max_num_seqs=4": (
+          f"--rollout_vllm_max_num_seqs={spec.max_num_seqs}"
+      ),
       "--max_steps=3": f"--max_steps={_STAGE_STEPS[stage]}",
   }
   for old, new in replacements.items():
@@ -200,7 +255,8 @@ def render(
     worker_nodepool: str,
     model_pvc: str,
     sandbox_nodepool: str | None = None,
-    instance_type: str = TOPOLOGY,
+    topology: str = "128",
+    instance_type: str | None = None,
     whitelist: str = CLEAN_WHITELIST,
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
     sampler_is: bool = False,
@@ -214,6 +270,18 @@ def render(
     raise ValueError("P58 admits only three-update or full")
   if arm not in _ARMS:
     raise ValueError("P58 arm must be native or zero")
+  spec = _topology_spec(topology)
+  if (
+      topology == "64split"
+      and instance_type is not None
+      and not instance_type.startswith(spec.instance_type)
+  ):
+    raise ValueError(
+        "P58 instance type must match the selected topology: "
+        f"topology={topology} expected={spec.instance_type} "
+        f"actual={instance_type}"
+    )
+  instance_type = instance_type or spec.instance_type
   if high_performance and (arm != "zero" or stage != "full"):
     raise ValueError("P58 high-performance is admitted only for Zero full")
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
@@ -224,6 +292,12 @@ def render(
       "off" if checked_vma_off_diagnostic else
       "on" if checked_vma_on_diagnostic else ""
   )
+  if topology == "64split" and (
+      high_performance or checked_vma_diagnostic or seam_localization
+  ):
+    raise ValueError(
+        "P58 64split has no admitted high-performance or diagnostic bundle"
+    )
   if checked_vma_diagnostic and (
       arm != "zero" or stage != "full" or high_performance
   ):
@@ -307,6 +381,8 @@ def render(
       else f"canon-p58-ds4b-{treatment}-"
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
   )
+  if topology == "64split":
+    name = name.replace("canon-p58-ds4b-", "canon-p58-ds4b-64s-", 1)
 
   if len(name) > 63:
     raise ValueError("rendered P58 JobSet name exceeds 63 characters")
@@ -316,7 +392,7 @@ def render(
       "canon.zero-tim/phase": "p58-deepswe-tim",
       "canon.zero-tim/stage": stage,
       "canon.zero-tim/arm": arm,
-      "canon.zero-tim/topology": "128",
+      "canon.zero-tim/topology": topology,
       "canon.zero-tim/fixed-lm-head": "1" if hp_bundle else "0",
       _TOKEN_TRANSPORT_LABEL: _TOKEN_TRANSPORT,
   })
@@ -400,8 +476,8 @@ def render(
       "maxRestarts": 0,
       "restartStrategy": "Recreate",
   }
-  p34._set_env(main, {
-      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else PROFILE,
+  rendered_env = {
+      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else spec.profile,
       "CANON_STATE": run_root,
       # TiTO is selected by the DeepSWE workload identity itself.  Keep the
       # identity in the raw JobSet as well as the sourced profile so a
@@ -446,13 +522,14 @@ def render(
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "R2E_K8S_QUEUE_NAME": queue_name,
       "NODE_SELECTOR_VAL": target_sandbox_nodepool,
-      "MIN_TOKEN_BUCKET": "2048",
+      "MIN_TOKEN_BUCKET": str(spec.global_m),
       "CANON_RUN_CMD": shlex.join(
           _command(
               stage,
               run_root=run_root,
               whitelist=whitelist,
               sampler_is=sampler_is,
+              topology=topology,
           )
       ),
       "CANON_RUN_LOG": f"{run_root}/run.log",
@@ -468,7 +545,10 @@ def render(
           else f"qwen3-4b-p58-{stage}"
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
-  })
+  }
+  if topology != "128":
+    rendered_env["CANON_P58_TOPOLOGY"] = topology
+  p34._set_env(main, rendered_env)
   if high_performance:
     p34._set_env(
         main, full_system_optimization_additions("deepswe-qwen4b")
@@ -553,8 +633,8 @@ def render(
     })
 
   worker = p34._worker(document)
-  worker["completions"] = WORKERS
-  worker["parallelism"] = WORKERS
+  worker["completions"] = spec.workers
+  worker["parallelism"] = spec.workers
   worker_template_metadata = worker["template"].setdefault("metadata", {})
   worker_template_annotations = worker_template_metadata.get("annotations", {})
   worker_template_annotations.pop(_EXCLUSIVE_TOPOLOGY_ANNOTATION, None)
@@ -570,7 +650,9 @@ def render(
     worker_pod["nodeSelector"][
         "cloud.google.com/gke-nodepool"
     ] = worker_nodepool
-  worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = TOPOLOGY
+  worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = (
+      spec.instance_type
+  )
   worker_container = p34._container(worker_pod["containers"], "pathways-worker")
   p34._replace_arg(
       worker_container["args"],
@@ -596,6 +678,7 @@ def render(
       worker_nodepool=worker_nodepool,
       cpu_nodepool=cpu_nodepool,
       sandbox_nodepool=sandbox_nodepool,
+      topology=topology,
       instance_type=instance_type,
       sampler_is=sampler_is,
       high_performance=high_performance,
@@ -631,6 +714,9 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "optimizer_resident": env["CANON_OPT_STATE_RESIDENT"],
       "optimizer_offload": env["CANON_P30_OPT_STATE_OFFLOAD"],
       "workers": p34._worker(document)["completions"],
+      "topology": document["metadata"]["labels"][
+          "canon.zero-tim/topology"
+      ],
   }
 
 
@@ -673,7 +759,8 @@ def validate(
     worker_nodepool: str,
     cpu_nodepool: str = _DEFAULT_CPU_NODEPOOL,
     sandbox_nodepool: str | None = None,
-    instance_type: str = TOPOLOGY,
+    topology: str = "128",
+    instance_type: str | None = None,
     sampler_is: bool = False,
     high_performance: bool = False,
     checked_vma_off_diagnostic: bool = False,
@@ -682,6 +769,14 @@ def validate(
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
+  spec = _topology_spec(topology)
+  if (
+      topology == "64split"
+      and instance_type is not None
+      and not instance_type.startswith(spec.instance_type)
+  ):
+    raise ValueError("P58 instance type drifted from selected topology")
+  instance_type = instance_type or spec.instance_type
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
     raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
   if seam_localization not in _SEAM_LOCALIZATION_MODES:
@@ -729,6 +824,10 @@ def validate(
       _TOKEN_TRANSPORT_LABEL
   ) != _TOKEN_TRANSPORT:
     raise ValueError("P58 DeepSWE token transport must be TiTO")
+  if document["metadata"]["labels"].get(
+      "canon.zero-tim/topology"
+  ) != topology:
+    raise ValueError("P58 topology label drifted from the selected topology")
   if actual_cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
     raise ValueError(
         f"P58 CPU head lost an admitted CPU node pool, got {actual_cpu_nodepool!r}"
@@ -756,13 +855,19 @@ def validate(
       or network.get("publishNotReadyAddresses") is not True
   ):
     raise ValueError("P58 Pathways routing requires JobSet Pod DNS")
-  if worker["backoffLimit"] != 0 or worker["completions"] != WORKERS or worker["parallelism"] != WORKERS:
-    raise ValueError("P58 worker count does not match 4x4x8")
+  if (
+      worker["backoffLimit"] != 0
+      or worker["completions"] != spec.workers
+      or worker["parallelism"] != spec.workers
+  ):
+    raise ValueError(
+        f"P58 worker count does not match {spec.instance_type}"
+    )
   if main["image"] != client_image or not p34._DIGEST_IMAGE.fullmatch(main["image"]):
     raise ValueError("P58 client image is not digest-pinned")
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
-      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else PROFILE,
+      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else spec.profile,
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
@@ -780,13 +885,18 @@ def validate(
       ),
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "MIN_TOKEN_BUCKET": "2048",
+      "MIN_TOKEN_BUCKET": str(spec.global_m),
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "R2E_K8S_QUEUE_NAME": document["metadata"]["labels"].get(
           _KUEUE_QUEUE_LABEL
       ),
       "NODE_SELECTOR_VAL": target_sandbox_nodepool,
   }
+  if topology == "128":
+    if "CANON_P58_TOPOLOGY" in env:
+      raise ValueError("historical P58-128 render must not add a topology flag")
+  else:
+    expected["CANON_P58_TOPOLOGY"] = topology
   if checked_vma_diagnostic:
     expected.update({
         "CANON_P58_CHECKED_VMA_DIAGNOSTIC": checked_vma_diagnostic,
@@ -892,11 +1002,11 @@ def validate(
       "--top_p=1.0",
       "--top_k=0",
       f"--seed={FIXED_SEED}",
-      "--rollout_mesh_dp=8",
-      "--rollout_mesh_tp=8",
-      "--train_mesh_dp=8",
-      "--train_mesh_tp=8",
-      "--rollout_vllm_max_num_seqs=16",
+      f"--rollout_mesh_dp={spec.role_dp}",
+      f"--rollout_mesh_tp={spec.role_tp}",
+      f"--train_mesh_dp={spec.role_dp}",
+      f"--train_mesh_tp={spec.role_tp}",
+      f"--rollout_vllm_max_num_seqs={spec.max_num_seqs}",
       "--max_num_batched_tokens=256",
       f"--max_concurrency={MAX_CONCURRENCY}",
       "--loss_agg_mode=sequence-mean-token-scale",
@@ -1019,7 +1129,9 @@ def validate(
   }
   if worker_env.get("PATHWAYS_HEAD") != address:
     raise ValueError("P58 worker PATHWAYS_HEAD lost the JobSet Pod DNS name")
-  if worker_pod["nodeSelector"].get("cloud.google.com/gke-tpu-topology") != TOPOLOGY:
+  if worker_pod["nodeSelector"].get(
+      "cloud.google.com/gke-tpu-topology"
+  ) != spec.instance_type:
     raise ValueError("P58 worker topology drifted")
   actual_worker_pool = worker_pod["nodeSelector"].get(
       "cloud.google.com/gke-nodepool"
@@ -1046,7 +1158,8 @@ def main() -> None:
   parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
   parser.add_argument("--sandbox-nodepool", default=None)
   parser.add_argument("--worker-nodepool", required=True)
-  parser.add_argument("--instance-type", default=TOPOLOGY)
+  parser.add_argument("--topology", choices=tuple(_TOPOLOGY_SPECS), default="128")
+  parser.add_argument("--instance-type", default=None)
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", default=CLEAN_WHITELIST)
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
@@ -1071,6 +1184,7 @@ def main() -> None:
       cpu_nodepool=args.cpu_nodepool,
       sandbox_nodepool=args.sandbox_nodepool,
       worker_nodepool=args.worker_nodepool,
+      topology=args.topology,
       instance_type=args.instance_type,
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
@@ -1098,6 +1212,7 @@ def main() -> None:
   print(
       "P58_DEEPSWE_TIM_RENDER_PASS "
       f"arm={args.arm} stage={args.stage} recipe={recipe} "
+      f"topology={args.topology} "
       "transport=token-in-token-out "
       f"output={args.output}"
   )

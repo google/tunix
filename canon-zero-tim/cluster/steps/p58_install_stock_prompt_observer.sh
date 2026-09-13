@@ -5,8 +5,10 @@
 set -euo pipefail
 source "$CANON_STATE/env.sh"
 
-production_native="$([ "${CANON_PROFILE_FILE:-}" = \
-     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] && \
+production_native="$({ [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] || \
+   [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env" ]; } && \
    [ "${CANON_P34_DEEPSWE:-}" = "1" ] && \
    [ "${CANON_P58_DEEPSWE_TIM:-}" = "1" ] && \
    [ "${CANON_P58_TIM_ADMITTED:-}" = "1" ] && \
