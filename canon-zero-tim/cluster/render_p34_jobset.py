@@ -393,6 +393,16 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "CANON_LOGPROB_M": "256",
       "CANON_VJP2_MAX_SEQS": "1",
       "NODE_SELECTOR_VAL": cpu_nodepool,
+      # R2E sandboxes are bare Pods created by the training process, not Job
+      # children, so Kueue's plain-Pod integration sees them individually. The
+      # cluster runs with manageJobsWithoutQueueName=true and does not exclude
+      # this namespace, so an unlabelled sandbox Pod would be managed with no
+      # LocalQueue to admit it into and would stay gated. Put them in the same
+      # queue as the training job, which is what render_p58_deepswe_tim.py
+      # already does.
+      "R2E_K8S_QUEUE_NAME": document["metadata"]["labels"].get(
+          "kueue.x-k8s.io/queue-name", ""
+      ),
       "R2E_ACTIVE_DEADLINE_SECONDS": "5100",
       "R2E_POD_START_TIMEOUT_SECONDS": "1200",
       "R2E_POD_DELETE_TIMEOUT_SECONDS": "300",

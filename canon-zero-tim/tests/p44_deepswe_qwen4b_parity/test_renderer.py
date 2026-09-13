@@ -199,6 +199,22 @@ class P44RendererTest(unittest.TestCase):
           sandbox_nodepool="sandbox-pool",
       )
 
+  def test_sandbox_pods_inherit_the_parent_jobset_queue(self):
+    # R2E sandboxes are bare Pods, so Kueue's plain-Pod integration sees them
+    # one by one. The cluster runs manageJobsWithoutQueueName=true, so an
+    # unlabelled sandbox Pod would be managed with no LocalQueue to admit it
+    # into. The queue name must therefore reach the trainer through the env.
+    for topology in ("64", "128"):
+      with self.subTest(topology=topology):
+        document = self._render(topology)
+        parent_queue = document["metadata"]["labels"][
+            "kueue.x-k8s.io/queue-name"
+        ]
+        self.assertTrue(parent_queue)
+        self.assertEqual(
+            renderer.p34._env(document)["R2E_K8S_QUEUE_NAME"], parent_queue
+        )
+
   def test_invalid_topology_and_unbounded_stage_are_rejected(self):
     with self.assertRaisesRegex(ValueError, "exactly 64 or 128"):
       self._render("256")
