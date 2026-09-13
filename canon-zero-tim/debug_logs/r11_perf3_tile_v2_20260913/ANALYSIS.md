@@ -20,23 +20,26 @@ Step-index-aligned comparison. Both runs use the same data split, the same
 See `step_comparison.md` for the generated table and
 `raw/r11_step_times.json` / `raw/r10_baseline_step_times.json` for the source data.
 
-| step | r11 s | r10 s | gain | r11 solve | r10 solve |
-|---:|---:|---:|---:|---:|---:|
-| 0 | 1927.8 | 2979.0 | 35.3% | 0.176 | 0.223 |
-| 1 | 539.1 | 1284.7 | 58.0% | 0.227 | 0.195 |
-| 2 | 512.5 | 1398.0 | 63.3% | 0.176 | 0.215 |
-| 3 | 523.7 | 1439.1 | 63.6% | 0.266 | 0.207 |
-| 4 | 555.6 | 1582.0 | 64.9% | 0.262 | 0.227 |
-| 5 | 617.3 | 1574.4 | 60.8% | 0.223 | 0.242 |
-| 6 | 573.1 | 1708.9 | 66.5% | 0.375 | 0.316 |
-| 7 | 575.5 | 1525.1 | 62.3% | 0.293 | 0.281 |
-| 8 | 634.0 | 1657.9 | 61.8% | 0.230 | 0.293 |
+| step | r11 s | r10 s | gain | r11 solve | r10 solve | note |
+|---:|---:|---:|---:|---:|---:|---|
+| 0 | 1927.8 | 2979.0 | 35.3% | 0.176 | 0.223 | compile |
+| 1 | 539.1 | 1284.7 | 58.0% | 0.227 | 0.195 | |
+| 2 | 512.5 | 1398.0 | 63.3% | 0.176 | 0.215 | |
+| 3 | 523.7 | 1439.1 | 63.6% | 0.266 | 0.207 | |
+| 4 | 555.6 | 1582.0 | 64.9% | 0.262 | 0.227 | |
+| 5 | 617.3 | 1574.4 | 60.8% | 0.223 | 0.242 | |
+| 6 | 573.1 | 1708.9 | 66.5% | 0.375 | 0.316 | |
+| 7 | 575.5 | 1525.1 | 62.3% | 0.293 | 0.281 | |
+| 8 | 634.0 | 1657.9 | 61.8% | 0.230 | 0.293 | |
+| 9 | 588.2 | 1848.6 | 68.2% | 0.297 | 0.293 | |
+| 10 | 766.6 | 2079.8 | 63.1% | 0.324 | 0.352 | **audit ON** |
+| 11 | 640.6 | 2302.9 | 72.2% | 0.230 | 0.281 | |
+| 12 | 594.5 | 2146.1 | 72.3% | 0.262 | 0.297 | |
 
-Steady state (step >= 1): mean **62.6%**, min 58.0%, max 66.5%, n=8.
+Steady state (step >= 1): mean **64.7%**, min 58.0%, max 72.3%, n=12.
 
-Solve ratio is not degraded: r11 is higher than r10 at steps 1, 3, 4, 6, 7 and
-lower at steps 2, 5, 8. Step 0 differs (0.176 vs 0.223), so the two runs are not
-bitwise reproductions of each other. That is expected: this wave includes
+Solve ratio is not degraded. Step 0 differs (0.176 vs 0.223), so the two runs are
+not bitwise reproductions of each other. That is expected: this wave includes
 `CANON_DP_REDUCE_ONCE` and `CANON_P32_LENGTH_SORT`, which change reduction order,
 and vLLM continuous batching is itself nondeterministic in request ordering.
 
@@ -120,12 +123,52 @@ r10 step-147 reference: `p32_vag_reverse 476.4s`, `rescore_b 230.9s`, `weight_sy
 p32 group cadence shows the compile clearly: group1->2 **421 s**, 2->3 **166 s**,
 3->4 31 s, then steady **2-5 s/group**; groups 4->30 (26 groups) total only **71 s**.
 
-### Attribution is still open
+### Attribution, resolved at step 10
 
 r10 has no `CANON_ALIGNMENT_AUDIT_EVERY`, so it audits on every step while r11
-audits only 1 step in 10. The r11 step-0 audit cost (426.3 s) is compile-inflated
-and cannot be used as the steady-state audit cost. Separating "tile v2 gain" from
-"audit-skip gain" requires the r11 step-10 audit, which runs compile-free.
+audits 1 step in 10. Separating the two effects needs a compile-free audit step,
+which is step 10 (`raw/step10_audit_evidence.log`):
+
+```
+[PERF] step=10 stage=trainer_old seconds=  2.985 rows=256
+[PERF] step=10 stage=rescore_b   seconds= 71.005 rows=256
+[PERF] step=10 stage=weight_sync seconds=  9.797
+[step 10] train_solve=0.324 ... time=766.6s
+```
+
+`trainer_old` in steady state is **2.985 s** against **349.0 s** at step 0, so
+**99.1% of the step-0 figure was compile**. Using step 0 would have overstated the
+audit cost by 5.8x. The true steady-state audit cost is `2.985 + 71.005 = 74.0 s`,
+not 426.3 s.
+
+| | s |
+|---|---:|
+| r11 non-audit steps (8, 9) | 634.0, 588.2 -> mean **611.1** |
+| r11 audit step (10) | **766.6** |
+| net cost of auditing | **+155.5** (74.0 in the two `[PERF]` stages, the remaining ~81 in `CANON_ALIGN_PRE` host sidecar attach and related work) |
+| r10 same range (8, 9, 10) | 1657.9, 1848.6, 2079.8 -> mean **1862.1** |
+
+Averaged over one 10-step cycle:
+
+```
+r11 as configured        = (9 * 611.1 + 766.6) / 10 = 626.7 s
+r11 if it audited always =                            766.6 s   (same policy as r10)
+r10                      =                           1862.1 s
+```
+
+| source of gain | percentage points |
+|---|---:|
+| **tile v2 + backward knives** (`DP_REDUCE_ONCE`, `P32_LENGTH_SORT`) | **58.8** |
+| audit skipping (`AUDIT_EVERY=10`) | 7.5 |
+| total | 66.3 |
+
+**About 89% of the gain (58.8 of 66.3 points) comes from tile v2 and the backward
+knives themselves.** Even if the audit were restored to r10's every-step policy,
+r11 would still be 58.8% faster. Step 10 against step 10 directly:
+766.6 s vs 2079.8 s, 63.1%.
+
+For reference, `rescore_b` in steady state is 71.0 s while r10 at step 147 reports
+230.9 s. Those are different step indices and the ratio must not be quoted.
 
 ---
 
@@ -329,4 +372,5 @@ restart or configuration change.
 | `raw/engine_driver.log` | 88 `[ENGINE_DRIVER]` windows |
 | `raw/pathtrace_tile_receipts.log` | 33 unique tile receipts (16 matmul, 17 rmsnorm) |
 | `raw/stage_and_step_timings.log` | `[PERF]`, `[step N]`, audit, p32 group, weight-sync, rollout-metric lines |
+| `raw/step10_audit_evidence.log` | the compile-free step-10 audit stages used for the attribution in section 3 |
 | `raw/r11_step_lines.log` | `[step N]` lines still retrievable after rotation |

@@ -1,0 +1,16 @@
+[CANON_ALIGN] audit=skip step=9 every=10 rescore_b=0 trainer_old=0
+2026-09-13 04:30:02 - INFO - [absl] [step 9] train_reward=0.297 train_solve=0.297 n=256 adv_abs_mean=0.257 compl_len=612.8 raw_compl_len=1801.5 trunc_ratio=0.000 time=588.2s
+[PERF] step=9 stage=weight_sync seconds=9.809
+[PERF] step=10 stage=trainer_old seconds=2.985 rows=256
+[PERF] step=10 stage=rescore_b seconds=71.005 rows=256
+2026-09-13 04:43:02 - INFO - [absl] [step 10] train_reward=0.324 train_solve=0.324 n=256 adv_abs_mean=0.340 compl_len=633.1 raw_compl_len=1780.3 trunc_ratio=0.000 time=766.6s
+[PERF] step=10 stage=weight_sync seconds=9.797
+[CANON_ALIGN] audit=skip step=11 every=10 rescore_b=0 trainer_old=0
+2026-09-13 04:53:56 - INFO - [absl] [step 11] train_reward=0.230 train_solve=0.230 n=256 adv_abs_mean=0.267 compl_len=684.9 raw_compl_len=1904.4 trunc_ratio=0.000 time=640.6s
+[PERF] step=11 stage=weight_sync seconds=9.506
+[CANON_ALIGN] audit=skip step=12 every=10 rescore_b=0 trainer_old=0
+2026-09-13 05:04:04 - INFO - [absl] [step 12] train_reward=0.262 train_solve=0.262 n=256 adv_abs_mean=0.162 compl_len=664.7 raw_compl_len=1820.3 trunc_ratio=0.000 time=594.5s
+[PERF] step=12 stage=weight_sync seconds=9.857
+[CANON_ALIGN] audit=skip step=13 every=10 rescore_b=0 trainer_old=0
+2026-09-13 05:14:39 - INFO - [absl] [step 13] train_reward=0.367 train_solve=0.367 n=256 adv_abs_mean=0.225 compl_len=669.7 raw_compl_len=1663.5 trunc_ratio=0.000 time=621.7s
+[PERF] step=13 stage=weight_sync seconds=9.702
