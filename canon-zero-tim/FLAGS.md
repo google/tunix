@@ -308,6 +308,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_REQUIRE_XPROF | 退役:P59 backward A/B 证据发射器(`cluster/render_p59_backward_ab.py` + `tasks/p59-dp16-parallel-backward/scripts/run_and_persist.sh` 及其两个测试)删除;三名零运行时读者;`CANON_P59_KIND` 保留 | wrapup_v2_default W3.8,2026-09-13 |
 | CANON_P33_DP / CANON_P33_DP4 / CANON_P33_EVAL / CANON_P33_WANDB / CANON_P57_EVALUATION | 账本订正:前四个是日志 marker(迁 MARKERS),第五个是派生局部量;从未是可设置的环境名 | wrapup_v2_default W3.10,2026-09-13 |
 | CANON_CLUSTER / CANON_ENV / CANON_OUT | 退役:`CANON_CLUSTER` 的唯一赋值(`cluster/entrypoint.sh`)删除、无读者;`CANON_ENV`/`CANON_OUT` 只是 `run_p35_onehost.sh` 的本地 bash 变量,从未是环境合同名 | wrapup_v2_default W3.11,2026-09-13 |
+| CANON_L3_A3_DIAG | 退役:`compute_per_token_diagnostics` 的环境门删除;方法本身只有 adapter 测试调用、无生产入口,保留为测试用诊断 | wrapup_v2_default W3.12,2026-09-13 |
 
 ## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
 
@@ -425,7 +426,6 @@ CANON_GSM8K_VANILLA
 CANON_IN_CONTAINER
 CANON_KV_PACKING
 CANON_KV_UNIFIED
-CANON_L3_A3_DIAG
 CANON_LOCAL_PROMPTS
 CANON_LOCAL_TRAJECTORIES
 CANON_LOGPROB_M
@@ -782,7 +782,7 @@ CANON_XPROF_STEP_IMMEDIATE_DELAY
 CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 447 settable names (appendix inventory above; exclusions: none).
+Count: 446 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

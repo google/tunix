@@ -5979,24 +5979,21 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
       value_and_grad = jax.jit(jax.value_and_grad(loss))
       primal, grad = value_and_grad(source)
       primal_repeat, grad_repeat = value_and_grad(source)
-      with mock.patch.dict(
-          os.environ, {"CANON_L3_A3_DIAG": "1"}, clear=False
-      ):
-        diag_logps, diag_entropy, diagnostics = jax.jit(
-            lambda st: adapter.compute_per_token_diagnostics(
-                graphdef=None,
-                state=st,
-                prompt_tokens=jnp.asarray(
-                    [[0, 1, 2], [0, 2, 1]], jnp.int32
-                ),
-                completion_tokens=jnp.asarray(
-                    [[3, 4, 0], [4, 3, 0]], jnp.int32
-                ),
-                pad_id=0,
-                eos_id=7,
-                temperature=1.0,
-            )
-        )(source)
+      diag_logps, diag_entropy, diagnostics = jax.jit(
+          lambda st: adapter.compute_per_token_diagnostics(
+              graphdef=None,
+              state=st,
+              prompt_tokens=jnp.asarray(
+                  [[0, 1, 2], [0, 2, 1]], jnp.int32
+              ),
+              completion_tokens=jnp.asarray(
+                  [[3, 4, 0], [4, 3, 0]], jnp.int32
+              ),
+              pad_id=0,
+              eos_id=7,
+              temperature=1.0,
+          )
+      )(source)
       self.assertEqual(diag_logps.shape, (2, 3))
       self.assertEqual(diag_entropy.shape, (2, 3))
       self.assertEqual(diagnostics["raw_rows"].shape, (2, 3, 8))

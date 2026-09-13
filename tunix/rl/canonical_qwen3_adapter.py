@@ -15560,10 +15560,6 @@ class Qwen3EngineForwardAdapter:
   ):
     """Diagnostic-only forward that exports already-live action-logit rows."""
     del graphdef, eos_id, segment_positions
-    if os.environ.get("CANON_L3_A3_DIAG", "") != "1":
-      raise FunctionalMappingError(
-          "compute_per_token_diagnostics requires CANON_L3_A3_DIAG=1"
-      )
     if images is not None:
       raise FunctionalMappingError("canonical Qwen3 adapter is text-only")
     if segment_ids is not None:
