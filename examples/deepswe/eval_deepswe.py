@@ -189,7 +189,7 @@ parser_cli.add_argument(
 parser_cli.add_argument(
     "--timeout",
     type=float,
-    default=float(os.getenv("TIMEOUT", "600")),
+    default=float(os.getenv("TIMEOUT", "3600")),
     help="Timeout in seconds for a single trajectory",
 )
 parser_cli.add_argument(
@@ -618,7 +618,20 @@ if MODEL_SOURCE == "maxtext":
 # ========================== Dataset ==========================
 
 logger.info("Loading dataset %s split=%s ...", DATASET_NAME, DATASET_SPLIT)
-if DATASET_NUM_PROC > 1:
+if DATASET_NAME.startswith("gs://") or os.path.isdir(DATASET_NAME):
+  try:
+    import datasets as datasets_lib
+    dataset = datasets_lib.load_from_disk(DATASET_NAME)
+    if isinstance(dataset, datasets_lib.DatasetDict):
+      dataset = dataset[DATASET_SPLIT]
+  except Exception as e:
+    logger.warning("load_from_disk failed (%s), falling back to load_dataset...", e)
+    dataset = load_dataset(
+        DATASET_NAME,
+        split=DATASET_SPLIT,
+        cache_dir=DATASET_CACHE,
+    )
+elif DATASET_NUM_PROC > 1:
   try:
     dataset = load_dataset(
         DATASET_NAME,
@@ -656,6 +669,12 @@ def _normalize_entry(entry):
   normalized = {
       k: json.dumps(v) if isinstance(v, list) else v for k, v in entry.items()
   }
+  if "instance_id" not in normalized or not normalized["instance_id"]:
+    normalized["instance_id"] = (
+        entry.get("commit_hash")
+        or (f"{entry.get('repo_name', 'repo')}__{entry.get('commit_hash', '')[:8]}"
+            if entry.get("commit_hash") else None)
+    )
   if DOCKER_IMAGE_PREFIX and normalized.get("docker_image"):
     # If image is from swebench-verified and prefix does not target swebench, keep original
     if "swebench-verified" in normalized["docker_image"] and "swebench-verified" not in DOCKER_IMAGE_PREFIX:
@@ -1196,7 +1215,7 @@ def model_call(
     **kwargs,
 ):
   """Model inference via tunix sampler."""
-  max_gen_steps = max_generation_steps or MAX_RESPONSE_LENGTH
+  max_gen_steps = min(max_generation_steps or MAX_RESPONSE_LENGTH, 4096)
   pair_index = None
   instance_id = "unknown"
   if env_unused is not None:
