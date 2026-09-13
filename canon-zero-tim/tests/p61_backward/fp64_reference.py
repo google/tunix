@@ -19,6 +19,7 @@ usage: fp64_reference.py --capture-a A/p61_numerical [--capture-b B/p61_numerica
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -412,6 +413,15 @@ def reference_gradient(root: Path, config, rows_per_step: int, max_rows: int | N
     else:
       jax.tree.map(lambda acc, g: np.add(acc, np.asarray(g, dtype=np.float64), out=acc), accumulator, grads)
     del grads
+    if trim_rows:
+      # Every trimmed row is a new shape, so the jit cache never serves a
+      # second call; on Qwen3-8B each retained float64 executable and its
+      # workspace cost tens of GB and the 16-row probe reached the OOM
+      # killer at row 15 (anon-rss 450 GB on a 440 GB host, 2026-09-13).
+      # Dropping the caches between rows changes no arithmetic: the same
+      # function is recompiled for the next shape either way.
+      jax.clear_caches()
+      gc.collect()
     log(f"rows {start}..{stop - 1} unreduced_sum={float(value):.9e} elapsed={time.perf_counter() - started:.0f}s")
   accumulator = jax.tree.map(lambda g: np.multiply(g, scale, out=g), accumulator)  # in place, numpy float64
   flat = jax.tree_util.tree_flatten_with_path(accumulator, is_leaf=_is_variable)[0]
