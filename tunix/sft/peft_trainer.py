@@ -18,7 +18,6 @@ from collections.abc import Iterable, Sequence
 import contextlib
 import dataclasses
 import functools
-import gc
 import math
 import os
 import time
@@ -651,13 +650,11 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_step_impl = None
     self._jitted_precomputed_gradient_scaled_step_impl = None
     self._jitted_precomputed_gradient_adopt_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
     self._jitted_precomputed_gradient_discard_impl = None
     self._jitted_precomputed_gradient_adopted_discard_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
     self._jitted_precomputed_gradient_adopted_discard_fn = None
@@ -729,13 +726,11 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_step_impl = None
     self._jitted_precomputed_gradient_scaled_step_impl = None
     self._jitted_precomputed_gradient_adopt_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
     self._jitted_precomputed_gradient_discard_impl = None
     self._jitted_precomputed_gradient_adopted_discard_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
     self._jitted_precomputed_gradient_adopted_discard_fn = None
@@ -748,20 +743,6 @@ class PeftTrainer:
     """Accumulates one externally computed gradient without updating."""
     grad_accumulator.add(grads, denom=jnp.asarray(1.0, jnp.float32))
     return _precomputed_gradient_norm(grads)
-
-  def _precomputed_gradient_pair_step(
-      self,
-      grad_accumulator: GradientAccumulator,
-      left: Any,
-      right: Any,
-      multiplier: ArrayLike,
-  ) -> ArrayLike:
-    """Adds one materialization-free `(left + right) * multiplier` pair."""
-    paired = jax.tree.map(
-        lambda a, b: (a + b) * multiplier.astype(a.dtype), left, right
-    )
-    grad_accumulator.add(paired, denom=jnp.asarray(1.0, jnp.float32))
-    return _precomputed_gradient_norm(paired)
 
   def _precomputed_gradient_scaled_step(
       self,
@@ -1244,60 +1225,6 @@ class PeftTrainer:
     self._p28_precomputed_microstep += 1
     return norm
 
-  def accumulate_precomputed_gradient_pair_microbatch(
-      self,
-      left: Any,
-      right: Any,
-      multiplier: ArrayLike,
-      *,
-      microbatch_index: int,
-  ) -> ArrayLike:
-    """Fuses pair sum/scale into the existing donated accumulator update."""
-    self._validate_precomputed_gradient_contract()
-    if os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") != "1":
-      raise ValueError(
-          "P30 fused pair accumulation requires its explicit env gate"
-      )
-    if self._jitted_precomputed_gradient_pair_step_fn is None:
-      if self._jitted_precomputed_gradient_pair_step_impl is None:
-        self._jitted_precomputed_gradient_pair_step_impl = nnx.jit(
-            self._precomputed_gradient_pair_step,
-            donate_argnames=("grad_accumulator",),
-        )
-      self._jitted_precomputed_gradient_pair_step_fn = functools.partial(
-          nnx.cached_partial(
-              self._jitted_precomputed_gradient_pair_step_impl,
-              self.grad_accumulator,
-          )
-      )
-    if microbatch_index != self._p28_precomputed_microstep:
-      raise ValueError(
-          "P30 pair gradient microbatch cadence mismatch: "
-          f"expected {self._p28_precomputed_microstep}, got {microbatch_index}"
-      )
-    accumulate_start = time.perf_counter()
-    norm = self._jitted_precomputed_gradient_pair_step_fn(
-        left, right, jnp.asarray(multiplier, jnp.float32)
-    )
-    accumulate_call_done = time.perf_counter()
-    norm.block_until_ready()
-    if os.environ.get("CANON_PERF_LOG", "1") != "0":
-      accumulate_done = time.perf_counter()
-      print(
-          "[PERF] stage=grad_accumulate seconds=%.3f microbatch=%d"
-          " variant=pair call=%.3f block=%.3f"
-          % (
-              accumulate_done - accumulate_start,
-              microbatch_index,
-              accumulate_call_done - accumulate_start,
-              accumulate_done - accumulate_call_done,
-          ),
-          flush=True,
-      )
-    self._iter_steps += 1
-    self._p28_precomputed_microstep += 1
-    return norm
-
   def accumulate_precomputed_scaled_gradient_microbatch(
       self,
       gradients: Any,
@@ -1498,13 +1425,6 @@ class PeftTrainer:
     if self._jitted_precomputed_gradient_commit_impl is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
       donate_argnames = ("optimizer", "grad_accumulator")
-      if os.environ.get("CANON_P30_DONATE_MODEL", "") == "1":
-        donate_argnames = ("model",) + donate_argnames
-        print(
-            "[P30.G2] DONATE_MODEL on "
-            "alias_contract=model,optimizer,grad_accumulator",
-            flush=True,
-        )
       self._jitted_precomputed_gradient_commit_impl = nnx.jit(
           self._precomputed_gradient_commit,
           donate_argnames=donate_argnames,
@@ -1679,15 +1599,7 @@ class PeftTrainer:
     # compiled executable caches remain intact.
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
-    if os.environ.get("CANON_P30_POST_COMMIT_GC", "") == "1":
-      collected = gc.collect()
-      print(
-          "[P30.G2] POST_COMMIT_GC on "
-          f"collected={collected} cached_bindings=cleared",
-          flush=True,
-      )
     self._train_steps += 1
     self._p28_precomputed_microstep = 0
     return norm
@@ -1728,7 +1640,6 @@ class PeftTrainer:
     # the transformed implementation and executable cache remain reusable.
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
     self._p28_precomputed_microstep = 0
@@ -1761,7 +1672,6 @@ class PeftTrainer:
       )
       self._jitted_precomputed_gradient_step_fn = None
       self._jitted_precomputed_gradient_scaled_step_fn = None
-      self._jitted_precomputed_gradient_pair_step_fn = None
       self._jitted_precomputed_gradient_commit_fn = None
       self._jitted_precomputed_gradient_discard_fn = None
       self._jitted_precomputed_gradient_adopted_discard_fn = None
@@ -1789,7 +1699,6 @@ class PeftTrainer:
     denominator = self._jitted_precomputed_gradient_adopted_discard_fn()
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
-    self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
     self._jitted_precomputed_gradient_discard_fn = None
     self._jitted_precomputed_gradient_adopted_discard_fn = None

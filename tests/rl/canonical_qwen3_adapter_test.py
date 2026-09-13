@@ -3785,7 +3785,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           "CANON_OPT_STATE_RESIDENT": "0",
           "CANON_P30_OPT_STATE_OFFLOAD": "1",
         "CANON_P30_SPARSE_GRAD_ASSEMBLY": "1",
-        "CANON_P30_FUSED_PAIR_ACCUMULATION": "0",
         "CANON_P30_REUSE_SEGMENTED_ENGINE": "1",
         "CANON_P30_RELEASE_CAPTURED_STATE": "1",
         "CANON_P30_RESHARD_ACCUMULATOR": "1",
@@ -5628,43 +5627,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         strict=True,
     ):
       np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
-
-    streamed_pairs = []
-    with (
-        mock.patch.dict(os.environ, g6_env, clear=False),
-        mock.patch.object(
-            canonical_qwen3_adapter,
-            "map_trainer_state_to_engine_leaves",
-            return_value=mapped,
-        ),
-    ):
-      pair_result = adapter.segmented_grpo_value_and_grad(
-          trainer_state=engine_leaves,
-          train_example=train_example,
-          algo_config=algo_config,
-          pad_id=0,
-          eos_id=2,
-          gradient_pair_sink=(
-              lambda index, left, right, multiplier: streamed_pairs.append(
-                  (index, left, right, multiplier)
-              )
-          ),
-      )
-    self.assertIs(
-        adapter._p30_segmented_engine, cached_segmented  # pylint: disable=protected-access
-    )
-    self.assertEqual(pair_result["gradient_microbatches"], 4)
-    self.assertEqual([item[0] for item in streamed_pairs], [0, 1, 2, 3])
-    for (_, left, right, multiplier), (_, expected) in zip(
-        streamed_pairs, streamed, strict=True
-    ):
-      actual = jax.tree.map(
-          lambda a, b: (a + b) * multiplier.astype(a.dtype), left, right
-      )
-      for actual_leaf, expected_leaf in zip(
-          jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
-      ):
-        np.testing.assert_array_equal(actual_leaf, expected_leaf)
 
     # P31 keeps the same two-trajectory math but grows the real batch from
     # 8 to 32 trajectories and therefore streams 16 accumulator steps.

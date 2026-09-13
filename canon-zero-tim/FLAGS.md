@@ -309,6 +309,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | CANON_P33_DP / CANON_P33_DP4 / CANON_P33_EVAL / CANON_P33_WANDB / CANON_P57_EVALUATION | 账本订正:前四个是日志 marker(迁 MARKERS),第五个是派生局部量;从未是可设置的环境名 | wrapup_v2_default W3.10,2026-09-13 |
 | CANON_CLUSTER / CANON_ENV / CANON_OUT | 退役:`CANON_CLUSTER` 的唯一赋值(`cluster/entrypoint.sh`)删除、无读者;`CANON_ENV`/`CANON_OUT` 只是 `run_p35_onehost.sh` 的本地 bash 变量,从未是环境合同名 | wrapup_v2_default W3.11,2026-09-13 |
 | CANON_L3_A3_DIAG | 退役:`compute_per_token_diagnostics` 的环境门删除;方法本身只有 adapter 测试调用、无生产入口,保留为测试用诊断 | wrapup_v2_default W3.12,2026-09-13 |
+| CANON_P30_DONATE_MODEL / CANON_P30_FUSED_PAIR_ACCUMULATION / CANON_P30_POST_COMMIT_GC | 退役:三个从未准入的 P30 臂(model 捐赠、成对累加、提交后 gc)连同 peft_trainer 的成对累加路径、learner 的 consume_pair、adapter 的 gradient_pair_sink 一起删除;所有 profile/载具/合同里的 `=0` 钉子同 CL 停写 | wrapup_v2_default W3.7,2026-09-13 |
 
 ## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
 
@@ -462,10 +463,7 @@ CANON_P28_SEGMENTED_TRAIN
 CANON_P28_SEGMENTED_VJP
 CANON_P29_FULL_TRAIN
 CANON_P29_LOG_DIR
-CANON_P30_DONATE_MODEL
-CANON_P30_FUSED_PAIR_ACCUMULATION
 CANON_P30_OPT_STATE_OFFLOAD
-CANON_P30_POST_COMMIT_GC
 CANON_P30_RELEASE_CAPTURED_STATE
 CANON_P30_RESHARD_ACCUMULATOR
 CANON_P30_REUSE_SEGMENTED_ENGINE
@@ -782,7 +780,7 @@ CANON_XPROF_STEP_IMMEDIATE_DELAY
 CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 446 settable names (appendix inventory above; exclusions: none).
+Count: 443 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

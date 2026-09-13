@@ -13601,7 +13601,6 @@ class Qwen3EngineForwardAdapter:
       pad_id,
       eos_id,
       gradient_microbatch_sink=None,
-      gradient_pair_sink=None,
   ):
     """Evaluates and reverses the complete GRPO loss without an outer JIT."""
     del eos_id
@@ -13624,10 +13623,7 @@ class Qwen3EngineForwardAdapter:
           "P28 complete loss requires exactly one of "
           "CANON_P28_G5C_ONLY=1 or CANON_P28_G6_UPDATE=1"
       )
-    num_sinks = sum(
-        sink is not None
-        for sink in (gradient_microbatch_sink, gradient_pair_sink)
-    )
+    num_sinks = int(gradient_microbatch_sink is not None)
     if (g5c_only and num_sinks != 0) or (g6_update and num_sinks != 1):
       raise FunctionalMappingError(
           "P28 G5c must retain one aggregate gradient; G6 must provide "
@@ -14019,7 +14015,7 @@ class Qwen3EngineForwardAdapter:
             int(np.asarray(jnp.count_nonzero(value)))
             for value in cache_leaves
         )
-      if gradient_microbatch_sink is None and gradient_pair_sink is None:
+      if gradient_microbatch_sink is None:
         if trainer_gradients is None:
           trainer_gradients = one_trainer_gradient
         elif batched_report:
@@ -14054,53 +14050,45 @@ class Qwen3EngineForwardAdapter:
           # The stock accumulator averages all micro-step gradients. Each
           # two-trajectory contribution is multiplied by that count so that
           # mean(N * scale * pair_sum) == scale * full-batch sum.
-          if gradient_pair_sink is not None:
-            gradient_pair_sink(
-                emitted_microbatches,
-                pair_gradient,
-                one_trainer_gradient,
-                scale * jnp.asarray(float(gradient_microbatches), scale.dtype),
+          if batched_report:
+            pair_gradient = self._batched_report_add(
+                pair_gradient, one_trainer_gradient
             )
           else:
-            if batched_report:
-              pair_gradient = self._batched_report_add(
-                  pair_gradient, one_trainer_gradient
-              )
-            else:
-              jitted_pair = (
-                  self._batched_report_add(
-                      pair_gradient, one_trainer_gradient
-                  )
-                  if report_verify
-                  else None
-              )
-              pair_gradient = jax.tree.map(
-                  lambda total, value: total + value,
-                  pair_gradient,
-                  one_trainer_gradient,
-              )
-              if jitted_pair is not None:
-                fault = self._p50_rev_verify(
-                    "report pair-accumulate", index, pair_gradient, jitted_pair
+            jitted_pair = (
+                self._batched_report_add(
+                    pair_gradient, one_trainer_gradient
                 )
-                if fault is not None:
-                  raise FunctionalMappingError(
-                      f"P50 batched-report verify mismatch: {fault}"
-                  )
-            if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
-              # scale must travel as an argument: a closure would embed the
-              # array as a trace constant and force a retrace per value.
-              micro_gradient = fused_micro_scale(
-                  pair_gradient, scale, gradient_microbatches
+                if report_verify
+                else None
+            )
+            pair_gradient = jax.tree.map(
+                lambda total, value: total + value,
+                pair_gradient,
+                one_trainer_gradient,
+            )
+            if jitted_pair is not None:
+              fault = self._p50_rev_verify(
+                  "report pair-accumulate", index, pair_gradient, jitted_pair
               )
-            else:
-              micro_gradient = jax.tree.map(
-                  lambda value: value * scale * jnp.asarray(
-                      float(gradient_microbatches), value.dtype
-                  ),
-                  pair_gradient,
-              )
-            gradient_microbatch_sink(emitted_microbatches, micro_gradient)
+              if fault is not None:
+                raise FunctionalMappingError(
+                    f"P50 batched-report verify mismatch: {fault}"
+                )
+          if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
+            # scale must travel as an argument: a closure would embed the
+            # array as a trace constant and force a retrace per value.
+            micro_gradient = fused_micro_scale(
+                pair_gradient, scale, gradient_microbatches
+            )
+          else:
+            micro_gradient = jax.tree.map(
+                lambda value: value * scale * jnp.asarray(
+                    float(gradient_microbatches), value.dtype
+                ),
+                pair_gradient,
+            )
+          gradient_microbatch_sink(emitted_microbatches, micro_gradient)
           emitted_microbatches += 1
           pair_gradient = None
       reports.append({

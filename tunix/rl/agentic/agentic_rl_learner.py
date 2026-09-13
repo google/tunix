@@ -1752,19 +1752,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     micro_norms = []
     reduce_once_update_norm = None
-    fused_pair_accumulation = (
-        os.environ.get("CANON_P30_FUSED_PAIR_ACCUMULATION", "") == "1"
-    )
-    if canonical_workload and fused_pair_accumulation:
-      raise alignment.AlignmentGateError(
-          "P33 uses rank-reduced scaled groups, not pair accumulation"
-      )
-    if fused_pair_accumulation:
-      print(
-          "[P30.G2] FUSED_PAIR_ACCUMULATION on order=(left+right)*scale",
-          flush=True,
-      )
-
     reduce_once_accumulator_loan = None
     reduce_once_accumulator_adoption_pending = False
     reduce_once_accumulator_adopted = False
@@ -1794,22 +1781,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         norm = actor_trainer.accumulate_precomputed_gradient_microbatch(
             gradients, microbatch_index=index
         )
-      micro_norms.append(norm)
-      if index < expected_microbatches - 1:
-        print(
-            f"{marker_prefix} update_accumulation_pending "
-            f"train_steps={actor_trainer.train_steps} "
-            f"microstep={index + 1}/{expected_microbatches}",
-            flush=True,
-        )
-
-    def consume_pair(index, left, right, multiplier):
-      norm = actor_trainer.accumulate_precomputed_gradient_pair_microbatch(
-          left,
-          right,
-          multiplier,
-          microbatch_index=index,
-      )
       micro_norms.append(norm)
       if index < expected_microbatches - 1:
         print(
@@ -2016,12 +1987,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       else:
         result = adapter.segmented_grpo_value_and_grad(
             **common,
-            gradient_microbatch_sink=(
-                None if fused_pair_accumulation else consume_microbatch
-            ),
-            gradient_pair_sink=(
-                consume_pair if fused_pair_accumulation else None
-            ),
+            gradient_microbatch_sink=consume_microbatch,
         )
       value_and_grad_call_done = time.perf_counter()
     result["loss"].block_until_ready()
