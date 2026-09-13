@@ -1,5 +1,38 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — 64-chip split-role latest-admitted control carrier
+
+The `deepswe_4b_64chip` B path now has one explicit, fail-closed optimization
+identity. After publication, run P44 parity-64 three-update with
+`--system-optimization-arm control`, then P58 Zero `--topology 64split`
+three-update with `--system-optimization-arm control`. Exact commands and
+inspection gates are at the top of `cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
+
+The admitted tuple is fixed lm-head + P59 rank-parallel checked-VMA/P67 +
+first-update gate + fingerprint-hybrid/first-group-warmup/batched-commit
+receipts + P71-fwd, layered on the existing P28/P29/P30 DeepSWE path. The
+optimizer remains TPU-resident, TiTO is on, prefix cache and sampler IS/TIS are
+off. `KEEP_TAPE=stream`, `DP_REDUCE_ONCE=1`, collective reduce, length-sort,
+P63 and production `V1_HP_FULL` are not admitted in this P58 carrier. P44
+treatment remains a separate target-unverified experiment.
+
+The selector is accepted only by the exact P58 64split Zero three-update
+profile. Renderer, authoritative `00_env.sh`, Python contract, learner,
+manifest, P58 classifier, and postflight all carry or verify the same arm.
+Absent selector preserves the previous conservative 64split path and the
+historical P58-128 render. Local DP1xTP4 plus DP2xTP2 evidence is factorized
+mechanism evidence only; the 64-chip target remains `TARGET NOT RUN` until the
+user applies it and returns complete artifacts.
+
+Local target-scoped evidence is complete: P58 203/203 plus 130 subtests pass
+both on the host and in the digest-pinned image; the P44 and P59 exact-image
+markers pass; fresh DP2xTP2 P59 mechanics and Qwen3-4B DP1xTP4
+recorded-trajectory backward-no-commit are green. This remains factorized
+one-host evidence, not TP8/Pathways/64-chip admission. The umbrella P58 image
+wrapper has an unrelated origin-baseline documentation failure in two
+FrozenLake/v1 HANDOFF first sections (`P74` missing); use the target-scoped
+gates above and do not edit those external ledgers in this task.
+
 ## START HERE — P58.38 CPU-pool migration and K30 preflight
 
 The current P58 infrastructure contract supersedes older active instructions

@@ -82,6 +82,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       *,
       sampler_is: bool = False,
       high_performance: bool = False,
+      system_optimization_arm: str | None = None,
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
       seam_localization: str = "",
@@ -101,6 +102,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         model_pvc="model-pvc",
         sampler_is=sampler_is,
         high_performance=high_performance,
+        system_optimization_arm=system_optimization_arm,
         checked_vma_off_diagnostic=checked_vma_off_diagnostic,
         checked_vma_on_diagnostic=checked_vma_on_diagnostic,
         seam_localization=seam_localization,
@@ -115,6 +117,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       *,
       sampler_is: bool = False,
       high_performance: bool = False,
+      system_optimization_arm: str | None = None,
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
       seam_localization: str = "",
@@ -127,6 +130,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
             stage,
             sampler_is=sampler_is,
             high_performance=high_performance,
+            system_optimization_arm=system_optimization_arm,
             checked_vma_off_diagnostic=checked_vma_off_diagnostic,
             checked_vma_on_diagnostic=checked_vma_on_diagnostic,
             seam_localization=seam_localization,
@@ -171,6 +175,35 @@ class P58EnvironmentContractTest(unittest.TestCase):
     )
     deepswe_contract.validate_environment(values)
 
+  def test_p58_64split_systemopt_survives_shell_and_python_contracts(self):
+    _, _, values = self._persisted(
+        "zero",
+        "three-update",
+        topology="64split",
+        system_optimization_arm="control",
+    )
+    self.assertEqual(
+        values["CANON_PROFILE"],
+        "qwen3-4b-dp4-tp8-deepswe-tim-systemopt",
+    )
+    self.assertEqual(values["CANON_P66_P59_CHECK_VMA"], "1")
+    deepswe_contract.validate_environment(values)
+    manifest = deepswe_debug._manifest(
+        values,
+        model_id="Qwen/Qwen3-4B-Instruct-2507",
+        output_dir=Path(values["CANON_P58_DEBUG_DIR"]),
+    )
+    self.assertEqual(manifest["system_optimization_arm"], "control")
+
+    for key, replacement in (
+        ("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", "treatment"),
+        ("CANON_P59_CHECKED_VMA", "0"),
+        ("CANON_P71_SCAN", "off"),
+        ("CANON_P32_KEEP_TAPE", "stream"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
   def test_p58_selector_is_fail_closed_and_128_absence_is_compatible(self):
     self.assertIs(
         deepswe_contract.active_workload({"CANON_P58_DEEPSWE_TIM": "1"}),
@@ -194,9 +227,11 @@ class P58EnvironmentContractTest(unittest.TestCase):
       *,
       sampler_is: bool = False,
       high_performance: bool = False,
+      system_optimization_arm: str | None = None,
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
       seam_localization: str = "",
+      topology: str = "128",
   ):
     supplied = os.environ.copy()
     rendered = self._rendered_env(
@@ -204,9 +239,11 @@ class P58EnvironmentContractTest(unittest.TestCase):
         stage,
         sampler_is=sampler_is,
         high_performance=high_performance,
+        system_optimization_arm=system_optimization_arm,
         checked_vma_off_diagnostic=checked_vma_off_diagnostic,
         checked_vma_on_diagnostic=checked_vma_on_diagnostic,
         seam_localization=seam_localization,
+        topology=topology,
     )
     supplied.update(rendered)
     supplied.update({

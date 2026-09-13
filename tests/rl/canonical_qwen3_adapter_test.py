@@ -2864,13 +2864,22 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
       np.testing.assert_array_equal(
           np.asarray(dhidden), np.asarray(expected_dhidden)
       )
-      self.assertEqual(
-          staged.sharding.spec,
-          jax.sharding.PartitionSpec("dp", None, "tp"),
+      self.assertTrue(
+          staged.sharding.is_equivalent_to(
+              jax.sharding.NamedSharding(
+                  trainer_mesh,
+                  jax.sharding.PartitionSpec("dp", None, "tp"),
+              ),
+              staged.ndim,
+          )
       )
-      self.assertEqual(
-          dhidden.sharding.spec,
-          jax.sharding.PartitionSpec("dp"),
+      self.assertTrue(
+          dhidden.sharding.is_equivalent_to(
+              jax.sharding.NamedSharding(
+                  trainer_mesh, jax.sharding.PartitionSpec("dp")
+              ),
+              dhidden.ndim,
+          )
       )
       bad_dlogits = jax.device_put(
           jnp.ones((16, vocab + 1), jnp.bfloat16),

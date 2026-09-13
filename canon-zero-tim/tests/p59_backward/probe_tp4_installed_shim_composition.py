@@ -284,10 +284,26 @@ def main() -> None:
         "serial_fp64_max_abs="
         f"{np.max(np.abs(serial_host - oracle_host))}"
     )
-  if staged.sharding.spec != jax.sharding.PartitionSpec("dp", None, "tp"):
-    raise AssertionError(f"installed projection staged sharding changed: {staged.sharding}")
-  if dhidden.sharding.spec != jax.sharding.PartitionSpec("dp"):
-    raise AssertionError(f"installed projection hidden sharding changed: {dhidden.sharding}")
+  expected_staged_sharding = jax.sharding.NamedSharding(
+      trainer_mesh, jax.sharding.PartitionSpec("dp", None, "tp")
+  )
+  if not staged.sharding.is_equivalent_to(
+      expected_staged_sharding, staged.ndim
+  ):
+    raise AssertionError(
+        "installed projection staged sharding changed: "
+        f"{staged.sharding}"
+    )
+  expected_hidden_sharding = jax.sharding.NamedSharding(
+      trainer_mesh, jax.sharding.PartitionSpec("dp")
+  )
+  if not dhidden.sharding.is_equivalent_to(
+      expected_hidden_sharding, dhidden.ndim
+  ):
+    raise AssertionError(
+        "installed projection hidden sharding changed: "
+        f"{dhidden.sharding}"
+    )
 
   # Flag presence alone must not select either local boundary outside P59's
   # outer manual data/model context.  Exercise the installed global projection

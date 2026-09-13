@@ -1381,10 +1381,10 @@ def _manifest(
   system_optimization_arm = values.get(
       "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", ""
   )
-  if mode == "p44" and system_optimization_arm:
+  if mode in ("p44", "p58") and system_optimization_arm:
     if system_optimization_arm not in ("control", "treatment"):
       raise ValueError(
-          "P44 system-optimization arm must be control or treatment"
+        "DeepSWE system-optimization arm must be control or treatment"
       )
     manifest["system_optimization_arm"] = system_optimization_arm
   return manifest

@@ -1752,6 +1752,12 @@ PY
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
     classification="$CANON_STATE/p58_deepswe_${CANON_P58_TIM_ARM}_${CANON_P34_RUN_STAGE}.classification.json"
+    p58_systemopt_args=()
+    if [ -n "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" ]; then
+      p58_systemopt_args=(
+        --system-optimization-arm "$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+      )
+    fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tests/p58_deepswe_native_zero/classify_run.py" \
         --arm "$CANON_P58_TIM_ARM" \
@@ -1763,6 +1769,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
         --update-report "$CANON_UPDATE_REPORT" \
         --alignment-report "$CANON_ALIGN_REPORT" \
+        "${p58_systemopt_args[@]}" \
         --output "$classification" || exit 1
     if [ "${CANON_P58_TOPOLOGY:-128}:${CANON_P34_RUN_STAGE}:${CANON_P58_TIM_ARM}" = \
          "64split:three-update:zero" ]; then

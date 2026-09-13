@@ -16,6 +16,7 @@ import yaml
 import render_p34_jobset as p34
 from v1_full_system_optimization import (
     FULL_SYSTEM_OPTIMIZATION_ENV_NAMES,
+    full_system_optimization_base_additions,
     full_system_optimization_additions,
 )
 
@@ -32,6 +33,9 @@ CLEAN_ROWS = 1012
 PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
 HP_PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
 SPLIT_PROFILE = "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
+SPLIT_SYSTEMOPT_PROFILE = (
+    "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
+)
 TOPOLOGY = "4x4x8"
 WORKERS = 32
 ROLE_DP = 8
@@ -261,6 +265,7 @@ def render(
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
     sampler_is: bool = False,
     high_performance: bool = False,
+    system_optimization_arm: str | None = None,
     checked_vma_off_diagnostic: bool = False,
     checked_vma_on_diagnostic: bool = False,
     seam_localization: str = "",
@@ -284,6 +289,18 @@ def render(
   instance_type = instance_type or spec.instance_type
   if high_performance and (arm != "zero" or stage != "full"):
     raise ValueError("P58 high-performance is admitted only for Zero full")
+  if system_optimization_arm not in (None, "control"):
+    raise ValueError("P58 admits only the system-optimization control arm")
+  if system_optimization_arm is not None and (
+      topology != "64split"
+      or arm != "zero"
+      or stage != "three-update"
+      or high_performance
+      or sampler_is
+  ):
+    raise ValueError(
+        "P58 system optimization requires 64split Zero three-update"
+    )
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
     raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
   if seam_localization not in _SEAM_LOCALIZATION_MODES:
@@ -362,6 +379,7 @@ def render(
   hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
       seam_localization
   )
+  fixed_head_bundle = hp_bundle or system_optimization_arm is not None
   zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
   treatment = (
       f"seam{seam_localization}"
@@ -370,6 +388,8 @@ def render(
       if checked_vma_diagnostic
       else "zero-hp"
       if high_performance
+      else "zero-systemopt"
+      if system_optimization_arm is not None
       else "native-is"
       if sampler_is
       else arm
@@ -393,7 +413,7 @@ def render(
       "canon.zero-tim/stage": stage,
       "canon.zero-tim/arm": arm,
       "canon.zero-tim/topology": topology,
-      "canon.zero-tim/fixed-lm-head": "1" if hp_bundle else "0",
+      "canon.zero-tim/fixed-lm-head": "1" if fixed_head_bundle else "0",
       _TOKEN_TRANSPORT_LABEL: _TOKEN_TRANSPORT,
   })
   if sampler_is:
@@ -477,7 +497,11 @@ def render(
       "restartStrategy": "Recreate",
   }
   rendered_env = {
-      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else spec.profile,
+      "CANON_PROFILE_FILE": (
+          SPLIT_SYSTEMOPT_PROFILE
+          if system_optimization_arm is not None
+          else HP_PROFILE if hp_bundle else spec.profile
+      ),
       "CANON_STATE": run_root,
       # TiTO is selected by the DeepSWE workload identity itself.  Keep the
       # identity in the raw JobSet as well as the sourced profile so a
@@ -506,7 +530,7 @@ def render(
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
       "CANON_P58_DEBUG_DIR": f"{run_root}/debug",
       "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
-      "CANON_P38_FIXED_LM_HEAD": "1" if hp_bundle else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_head_bundle else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
           "1" if arm == "native" or zero_hp_ab_warning else "0"
@@ -549,6 +573,13 @@ def render(
   if topology != "128":
     rendered_env["CANON_P58_TOPOLOGY"] = topology
   p34._set_env(main, rendered_env)
+  if system_optimization_arm is not None:
+    systemopt = full_system_optimization_base_additions("deepswe-qwen4b")
+    systemopt.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
+    p34._set_env(main, systemopt)
   if high_performance:
     p34._set_env(
         main, full_system_optimization_additions("deepswe-qwen4b")
@@ -682,6 +713,7 @@ def render(
       instance_type=instance_type,
       sampler_is=sampler_is,
       high_performance=high_performance,
+      system_optimization_arm=system_optimization_arm,
       checked_vma_off_diagnostic=checked_vma_off_diagnostic,
       checked_vma_on_diagnostic=checked_vma_on_diagnostic,
       seam_localization=seam_localization,
@@ -730,7 +762,7 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       item.get("value") for item in proxy.get("env", [])
       if item.get("name") == p34.PROXY_XLA_ENV
   ]
-  return {
+  signature = {
       "arm": env["CANON_P58_TIM_ARM"],
       "alignment_warning_only": env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"],
       "proxy_xla": proxy_xla,
@@ -747,6 +779,11 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
           if item.startswith(("--sampler_is=", "--sampler_is_threshold="))
       ),
   }
+  if "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM" in env:
+    signature["system_optimization_arm"] = env[
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+    ]
+  return signature
 
 
 def validate(
@@ -763,12 +800,28 @@ def validate(
     instance_type: str | None = None,
     sampler_is: bool = False,
     high_performance: bool = False,
+    system_optimization_arm: str | None = None,
     checked_vma_off_diagnostic: bool = False,
     checked_vma_on_diagnostic: bool = False,
     seam_localization: str = "",
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
+  if system_optimization_arm not in (None, "control"):
+    raise ValueError("P58 admits only the system-optimization control arm")
+  if system_optimization_arm is not None and (
+      topology != "64split"
+      or arm != "zero"
+      or stage != "three-update"
+      or high_performance
+      or sampler_is
+      or checked_vma_off_diagnostic
+      or checked_vma_on_diagnostic
+      or bool(seam_localization)
+  ):
+    raise ValueError(
+        "P58 system optimization requires 64split Zero three-update"
+    )
   spec = _topology_spec(topology)
   if (
       topology == "64split"
@@ -788,6 +841,7 @@ def validate(
   hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
       seam_localization
   )
+  fixed_head_bundle = hp_bundle or system_optimization_arm is not None
   zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
   head = p34._head(document)
   actual_cpu_nodepool = head.get("nodeSelector", {}).get(
@@ -818,7 +872,7 @@ def validate(
     raise ValueError("P58 requires exact Attempt-0 failure policy")
   if document["metadata"]["labels"].get(
       "canon.zero-tim/fixed-lm-head"
-  ) != ("1" if hp_bundle else "0"):
+  ) != ("1" if fixed_head_bundle else "0"):
     raise ValueError("P58 fixed lm-head label drifted from the selected bundle")
   if document["metadata"]["labels"].get(
       _TOKEN_TRANSPORT_LABEL
@@ -867,7 +921,11 @@ def validate(
     raise ValueError("P58 client image is not digest-pinned")
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
-      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else spec.profile,
+      "CANON_PROFILE_FILE": (
+          SPLIT_SYSTEMOPT_PROFILE
+          if system_optimization_arm is not None
+          else HP_PROFILE if hp_bundle else spec.profile
+      ),
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
@@ -878,7 +936,7 @@ def validate(
       "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
       "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
-      "CANON_P38_FIXED_LM_HEAD": "1" if hp_bundle else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_head_bundle else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
           "1" if arm == "native" or zero_hp_ab_warning else "0"
@@ -946,11 +1004,19 @@ def validate(
   }
   if wrong:
     raise ValueError(f"P58 rendered environment mismatch: {wrong}")
-  optimization_additions = (
-      full_system_optimization_additions("deepswe-qwen4b")
-      if high_performance
-      else {}
-  )
+  optimization_additions = {}
+  if high_performance:
+    optimization_additions = full_system_optimization_additions(
+        "deepswe-qwen4b"
+    )
+  elif system_optimization_arm is not None:
+    optimization_additions = full_system_optimization_base_additions(
+        "deepswe-qwen4b"
+    )
+    optimization_additions.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
   optimization_wrong = {
       key: env.get(key)
       for key, value in optimization_additions.items()
@@ -961,7 +1027,7 @@ def validate(
         "P58 production system-optimization bundle drifted: "
         f"{optimization_wrong}"
     )
-  if not high_performance:
+  if not high_performance and system_optimization_arm is None:
     leaked = [
         key for key in FULL_SYSTEM_OPTIMIZATION_ENV_NAMES if key in env
     ]
@@ -1165,6 +1231,7 @@ def main() -> None:
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
   parser.add_argument("--sampler-is", action="store_true")
   parser.add_argument("--high-performance", action="store_true")
+  parser.add_argument("--system-optimization-arm", choices=("control",))
   parser.add_argument("--checked-vma-off-diagnostic", action="store_true")
   parser.add_argument("--checked-vma-on-diagnostic", action="store_true")
   parser.add_argument(
@@ -1191,6 +1258,7 @@ def main() -> None:
       whitelist_sha256=args.whitelist_sha256,
       sampler_is=args.sampler_is,
       high_performance=args.high_performance,
+      system_optimization_arm=args.system_optimization_arm,
       checked_vma_off_diagnostic=args.checked_vma_off_diagnostic,
       checked_vma_on_diagnostic=args.checked_vma_on_diagnostic,
       seam_localization=args.seam_localization,
@@ -1207,6 +1275,8 @@ def main() -> None:
       if args.sampler_is
       else "zero-hp"
       if args.high_performance
+      else "zero-systemopt-control"
+      if args.system_optimization_arm
       else f"{args.arm}-raw"
   )
   print(

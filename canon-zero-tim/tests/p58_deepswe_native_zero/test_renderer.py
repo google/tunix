@@ -158,6 +158,65 @@ class P58RendererTest(unittest.TestCase):
           "zero", "full", topology="64split", instance_type="4x4x8"
       )
 
+  def test_64split_systemopt_control_is_exact_and_isolated(self):
+    document = self._render(
+        "zero",
+        "three-update",
+        topology="64split",
+        system_optimization_arm="control",
+    )
+    env = renderer.p34._env(document)
+    expected = renderer.full_system_optimization_base_additions(
+        "deepswe-qwen4b"
+    )
+    expected.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": "control",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
+    self.assertEqual(env["CANON_PROFILE_FILE"], renderer.SPLIT_SYSTEMOPT_PROFILE)
+    self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+    self.assertEqual(env["CANON_V1_HP_FULL"], "0")
+    for key, value in expected.items():
+      self.assertEqual(env[key], value)
+    for key in (
+        "CANON_P32_KEEP_TAPE",
+        "CANON_DP_REDUCE_ONCE",
+        "CANON_DP_COLLECTIVE_REDUCE",
+        "CANON_P32_LENGTH_SORT",
+        "CANON_P63_OVERFLOW_SAFE_CLIP",
+    ):
+      self.assertNotIn(key, env)
+    self.assertEqual(
+        renderer.treatment_signature(document)["system_optimization_arm"],
+        "control",
+    )
+
+  def test_64split_systemopt_rejects_neighboring_identities(self):
+    for overrides in (
+        {"topology": "128"},
+        {"arm": "native", "topology": "64split"},
+        {"stage": "full", "topology": "64split"},
+        {"topology": "64split", "sampler_is": True},
+        {"topology": "64split", "high_performance": True},
+    ):
+      kwargs = {
+          "arm": "zero",
+          "stage": "three-update",
+          "system_optimization_arm": "control",
+          **overrides,
+      }
+      arm = kwargs.pop("arm")
+      stage = kwargs.pop("stage")
+      with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+        self._render(arm, stage, **kwargs)
+    with self.assertRaisesRegex(ValueError, "only the system-optimization"):
+      self._render(
+          "zero",
+          "three-update",
+          topology="64split",
+          system_optimization_arm="treatment",
+      )
+
   def test_default_render_preserves_historical_128_identity(self):
     document = self._render("zero", "full")
     env = renderer.p34._env(document)

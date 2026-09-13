@@ -20,11 +20,14 @@ local_M=256 global_M=1024 max_num_seqs_per_dp=32
 ```
 
 Selector absence preserves historical P58-128. Present-but-empty or any value
-other than `128|64split` fails closed. `64split` deliberately rejects
-`--high-performance`, checked-VMA, and seam-localization bundles because those
-are admitted only for the existing DP8 role. Do not work around that rejection
-with environment edits. Prefix cache stays off, TiTO stays on, sampler IS/TIS
-stay off, the optimizer is TPU-resident, and checkpointing is disabled
+other than `128|64split` fails closed. `64split` rejects the DP8-only
+`--high-performance`, checked-VMA diagnostic, and seam-localization bundles.
+Its separately named `--system-optimization-arm control` profile admits the
+current common DeepSWE optimization tuple with P59 checked-VMA, but deliberately
+keeps streamed tape and reduce-once absent pending target evidence. Do not
+reconstruct this tuple with environment edits. Prefix cache stays off, TiTO
+stays on, sampler IS/TIS stay off, the optimizer is TPU-resident, and
+checkpointing is disabled
 (`--ckpt_dir=none`, no save cadence).
 
 Local evidence is only a claim-limited prerequisite. The executable tree at
@@ -35,9 +38,9 @@ the final unpublished full-worktree diff hash is recorded in the outer task
 HANDOFF so this tracked file does not make that hash self-referential.
 
 - DP2xTP2 P59 mechanics:
-  `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p2r1_20260913_0316`;
+  `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p1a_20260913_0445`;
 - Qwen3-4B DP1xTP4 recorded-trajectory backward-no-commit:
-  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_d4b64_p2r1_20260913_0321`.
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_d4b64_p1a_20260913_0449`.
 
 Both checksum gates passed. The DeepSWE run had A=B=C zero bytes over 1,254
 action tokens, two repeat-exact finite/nonzero gradients, device-resident
@@ -45,16 +48,22 @@ optimizer state, zero commits, and peak HBM 56,636,814,336 /
 102,803,437,568 bytes. This does not certify TP8, Pathways, split ownership,
 or 64-chip HBM. The 64-chip target is `TARGET NOT RUN` until the user
 explicitly approves publication and separately applies the rendered JobSet.
+The matching digest-pinned image passed the complete P58 suite (203 tests,
+130 subtests), `P44_EXACT_IMAGE_CPU_PASS`, and
+`P59_TP_SHIM_EXACT_IMAGE_PASS`. The umbrella wrapper subsequently stops only
+on two unchanged FrozenLake/v1 HANDOFF `P74` documentation assertions; do not
+misclassify those unrelated baseline failures as a P58 carrier failure.
 
 ### P2.1 — existing P44 64-chip carrier first
 
 After publication, read back one clean 40-character SHA from
 `yuxzhang/canon-zero-tim` and use the matching digest-pinned client image. Run
-the existing P44 parity-64 three-update scientific carrier before P58. Its
-recipe is unchanged; the optional infrastructure-only sandbox argument makes
-the documented head/sandbox placement explicit. This proves the one-slice
-split-role transport; its warning-only policy and B4xG4 batch are not P58
-Zero-TIM admission.
+the existing P44 parity-64 three-update scientific carrier before P58, using
+its v2 `control` admission. That arm enables the same admitted common tuple as
+P58 while keeping `KEEP_TAPE` and `REDUCE_ONCE` absent. The optional
+infrastructure-only sandbox argument makes the documented head/sandbox
+placement explicit. This proves the one-slice split-role transport with the
+strict numerical contract; its B4xG4 batch is not P58 admission.
 
 ```bash
 SOURCE_SHA=<published-readback-40-char-sha>
@@ -77,6 +86,7 @@ python3 canon-zero-tim/cluster/render_p44_deepswe_parity.py \
   --run-id "$P44_RUN_ID" \
   --stage three-update \
   --topology 64 \
+  --system-optimization-arm control \
   --cpu-nodepool "$CPU_NODEPOOL" \
   --sandbox-nodepool "$SANDBOX_NODEPOOL" \
   --worker-nodepool "$TPU_NODEPOOL" \
@@ -111,6 +121,7 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --stage three-update \
   --arm zero \
   --topology 64split \
+  --system-optimization-arm control \
   --cpu-nodepool "$CPU_NODEPOOL" \
   --sandbox-nodepool "$SANDBOX_NODEPOOL" \
   --worker-nodepool "$TPU_NODEPOOL" \
@@ -123,12 +134,24 @@ Before the user applies it, inspect the rendered file and require all of:
 
 - topology label `64split`, worker completions/parallelism 16, TPU topology
   `4x4x4`, and exclusive-topology at JobSet scope;
-- split profile, exact clean-list digest/1,012 rows, B8xG16, DP4xTP8 for both
+- systemopt split profile, exact clean-list digest/1,012 rows, B8xG16,
+  DP4xTP8 for both
   roles, max concurrency 128, 32 sequences/DP, local/global M 256/1024;
 - `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY=0`, TiTO, prefix cache off, sampler IS/TIS
   off, device-resident optimizer, and checkpoint disabled;
+- exact `CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=control`, fixed lm-head,
+  P59 rank-parallel checked-VMA/P67, first-update gate,
+  fingerprint-hybrid/first-group-warmup/batched-commit receipts, P71-fwd;
+  `KEEP_TAPE`, `DP_REDUCE_ONCE`, collective reduce, length-sort, P63, and
+  production `V1_HP_FULL` must remain absent/off as specified by the profile;
 - exact 3,000/3,300/3,600 trajectory/sandbox/batch deadline ladder and the
   admitted CPU/sandbox node pools.
+
+Required startup/postflight receipts include exactly one
+`[P58.64SPLIT.SYSTEMOPT] arm=control topology=64split strict=1`, one checked-VMA
+receipt per update, and the two first-update gate receipts. The classifier
+rejects a missing manifest arm, runtime marker, or per-update reduction
+visibility.
 
 The first run must finish all three updates before a second same-seed run is
 requested. A valid run has 128 durable trajectory rows per batch, eight prompt

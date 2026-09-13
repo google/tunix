@@ -847,12 +847,6 @@ def validate_environment(values: Mapping[str, str]) -> None:
         "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM must be absent, control, or "
         "treatment"
     )
-  if system_optimization_arm and (
-      not parity or values.get("CANON_P34_RUN_STAGE", "") != "three-update"
-  ):
-    raise ValueError(
-        "DeepSWE system optimization is admitted only for P44 three-update"
-    )
   p46_train = workload.contract_name in (
       "p46-qwen32b-train-64",
       "p46-qwen32b-train-256",
@@ -861,6 +855,24 @@ def validate_environment(values: Mapping[str, str]) -> None:
   p58_arm = values.get("CANON_P58_TIM_ARM", "")
   if p58_tim and p58_arm not in ("native", "zero"):
     raise ValueError("CANON_P58_TIM_ARM must be native or zero")
+  p58_64split_systemopt = bool(
+      p58_tim
+      and workload.contract_name == "p58-qwen4b-tim-64split"
+      and p58_arm == "zero"
+      and values.get("CANON_P34_RUN_STAGE", "") == "three-update"
+      and system_optimization_arm == "control"
+  )
+  if system_optimization_arm and not (
+      (
+          parity
+          and values.get("CANON_P34_RUN_STAGE", "") == "three-update"
+      )
+      or p58_64split_systemopt
+  ):
+    raise ValueError(
+        "DeepSWE system optimization requires P44 three-update or the "
+        "P58 64split Zero three-update control identity"
+    )
   p58_recipe = p58_sampler_recipe(values) if p58_tim else ""
   p58_hp = values.get("CANON_V1_HP_FULL", "0") == "1"
   p58_zero_ab_warning = bool(
@@ -1140,11 +1152,15 @@ def validate_environment(values: Mapping[str, str]) -> None:
   if system_optimization_arm:
     expected.update({
         "CANON_PROFILE_FILE": (
-            "cluster/profiles/"
+            "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
+            if p58_64split_systemopt
+            else "cluster/profiles/"
             "qwen3-4b-dp-parity-deepswe-v2-admission.env"
         ),
         "CANON_PROFILE": (
-            f"qwen3-4b-dp{workload.dp_size}-tp8-deepswe-v2-admission"
+            "qwen3-4b-dp4-tp8-deepswe-tim-systemopt"
+            if p58_64split_systemopt
+            else f"qwen3-4b-dp{workload.dp_size}-tp8-deepswe-v2-admission"
         ),
         "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": (
             system_optimization_arm
@@ -1167,7 +1183,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
         ),
         "CANON_DP_COLLECTIVE_REDUCE": None,
         "CANON_P32_LENGTH_SORT": None,
-        "CANON_V1_HP_FULL": None,
+        "CANON_V1_HP_FULL": "0" if p58_64split_systemopt else None,
         "CANON_P63_OVERFLOW_SAFE_CLIP": None,
     })
   if pilot or debug or parity or p58_tim:

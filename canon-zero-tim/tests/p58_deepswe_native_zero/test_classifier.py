@@ -29,7 +29,10 @@ _WANDB_PASS = "[CANON_" "P34_WANDB] ONLINE_RUN_PASS\n"
 
 
 def _values(
-    root: Path, arm: str, topology: str = "128"
+    root: Path,
+    arm: str,
+    topology: str = "128",
+    system_optimization_arm: str | None = None,
 ) -> dict[str, str]:
   values = {
       "CANON_P34_DEEPSWE": "1",
@@ -45,6 +48,8 @@ def _values(
   }
   if topology != "128":
     values["CANON_P58_TOPOLOGY"] = topology
+  if system_optimization_arm is not None:
+    values["CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"] = system_optimization_arm
   return values
 
 
@@ -97,7 +102,12 @@ def _post(arm: str) -> dict:
   }
 
 
-def _update(step: int, arm: str, topology: str = "128") -> dict:
+def _update(
+    step: int,
+    arm: str,
+    topology: str = "128",
+    system_optimization_arm: str | None = None,
+) -> dict:
   split = topology == "64split"
   record = {
       "contract_name": (
@@ -126,12 +136,24 @@ def _update(step: int, arm: str, topology: str = "128") -> dict:
         "dp_reduction_rounds_per_transaction": 6,
         "dp_rank_pullbacks_per_transaction": 4 if split else 8,
     })
+  if system_optimization_arm is not None:
+    record.update({
+        "system_optimization_arm": system_optimization_arm,
+        "dp_reduction_visibility": "EXPLICIT_FIXED_TREE",
+        "dp_staged_accumulations": 0,
+    })
   return record
 
 
 class P58ClassifierTest(unittest.TestCase):
 
-  def _classify(self, root: Path, arm: str, topology: str = "128"):
+  def _classify(
+      self,
+      root: Path,
+      arm: str,
+      topology: str = "128",
+      system_optimization_arm: str | None = None,
+  ):
     with contextlib.redirect_stdout(io.StringIO()):
       for step in range(3):
         deepswe_debug.persist_batch(
@@ -140,19 +162,61 @@ class P58ClassifierTest(unittest.TestCase):
             optimizer_step=step,
             output_dir=root,
             model_id="Qwen/Qwen3-4B-Instruct-2507",
-            values=_values(root, arm, topology),
+            values=_values(root, arm, topology, system_optimization_arm),
         )
     return classifier.classify(
         arm=arm,
         stage="three-update",
-        log_text=_WANDB_PASS,
+        log_text=(
+            _WANDB_PASS
+            + "[P58.64SPLIT.SYSTEMOPT] arm=control topology=64split strict=1\n"
+            + "[P59.CHECKED_VMA] enabled=1\n" * 3
+            + "[V1.FIRST_UPDATE]\n" * 2
+            if system_optimization_arm is not None
+            else _WANDB_PASS
+        ),
         debug_dir=root,
         weights=[{"verdict": "PASS", "equal": True}],
         pre_alignment=[_pre(arm)],
         alignment=[_post(arm)],
-        updates=[_update(step, arm, topology) for step in range(3)],
+        updates=[
+            _update(step, arm, topology, system_optimization_arm)
+            for step in range(3)
+        ],
         topology=topology,
+        system_optimization_arm=system_optimization_arm,
     )
+
+  def test_64split_systemopt_requires_runtime_receipts(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      report = self._classify(
+          root, "zero", "64split", system_optimization_arm="control"
+      )
+      self.assertEqual(report["verdict"], "PASS")
+      bad_updates = [
+          _update(step, "zero", "64split", "control")
+          for step in range(3)
+      ]
+      del bad_updates[1]["dp_reduction_visibility"]
+      failed = classifier.classify(
+          arm="zero",
+          stage="three-update",
+          topology="64split",
+          system_optimization_arm="control",
+          log_text=(
+              _WANDB_PASS
+              + "[P58.64SPLIT.SYSTEMOPT] arm=control topology=64split strict=1\n"
+              + "[P59.CHECKED_VMA] enabled=1\n" * 3
+              + "[V1.FIRST_UPDATE]\n" * 2
+          ),
+          debug_dir=root,
+          weights=[{"verdict": "PASS", "equal": True}],
+          pre_alignment=[_pre("zero")],
+          alignment=[_post("zero")],
+          updates=bad_updates,
+      )
+      self.assertIn("system_optimization_receipts", failed["failed"])
 
   def test_64split_native_and_zero_use_split_evidence_geometry(self):
     for arm in ("native", "zero"):

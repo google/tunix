@@ -61,7 +61,12 @@ def _records(path: Path) -> list[dict[str, Any]]:
 
 
 def _artifact_checks(
-    debug_dir: Path, *, arm: str, stage: str, topology: str
+    debug_dir: Path,
+    *,
+    arm: str,
+    stage: str,
+    topology: str,
+    system_optimization_arm: str | None = None,
 ) -> tuple[dict[str, bool], list[dict[str, Any]]]:
   specs = {
       "128": (
@@ -183,6 +188,12 @@ def _artifact_checks(
       and str(manifest.get("clean_rows")) == "1012"
       and manifest.get("whitelist_sha256") == _WHITELIST_SHA256
       and bool(_SHA.fullmatch(str(manifest.get("source_commit", ""))))
+      and (
+          manifest.get("system_optimization_arm")
+          == system_optimization_arm
+          if system_optimization_arm is not None
+          else "system_optimization_arm" not in manifest
+      )
   )
   return {
       "manifest_exact": manifest_valid,
@@ -231,9 +242,18 @@ def classify(
     alignment: list[dict[str, Any]],
     updates: list[dict[str, Any]],
     topology: str = "128",
+    system_optimization_arm: str | None = None,
 ) -> dict[str, Any]:
   if arm not in ("native", "zero") or stage not in _STAGE_UPDATES:
     raise ValueError("P58 classifier requires a signed arm and stage")
+  if system_optimization_arm not in (None, "control"):
+    raise ValueError("P58 classifier admits only systemopt control")
+  if system_optimization_arm is not None and (
+      arm != "zero" or stage != "three-update" or topology != "64split"
+  ):
+    raise ValueError(
+        "P58 systemopt classification requires 64split Zero three-update"
+    )
   expected_commits = _STAGE_UPDATES[stage]
   geometry = {
       "128": {
@@ -248,7 +268,11 @@ def classify(
   if geometry is None:
     raise ValueError("P58 classifier topology must be 128 or 64split")
   artifact_checks, metrics = _artifact_checks(
-      debug_dir, arm=arm, stage=stage, topology=topology
+      debug_dir,
+      arm=arm,
+      stage=stage,
+      topology=topology,
+      system_optimization_arm=system_optimization_arm,
   )
   committed = [record for record in updates if record.get("commits") == 1]
   skipped = [record for record in updates if record.get("commits") == 0]
@@ -367,6 +391,24 @@ def classify(
       ),
       "update_records_nonempty": bool(updates),
       "update_geometry": update_geometry,
+      "system_optimization_receipts": (
+          all(
+              record.get("system_optimization_arm") == "control"
+              and record.get("dp_reduction_visibility")
+              == "EXPLICIT_FIXED_TREE"
+              and record.get("dp_staged_accumulations") == 0
+              for record in updates
+          )
+          and log_text.count(
+              "[P58.64SPLIT.SYSTEMOPT] "
+              "arm=control topology=64split strict=1"
+          ) == 1
+          and log_text.count("[P59.CHECKED_VMA] enabled=1")
+          == expected_commits
+          and log_text.count("[V1.FIRST_UPDATE]") == 2
+          if system_optimization_arm is not None
+          else True
+      ),
       "optimizer_commit_count": len(committed) == expected_commits,
       "optimizer_steps_monotonic": committed_steps == list(range(1, expected_commits + 1)),
       "compact_filtered_skips_valid": skipped_valid,
@@ -383,6 +425,7 @@ def classify(
       "arm": arm,
       "stage": stage,
       "topology": topology,
+      "system_optimization_arm": system_optimization_arm,
       "verdict": "PASS" if not failed else "FAIL",
       "claim_level": (
           "alignment-degraded-convergence-canary"
@@ -418,6 +461,7 @@ def main() -> None:
   parser.add_argument("--arm", choices=("native", "zero"), required=True)
   parser.add_argument("--stage", choices=tuple(_STAGE_UPDATES), required=True)
   parser.add_argument("--topology", choices=("128", "64split"), default="128")
+  parser.add_argument("--system-optimization-arm", choices=("control",))
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--debug-dir", type=Path, required=True)
   parser.add_argument("--weight-report", type=Path, required=True)
@@ -436,6 +480,7 @@ def main() -> None:
       alignment=_records(args.alignment_report),
       updates=_records(args.update_report),
       topology=args.topology,
+      system_optimization_arm=args.system_optimization_arm,
   )
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite P58 evidence: {args.output}")

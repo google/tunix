@@ -16,6 +16,9 @@ HP_PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
 SPLIT_PROFILE = (
     PKG / "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
 )
+SYSTEMOPT_PROFILE = (
+    PKG / "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
+)
 RUN_STEP = PKG / "cluster/steps/90_run.sh"
 
 
@@ -121,6 +124,50 @@ source {SPLIT_PROFILE}
         capture_output=True,
     )
     self.assertNotEqual(result.returncode, 0)
+
+  def test_64split_systemopt_profile_accepts_only_exact_control_tuple(self):
+    common = """
+export CANON_P58_TOPOLOGY=64split
+export CANON_P58_TIM_ARM=zero
+export CANON_P34_RUN_STAGE=three-update
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=3
+export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=control
+export CANON_P34_DISABLE_SAMPLER_IS=1
+export CANON_P34_DISABLE_TIS=1
+export CANON_P38_FIXED_LM_HEAD=1
+export CANON_P59_RANK_PARALLEL_BACKWARD=1
+export CANON_P59_CHECKED_VMA=1
+export CANON_P67_P66_VMA_P59_ONLY=1
+export CANON_V1_HP_FIRST_UPDATE_GATE=1
+export CANON_DP_COMPARE_MODE=fingerprint-hybrid
+export CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
+export CANON_DP_FINITE_FETCH=batched-commit
+export CANON_P71_SCAN=fwd
+"""
+    script = f"""
+set -euo pipefail
+source {CANON}
+{common}
+source {SYSTEMOPT_PROFILE}
+printf '%s\n' "$CANON_PROFILE|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], check=True, text=True, capture_output=True
+    )
+    self.assertIn(
+        "qwen3-4b-dp4-tp8-deepswe-tim-systemopt|4|8|control",
+        result.stdout,
+    )
+    bad = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail; source {CANON}; {common}; "
+         "export CANON_P32_KEEP_TAPE=stream; "
+         f"source {SYSTEMOPT_PROFILE}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    self.assertNotEqual(bad.returncode, 0)
 
   def test_native_removes_complete_numerical_bundle(self):
     output = _source("native")
