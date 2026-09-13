@@ -259,11 +259,32 @@ esac
     self.assertIs(container["volumeMounts"][0]["readOnly"], True)
     self.assertIn("Qwen3-4B-Instruct-2507", container["args"][1])
 
+  def test_probe_admits_the_bodaborg_pairing(self):
+    image = "registry.example/tunix@sha256:" + "2" * 64
+    document = pvc_probe.render(
+        run_id="p58k30",
+        client_image=image,
+        queue_name="default",
+        head_nodepool="cpu-np",
+    )
+    self.assertEqual(
+        document["spec"]["nodeSelector"]["cloud.google.com/gke-nodepool"],
+        "cpu-np",
+    )
+    self.assertEqual(
+        document["metadata"]["labels"]["kueue.x-k8s.io/queue-name"],
+        "default",
+    )
+
   def test_probe_rejects_wrong_pool_pvc_or_floating_image(self):
     image = "registry.example/tunix@sha256:" + "2" * 64
     with self.assertRaisesRegex(ValueError, "head pool"):
       pvc_probe.render(
-          run_id="p58k30", client_image=image, head_nodepool="cpu-np"
+          run_id="p58k30", client_image=image, head_nodepool="sandbox-cpu-pool"
+      )
+    with self.assertRaisesRegex(ValueError, "queue"):
+      pvc_probe.render(
+          run_id="p58k30", client_image=image, queue_name="trellis"
       )
     with self.assertRaisesRegex(ValueError, "model PVC"):
       pvc_probe.render(

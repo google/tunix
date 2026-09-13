@@ -12,8 +12,15 @@ import yaml
 
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _DIGEST_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+# Admission stays fail-closed: only the pairings listed here are accepted.
+# "multislice-queue" + "canon-cpu-pool" is the original mlperf-v5p pairing;
+# "default" + "cpu-np" is the bodaborg-v5p-nap pairing, where neither original
+# name exists. Defaults keep the historical values so existing callers are
+# unaffected. This mirrors render_p58_sandbox_probe.py.
 _QUEUE = "multislice-queue"
+_ADMITTED_QUEUES = frozenset({"multislice-queue", "default"})
 _HEAD_NODEPOOL = "canon-cpu-pool"
+_ADMITTED_HEAD_NODEPOOLS = frozenset({"canon-cpu-pool", "cpu-np"})
 _MODEL_PVC = "haoyugao-cpu-np-pvc"
 _MOUNT_PATH = "/mnt/disks/linchai_data"
 _REQUIRED_PATH = f"{_MOUNT_PATH}/models/Qwen3-4B-Instruct-2507"
@@ -41,10 +48,15 @@ def render(
   queue_name = _label(queue_name, field="queue_name")
   head_nodepool = _label(head_nodepool, field="head_nodepool")
   model_pvc = _label(model_pvc, field="model_pvc")
-  if queue_name != _QUEUE:
-    raise ValueError(f"P58 PVC probe requires queue {_QUEUE!r}")
-  if head_nodepool != _HEAD_NODEPOOL:
-    raise ValueError(f"P58 PVC probe requires head pool {_HEAD_NODEPOOL!r}")
+  if queue_name not in _ADMITTED_QUEUES:
+    raise ValueError(
+        f"P58 PVC probe requires queue in {sorted(_ADMITTED_QUEUES)!r}"
+    )
+  if head_nodepool not in _ADMITTED_HEAD_NODEPOOLS:
+    raise ValueError(
+        "P58 PVC probe requires head pool in"
+        f" {sorted(_ADMITTED_HEAD_NODEPOOLS)!r}"
+    )
   if model_pvc != _MODEL_PVC:
     raise ValueError(f"P58 PVC probe requires model PVC {_MODEL_PVC!r}")
   if _DIGEST_IMAGE.fullmatch(client_image) is None:

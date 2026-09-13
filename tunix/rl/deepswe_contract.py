@@ -29,6 +29,10 @@ import numpy as np
 
 
 WEIGHT_ATTESTATION_SCHEMA = "canon.p34.deepswe.weight-attestation.v1"
+# Mirrors examples/deepswe/r2egym_runtime_patch.py, which applies the same rule
+# to the sandbox Pod label. Both layers must agree on what a queue name is, or
+# the renderer emits a name the runtime then rejects.
+_KUBERNETES_DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z")
 P44_TOPOLOGY_FIELDS = frozenset({
     "contract_name",
     "dp_size",
@@ -1000,7 +1004,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "R2E_K8S_MEM": "4Gi",
       "R2E_K8S_CPU_LIMIT": "4",
       "R2E_K8S_MEM_LIMIT": "8Gi",
-      "R2E_K8S_QUEUE_NAME": "multislice-queue" if p58_tim else None,
+      # R2E_K8S_QUEUE_NAME is deliberately absent from this exact-match block;
+      # it is cluster placement rather than recipe, and it is validated by
+      # shape below. See the check that follows the mismatch raise.
       "WANDB_MODE": "online",
       "CANON_P39_64CHIP_PILOT": "1" if pilot else "0",
       "CANON_P39_PILOT_ADMITTED": "1" if pilot else "0",
@@ -1220,6 +1226,27 @@ def validate_environment(values: Mapping[str, str]) -> None:
   }
   if wrong:
     raise ValueError(f"P34 environment mismatch: {wrong}")
+  # The LocalQueue name is whatever the parent JobSet was admitted into:
+  # "multislice-queue" on the 256-chip cluster, "default" on bodaborg-v5p-nap.
+  # Pinning one literal turned this contract into a cluster lock and rejected
+  # every render the moment the lane was retargeted, so placement is matched by
+  # shape here the same way NODE_SELECTOR_VAL is left unpinned above. Shape
+  # still matters: R2E sandboxes are bare Pods, so under Kueue's plain-Pod
+  # integration an absent or malformed queue name leaves each of them managed
+  # with no queue to admit it into, and they stay gated forever.
+  #
+  # Presence is only required when this run actually creates those Pods.
+  # NODE_SELECTOR_VAL is the signal: render_p34_jobset.py emits it together
+  # with the queue name, while a lane that never reaches Kubernetes has
+  # neither, and must not be failed for that.
+  queue_name = values.get("R2E_K8S_QUEUE_NAME", "")
+  creates_sandboxes = bool(values.get("NODE_SELECTOR_VAL", ""))
+  if queue_name or creates_sandboxes:
+    if len(queue_name) > 63 or not _KUBERNETES_DNS_LABEL.fullmatch(queue_name):
+      raise ValueError(
+          "P34 R2E_K8S_QUEUE_NAME must be an exact Kubernetes DNS label, got"
+          f" {queue_name!r}"
+      )
   flags = values.get("XLA_FLAGS", "")
   has_precision_pin = "--xla_allow_excess_precision=false" in flags
   if numerical_bundle and not has_precision_pin:

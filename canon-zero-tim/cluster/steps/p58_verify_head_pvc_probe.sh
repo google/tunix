@@ -13,10 +13,26 @@ case "$namespace:$queue_name:$head_nodepool:$model_pvc:$probe_pod" in
     exit 2
     ;;
 esac
-if [[ "$queue_name" != "multislice-queue" || \
-      "$head_nodepool" != "canon-cpu-pool" || \
-      "$model_pvc" != "haoyugao-cpu-np-pvc" ]]; then
-  echo "P58_HEAD_PVC_BLOCKED reason=unsigned_contract" >&2
+# Admission stays fail-closed: each identifier is checked against its own
+# admitted set rather than one frozen pairing. "default" + "cpu-np" is the
+# bodaborg-v5p-nap pairing; "multislice-queue" + "canon-cpu-pool" is the
+# original mlperf-v5p pairing. This mirrors p58_verify_sandbox_capacity.sh.
+case "$queue_name" in
+  multislice-queue|default) ;;
+  *)
+    echo "P58_HEAD_PVC_BLOCKED reason=unsigned_contract field=queue" >&2
+    exit 2
+    ;;
+esac
+case "$head_nodepool" in
+  canon-cpu-pool|cpu-np) ;;
+  *)
+    echo "P58_HEAD_PVC_BLOCKED reason=unsigned_contract field=nodepool" >&2
+    exit 2
+    ;;
+esac
+if [[ "$model_pvc" != "haoyugao-cpu-np-pvc" ]]; then
+  echo "P58_HEAD_PVC_BLOCKED reason=unsigned_contract field=pvc" >&2
   exit 2
 fi
 command -v kubectl >/dev/null || {

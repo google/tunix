@@ -21,6 +21,11 @@ _BASE_PATH = _ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml"
 _SOURCE_COMMIT = "1" * 40
 _RUN_ID = "queue-a"
 
+# The renderer imports its p34 sibling for the shared priority class, which
+# resolves for free when it runs as a script but not when it is loaded by file
+# path here. The p44 and p58 renderer tests arrange the same thing.
+sys.path.insert(0, str(_ROOT / "canon-zero-tim/cluster"))
+
 _MODULE_SPEC = importlib.util.spec_from_file_location(
     "render_p33_jobsets", _RENDERER_PATH
 )

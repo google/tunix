@@ -94,7 +94,9 @@ class P58EnvironmentContractTest(unittest.TestCase):
         source_commit="1" * 40,
         source_branch="yuxzhang/canon-zero-tim",
         client_image="registry.example/tunix@sha256:" + "2" * 64,
-        run_id="env-test",
+        # The longest combination here is "native-is" + "full", which leaves
+        # only six characters for the run id inside the 36-character budget.
+        run_id="envt",
         stage=stage,
         arm=arm,
         cpu_nodepool="canon-cpu-pool",

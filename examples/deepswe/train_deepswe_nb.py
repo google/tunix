@@ -344,9 +344,14 @@ if _P58_TIM_RAW == "1":
       "[P58.CHECKPOINT] PASS mode=disabled cli=none resume=unsupported",
       flush=True,
   )
+  # Report the pool actually resolved for this run. The literals that used to
+  # be printed here were the original cluster's pools, so the receipt kept
+  # claiming "canon-cpu-pool"/"deepswe-cpu-pool-2" after the lane moved to
+  # bodaborg-v5p-nap. The head pool is not observable from inside this
+  # process, so it is no longer asserted here.
   print(
       "[P58.SANDBOX_ROUTE] PASS "
-      "head=canon-cpu-pool sandbox=deepswe-cpu-pool-2",
+      f"sandbox={expected_node_selector_val}",
       flush=True,
   )
 MODEL_VERSION = args.model_version
