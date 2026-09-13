@@ -846,28 +846,31 @@ if ROLLOUT_ENGINE == "vllm":
 
   additional_config = None
   if MODEL_SOURCE == "maxtext":
+    maxtext_cfg = {
+        "model_name": MODEL_VERSION.lower().split("/")[-1],
+        "model_call_mode": "inference",
+        "scan_layers": SCAN_LAYERS,
+        "enable_dp_attention": False,
+        "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
+        "log_config": False,
+        "weight_dtype": WEIGHT_DTYPE,
+        "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
+        "attention": MAXTEXT_ATTENTION,
+        "remat_policy": "none",
+        "max_target_length": MAX_MODEL_LEN,
+        "max_prefill_predict_length": MAX_PREFILL_LENGTH,
+        "checkpoint_storage_use_ocdbt": CHECKPOINT_STORAGE_USE_OCDBT,
+        "checkpoint_storage_use_zarr3": CHECKPOINT_STORAGE_USE_ZARR3,
+        "checkpoint_storage_concurrent_gb": (
+            CHECKPOINT_STORAGE_CONCURRENT_GB
+        ),
+    }
+    if not VLLM_INIT_RANDOM_WEIGHTS:
+      maxtext_cfg["load_parameters_path"] = MODEL_PATH
+
     additional_config = {
         "enable_continue_decode": ENABLE_CONTINUE_DECODE,
-        "maxtext_config": {
-            "model_name": MODEL_VERSION.lower().split("/")[-1],
-            "model_call_mode": "inference",
-            "load_parameters_path": MODEL_PATH,
-            "scan_layers": SCAN_LAYERS,
-            "enable_dp_attention": False,
-            "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
-            "log_config": False,
-            "weight_dtype": WEIGHT_DTYPE,
-            "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
-            "attention": MAXTEXT_ATTENTION,
-            "remat_policy": "none",
-            "max_target_length": MAX_MODEL_LEN,
-            "max_prefill_predict_length": MAX_PREFILL_LENGTH,
-            "checkpoint_storage_use_ocdbt": CHECKPOINT_STORAGE_USE_OCDBT,
-            "checkpoint_storage_use_zarr3": CHECKPOINT_STORAGE_USE_ZARR3,
-            "checkpoint_storage_concurrent_gb": (
-                CHECKPOINT_STORAGE_CONCURRENT_GB
-            ),
-        },
+        "maxtext_config": maxtext_cfg,
     }
 
     # The adapter regenerates the MaxText config and would otherwise reinstate
@@ -880,9 +883,10 @@ if ROLLOUT_ENGINE == "vllm":
       def _generate_maxtext_config_with_no_remat(vllm_config_param):
         if "maxtext_config" not in vllm_config_param.additional_config:
           vllm_config_param.additional_config["maxtext_config"] = {}
-        vllm_config_param.additional_config["maxtext_config"][
-            "remat_policy"
-        ] = "none"
+        mc = vllm_config_param.additional_config["maxtext_config"]
+        mc["remat_policy"] = "none"
+        if getattr(vllm_config_param, "load_config", None) and getattr(vllm_config_param.load_config, "load_format", None) == "dummy":
+          mc.pop("load_parameters_path", None)
         return _orig_generate_maxtext_config(vllm_config_param)
 
       adapter.generate_maxtext_config = _generate_maxtext_config_with_no_remat
