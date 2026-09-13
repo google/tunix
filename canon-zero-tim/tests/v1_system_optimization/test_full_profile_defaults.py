@@ -160,7 +160,11 @@ class FullProfileDefaultsTest(unittest.TestCase):
             root / f"explicit-{index}",
         )
         self.assertEqual(automatic, explicit)
-        self.assertEqual(automatic, ["stream", True, True, None])
+        # The FrozenLake full profile exports the r3 length-sorted backward
+        # grouping (tasks/zero_tim_perf2 phase C/D); it is not part of the
+        # derived pair and the stale parent value must not survive either way.
+        sort = "1" if "frozenlake" in raw.get("CANON_PROFILE_FILE", "") else None
+        self.assertEqual(automatic, ["stream", True, True, sort])
         # An explicit off control cannot be promoted merely by selecting the
         # optimized profile. Preserve the old partial-pair semantics too.
         for suffix, overrides in (
@@ -171,7 +175,7 @@ class FullProfileDefaultsTest(unittest.TestCase):
         ):
           self.assertEqual(
               self._resolve({**raw, **overrides}, root / f"{suffix}-{index}"),
-              ["", False, True, None],
+              ["", False, True, sort],
           )
 
   def test_renderer_rejects_profile_defaults_in_a_stale_raw_template(self):
