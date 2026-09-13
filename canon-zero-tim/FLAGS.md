@@ -293,6 +293,7 @@ T9f target validation is pending; see the owning task's phase and handoff.
 `[CANON_P38_DURABLE_COLLECTION]`、`[CANON_P38_SEAM_CLASSIFICATION_JSON]`、
 PATHTRACE 族(固定树行数 =2×层+1)。
 2026-09-13 合线登记(perf/perf2/perf3 与 v2 one-host 载具的 marker,原文只以缩写或家族名出现):`[CANON_ALIGN_PRE_EVIDENCE]`、`[CANON_ALIGN_WARNING]`、`[CANON_FROZENLAKE_P42_JSON]`、`[CANON_P33_DP8]`、`[CANON_PROMPT_DIRECT_LOGPROBS]`、`[CANON_PROMPT_ABSOLUTE_TARGET_IDS]`(`[CANON_P33_DP8]` 与 `[CANON_P33_DP4]` 同为 `_segmented_update_geometry` 的 f-string 产物;两个 `CANON_PROMPT_*` 是 runner 补丁 06 的 PATHTRACE 行)。
+2026-09-13 W3.10(v2 Phase F g5 账本订正):`[CANON_P33_DP]`(`agentic_rl_learner._segmented_update_geometry` 的 f-string 前缀,`[CANON_P33_DP4]`/`[CANON_P33_DP8]` 由它生成)、`[CANON_P33_EVAL]`、`[CANON_P33_WANDB]`(`examples/frozenlake/train_frozenlake_qwen3.py`、`examples/math_gsm8k/qwen3_grpo_demo.py` 的字面 marker,`cluster/steps/90_run.sh` 与 `tests/p33_workloads/classify_run.py` 消费)从可设置名 Appendix 迁到此处;`CANON_P57_EVALUATION` 不是环境名而是 `CANON_P57_RUN_KIND == "eval"` 派生的 Python 局部量,列入审计脚本的 NON_SETTABLE_CANON_IDENTIFIERS。源码零改动。
 Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按合同类文档对待。
 
 ## 否决与退役区(只增不删)
@@ -305,6 +306,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | C3 延迟写回 | 净零 +4.5±4.1s(PCIe 争用),机制留备胎默认关 | P49 |
 | truncated-cache backward | 丢 97.5% Wv,结构错 | R4 裁决 |
 | CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_REQUIRE_XPROF | 退役:P59 backward A/B 证据发射器(`cluster/render_p59_backward_ab.py` + `tasks/p59-dp16-parallel-backward/scripts/run_and_persist.sh` 及其两个测试)删除;三名零运行时读者;`CANON_P59_KIND` 保留 | wrapup_v2_default W3.8,2026-09-13 |
+| CANON_P33_DP / CANON_P33_DP4 / CANON_P33_EVAL / CANON_P33_WANDB / CANON_P57_EVALUATION | 账本订正:前四个是日志 marker(迁 MARKERS),第五个是派生局部量;从未是可设置的环境名 | wrapup_v2_default W3.10,2026-09-13 |
 
 ## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
 
@@ -491,15 +493,11 @@ CANON_P32_CHUNK_BATCH
 CANON_P32_LENGTH_SORT
 CANON_P32_LONG_PROMPT_EXAMPLES
 CANON_P33_DISABLE_EVAL
-CANON_P33_DP
-CANON_P33_DP4
 CANON_P33_ENABLE_EVAL
-CANON_P33_EVAL
 CANON_P33_NO_COMMIT
 CANON_P33_RUN_STAGE
 CANON_P33_SHARED_MESH
 CANON_P33_SHORT_ALIGNMENT
-CANON_P33_WANDB
 CANON_P33_WORKLOAD_LAUNCH_ADMITTED
 CANON_P34_ABCPROD
 CANON_P34_CLEAN_ROWS
@@ -624,7 +622,6 @@ CANON_P57_INFERENCE_REGIME
 CANON_P57_CALIBRATION_MODE
 CANON_P57_CALIBRATION_OUTPUT
 CANON_P57_CALIBRATION_RECIPES
-CANON_P57_EVALUATION
 CANON_P57_EVAL_CHECKPOINT_STEP
 CANON_P57_EVAL_OUTPUT
 CANON_P57_EXPECTED_UPDATES
@@ -787,7 +784,7 @@ CANON_XPROF_STEP_IMMEDIATE_DELAY
 CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 455 settable names (appendix inventory above; exclusions: none).
+Count: 450 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

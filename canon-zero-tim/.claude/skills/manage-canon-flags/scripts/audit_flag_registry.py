@@ -31,6 +31,7 @@ CHANGED_FLAG_PATHS = (
 # closed until it is registered or deliberately classified here.
 NON_SETTABLE_CANON_IDENTIFIERS = frozenset({
     "CANON_P57_CALIBRATION",
+    "CANON_P57_EVALUATION",
     "CANON_P57_NO_UPDATE",
 })
 
