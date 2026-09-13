@@ -648,11 +648,15 @@ def _normalize_entry(entry):
       k: json.dumps(v) if isinstance(v, list) else v for k, v in entry.items()
   }
   if DOCKER_IMAGE_PREFIX and normalized.get("docker_image"):
-    # e.g. 'namanjain12/pandas_final:tag' -> '<prefix>/pandas_final:tag'
-    image_name = normalized["docker_image"].split("/")[-1]
-    normalized["docker_image"] = (
-        f"{DOCKER_IMAGE_PREFIX.rstrip('/')}/{image_name}"
-    )
+    # If image is from swebench-verified and prefix does not target swebench, keep original
+    if "swebench-verified" in normalized["docker_image"] and "swebench-verified" not in DOCKER_IMAGE_PREFIX:
+      pass
+    else:
+      # e.g. 'namanjain12/pandas_final:tag' -> '<prefix>/pandas_final:tag'
+      image_name = normalized["docker_image"].split("/")[-1]
+      normalized["docker_image"] = (
+          f"{DOCKER_IMAGE_PREFIX.rstrip('/')}/{image_name}"
+      )
   return normalized
 
 
