@@ -732,6 +732,8 @@ if USE_AGENT_SANDBOX:
       max_warmpool_replicas=MAX_WARMPOOL_REPLICAS,
       scaffold=SCAFFOLD,
   )
+  logger.info('[Main] Starting warmpools for planned tasks on K8s...')
+  fleet.start_warmpools(wait=False)
 
 # ========================== Model & Mesh ==========================
 
