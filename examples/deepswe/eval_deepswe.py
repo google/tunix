@@ -341,7 +341,7 @@ parser_cli.add_argument(
 parser_cli.add_argument(
     "--enable_continue_decode",
     type=str2bool,
-    default=os.getenv("ENABLE_CONTINUE_DECODE", "true").lower() == "true",
+    default=os.getenv("ENABLE_CONTINUE_DECODE", "false").lower() == "true",
     help="Whether to enable continue decode in vLLM",
 )
 parser_cli.add_argument(
