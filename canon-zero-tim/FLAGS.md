@@ -307,6 +307,7 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | truncated-cache backward | 丢 97.5% Wv,结构错 | R4 裁决 |
 | CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_REQUIRE_XPROF | 退役:P59 backward A/B 证据发射器(`cluster/render_p59_backward_ab.py` + `tasks/p59-dp16-parallel-backward/scripts/run_and_persist.sh` 及其两个测试)删除;三名零运行时读者;`CANON_P59_KIND` 保留 | wrapup_v2_default W3.8,2026-09-13 |
 | CANON_P33_DP / CANON_P33_DP4 / CANON_P33_EVAL / CANON_P33_WANDB / CANON_P57_EVALUATION | 账本订正:前四个是日志 marker(迁 MARKERS),第五个是派生局部量;从未是可设置的环境名 | wrapup_v2_default W3.10,2026-09-13 |
+| CANON_CLUSTER / CANON_ENV / CANON_OUT | 退役:`CANON_CLUSTER` 的唯一赋值(`cluster/entrypoint.sh`)删除、无读者;`CANON_ENV`/`CANON_OUT` 只是 `run_p35_onehost.sh` 的本地 bash 变量,从未是环境合同名 | wrapup_v2_default W3.11,2026-09-13 |
 
 ## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
 
@@ -355,7 +356,6 @@ CANON_DP_REDUCE_ONCE
 CANON_CANONICAL_DEPTHS
 CANON_CHECKPOINT_CONTRACT_JSON
 CANON_CLIENT_IMAGE
-CANON_CLUSTER
 CANON_CONTINUE_DECODE
 CANON_CUT
 CANON_DEEPSWE_ALIGNMENT_WARN_ONLY
@@ -386,7 +386,6 @@ CANON_ENGINE_STEP_LOG_EVERY
 CANON_ENGINE_STEP_LOG_SUMMARY_EVERY
 CANON_ENGINE_STEP_LOG_ALL_PROCS
 CANON_ENGINE_DRIVER_LOG
-CANON_ENV
 CANON_EXPECTED_SLICE_DEVICES
 CANON_EXPECT_COMMIT
 CANON_EXPECT_JAX_VERSION
@@ -445,7 +444,6 @@ CANON_NUM_GENERATIONS
 CANON_N_LAYERS
 CANON_ONEHOST_JAX_CACHE_DIR
 CANON_OPT_STATE_RESIDENT
-CANON_OUT
 CANON_OUT_BYTES
 CANON_P28_BATCHED_REPORT
 CANON_P28_BATCHED_REVERSE
@@ -784,7 +782,7 @@ CANON_XPROF_STEP_IMMEDIATE_DELAY
 CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 450 settable names (appendix inventory above; exclusions: none).
+Count: 447 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

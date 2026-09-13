@@ -34,7 +34,6 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "$HERE/.." && pwd)"
 export CANON_PKG="$PKG"
-export CANON_CLUSTER="$HERE"
 # Steps run as separate processes, so exported variables do not flow between them.  00_env.sh
 # writes one env file here and every later step sources it -- the resolved configuration is
 # then a file you can cat, not state you have to reconstruct.
