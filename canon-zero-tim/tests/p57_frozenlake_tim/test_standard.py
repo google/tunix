@@ -18,13 +18,15 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
+from tunix.rl import perf_log
+
 ROOT = Path(__file__).resolve().parents[3]
 PKG = ROOT / "canon-zero-tim"
 SOURCE = ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
 TREE = ast.parse(SOURCE.read_text())
 NAMES = {"_p57_tim_standard_enabled", "_validate_p57_tim_standard",
          "_validate_p57_old_logps_source_request"}
-CONTRACT = {"Mapping": Mapping, "alignment": SimpleNamespace(AlignmentGateError=ValueError)}
+CONTRACT = {"Mapping": Mapping, "alignment": SimpleNamespace(AlignmentGateError=ValueError, is_audit_step=lambda step: True)}
 
 
 def block(nodes):
@@ -53,9 +55,11 @@ def select(source="auto", sampler=None, rollout=((-4., -5.),), trainer=None, ste
       deepswe_debug=SimpleNamespace(rollout_only=lambda: False),
       self=SimpleNamespace(algo_config=SimpleNamespace(use_rollout_logps=True, sampler_is=sampler),
           rl_cluster=SimpleNamespace(get_actor_per_token_logps=lambda **kw: trainer,
-                                    actor_trainer=SimpleNamespace(train_steps=step))),
-      alignment=SimpleNamespace(AlignmentGateError=ValueError), expected_step=0,
-      prompt_ids=None, completion_ids=None, pad_value=0, eos_value=1,
+                                    actor_trainer=SimpleNamespace(train_steps=step),
+                                    global_steps=step)),
+      alignment=SimpleNamespace(AlignmentGateError=ValueError, is_audit_step=lambda step: True), expected_step=0,
+      prompt_ids=None, completion_ids=jnp.zeros((1, 2), dtype=jnp.int32), pad_value=0, eos_value=1,
+      perf_log=perf_log,
       compute_logps_micro_batch_size=8, prompt_mask=None, completion_valid_mask=None,
       host_prompt_lengths=None, host_completion_lengths=None, completion_mask=jnp.ones((1, 2)))
   exec(SELECTION, scope)
