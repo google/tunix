@@ -137,9 +137,9 @@ kubectl apply --server-side --dry-run=server -f "$P44_OUTPUT"
 
 Rendering and applying are separate stop points. Never hand-edit the YAML.
 The user performs `kubectl apply`; the evidence agent only reads the complete
-pod-0 raw log and durable artifacts. Do not proceed if `haoyugao-cpu-np-pvc`
-cannot mount on `canon-cpu-pool`, or if sandbox pods do not target
-`deepswe-cpu-pool-2`.
+pod-0 raw log and durable artifacts. Do not proceed if `$MODEL_PVC` cannot
+mount on `$CPU_NODEPOOL`, or if sandbox pods do not target
+`$SANDBOX_NODEPOOL`.
 
 ### P2.2 — P58 64split Zero three-update
 
@@ -171,7 +171,8 @@ kubectl apply --server-side --dry-run=server -f "$P58_OUTPUT"
 Before the user applies it, inspect the rendered file and require all of:
 
 - topology label `64split`, worker completions/parallelism 16, TPU topology
-  `4x4x4`, and exclusive-topology at JobSet scope;
+  `4x4x4`, and exclusive-topology on the worker Pod template only, never at
+  JobSet scope, so the head stays schedulable on the shared CPU pool;
 - systemopt split profile, exact clean-list digest/1,012 rows, B8xG16,
   DP4xTP8 for both
   roles, max concurrency 128, 32 sequences/DP, local/global M 256/1024;
