@@ -1,0 +1,1 @@
+[step 9] train_reward=0.297 train_solve=0.297 n=256 adv_abs_mean=0.257 compl_len=612.8 raw_compl_len=1801.5 trunc_ratio=0.000 time=588.2s
