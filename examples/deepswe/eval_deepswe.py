@@ -852,7 +852,9 @@ if ROLLOUT_ENGINE == "vllm":
     maxtext_cfg = {
         "model_name": MODEL_VERSION.lower().split("/")[-1],
         "model_call_mode": "inference",
-        "scan_layers": SCAN_LAYERS,
+        # vLLM inference requires unrolled layers for PagedAttention KV cache indexing (see maxtext vllm.yml).
+        # The base checkpoint remains scanned; weight_converter automatically unrolls scanned layers into vLLM.
+        "scan_layers": False,
         "enable_dp_attention": False,
         "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
         "log_config": False,
@@ -888,6 +890,7 @@ if ROLLOUT_ENGINE == "vllm":
           vllm_config_param.additional_config["maxtext_config"] = {}
         mc = vllm_config_param.additional_config["maxtext_config"]
         mc["remat_policy"] = "none"
+        mc["scan_layers"] = False
         if getattr(vllm_config_param, "load_config", None) and getattr(vllm_config_param.load_config, "load_format", None) == "dummy":
           mc.pop("load_parameters_path", None)
         return _orig_generate_maxtext_config(vllm_config_param)
