@@ -77,6 +77,8 @@ ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
+LOG_DIR=${LOG_DIR:-}
+TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
@@ -381,6 +383,12 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$TRAINER_FSDP" ]]; then
     ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
+  fi
+  if [[ -n "$LOG_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--log_dir="$LOG_DIR")
+  fi
+  if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
   fi
   if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
     ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
