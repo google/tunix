@@ -2,10 +2,33 @@
 
 ## START HERE — 64-chip split-role latest-admitted control carrier
 
-The `deepswe_4b_64chip` B path now has one explicit, fail-closed optimization
-identity. After publication, run P44 parity-64 three-update with
-`--system-optimization-arm control`, then P58 Zero `--topology 64split`
-three-update with `--system-optimization-arm control`. Exact commands and
+The `deepswe_4b_64chip` B path has one explicit, fail-closed optimization
+identity. Read back one clean 40-character SHA from
+`yuxzhang/canon-zero-tim`, pair it with the matching digest-pinned image, and
+then run these two carriers in order. Do not hand-edit a rendered YAML and do
+not apply the generic checked-in base YAML.
+
+| Order | Purpose | Exact selector | Batch | Updates | Meaning |
+|---|---|---|---|---:|---|
+| 1 | one-slice transport/parity gate | P44 `--topology 64 --stage three-update --system-optimization-arm control` | B4xG4 = 16 | 3 | proves the 32+32 role split carrier; it is not P58 admission |
+| 2 | target P58 B pilot | P58 `--topology 64split --arm zero --stage three-update --system-optimization-arm control` | B8xG16 = 128 | 3 | first target run; repeat from a fresh run ID only after it passes |
+
+The P58 model is exactly `Qwen/Qwen3-4B-Instruct-2507`. Its prompt budget is
+4,096 tokens and its response budget is 16,384 tokens for the entire
+multi-turn trajectory, with at most 50 turns. The vLLM KV/model window is
+20,608 (= 4,096 + 16,384 + 128 reserve); it is not a 20,608-token response
+budget. `MAX_CONTEXT_LIMIT_REACHED` and the other signed timeout/overlong
+statuses remain filtered and do not contribute reward, advantage, or an
+optimizer update. The batch itself must nevertheless durably contain all 128
+rows before reward/rescore/trainer handoff.
+
+The first target launch is deliberately three-update, not full training. The
+latest-admitted system-optimization selector is accepted only by the exact
+`64split:zero:three-update` identity. A request that combines `--stage full`
+with `--system-optimization-arm control` must fail closed. Promotion to the
+1,000-update full stage requires two independently passing same-seed target
+runs, their accounting/bytewise evidence, a later contract change, and a
+separate user-approved publish/launch stop. Exact render commands and
 inspection gates are at the top of `cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
 
 The admitted tuple is fixed lm-head + P59 rank-parallel checked-VMA/P67 +
@@ -23,6 +46,18 @@ Absent selector preserves the previous conservative 64split path and the
 historical P58-128 render. Local DP1xTP4 plus DP2xTP2 evidence is factorized
 mechanism evidence only; the 64-chip target remains `TARGET NOT RUN` until the
 user applies it and returns complete artifacts.
+
+For the P58 target run, preserve the complete signed recipe: clean 1,012-task
+list; sampling temperature 1.0/top-p 1.0/top-k 0/seed 42; RLOO with
+sequence-mean-token-scale, scale 16,384 and denominator-weighted
+accumulation; beta 0; clip 0.20/0.28; AdamW 1e-6, betas 0.9/0.99, weight
+decay 0.01 and gradient clip 1.0; TPU-resident optimizer; remat decoder;
+rollout microbatch 1 and train/logprob/mini microbatches 8. Prefix cache,
+sampler IS/TIS, group clip filtering, degenerate-group masking and checkpoint
+save/resume stay off. Global rollout concurrency remains 128, with 32 vLLM
+sequences and 256 batched tokens per DP replica. The timeout ladder is 300 s
+per turn, 3,000 s per episode, 600 s step/reward, 300 s cleanup, 3,300 s
+sandbox active deadline, and 3,600 s batch deadline.
 
 Local target-scoped evidence is complete: P58 203/203 plus 130 subtests pass
 both on the host and in the digest-pinned image; the P44 and P59 exact-image

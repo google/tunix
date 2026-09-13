@@ -727,7 +727,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 440 settable names (appendix inventory above; exclusions: none).
+Count: 442 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

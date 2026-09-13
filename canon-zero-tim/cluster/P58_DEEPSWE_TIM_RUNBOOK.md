@@ -1,12 +1,46 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
-## P58.64split P2 — one 64-chip slice, split roles (unpublished until approved)
+## P58.64split P2 — one 64-chip slice, split roles
 
 This lane compresses the P58 Qwen3-4B Zero-TIM workload onto one physical
 v5p `4x4x4` slice. It is configuration B in `deepswe_4b_64chip`: rollout and
 trainer own disjoint, exhaustive 32-device halves; each role is DP4xTP8. The
 scientific batch remains B8xG16 = 128 trajectories. This is not colocated;
 colocated DP8xTP8 is a later phase and must not be inferred from this section.
+
+### Exact run matrix
+
+Do not skip or combine the two rows. P44 is the small carrier gate; P58 is the
+actual Qwen3-4B DeepSWE pilot.
+
+| Order | Renderer | Exact selectors | Batch | Horizon |
+|---|---|---|---|---:|
+| 1 | `render_p44_deepswe_parity.py` | `--topology 64 --stage three-update --system-optimization-arm control` | B4xG4 = 16 | 3 updates |
+| 2 | `render_p58_deepswe_tim.py` | `--topology 64split --arm zero --stage three-update --system-optimization-arm control` | B8xG16 = 128 | 3 updates |
+
+The P58 row is exactly `Qwen/Qwen3-4B-Instruct-2507`, prompt 4,096,
+response 16,384 across the complete multi-turn episode, and at most 50 turns.
+The engine reports a 20,608-token KV/model window because it adds the prompt,
+response, and 128-token reserve; this must not be mistaken for a 20,608-token
+response. The full signed P58 recipe is:
+
+```text
+data=clean 1,012-task P58 whitelist
+sampling=temperature 1.0, top_p 1.0, top_k 0, seed 42
+algorithm=RLOO, beta 0, clip 0.20/0.28, off_policy_steps 0
+loss=sequence-mean-token-scale, scale 16384, denominator-weighted accumulation
+optimizer=TPU-resident AdamW(lr 1e-6, betas 0.9/0.99, wd 0.01, grad_clip 1.0)
+microbatch=mini/train/logprob 8, rollout 1; remat=decoder
+rollout=max_concurrency 128, max_num_seqs_per_dp 32, batched_tokens_per_dp 256
+timeouts=turn 300, episode 3000, step/reward 600, cleanup 300, sandbox 3300, batch 3600
+disabled=prefix cache, sampler IS/TIS, group clip filter, degenerate-group masking, checkpoints
+transport=TiTO; use_rollout_logps=true
+```
+
+The system-optimization control selector is currently admitted only for exact
+P58 `64split:zero:three-update`. It must reject `--stage full`. Do not replace
+the second row with a 1,000-update render: full promotion is a later contract
+and user approval after two independently passing same-seed target runs.
 
 The selector is exact:
 
@@ -30,12 +64,9 @@ stays on, sampler IS/TIS stay off, the optimizer is TPU-resident, and
 checkpointing is disabled
 (`--ckpt_dir=none`, no save cadence).
 
-Local evidence is only a claim-limited prerequisite. The executable tree at
-run start (`3f95bdc762b93b59ad2c8fb2f7a332ea5b3548d4` plus diff
-`c92b4787c8fa38069c420c955cf24cd87b17bb0e42efcb3c9a9371f185050b1b`)
-passed. The only tracked post-run change was this runbook evidence update;
-the final unpublished full-worktree diff hash is recorded in the outer task
-HANDOFF so this tracked file does not make that hash self-referential.
+Local evidence is only a claim-limited prerequisite. The implementation is
+carried by commits `4d0a2ee6a` and `e8ebdad82`; the operator must use the final
+published readback SHA rather than either abbreviated development anchor.
 
 - DP2xTP2 P59 mechanics:
   `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p1a_20260913_0445`;
