@@ -254,6 +254,12 @@ parser_cli.add_argument(
     help="Reshard chunk size for vLLM weight sync",
 )
 parser_cli.add_argument(
+    "--vllm_init_random_weights",
+    type=str2bool,
+    default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "false").lower() == "true",
+    help="Initialize vLLM with random weights and sync real weights chunked",
+)
+parser_cli.add_argument(
     "--sglang_mem_fraction_static",
     type=float,
     default=float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")),
@@ -485,6 +491,9 @@ VLLM_SERVER_MODE = args.vllm_server_mode
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = args.vllm_max_batched_tokens
 VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
+VLLM_INIT_RANDOM_WEIGHTS = args.vllm_init_random_weights or (
+    args.vllm_reshard_chunk_size > 0
+)
 
 SGLANG_MEM_FRACTION_STATIC = args.sglang_mem_fraction_static
 SGLANG_INIT_RANDOM_WEIGHTS = args.sglang_init_random_weights
@@ -910,7 +919,7 @@ if ROLLOUT_ENGINE == "vllm":
   vllm_config = VllmConfig(
       mesh=mesh,
       hbm_utilization=VLLM_HBM_UTILIZATION,
-      init_with_random_weights=False,
+      init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
       tpu_backend_type="jax",
       server_mode=VLLM_SERVER_MODE,
       tensor_parallel_size=mesh.shape["tp"],
@@ -924,14 +933,75 @@ if ROLLOUT_ENGINE == "vllm":
       sampling_kwargs=sampling_kwargs,
   )
 
-  logger.info(
-      "Initializing VllmSampler directly with checkpoint from %s ...",
-      MODEL_PATH,
-  )
-  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-  logger.info(
-      "VllmSampler successfully initialized directly with model weights."
-  )
+  if VLLM_INIT_RANDOM_WEIGHTS:
+    from flax import nnx
+
+    logger.info(
+        "Initializing VllmSampler with random weights (chunked sync enabled)..."
+    )
+    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+
+    logger.info("Loading base model weights to transfer into VllmSampler...")
+    if MODEL_SOURCE == "maxtext":
+      logger.info(
+          "Loading MaxText model %s from %s (scan_layers=%s)...",
+          MODEL_VERSION,
+          MODEL_PATH,
+          SCAN_LAYERS,
+      )
+      model, _ = AutoModel.from_pretrained(
+          model_id=MODEL_VERSION,
+          mesh=mesh,
+          model_source=ModelSource.MAXTEXT,
+          model_path=MODEL_PATH,
+          enable_checkpointing=True,
+          allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
+          scan_layers=SCAN_LAYERS,
+          checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
+      )
+    elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
+      model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
+      logger.info("Loading model weights from %s ...", MODEL_PATH)
+      model = params_lib.create_model_from_safe_tensors(
+          MODEL_PATH, model_config, mesh, dtype=jnp.float32
+      )
+    elif MODEL_VERSION in ("Qwen/Qwen3-32B", "Qwen3-32B"):
+      model_config = model_lib.ModelConfig.qwen3_32b()
+      logger.info("Loading model weights from %s ...", MODEL_PATH)
+      model = params_lib.create_model_from_safe_tensors(
+          MODEL_PATH, model_config, mesh, dtype=jnp.float32
+      )
+    else:
+      logger.info(
+          "Loading model weights via AutoModel for %s ...", MODEL_VERSION
+      )
+      model, _ = AutoModel.from_pretrained(
+          model_id=MODEL_VERSION,
+          mesh=mesh,
+          model_source=ModelSource.HUGGINGFACE,
+          model_path=MODEL_PATH,
+      )
+
+    logger.info(
+        "Transferring model weights to VllmSampler with reshard_chunk_size=%s...",
+        VLLM_RESHARD_CHUNK_SIZE,
+    )
+    sampler.update_params(nnx.state(model))
+    logger.info(
+        "Weight transfer complete. Freeing temporary model weights..."
+    )
+    del model
+    gc.collect()
+    sft_utils.show_hbm_usage()
+  else:
+    logger.info(
+        "Initializing VllmSampler directly with checkpoint from %s ...",
+        MODEL_PATH,
+    )
+    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+    logger.info(
+        "VllmSampler successfully initialized directly with model weights."
+    )
 
 elif ROLLOUT_ENGINE in ("vanilla", "sglang_jax"):
   if MODEL_SOURCE == "maxtext":
