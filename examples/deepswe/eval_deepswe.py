@@ -729,7 +729,10 @@ def patch_kubernetes_runtime():
 patch_kubernetes_runtime()
 
 try:
-  k8s_config.load_kube_config()
+  if os.getenv("KUBERNETES_SERVICE_HOST"):
+    k8s_config.load_incluster_config()
+  else:
+    k8s_config.load_kube_config()
   k8s_client = client.CoreV1Api()
   logger.info("Kubernetes connection verified.")
 except Exception as e:
@@ -940,11 +943,6 @@ if ROLLOUT_ENGINE == "vllm":
   if VLLM_INIT_RANDOM_WEIGHTS:
     from flax import nnx
 
-    logger.info(
-        "Initializing VllmSampler with random weights (chunked sync enabled)..."
-    )
-    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-
     logger.info("Loading base model weights to transfer into VllmSampler...")
     if MODEL_SOURCE == "maxtext":
       logger.info(
@@ -985,6 +983,11 @@ if ROLLOUT_ENGINE == "vllm":
           model_source=ModelSource.HUGGINGFACE,
           model_path=MODEL_PATH,
       )
+
+    logger.info(
+        "Initializing VllmSampler with random weights (chunked sync enabled)..."
+    )
+    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
 
     logger.info(
         "Transferring model weights to VllmSampler with reshard_chunk_size=%s...",
