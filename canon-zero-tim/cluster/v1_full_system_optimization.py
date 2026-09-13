@@ -1,4 +1,22 @@
-"""Reviewed system-optimization additions for registered V1 full recipes."""
+"""Reviewed system-optimization additions for registered V1 full recipes.
+
+The bundle below is the exact environment tuple a registered full job
+receives on top of its profile.  It deliberately does not spell the
+zero_tim_perf3 KEEP set, which is a code default rather than an environment
+addition (tasks/wrapup_v2_default W4.1, 2026-09-13):
+
+* matmul tile policy v2 (``src/engine_shims/p22_pallas_matmul.TILE_POLICY``),
+* the 256-row rmsnorm block (``p22_pallas_rmsnorm.ROW_TILE_POLICY``),
+* log-softmax 256-row bucketing (``CANON_LOGPROB_M_BUCKET`` defaults to 1),
+* the 10-step alignment audit period (``CANON_ALIGNMENT_AUDIT_EVERY``, set
+  by the FrozenLake full profile), and
+* the plain projection pullback (``p22xk_vjp_ops.plain_matmul_vjp_enabled``
+  defaults to on; ``CANON_MATMUL_VJP_PLAIN=0`` is the replica A/B path).
+
+The reduce-once DP sum is one half of the ``FULL_PROFILE_DEFAULT_NAMES``
+pair that the exact full profile derives from this policy; profiles must not
+export either half (see ``full_profile_defaults``).
+"""
 
 from __future__ import annotations
 

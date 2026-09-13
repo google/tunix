@@ -49,8 +49,9 @@ def canonical_swiglu(gate, up):
 # fusion bf16[256,256] sea (4032 per launch, 5%).  The backward does not
 # need the forward's K-blocking: dX = cot . W^T and dW = X^T . cot as two
 # plain f32-accumulating dots give the same gradient up to summation order.
-# CANON_MATMUL_VJP_PLAIN=1 selects the plain dots; the default 0 keeps the
-# replica pullback.
+# The plain dots are the code default (tasks/zero_tim_perf3 Phase H);
+# CANON_MATMUL_VJP_PLAIN=0 keeps the K-block replica pullback as the explicit
+# A/B path until the tp8 64-chip wave has exercised the default.
 PLAIN_VJP_ENV = "CANON_MATMUL_VJP_PLAIN"
 _PLAIN_RECEIPT = set()
 
