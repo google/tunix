@@ -292,6 +292,7 @@ T9f target validation is pending; see the owning task's phase and handoff.
 `[P57.TITO.EMPTY_RESPONSE]`、
 `[CANON_P38_DURABLE_COLLECTION]`、`[CANON_P38_SEAM_CLASSIFICATION_JSON]`、
 PATHTRACE 族(固定树行数 =2×层+1)。
+2026-09-13 合线登记(perf/perf2/perf3 与 v2 one-host 载具的 marker,原文只以缩写或家族名出现):`[CANON_ALIGN_PRE_EVIDENCE]`、`[CANON_ALIGN_WARNING]`、`[CANON_FROZENLAKE_P42_JSON]`、`[CANON_P33_DP8]`、`[CANON_PROMPT_DIRECT_LOGPROBS]`、`[CANON_PROMPT_ABSOLUTE_TARGET_IDS]`(`[CANON_P33_DP8]` 与 `[CANON_P33_DP4]` 同为 `_segmented_update_geometry` 的 f-string 产物;两个 `CANON_PROMPT_*` 是 runner 补丁 06 的 PATHTRACE 行)。
 Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按合同类文档对待。
 
 ## 否决与退役区(只增不删)
@@ -303,6 +304,27 @@ Marker 是观测契约:改名/删除 = 破坏 postflight 与历史可比性,按�
 | CANON_KV_UNIFIED 作为修复 | 生产红,非修复 | p38u1 |
 | C3 延迟写回 | 净零 +4.5±4.1s(PCIe 争用),机制留备胎默认关 | P49 |
 | truncated-cache backward | 丢 97.5% Wv,结构错 | R4 裁决 |
+
+## perf / perf2 / perf3 与 one-host 载具新增名的登记(2026-09-13,wrapup_v2_default W1;审计 `--changed-base 06a0fdb9` 之前漏登)
+
+这些名在发布线 3f95bdc7 上已有读者但未进 Appendix;此处补登,处置随 W4 四节重写归位。默认位与读者以 file:line 为准。
+
+| 名 | 层 | 取值 / 默认 | 读者与收据 |
+|---|---|---|---|
+| `CANON_MATMUL_VJP_PLAIN` | A 数值 | 1(代码默认,zero_tim_perf3 Phase H)/ 0 = K-block replica pullback(tp8 64 卡验过前保留的 A/B 路径;T 层删) | `src/engine_shims/p22xk_vjp_ops.py:plain_matmul_vjp_enabled`;收据 `[PATHTRACE] CANON_MATMUL_VJP_PLAIN=…` |
+| `CANON_LOGPROB_M_BUCKET` | A 数值(程序组织) | 1(代码默认:log-softmax 按 256 行分桶)/ 0 = 单程序 | `tunix/rl/canonical_logsoftmax.py`;FL one-host 载具透传 |
+| `CANON_ENGINE_STEP_LOG` | B 仪器 | 1(默认开;0 关) | runner 补丁 39:每引擎步 `[ENGINE_STEP]` + `[ENGINE_STEP_SUMMARY]`,64 卡进账用,不删 |
+| `CANON_ENGINE_STEP_LOG_FULL` | B 仪器 | 5000(前 N 步逐步打印) | runner 补丁 39 |
+| `CANON_ENGINE_STEP_LOG_EVERY` | B 仪器 | 20(之后每 N 步一行) | runner 补丁 39 |
+| `CANON_ENGINE_STEP_LOG_SUMMARY_EVERY` | B 仪器 | 500(汇总行周期) | runner 补丁 39 |
+| `CANON_ENGINE_STEP_LOG_ALL_PROCS` | B 仪器 | 0(只 process 0 打印;1 全部进程) | runner 补丁 39 |
+| `CANON_ENGINE_DRIVER_LOG` | B 仪器 | 1(默认开):驱动每 10 s `[ENGINE_DRIVER]` | `tunix/generate/vllm_async_driver.py:90` |
+| `CANON_XPROF_STEP_IMMEDIATE` | B 诊断 | 空(关)/ 1 = FL one-host measure 载具的活 rollout 步窗 xprof(`V2_FL_XPROF_PHASE=step`) | `tunix/rl/agentic/agentic_rl_learner.py:6088`;载具 `run_frozenlake_dp2tp2_onehost.sh:388` |
+| `CANON_XPROF_STEP_IMMEDIATE_DELAY` | B 诊断 | 空(0 s):步窗开窗前延迟 | learner:6106;载具 `V2_FL_XPROF_STEP_DELAY` |
+| `CANON_XPROF_STEP_IMMEDIATE_SECONDS` | B 诊断 | 空(0 = 到步末):步窗最长秒数 | learner:6108;载具 `V2_FL_XPROF_STEP_SECONDS` |
+| `CANON_DP_WORKLOAD_DIAG_UNPIN` | B 诊断 | 空;冒号分隔的钉子名 = 诊断发跳过该合同钉(如 E2e 的 `CANON_DP_COLLECTIVE_REDUCE` 未准入钉) | `tunix/rl/dp_workloads.py`;FL one-host 载具透传(inner.sh:101 追加 `CANON_FROZENLAKE_ALI…`) |
+| `CANON_FL_DIAG_VLLM_MAX_NUM_SEQS` | B 诊断 | 空;整数 = 覆盖 one-host FL 引擎的 max_num_seqs(诊断) | `tunix/rl/dp_workloads.py`;载具 `run_frozenlake_dp2tp2_onehost.sh:371` |
+| `CANON_V1_GSM8K_XPROF_GEOMETRY` | D 载具 | dp4-tp1(默认)/ dp2-tp2 / dp2-tp2-long / dp2-tp2-long8k / dp2-tp2-p45:GSM8K one-host xprof pair 的几何身份,须与 `V1_GSM8K_XPROF_GEOMETRY` 一致 | `tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_{common,inner}.sh` |
 
 ## Appendix — machine-generated full inventory (basis a94d6c0c, count must equal census)
 
@@ -351,9 +373,16 @@ CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM
 CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS
 CANON_DP_PROBE_LOCAL_SAMPLES
 CANON_DP_SIZE
+CANON_DP_WORKLOAD_DIAG_UNPIN
 CANON_ENGINE_DP_SIZE
 CANON_ENGINE_LOGPROB_READBACK
 CANON_ENGINE_MODULE_C
+CANON_ENGINE_STEP_LOG
+CANON_ENGINE_STEP_LOG_FULL
+CANON_ENGINE_STEP_LOG_EVERY
+CANON_ENGINE_STEP_LOG_SUMMARY_EVERY
+CANON_ENGINE_STEP_LOG_ALL_PROCS
+CANON_ENGINE_DRIVER_LOG
 CANON_ENV
 CANON_EXPECTED_SLICE_DEVICES
 CANON_EXPECT_COMMIT
@@ -365,6 +394,7 @@ CANON_EXPECT_VISIBLE_DEVICES
 CANON_FIXED_AR
 CANON_FIXED_AR_EMBED
 CANON_FIXED_AR_GATHER
+CANON_FL_DIAG_VLLM_MAX_NUM_SEQS
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY
 CANON_FROZENLAKE_C0
 CANON_FROZENLAKE_CKPT_INTERVAL
@@ -398,7 +428,9 @@ CANON_LOCAL_PROMPTS
 CANON_LOCAL_TRAJECTORIES
 CANON_LOGPROB_M
 CANON_LOGPROB_STEP_FUSION
+CANON_LOGPROB_M_BUCKET
 CANON_M15_TOKEN_CONTINUITY
+CANON_MATMUL_VJP_PLAIN
 CANON_MAX_BATCHED
 CANON_MESH_SHAPE
 CANON_MINREPRO_N
@@ -733,6 +765,7 @@ CANON_V2_TRAINING_CAPSULE
 CANON_V2_TRAINING_CAPSULE_MODE
 CANON_V2_TRAINING_CAPSULE_SHA256
 CANON_V1_GSM8K_XPROF_ARM
+CANON_V1_GSM8K_XPROF_GEOMETRY
 CANON_V1_FL_TP8_AB_ARM
 CANON_V1_HP_FULL
 CANON_VJP2_MAX_SEQS
@@ -751,9 +784,12 @@ CANON_XPROF_PYTHON_TRACER
 CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
+CANON_XPROF_STEP_IMMEDIATE
+CANON_XPROF_STEP_IMMEDIATE_DELAY
+CANON_XPROF_STEP_IMMEDIATE_SECONDS
 ```
 
-Count: 444 settable names (appendix inventory above; exclusions: none).
+Count: 458 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

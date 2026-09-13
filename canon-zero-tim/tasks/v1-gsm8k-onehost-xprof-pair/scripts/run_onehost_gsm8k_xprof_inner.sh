@@ -93,7 +93,7 @@ case "$V1_GSM8K_XPROF_ARM" in
       IFS=',' read -r -a diag_overrides <<< "$V1_GSM8K_XPROF_DIAG_OVERRIDES"
       for kv in "${diag_overrides[@]}"; do
         if [[ ! "$kv" =~ ^CANON_[A-Z0-9_]+=[^[:space:]]*$ ]]; then
-          echo "[V1.GSM8K.XPROF] invalid diag override (want CANON_NAME=VALUE or CANON_NAME=): $kv" >&2
+          echo "[V1.GSM8K.XPROF] invalid diag override (want NAME=VALUE or NAME=): $kv" >&2
           exit 2
         fi
         if [ -z "${kv#*=}" ]; then
