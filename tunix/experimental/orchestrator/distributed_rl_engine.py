@@ -147,7 +147,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       # Local routing hints only: this kwargs dict is consumed by the pool's
       # router hook and never forwarded to the remote call.
       worker = self._rollout_pool._get_next_actor(
-          method_name="generate",
           kwargs={
               "route_key": route_key,
               "request_id": req.request_id,
@@ -391,7 +390,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     for req in requests:
       route_key = req.metadata.get("prefix_hash", req.prompt_id)
       worker = self._rollout_pool._get_next_actor(
-            method_name="generate",
             kwargs={
                 "route_key": route_key,
                 "request_id": req.request_id,
