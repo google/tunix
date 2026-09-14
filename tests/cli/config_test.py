@@ -288,6 +288,34 @@ class ConfigTest(parameterized.TestCase):
     # equals the clipped gradient norm.
     self.assertAlmostEqual(float(optax.global_norm(updates)), 1.0, places=4)
 
+  def test_create_optimizer_gradient_transformation_bfloat16(self):
+    """Verifies that plain transformations created by create_optimizer preserve bfloat16."""
+    clipping = config.create_optimizer(
+        {"opt_type": "clip_by_global_norm", "max_norm": 1.0},
+        "test_config_path",
+    )
+    params = {"w": jax.numpy.zeros((2,), dtype=jax.numpy.bfloat16)}
+    grads = {"w": jax.numpy.array([60.0, 80.0], dtype=jax.numpy.bfloat16)}
+    updates, _ = clipping.update(grads, clipping.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 1.0, places=2)
+    self.assertEqual(optax.tree.dtype(updates), jax.numpy.bfloat16)
+
+  def test_create_optimizer_chains_opt_chain_type_bfloat16(self):
+    """Verifies that chained transformations work with bfloat16 gradients."""
+    optimizer = config.create_optimizer(
+        {
+            "opt_type": "sgd",
+            "learning_rate": 1.0,
+            "opt_chain_type": "clip_by_global_norm",
+            "chain_kwargs": {"max_norm": 1.0},
+        },
+        "test_config_path",
+    )
+    params = {"w": jax.numpy.zeros((2,), dtype=jax.numpy.bfloat16)}
+    grads = {"w": jax.numpy.array([60.0, 80.0], dtype=jax.numpy.bfloat16)}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 1.0, places=2)
+
   def test_create_optimizer_without_opt_chain_type_is_unchained(self):
     """`opt_chain_type` defaults to None, which leaves gradients untouched."""
     optimizer = config.create_optimizer(

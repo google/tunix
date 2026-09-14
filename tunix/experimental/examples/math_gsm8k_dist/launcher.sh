@@ -467,8 +467,6 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
-    --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
-    --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     --optimizer_b1="$ADAM_B1"
     --optimizer_b2="$ADAM_B2"
     --optimizer_eps="$ADAM_EPS"
@@ -487,6 +485,12 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
+  if [[ -n "$OPT_CHAIN_TYPE" ]]; then
+    TRAINER_CMD+=(
+      --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
+      --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
+    )
+  fi
   if [[ -n "$MAXTEXT_CKPT" ]]; then
     TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
   fi

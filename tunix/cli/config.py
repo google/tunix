@@ -346,12 +346,18 @@ def create_optimizer(
   )
   # Wrap the optimizer function with inject_hyperparams so that
   # the learning rate can be tracked and logged during training.
-  injected_opt_func = optax.inject_hyperparams(
-      opt_func, hyperparam_dtype=jax.numpy.float32
-  )
+  # Plain gradient transformations (such as chained clip_by_global_norm)
+  # have no learning rate and must not be wrapped, preserving their argument
+  # dtypes (e.g. max_norm) so they do not conflict with bfloat16 updates.
+  if learning_rate_val is not None:
+    opt_func_to_call = optax.inject_hyperparams(
+        opt_func, hyperparam_dtype=jax.numpy.float32
+    )
+  else:
+    opt_func_to_call = opt_func
   # Call the optimizer function with the extracted kwargs
   try:
-    optimizer = injected_opt_func(**opt_kwargs)
+    optimizer = opt_func_to_call(**opt_kwargs)
   except TypeError as e:
     raise TypeError(
         f"Error calling {opt_type} with arguments {opt_kwargs}. "

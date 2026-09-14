@@ -40,6 +40,8 @@ export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LEARNING_RATE=${LEARNING_RATE:-1e-6}
+export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
+export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
 export LORA_RANK=${LORA_RANK:-64}
@@ -212,6 +214,10 @@ start_trainer() {
   if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
     lora_args="--use_lora"
   fi
+  local opt_chain_flags=""
+  if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
+    opt_chain_flags="--optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\""
+  fi
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
@@ -237,8 +243,10 @@ start_trainer() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
+        --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
+        ${opt_chain_flags} \
         --learning_rate=${LEARNING_RATE} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \

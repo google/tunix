@@ -262,6 +262,11 @@ start_trainer() {
     fi
   fi
 
+  local opt_chain_flags=""
+  if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
+    opt_chain_flags="--optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\""
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
@@ -293,8 +298,7 @@ start_trainer() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
-        --optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" \
-        --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\" \
+        ${opt_chain_flags} \
         --optimizer_b1=${ADAM_B1} \
         --optimizer_b2=${ADAM_B2} \
         --optimizer_eps=${ADAM_EPS} \

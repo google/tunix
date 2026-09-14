@@ -44,6 +44,8 @@ MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
+OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
 SAMPLER=${SAMPLER:-inprocess_vllm}
@@ -250,6 +252,7 @@ echo "Launching trainer node..."
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --mini_batch_size="$MINI_BATCH_SIZE"
+    --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --learning_rate="$LEARNING_RATE"
@@ -260,6 +263,12 @@ echo "Launching trainer node..."
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
+  if [[ -n "$OPT_CHAIN_TYPE" ]]; then
+    TRAINER_CMD+=(
+      --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
+      --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
+    )
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi

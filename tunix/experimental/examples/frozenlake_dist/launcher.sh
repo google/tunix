@@ -45,6 +45,7 @@ LEARNING_RATE=${LEARNING_RATE:-1e-6}
 ADAM_B1=${ADAM_B1:-0.9}
 ADAM_B2=${ADAM_B2:-0.95}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.0}
+OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-100.0}
 TEMPERATURE=${TEMPERATURE:-0.7}
 TOP_P=${TOP_P:-1.0}
@@ -222,13 +223,17 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --adam_b1="$ADAM_B1"
     --adam_b2="$ADAM_B2"
     --weight_decay="$WEIGHT_DECAY"
-    --optimizer_opt_chain_type="clip_by_global_norm"
-    --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     --sampler_type="$SAMPLER"
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
+  if [[ -n "$OPT_CHAIN_TYPE" ]]; then
+    cmd+=(
+      --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
+      --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
+    )
+  fi
   is_true "$DEBUG" && cmd+=(--debug)
   export JAX_PLATFORMS=tpu,cpu
   export TPU_VISIBLE_DEVICES="$TRAINER_TPU_CHIPS"
