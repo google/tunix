@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import importlib.util
 from pathlib import Path
 import re
 import shlex
@@ -13,7 +14,19 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 
-import render_p34_jobset as p34
+
+def _load_p34_contract():
+  """Use this source revision's sibling even when loaded by absolute path."""
+  path = Path(__file__).resolve().with_name("render_p34_jobset.py")
+  spec = importlib.util.spec_from_file_location("p33_p34_contract", path)
+  if spec is None or spec.loader is None:
+    raise ImportError(f"cannot load P34 renderer contract: {path}")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+p34 = _load_p34_contract()
 
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
