@@ -79,6 +79,46 @@ def _patch_r2egym_for_agent_sandbox() -> None:
         )
 
       docker_mod.DockerRuntime.start_container = _patched_start_container
+
+    orig_start_pod = getattr(
+        docker_mod.DockerRuntime, "_orig_start_kubernetes_pod", None
+    )
+    if orig_start_pod is None and hasattr(
+        docker_mod.DockerRuntime, "_start_kubernetes_pod"
+    ):
+      docker_mod.DockerRuntime._orig_start_kubernetes_pod = (
+          docker_mod.DockerRuntime._start_kubernetes_pod
+      )
+
+      def _patched_start_kubernetes_pod(
+          self, docker_image, command, pod_name, **docker_kwargs
+      ):
+        original_create_namespaced_pod = self.client.create_namespaced_pod
+
+        def patched_create_namespaced_pod(*args, **kwargs):
+          body = kwargs.get("body")
+          if body and "spec" in body:
+            key = os.environ.get(
+                "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
+            )
+            val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
+            body["spec"]["nodeSelector"] = {key: val}
+            logging.info(
+                "[SandboxFleet] Overrode nodeSelector to %s=%s", key, val
+            )
+          return original_create_namespaced_pod(*args, **kwargs)
+
+        self.client.create_namespaced_pod = patched_create_namespaced_pod
+        try:
+          return self._orig_start_kubernetes_pod(
+              docker_image, command, pod_name, **docker_kwargs
+          )
+        finally:
+          self.client.create_namespaced_pod = original_create_namespaced_pod
+
+      docker_mod.DockerRuntime._start_kubernetes_pod = (
+          _patched_start_kubernetes_pod
+      )
   except Exception as e:
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
@@ -191,6 +231,7 @@ def _init_global_fleet(
         f" (max_concurrent={effective_max_concurrent},"
         f" window_size={batch_size},"
         f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
+        f" scaffold={scaffold},"
         " warm_per_task=True)..."
     )
     logging.info(msg)
@@ -309,6 +350,12 @@ class PrewarmDatasetIterator:
   def _unwarm_batch(self, images: list[str]):
     if images and self.fleet:
       for img in images:
+        # Do NOT retire OpenHands warm pools from this sliding window.
+        # `in_flight_batches` is a batch-count heuristic with no visibility
+        # into whether rollouts still hold or have yet to acquire handles.
+        # Bypassing unwarm avoids use-after-free crashes on large TPU slices.
+        if self.scaffold == "openhands":
+          continue
         try:
           self.fleet.unwarm_image(img)
           logging.info(
@@ -433,7 +480,7 @@ class SWEEnv(BaseTaskEnv):
       backend: str = "kubernetes",
       delete_image: bool = False,
       verbose: bool = False,
-      scaffold: str = "r2egym",
+      scaffold: str = "openhands",
       max_steps: int = 1,
       use_agent_sandbox: bool = False,
       fleet: Any | None = None,
@@ -556,6 +603,7 @@ class SWEEnv(BaseTaskEnv):
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv
+    _patch_r2egym_for_agent_sandbox()
     global EnvArgs, RepoEnv, Action
     if EnvArgs is None:
       from r2egym.agenthub.action import Action  # pytype: disable=import-error
@@ -577,6 +625,7 @@ class SWEEnv(BaseTaskEnv):
     if not self.env and not self.workspace:
       if self.use_agent_sandbox:
         self._init_agent_sandbox_env()
+
       else:
         self._init_local_repo_env()
     elif self.env is not None:
@@ -612,7 +661,7 @@ class SWEEnv(BaseTaskEnv):
           info={"max_steps": self.max_steps},
       )
 
-    if self.scaffold == "openhands" and self.workspace is not None:
+    if self.scaffold == "openhands":
       return openhands_utils.step_openhands(self, action_obj)
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
@@ -628,6 +677,13 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    if self.workspace is not None and hasattr(self.workspace, "close"):
+      try:
+        self.workspace.close()
+      except Exception as e:
+        logging.warning("[SWEEnv] Workspace close note: %s", e)
+      self.workspace = None
+
     if self.env is not None:
       self.env.close()
 
