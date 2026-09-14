@@ -850,7 +850,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._channel_loop: Optional[Any] = None
-    self._rpc: Optional[Any] = None
+    self._channels_lock = threading.Lock()
     self._dispatch_rpc: Optional[Any] = None
     self._poll_rpc: Optional[Any] = None
     self._rpc_timeout_s = rpc_timeout_s

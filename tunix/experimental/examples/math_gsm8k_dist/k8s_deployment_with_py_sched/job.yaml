@@ -39,7 +39,7 @@ spec:
           effect: NoSchedule
       initContainers:
         - name: scheduler
-          image: us-central1-docker.pkg.dev/PROJECT_ID/tunix-rl/py-rl-scheduler:latest
+          image: <path-to-your-docker-registry-here>/py-rl-scheduler:latest
           restartPolicy: Always  # native sidecar
           args:
             - --host=0.0.0.0
@@ -60,7 +60,7 @@ spec:
               memory: 2Gi
       containers:
         - name: tunix
-          image: us-central1-docker.pkg.dev/PROJECT_ID/tunix-rl/tunix-tpu:latest
+          image: <path-to-your-docker-registry-here>/tunix-tpu:latest
           workingDir: /app
           command:
             - bash

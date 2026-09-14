@@ -67,7 +67,7 @@ spec:
                     key: api-key
                     name: wandb-credentials
                     optional: true
-              image: us-central1-docker.pkg.dev/kfswain-gke-dev/tunix-rl/tunix-tpu:latest
+              image: <path-to-your-docker-registry-here>/tunix-tpu:latest
               imagePullPolicy: Always
               name: worker
               ports:

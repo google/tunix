@@ -27,6 +27,7 @@ router hook on `RoutingActorPool` cannot decline, so degradation happens here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -45,10 +46,12 @@ class RemoteSchedulerRouter:
   Compatible with `RoutingActorPool(router=...)`: called as
   ``router(actors, method_name, args, kwargs) -> actor``.
 
-  A background daemon thread polls each actor's ``heartbeat()`` and caches the
-  latest `HealthReport` per worker; the routing hot path does no RPC — it
-  snapshots the cache, posts one HTTP request to the sidecar (bounded by
-  ``http_timeout_s``), and maps the winner's name back to an actor handle.
+  A background daemon thread runs a private asyncio loop that polls each
+  worker's ``heartbeat`` RPC as its own task (so one hung worker cannot stall
+  the others' stats) and caches the latest `HealthReport` per worker; the
+  routing hot path does no RPC — it snapshots the cache, posts one HTTP
+  request to the sidecar (bounded by ``http_timeout_s``), and maps the
+  winner's name back to an actor handle.
   """
 
   def __init__(
@@ -81,17 +84,34 @@ class RemoteSchedulerRouter:
   # ---------------------------------------------------------------- naming
 
   def _name_for(self, actor: Any, index: int) -> str:
+    """Returns the resolved worker_id, else a stable local fallback. No RPC.
+
+    Safe on the routing hot path (which runs inside the orchestrator's event
+    loop, where blocking `submit()` is forbidden); resolution happens in the
+    poller via `_resolve_name`.
+    """
+    name = self._names.get(id(actor))
+    if name is not None:
+      return name
+    return str(getattr(actor, "target_address", None) or f"worker-{index}")
+
+  async def _resolve_name(self, actor: Any, index: int) -> str:
+    """Fetches the worker_id over RPC, caching on success only.
+
+    Poller-loop only. Failures are not cached, so a worker that is
+    unreachable on the first poll keeps its address fallback until it comes
+    up, then upgrades to its real worker_id.
+    """
     key = id(actor)
     name = self._names.get(key)
     if name is not None:
       return name
     try:
-      info = actor.info()
-      name = getattr(info, "worker_id", None)
+      name = getattr(await actor.asubmit("info"), "worker_id", None)
     except Exception:  # pylint: disable=broad-except
       name = None
     if not name:
-      name = getattr(actor, "target_address", None) or f"worker-{index}"
+      return self._name_for(actor, index)
     self._names[key] = str(name)
     return self._names[key]
 
@@ -103,32 +123,49 @@ class RemoteSchedulerRouter:
       if self._poller is None or not self._poller.is_alive():
         self._stop_event.clear()
         self._poller = threading.Thread(
-            target=self._poll_loop,
+            target=lambda: asyncio.run(self._poll_main()),
             name="remote-scheduler-router-poller",
             daemon=True,
         )
         self._poller.start()
 
-  def _poll_loop(self) -> None:
-    while not self._stop_event.is_set():
-      with self._lock:
-        actors = list(self._actors)
-      for i, actor in enumerate(actors):
-        name = self._name_for(actor, i)
-        try:
-          heartbeat = getattr(actor, "heartbeat", None)
-          report = heartbeat() if callable(heartbeat) else actor.submit(
-              "heartbeat"
-          )
-          stats = self._report_to_stats(report)
-        except Exception as e:  # pylint: disable=broad-except
-          logging.log_every_n(
-              logging.WARNING, "Heartbeat poll failed for %s: %s", 20, name, e
-          )
-          continue
+  async def _poll_main(self) -> None:
+    # One task per worker on this thread's private event loop: a hung worker
+    # (RPC timeout 60s) keeps only its own task pending — it is skipped on
+    # later ticks rather than piling up requests or stalling other workers'
+    # stats — and all tasks are cancelled promptly on stop().
+    pending: Dict[int, asyncio.Task] = {}
+    try:
+      while not self._stop_event.is_set():
         with self._lock:
-          self._snapshots[name] = (stats, time.monotonic())
-      self._stop_event.wait(self._poll_interval_s)
+          actors = list(self._actors)
+        live_keys = {id(actor) for actor in actors}
+        for key in [k for k in pending if k not in live_keys]:
+          pending.pop(key).cancel()
+        for i, actor in enumerate(actors):
+          key = id(actor)
+          task = pending.get(key)
+          if task is not None and not task.done():
+            continue
+          pending[key] = asyncio.create_task(self._poll_actor(actor, i))
+        await asyncio.sleep(self._poll_interval_s)
+    finally:
+      for task in pending.values():
+        task.cancel()
+      await asyncio.gather(*pending.values(), return_exceptions=True)
+
+  async def _poll_actor(self, actor: Any, index: int) -> None:
+    name = await self._resolve_name(actor, index)
+    try:
+      report = await actor.asubmit("heartbeat")
+      stats = self._report_to_stats(report)
+    except Exception as e:  # pylint: disable=broad-except
+      logging.log_every_n(
+          logging.WARNING, "Heartbeat poll failed for %s: %s", 20, name, e
+      )
+      return
+    with self._lock:
+      self._snapshots[name] = (stats, time.monotonic())
 
   def _report_to_stats(self, report: Any) -> Dict[str, Any]:
     """Maps a tunix HealthReport onto scheduler candidate attributes."""

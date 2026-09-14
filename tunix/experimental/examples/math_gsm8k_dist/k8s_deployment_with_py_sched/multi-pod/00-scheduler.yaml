@@ -10,7 +10,7 @@ spec:
     spec:
       containers:
         - name: scheduler
-          image: us-central1-docker.pkg.dev/kfswain-gke-dev/tunix-rl/py-rl-scheduler:latest
+          image: <path-to-your-docker-registry-here>/py-rl-scheduler:latest
           args: ["--host=0.0.0.0", "--port=8100", "--config=integration/tunix/examples/scheduler.yaml"]
           ports: [{containerPort: 8100}]
           readinessProbe: {httpGet: {path: /healthz, port: 8100}, periodSeconds: 3}
