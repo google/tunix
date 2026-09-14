@@ -1,17 +1,26 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — 64-chip split-role latest-admitted control carrier
+## START HERE — urgent 64-chip split-role treatment/full launch
+
+**Launch verdict (2026-09-14 05:16:54 UTC): READY FOR THE FIRST 64-CHIP FULL
+LAUNCH; NOT TARGET-CERTIFIED.** The local contracts and factorized four-chip
+gates are sufficient to enter one P58 treatment/full run without first spending
+the slice on the three diagnostic carriers. This statement does not certify
+DP4xTP8, Pathways, split-role HBM, sandbox throughput, or training convergence.
+Update 0 must establish those target-local correctness receipts inline; any red
+receipt stops, while a complete pass continues the same process toward 1,000
+updates.
 
 The `deepswe_4b_64chip` B path has one explicit, fail-closed optimization
 identity. Read back one clean 40-character SHA from
 `yuxzhang/canon-zero-tim`, pair it with the matching digest-pinned image, and
-then run these two carriers in order. Do not hand-edit a rendered YAML and do
-not apply the generic checked-in base YAML.
+then use the urgent route below. Do not hand-edit a rendered YAML and do not
+apply the generic checked-in base YAML.
 
 | Order | Purpose | Exact selector | Batch | Updates | Meaning |
 |---|---|---|---|---:|---|
-| 1 | one-slice transport/parity gate | P44 `--topology 64 --stage three-update --system-optimization-arm control` | B4xG4 = 16 | 3 | proves the 32+32 role split carrier; it is not P58 admission |
-| 2 | target P58 B pilot | P58 `--topology 64split --arm zero --stage three-update --system-optimization-arm control` | B8xG16 = 128 | 3 | first target run; repeat from a fresh run ID only after it passes |
+| 1 | one-host factorized gate | DP2xTP2 reduction mechanics + Qwen3-4B DP1xTP4 DeepSWE replay | B2xG2 carrier | 0 | local launch evidence only |
+| 2 | target P58 B full | P58 `--topology 64split --arm zero --stage full --system-optimization-arm treatment` | B8xG16 = 128 | 1,000 | update 0 is inline fail-closed; then continue the same job |
 
 The P58 model is exactly `Qwen/Qwen3-4B-Instruct-2507`. Its prompt budget is
 4,096 tokens and its response budget is 16,384 tokens for the entire
@@ -22,26 +31,31 @@ statuses remain filtered and do not contribute reward, advantage, or an
 optimizer update. The batch itself must nevertheless durably contain all 128
 rows before reward/rescore/trainer handoff.
 
-The first target launch is deliberately three-update, not full training. The
-latest-admitted system-optimization selector is accepted only by the exact
-`64split:zero:three-update` identity. A request that combines `--stage full`
-with `--system-optimization-arm control` must fail closed. Promotion to the
-1,000-update full stage requires two independently passing same-seed target
-runs, their accounting/bytewise evidence, a later contract change, and a
-separate user-approved publish/launch stop. Exact render commands and
-inspection gates are at the top of `cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
+The user explicitly waived the separate P44/control/treatment three-update
+launches because TPU time is urgent. Treatment now admits the exact
+`64split:zero:full/1000` identity; control/full still fails closed. The full
+job keeps every-update strict A=B=C. Its existing first-update gate is the
+inline admission point: any alignment, gradient, replica, optimizer or receipt
+failure stops before promotion; a pass continues the same process rather than
+ending at update 3. Exact render and inspection commands are at the top of
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Render/apply remain separate user stop
+points.
 
 The admitted tuple is fixed lm-head + P59 rank-parallel checked-VMA/P67 +
 first-update gate + fingerprint-hybrid/first-group-warmup/batched-commit
-receipts + P71-fwd, layered on the existing P28/P29/P30 DeepSWE path. The
-optimizer remains TPU-resident, TiTO is on, prefix cache and sampler IS/TIS are
-off. `KEEP_TAPE=stream`, `DP_REDUCE_ONCE=1`, collective reduce, length-sort,
-P63 and production `V1_HP_FULL` are not admitted in this P58 carrier. P44
-treatment remains a separate target-unverified experiment.
+receipts + P71-fwd, layered on the existing P28/P29/P30 DeepSWE path. Control
+keeps `KEEP_TAPE`, `DP_REDUCE_ONCE` and length-sort absent. Treatment requires
+exactly `KEEP_TAPE=stream`, `DP_REDUCE_ONCE=1` and
+`CANON_P32_LENGTH_SORT=1`; its runtime receipts are one DP reduction
+transaction, 32 staged accumulations and one validated length permutation per
+update. The optimizer remains TPU-resident, TiTO is on, prefix cache and
+sampler IS/TIS are off. Collective reduce, P63, audit decimation and production
+`V1_HP_FULL` remain out.
 
-The selector is accepted only by the exact P58 64split Zero three-update
-profile. Renderer, authoritative `00_env.sh`, Python contract, learner,
-manifest, P58 classifier, and postflight all carry or verify the same arm.
+The selector is accepted only by exact P58 64split Zero `three-update/3`, or by
+the treatment-only `full/1000` profile. Renderer, authoritative `00_env.sh`,
+Python contract, learner, manifest, P58 classifier, and postflight all carry or
+verify the same arm/stage/tuple.
 Absent selector preserves the previous conservative 64split path and the
 historical P58-128 render. Local DP1xTP4 plus DP2xTP2 evidence is factorized
 mechanism evidence only; the 64-chip target remains `TARGET NOT RUN` until the
@@ -59,14 +73,35 @@ sequences and 256 batched tokens per DP replica. The timeout ladder is 300 s
 per turn, 3,000 s per episode, 600 s step/reward, 300 s cleanup, 3,300 s
 sandbox active deadline, and 3,600 s batch deadline.
 
-Local target-scoped evidence is complete: P58 203/203 plus 130 subtests pass
+The control path's prior local target-scoped evidence is complete: P58 203/203 plus 130 subtests pass
 both on the host and in the digest-pinned image; the P44 and P59 exact-image
 markers pass; fresh DP2xTP2 P59 mechanics and Qwen3-4B DP1xTP4
 recorded-trajectory backward-no-commit are green. This remains factorized
 one-host evidence, not TP8/Pathways/64-chip admission. The umbrella P58 image
 wrapper has an unrelated origin-baseline documentation failure in two
 FrozenLake/v1 HANDOFF first sections (`P74` missing); use the target-scoped
-gates above and do not edit those external ledgers in this task.
+gates above and do not edit those external ledgers in this task. The P58
+treatment wiring has host contract coverage but remains target-unverified until
+its DP4xTP8 runs complete; do not inherit FrozenLake performance or gradient
+anchors.
+
+The four-chip gate is deliberately factorized. Qwen3-4B has no registered TP2
+production output-head geometry: the real model/trajectory/backward replay is
+DP1xTP4, while DP2xTP2 covers the rank-parallel and fixed-reducer mechanics.
+Never label the latter a Qwen3-4B model run or a TP8 certificate. After both
+local gates pass on the final clean source, the user's next action is the fresh
+treatment/full render from the runbook, not the three diagnostic 64-chip rows.
+
+The current P2b diff passed its fresh DP2xTP2 development gate at
+`/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p2bdev_20260914_0512`.
+Required P59/P62 markers and both replica-exact groups passed; fp64 relative L2
+was `3.77417983e-08`, cosine was `1`, optimizer commits were `0`, and the
+artifact checksum gate passed. The run records base source
+`abafa27b10f3885799db592c0d36a860b0b1a44e` plus uncommitted diff SHA-256
+`507ef2a2713fe6203d67b0115bce3a343b9a29c9ce8f775c16ed3c70868bf33a`.
+Treat it as development evidence until the same content has a clean published
+source identity; it still does not prove TP8, 64-chip, Pathways, HBM, or target
+throughput.
 
 ## START HERE — P58.38 CPU-pool migration and K30 preflight
 

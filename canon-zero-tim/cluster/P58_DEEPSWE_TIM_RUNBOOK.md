@@ -8,15 +8,18 @@ trainer own disjoint, exhaustive 32-device halves; each role is DP4xTP8. The
 scientific batch remains B8xG16 = 128 trajectories. This is not colocated;
 colocated DP8xTP8 is a later phase and must not be inferred from this section.
 
-### Exact run matrix
+### Urgent full-training route
 
-Do not skip or combine the two rows. P44 is the small carrier gate; P58 is the
-actual Qwen3-4B DeepSWE pilot.
+The user selected a shortened launch route: finish the four-chip factorized
+gate, then render one fresh P58 treatment/full JobSet. Do not spend the slice
+on separate P44, control or treatment three-update jobs. Those carriers remain
+available for diagnosis, but they are waived as launch steps and are not
+retroactively counted as target evidence.
 
 | Order | Renderer | Exact selectors | Batch | Horizon |
 |---|---|---|---|---:|
-| 1 | `render_p44_deepswe_parity.py` | `--topology 64 --stage three-update --system-optimization-arm control` | B4xG4 = 16 | 3 updates |
-| 2 | `render_p58_deepswe_tim.py` | `--topology 64split --arm zero --stage three-update --system-optimization-arm control` | B8xG16 = 128 | 3 updates |
+| 1 | one-host factorized gates | DP2xTP2 reduction mechanics plus Qwen3-4B DP1xTP4 DeepSWE replay | B2xG2 carrier | backward-no-commit |
+| 2 | `render_p58_deepswe_tim.py` | `--topology 64split --arm zero --stage full --system-optimization-arm treatment` | B8xG16 = 128 | 1,000 updates |
 
 The P58 row is exactly `Qwen/Qwen3-4B-Instruct-2507`, prompt 4,096,
 response 16,384 across the complete multi-turn episode, and at most 50 turns.
@@ -67,10 +70,12 @@ At run exit there must be zero resources with the exact run-id lineage. A live
 Fleet pilot requires separate render/apply approval and a proven sandbox
 nodepool with room for all 256 Pods.
 
-The system-optimization control selector is currently admitted only for exact
-P58 `64split:zero:three-update`. It must reject `--stage full`. Do not replace
-the second row with a 1,000-update render: full promotion is a later contract
-and user approval after two independently passing same-seed target runs.
+The system-optimization selector remains fail-closed. Control is admitted only
+for exact `64split:zero:three-update/3`. Treatment is admitted for that carrier
+or for exact `64split:zero:full/1000`. The full identity adds streamed kept
+tape, one DP reduction per update and length-sorted row scheduling. It does not
+enable the broad `--high-performance` bundle, P63, collective reduction or an
+alignment-audit cadence: A=B=C remains strict on every update.
 
 The selector is exact:
 
@@ -86,12 +91,12 @@ local_M=256 global_M=1024 max_num_seqs_per_dp=32
 Selector absence preserves historical P58-128. Present-but-empty or any value
 other than `128|64split` fails closed. `64split` rejects the DP8-only
 `--high-performance`, checked-VMA diagnostic, and seam-localization bundles.
-Its separately named `--system-optimization-arm control` profile admits the
-current common DeepSWE optimization tuple with P59 checked-VMA, but deliberately
-keeps streamed tape and reduce-once absent pending target evidence. Do not
-reconstruct this tuple with environment edits. Prefix cache stays off, TiTO
-stays on, sampler IS/TIS stay off, the optimizer is TPU-resident, and
-checkpointing is disabled
+Its separately named system-optimization profile admits two exact arms. Control
+keeps streamed tape, reduce-once and length-sort absent; treatment requires
+`CANON_P32_KEEP_TAPE=stream`, `CANON_DP_REDUCE_ONCE=1` and
+`CANON_P32_LENGTH_SORT=1`. Do not reconstruct either tuple with environment
+edits. Prefix cache stays off, TiTO stays on, sampler IS/TIS stay off, the
+optimizer is TPU-resident, and checkpointing is disabled
 (`--ckpt_dir=none`, no save cadence).
 
 Local evidence is only a claim-limited prerequisite. The implementation is
@@ -99,7 +104,9 @@ carried by commits `4d0a2ee6a` and `e8ebdad82`; the operator must use the final
 published readback SHA rather than either abbreviated development anchor.
 
 - DP2xTP2 P59 mechanics:
-  `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p1a_20260913_0445`;
+  `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p2bdev_20260914_0512`
+  (current P2b development diff; P59/P62 PASS, replica exact, fp64 relative
+  L2 `3.77417983e-08`, zero commits, checksums pass);
 - Qwen3-4B DP1xTP4 recorded-trajectory backward-no-commit:
   `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_d4b64_p1a_20260913_0449`.
 
@@ -115,7 +122,66 @@ The matching digest-pinned image passed the complete P58 suite (203 tests,
 on two unchanged FrozenLake/v1 HANDOFF `P74` documentation assertions; do not
 misclassify those unrelated baseline failures as a P58 carrier failure.
 
-### P2.1 — existing P44 64-chip carrier first
+There is intentionally no claim of a Qwen3-4B DP2xTP2 model run. The registered
+Qwen3-4B production head is TP8 and the bounded four-chip DeepSWE carrier is
+DP1xTP4; inventing a TP2 output-head geometry would test a different program.
+The DP2xTP2 gate covers rank-parallel/reduce-once mechanics, while the DP1xTP4
+replay covers the real Qwen3-4B model, trajectory, alignment and backward path.
+Together they are factorized launch evidence only.
+
+### P2.1 — urgent P58 treatment full
+
+After both factorized one-host checks pass on the final clean committed source,
+read back one 40-character source SHA and pair it with the matching
+digest-pinned image. Render, inspect and server-dry-run the full JobSet; only
+the user may apply it:
+
+```bash
+SOURCE_SHA=<published-readback-40-char-sha>
+CLIENT_IMAGE_DIGEST=<matching-image@sha256:digest>
+CPU_NODEPOOL=canon-cpu-pool
+SANDBOX_NODEPOOL=deepswe-cpu-pool-2
+TPU_NODEPOOL=auto
+MODEL_PVC=haoyugao-cpu-np-pvc
+P58_RUN_ID=<fresh-p58-64split-treatment-full-id>
+P58_OUTPUT="/tmp/p58-64split-treatment-full-${P58_RUN_ID}.yaml"
+
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output "$P58_OUTPUT" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$P58_RUN_ID" \
+  --stage full \
+  --arm zero \
+  --topology 64split \
+  --system-optimization-arm treatment \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --sandbox-nodepool "$SANDBOX_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC"
+sha256sum "$P58_OUTPUT"
+kubectl apply --server-side --dry-run=server -f "$P58_OUTPUT"
+```
+
+Before apply, require `stage=full`, `expected_updates=1000`, B8xG16,
+DP4xTP8 per role, 16 workers on one `4x4x4` slice, the 1,012-task clean-list
+digest, TiTO, prefix cache off, device optimizer, checkpoints off, and exact
+treatment tuple `stream/1/1`. Require P63, collective reduce,
+`CANON_ALIGNMENT_AUDIT_EVERY` and `CANON_V1_HP_FULL` absent/off.
+
+Update 0 is the inline gate, not a separate warm-up job. It must emit one
+`[P58.64SPLIT.SYSTEMOPT] arm=treatment stage=full topology=64split strict=1`,
+one valid `[P32.LENGTH_SORT] ... rows=128 dp=4 groups=32` receipt, one DP
+reduction transaction with 32 staged accumulations, strict A=B=C, finite
+nonzero gradients, exact replicas, one optimizer transaction and a
+TPU-resident optimizer. Any missing/red receipt stops the same full job before
+promotion. Updates 1 and 2 are monitoring milestones; they are not an
+automatic stop. If update 0 passes, the same process continues toward 1,000
+commits.
+
+### Diagnostic fallback — existing P44 64-chip carrier
 
 After publication, read back one clean 40-character SHA from
 `yuxzhang/canon-zero-tim` and use the matching digest-pinned client image. Run
@@ -171,7 +237,7 @@ pod-0 raw log and durable artifacts. Do not proceed if `$MODEL_PVC` cannot
 mount on `$CPU_NODEPOOL`, or if sandbox pods do not target
 `$SANDBOX_NODEPOOL`.
 
-### P2.2 — P58 64split Zero three-update
+### Diagnostic fallback — P58 64split Zero control three-update
 
 Only after P44 carrier evidence is accepted, render one P58 Zero attempt:
 
@@ -222,8 +288,8 @@ receipt per update, and the two first-update gate receipts. The classifier
 rejects a missing manifest arm, runtime marker, or per-update reduction
 visibility.
 
-The first run must finish all three updates before a second same-seed run is
-requested. A valid run has 128 durable trajectory rows per batch, eight prompt
+The control run must finish all three updates before treatment is requested. A
+valid run has 128 durable trajectory rows per batch, eight prompt
 groups, no ALIGN FAIL, A=B=C zero bytes, finite nonzero gradients, one and only
 one optimizer transaction per update, device optimizer placement, complete
 HBM/engine-step/timing receipts, and no partial-rollout handoff. Because P58
@@ -237,6 +303,51 @@ DeepSWE accountant and must emit:
 ```text
 [P58.64SPLIT.ACCOUNT] PASS report=<state>/p58_deepswe_64split_accounting.json sha256=<sha256>
 ```
+
+### Diagnostic fallback — P58 64split Zero trainer-core treatment
+
+Only after P2.2 independently passes, render a fresh treatment run. Reuse the
+same source/image/data/seed/geometry values, but never reuse the run ID or
+output path:
+
+```bash
+P58_TREATMENT_RUN_ID=<fresh-p58-64split-treatment-id>
+P58_TREATMENT_OUTPUT="/tmp/p58-64split-treatment-three-${P58_TREATMENT_RUN_ID}.yaml"
+
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output "$P58_TREATMENT_OUTPUT" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$P58_TREATMENT_RUN_ID" \
+  --stage three-update \
+  --arm zero \
+  --topology 64split \
+  --system-optimization-arm treatment \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --sandbox-nodepool "$SANDBOX_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC"
+sha256sum "$P58_TREATMENT_OUTPUT"
+kubectl apply --server-side --dry-run=server -f "$P58_TREATMENT_OUTPUT"
+```
+
+In addition to every control invariant, require exactly
+`CANON_P32_KEEP_TAPE=stream`, `CANON_DP_REDUCE_ONCE=1`,
+`CANON_P32_LENGTH_SORT=1`, one
+`[P58.64SPLIT.SYSTEMOPT] arm=treatment ...` startup receipt, and on every
+update `dp_reduction_visibility=EXPLICIT_FIXED_TREE_REDUCE_ONCE`,
+`dp_reduction_transactions=1`, `dp_staged_accumulations=32`, plus one valid
+`[P32.LENGTH_SORT] ... rows=128 dp=4 groups=32` receipt. Collective reduce,
+P63 and rollout-HP remain absent.
+
+Run two fresh same-seed treatment attempts and require bytewise-identical
+updates plus the registered fp64 gradient-distance gate. Do not require
+control and treatment gradient bits to match: reduce-once deliberately changes
+the cross-group/rank summation order. Compare their steady update time and HBM
+only after both arms pass their own numerical classifiers; performance is
+material only at `max(5%, 2xCV)`.
 
 That JSON is the authoritative single-run R32/U32/S, lifecycle, solve-signal,
 trainer-HBM, and engine-receipt summary. Missing timing or receipt data is

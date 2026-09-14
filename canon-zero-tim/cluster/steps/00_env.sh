@@ -545,10 +545,10 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
    [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
    [ "${CANON_P58_TOPOLOGY:-}" = "64split" ] && \
-   [ "${CANON_P34_RUN_STAGE:-}" = "three-update" ] && \
    [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
-   [ "${CANON_P58_EXPECTED_UPDATES:-}" = "3" ] && \
-   [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" = "control" ] && \
+   { [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}:${CANON_P34_RUN_STAGE:-}:${CANON_P58_EXPECTED_UPDATES:-}" = "control:three-update:3" ] || \
+     [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}:${CANON_P34_RUN_STAGE:-}:${CANON_P58_EXPECTED_UPDATES:-}" = "treatment:three-update:3" ] || \
+     [ "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}:${CANON_P34_RUN_STAGE:-}:${CANON_P58_EXPECTED_UPDATES:-}" = "treatment:full:1000" ]; } && \
    [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
    [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
    [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ]; then
@@ -2026,7 +2026,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
         }
         echo "[env] P44 v2 Qwen3-4B TP8 fixed lm-head enabled"
         ;;
-      three-update:cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env)
+      three-update:cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env|\
+      full:cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env)
         [ "$P58_64SPLIT_SYSTEMOPT" = "1" ] && \
         [ "${CANON_P46_EVALUATION:-0}" = "0" ] || {
           echo "[env] P58 64split systemopt fixed lm-head contract drifted" >&2
@@ -2350,14 +2351,33 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
           [ "${CANON_DP_FINITE_FETCH:-}" = "batched-commit" ] && \
           [ "${CANON_P71_SCAN:-}" = "fwd" ] && \
           [ "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" = "0" ] && \
-          ! [[ -v CANON_P32_KEEP_TAPE ]] && \
-          ! [[ -v CANON_DP_REDUCE_ONCE ]] && \
-          ! [[ -v CANON_DP_COLLECTIVE_REDUCE ]] && \
-          ! [[ -v CANON_P32_LENGTH_SORT ]] || {
-            echo "[env] P58 64split systemopt control tuple drifted" >&2
+          ! [[ -v CANON_DP_COLLECTIVE_REDUCE ]] || {
+            echo "[env] P58 64split systemopt common tuple drifted" >&2
             fail=1
           }
-          echo "[P58.64SPLIT.SYSTEMOPT] arm=control topology=64split strict=1"
+          case "${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM:-}" in
+            control)
+              ! [[ -v CANON_P32_KEEP_TAPE ]] && \
+              ! [[ -v CANON_DP_REDUCE_ONCE ]] && \
+              ! [[ -v CANON_P32_LENGTH_SORT ]] || {
+                echo "[env] P58 64split control leaked treatment selectors" >&2
+                fail=1
+              }
+              ;;
+            treatment)
+              [ "${CANON_P32_KEEP_TAPE:-}" = "stream" ] && \
+              [ "${CANON_DP_REDUCE_ONCE:-}" = "1" ] && \
+              [ "${CANON_P32_LENGTH_SORT:-}" = "1" ] || {
+                echo "[env] P58 64split treatment lost stream, reduce-once or length-sort" >&2
+                fail=1
+              }
+              ;;
+            *)
+              echo "[env] P58 64split systemopt arm changed" >&2
+              fail=1
+              ;;
+          esac
+          echo "[P58.64SPLIT.SYSTEMOPT] arm=${CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM} stage=${CANON_P34_RUN_STAGE} topology=64split strict=1"
         else
           [ "${CANON_PROFILE_FILE:-}" = \
             "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env" ] && \

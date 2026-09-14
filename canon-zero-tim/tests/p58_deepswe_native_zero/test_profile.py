@@ -125,14 +125,13 @@ source {SPLIT_PROFILE}
     )
     self.assertNotEqual(result.returncode, 0)
 
-  def test_64split_systemopt_profile_accepts_only_exact_control_tuple(self):
+  def test_64split_systemopt_profile_accepts_exact_control_and_treatment(self):
     common = """
 export CANON_P58_TOPOLOGY=64split
 export CANON_P58_TIM_ARM=zero
 export CANON_P34_RUN_STAGE=three-update
 export CANON_P34_NO_COMMIT=0
 export CANON_P58_EXPECTED_UPDATES=3
-export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=control
 export CANON_P34_DISABLE_SAMPLER_IS=1
 export CANON_P34_DISABLE_TIS=1
 export CANON_P38_FIXED_LM_HEAD=1
@@ -145,22 +144,32 @@ export CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
 export CANON_DP_FINITE_FETCH=batched-commit
 export CANON_P71_SCAN=fwd
 """
-    script = f"""
+    for arm in ("control", "treatment"):
+      treatment = (
+          "export CANON_P32_KEEP_TAPE=stream\n"
+          "export CANON_DP_REDUCE_ONCE=1\n"
+          "export CANON_P32_LENGTH_SORT=1\n"
+          if arm == "treatment" else ""
+      )
+      script = f"""
 set -euo pipefail
 source {CANON}
 {common}
+export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM={arm}
+{treatment}
 source {SYSTEMOPT_PROFILE}
 printf '%s\n' "$CANON_PROFILE|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
 """
-    result = subprocess.run(
-        ["bash", "-c", script], check=True, text=True, capture_output=True
-    )
-    self.assertIn(
-        "qwen3-4b-dp4-tp8-deepswe-tim-systemopt|4|8|control",
-        result.stdout,
-    )
+      result = subprocess.run(
+          ["bash", "-c", script], check=True, text=True, capture_output=True
+      )
+      self.assertIn(
+          f"qwen3-4b-dp4-tp8-deepswe-tim-systemopt|4|8|{arm}",
+          result.stdout,
+      )
     bad = subprocess.run(
         ["bash", "-c", f"set -euo pipefail; source {CANON}; {common}; "
+         "export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=control; "
          "export CANON_P32_KEEP_TAPE=stream; "
          f"source {SYSTEMOPT_PROFILE}"],
         check=False,
@@ -168,6 +177,29 @@ printf '%s\n' "$CANON_PROFILE|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_DEEPSWE_SYSTE
         capture_output=True,
     )
     self.assertNotEqual(bad.returncode, 0)
+
+    full = subprocess.run(
+        ["bash", "-c", f"""
+set -euo pipefail
+source {CANON}
+{common}
+export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=treatment
+export CANON_P34_RUN_STAGE=full
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_KEEP_TAPE=stream
+export CANON_DP_REDUCE_ONCE=1
+export CANON_P32_LENGTH_SORT=1
+source {SYSTEMOPT_PROFILE}
+printf '%s\n' "$CANON_PROFILE|$CANON_P34_RUN_STAGE|$CANON_P58_EXPECTED_UPDATES"
+"""],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    self.assertIn(
+        "qwen3-4b-dp4-tp8-deepswe-tim-systemopt|full|1000",
+        full.stdout,
+    )
 
   def test_native_removes_complete_numerical_bundle(self):
     output = _source("native")

@@ -1387,6 +1387,11 @@ def _manifest(
         "DeepSWE system-optimization arm must be control or treatment"
       )
     manifest["system_optimization_arm"] = system_optimization_arm
+    manifest["system_optimization_tuple"] = {
+        "keep_tape": values.get("CANON_P32_KEEP_TAPE") or None,
+        "dp_reduce_once": values.get("CANON_DP_REDUCE_ONCE") or None,
+        "length_sort": values.get("CANON_P32_LENGTH_SORT") or None,
+    }
   return manifest
 
 

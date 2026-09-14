@@ -300,17 +300,25 @@ def render(
   instance_type = instance_type or spec.instance_type
   if high_performance and (arm != "zero" or stage != "full"):
     raise ValueError("P58 high-performance is admitted only for Zero full")
-  if system_optimization_arm not in (None, "control"):
-    raise ValueError("P58 admits only the system-optimization control arm")
+  if system_optimization_arm not in (None, "control", "treatment"):
+    raise ValueError(
+        "P58 system-optimization arm must be control or treatment"
+    )
   if system_optimization_arm is not None and (
       topology != "64split"
       or arm != "zero"
-      or stage != "three-update"
+      or (
+          stage != "three-update"
+          and not (
+              system_optimization_arm == "treatment" and stage == "full"
+          )
+      )
       or high_performance
       or sampler_is
   ):
     raise ValueError(
-        "P58 system optimization requires 64split Zero three-update"
+        "P58 system optimization requires 64split Zero three-update, or "
+        "the treatment full candidate"
     )
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
     raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
@@ -408,7 +416,7 @@ def render(
       if checked_vma_diagnostic
       else "zero-hp"
       if high_performance
-      else "zero-systemopt"
+      else f"zero-systemopt-{system_optimization_arm}"
       if system_optimization_arm is not None
       else "native-is"
       if sampler_is
@@ -423,14 +431,15 @@ def render(
   )
   if topology == "64split":
     # Compact tokens for the 64split row.  The long form
-    # "canon-p58-ds4b-64s-zero-systemopt-three-" is already 40 characters
-    # before the run id, which always exceeds the 36-character budget that
+    # "canon-p58-ds4b-64s-zero-systemopt-treatment-three-" already exceeds
+    # the 36-character budget before the run id.  That budget is documented
     # MAX_JOBSET_NAME_LEN documents, so this row could never be applied.
     # Nothing identifying is lost: the model, arm and system-optimization arm
     # are all pinned by the signed recipe and by the JobSet labels, not by the
-    # name.  "64s" = 64split, "zsopt" = zero + system-optimization control.
+    # name.  "64s" = 64split; "zsoptc"/"zsoptt" identify the selected arm.
     name = name.replace("canon-p58-ds4b-", "canon-p58-64s-", 1)
-    name = name.replace("-zero-systemopt-", "-zsopt-", 1)
+    name = name.replace("-zero-systemopt-control-", "-zsoptc-", 1)
+    name = name.replace("-zero-systemopt-treatment-", "-zsoptt-", 1)
 
   if len(name) > p34.MAX_JOBSET_NAME_LEN:
     raise ValueError(
@@ -613,6 +622,12 @@ def render(
         "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
     })
+    if system_optimization_arm == "treatment":
+      systemopt.update({
+          "CANON_P32_KEEP_TAPE": "stream",
+          "CANON_DP_REDUCE_ONCE": "1",
+          "CANON_P32_LENGTH_SORT": "1",
+      })
     p34._set_env(main, systemopt)
   if high_performance:
     p34._set_env(
@@ -821,6 +836,9 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
     signature["system_optimization_arm"] = env[
         "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
     ]
+    signature["keep_tape"] = env.get("CANON_P32_KEEP_TAPE")
+    signature["dp_reduce_once"] = env.get("CANON_DP_REDUCE_ONCE")
+    signature["length_sort"] = env.get("CANON_P32_LENGTH_SORT")
   return signature
 
 
@@ -847,12 +865,19 @@ def validate(
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
-  if system_optimization_arm not in (None, "control"):
-    raise ValueError("P58 admits only the system-optimization control arm")
+  if system_optimization_arm not in (None, "control", "treatment"):
+    raise ValueError(
+        "P58 system-optimization arm must be control or treatment"
+    )
   if system_optimization_arm is not None and (
       topology != "64split"
       or arm != "zero"
-      or stage != "three-update"
+      or (
+          stage != "three-update"
+          and not (
+              system_optimization_arm == "treatment" and stage == "full"
+          )
+      )
       or high_performance
       or sampler_is
       or checked_vma_off_diagnostic
@@ -860,7 +885,8 @@ def validate(
       or bool(seam_localization)
   ):
     raise ValueError(
-        "P58 system optimization requires 64split Zero three-update"
+        "P58 system optimization requires 64split Zero three-update, or "
+        "the treatment full candidate"
     )
   spec = _topology_spec(topology)
   if (
@@ -1068,6 +1094,12 @@ def validate(
         "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
     })
+    if system_optimization_arm == "treatment":
+      optimization_additions.update({
+          "CANON_P32_KEEP_TAPE": "stream",
+          "CANON_DP_REDUCE_ONCE": "1",
+          "CANON_P32_LENGTH_SORT": "1",
+      })
   optimization_wrong = {
       key: env.get(key)
       for key, value in optimization_additions.items()
@@ -1291,7 +1323,9 @@ def main() -> None:
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
   parser.add_argument("--sampler-is", action="store_true")
   parser.add_argument("--high-performance", action="store_true")
-  parser.add_argument("--system-optimization-arm", choices=("control",))
+  parser.add_argument(
+      "--system-optimization-arm", choices=("control", "treatment")
+  )
   parser.add_argument("--checked-vma-off-diagnostic", action="store_true")
   parser.add_argument("--checked-vma-on-diagnostic", action="store_true")
   parser.add_argument(
@@ -1337,7 +1371,7 @@ def main() -> None:
       if args.sampler_is
       else "zero-hp"
       if args.high_performance
-      else "zero-systemopt-control"
+      else f"zero-systemopt-{args.system_optimization_arm}"
       if args.system_optimization_arm
       else f"{args.arm}-raw"
   )

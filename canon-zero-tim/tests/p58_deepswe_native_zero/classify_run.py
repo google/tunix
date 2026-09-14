@@ -29,6 +29,8 @@ _COMPACT = {
     "REWARD_TIMEOUT",
 }
 _SHA = re.compile(r"[0-9a-f]{40}")
+_FIELD_RE = re.compile(r"([a-z0-9_]+)=([^ ]+)")
+_LENGTH_SORT_PREFIX = "[P32.LENGTH_SORT] "
 _ZERO_HP_AB_POLICY_ID = "deepswe-zero-hp-ab-warning-v1"
 _ZERO_HP_WARNING_ITEMS = {
     "S_decode_vs_S_prefill",
@@ -194,6 +196,22 @@ def _artifact_checks(
           if system_optimization_arm is not None
           else "system_optimization_arm" not in manifest
       )
+      and (
+          manifest.get("system_optimization_tuple")
+          == {
+              "keep_tape": (
+                  "stream" if system_optimization_arm == "treatment" else None
+              ),
+              "dp_reduce_once": (
+                  "1" if system_optimization_arm == "treatment" else None
+              ),
+              "length_sort": (
+                  "1" if system_optimization_arm == "treatment" else None
+              ),
+          }
+          if system_optimization_arm is not None
+          else "system_optimization_tuple" not in manifest
+      )
   )
   return {
       "manifest_exact": manifest_valid,
@@ -246,13 +264,21 @@ def classify(
 ) -> dict[str, Any]:
   if arm not in ("native", "zero") or stage not in _STAGE_UPDATES:
     raise ValueError("P58 classifier requires a signed arm and stage")
-  if system_optimization_arm not in (None, "control"):
-    raise ValueError("P58 classifier admits only systemopt control")
+  if system_optimization_arm not in (None, "control", "treatment"):
+    raise ValueError("P58 classifier admits systemopt control or treatment")
   if system_optimization_arm is not None and (
-      arm != "zero" or stage != "three-update" or topology != "64split"
+      arm != "zero"
+      or topology != "64split"
+      or (
+          stage != "three-update"
+          and not (
+              system_optimization_arm == "treatment" and stage == "full"
+          )
+      )
   ):
     raise ValueError(
-        "P58 systemopt classification requires 64split Zero three-update"
+        "P58 systemopt classification requires 64split Zero three-update, "
+        "or the treatment full candidate"
     )
   expected_commits = _STAGE_UPDATES[stage]
   geometry = {
@@ -344,14 +370,35 @@ def classify(
         for record in updates
     )
   else:
+    expected_transactions = (
+        1
+        if system_optimization_arm == "treatment"
+        else geometry["transactions"]
+    )
     update_geometry = common_update_geometry and all(
         record.get("dp_replicas_exact") is True
-        and record.get("dp_reduction_transactions") == geometry["transactions"]
+        and record.get("dp_reduction_transactions") == expected_transactions
         and record.get("dp_reduction_rounds_per_transaction") == 6
         and record.get("dp_rank_pullbacks_per_transaction") == geometry["dp"]
         for record in updates
     )
   committed_steps = [record.get("train_steps_after") for record in committed]
+  length_sort_receipts = [
+      dict(_FIELD_RE.findall(line.removeprefix(_LENGTH_SORT_PREFIX)))
+      for line in log_text.splitlines()
+      if line.startswith(_LENGTH_SORT_PREFIX)
+  ]
+  expected_length_sort_receipt = {
+      "enabled": "1",
+      "rows": "128",
+      "dp": str(geometry["dp"]),
+      "groups": str(geometry["transactions"]),
+  }
+  length_sort_receipts_valid = all(
+      all(receipt.get(key) == value for key, value in expected_length_sort_receipt.items())
+      and bool(re.fullmatch(r"[0-9a-f]{64}", receipt.get("permutation_sha256", "")))
+      for receipt in length_sort_receipts
+  )
   skipped_valid = all(
       record.get("mode") == "compact-filtered-no-commit"
       and record.get("loss_denominator") == 0.0
@@ -393,16 +440,32 @@ def classify(
       "update_geometry": update_geometry,
       "system_optimization_receipts": (
           all(
-              record.get("system_optimization_arm") == "control"
+              record.get("system_optimization_arm") == system_optimization_arm
               and record.get("dp_reduction_visibility")
-              == "EXPLICIT_FIXED_TREE"
-              and record.get("dp_staged_accumulations") == 0
+              == (
+                  "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
+                  if system_optimization_arm == "treatment"
+                  else "EXPLICIT_FIXED_TREE"
+              )
+              and record.get("dp_staged_accumulations")
+              == (
+                  geometry["transactions"]
+                  if system_optimization_arm == "treatment"
+                  else 0
+              )
               for record in updates
           )
           and log_text.count(
               "[P58.64SPLIT.SYSTEMOPT] "
-              "arm=control topology=64split strict=1"
+              f"arm={system_optimization_arm} stage={stage} "
+              "topology=64split strict=1"
           ) == 1
+          and (
+              len(length_sort_receipts) == expected_commits
+              and length_sort_receipts_valid
+              if system_optimization_arm == "treatment"
+              else not length_sort_receipts
+          )
           and log_text.count("[P59.CHECKED_VMA] enabled=1")
           == expected_commits
           and log_text.count("[V1.FIRST_UPDATE]") == 2
@@ -426,6 +489,11 @@ def classify(
       "stage": stage,
       "topology": topology,
       "system_optimization_arm": system_optimization_arm,
+      "length_sort_receipts": (
+          len(length_sort_receipts)
+          if system_optimization_arm == "treatment"
+          else None
+      ),
       "verdict": "PASS" if not failed else "FAIL",
       "claim_level": (
           "alignment-degraded-convergence-canary"
@@ -461,7 +529,9 @@ def main() -> None:
   parser.add_argument("--arm", choices=("native", "zero"), required=True)
   parser.add_argument("--stage", choices=tuple(_STAGE_UPDATES), required=True)
   parser.add_argument("--topology", choices=("128", "64split"), default="128")
-  parser.add_argument("--system-optimization-arm", choices=("control",))
+  parser.add_argument(
+      "--system-optimization-arm", choices=("control", "treatment")
+  )
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--debug-dir", type=Path, required=True)
   parser.add_argument("--weight-report", type=Path, required=True)

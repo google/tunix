@@ -867,8 +867,14 @@ def validate_environment(values: Mapping[str, str]) -> None:
       p58_tim
       and workload.contract_name == "p58-qwen4b-tim-64split"
       and p58_arm == "zero"
-      and values.get("CANON_P34_RUN_STAGE", "") == "three-update"
-      and system_optimization_arm == "control"
+      and (
+          values.get("CANON_P34_RUN_STAGE", "") == "three-update"
+          or (
+              system_optimization_arm == "treatment"
+              and values.get("CANON_P34_RUN_STAGE", "") == "full"
+          )
+      )
+      and system_optimization_arm in ("control", "treatment")
   )
   if system_optimization_arm and not (
       (
@@ -879,7 +885,8 @@ def validate_environment(values: Mapping[str, str]) -> None:
   ):
     raise ValueError(
         "DeepSWE system optimization requires P44 three-update or the "
-        "P58 64split Zero three-update control identity"
+        "P58 64split Zero three-update control/treatment or treatment-full "
+        "identity"
     )
   p58_recipe = p58_sampler_recipe(values) if p58_tim else ""
   p58_hp = values.get("CANON_V1_HP_FULL", "0") == "1"
@@ -1192,7 +1199,14 @@ def validate_environment(values: Mapping[str, str]) -> None:
             "1" if system_optimization_arm == "treatment" else None
         ),
         "CANON_DP_COLLECTIVE_REDUCE": None,
-        "CANON_P32_LENGTH_SORT": None,
+        "CANON_P32_LENGTH_SORT": (
+            "1"
+            if (
+                p58_64split_systemopt
+                and system_optimization_arm == "treatment"
+            )
+            else None
+        ),
         "CANON_V1_HP_FULL": "0" if p58_64split_systemopt else None,
         "CANON_P63_OVERFLOW_SAFE_CLIP": None,
     })

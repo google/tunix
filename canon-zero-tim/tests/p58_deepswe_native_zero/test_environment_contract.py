@@ -57,6 +57,22 @@ SPEC.loader.exec_module(renderer)
 
 class P58EnvironmentContractTest(unittest.TestCase):
 
+  def test_checked_vma_full_scope_is_p58_treatment_only(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text(encoding="utf-8")
+    p44_scope, p58_and_after = learner.split(
+        "exact_p58_64split_systemopt_geometry = (", 1
+    )
+    p44_scope = p44_scope.rsplit("exact_p44_v2_geometry = (", 1)[1]
+    p58_scope = p58_and_after.split("exact_checked_vma_geometry = (", 1)[0]
+    self.assertIn('and run_stage == "three-update"', p44_scope)
+    self.assertNotIn('and run_stage == "full"', p44_scope)
+    self.assertIn(
+        'deepswe_system_optimization_arm == "treatment"', p58_scope
+    )
+    self.assertIn('and run_stage == "full"', p58_scope)
+
   def test_swe_env_preserves_normalized_prompt_before_reset(self):
     env = SWEEnv({
         "problem_statement": np.array(["raw problem"]),
@@ -178,33 +194,74 @@ class P58EnvironmentContractTest(unittest.TestCase):
     deepswe_contract.validate_environment(values)
 
   def test_p58_64split_systemopt_survives_shell_and_python_contracts(self):
-    _, _, values = self._persisted(
-        "zero",
-        "three-update",
-        topology="64split",
-        system_optimization_arm="control",
-    )
-    self.assertEqual(
-        values["CANON_PROFILE"],
-        "qwen3-4b-dp4-tp8-deepswe-tim-systemopt",
-    )
-    self.assertEqual(values["CANON_P66_P59_CHECK_VMA"], "1")
-    deepswe_contract.validate_environment(values)
-    manifest = deepswe_debug._manifest(
-        values,
-        model_id="Qwen/Qwen3-4B-Instruct-2507",
-        output_dir=Path(values["CANON_P58_DEBUG_DIR"]),
-    )
-    self.assertEqual(manifest["system_optimization_arm"], "control")
-
-    for key, replacement in (
-        ("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", "treatment"),
-        ("CANON_P59_CHECKED_VMA", "0"),
-        ("CANON_P71_SCAN", "off"),
-        ("CANON_P32_KEEP_TAPE", "stream"),
+    for arm, stage in (
+        ("control", "three-update"),
+        ("treatment", "three-update"),
+        ("treatment", "full"),
     ):
-      with self.subTest(key=key), self.assertRaises(ValueError):
-        deepswe_contract.validate_environment({**values, key: replacement})
+      with self.subTest(arm=arm, stage=stage):
+        _, _, values = self._persisted(
+            "zero",
+            stage,
+            topology="64split",
+            system_optimization_arm=arm,
+        )
+        self.assertEqual(
+            values["CANON_PROFILE"],
+            "qwen3-4b-dp4-tp8-deepswe-tim-systemopt",
+        )
+        self.assertEqual(values["CANON_P66_P59_CHECK_VMA"], "1")
+        self.assertEqual(
+            values.get("CANON_P32_KEEP_TAPE"),
+            "stream" if arm == "treatment" else None,
+        )
+        self.assertEqual(
+            values.get("CANON_DP_REDUCE_ONCE"),
+            "1" if arm == "treatment" else None,
+        )
+        self.assertEqual(
+            values.get("CANON_P32_LENGTH_SORT"),
+            "1" if arm == "treatment" else None,
+        )
+        deepswe_contract.validate_environment(values)
+        manifest = deepswe_debug._manifest(
+            values,
+            model_id="Qwen/Qwen3-4B-Instruct-2507",
+            output_dir=Path(values["CANON_P58_DEBUG_DIR"]),
+        )
+        self.assertEqual(manifest["system_optimization_arm"], arm)
+        self.assertEqual(
+            manifest["system_optimization_tuple"],
+            {
+                "keep_tape": "stream" if arm == "treatment" else None,
+                "dp_reduce_once": "1" if arm == "treatment" else None,
+                "length_sort": "1" if arm == "treatment" else None,
+            },
+        )
+
+        for key, replacement in (
+            ("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", "invalid"),
+            ("CANON_P59_CHECKED_VMA", "0"),
+            ("CANON_P71_SCAN", "off"),
+            (
+                "CANON_P32_KEEP_TAPE",
+                "off" if arm == "treatment" else "stream",
+            ),
+            (
+                "CANON_P32_LENGTH_SORT",
+                "0" if arm == "treatment" else "1",
+            ),
+        ):
+          with self.subTest(arm=arm, key=key), self.assertRaises(ValueError):
+            deepswe_contract.validate_environment({**values, key: replacement})
+
+    with self.assertRaises(ValueError):
+      self._rendered_env(
+          "zero",
+          "full",
+          topology="64split",
+          system_optimization_arm="control",
+      )
 
   def test_p58_selector_is_fail_closed_and_128_absence_is_compatible(self):
     self.assertIs(

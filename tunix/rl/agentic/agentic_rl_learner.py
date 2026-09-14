@@ -2140,11 +2140,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       exact_p58_64split_systemopt_geometry = (
           full_train
           and not p33_no_commit
-          and run_stage == "three-update"
+          and (
+              run_stage == "three-update"
+              or (
+                  deepswe_system_optimization_arm == "treatment"
+                  and run_stage == "full"
+              )
+          )
           and workload_identity == "p58-qwen4b-tim-64split"
           and (workload.dp_size, workload.tp_size, workload.global_m)
           == (4, 8, 1024)
-          and deepswe_system_optimization_arm == "control"
+          and deepswe_system_optimization_arm in ("control", "treatment")
           and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1"
           and os.environ.get("CANON_P58_TIM_ADMITTED", "0") == "1"
           and os.environ.get("CANON_P58_TIM_ARM", "") == "zero"

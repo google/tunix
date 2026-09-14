@@ -24,6 +24,7 @@ import pytest
 
 from tunix.rl import canonical_qwen3_adapter as adapter_module
 from tunix.rl import common
+from tunix.rl import dp_training
 
 _HARNESS_PATH = Path(__file__).with_name("test_p71_fwd_scan.py")
 _spec = importlib.util.spec_from_file_location("p71_harness_sort", _HARNESS_PATH)
@@ -336,6 +337,25 @@ def _run_update(stream, length_sort):
           value + jnp.asarray(0, value.dtype) for value in cotangents
       ),
       adapter,
+  )
+
+  def report_adjoint_accumulate(self, state, cotangents, accumulator):
+    staged = self._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
+        state, cotangents
+    )
+    self._p59_report_accumulate_bucket_receipt = (  # pylint: disable=protected-access
+        8,
+        1,
+        2130875392,
+        7,
+    )
+    return (
+        tuple(left + right for left, right in zip(accumulator, staged)),
+        dp_training.staged_gradient_receipts(staged),
+    )
+
+  adapter._p59_rank_parallel_report_adjoint_accumulate = types.MethodType(  # pylint: disable=protected-access
+      report_adjoint_accumulate, adapter
   )
   adapter._p59_reducer_template = types.MethodType(  # pylint: disable=protected-access
       lambda self, state, staged: state, adapter
