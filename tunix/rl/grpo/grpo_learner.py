@@ -215,6 +215,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         "sampler_is/weight_min": np.min,
         "router_agreement/exact_match": np.mean,
         "router_agreement/topk_overlap_frac": np.mean,
+        "router_agreement/captured": np.mean,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,

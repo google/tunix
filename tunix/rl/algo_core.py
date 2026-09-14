@@ -1303,9 +1303,29 @@ def grpo_loss_fn(
     )
     aux["router_agreement/exact_match"] = exact_match
     aux["router_agreement/topk_overlap_frac"] = overlap_frac
+    aux["router_agreement/captured"] = jnp.float32(1.0)
   else:
-    aux["router_agreement/exact_match"] = jnp.float32(1.0)
-    aux["router_agreement/topk_overlap_frac"] = jnp.float32(1.0)
+    # -1, not 1.0. Both metrics are fractions in [0, 1], so a negative value is
+    # unreachable by the real computation and reads unambiguously as "routing
+    # was not captured on this step".
+    #
+    # This previously emitted 1.0, which is the same value perfect agreement
+    # produces -- `sum(matches)/denom` is exactly 1.0 when every expert matches,
+    # so the two cases were indistinguishable in the logs. A run with
+    # `return_routed_experts` off reported flawless routing, and that reading was
+    # used for a day to rule expert-routing divergence out as the cause of the
+    # 35B's zero gradient. It could not support that conclusion.
+    #
+    # `captured` is emitted alongside because both agreement metrics are reduced
+    # across micro-batches with `mean_of_means`. A step where only some
+    # micro-batches captured would average -1 against real values and can land
+    # back inside [0, 1] -- three capturing micro-batches at 1.0 and one at -1
+    # averages to 0.5, which reads as "half the experts disagreed". `captured`
+    # is the fraction of micro-batches that actually measured, and is the flag to
+    # check before reading the other two at all.
+    aux["router_agreement/exact_match"] = jnp.float32(-1.0)
+    aux["router_agreement/topk_overlap_frac"] = jnp.float32(-1.0)
+    aux["router_agreement/captured"] = jnp.float32(0.0)
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:

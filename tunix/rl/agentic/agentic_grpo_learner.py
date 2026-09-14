@@ -374,6 +374,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_is/weight_min": np.min,
         "router_agreement/exact_match": common.mean_of_means,
         "router_agreement/topk_overlap_frac": common.mean_of_means,
+        "router_agreement/captured": common.mean_of_means,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"

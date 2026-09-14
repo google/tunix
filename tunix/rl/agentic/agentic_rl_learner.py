@@ -1106,6 +1106,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 ("tis/is_oob_ratio", "is_oob"),
                 ("router_agreement/exact_match", "router_match"),
                 ("router_agreement/topk_overlap_frac", "router_overlap"),
+                ("router_agreement/captured", "router_captured"),
             ):
               if key in am:
                 vals, _ = am[key]
