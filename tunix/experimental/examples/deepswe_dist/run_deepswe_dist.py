@@ -44,6 +44,7 @@ from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
+from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 # pylint: enable=g-import-not-at-top
@@ -183,8 +184,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  algo_config = algorithm_config.GRPOConfig(
+      num_generations=args.num_generations,
+      epsilon=args.epsilon,
+      beta=args.beta,
+      temperature=args.temperature,
+      use_rollout_logps=args.use_rollout_logps,
+  )
   return algorithm_adapter.GRPOAdapter(
-      group_size=args.num_generations,
+      algo_config=algo_config,
       mini_batch_size=args.batch_size,
       train_micro_batch_size=args.train_micro_batch_size,
       max_turns=args.max_turns,
@@ -193,10 +201,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           if args.max_seq_token_per_tpu is not None
           else args.max_prompt_length + args.max_response_length
       ),
-      clip_epsilon=args.epsilon,
-      beta_kl=args.beta,
-      temperature=args.temperature,
-      use_rollout_logps=args.use_rollout_logps,
   )
 
 
@@ -210,8 +214,8 @@ def _configure_trainer_loss(
   logging.info(
       "Configuring trainer-side GRPO loss via TrainerWorker RPC (beta=%s, "
       "epsilon=%s).",
-      algo.beta_kl,
-      algo.clip_epsilon,
+      algo.algo_config.beta,
+      algo.algo_config.epsilon,
   )
   trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
   trainer_handle.submit(

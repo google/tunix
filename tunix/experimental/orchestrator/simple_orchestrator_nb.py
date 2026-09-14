@@ -23,6 +23,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.worker import abstract_worker
+from tunix.rl import algorithm_config
 
 
 class SimulatedRolloutWorker(abstract_worker.Worker):
@@ -138,7 +139,15 @@ def main():
 
   print(f"Registered roles in cluster: {orch.registry.roles()}")
 
-  algo = algorithm_adapter.GRPOAdapter(group_size=2, mini_batch_size=1, max_packed_len=32)
+  algo_config = algorithm_config.GRPOConfig(
+      num_generations=2,
+      temperature=1.0,
+  )
+  algo = algorithm_adapter.GRPOAdapter(
+      algo_config=algo_config,
+      mini_batch_size=1,
+      max_packed_len=32,
+  )
   assembler = batch_assembly.SequencePackedBatchAssembler(
       batch_size=1, group_size=2, mini_batch_size=1, max_packed_len=32
   )

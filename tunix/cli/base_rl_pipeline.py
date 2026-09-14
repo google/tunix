@@ -304,10 +304,11 @@ class BasePipeline(abc.ABC, config.HyperParameters):
     max_prompt = rollout_cfg.get("max_prompt_length", 0)
     max_response = rollout_cfg.get("total_generation_steps", 0)
 
-    kv_cache_size = 0
+    kv_cache_size = rollout_cfg.get("kv_cache_size") or (
+        max_prompt + max_response + 256
+    )
     if self._is_agentic_mode(mode):
       agentic_cfg = self._config_mapping(f"{mode}_config")
-      kv_cache_size = max_prompt + max_response + 256
       filtered["kv_cache_size"] = kv_cache_size
       logging.info("kv_cache_size: %d", kv_cache_size)
 
@@ -315,8 +316,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
     else:
       rl_algm_cfg = self._config_mapping(f"{mode}_config")
       # Standard: kv_cache_size = max_prompt + max_response + 256
-      if max_prompt and max_response:
-        kv_cache_size = max_prompt + max_response + 256
+      if max_prompt and max_response or "kv_cache_size" in rollout_cfg:
         filtered["kv_cache_size"] = kv_cache_size
       # Defaults to global batch size * num_generations to allow full
       # concurrency.

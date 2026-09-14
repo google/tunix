@@ -128,6 +128,7 @@ class StandardRLProgram(RLProgram):
       mini_batch_size: int = 4,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      checkpoint_save_interval_steps: int = 1,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
@@ -153,6 +154,23 @@ class StandardRLProgram(RLProgram):
       )
     else:
       self.generation_args = generation_args
+    algo_config = getattr(self.algo, "algo_config", None)
+    if algo_config is not None:
+      algo_temp = getattr(algo_config, "temperature", None)
+      gen_temp = getattr(self.generation_args, "temperature", None)
+      if algo_temp is not None and gen_temp is not None:
+        if algo_temp != gen_temp:
+          raise ValueError(
+              "Conflicting temperature: generation_args.temperature="
+              f"{gen_temp} does not match"
+              f" algo.algo_config.temperature={algo_temp}."
+          )
+      elif gen_temp is not None and algo_temp is None:
+        algo_config.temperature = gen_temp
+      elif algo_temp is not None and gen_temp is None:
+        self.generation_args = dataclasses.replace(
+            self.generation_args, temperature=algo_temp
+        )
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
     self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
@@ -190,6 +208,10 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    # 0 (or negative) means "never save". Previously the orchestrator
+    # checkpointed at every weight update regardless of this setting, which for
+    # a 35B model meant a 64.6 GiB write per step.
+    self.checkpoint_save_interval_steps = checkpoint_save_interval_steps
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
@@ -741,6 +763,20 @@ class StandardRLProgram(RLProgram):
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
+        interval = self.checkpoint_save_interval_steps
+        if interval is None or interval <= 0:
+          # Mark as handled so the fallback path below does not retry.
+          checkpoint_saved = True
+          return
+        if (current_step + 1) % interval != 0:
+          logging.info(
+              "Skipping checkpoint at step %d (checkpoint_save_interval_steps"
+              "=%d).",
+              current_step + 1,
+              interval,
+          )
+          checkpoint_saved = True
+          return
         optimizer_step = self.step + 1
         if (
             isinstance(step_result, dict)
@@ -822,11 +858,11 @@ class StandardRLProgram(RLProgram):
                 role=datatypes.Role.ACTOR
             )
             final_minibatch_completed = True
-            # TODO(tunix-dev): Configurable checkpointing frequency. Today we
-            # checkpoint at the same frequency as the weight update.
             # Save only at a resumable full-batch boundary. An optimizer step
             # can occur earlier when a full batch contains multiple mini
             # batches, but the dataset resume cursor advances in full batches.
+            # Frequency is governed by checkpoint_save_interval_steps inside
+            # _maybe_save_checkpoint.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
             # abort the entire program. Make it configurable on whether to fail
             # or continue.

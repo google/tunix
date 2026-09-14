@@ -44,6 +44,7 @@ from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
+from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 
 # pylint: enable=g-import-not-at-top
@@ -188,8 +189,21 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  algo_config = algorithm_config.GRPOConfig(
+      num_generations=args.num_generations,
+      epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
+      beta=args.beta,
+      temperature=args.temperature,
+      loss_algo=args.loss_algo,
+      policy_loss_fn="grpo",
+      advantage_estimator=args.advantage_estimator,
+      loss_agg_mode=args.loss_agg_mode,
+      kl_loss_mode=args.kl_loss_mode,
+      use_rollout_logps=args.use_rollout_logps,
+  )
   return algorithm_adapter.GRPOAdapter(
-      group_size=args.num_generations,
+      algo_config=algo_config,
       mini_batch_size=args.mini_batch_size,
       train_micro_batch_size=args.train_micro_batch_size,
       max_turns=args.max_turns,
@@ -199,16 +213,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           else args.max_prompt_length + args.max_response_length
       ),
       max_response_length=args.max_response_length,
-      clip_epsilon=args.epsilon,
-      epsilon_high=args.epsilon_high,
-      beta_kl=args.beta,
-      temperature=args.temperature,
-      loss_algo=args.loss_algo,
-      policy_loss_fn="grpo",
-      advantage_estimator=args.advantage_estimator,
-      loss_agg_mode=args.loss_agg_mode,
-      kl_loss_mode=args.kl_loss_mode,
-      use_rollout_logps=args.use_rollout_logps,
   )
 
 

@@ -28,9 +28,14 @@ import sys
 from typing import Any
 
 from tunix.experimental.examples.common import models
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
+
+
+# Import Raiden before any other libraries to ensure correct JAX compilation.
+raiden_preload.import_raiden()
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -61,9 +66,25 @@ def _import_vllm_sampler():
 
 
 def _chat_parser_for(
-    model_id: str, tokenizer: Any, *, enable_thinking: bool = False
+    model_id: str,
+    tokenizer: Any,
+    mode: str = "auto",
+    *,
+    enable_thinking: bool = False,
 ):
-  """Selects the chat template parser by model family."""
+  """Selects the chat parser: `raw` text, or the model family's template.
+
+  Args:
+    model_id: Model name used to pick the family-specific template parser.
+    tokenizer: Tokenizer handed to the parser.
+    mode: Either `auto` (model family's template) or `raw` (no template).
+    enable_thinking: Whether the template parser opens a thinking block.
+
+  Returns:
+    The chat parser to use for this rollout worker.
+  """
+  if mode == "raw":
+    return chat_parser_lib.RawTextParser(tokenizer)
   name = model_id.lower()
   for family, parser_cls in CHAT_PARSERS.items():
     if family in name:
@@ -127,6 +148,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Override MaxText inference attention kernel (e.g."
           " vllm_batched_rpa)."
+      ),
+  )
+  parser.add_argument(
+      "--chat_parser",
+      type=str,
+      default=os.getenv("CHAT_PARSER", "auto"),
+      choices=["auto", "raw"],
+      help=(
+          "auto: the model family's chat template parser (Qwen/Llama/Gemma);"
+          " raw: feed message contents verbatim with no template, for"
+          " completion-style prompts the model is meant to continue."
       ),
   )
   parser.add_argument(
@@ -300,6 +332,7 @@ def _create_vanilla_worker(args, tokenizer):
   chat_parser = _chat_parser_for(
       args.model_id or args.model_name,
       tokenizer,
+      args.chat_parser,
       enable_thinking=args.enable_thinking,
   )
   return rollout_worker.RolloutWorker(
@@ -332,6 +365,7 @@ def _create_vllm_worker(args, tokenizer):
   chat_parser = _chat_parser_for(
       args.model_id or args.model_name,
       tokenizer,
+      args.chat_parser,
       enable_thinking=args.enable_thinking,
   )
   logging.info("Creating RolloutWorker wrapper...")
@@ -367,7 +401,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   logging.info("Creating vLLM mapping config...")
   mapping_config = mappings_lib.MappingConfig(
-      lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
+      **mapping_vllm_jax.VLLM_JAX_MAPPING
   )
   vllm_model = (
       args.model_dir
@@ -546,6 +580,13 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   args = _parse_args(argv)
+  if args.debug:
+    # L1 (local): mirror what PR #2201 does for the orchestrator, and switch on
+    # the collector's raw sampler-response log. The orchestrator-side
+    # [Sampled Response] log only exists when --reward_mode=exact, so this is
+    # the only rollout-text evidence available in the default env reward mode.
+    logging.getLogger().setLevel(logging.DEBUG)
+    os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
   logging.info("Parsed args: %s", args)
 
   if REPO_ROOT not in sys.path:

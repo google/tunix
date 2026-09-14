@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 from typing import Any, List, Mapping, Sequence
@@ -32,18 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 def _get_rl_vllm_sampler_cls():
-  """Lazy import of tpu_inference.rl.RLVllmSampler.
+  """Lazy import of tunix.experimental.rollout.vllm_sampler_v2.RLVllmSampler.
 
-  Resolved through importlib so static analyzers do not try to follow the
-  tpu-inference dependency, which is not available in every environment.
+  Deferred because `vllm_sampler_v2` imports vLLM at module scope, while
+  `rollout/__init__.py` imports this module eagerly and vLLM is not a
+  dependency of the base `google-tunix` install. Importing it at module scope
+  would break `import tunix.experimental.rollout` wherever vLLM is absent.
   """
-  try:
-    return getattr(importlib.import_module("tpu_inference.rl"), "RLVllmSampler")
-  except (ImportError, AttributeError) as e:
-    raise ImportError(
-        "tpu_inference.rl.RLVllmSampler is not available. Please ensure"
-        " tpu-inference is installed."
-    ) from e
+  from tunix.experimental.rollout import vllm_sampler_v2  # pylint: disable=g-import-not-at-top
+
+  return vllm_sampler_v2.RLVllmSampler
 
 
 # Hooks RLVllmSampler must expose for Raiden weight sync; verified once at

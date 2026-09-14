@@ -42,14 +42,16 @@ class RaidenWeightSyncDelegate:
       self,
       *args,
       worker_index: int = 0,
+      server_id: str = "rollout",
       **kwargs,
   ):
     del args, kwargs
     # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
     self._sampler = None
+
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
-            "rollout",
+            job_name=server_id,
             worker_index=worker_index,
             auto_h2d=True,
         )

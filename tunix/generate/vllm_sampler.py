@@ -158,9 +158,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if config.server_mode:
       self._driver = self._create_driver()
+      utils.detach_incompatible_vllm_cleanup_finalizer(self._driver.llm_engine)
       atexit.register(self.stop)
     else:
       self.llm = LLM(**self.args)
+      utils.detach_incompatible_vllm_cleanup_finalizer(self.llm.llm_engine)
 
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
