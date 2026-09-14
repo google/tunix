@@ -50,6 +50,9 @@ kubectl apply --server-side -f "https://github.com/kubernetes-sigs/jobset/releas
 
 ## 2. Build and push images
 
+> [!NOTE]
+> The $REPO path to the images need to be injected into the appropriate locations in the yaml file signaled by `<path-to-your-docker-registry-here>`
+
 ```bash
 gcloud artifacts repositories create tunix-rl \
   --repository-format=docker --location=us-central1 --project="$PROJECT" || true
