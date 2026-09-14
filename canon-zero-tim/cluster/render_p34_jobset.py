@@ -26,6 +26,30 @@ DEFAULT_SOURCE_BRANCH = "yuxzhang/canon-zero-tim"
 PRIORITY_CLASS = "medium"
 # Kept as the historical private spelling used throughout this module.
 _PRIORITY_CLASS = PRIORITY_CLASS
+# The DeepSWE head drives one r2egym sandbox Pod per rollout, which needs
+# exactly two capability sets against the Kubernetes API:
+#   pods      {create, delete, get, list}  -- examples/deepswe/r2egym_runtime_patch.py
+#   pods/exec {create}                     -- r2egym .../runtime/docker.py runs every
+#                                             command, and copies files in, over an
+#                                             exec websocket
+# A Pod that does not name a ServiceAccount runs as the namespace "default" SA,
+# which on bodaborg-v5p-nap is bound to ClusterRole "power-users".  That role
+# grants pods and pods/attach but *not* pods/exec, so sandbox creation succeeds
+# and the first exec dies with
+#   403 ... cannot get resource "pods/exec" in the namespace "default"
+# (observed on canon-p44-ds4b-t64-three-bd03 after the run had already brought
+# up all 64 chips -- the failure is late and expensive, hence this constant).
+#
+# We cannot repair that by binding pods/exec ourselves: our own pods/exec comes
+# from the GKE Cloud IAM webhook authorizer, and RBAC escalation prevention only
+# consults the RBAC rule resolver, so `create rolebinding` for pods/exec is
+# rejected for any subject.  `bind` and `escalate` are likewise denied.
+#
+# "xpk-sa" is the cluster's pre-provisioned identity for exactly this pattern:
+# a namespaced RoleBinding already grants it pods/exec, and cluster-scoped
+# bindings to ClusterRole "agent-sandbox-controller" grant it pod lifecycle.
+# Naming it here changes only our own Pod; no shared cluster object is touched.
+HEAD_SERVICE_ACCOUNT = "xpk-sa"
 # Worker node-pool sentinels meaning "do not pin cloud.google.com/gke-nodepool".
 # On Node-Auto-Provisioning clusters such as bodaborg-v5p-nap the TPU slice pool
 # is created on demand with an unpredictable name (observed:
@@ -303,6 +327,9 @@ def render(
 
   head = _head(document)
   head["nodeSelector"] = {"cloud.google.com/gke-nodepool": cpu_nodepool}
+  # Only the head talks to the Kubernetes API; workers never do, so they keep
+  # the namespace default ServiceAccount.  See HEAD_SERVICE_ACCOUNT above.
+  head["serviceAccountName"] = HEAD_SERVICE_ACCOUNT
   head_job = document["spec"]["replicatedJobs"][0]["template"]["spec"]
   head_job["backoffLimit"] = 0
   service_containers = head.get("initContainers", []) + head["containers"]
@@ -493,6 +520,14 @@ def validate(
     raise ValueError(
         "P34 Pathways Pod priority class drifted: "
         f"expected {_PRIORITY_CLASS!r}, got {priorities}"
+    )
+  # Fail closed here rather than 40 minutes into a 64-chip run: the namespace
+  # default ServiceAccount cannot exec into sandbox Pods.
+  if head.get("serviceAccountName") != HEAD_SERVICE_ACCOUNT:
+    raise ValueError(
+        "P34 head must run as the sandbox-capable ServiceAccount "
+        f"{HEAD_SERVICE_ACCOUNT!r}, got "
+        f"{head.get('serviceAccountName')!r}"
     )
   if main["image"] != client_image or not _DIGEST_IMAGE.fullmatch(main["image"]):
     raise ValueError("P34 client image is not digest-pinned")

@@ -395,6 +395,15 @@ def validate(
   )
   if not effective_sandbox_nodepool:
     raise ValueError("P44 sandbox nodepool identity is missing")
+  # P44 is the lane that actually launches r2egym sandboxes, so the head needs
+  # pods/exec.  The namespace default ServiceAccount does not have it; see
+  # render_p34_jobset.HEAD_SERVICE_ACCOUNT.
+  if head.get("serviceAccountName") != p34.HEAD_SERVICE_ACCOUNT:
+    raise ValueError(
+        "P44 head must run as the sandbox-capable ServiceAccount "
+        f"{p34.HEAD_SERVICE_ACCOUNT!r}, got "
+        f"{head.get('serviceAccountName')!r}"
+    )
   if document["spec"]["failurePolicy"]["maxRestarts"] != 0:
     raise ValueError("P44 parity must remain attempt-zero")
   if (

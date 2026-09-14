@@ -890,6 +890,14 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
+  # The head drives r2egym sandbox Pods over pods/exec, which the namespace
+  # default ServiceAccount lacks; see render_p34_jobset.HEAD_SERVICE_ACCOUNT.
+  if head.get("serviceAccountName") != p34.HEAD_SERVICE_ACCOUNT:
+    raise ValueError(
+        "P58 head must run as the sandbox-capable ServiceAccount "
+        f"{p34.HEAD_SERVICE_ACCOUNT!r}, got "
+        f"{head.get('serviceAccountName')!r}"
+    )
   if _RETIRED_DEVICE_PROBE_TRIGGER in env:
     raise ValueError(
         "P58 must not re-enable the retired Step 65 device probe: "
