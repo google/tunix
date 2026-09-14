@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -65,9 +67,9 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_three_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "c0c72e9b9f2203094488a51f108e5ba4d0337978567f87d21689189cbf9c1a1d",
-        "f1b989dd35e1893dd11e55acd47071c792193eae4cfe90437047a754fb21c9a0",
-        "7c3f92e5ff7310ed9d881f8c499d099eb7600edcd277f5b06fa78436c2cfd796",
+        "57bb467259e1a312d14052c2a2a8cc27fdbba42e84c29be79a128588b2db2400",
+        "60dccb879307e3018451a57a97e802378599d0ffe232e333c7b75a944a90bb2f",
+        "7c43b7b06bb2eed42587c9f20bce07be0bffc9cf14714cd3c0b78faa75b6d0ba",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_three(Path(tmp) / "first")
@@ -80,8 +82,8 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_frozenlake_two_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "1d831f517551201819c136a34be2cdd593a6dbd7ba64c02a96b6c4e016859680",
-        "727d3cabf63b98c67e9a6351269625f3928dc34c0a9163bdb3967ca64e5daf49",
+        "26481cfde65b7aff3aa593bdc1531250a5069ac4622e19894f3c4466e8138cec",
+        "2ecbacd28b3ad722082dba6e53e02631cacd3d6d7e6c4986db39b9e48846666b",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_two(Path(tmp) / "first")
@@ -92,11 +94,39 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
         self.assertNotIn("CANON_DP_REDUCE_ONCE", _env(path))
         self.assertNotIn("CANON_P32_KEEP_TAPE", _env(path))
 
-  def test_image_receipt_and_profile_defaults_are_the_only_legacy_deltas(self):
+  def _restore_legacy_infrastructure(self, document):
+    # Invert exactly the nine scalar base changes in f712fc3b. Require the
+    # reviewed new values first; do not normalize arbitrary future drift.
+    queue = "kueue.x-k8s.io/queue-name"
+    labels = document["metadata"]["labels"]
+    self.assertEqual(labels[queue], "default")
+    labels[queue] = "multislice-queue"
+    jobs = document["spec"]["replicatedJobs"]
+    self.assertEqual(len(jobs), 2)
+    for job in jobs:
+      template = job["template"]["spec"]["template"]
+      self.assertEqual(template["metadata"]["labels"][queue], "default")
+      template["metadata"]["labels"][queue] = "multislice-queue"
+      self.assertEqual(template["spec"]["priorityClassName"], "medium")
+      template["spec"]["priorityClassName"] = "very-high"
+    head = jobs[0]["template"]["spec"]["template"]["spec"]
+    containers = {item["name"]: item for item in head["initContainers"]}
+    for name, current, previous in (
+        ("pathways-proxy", {"cpu": "8", "memory": "16Gi"},
+         {"cpu": "32", "memory": "200Gi"}),
+        ("pathways-rm", {"cpu": "4", "memory": "16Gi"},
+         {"cpu": "8", "memory": "32Gi"}),
+    ):
+      requests = containers[name]["resources"]["requests"]
+      self.assertEqual(requests, current)
+      requests.update(previous)
+
+  def test_image_receipt_profile_defaults_and_base_are_the_only_legacy_deltas(self):
     # The TiTO provenance change added CANON_CLIENT_IMAGE to FrozenLake.
     # Retain all old goldens as a reconstruction oracle: removing precisely
-    # that independently checked receipt, then restoring only the stream/1
-    # entries now owned by the profile, must recover every old byte hash.
+    # that independently checked receipt, restoring the stream/1 entries now
+    # owned by the profile and the reviewed base fields must recover every
+    # old byte hash. The original legacy hash values are not refreshed.
     legacy = {
         "three": (
             "8b4fd423073bc1b8fc39a3a4bac60d418411392018c2e1bf7df37d0062ccc341",
@@ -113,6 +143,7 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
         for path, expected in zip(render(Path(tmp) / label), legacy[label], strict=True):
           raw = path.read_text(encoding="utf-8")
           document = THREE.yaml.safe_load(raw)
+          self._restore_legacy_infrastructure(document)
           pod = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
           main = next(item for item in pod["containers"] if item["name"] == "jax-tpu")
           receipts = [item for item in main["env"] if item["name"] == "CANON_CLIENT_IMAGE"]
@@ -134,6 +165,52 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
           header = "\n".join(raw.splitlines()[:2]) + "\n"
           reconstructed = header + THREE.yaml.safe_dump(document, sort_keys=False)
           self.assertEqual(hashlib.sha256(reconstructed.encode()).hexdigest(), expected)
+
+  def test_legacy_reconstruction_rejects_unreviewed_base_values(self):
+    base = THREE.yaml.safe_load(BASE.read_text(encoding="utf-8"))
+    queue = "kueue.x-k8s.io/queue-name"
+    paths = [("metadata", "labels", queue)]
+    for index in (0, 1):
+      prefix = ("spec", "replicatedJobs", index, "template", "spec", "template")
+      paths.extend((prefix + ("metadata", "labels", queue),
+                    prefix + ("spec", "priorityClassName")))
+    for index in (0, 1):
+      for resource in ("cpu", "memory"):
+        paths.append(("spec", "replicatedJobs", 0, "template", "spec",
+                      "template", "spec", "initContainers", index,
+                      "resources", "requests", resource))
+    for path in paths:
+      with self.subTest(path=path):
+        changed = copy.deepcopy(base)
+        parent = changed
+        for key in path[:-1]:
+          parent = parent[key]
+        parent[path[-1]] = "unreviewed"
+        with self.assertRaises(AssertionError):
+          self._restore_legacy_infrastructure(changed)
+
+  def test_legacy_oracle_still_rejects_env_and_unrelated_resource_drift(self):
+    render = self._render_three
+    for mutation in ("training-env", "resource-limit"):
+      with self.subTest(mutation=mutation):
+        def changed_render(root):
+          paths = render(root)
+          raw = paths[0].read_text(encoding="utf-8")
+          document = THREE.yaml.safe_load(raw)
+          head = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+          if mutation == "training-env":
+            main = next(item for item in head["containers"] if item["name"] == "jax-tpu")
+            next(item for item in main["env"] if item["name"] == "CANON_P71_SCAN")["value"] = "full"
+          else:
+            head["initContainers"][0]["resources"]["limits"]["cpu"] = "31"
+          header = "\n".join(raw.splitlines()[:2]) + "\n"
+          paths[0].write_text(header + THREE.yaml.safe_dump(document, sort_keys=False),
+                              encoding="utf-8")
+          return paths
+
+        with mock.patch.object(self, "_render_three", side_effect=changed_render):
+          with self.assertRaises(AssertionError):
+            self.test_image_receipt_profile_defaults_and_base_are_the_only_legacy_deltas()
 
 
 if __name__ == "__main__":
