@@ -32,6 +32,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.experimental.train import peft_trainer_v2
+from tunix.rl import common as rl_common
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
@@ -167,6 +168,66 @@ class PeftTrainerTest(parameterized.TestCase):
     )
 
     trainer.train(self.train_ds)  # No eval dataset.
+
+  def test_per_token_logps_matches_direct_compute(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    batch, prompt_len, completion_len = 2, 3, 4
+    prompt_tokens = np.arange(
+        1, 1 + batch * prompt_len, dtype=np.int32
+    ).reshape(batch, prompt_len)
+    completion_tokens = np.arange(
+        1, 1 + batch * completion_len, dtype=np.int32
+    ).reshape(batch, completion_len)
+
+    out = trainer.per_token_logps(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        pad_id=0,
+        eos_id=0,
+        temperature=1.0,
+    )
+    # Scoring one row per forward must give identical values.
+    out_micro = trainer.per_token_logps(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        pad_id=0,
+        eos_id=0,
+        temperature=1.0,
+        micro_batch_size=1,
+    )
+    # Reference: the frozen scorer on the same (live) params.
+    graphdef, state = nnx.split(model)
+    expected = rl_common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=jnp.asarray(prompt_tokens),
+        completion_tokens=jnp.asarray(completion_tokens),
+        pad_id=0,
+        eos_id=0,
+        stop_gradient=True,
+        temperature=1.0,
+        chunk_size=0,
+    )
+
+    self.assertEqual(out.shape, (batch, completion_len))
+    self.assertEqual(out.dtype, np.float32)
+    np.testing.assert_allclose(out, np.asarray(expected), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(out, out_micro, rtol=1e-4, atol=1e-4)
+
+  def test_per_token_logps_empty_batch_raises(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    with self.assertRaises(ValueError):
+      trainer.per_token_logps(
+          prompt_tokens=np.zeros((0, 3), dtype=np.int32),
+          completion_tokens=np.zeros((0, 4), dtype=np.int32),
+          pad_id=0,
+          eos_id=0,
+      )
 
   @parameterized.named_parameters(
       ('lora_disabled_distributed', False, True),

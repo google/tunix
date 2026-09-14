@@ -17,6 +17,8 @@
 import contextlib
 from typing import Any, Callable, ContextManager, cast
 
+import numpy as np
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
@@ -232,6 +234,44 @@ class TrainerWorker(abstract_worker.Worker):
           eval_batches += 1
       self._last_error = None
       return self._response(evaluated=True, eval_batches=eval_batches)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def per_token_logps(
+      self, items: datatypes.LogprobsRequest, **kwargs: Any
+  ) -> datatypes.LogprobsResponse:
+    """Scores per-token log-probs for a padded request under live weights.
+
+    Read-only: unlike the frozen reference scorer this uses the trainer's
+    current (actor) parameters, but it must not mutate trainer state. Accepts a
+    ``LogprobsRequest`` composed by the orchestrator; the actor path sets
+    ``pad_id``/``eos_id`` (and any packing fields) explicitly.
+    """
+    del kwargs  # Accepted for engine-forwarding parity; unused.
+    self._ensure_ready()
+    if items.pad_id is None or items.eos_id is None:
+      raise ValueError(
+          "TrainerWorker.per_token_logps requires pad_id and eos_id to be set "
+          "on the LogprobsRequest; the actor scoring path must compose them."
+      )
+    try:
+      result = self._trainer.per_token_logps(
+          prompt_tokens=items.prompt_tokens,
+          completion_tokens=items.completion_tokens,
+          pad_id=items.pad_id,
+          eos_id=items.eos_id,
+          temperature=items.temperature,
+          segment_ids=items.segment_ids,
+          segment_positions=items.segment_positions,
+      )
+      self._last_error = None
+      return datatypes.LogprobsResponse(
+          request_id=items.request_id,
+          per_token_logps=np.asarray(result, dtype=np.float32),
+          model_version=self._policy_version(),
+      )
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR

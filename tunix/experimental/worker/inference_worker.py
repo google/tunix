@@ -162,8 +162,10 @@ class InferenceWorker(abstract_worker.Worker):
             temperature=req.temperature,
         )
 
+      prompt_tokens = np.asarray(req.prompt_tokens)
+      completion_tokens = np.asarray(req.completion_tokens)
       logps = batch_utils.apply_chunked(
-          _score, self._chunk_size, req.prompt_tokens, req.completion_tokens
+          _score, self._chunk_size, prompt_tokens, completion_tokens
       )
       return datatypes.LogprobsResponse(
           request_id=req.request_id,
