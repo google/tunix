@@ -134,7 +134,7 @@ environment must print both:
 
 ```text
 [env] DeepSWE Fleet contract OK: active=<C> replacement_warm=<C> minimum_total=<2C> admitted_capacity=<N> lookahead=0
-[DEEPSWE.SANDBOX] RBAC_PASS namespace=<namespace> checks=26
+[DEEPSWE.SANDBOX] RBAC_PASS namespace=<namespace> checks=25
 [DEEPSWE.SANDBOX] ADMISSION_PASS mode=fleet source=7935857fee859bb18752ee04d8948b975e47ff20 ...
 ```
 

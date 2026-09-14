@@ -59,11 +59,21 @@ enabled. Direct remains the rollback arm by omitting both arguments.
 
 The source is pinned to Agent Sandbox commit
 `7935857fee859bb18752ee04d8948b975e47ff20`. Require its exact admission and
-`[DEEPSWE.SANDBOX] RBAC_PASS namespace=<namespace> checks=26`, followed by one
+`[DEEPSWE.SANDBOX] RBAC_PASS namespace=<namespace> checks=25`, followed by one
 `BATCH_READY ... warm_replicas=128`, before interpreting rollout speed. The
 head uses the pre-provisioned `xpk-sa`; the renderer never creates or widens
-RBAC. A denied extension-resource, CRD, Secret, Pod-read, or `pods/exec`
+RBAC. A denied extension-resource, CRD, Pod-read, or `pods/exec`
 SelfSubjectAccessReview is fatal before worker wait/model startup.
+
+The surface is 25 reviews, not 26, because the Fleet lane names no image pull
+Secret. `xpk-sa` cannot read one and cannot be granted the right to: GKE's RBAC
+escalation check consults only the RBAC rule resolver, while our own `get
+secrets` arrives through the Cloud IAM webhook, so it is a permission we hold
+and cannot delegate. Binding known ClusterRoles pins our RBAC identity to
+`power-users`, which carries no `secrets` rule. The R2E task images are public
+and pull anonymously (verified on sandbox-cpu-pool: 742 MB in 7.4s, no
+imagePullSecrets). Restore the 26th review only when an administrator grants
+`get secrets/dockerhub-pro`.
 Every batch still requires 128 durable rows; Fleet may not weaken P58 timeout,
 partial-batch, cleanup, TITO, A/B/C, gradient, optimizer, or checkpoint rules.
 At run exit there must be zero resources with the exact run-id lineage. A live
