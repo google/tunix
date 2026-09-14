@@ -2,9 +2,9 @@
 
 ## START HERE — P2c gives 64split and 128 the same treatment semantics
 
-As of 2026-09-14 20:15:45 UTC, P2c is implemented locally over
-`15ae364b2cdf79a8b8d120eb0169be94c8b6fcca`; it is not published and neither
-target topology has run. The existing 64-chip `64split` row remains DP4xTP8
+P2c implementation commit
+`0ff4a010e7f127a1d47a7bad48dcc8d540f2c543` is published on the operator
+branch; neither target topology has run. The existing 64-chip `64split` row remains DP4xTP8
 per role on one `4x4x4` slice. The new explicit `--topology 128` row remains
 two disjoint 64-device roles, each DP8xTP8, on one `4x4x8` slice. Both can now
 select the same exact P2b treatment semantics without sharing geometry values:
@@ -29,12 +29,11 @@ is byte-identical across 12 cases; forced-DP8 CPU reducer, whole-update
 length-sort, reduce-once update-norm, P34 and syntax/diff gates pass.
 
 Exact 128 rendering and update-0 receipts are at the top of
-`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Do not apply until this work is committed,
-published by explicit user approval, read back by full SHA and paired with the
-matching digest-pinned image. Local construction is not DP8xTP8 target proof;
-both 64 and 128 remain `TARGET NOT RUN`. The next stop point is user approval
-to commit/push, followed by a full-SHA readback and matching image. Render and
-apply are separate later approvals.
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Before rendering, fetch the operator
+branch, read back its current full 40-character HEAD, and pair that source with
+the matching digest-pinned image. Local construction is not DP8xTP8 target
+proof; both 64 and 128 remain `TARGET NOT RUN`. Render and apply are separate
+later approvals.
 
 ## Urgent 64-chip split-role treatment/full launch
 

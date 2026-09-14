@@ -85,8 +85,9 @@ missing, duplicate, malformed or extra receipt is fatal. A complete update-0
 pass continues the same process toward 1,000 updates; it is not a separate
 three-step job.
 
-Local construction is green at the uncommitted P2c worktree: P58 `213 passed,
-218 subtests passed`; P44 `51 passed, 57 subtests passed`; the flag registry is
+Local construction is green for P2c implementation commit
+`0ff4a010e7f127a1d47a7bad48dcc8d540f2c543`: P58 `213 passed, 218 subtests
+passed`; P44 `51 passed, 57 subtests passed`; the flag registry is
 exact at 435/435; forced-DP8 CPU reducer, whole-update length-sort and
 reduce-once update-norm controls pass; 12 historical/existing render cases are
 byte-identical. These are construction evidence only. Four-chip evidence
