@@ -117,8 +117,11 @@ def _extract_old_logps(
 class AlgorithmAdapter(abc.ABC):
   """Abstract algorithm adapter for returns math, advantages, and loss functions."""
 
+  algo_config: Any = None
+
   def __init__(
       self,
+      algo_config: algorithm_config.AlgorithmConfig | None = None,
       group_size: int = 8,
       mini_batch_size: int = 4,
       train_micro_batch_size: int = 1,
@@ -126,6 +129,11 @@ class AlgorithmAdapter(abc.ABC):
       max_packed_len: int = 8192,
       max_response_length: int = 1024,
   ):
+    self.algo_config = (
+        algo_config
+        if algo_config is not None
+        else algorithm_config.AlgorithmConfig()
+    )
     self.group_size = group_size
     self.mini_batch_size = mini_batch_size
     self.train_micro_batch_size = train_micro_batch_size
@@ -194,10 +202,10 @@ class GRPOAdapter(AlgorithmAdapter):
     """
     if algo_config is None:
       algo_config = algorithm_config.GRPOConfig()
-    self.algo_config = algo_config
 
     super().__init__(
-        group_size=self.algo_config.num_generations,
+        algo_config=algo_config,
+        group_size=algo_config.num_generations,
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=train_micro_batch_size,
         max_turns=max_turns,
@@ -314,7 +322,14 @@ class PPOAdapter(AlgorithmAdapter):
       policy_loss_fn: str = "ppo",
       use_rollout_logps: bool = True,
   ):
+    algo_config = algorithm_config.AlgorithmConfig(
+        algo_variant="ppo",
+        advantage_estimator="gae",
+        policy_loss_fn=policy_loss_fn,
+        use_rollout_logps=use_rollout_logps,
+    )
     super().__init__(
+        algo_config=algo_config,
         group_size=group_size,
         mini_batch_size=mini_batch_size,
         max_turns=max_turns,

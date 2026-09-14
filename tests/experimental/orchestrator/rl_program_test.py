@@ -15,6 +15,7 @@
 import asyncio
 import builtins
 from collections.abc import Sequence
+import types
 from typing import Any
 from unittest import mock
 
@@ -212,6 +213,10 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.max_packed_len = 16
     self.mock_algo.max_response_length = 1024
     self.mock_algo.requires_reference_kl = False
+    self.mock_algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
 
     mock_payload = datatypes.RLTrainerPayload(
         prompt_ids=np.array([1, 2], dtype=np.int32),
@@ -271,8 +276,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=(
               "p0",
           ),  # Just 1 prompt. Dispatches 2 rollouts since group_size=2.
-          group_size=2,
-          mini_batch_size=1,
           max_steps=10,
       )
 
@@ -308,13 +311,67 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_1"],
         algo=self.mock_algo,
         reward_fns=[lambda x: 1.0],
-        group_size=2,
-        mini_batch_size=1,
     )
     self.assertIsInstance(
         program.assembler, batch_assembly.SequencePackedBatchAssembler
     )
     self.assertEqual(program.assembler.batch_size, 2)
+
+  def test_program_inherits_group_size_and_mini_batch_size_from_algo(self):
+    self.mock_algo.group_size = 5
+    self.mock_algo.mini_batch_size = 3
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+    )
+    self.assertEqual(program.group_size, 5)
+    self.assertEqual(program.mini_batch_size, 3)
+
+  def test_unexpected_group_size_argument_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]
+          dataset=["prompt_1"],
+          algo=self.mock_algo,
+          group_size=4,
+      )
+
+  def test_unexpected_mini_batch_size_argument_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]
+          dataset=["prompt_1"],
+          algo=self.mock_algo,
+          mini_batch_size=3,
+      )
+
+  def test_program_use_rollout_logps_matching(self):
+    self.mock_algo.algo_config = types.SimpleNamespace(
+        temperature=0.7,
+        use_rollout_logps=True,
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+        generation_args=datatypes.GenerationArgs(
+            temperature=0.7,
+            return_logprobs=True,
+        ),
+    )
+    self.assertTrue(program.generation_args.return_logprobs)
+    self.assertTrue(self.mock_algo.algo_config.use_rollout_logps)
+
+  def test_program_use_rollout_logps_missing_in_generation_args_inherits_from_algo(
+      self,
+  ):
+    self.mock_algo.algo_config = types.SimpleNamespace(
+        temperature=0.7,
+        use_rollout_logps=True,
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+    )
+    self.assertTrue(program.generation_args.return_logprobs)
+    self.assertTrue(self.mock_algo.algo_config.use_rollout_logps)
 
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
@@ -350,7 +407,10 @@ class RLProgramTest(absltest.TestCase):
           [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
           group_size=2,
           policy_version=0,
-          generation_args=datatypes.GenerationArgs(max_response_length=1024),
+          generation_args=datatypes.GenerationArgs(
+              max_response_length=1024,
+              return_logprobs=True,
+          ),
       )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.save_checkpoint.assert_called_once_with(
@@ -729,8 +789,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=2,
-          mini_batch_size=4,
           reward_fns=[lambda x: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
@@ -870,8 +928,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=1,
-          mini_batch_size=4,
           reward_fns=[lambda x: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
@@ -939,8 +995,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=1,
-          mini_batch_size=2,
           batch_size=4,
           reward_fns=[lambda x: 1.0],
           assembler=padded_assembler,
@@ -1044,8 +1098,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=3,
-          mini_batch_size=1,
           reward_fns=[lambda x: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
@@ -1107,8 +1159,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=2,
-          mini_batch_size=2,
           reward_fns=[lambda x: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
@@ -1170,8 +1220,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=2,
-          mini_batch_size=2,
           reward_fns=[lambda x: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
@@ -1242,8 +1290,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=3,
-          mini_batch_size=1,
           reward_fns=[lambda x: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
@@ -1387,8 +1433,6 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          group_size=2,
-          mini_batch_size=2,
           reward_fns=[lambda x: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
@@ -1509,7 +1553,10 @@ class RLProgramTest(absltest.TestCase):
           [dict_item],
           group_size=2,
           policy_version=0,
-          generation_args=datatypes.GenerationArgs(max_response_length=1024),
+          generation_args=datatypes.GenerationArgs(
+              max_response_length=1024,
+              return_logprobs=True,
+          ),
       )
 
     asyncio.run(_run())
@@ -1581,8 +1628,6 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(
           dataset=dataset,
           reward_fns=[tracking_reward_fn],
-          group_size=2,
-          mini_batch_size=1,
           max_steps=1,
       )
 
@@ -2830,29 +2875,11 @@ class RLProgramTest(absltest.TestCase):
       _, kwargs = self.mock_engine.dispatch_rollouts.call_args
       expected_gen_args = datatypes.GenerationArgs(
           max_response_length=512,
+          return_logprobs=True,
       )
       self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
 
     asyncio.run(_run())
-
-  def test_program_temperature_conflict_raises(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = 0.8
-
-    gen_args = datatypes.GenerationArgs(temperature=1.0)
-    with self.assertRaisesRegex(ValueError, "Conflicting temperature"):
-      rl_program.StandardRLProgram(
-          dataset=("p0",),
-          algo=mock_algo,
-          generation_args=gen_args,
-      )
 
   def test_program_temperature_matching_sets_algo_config(self):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
@@ -2862,8 +2889,9 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = 0.8
+    mock_algo.algo_config = mock.MagicMock(
+        temperature=0.8, use_rollout_logps=None
+    )
 
     gen_args = datatypes.GenerationArgs(temperature=0.8)
     rl_program.StandardRLProgram(
@@ -2873,7 +2901,7 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertEqual(mock_algo.algo_config.temperature, 0.8)
 
-  def test_program_temperature_missing_in_generation_args_inherits_from_algo(
+  def test_program_temperature_missing_in_generation_args_leaves_none(
       self,
   ):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
@@ -2883,14 +2911,15 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = 0.8
+    mock_algo.algo_config = mock.MagicMock(
+        temperature=0.8, use_rollout_logps=None
+    )
 
     program = rl_program.StandardRLProgram(
         dataset=("p0",),
         algo=mock_algo,
     )
-    self.assertEqual(program.generation_args.temperature, 0.8)
+    self.assertIsNone(program.generation_args.temperature)
 
   def test_program_temperature_missing_in_algo_config_propagates_from_generation_args(
       self,
@@ -2902,8 +2931,9 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock()
-    mock_algo.algo_config.temperature = None
+    mock_algo.algo_config = mock.MagicMock(
+        temperature=None, use_rollout_logps=None
+    )
 
     gen_args = datatypes.GenerationArgs(temperature=0.8)
     rl_program.StandardRLProgram(

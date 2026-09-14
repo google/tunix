@@ -56,6 +56,15 @@ class AlgorithmConfig:
   # treating the pool as unusable for that fn and evaluating it in the parent
   # process instead.
   reward_worker_timeout_seconds: float = 180.0
+  # Sampling temperature used during rollout generation to compute log
+  # probabilities and entropy in the loss function.
+  # NB: This should not be configured manually, instead it will be set by the RL
+  # engine based on the rollout config.
+  temperature: float | None = None
+  # Whether to use rollout-side log probabilities as old-policy log
+  # probabilities. If False, recompute old-policy log probabilities on the
+  # trainer actor.
+  use_rollout_logps: bool = True
 
   def __post_init__(self):
     valid_algo_variants = [
@@ -143,16 +152,11 @@ class GRPOConfig(AlgorithmConfig):
     epsilon_high: Epsilon value for upper bound clipping.
     epsilon_c: Dual-clip PPO/GRPO lower bound for clipping when advantages are
       negative.
-    use_rollout_logps: Whether to use rollout-side log probabilities as
-      old-policy log probabilities. If False, recompute old-policy log
-      probabilities on the trainer actor.
     sampler_is: Optional truncated importance-sampling correction between the
       rollout sampler and trainer actor. Set to "token" to use trainer
       recomputed logps as old-policy logps and multiply the policy loss by
       detached per-token sampler/trainer correction weights.
     sampler_is_threshold: Maximum per-token TIS correction weight.
-    temperature: Sampling temperature used during rollout generation to compute
-      log probabilities and entropy in the loss function.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
@@ -172,8 +176,6 @@ class GRPOConfig(AlgorithmConfig):
   epsilon: float = 0.2
   epsilon_high: float | None = None
   epsilon_c: float | None = None
-  temperature: float | None = None
-  use_rollout_logps: bool = True
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
 

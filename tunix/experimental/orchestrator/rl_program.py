@@ -125,9 +125,7 @@ class StandardRLProgram(RLProgram):
       assembler: batch_assembly.BatchAssembler | None = None,
       batch_config: batch_assembly.BatchConfig | None = None,
       generation_args: datatypes.GenerationArgs | None = None,
-      group_size: int = 8,
       batch_size: int | None = None,
-      mini_batch_size: int = 4,
       max_staleness: int = 0,
       sync_weights: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
@@ -144,7 +142,7 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
-    algo_max_response_length = getattr(self.algo, "max_response_length", 1024)
+    algo_max_response_length = self.algo.max_response_length
     if generation_args is None:
       self.generation_args = datatypes.GenerationArgs(
           max_response_length=algo_max_response_length,
@@ -156,26 +154,19 @@ class StandardRLProgram(RLProgram):
       )
     else:
       self.generation_args = generation_args
-    algo_config = getattr(self.algo, "algo_config", None)
-    if algo_config is not None:
-      algo_temp = getattr(algo_config, "temperature", None)
-      gen_temp = getattr(self.generation_args, "temperature", None)
-      if algo_temp is not None and gen_temp is not None:
-        if algo_temp != gen_temp:
-          raise ValueError(
-              "Conflicting temperature: generation_args.temperature="
-              f"{gen_temp} does not match"
-              f" algo.algo_config.temperature={algo_temp}."
-          )
-      elif gen_temp is not None and algo_temp is None:
-        algo_config.temperature = gen_temp
-      elif algo_temp is not None and gen_temp is None:
-        self.generation_args = dataclasses.replace(
-            self.generation_args, temperature=algo_temp
-        )
+
+    gen_temp = self.generation_args.temperature
+    if gen_temp is not None:
+      self.algo.algo_config.temperature = gen_temp
+
+    self.generation_args = dataclasses.replace(
+        self.generation_args,
+        return_logprobs=self.algo.algo_config.use_rollout_logps,
+    )
+
     self.reward_fns = list(reward_fns) if reward_fns else []
-    self.group_size = getattr(algo, "group_size", group_size)
-    self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
+    self.group_size = algo.group_size
+    self.mini_batch_size = algo.mini_batch_size
     if self.mini_batch_size <= 0 or self.group_size <= 0:
       raise ValueError("mini_batch_size and group_size must be positive.")
     self.full_batch_size = (
@@ -376,13 +367,19 @@ class StandardRLProgram(RLProgram):
           src_item = group[idx] if idx < len(group) else None
           src_traj = getattr(src_item, "traj", None)
           if isinstance(src_traj, dict):
-            raw_status = src_traj.get("status") or getattr(src_item, "status", None)
+            raw_status = src_traj.get("status") or getattr(
+                src_item, "status", None
+            )
             raw_steps = src_traj.get("steps")
             traj_dict = dict(src_traj)
           elif src_traj is not None:
-            raw_status = getattr(src_traj, "status", None) or getattr(src_item, "status", None)
+            raw_status = getattr(src_traj, "status", None) or getattr(
+                src_item, "status", None
+            )
             raw_steps = getattr(src_traj, "steps", None)
-            traj_dict = src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+            traj_dict = (
+                src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+            )
           else:
             raw_status = getattr(src_item, "status", None)
             raw_steps = []
