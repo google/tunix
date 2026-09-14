@@ -55,7 +55,7 @@ Usage:
 """
 
 import asyncio
-import collections
+from collections import Counter
 import json
 import logging
 import os
@@ -72,8 +72,8 @@ from jax.sharding import Mesh
 from kubernetes import client
 from kubernetes import config as k8s_config
 import numpy as np
-from swe_agent import SWEAgent
-from swe_env import SWEEnv
+from swe_agent import CodeActAgent, SWEAgent
+from swe_env import SWEEnv, _init_global_fleet
 from transformers import AutoTokenizer
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
@@ -84,8 +84,6 @@ from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.sft import utils as sft_utils
-
-Counter = collections.Counter
 
 # ========================== Configuration ==========================
 
@@ -114,6 +112,9 @@ MAX_CONTEXT_LIMIT = int(
 ENABLE_GUARD = False
 if os.getenv("ENABLE_GUARD", "false").lower() == "true":
   ENABLE_GUARD = True
+
+SCAFFOLD = os.getenv("SCAFFOLD", "openhands")
+USE_AGENT_SANDBOX = os.getenv("USE_AGENT_SANDBOX", "true").lower() == "true"
 
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 
@@ -210,10 +211,10 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
 devices = jax.devices()
-# Force pure tensor parallelism for eval: DP=1, TP=8.
+# Force pure tensor parallelism for eval: DP=1, TP=min(8, len(devices)).
 # Qwen3-32B has tensors such as (5120, 8, 128), so TP must not exceed 8 for
 # shardings that partition that dimension on the tp axis.
-TP_SIZE = 8
+TP_SIZE = min(8, len(devices))
 mesh_devices = np.array(devices[:TP_SIZE]).reshape(1, TP_SIZE)
 mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
 logger.info(
@@ -518,13 +519,16 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
 def pairs_generator():
   """Yield one full (agent, env) trajectory task per dataset entry."""
   for pair_index, entry in enumerate(entries):
-    agent = SWEAgent()
+    agent_cls = CodeActAgent if SCAFFOLD == "openhands" else SWEAgent
+    agent = agent_cls(scaffold=SCAFFOLD)
     env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
     env = env_cls(
         entry=entry,
         max_steps=MAX_STEPS,
         pair_index=pair_index,
         group_id=pair_index,
+        scaffold=SCAFFOLD,
+        use_agent_sandbox=USE_AGENT_SANDBOX,
     )
     yield agent, env
 
@@ -532,6 +536,15 @@ def pairs_generator():
 async def run_evaluation():
   """Run evaluation with orchestrator-managed task-level parallelism."""
   os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+  if USE_AGENT_SANDBOX:
+    _init_global_fleet(
+        tasks=entries,
+        max_concurrency=MAX_CONCURRENT,
+        num_generations=1,
+        batch_size=MAX_CONCURRENT,
+        scaffold=SCAFFOLD,
+    )
 
   orchestrator = RolloutOrchestrator(
       engine_cls=EvalTrajectoryCollectEngine,

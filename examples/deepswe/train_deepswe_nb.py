@@ -262,6 +262,13 @@ parser.add_argument(
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="Logging level for the script and relevant libraries.",
 )
+parser.add_argument(
+    "--scaffold",
+    type=str,
+    default=os.getenv("SCAFFOLD", "openhands"),
+    choices=["r2egym", "sweagent", "openhands"],
+    help="Agent scaffold/sandbox toolset to use ('r2egym', 'sweagent', or 'openhands').",
+)
 
 args, _ = parser.parse_known_args()
 
@@ -277,52 +284,6 @@ if args.model_source == "maxtext":
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
-
-# Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector.
-# This is required because r2egym hardcodes the CPU nodepool name (using
-# Karpenter bigcpu-standby), which does not exist in our GKE cluster. We
-# override it here to match the nodepool configured via the
-# --node_selector_val flag.
-def patch_kubernetes_runtime():
-  try:
-    from r2egym.agenthub.runtime.docker import DockerRuntime
-    import os
-
-    original_start_kubernetes_pod = DockerRuntime._start_kubernetes_pod
-
-    def patched_start_kubernetes_pod(
-        self, docker_image, command, pod_name, **docker_kwargs
-    ):
-      original_create_namespaced_pod = self.client.create_namespaced_pod
-
-      def patched_create_namespaced_pod(*args, **kwargs):
-        body = kwargs.get("body")
-        if body and "spec" in body:
-          key = os.environ.get(
-              "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
-          )
-          val = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
-          body["spec"]["nodeSelector"] = {key: val}
-          print(f"[Monkeypatch] Overrode nodeSelector to {key}={val}")
-        return original_create_namespaced_pod(*args, **kwargs)
-
-      self.client.create_namespaced_pod = patched_create_namespaced_pod
-      try:
-        return original_start_kubernetes_pod(
-            self, docker_image, command, pod_name, **docker_kwargs
-        )
-      finally:
-        self.client.create_namespaced_pod = original_create_namespaced_pod
-
-    DockerRuntime._start_kubernetes_pod = patched_start_kubernetes_pod
-    print(
-        "[Monkeypatch] Successfully patched DockerRuntime._start_kubernetes_pod"
-    )
-  except Exception as e:
-    print(f"[Monkeypatch] Failed to patch DockerRuntime: {e}")
-
-
-patch_kubernetes_runtime()
 
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
@@ -684,12 +645,14 @@ if USE_AGENT_SANDBOX:
       max_concurrency=MAX_CONCURRENCY,
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
+      scaffold=args.scaffold,
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,
       fleet=fleet,
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
+      scaffold=args.scaffold,
   )
 
 
@@ -1069,7 +1032,7 @@ config_kwargs = {
     "max_response_length": MAX_RESPONSE_LENGTH,
     "beta": BETA,
     "epsilon": EPSILON,
-    "system_prompt": swe_agent.SWE_SYSTEM_PROMPT,
+    "system_prompt": swe_agent.get_system_prompt(scaffold=args.scaffold),
     "max_concurrency": MAX_CONCURRENCY,
     "epsilon_high": EPSILON_HIGH,
     "off_policy_steps": OFF_POLICY_STEPS,
@@ -1083,11 +1046,17 @@ config_kwargs = {
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
+agent_class = (
+    swe_agent.CodeActAgent
+    if args.scaffold == "openhands"
+    else swe_agent.SWEAgent
+)
+
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine,
     reward_fns=None,
-    agent_class=swe_agent.SWEAgent,
-    agent_kwargs={},
+    agent_class=agent_class,
+    agent_kwargs={"scaffold": args.scaffold},
     env_class=swe_env.SWEEnv,
     env_kwargs={
         "max_steps": MAX_TURNS,
@@ -1095,6 +1064,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "reward_timeout": REWARD_TIMEOUT_SECS,
         "use_agent_sandbox": USE_AGENT_SANDBOX,
         "fleet": fleet,
+        "scaffold": args.scaffold,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
