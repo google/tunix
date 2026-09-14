@@ -771,6 +771,68 @@ if USE_AGENT_SANDBOX:
   logger.info('[Main] Starting warmpools for planned tasks on K8s...')
   fleet.start_warmpools(wait=False)
 
+  # Resilient acquire: self-heal if another job deletes warmpools in shared namespace
+  orig_acquire = fleet.acquire
+
+  def resilient_acquire(task):
+    for attempt in range(10):
+      try:
+        return orig_acquire(task)
+      except Exception as exc:
+        exc_str = str(exc)
+        if "SandboxWarmPool" in exc_str or "not found" in exc_str.lower():
+          logger.warning(
+              "[ResilientAcquire] Warmpool missing for %s (attempt %d/10): %s; recreating...",
+              task.image,
+              attempt + 1,
+              exc,
+          )
+          try:
+            entry = fleet.plan_.for_image(task.image) if fleet.plan_ else None
+            cluster = fleet.registry.get(entry.cluster if entry else "default")
+            fleet._ensure_pool(cluster, task.image, 1)
+          except Exception as ce:
+            logger.warning("[ResilientAcquire] Pool recreation error: %s", ce)
+          time.sleep(5)
+        else:
+          raise
+    return orig_acquire(task)
+
+  fleet.acquire = resilient_acquire
+
+  def safe_teardown(*args, **kwargs):
+    logger.info(
+        "[Main] Safely tearing down ONLY our own warmpools and claims (oh-img-*)..."
+    )
+    try:
+      fleet.release_all()
+      for c in fleet.registry:
+        try:
+          pools = c.resources.list_warmpools(label_selector=None)
+          for p in pools:
+            if p.startswith("pool-oh-img-"):
+              try:
+                c.resources.delete_warmpool(p)
+              except Exception:
+                pass
+        except Exception as pe:
+          logger.warning("Error cleaning up warmpools: %s", pe)
+        try:
+          tmpls = c.resources.list_templates(label_selector=None)
+          for t in tmpls:
+            if t.startswith("oh-img-"):
+              try:
+                c.resources.delete_template(t)
+              except Exception:
+                pass
+        except Exception as te:
+          logger.warning("Error cleaning up templates: %s", te)
+    except Exception as e:
+      logger.warning("Error during safe teardown: %s", e)
+
+  fleet.teardown = safe_teardown
+  fleet._teardown = safe_teardown
+
 # ========================== Model & Mesh ==========================
 
 # Tokenizer Setup
