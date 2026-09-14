@@ -25,17 +25,6 @@ ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 INFERENCE_PORT=${INFERENCE_PORT:-20002}
-# Comma-separated gRPC ports, one rollout node per port (e.g. "20001,20003,20004").
-ROLLOUT_PORTS=${ROLLOUT_PORTS:-$ROLLOUT_PORT}
-# Optional py-inference-scheduler sidecar. Either point SCHEDULER_URL at an
-# externally managed sidecar (e.g. a k8s sidecar container), or set
-# START_SCHEDULER=1 with SCHEDULER_REPO pointing at a py-rl-scheduler checkout
-# to have this script launch one locally.
-SCHEDULER_URL=${SCHEDULER_URL:-}
-START_SCHEDULER=${START_SCHEDULER:-0}
-SCHEDULER_REPO=${SCHEDULER_REPO:-}
-SCHEDULER_PORT=${SCHEDULER_PORT:-8100}
-SCHEDULER_CONFIG=${SCHEDULER_CONFIG:-integration/tunix/examples/scheduler.yaml}
 RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
 INFERENCE_ADDR=${INFERENCE_ADDR:-}
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
@@ -154,6 +143,19 @@ TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 # INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 # TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
 # TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
+
+# ---Custom-scheduler-env-vars---
+# Optional py-inference-scheduler sidecar. Either point SCHEDULER_URL at an
+# externally managed sidecar (e.g. a k8s sidecar container), or set
+# START_SCHEDULER=1 with SCHEDULER_REPO pointing at a py-rl-scheduler checkout
+# to have this script launch one locally.
+SCHEDULER_URL=${SCHEDULER_URL:-}
+START_SCHEDULER=${START_SCHEDULER:-0}
+SCHEDULER_REPO=${SCHEDULER_REPO:-}
+SCHEDULER_PORT=${SCHEDULER_PORT:-8100}
+SCHEDULER_CONFIG=${SCHEDULER_CONFIG:-integration/tunix/examples/scheduler.yaml}
+# Comma-separated gRPC ports, one rollout node per port (e.g. "20001,20003,20004").
+ROLLOUT_PORTS=${ROLLOUT_PORTS:-$ROLLOUT_PORT}
 
 TRAINER_LOG="${LOG_ROOT}/trainer.log"
 ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
@@ -760,17 +762,12 @@ fi
 dump_debug_snapshot
 
 echo "Launching CPU orchestrator..."
-ROLLOUT_ADDRS=""
-for port in "${ROLLOUT_PORT_ARR[@]}"; do
-  ROLLOUT_ADDRS+="${ROLLOUT_ADDRS:+,}localhost:${port}"
-done
 (
   ORCHESTRATOR_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_id="${ORCHESTRATOR_ID}"
     --discovery_port="${ORCHESTRATOR_PORT}"
     --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main
-    --rollout_addr="$ROLLOUT_ADDRS"
 
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
