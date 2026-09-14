@@ -168,8 +168,9 @@ def main() -> None:
       else ""
   )
 
-  # Whole line or nothing, as with `queue_label`: `priorityClassName:` with an empty
-  # value is a YAML null, which the API server rejects rather than reading as "unset".
+  # Emit the whole line or none of it, as `queue_label` does. `priorityClassName:` with
+  # an empty value parses as a YAML null, which the API server rejects rather than
+  # treating as unset.
   priority_class_line = (
       f"            priorityClassName: {args.priority_class_name}\n"
       if args.priority_class_name
