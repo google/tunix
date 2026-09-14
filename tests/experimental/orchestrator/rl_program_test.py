@@ -3407,5 +3407,179 @@ class RLProgramTest(absltest.TestCase):
     program.close()
 
 
+def _traj_item(tokens, clipped=None, raw_length=None):
+  """Builds a TrajectoryItem, optionally with collector annotations."""
+  traj = {"conversation_tokens": np.asarray(tokens, dtype=np.int32)}
+  if clipped is not None:
+    traj["clipped"] = clipped
+    traj["raw_length"] = (
+        raw_length if raw_length is not None else len(tokens)
+    )
+  return datatypes.TrajectoryItem(prompt_id="p", group_index=0, traj=traj)
+
+
+class GenerationMetricsTest(absltest.TestCase):
+  """Covers `_generation_metrics`, the per-prompt-group accounting."""
+
+  def test_uses_collector_annotations(self):
+    # The collector scored these against the budget actually enforced for the
+    # request, which may differ from this program's default. Whatever it
+    # decided is authoritative here; nothing is recomputed.
+    metrics = rl_program._generation_metrics([[
+        _traj_item([1, 2, 3], clipped=True, raw_length=3),
+        _traj_item([1, 2], clipped=False, raw_length=2),
+    ]])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.5)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.5)
+
+  def test_zero_length_rollout_stays_in_denominator(self):
+    # A rollout that ran and produced nothing is still a rollout: the agentic
+    # learner divides by the whole group, so dropping it would inflate
+    # clip_ratio (1.0 here instead of 0.5).
+    metrics = rl_program._generation_metrics([[
+        _traj_item([1, 2, 3, 4], clipped=True, raw_length=4),
+        _traj_item([], clipped=False, raw_length=0),
+    ]])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.5)
+    self.assertEqual(metrics["generation/completions/min_raw_length"], 0.0)
+
+  def test_unannotated_items_do_not_join_the_denominator(self):
+    # Mixed groups are not expected in practice, but an unannotated rollout
+    # must never be counted as "not clipped" by omission.
+    metrics = rl_program._generation_metrics([[
+        _traj_item([1, 2, 3, 4], clipped=True, raw_length=4),
+        _traj_item([1, 2, 3, 4]),
+    ]])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 1.0)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 4.0)
+
+  def test_half_annotated_item_is_skipped_not_raised(self):
+    # A producer that wrote one key and not the other is a bug, but it must
+    # not take down the training step: this is only a metric.
+    half = _traj_item([1, 2, 3, 4], clipped=True, raw_length=4)
+    del half.traj["raw_length"]
+
+    metrics = rl_program._generation_metrics(
+        [[half, _traj_item([1, 2], clipped=False, raw_length=2)]]
+    )
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.0)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.0)
+
+  def test_returns_empty_without_annotations(self):
+    payload_only = datatypes.TrajectoryItem(prompt_id="p", traj={})
+
+    self.assertEmpty(rl_program._generation_metrics([]))
+    self.assertEmpty(rl_program._generation_metrics([[payload_only]]))
+    self.assertEmpty(rl_program._generation_metrics([[_traj_item([1, 2])]]))
+
+  def test_accepts_numpy_scalar_annotations(self):
+    # The collector casts these, but the trajectory may round-trip through
+    # numpy on the way here.
+    metrics = rl_program._generation_metrics(
+        [[_traj_item([1, 2], clipped=np.True_, raw_length=np.int64(2))]]
+    )
+
+    self.assertIsInstance(metrics["generation/completions/clip_ratio"], float)
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 1.0)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.0)
+
+  def test_each_metric_uses_its_own_reduce_op(self):
+    metrics = rl_program._generation_metrics([
+        [
+            _traj_item([], clipped=True, raw_length=8),
+            _traj_item([], clipped=False, raw_length=12),
+        ],
+        [
+            _traj_item([], clipped=False, raw_length=10),
+            _traj_item([], clipped=False, raw_length=30),
+        ],
+    ])
+
+    self.assertEqual(
+        metrics,
+        {
+            "generation/completions/clip_ratio": 0.25,
+            "generation/completions/mean_raw_length": 15.0,
+            "generation/completions/max_raw_length": 30.0,
+            "generation/completions/min_raw_length": 8.0,
+        },
+    )
+
+  def test_unequal_groups_average_per_group_not_per_rollout(self):
+    # Group A: 1 of 4 clipped. Group B: 2 of 2 clipped. Averaging the group
+    # ratios gives 0.625; pooling rollouts would give 0.5. The agentic learner
+    # averages group ratios, so this pins that behavior.
+    group_a = [
+        _traj_item([], clipped=c, raw_length=10)
+        for c in (True, False, False, False)
+    ]
+    group_b = [_traj_item([], clipped=True, raw_length=10) for _ in range(2)]
+
+    metrics = rl_program._generation_metrics([group_a, group_b])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.625)
+
+
+class GenerationMetricsLoggingTest(absltest.TestCase):
+  """Covers how the computed metrics reach the metrics logger."""
+
+  def _log_metrics(self, metrics):
+    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    algo.num_generations = 2
+    algo.mini_batch_size = 1
+    algo.max_turns = 1
+    algo.max_packed_len = 16
+    algo.max_response_length = 1024
+    algo.requires_reference_kl = False
+    algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=algo,
+        reward_fns=[lambda x: 1.0],
+    )
+    program.metrics_logger = mock.MagicMock()
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        generation_metrics=metrics,
+        num_rollouts=0,
+        num_microbatches=0,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+    return {
+        call.args[1]: call.args[2]
+        for call in program.metrics_logger.log.call_args_list
+    }
+
+  def test_logs_the_names_generation_metrics_produced(self):
+    # The names are the ones `_generation_metrics` returns; this pins that
+    # nothing rewrites or re-prefixes them on the way to the logger.
+    computed = rl_program._generation_metrics(
+        [[_traj_item([1, 2], clipped=True, raw_length=2)]]
+    )
+
+    logged = self._log_metrics(computed)
+
+    self.assertEqual(logged["generation/completions/clip_ratio"], 1.0)
+    self.assertEqual(logged["generation/completions/max_raw_length"], 2.0)
+
+  def test_no_metrics_logs_no_generation_metrics(self):
+    logged = self._log_metrics({})
+
+    self.assertEmpty(
+        [k for k in logged if k.startswith("generation/completions/")]
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

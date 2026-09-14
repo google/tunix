@@ -818,5 +818,225 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
       engine._convert_to_trajectory(mock_traj)
 
 
+class ResponseBudgetAnnotationTest(absltest.TestCase):
+  """Covers the `clipped` / `raw_length` annotations on collected trajectories."""
+
+  class _EosTokenizer(_MockTokenizer):
+    eos_token_id = 7
+
+  def _engine(self, max_response_length, tokenizer=None, eos_ids=(7,)):
+    generation_kwargs = {}
+    if max_response_length is not None:
+      generation_kwargs["max_response_length"] = max_response_length
+    request = datatypes.RolloutRequest(
+        prompt_id="p1",
+        generation_kwargs=generation_kwargs,
+    )
+    return collector.TrajectoryCollectorEngine(
+        traj_id="t1",
+        request=request,
+        sampler=_MockSampler(),
+        env_client=mock.MagicMock(),
+        agent=mock.MagicMock(),
+        tokenizer=tokenizer or self._EosTokenizer(),
+        chat_parser=_RecordingParser(),
+        eos_ids=eos_ids,
+    )
+
+  def test_truncated_without_eos_is_clipped(self):
+    engine = self._engine(max_response_length=4)
+    traj = {"conversation_tokens": np.array([1, 2, 3, 4])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertTrue(traj["clipped"])
+    self.assertEqual(traj["raw_length"], 4)
+
+  def test_budget_reached_but_ending_on_eos_is_not_clipped(self):
+    # The boundary the metric hinges on: filling the budget is not truncation
+    # if the model still emitted EOS as its final token.
+    engine = self._engine(max_response_length=4)
+    traj = {"conversation_tokens": np.array([1, 2, 3, 7])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertFalse(traj["clipped"])
+    self.assertEqual(traj["raw_length"], 4)
+
+  def test_short_response_is_not_clipped(self):
+    engine = self._engine(max_response_length=8)
+    traj = {"conversation_tokens": np.array([1, 2, 7])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertFalse(traj["clipped"])
+    self.assertEqual(traj["raw_length"], 3)
+
+  def test_overlong_response_clamps_raw_length(self):
+    engine = self._engine(max_response_length=3)
+    traj = {"conversation_tokens": np.array([1, 2, 3, 4, 5])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertTrue(traj["clipped"])
+    self.assertEqual(traj["raw_length"], 3)
+
+  def test_per_request_budget_overrides_program_default(self):
+    # DistributedRLEngine lets a dataset item override max_response_length, so
+    # the flag must follow the budget this request actually ran with rather
+    # than any program-level default.
+    tight = self._engine(max_response_length=4)
+    loose = self._engine(max_response_length=64)
+    tokens = np.array([1, 2, 3, 4])
+
+    tight_traj = {"conversation_tokens": tokens}
+    loose_traj = {"conversation_tokens": tokens}
+    tight._annotate_response_budget(tight_traj)
+    loose._annotate_response_budget(loose_traj)
+
+    self.assertTrue(tight_traj["clipped"])
+    self.assertFalse(loose_traj["clipped"])
+
+  def test_configured_stop_token_ends_the_rollout_cleanly(self):
+    # The case this metric exists to distinguish. A Qwen chat run launched with
+    # --eos_tokens='<|im_end|>' terminates on that token, not on the
+    # tokenizer's own EOS; scoring against the tokenizer default would call
+    # every normal termination at the budget a truncation.
+    engine = self._engine(max_response_length=4, eos_ids=[151645])
+    traj = {"conversation_tokens": np.array([1, 2, 3, 151645])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertFalse(traj["clipped"])
+    self.assertEqual(traj["raw_length"], 4)
+
+  def test_configured_stop_set_replaces_the_tokenizer_default(self):
+    # The sampler stops on the configured set only, so the tokenizer's EOS
+    # (7 here) is just another token and does not end the rollout.
+    engine = self._engine(max_response_length=4, eos_ids=[151645])
+    traj = {"conversation_tokens": np.array([1, 2, 3, 7])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertTrue(traj["clipped"])
+
+  def test_any_member_of_the_stop_set_counts(self):
+    engine = self._engine(max_response_length=4, eos_ids=[151643, 151645])
+    traj = {"conversation_tokens": np.array([1, 2, 3, 151643])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertFalse(traj["clipped"])
+
+  def test_no_budget_leaves_trajectory_unannotated(self):
+    engine = self._engine(max_response_length=None)
+    traj = {"conversation_tokens": np.array([1, 2, 3])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertNotIn("clipped", traj)
+    self.assertNotIn("raw_length", traj)
+
+  def test_non_positive_budget_leaves_trajectory_unannotated(self):
+    # Scoring against a zero budget would mark every rollout clipped, which is
+    # worse than reporting nothing.
+    engine = self._engine(max_response_length=0)
+    traj = {"conversation_tokens": np.array([1, 2, 3])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertNotIn("clipped", traj)
+    self.assertNotIn("raw_length", traj)
+
+  def test_unset_eos_ids_leaves_trajectory_unannotated(self):
+    # Even when the tokenizer exposes eos_token_id=7, the framework must not
+    # force it when eos_ids is unset/None, because stop tokens are defined at
+    # the recipe level (RolloutConfig.eos_tokens).
+    engine = self._engine(
+        max_response_length=4,
+        tokenizer=self._EosTokenizer(),
+        eos_ids=None,
+    )
+    traj = {"conversation_tokens": np.array([1, 2, 3, 7])}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertNotIn("clipped", traj)
+    self.assertNotIn("raw_length", traj)
+
+  def test_empty_response_is_annotated_as_zero_length(self):
+    # A rollout that produced nothing still ran, and must keep its slot in the
+    # group denominator; the agentic learner scores it as length 0, unclipped.
+    engine = self._engine(max_response_length=4)
+    traj = {"conversation_tokens": np.array([], dtype=np.int32)}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertFalse(traj["clipped"])
+    self.assertEqual(traj["raw_length"], 0)
+
+  def test_raw_length_counts_env_tokens_not_just_assistant_tokens(self):
+    # Raw length spans the whole response. `conversation_masks` is the
+    # assistant-only loss mask, covering 2 of these 5 tokens; deriving the
+    # length from it instead would undercount multi-turn rollouts, which is
+    # exactly what rollout/completion_length_mean already does.
+    engine = self._engine(max_response_length=8)
+    traj = {
+        "conversation_tokens": np.array([1, 2, 3, 4, 5]),
+        "conversation_masks": np.array([1, 1, 0, 0, 0]),
+    }
+
+    engine._annotate_response_budget(traj)
+
+    self.assertEqual(traj["raw_length"], 5)
+
+  def test_missing_token_stream_leaves_trajectory_unannotated(self):
+    engine = self._engine(max_response_length=4)
+    traj = {}
+
+    engine._annotate_response_budget(traj)
+
+    self.assertNotIn("clipped", traj)
+    self.assertNotIn("raw_length", traj)
+
+  def test_convert_to_trajectory_annotates(self):
+    engine = self._engine(max_response_length=4)
+
+    item = engine._convert_to_trajectory(
+        {"conversation_tokens": np.array([1, 2, 3, 4])}
+    )
+
+    self.assertTrue(item.traj["clipped"])
+    self.assertEqual(item.traj["raw_length"], 4)
+
+  def test_response_budget_facts_helper(self):
+    self.assertEqual(
+        collector.response_budget_facts([10, 20, 30], 4, {99}),
+        (3, False),
+    )
+    self.assertEqual(
+        collector.response_budget_facts([10, 20, 30, 40], 4, {99}),
+        (4, True),
+    )
+    self.assertEqual(
+        collector.response_budget_facts([10, 20, 30, 99], 4, {99}),
+        (4, False),
+    )
+    self.assertEqual(
+        collector.response_budget_facts(
+            np.array([1, 2, 3, 151645], dtype=np.int64), 4, {151643, 151645}
+        ),
+        (4, False),
+    )
+    self.assertEqual(
+        collector.response_budget_facts([1, 2, 3, 4, 5], 4, {99}),
+        (4, True),
+    )
+    self.assertEqual(
+        collector.response_budget_facts([], 4, {99}),
+        (0, False),
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -134,6 +134,10 @@ class RolloutManager:
           "RolloutManager requires valid tokenizer and chat_parser arguments"
           " (none can be None)."
       )
+    # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and it
+    # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
+    # that stopped on its own from one that exhausted its budget.
+    self.eos_ids = getattr(config, "eos_tokens", None) if config else None
 
     self._active_collectors: Dict[
         str, collector_lib.TrajectoryCollectorEngine
@@ -206,6 +210,7 @@ class RolloutManager:
         agent=agent,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        eos_ids=self.eos_ids,
     )
 
     self._active_collectors[traj_id] = collector
