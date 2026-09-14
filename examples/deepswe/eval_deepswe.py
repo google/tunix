@@ -1056,15 +1056,31 @@ if ROLLOUT_ENGINE == "vllm":
     )
     sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
 
+    model_state = nnx.state(model)
+    if "qwen" in MODEL_VERSION.lower() and SCAN_LAYERS:
+      from maxtext.integration.vllm.maxtext_vllm_rollout import (
+          unroll_qwen_scanned_weights,
+          validate_direct_sync_layer_coverage,
+      )
+      logger.info("Unrolling Qwen scanned weights (heterogeneous cycle=4)...")
+      model_state = unroll_qwen_scanned_weights(model_state, scan_axis=1)
+      covered_params = validate_direct_sync_layer_coverage(
+          model_state, sampler.transformer_state
+      )
+      logger.info(
+          "Successfully validated direct sync coverage for all %d Qwen layer parameters!",
+          covered_params,
+      )
+
     logger.info(
         "Transferring model weights to VllmSampler with reshard_chunk_size=%s...",
         VLLM_RESHARD_CHUNK_SIZE,
     )
-    sampler.update_params(nnx.state(model))
+    sampler.update_params(model_state)
     logger.info(
         "Weight transfer complete. Freeing temporary model weights..."
     )
-    del model
+    del model, model_state
     gc.collect()
     sft_utils.show_hbm_usage()
   else:
