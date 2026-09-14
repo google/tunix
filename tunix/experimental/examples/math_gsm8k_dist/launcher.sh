@@ -79,6 +79,10 @@ SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-auto}
+# Qwen3 chat models close each turn with `<|im_end|>` rather than the
+# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
+# fall back to the tokenizer's EOS token.
+EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
 # Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
 # both the trainer and the rollout, so the two cannot drift. A disagreement is
 # not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
@@ -386,6 +390,7 @@ echo "  ckpt max keep:  $CHECKPOINT_MAX_TO_KEEP"
 echo "  ckpt root dir:  $CHECKPOINT_ROOT_DIRECTORY"
 echo "  sampler:        $SAMPLER"
 echo "  weight sync:    $WEIGHT_SYNC_MODE"
+echo "  eos tokens:     ${EOS_TOKENS:-<tokenizer default>}"
 echo "  trainer backend:$TRAINER_BACKEND"
 echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
 echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
@@ -542,6 +547,9 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   fi
   if [[ -n "$MAXTEXT_ATTENTION" ]]; then
     ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
+  fi
+  if [[ -n "$EOS_TOKENS" ]]; then
+    ROLLOUT_CMD+=( --eos_tokens="$EOS_TOKENS" )
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)

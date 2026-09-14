@@ -118,6 +118,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_tp", type=int, default=2)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
+  parser.add_argument(
+      "--eos_tokens",
+      type=str,
+      default="",
+      help=(
+          "Comma-separated stop tokens for the rollout, given either as token"
+          " strings (e.g. '<|im_end|>' for Qwen chat models) or as token ids."
+          " Unset leaves the sampler on the tokenizer's own EOS token."
+      ),
+  )
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=64)
   parser.add_argument("--lora_alpha", type=float, default=64.0)
@@ -264,7 +274,48 @@ def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
   return config
 
 
-def _rollout_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+def _eos_token_ids(
+    args: argparse.Namespace, tokenizer: Any
+) -> list[int] | None:
+  """Resolves --eos_tokens into token ids, or None when the flag is unset.
+
+  Entries are either literal token ids or token strings (e.g. `<|im_end|>` for
+  Qwen chat models), which the caller's example knows and the rollout node does
+  not.
+
+  Args:
+    args: Parsed rollout node flags.
+    tokenizer: Tokenizer used to resolve token strings to ids.
+
+  Returns:
+    The resolved token ids, or None when --eos_tokens is empty.
+
+  Raises:
+    ValueError: If an entry does not map to exactly one token id.
+  """
+  raw_entries = (args.eos_tokens or "").split(",")
+  entries = [entry.strip() for entry in raw_entries if entry.strip()]
+  if not entries:
+    return None
+  token_ids = []
+  for entry in entries:
+    if entry.lstrip("-").isdigit():
+      token_ids.append(int(entry))
+      continue
+    ids = tokenizer.encode(entry, add_special_tokens=False)
+    if len(ids) != 1:
+      raise ValueError(
+          f"--eos_tokens entry {entry!r} is not a single token for this"
+          f" tokenizer (encoded to {ids})."
+      )
+    token_ids.extend(ids)
+  logging.info("Resolved --eos_tokens %s to ids %s", entries, token_ids)
+  return token_ids
+
+
+def _rollout_config_kwargs(
+    args: argparse.Namespace, tokenizer: Any = None
+) -> dict[str, Any]:
   return {
       "weight_sync_mode": args.weight_sync_mode,
       "max_prompt_length": args.max_prompt_length,
@@ -272,6 +323,7 @@ def _rollout_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
       "temperature": 1.0,
       "top_p": 1.0,
       "return_logprobs": True,
+      "eos_tokens": _eos_token_ids(args, tokenizer),
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
@@ -317,7 +369,7 @@ def _create_vanilla_worker(args, tokenizer):
     )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
-      **_rollout_config_kwargs(args),
+      **_rollout_config_kwargs(args, tokenizer),
   )
   sampler_adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
       server_id=args.worker_id,
@@ -354,7 +406,7 @@ def _create_vllm_worker(args, tokenizer):
   )
 
   if args.sampler == "vllm":
-    sampler_adapter, rollout_config = _create_vllm_sampler(args)
+    sampler_adapter, rollout_config = _create_vllm_sampler(args, tokenizer)
   else:
     sampler_adapter, rollout_config = _create_inprocess_vllm_sampler(
         args, tokenizer
@@ -486,12 +538,12 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
       rollout_vllm_model_version=vllm_model,
-      **_rollout_config_kwargs(args),
+      **_rollout_config_kwargs(args, tokenizer),
   )
   return sampler_adapter, config
 
 
-def _create_vllm_sampler(args):
+def _create_vllm_sampler(args, tokenizer):
   """Creates a vLLM sampler rollout worker instance."""
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
       vllm_sampler_adapter,
@@ -559,7 +611,7 @@ def _create_vllm_sampler(args):
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
-      **_rollout_config_kwargs(args),
+      **_rollout_config_kwargs(args, tokenizer),
   )
   return sampler_adapter, config
 

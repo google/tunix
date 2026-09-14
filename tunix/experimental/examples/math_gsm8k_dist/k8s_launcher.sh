@@ -37,6 +37,10 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
+# Qwen3 chat models close each turn with `<|im_end|>` rather than the
+# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
+# fall back to the tokenizer's EOS token.
+export EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
@@ -397,6 +401,7 @@ start_rollout_instance() {
         --tokenizer_path=${TOKENIZER_PATH} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        ${EOS_TOKENS:+--eos_tokens=\"${EOS_TOKENS}\"} \
         --sampler=${SAMPLER} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
