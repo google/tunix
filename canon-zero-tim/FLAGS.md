@@ -94,7 +94,7 @@ admitted 值即当前默认:来自代码默认、bundle `cluster/v1_full_system_
 
 | 名 | 家族 | 默认/取值 | 来源/读者 | 备注 |
 |---|---|---|---|---|
-| `CANON_AGENT_SANDBOX_COMMIT` | new | absent outside Fleet; exact pin in D section | canon-zero-tim/cluster/render_p34_jobset.py:173; cluster/steps/36_install_agent_sandbox.sh:16 | Fleet-only infrastructure source identity; retained from origin, no new certification |
+| `CANON_AGENT_SANDBOX_COMMIT` | new | exact pin in D section; Q32 profile exports it even in direct mode | canon-zero-tim/cluster/render_p34_jobset.py:173; canon-zero-tim/cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env:88; cluster/steps/36_install_agent_sandbox.sh:16 | Source identity consumed in Fleet mode; presence alone does not prove Fleet is active; retained from origin, no new certification |
 | `CANON_DEEPSWE_SANDBOX_RUNTIME` | new | absent/empty resolves to direct; fleet opt-in | examples/deepswe/sandbox_fleet.py:166; canon-zero-tim/cluster/steps/00_env.sh:1026 | Optional workload infrastructure; D section defines fail-closed delivery and sunset |
 | `CANON_ALIGN` | g7 | 未钉(family keep) | tasks/v2_integrate/f0_families/g7_run_identity_paths.md:41 (reader tunix/rl/trainer.py:178) | family verdict keep; reader tunix/rl/trainer.py:178 |
 | `CANON_ALIGNMENT_GATE` | g7 | 未钉(family keep) | tasks/v2_integrate/f0_families/g7_run_identity_paths.md:45 (reader tunix/rl/alignment.py:38) | family verdict keep; reader tunix/rl/alignment.py:38 |
