@@ -9,6 +9,7 @@ models (e.g. Qwen3.5-35B-A3B) and configurable JAX/vLLM sharding meshes.
 import argparse
 import asyncio
 import collections
+import concurrent.futures
 import gc
 import json
 import logging
@@ -926,6 +927,7 @@ if ROLLOUT_ENGINE == "vllm":
       "max_num_seqs": VLLM_MAX_NUM_SEQS,
       "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
       "enable_prefix_caching": ENABLE_PREFIX_CACHING,
+      "async_scheduling": True,
       "kv_cache_metrics": True,
       "disable_log_stats": False,
       "tokenizer": tokenizer_path,
@@ -1393,6 +1395,13 @@ async def run_evaluation():
   if not OUTPUT_DIR.startswith("gs://"):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+  loop = asyncio.get_running_loop()
+  executor = concurrent.futures.ThreadPoolExecutor(
+      max_workers=max(MAX_CONCURRENT, 32),
+      thread_name_prefix="model_call_worker",
+  )
+  loop.set_default_executor(executor)
+
   orchestrator = RolloutOrchestrator(
       engine_cls=EvalTrajectoryCollectEngine,
       engine_kwargs=dict(
@@ -1465,8 +1474,11 @@ async def run_evaluation():
           ANSI_RESET,
       )
 
-  await producer
-  return results
+  try:
+    await producer
+    return results
+  finally:
+    executor.shutdown(wait=False)
 
 
 # ========================== Results ==========================
