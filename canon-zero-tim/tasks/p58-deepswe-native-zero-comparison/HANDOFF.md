@@ -92,16 +92,21 @@ Never label the latter a Qwen3-4B model run or a TP8 certificate. After both
 local gates pass on the final clean source, the user's next action is the fresh
 treatment/full render from the runbook, not the three diagnostic 64-chip rows.
 
-The current P2b diff passed its fresh DP2xTP2 development gate at
+The P2b implementation is commit
+`3df1405a01d42575b80c934968afc8c60b02a8a8`, rebased over the Agent Sandbox
+namespace/runtime fixes in `2078d483a` and `4f83ecd55`. The intersecting P58
+and Fleet contract suites passed together (127 tests, 1 skipped, 143
+subtests). Its pre-rebase but code-equivalent development diff passed the fresh
+DP2xTP2 gate at
 `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p2bdev_20260914_0512`.
 Required P59/P62 markers and both replica-exact groups passed; fp64 relative L2
 was `3.77417983e-08`, cosine was `1`, optimizer commits were `0`, and the
 artifact checksum gate passed. The run records base source
 `abafa27b10f3885799db592c0d36a860b0b1a44e` plus uncommitted diff SHA-256
 `507ef2a2713fe6203d67b0115bce3a343b9a29c9ce8f775c16ed3c70868bf33a`.
-Treat it as development evidence until the same content has a clean published
-source identity; it still does not prove TP8, 64-chip, Pathways, HBM, or target
-throughput.
+The clean implementation commit gives the source a reviewable identity, but
+the runtime result remains development evidence: it still does not prove TP8,
+64-chip, Pathways, HBM, or target throughput.
 
 ## START HERE — P58.38 CPU-pool migration and K30 preflight
 

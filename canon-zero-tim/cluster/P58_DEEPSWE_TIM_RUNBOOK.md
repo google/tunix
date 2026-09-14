@@ -99,9 +99,11 @@ edits. Prefix cache stays off, TiTO stays on, sampler IS/TIS stay off, the
 optimizer is TPU-resident, and checkpointing is disabled
 (`--ckpt_dir=none`, no save cadence).
 
-Local evidence is only a claim-limited prerequisite. The implementation is
-carried by commits `4d0a2ee6a` and `e8ebdad82`; the operator must use the final
-published readback SHA rather than either abbreviated development anchor.
+Local evidence is only a claim-limited prerequisite. The P2b implementation is
+commit `3df1405a01d42575b80c934968afc8c60b02a8a8`, rebased over the current Agent
+Sandbox namespace/runtime changes. The operator must still use the final
+published readback SHA and its matching digest-pinned image rather than an
+older abbreviated development anchor.
 
 - DP2xTP2 P59 mechanics:
   `/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_d4b64_p2bdev_20260914_0512`
