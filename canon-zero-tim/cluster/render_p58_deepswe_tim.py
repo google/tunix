@@ -268,6 +268,8 @@ def render(
     worker_nodepool: str,
     model_pvc: str,
     sandbox_nodepool: str | None = None,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     topology: str = "128",
     instance_type: str | None = None,
     whitelist: str = CLEAN_WHITELIST,
@@ -526,6 +528,9 @@ def render(
       "restartStrategy": "Recreate",
   }
   rendered_env = {
+      **p34.sandbox_runtime_environment(
+          sandbox_runtime, sandbox_capacity, active_trajectories=128
+      ),
       "CANON_PROFILE_FILE": (
           SPLIT_SYSTEMOPT_PROFILE
           if system_optimization_arm is not None
@@ -740,6 +745,8 @@ def render(
       worker_nodepool=worker_nodepool,
       cpu_nodepool=cpu_nodepool,
       sandbox_nodepool=sandbox_nodepool,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
       topology=topology,
       instance_type=instance_type,
       sampler_is=sampler_is,
@@ -827,6 +834,8 @@ def validate(
     worker_nodepool: str,
     cpu_nodepool: str = _DEFAULT_CPU_NODEPOOL,
     sandbox_nodepool: str | None = None,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     topology: str = "128",
     instance_type: str | None = None,
     sampler_is: bool = False,
@@ -898,6 +907,9 @@ def validate(
         f"{p34.HEAD_SERVICE_ACCOUNT!r}, got "
         f"{head.get('serviceAccountName')!r}"
     )
+  p34.validate_sandbox_runtime_environment(
+      env, sandbox_runtime, sandbox_capacity, active_trajectories=128
+  )
   if _RETIRED_DEVICE_PROBE_TRIGGER in env:
     raise ValueError(
         "P58 must not re-enable the retired Step 65 device probe: "
@@ -1267,6 +1279,10 @@ def main() -> None:
   parser.add_argument("--arm", choices=_ARMS, required=True)
   parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
   parser.add_argument("--sandbox-nodepool", default=None)
+  parser.add_argument(
+      "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
+  )
+  parser.add_argument("--sandbox-capacity", type=int)
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--topology", choices=tuple(_TOPOLOGY_SPECS), default="128")
   parser.add_argument("--instance-type", default=None)
@@ -1294,6 +1310,8 @@ def main() -> None:
       arm=args.arm,
       cpu_nodepool=args.cpu_nodepool,
       sandbox_nodepool=args.sandbox_nodepool,
+      sandbox_runtime=args.sandbox_runtime,
+      sandbox_capacity=args.sandbox_capacity,
       worker_nodepool=args.worker_nodepool,
       topology=args.topology,
       instance_type=args.instance_type,

@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 440 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 444 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -191,6 +191,23 @@ Bypass runs. This entry extends the P57 family row below.
 
 ## D 层 · 发射/基建管道(~230,按前缀组;逐条语义允许"待考古")
 
+`CANON_DEEPSWE_SANDBOX_RUNTIME=direct|fleet` is the single DeepSWE sandbox
+lifecycle selector. Missing/empty resolves to `direct`; direct R2E remains the
+default and neither installs nor imports Agent Sandbox. `fleet` is R2E-only,
+default-off, and requires the exact Kubernetes Agent Sandbox v0.5.3 source
+`CANON_AGENT_SANDBOX_COMMIT=7935857fee859bb18752ee04d8948b975e47ff20`, a
+run identity, and an operator/rendered positive `R2E_SANDBOX_CAPACITY`. The
+capacity is total sandbox Pods, not the upstream warm-replica hint: for current
+batch concurrency `C=B*G`, admission requires at least active `C` plus
+controller replacement-warm `C`, hence `capacity>=2C`. P1 deliberately has no
+lookahead; adding one next-batch pool would require separate `3C` admission and
+evidence. Unknown modes, evaluation use, capacity in direct mode, source drift,
+or insufficient capacity fail before TPU work. Fleet changes only environment
+lifecycle; it cannot relax trajectory deadlines, complete-batch durability,
+cleanup, TITO, logprob, loss, backward, or optimizer contracts. The selector
+remains experimental until matched direct/Fleet target runs pass per DeepSWE
+workload and geometry; retire it if no material throughput gain is shown.
+
 T9g registers `CANON_P57_TRAIN_GEOMETRY`: absent retains the historical
 DP8xTP8/B32xG8 full recipe; the only present value is `dp4-tp8-b128`.
 It selects a separate P45/M15 Zero-HP full profile (32 chips, B16xG8,
@@ -289,6 +306,7 @@ CANON_ALIGNMENT_GATE
 CANON_ALIGNMENT_GATE_ONLY
 CANON_ALIGNMENT_TRAIN
 CANON_ALIGNMENT_UPDATE_CANARY
+CANON_AGENT_SANDBOX_COMMIT
 CANON_ALIGN
 CANON_ALIGN_PRE
 CANON_ALIGN_REPORT
@@ -320,6 +338,7 @@ CANON_DEEPSWE_ONEHOST_TASK_IMAGE
 CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS
 CANON_DEEPSWE_REWARD_TIMEOUT_SECS
 CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS
+CANON_DEEPSWE_SANDBOX_RUNTIME
 CANON_DEEPSWE_STEP_TIMEOUT_SECS
 CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM
 CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS
@@ -727,7 +746,7 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 442 settable names (appendix inventory above; exclusions: none).
+Count: 444 settable names (appendix inventory above; exclusions: none).
 
 
 ## 无 flag 的行为变更(tasks/v1_long_context,2026-09-02/03;均零比特,双几何双门通过)

@@ -36,6 +36,7 @@ from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
 from examples.deepswe.r2egym_runtime_patch import resolve_node_selector_value
+from examples.deepswe import sandbox_fleet as sandbox_fleet_lib
 
 faulthandler.register(signal.SIGINT, all_threads=True)
 
@@ -326,6 +327,17 @@ if os.environ.get("CANON_P34_STRICT_CLI", "") == "1":
   args = parser.parse_args()
 else:
   args, _ = parser.parse_known_args()
+SANDBOX_RUNTIME = sandbox_fleet_lib.runtime_mode()
+print(
+    "[DEEPSWE.SANDBOX] "
+    f"mode={SANDBOX_RUNTIME} "
+    + (
+        f"source={sandbox_fleet_lib.AGENT_SANDBOX_COMMIT}"
+        if SANDBOX_RUNTIME == sandbox_fleet_lib.FLEET
+        else "source=direct-r2egym"
+    ),
+    flush=True,
+)
 _P58_TIM_RAW = os.environ.get("CANON_P58_DEEPSWE_TIM", "0")
 if _P58_TIM_RAW not in ("0", "1"):
   raise ValueError("CANON_P58_DEEPSWE_TIM must be exactly 0 or 1")
@@ -417,6 +429,7 @@ def patch_kubernetes_runtime():
 if (
     os.environ.get("CANON_P34_DEEPSWE", "") != "1"
     and not ONEHOST_SMOKE
+    and SANDBOX_RUNTIME == sandbox_fleet_lib.DIRECT
 ):
   patch_kubernetes_runtime()
 
@@ -519,7 +532,7 @@ DATASET_CACHE = os.getenv(
 )
 os.makedirs(DATASET_CACHE, exist_ok=True)
 
-if not ONEHOST_SMOKE:
+if not ONEHOST_SMOKE or SANDBOX_RUNTIME == sandbox_fleet_lib.FLEET:
   os.environ["KUBECONFIG"] = "~/.kube/config"
   os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
   os.environ["NODE_SELECTOR_VAL"] = (
@@ -532,7 +545,7 @@ if not ONEHOST_SMOKE:
 
 
 # Kubernetes Setup
-if not ONEHOST_SMOKE:
+if not ONEHOST_SMOKE or SANDBOX_RUNTIME == sandbox_fleet_lib.FLEET:
   try:
     if k8s_config is not None:
       k8s_config.load_kube_config()
@@ -541,7 +554,10 @@ if not ONEHOST_SMOKE:
   except Exception as e:
     print(f"Warning: Kubernetes config loading failed: {e}")
 
-if os.environ.get("CANON_P34_DEEPSWE", "") == "1":
+if (
+    os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+    and SANDBOX_RUNTIME == sandbox_fleet_lib.DIRECT
+):
   apply_repoenv_kubernetes_poll_patch()
 
 
@@ -896,11 +912,16 @@ if (
 
 P58_ONEHOST_XPROF_ARM = ""
 P58_ONEHOST_SEAM_PROBE = False
+ONEHOST_REAL_B2 = False
 # This selector is assigned from the environment only inside the one-host
 # admission block.  Production DeepSWE must still bind it so later shared
 # cluster-config construction cannot read an unbound diagnostic name.
 P58_Q4_TP4_TRAJECTORY_REPLAY = False
 if ONEHOST_SMOKE:
+  onehost_real_b2_raw = os.environ.get("DEEPSWE_ONEHOST_REAL_B2", "0")
+  if onehost_real_b2_raw not in ("0", "1"):
+    raise ValueError("DEEPSWE_ONEHOST_REAL_B2 must be exactly 0 or 1")
+  ONEHOST_REAL_B2 = onehost_real_b2_raw == "1"
   if not deepswe_debug.deepswe_exact_token_continuity(os.environ):
     raise ValueError("one-host DeepSWE requires token-in/token-out")
   print(
@@ -948,6 +969,19 @@ if ONEHOST_SMOKE:
   P58_Q4_TP4_TRAJECTORY_REPLAY = (
       deepswe_debug.q4_tp4_trajectory_replay(os.environ)
   )
+  if ONEHOST_REAL_B2 and any((
+      P58_ONEHOST_XPROF_ARM,
+      P58_ONEHOST_SEAM_PROBE,
+      P58_Q4_TP4_ZERO_ADMISSION,
+      P58_Q4_TP4_SEAM_DIAGNOSTIC,
+      P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC,
+      P58_Q4_TP4_SHORT_BACKWARD,
+      P58_Q4_TP4_CARRIER_SCREEN,
+      P58_Q4_TP4_TRAJECTORY_REPLAY,
+  )):
+    raise ValueError(
+        "DEEPSWE_ONEHOST_REAL_B2 is only for the generic real rollout carrier"
+    )
   if P58_ONEHOST_XPROF_ARM:
     expected_fixed_head = "1" if P58_Q4_TP4_ZERO_ADMISSION else "0"
     common_xprof = {
@@ -1057,12 +1091,14 @@ if ONEHOST_SMOKE:
       if P58_Q4_TP4_CARRIER_SCREEN or P58_Q4_TP4_TRAJECTORY_REPLAY
       else 0.7
   )
-  expected_prompts = 2 if P58_Q4_TP4_TRAJECTORY_REPLAY else 1
+  expected_prompts = (
+      2 if P58_Q4_TP4_TRAJECTORY_REPLAY or ONEHOST_REAL_B2 else 1
+  )
   expected_max_num_seqs = (
       16
       if P58_Q4_TP4_CARRIER_SCREEN
       else 4
-      if P58_Q4_TP4_TRAJECTORY_REPLAY
+      if P58_Q4_TP4_TRAJECTORY_REPLAY or ONEHOST_REAL_B2
       else 2
   )
   onehost_exact = {
@@ -1075,6 +1111,9 @@ if ONEHOST_SMOKE:
       "compute_logps_micro_batch_size": COMPUTE_LOGPS_MICRO_BATCH_SIZE == 1,
       "rollout_micro_batch_size": ROLLOUT_MICRO_BATCH_SIZE == 1,
       "num_generations": NUM_GENERATIONS == expected_generations,
+      "max_concurrency": (
+          MAX_CONCURRENCY == expected_prompts * expected_generations
+      ),
       "max_prompt_length": MAX_PROMPT_LENGTH == expected_prompt_length,
       "max_response_length": MAX_RESPONSE_LENGTH == expected_response_length,
       "max_turns": MAX_TURNS == expected_turns,
@@ -1334,11 +1373,20 @@ if ONEHOST_SMOKE:
           "one-host task selection must retain exactly one row, got "
           f"{len(dataset)}"
       )
-    print(
-        "[DEEPSWE.ONEHOST.DATASET] PASS rows=1 "
-        f"docker_image={target_image}",
-        flush=True,
-    )
+    if ONEHOST_REAL_B2:
+      dataset = dataset.select([0, 0])
+      print(
+          "[DEEPSWE.ONEHOST.DATASET] PASS rows=2 batch_size=2 "
+          "source_rows=1 prompt_identity=repeated-real-task "
+          f"docker_image={target_image}",
+          flush=True,
+      )
+    else:
+      print(
+          "[DEEPSWE.ONEHOST.DATASET] PASS rows=1 "
+          f"docker_image={target_image}",
+          flush=True,
+      )
 
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
@@ -1392,6 +1440,19 @@ train_dataset, _ = data_lib.post_init_dataset(
     prompt_key="problem_statement",
     custom_batch_fn=mixed_type_batch_fn,
 )
+
+sandbox_manager = None
+if SANDBOX_RUNTIME == sandbox_fleet_lib.FLEET:
+  sandbox_manager = sandbox_fleet_lib.DeepSWESandboxFleet(
+      dataset,
+      batch_size=BATCH_SIZE,
+      num_generations=NUM_GENERATIONS,
+      max_concurrency=MAX_CONCURRENCY,
+      scaffold="r2egym",
+  )
+  train_dataset = sandbox_fleet_lib.CurrentBatchPrewarmIterator(
+      train_dataset, sandbox_manager
+  )
 
 
 # %%
@@ -1982,6 +2043,9 @@ config_kwargs = {
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
+onehost_env_kwargs = {"backend": "docker"} if ONEHOST_SMOKE else {}
+if SANDBOX_RUNTIME == sandbox_fleet_lib.FLEET:
+  onehost_env_kwargs = {}
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
@@ -1993,7 +2057,8 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
-        **({"backend": "docker"} if ONEHOST_SMOKE else {}),
+        "sandbox_manager": sandbox_manager,
+        **onehost_env_kwargs,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
@@ -2028,6 +2093,17 @@ def initialize_wandb():
           "engine-global; async completion order not claimed"
           if P58_FIXED_SEED
           else "dataset-only"
+      ),
+      "sandbox_runtime": SANDBOX_RUNTIME,
+      "sandbox_runtime_source": (
+          sandbox_fleet_lib.AGENT_SANDBOX_COMMIT
+          if SANDBOX_RUNTIME == sandbox_fleet_lib.FLEET
+          else "direct-r2egym"
+      ),
+      "sandbox_capacity": (
+          sandbox_manager.admission.total_capacity
+          if sandbox_manager is not None
+          else None
       ),
       # Stringify set so wandb can serialize it
       "filter_statuses": (
@@ -2074,7 +2150,11 @@ else:
 
 
 print("Starting training...", flush=True)
-agentic_grpo_learner.train(train_dataset=train_dataset)
+try:
+  agentic_grpo_learner.train(train_dataset=train_dataset)
+finally:
+  if sandbox_manager is not None:
+    sandbox_manager.close()
 
 
 # %%

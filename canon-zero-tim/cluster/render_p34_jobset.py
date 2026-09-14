@@ -91,6 +91,52 @@ _STAGE_STEPS = {
     "three-update": 3,
     "full": 1000,
 }
+SANDBOX_RUNTIMES = ("direct", "fleet")
+
+
+def sandbox_runtime_environment(
+    runtime: str, capacity: int | None, *, active_trajectories: int
+) -> dict[str, str]:
+  """Returns the fail-closed renderer payload for DeepSWE sandbox lifecycle."""
+  if runtime not in SANDBOX_RUNTIMES:
+    raise ValueError("sandbox_runtime must be exactly direct or fleet")
+  if runtime == "direct":
+    if capacity is not None:
+      raise ValueError("sandbox_capacity is valid only for fleet runtime")
+    return {"CANON_DEEPSWE_SANDBOX_RUNTIME": "direct"}
+  if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+    raise ValueError("fleet sandbox_capacity must be a positive integer")
+  minimum = 2 * active_trajectories
+  if capacity < minimum:
+    raise ValueError(
+        "fleet sandbox_capacity is below active + replacement warm: "
+        f"capacity={capacity} minimum={minimum}"
+    )
+  return {
+      "CANON_DEEPSWE_SANDBOX_RUNTIME": "fleet",
+      "R2E_SANDBOX_CAPACITY": str(capacity),
+  }
+
+
+def validate_sandbox_runtime_environment(
+    env: Mapping[str, str],
+    runtime: str,
+    capacity: int | None,
+    *,
+    active_trajectories: int,
+) -> None:
+  expected = sandbox_runtime_environment(
+      runtime, capacity, active_trajectories=active_trajectories
+  )
+  wrong = {
+      key: env.get(key)
+      for key, value in expected.items()
+      if env.get(key) != value
+  }
+  if wrong:
+    raise ValueError(f"rendered sandbox runtime environment mismatch: {wrong}")
+  if runtime == "direct" and "R2E_SANDBOX_CAPACITY" in env:
+    raise ValueError("direct sandbox runtime retained a Fleet capacity")
 
 
 class _QuotedString(str):
@@ -275,6 +321,8 @@ def render(
     whitelist: str,
     whitelist_sha256: str,
     fixed_lm_head: bool = False,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
 ) -> dict[str, Any]:
   """Returns a fail-closed P34 JobSet without mutating the base mapping."""
   if not _SHA.fullmatch(source_commit):
@@ -366,6 +414,9 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
 
   no_commit = "1" if stage == "backward-no-commit" else "0"
   _set_env(main, {
+      **sandbox_runtime_environment(
+          sandbox_runtime, sandbox_capacity, active_trajectories=64
+      ),
       "CANON_MODE": "run",
       "CANON_PROFILE_FILE": "cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env",
       "CANON_STATE": run_root,
@@ -478,6 +529,8 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       client_image=client_image,
       stage=stage,
       fixed_lm_head=fixed_lm_head,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
   )
   return document
 
@@ -494,12 +547,20 @@ def validate(
     client_image: str,
     stage: str,
     fixed_lm_head: bool = False,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
 ) -> None:
   """Rejects any rendered object that weakens the P34 attempt-zero contract."""
   head = _head(document)
   worker = _worker(document)
   main = _container(head["containers"], "jax-tpu")
   env = _env(document)
+  validate_sandbox_runtime_environment(
+      env,
+      sandbox_runtime,
+      sandbox_capacity,
+      active_trajectories=64,
+  )
   if document["metadata"]["labels"].get(
       "canon.zero-tim/fixed-lm-head"
   ) != ("1" if fixed_lm_head else "0"):
@@ -648,6 +709,14 @@ def main() -> None:
       action="store_true",
       help="experimental Qwen3-32B TP8 fixed-output-head construction",
   )
+  parser.add_argument(
+      "--sandbox-runtime", choices=SANDBOX_RUNTIMES, default="direct"
+  )
+  parser.add_argument(
+      "--sandbox-capacity",
+      type=int,
+      help="total admitted sandbox Pods; required only for fleet",
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -664,6 +733,8 @@ def main() -> None:
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
       fixed_lm_head=args.fixed_lm_head,
+      sandbox_runtime=args.sandbox_runtime,
+      sandbox_capacity=args.sandbox_capacity,
   )
   args.output.write_text(dump_jobset(document))
   print(f"P34_JOBSET_RENDER_PASS output={args.output}")

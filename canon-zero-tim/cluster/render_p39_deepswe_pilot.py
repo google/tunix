@@ -52,6 +52,8 @@ def render(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
 ) -> dict[str, Any]:
   """Returns one strict attempt-zero pilot derived from the reviewed base."""
   if stage not in _STAGES:
@@ -102,6 +104,9 @@ def render(
   )
 
   p34._set_env(main, {
+      **p34.sandbox_runtime_environment(
+          sandbox_runtime, sandbox_capacity, active_trajectories=64
+      ),
       "CANON_PROFILE_FILE": (
           "cluster/profiles/qwen3-32b-dp4-tp8-deepswe-pilot.env"
       ),
@@ -158,6 +163,8 @@ def render(
       source_commit=source_commit,
       client_image=client_image,
       stage=stage,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
   )
   return document
 
@@ -168,6 +175,8 @@ def validate(
     source_commit: str,
     client_image: str,
     stage: str,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
 ) -> None:
   """Rejects topology, optimizer-placement, or boundedness drift."""
   if stage not in _STAGES:
@@ -176,6 +185,9 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
+  p34.validate_sandbox_runtime_environment(
+      env, sandbox_runtime, sandbox_capacity, active_trajectories=64
+  )
   if document["spec"]["failurePolicy"]["maxRestarts"] != 0:
     raise ValueError("P39 pilot must remain attempt-zero")
   if (
@@ -247,6 +259,10 @@ def main() -> None:
   parser.add_argument("--model-pvc", required=True)
   parser.add_argument("--whitelist", required=True)
   parser.add_argument("--whitelist-sha256", required=True)
+  parser.add_argument(
+      "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
+  )
+  parser.add_argument("--sandbox-capacity", type=int)
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -262,6 +278,8 @@ def main() -> None:
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
+      sandbox_runtime=args.sandbox_runtime,
+      sandbox_capacity=args.sandbox_capacity,
   )
   args.output.write_text(p34.dump_jobset(document))
   print(f"P39_PILOT_JOBSET_RENDER_PASS output={args.output}")

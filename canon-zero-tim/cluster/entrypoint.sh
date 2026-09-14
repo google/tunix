@@ -100,6 +100,7 @@ if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   # sampler. Keep the RoPE decision and pinned R2E install, but do not overlay
   # the differentiable canonical chain used for training/alignment.
   step 35_install_r2egym.sh
+  step 36_install_agent_sandbox.sh
   log "P46_EVALUATION_STOCK_PATH mode=$CANON_P46_EVALUATION_MODE source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
 elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
      [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
@@ -108,6 +109,7 @@ elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
   # target before installing the separately signed, observer-only B overlay.
   # The zero-TIM canonical chain remains absent.
   step 35_install_r2egym.sh
+  step 36_install_agent_sandbox.sh
   step p58_verify_stock_engine.sh
   step p58_install_stock_prompt_observer.sh
   log "P58_NATIVE_STOCK_PATH source=$CANON_EXPECT_COMMIT canonical_overlay=skipped stock_observer=installed"
@@ -118,6 +120,7 @@ elif p57_is_stock_fast_runtime; then
   # Keep the independent R2E gym install, but leave all six tpu_inference
   # targets byte-identical to the pinned image established by Step 20.
   step 35_install_r2egym.sh
+  step 36_install_agent_sandbox.sh
   step 37_install_stock_runtime.sh
   step 38_verify_stock_engine.sh
   p57_observer_overlay=absent
@@ -139,6 +142,7 @@ elif [ "${CANON_PROFILE_FILE:-}" = \
 else
   step 30_install_canon.sh
   step 35_install_r2egym.sh
+  step 36_install_agent_sandbox.sh
   step 40_overlay_engine.sh
   step 50_verify_overlay.sh
 fi

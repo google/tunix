@@ -89,6 +89,77 @@ clock, cleanup is bounded separately, and the R2E pod must be gone before the
 cleanup call can return. Exceeding a boundary ends the attempt; it does not
 continue to train on a partial batch.
 
+## Optional Agent Sandbox Fleet runtime (training only)
+
+All maintained DeepSWE **training** renderers expose the same default-off
+infrastructure selector:
+
+```text
+--sandbox-runtime direct|fleet
+--sandbox-capacity <explicit total sandbox Pod slots>
+```
+
+Omitting both preserves the existing direct R2E lifecycle. `direct` rejects a
+capacity value. `fleet` uses Kubernetes Agent Sandbox v0.5.3 at exact commit
+`7935857fee859bb18752ee04d8948b975e47ff20`; the launcher installs that exact
+source, warms only the current prompt batch, and keeps prompt/tool/reward,
+trajectory, TITO, logprob, loss, backward and optimizer semantics unchanged.
+P46 clean/reward-only evaluation does not admit this training runtime.
+
+The capacity argument is an operator attestation, not an automatic quota or
+node-pool provisioner. A claimed C-wide warm batch causes the controller to
+replenish C warm replicas, so the no-lookahead admission is `2C` total:
+
+| Training lane | BxG / C | Minimum `--sandbox-capacity` |
+|---|---:|---:|
+| P43, P44, P46 Q4 debug | 4x4 / 16 | 32 |
+| P34, P39, P46 Q32 train | 8x8 / 64 | 128 |
+| P58 Q4 train | 8x16 / 128 | 256 |
+
+Do not add a hidden second-batch lookahead. That would raise the capacity
+contract to 3C and requires a separate admission. The wrapper also sizes the
+per-image hard cap to C, because a batch may contain the same image for more
+than one prompt.
+
+To render a Fleet training arm, append the exact pair to the normal renderer
+command, for example P34:
+
+```bash
+  --sandbox-runtime fleet \
+  --sandbox-capacity 128
+```
+
+For P58 append `--sandbox-capacity 256`; for P44 append 32. The rendered
+environment must print both:
+
+```text
+[env] DeepSWE Fleet contract OK: active=<C> replacement_warm=<C> minimum_total=<2C> admitted_capacity=<N> lookahead=0
+[DEEPSWE.SANDBOX] RBAC_PASS namespace=<namespace> checks=26
+[DEEPSWE.SANDBOX] ADMISSION_PASS mode=fleet source=7935857fee859bb18752ee04d8948b975e47ff20 ...
+```
+
+All DeepSWE heads run as the pre-provisioned `xpk-sa`. This is required even
+for direct R2E because the namespace default ServiceAccount cannot exec into
+the sandbox Pod on the target cluster. Fleet additionally needs client-side
+access to SandboxTemplate, SandboxWarmPool, SandboxClaim, Sandbox, Pod,
+`pods/exec`, the pull Secret, and the four CRDs. Step 36 performs 26 read-only
+`SelfSubjectAccessReview` calls and fails before worker wait/model startup on
+any denied or indeterminate result. The renderer does not create or widen an
+RBAC binding; the cluster operator must provision those permissions.
+
+Each batch then requires `BATCH_READY`, complete trajectory rows, and normal
+DeepSWE numerical/training markers. Fleet release confirms the run's exact
+SandboxClaim, Sandbox and Pod are absent. Final cleanup is scoped to
+`canon.zero-tim/run-id=<run>`; it deliberately never calls upstream's broad
+managed-label `SandboxFleet.teardown()`, which is unsafe in a shared namespace.
+Any warm/acquire/bind/release/deletion error remains fatal rather than becoming
+a reward-zero row.
+
+Before a target run, prove the Agent Sandbox controller/CRDs/RBAC, image pull,
+CPU nodepool and total capacity independently. A host construction pass is not
+live sandbox evidence. Roll back by omitting both Fleet arguments; do not leave
+`R2E_SANDBOX_CAPACITY` in a direct manifest.
+
 ## Required operator inputs
 
 - Exact 40-character source commit on `yuxzhang/canon-zero-tim`.

@@ -117,6 +117,8 @@ def render(
     whitelist: str,
     whitelist_sha256: str,
     sandbox_nodepool: str | None = None,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     fixed_lm_head: bool = False,
     system_optimization_arm: str | None = None,
 ) -> dict[str, Any]:
@@ -214,6 +216,9 @@ def render(
   )
 
   environment = {
+      **p34.sandbox_runtime_environment(
+          sandbox_runtime, sandbox_capacity, active_trajectories=16
+      ),
       "CANON_PROFILE_FILE": (
           _STRICT_PROFILE
           if system_optimization_arm is not None
@@ -317,6 +322,8 @@ def render(
       stage=stage,
       topology=topology,
       sandbox_nodepool=effective_sandbox_nodepool,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
       fixed_lm_head=effective_fixed_lm_head,
       system_optimization_arm=system_optimization_arm,
   )
@@ -365,6 +372,8 @@ def validate(
     stage: str,
     topology: str,
     sandbox_nodepool: str | None = None,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     fixed_lm_head: bool = False,
     system_optimization_arm: str | None = None,
 ) -> None:
@@ -388,6 +397,9 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
+  p34.validate_sandbox_runtime_environment(
+      env, sandbox_runtime, sandbox_capacity, active_trajectories=16
+  )
   effective_sandbox_nodepool = (
       head.get("nodeSelector", {}).get("cloud.google.com/gke-nodepool")
       if sandbox_nodepool is None
@@ -543,6 +555,10 @@ def main() -> None:
       ),
   )
   parser.add_argument("--worker-nodepool", required=True)
+  parser.add_argument(
+      "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
+  )
+  parser.add_argument("--sandbox-capacity", type=int)
   parser.add_argument("--model-pvc", required=True)
   parser.add_argument("--whitelist", required=True)
   parser.add_argument("--whitelist-sha256", required=True)
@@ -576,6 +592,8 @@ def main() -> None:
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
       sandbox_nodepool=args.sandbox_nodepool,
+      sandbox_runtime=args.sandbox_runtime,
+      sandbox_capacity=args.sandbox_capacity,
       fixed_lm_head=args.fixed_lm_head,
       system_optimization_arm=args.system_optimization_arm,
   )

@@ -159,6 +159,8 @@ def render_q4_debug(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   document = p44.render(
@@ -174,6 +176,8 @@ def render_q4_debug(
       model_pvc=model_pvc,
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
       fixed_lm_head=fixed_lm_head,
   )
   document["metadata"]["labels"]["canon.zero-tim/profile-family"] = "q4-debug"
@@ -193,6 +197,8 @@ def render_q32_train(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   document = _base_render(
@@ -225,6 +231,9 @@ def render_q32_train(
   )
   main = p34._container(p34._head(document)["containers"], "jax-tpu")
   p34._set_env(main, {
+      **p34.sandbox_runtime_environment(
+          sandbox_runtime, sandbox_capacity, active_trajectories=64
+      ),
       "CANON_PROFILE_FILE": (
           "cluster/profiles/qwen3-32b-dp-parity-deepswe-full.env"
       ),
@@ -263,6 +272,8 @@ def render_q32_train(
       source_commit=source_commit,
       client_image=client_image,
       topology=topology,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
       fixed_lm_head=fixed_lm_head,
   )
   return document
@@ -516,10 +527,14 @@ def _validate_topology(document: Mapping[str, Any], topology: str) -> None:
 
 def validate_q32(
     document: Mapping[str, Any], *, source_commit: str, client_image: str,
-    topology: str, fixed_lm_head: bool = False,
+    topology: str, sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None, fixed_lm_head: bool = False,
 ) -> None:
   _validate_topology(document, topology)
   env = p34._env(document)
+  p34.validate_sandbox_runtime_environment(
+      env, sandbox_runtime, sandbox_capacity, active_trajectories=64
+  )
   main = p34._container(p34._head(document)["containers"], "jax-tpu")
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
@@ -642,6 +657,8 @@ def render(
     parity_canary: bool = False,
     full_campaign: bool = False,
     first_pass_census: bool = False,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
     fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   if workload not in WORKLOADS:
@@ -672,6 +689,12 @@ def render(
     )
   if workload == "q4-clean-eval" and fixed_lm_head:
     raise ValueError("fixed lm-head is restricted to P46 training workloads")
+  if workload == "q4-clean-eval" and (
+      sandbox_runtime != "direct" or sandbox_capacity is not None
+  ):
+    raise ValueError(
+        "P46 clean evaluation does not admit the training Sandbox Fleet"
+    )
   common = dict(
       source_commit=source_commit,
       source_branch=source_branch,
@@ -685,9 +708,21 @@ def render(
       whitelist_sha256=whitelist_sha256,
   )
   if workload == "q4-debug":
-    return render_q4_debug(base, fixed_lm_head=fixed_lm_head, **common)
+    return render_q4_debug(
+        base,
+        sandbox_runtime=sandbox_runtime,
+        sandbox_capacity=sandbox_capacity,
+        fixed_lm_head=fixed_lm_head,
+        **common,
+    )
   if workload == "q32-train":
-    return render_q32_train(base, fixed_lm_head=fixed_lm_head, **common)
+    return render_q32_train(
+        base,
+        sandbox_runtime=sandbox_runtime,
+        sandbox_capacity=sandbox_capacity,
+        fixed_lm_head=fixed_lm_head,
+        **common,
+    )
   return render_q4_eval(
       base,
       resume_tag=resume_tag or run_id,
@@ -743,6 +778,10 @@ def main() -> None:
   )
   parser.add_argument("--cpu-nodepool", required=True)
   parser.add_argument("--worker-nodepool", required=True)
+  parser.add_argument(
+      "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
+  )
+  parser.add_argument("--sandbox-capacity", type=int)
   parser.add_argument("--model-pvc", required=True)
   parser.add_argument("--whitelist", default=p34.P34_CLEAN_WHITELIST)
   parser.add_argument(
@@ -794,6 +833,8 @@ def main() -> None:
       parity_canary=args.parity_canary,
       full_campaign=args.full_campaign,
       first_pass_census=args.first_pass_census,
+      sandbox_runtime=args.sandbox_runtime,
+      sandbox_capacity=args.sandbox_capacity,
       fixed_lm_head=args.fixed_lm_head,
   )
   args.output.write_text(p34.dump_jobset(document), encoding="utf-8")

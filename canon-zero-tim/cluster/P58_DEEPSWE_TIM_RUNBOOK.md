@@ -37,6 +37,36 @@ disabled=prefix cache, sampler IS/TIS, group clip filter, degenerate-group maski
 transport=TiTO; use_rollout_logps=true
 ```
 
+### Optional Agent Sandbox Fleet arm
+
+P58 training can replace direct cold R2E Pods with the shared, current-batch
+Agent Sandbox Fleet without changing the recipe above. It is default-off. Add
+both arguments to the exact P58 renderer command:
+
+```bash
+  --sandbox-runtime fleet \
+  --sandbox-capacity 256
+```
+
+P58 has C=128 active trajectories. Capacity 256 is the minimum simultaneous
+total for 128 claimed sandboxes plus 128 controller-replenished warm replicas;
+255 fails rendering and `00_env.sh`. This value declares verified cluster
+capacity—it does not create CPU nodes or a quota. No next-batch lookahead is
+enabled. Direct remains the rollback arm by omitting both arguments.
+
+The source is pinned to Agent Sandbox commit
+`7935857fee859bb18752ee04d8948b975e47ff20`. Require its exact admission and
+`[DEEPSWE.SANDBOX] RBAC_PASS namespace=<namespace> checks=26`, followed by one
+`BATCH_READY ... warm_replicas=128`, before interpreting rollout speed. The
+head uses the pre-provisioned `xpk-sa`; the renderer never creates or widens
+RBAC. A denied extension-resource, CRD, Secret, Pod-read, or `pods/exec`
+SelfSubjectAccessReview is fatal before worker wait/model startup.
+Every batch still requires 128 durable rows; Fleet may not weaken P58 timeout,
+partial-batch, cleanup, TITO, A/B/C, gradient, optimizer, or checkpoint rules.
+At run exit there must be zero resources with the exact run-id lineage. A live
+Fleet pilot requires separate render/apply approval and a proven sandbox
+nodepool with room for all 256 Pods.
+
 The system-optimization control selector is currently admitted only for exact
 P58 `64split:zero:three-update`. It must reject `--stage full`. Do not replace
 the second row with a 1,000-update render: full promotion is a later contract

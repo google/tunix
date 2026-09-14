@@ -69,6 +69,7 @@ class SWEEnv(BaseTaskEnv):
       verbose: bool = False,
       scaffold: str = "r2egym",
       max_steps: int = 1,
+      sandbox_manager: Any | None = None,
   ):
     """Initialize the SWE environment.
 
@@ -80,6 +81,8 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout: Timeout for reward computation in seconds.
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
+        sandbox_manager: Optional run-owned Agent Sandbox Fleet manager. When
+          absent, the existing direct R2E runtime is used unchanged.
     """
     self.entry = _unpack_entry(entry)
     prompt = self.entry.get("prompts", self.entry.get("problem_statement"))
@@ -94,6 +97,8 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env = None
+    self.sandbox_handle = None
+    self.sandbox_manager = sandbox_manager
     self.runtime_time = {
         "sandbox_acquire_latency": 0.0,
         "sandbox_start_latency": 0.0,
@@ -105,6 +110,8 @@ class SWEEnv(BaseTaskEnv):
         "r2egym",
         "sweagent",
     ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+    if sandbox_manager is not None and scaffold != "r2egym":
+      raise ValueError("Agent Sandbox Fleet admits only scaffold=r2egym")
     # ``BaseTaskEnv.task`` is the durable pre-observation task record used by
     # the trajectory collector.  R2E sandbox creation can time out before
     # ``get_task_instruction()`` gives the agent its first observation, so the
@@ -139,31 +146,66 @@ class SWEEnv(BaseTaskEnv):
           self.step_timeout,
           self.reward_timeout,
       )
-      env_args = EnvArgs(ds=self.entry)
       started = time.perf_counter()
       try:
-        self.env = RepoEnv(
-            env_args,
-            backend=self.backend,
-            step_timeout=self.step_timeout,
-            reward_timeout=self.reward_timeout,
-            verbose=self.verbose,
-        )
+        if self.sandbox_manager is None:
+          env_args = EnvArgs(ds=self.entry)
+          self.env = RepoEnv(
+              env_args,
+              backend=self.backend,
+              step_timeout=self.step_timeout,
+              reward_timeout=self.reward_timeout,
+              verbose=self.verbose,
+          )
+        else:
+          batch_started = self.extra_kwargs.get(
+              "_trajectory_batch_started_monotonic"
+          )
+          self.sandbox_handle, acquire_elapsed = (
+              self.sandbox_manager.acquire(
+                  self.entry, batch_started_monotonic=batch_started
+              )
+          )
+          self.runtime_time["sandbox_acquire_latency"] += acquire_elapsed
+          bind_started = time.perf_counter()
+          try:
+            self.env = self.sandbox_manager.make_repo_env(
+                self.sandbox_handle,
+                command_files=R2EGYM_COMMAND_FILES,
+                step_timeout=self.step_timeout,
+                reward_timeout=self.reward_timeout,
+                verbose=self.verbose,
+            )
+          except BaseException as bind_error:
+            try:
+              self.sandbox_manager.release(self.sandbox_handle)
+            except BaseException as release_error:
+              raise ExceptionGroup(
+                  "Agent Sandbox bind and cleanup both failed",
+                  [bind_error, release_error],
+              ) from release_error
+            self.sandbox_handle = None
+            raise
+          self.runtime_time["sandbox_start_latency"] += (
+              time.perf_counter() - bind_started
+          )
       except BaseException:
-        self.runtime_time["sandbox_start_latency"] += (
-            time.perf_counter() - started
-        )
+        if self.sandbox_manager is None:
+          self.runtime_time["sandbox_start_latency"] += (
+              time.perf_counter() - started
+          )
         raise
-      runtime_time = getattr(
-          getattr(self.env, "runtime", None), "_tunix_runtime_time", {}
-      )
-      if isinstance(runtime_time, dict):
-        self.runtime_time["sandbox_acquire_latency"] += float(
-            runtime_time.get("sandbox_acquire_latency", 0.0)
+      if self.sandbox_manager is None:
+        runtime_time = getattr(
+            getattr(self.env, "runtime", None), "_tunix_runtime_time", {}
         )
-        self.runtime_time["sandbox_start_latency"] += float(
-            runtime_time.get("sandbox_start_latency", 0.0)
-        )
+        if isinstance(runtime_time, dict):
+          self.runtime_time["sandbox_acquire_latency"] += float(
+              runtime_time.get("sandbox_acquire_latency", 0.0)
+          )
+          self.runtime_time["sandbox_start_latency"] += float(
+              runtime_time.get("sandbox_start_latency", 0.0)
+          )
       lifecycle_elapsed = time.perf_counter() - started
       classified_elapsed = (
           self.runtime_time["sandbox_acquire_latency"]
@@ -187,9 +229,9 @@ class SWEEnv(BaseTaskEnv):
             time.perf_counter() - started
         )
     self.final_reward_fn = self.env.compute_reward
-    if self.scaffold == "r2egym":
+    if self.scaffold == "r2egym" and self.sandbox_manager is None:
       self.env.add_commands(R2EGYM_COMMAND_FILES)
-    else:
+    elif self.scaffold == "sweagent":
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
     self.total_steps = 0
 
@@ -246,13 +288,43 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
-    if self.env is not None:
+    close_error = None
+    repo_env = self.env
+    if repo_env is not None:
       logging.info("%s closing RepoEnv", self._debug_prefix)
-      self.env.close()
+      try:
+        repo_env.close()
+      except BaseException as error:  # release still must run
+        close_error = error
+      finally:
+        self.env = None
 
-    if self.delete_image and self.env:
-      docker_image = self.env.runtime.docker_image
-      os.system(f"docker rmi {docker_image}")
+      # Preserve the pre-Fleet direct-R2E behavior exactly.  Fleet resources
+      # are controller-owned and are deleted through sandbox_manager.release().
+      if self.delete_image and self.sandbox_manager is None:
+        docker_image = repo_env.runtime.docker_image
+        os.system(f"docker rmi {docker_image}")
+
+    if self.sandbox_handle is not None:
+      handle = self.sandbox_handle
+      self.sandbox_handle = None
+      try:
+        cleanup_elapsed = self.sandbox_manager.release(handle)
+        logging.info(
+            "%s Agent Sandbox released in %.2fs",
+            self._debug_prefix,
+            cleanup_elapsed,
+        )
+      except BaseException as error:
+        if close_error is not None:
+          raise ExceptionGroup(
+              "R2E adapter close and Agent Sandbox release both failed",
+              [close_error, error],
+          ) from error
+        raise
+
+    if close_error is not None:
+      raise close_error
 
   @staticmethod
   def from_dict(extra_info: dict | str) -> "SWEEnv":  # pyrefly: ignore[bad-override]

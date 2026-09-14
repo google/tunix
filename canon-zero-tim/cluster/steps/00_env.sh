@@ -1022,6 +1022,50 @@ positive_int() {
     fail=1
   }
 }
+
+case "${CANON_DEEPSWE_SANDBOX_RUNTIME:-direct}" in
+  direct)
+    if [ -n "${R2E_SANDBOX_CAPACITY:-}" ]; then
+      echo "[env] R2E_SANDBOX_CAPACITY is valid only with CANON_DEEPSWE_SANDBOX_RUNTIME=fleet" >&2
+      fail=1
+    fi
+    ;;
+  fleet)
+    [ "${CANON_P34_DEEPSWE:-0}" = "1" ] || \
+    [ "${CANON_DEEPSWE_ONEHOST_SMOKE:-0}" = "1" ] || {
+      echo "[env] Fleet sandbox runtime is admitted only for DeepSWE training or its one-host carrier" >&2
+      fail=1
+    }
+    [ "${CANON_P46_EVALUATION:-0}" = "0" ] || {
+      echo "[env] Fleet sandbox runtime is not admitted for P46 evaluation" >&2
+      fail=1
+    }
+    [ "${CANON_R2EGYM_INSTALL:-0}" = "1" ] || {
+      echo "[env] Fleet sandbox runtime requires the pinned R2E install" >&2
+      fail=1
+    }
+    [ "${CANON_AGENT_SANDBOX_COMMIT:-}" = \
+      "7935857fee859bb18752ee04d8948b975e47ff20" ] || {
+      echo "[env] Fleet sandbox runtime requires the registered Agent Sandbox commit" >&2
+      fail=1
+    }
+    positive_int R2E_SANDBOX_CAPACITY
+    if [[ "${R2E_SANDBOX_CAPACITY:-}" =~ ^[1-9][0-9]*$ ]] && \
+       [[ "${CANON_GLOBAL_TRAJECTORIES:-}" =~ ^[1-9][0-9]*$ ]]; then
+      _canon_fleet_minimum=$((CANON_GLOBAL_TRAJECTORIES * 2))
+      if [ "$R2E_SANDBOX_CAPACITY" -lt "$_canon_fleet_minimum" ]; then
+        echo "[env] Fleet capacity too small: capacity=$R2E_SANDBOX_CAPACITY minimum=$_canon_fleet_minimum (active + replacement warm)" >&2
+        fail=1
+      fi
+      echo "[env] DeepSWE Fleet contract OK: active=$CANON_GLOBAL_TRAJECTORIES replacement_warm=$CANON_GLOBAL_TRAJECTORIES minimum_total=$_canon_fleet_minimum admitted_capacity=$R2E_SANDBOX_CAPACITY lookahead=0"
+      unset _canon_fleet_minimum
+    fi
+    ;;
+  *)
+    echo "[env] CANON_DEEPSWE_SANDBOX_RUNTIME must be exactly direct or fleet" >&2
+    fail=1
+    ;;
+esac
 validate_train_mesh_pin() {
   local value="$1"
   local -a ids=()
