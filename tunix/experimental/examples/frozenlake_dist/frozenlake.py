@@ -93,7 +93,6 @@ def build_prompt_item(
           "return_logprobs": True,
       },
       "metadata": {
-          "prefix_hash": prompt_id,
           "episode_timeout": episode_timeout_secs,
           "env_config": {
               "entry": normalized_entry,

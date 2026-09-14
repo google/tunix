@@ -71,7 +71,8 @@ class AbstractRLEngine(Protocol):
       group_size: Number of rollout trajectories to generate per prompt (G).
       policy_version: Active policy version for generation.
       generation_args: Optional generation parameters (temperature, max steps).
-      route_metadata: Optional routing metadata (e.g. `prefix_hash`).
+      route_metadata: Optional routing metadata merged into each request's
+        metadata.
       **kwargs: Optional additional metadata.
 
     Returns:

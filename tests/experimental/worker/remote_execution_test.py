@@ -266,6 +266,43 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_stable_route_hash_is_deterministic_across_processes(self):
+    # Golden values, not a self-consistency check: a PYTHONHASHSEED-salted
+    # hash would produce different numbers on each interpreter invocation and
+    # so could never match a hardcoded constant.
+    self.assertEqual(
+        remote_lib.stable_route_hash("prompt_7"), 7682816066691324195
+    )
+    self.assertEqual(
+        remote_lib.stable_route_hash("route_key_abc"), 8273245243606849686
+    )
+
+  def test_stable_route_hash_passes_integers_through(self):
+    # Integer keys are explicit shard indices and must not be hashed.
+    for shard in (0, 1, 7, 64):
+      self.assertEqual(remote_lib.stable_route_hash(shard), shard)
+
+  def test_stable_route_hash_rejects_negative_integers(self):
+    # A negative shard index is always a caller bug: `%` would silently fold it
+    # onto a valid actor instead of surfacing the mistake.
+    with self.assertRaises(ValueError):
+      remote_lib.stable_route_hash(-1)
+
+  def test_stable_route_hash_separates_adjacent_structured_keys(self):
+    # Regression guard: CRC32 is linear over GF(2), so keys differing in one
+    # trailing character collapse into the same bucket under small moduli.
+    for num_actors in (2, 3, 4, 8):
+      buckets = {
+          remote_lib.stable_route_hash(f"prompt_7#{shard}") % num_actors
+          for shard in range(num_actors)
+      }
+      self.assertGreater(
+          len(buckets),
+          1,
+          f"adjacent route keys all collapsed to one bucket for"
+          f" num_actors={num_actors}",
+      )
+
   def test_routing_actor_pool_prompt_affinity_and_custom_router(self):
     async def _run_test():
       engine_0 = StubWorkerEngine("worker_0", latency=0.001)

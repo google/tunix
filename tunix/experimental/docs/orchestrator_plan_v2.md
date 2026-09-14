@@ -77,7 +77,7 @@ graph TD
 
     subgraph L1_INFRA ["Layer 1: Cluster Compute & Infrastructure"]
         ENG["distributed_rl_engine.py (DistributedRLEngine)<br/>• dispatch_rollouts(requests), poll_rollouts(timeout)<br/>• train_step(payload), sync_weights(role), per_token_logps(role)"]
-        LB["load_balancer.py (WorkerPoolBalancer)<br/>• Least-in-flight queue depth & prefix-cache consistent routing<br/>• Concurrent multi-worker long-polling collector"]
+        LB["load_balancer.py (WorkerPoolBalancer)<br/>• Least-in-flight queue depth & per-trajectory sticky routing<br/>• Concurrent multi-worker long-polling collector"]
         ORCH["orchestrator.py (ClusterOrchestrator)<br/>• WorkerRegistry: Indexes live workers by role (ACTOR, ROLLOUT, REFERENCE, CRITIC)<br/>• HealthMonitor & LifecycleDriver: Heartbeats, pre-flight checks & pod restarts<br/>• CompositeCheckpointHandler: Atomic step recovery & queue offset rewinding"]
     end
 
@@ -249,17 +249,19 @@ class AbstractRLEngine(Protocol):
 
 
 class WorkerPoolBalancer:
-  """Load balancing, prefix-cache affinity, and concurrent long polling across worker replicas."""
+  """Load balancing, per-trajectory affinity, and concurrent long polling across worker replicas."""
 
   def __init__(self, workers: Sequence[Any]):
     self._workers = list(workers)
     self._in_flight: dict[int, int] = {i: 0 for i in range(len(workers))}
 
   def select_worker_for_request(self, req: datatypes.RolloutRequest) -> tuple[int, Any]:
-    """Selects worker using least-in-flight queue depth or prefix-cache hash affinity."""
-    # Prefix-cache routing: Hash system prompt prefix to maximize vLLM KV-cache reuse
-    if "prefix_hash" in req.metadata:
-      idx = req.metadata["prefix_hash"] % len(self._workers)
+    """Selects worker using least-in-flight queue depth or sticky trajectory affinity."""
+    # Sticky routing: hash the per-trajectory key so a redispatched trajectory
+    # returns to the worker that may still hold its KV cache. Hashing a
+    # per-prompt key instead would pin a whole group to one worker.
+    if req.traj_id:
+      idx = stable_route_hash(req.traj_id) % len(self._workers)
     else:
       # Least-in-flight worker
       idx = min(self._in_flight, key=self._in_flight.get)

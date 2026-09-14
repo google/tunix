@@ -264,7 +264,6 @@ def _build_prompt_item(
           "answer": answer,
           "gold_answer": answer,
           "question": question,
-          "prefix_hash": prompt_id,
           "env_config": {
               "prompt": prompt,
               "prompts": prompt,

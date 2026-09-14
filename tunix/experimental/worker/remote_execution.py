@@ -36,6 +36,7 @@ Security Notes / Trust Boundaries:
 import abc
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import threading
 import traceback as traceback_lib
@@ -865,6 +866,30 @@ class ActorPool(abc.ABC):
     raise NotImplementedError
 
 
+def stable_route_hash(route_key: Any) -> int:
+  """Maps a sticky routing key to a process-stable non-negative integer.
+
+  Args:
+    route_key: The sticky routing key. Non-negative integers are returned
+      as-is; any other value is hashed via its `str()` representation.
+
+  Returns:
+    A non-negative integer suitable for `% num_actors` bucketing.
+
+  Raises:
+    ValueError: If `route_key` is a negative integer.
+  """
+  if isinstance(route_key, int):
+    if route_key < 0:
+      raise ValueError(
+          "An integer route_key is an explicit shard index and must be"
+          f" non-negative, got {route_key}."
+      )
+    return route_key
+  digest = hashlib.blake2b(str(route_key).encode("utf-8"), digest_size=8)
+  return int.from_bytes(digest.digest(), "big")
+
+
 class RoutingActorPool(ActorPool):
   """ActorPool with smart task routing (`route_key affinity, round-robin fallback`).
 
@@ -908,8 +933,9 @@ class RoutingActorPool(ActorPool):
       method_name: Target remote method being invoked.
       args: Positional arguments passed to the method call.
       kwargs: Keyword arguments passed to the method call. If this dictionary
-        contains `route_key`, stable hash routing (`hash(route_key) % N`) is
-        used for sticky endpoint affinity (popped prior to remote dispatch).
+        contains `route_key`, process-stable hash routing
+        (`stable_route_hash(route_key) % N`) is used for sticky endpoint
+        affinity (popped prior to remote dispatch).
 
     Returns:
       The selected `ActorHandle` target worker.
@@ -944,8 +970,12 @@ class RoutingActorPool(ActorPool):
     route_key = kwargs.get("route_key")
 
     if route_key is not None:
-      # Stable hash routing ensures identical route_keys consistently hit the same endpoint
-      return self._actors[hash(route_key) % len(self._actors)]
+      # Not builtin `hash()`: it salts `str` per process, so placement would
+      # not survive a restart.
+      # TODO(tunix-dev): `% len(self._actors)` remaps every key when pool
+      # membership changes, not just the keys on the affected actor. Switch to
+      # rendezvous (HRW) hashing before adding actor eviction.
+      return self._actors[stable_route_hash(route_key) % len(self._actors)]
 
     # Default fallback: round-robin load balancing across all endpoints
     actor = self._actors[self._idx % len(self._actors)]

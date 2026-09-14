@@ -163,7 +163,6 @@ def build_prompt_item(
       "metadata": {
           "instance_id": prompt_id,
           "problem_statement": problem,
-          "prefix_hash": prompt_id,
           "env_config": env_config,
           "agent_config": agent_config,
       },

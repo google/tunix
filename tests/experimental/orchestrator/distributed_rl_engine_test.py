@@ -139,23 +139,28 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_2.generate.return_value = [resp2]
 
       results = await self.engine.generate([
-          {"prompt": "p1", "prompt_id": "p1", "metadata": {"prefix_hash": 0}},
-          {"prompt": "p2", "prompt_id": "p2", "metadata": {"prefix_hash": 1}},
+          {"prompt": "p1", "prompt_id": "p1"},
+          {"prompt": "p2", "prompt_id": "p2"},
       ])
       self.assertLen(results, 2)
       rewards = {res.traj["reward"] for res in results}
       self.assertEqual(rewards, {1.0, 2.0})
 
-      # Verify underlying logical methods were called correctly
+      # Which prompt lands on which worker is decided by hashing its traj_id,
+      # so assert on the set of dispatched requests rather than on per-worker
+      # identity. Both workers get one request because these two traj_ids
+      # happen to hash to different buckets at N=2.
       self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
-      p1 = self.mock_rollout_1.generate.call_args.kwargs["requests"][0]
-      self.assertEqual(p1.prompt, "p1")
-      self.assertEqual(p1.prompt_id, "p1")
-
       self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
-      p2 = self.mock_rollout_2.generate.call_args.kwargs["requests"][0]
-      self.assertEqual(p2.prompt, "p2")
-      self.assertEqual(p2.prompt_id, "p2")
+      dispatched = [
+          req
+          for mock in (self.mock_rollout_1, self.mock_rollout_2)
+          for req in mock.generate.call_args.kwargs["requests"]
+      ]
+      self.assertCountEqual([req.prompt for req in dispatched], ["p1", "p2"])
+      self.assertCountEqual(
+          [req.prompt_id for req in dispatched], ["p1", "p2"]
+      )
 
     asyncio.run(_run())
 
@@ -178,7 +183,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           [{
               "prompt": "p1",
               "prompt_id": "prompt_1",
-              "metadata": {"prefix_hash": 0},
           }],
           generation_args=datatypes.GenerationArgs(
               max_generation_steps=8,
@@ -216,7 +220,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           prompt="p1",
           prompt_id="prompt_1",
           generation_kwargs={"max_generation_steps": 8},
-          metadata={"prefix_hash": 0},
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
@@ -747,36 +750,74 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dispatch_rollout_requests_with_prefix_routing(self):
+  def test_dispatch_spreads_one_group_across_workers(self):
     async def _run():
-      req1 = datatypes.RolloutRequest(
-          request_id="1",
-          prompt="p1",
-          prompt_id="1",
-          metadata={"prefix_hash": 0},
-      )
-      req2 = datatypes.RolloutRequest(
-          request_id="2",
-          prompt="p2",
-          prompt_id="2",
-          metadata={"prefix_hash": 1},
+      # A single prompt: every request shares one prompt_id, which used to pin
+      # the whole group to a single worker.
+      await self.engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}], group_size=4
       )
 
-      req_ids = await self.engine.dispatch_rollout_requests([req1, req2])
-      self.assertEqual(req_ids, ["1", "2"])
+      dispatched_1 = [
+          req
+          for call in self.mock_rollout_1.generate.call_args_list
+          for req in call.kwargs["requests"]
+      ]
+      dispatched_2 = [
+          req
+          for call in self.mock_rollout_2.generate.call_args_list
+          for req in call.kwargs["requests"]
+      ]
 
-      # Due to deterministic hash logic, req1 -> rollout_1 and req2 -> rollout_2
-      self.mock_rollout_1.generate.assert_called_once()
-      dispatched_req1 = self.mock_rollout_1.generate.call_args.kwargs[
-          "requests"
-      ][0]
-      self.assertEqual(dispatched_req1.request_id, "1")
+      # Routing on the per-trajectory key must not send the whole group to one
+      # worker. The split is hash-determined, so assert both workers are used
+      # rather than an exact ratio.
+      self.assertNotEmpty(dispatched_1)
+      self.assertNotEmpty(dispatched_2)
 
-      self.mock_rollout_2.generate.assert_called_once()
-      dispatched_req2 = self.mock_rollout_2.generate.call_args.kwargs[
-          "requests"
-      ][0]
-      self.assertEqual(dispatched_req2.request_id, "2")
+      # No trajectory is dropped or duplicated.
+      self.assertEqual(
+          sorted(
+              r.group_index for r in (*dispatched_1, *dispatched_2)
+          ),
+          [0, 1, 2, 3],
+      )
+
+    asyncio.run(_run())
+
+  def test_dispatch_routes_same_trajectory_to_same_worker(self):
+    async def _run():
+      # Same (prompt_id, group_index) => same traj_id => same worker, so a
+      # redispatch lands where the trajectory's KV cache may still live.
+      def _req(request_id: str) -> datatypes.RolloutRequest:
+        return datatypes.RolloutRequest(
+            request_id=request_id,
+            prompt="p1",
+            prompt_id="1",
+            group_index=0,
+        )
+
+      req_ids = await self.engine.dispatch_rollout_requests(
+          [_req("first"), _req("retry")]
+      )
+      self.assertEqual(req_ids, ["first", "retry"])
+
+      dispatched_1 = [
+          req
+          for call in self.mock_rollout_1.generate.call_args_list
+          for req in call.kwargs["requests"]
+      ]
+      dispatched_2 = [
+          req
+          for call in self.mock_rollout_2.generate.call_args_list
+          for req in call.kwargs["requests"]
+      ]
+
+      # Both dispatches resolve to the same worker; which one is hash-defined.
+      landed = dispatched_1 or dispatched_2
+      self.assertEqual(
+          [r.request_id for r in landed], ["first", "retry"]
+      )
 
     asyncio.run(_run())
 
@@ -786,20 +827,26 @@ class DistributedRLEngineTest(absltest.TestCase):
           request_id="1",
           prompt="p1",
           prompt_id="1",
-          metadata={"prefix_hash": 0},
       )
       req2 = datatypes.RolloutRequest(
           request_id="2",
           prompt="p2",
           prompt_id="2",
-          metadata={"prefix_hash": 1},
       )
 
       req_ids = await self.engine.dispatch_rollouts([req1, req2])
       self.assertEqual(req_ids, ["1", "2"])
 
-      self.mock_rollout_1.generate.assert_called_once()
-      self.mock_rollout_2.generate.assert_called_once()
+      # Delegation, not placement: both requests must reach a worker. Which
+      # worker is hash-defined, and two trajectories may legitimately collide
+      # onto the same one.
+      dispatched = [
+          req
+          for mock in (self.mock_rollout_1, self.mock_rollout_2)
+          for call in mock.generate.call_args_list
+          for req in call.kwargs["requests"]
+      ]
+      self.assertCountEqual([r.request_id for r in dispatched], ["1", "2"])
 
     asyncio.run(_run())
 
@@ -961,7 +1008,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           [{"prompt": "p1", "prompt_id": "p1"}],
           group_size=1,
           generation_args=gen_args,
-          route_metadata={"prefix_hash": "cache_key_1"},
+          route_metadata={"custom_key": "custom_value"},
       )
       self.assertLen(req_ids, 1)
 
@@ -974,7 +1021,8 @@ class DistributedRLEngineTest(absltest.TestCase):
           dispatched.generation_kwargs,
           {"temperature": 0.7, "max_generation_steps": 128},
       )
-      self.assertEqual(dispatched.metadata["prefix_hash"], "cache_key_1")
+      # route_metadata has no fixed schema; any key is merged through verbatim.
+      self.assertEqual(dispatched.metadata["custom_key"], "custom_value")
 
     asyncio.run(_run())
 
