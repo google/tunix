@@ -38,7 +38,7 @@ spec:
         parallelism: 1
         template:
           spec:
-            dnsPolicy: ClusterFirstWithHostNet
+${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never
             terminationGracePeriodSeconds: 10
@@ -218,7 +218,7 @@ spec:
               # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
               # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
           spec:
-            dnsPolicy: ClusterFirstWithHostNet
+${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure
             terminationGracePeriodSeconds: 10

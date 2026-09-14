@@ -1,0 +1,21 @@
+--- a/src/maxtext/training_engine/maxtext_engine.py
++++ b/src/maxtext/training_engine/maxtext_engine.py
+@@ -1260,6 +1260,18 @@
+   def _prepare_batch(self, payload: Any) -> Any:
+     """Maps a payload to the inputs the loss function is called with."""
+     if self._gen_model_input_fn is not None:
++      # Tunix declares `RLTrainerPayload.metadata` with `pytree_node=False`, so it lives in
++      # the treedef rather than the leaves, and batch assembly fills it with per-microbatch
++      # values (`trajectory_ids`, `lineage`). A `gen_model_input_fn` that forwards the
++      # payload whole -- the GRPO adapter's does, as `train_example` -- therefore hands
++      # `_batch_signature` a structure that differs on every micro-batch, and
++      # `_needs_recompile` answers yes to all of them: one full XLA compile per micro-batch,
++      # visible only as a slow run. Clearing it holds the treedef still. Nothing downstream
++      # reads it; the fallback branch below already drops it for the same reason. Checked
++      # against `__dataclass_fields__`, not `hasattr`, so a `metadata` *property* does not
++      # send `replace` looking for an init argument that does not exist.
++      if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
++        payload = dataclasses.replace(payload, metadata={})
+       return self._gen_model_input_fn(payload)
+     if dataclasses.is_dataclass(payload):
+       return {

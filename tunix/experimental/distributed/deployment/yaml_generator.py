@@ -54,6 +54,17 @@ def main() -> None:
       default=os.environ.get("KUEUE_QUEUE_NAME", ""),
       help="Kueue local queue name for scheduling (optional).",
   )
+  parser.add_argument(
+      "--priority_class_name",
+      default=os.environ.get("PRIORITY_CLASS_NAME", ""),
+      help=(
+          "PriorityClass for every pod in the JobSet (optional). Left unset,"
+          " pods get priority 0 and are the first thing evicted when the"
+          " cluster is contended. Kueue reads the same value when no"
+          " kueue.x-k8s.io/priority-class label is present, so one setting"
+          " covers both admission and kube-scheduler preemption."
+      ),
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -157,6 +168,14 @@ def main() -> None:
       else ""
   )
 
+  # Whole line or nothing, as with `queue_label`: `priorityClassName:` with an empty
+  # value is a YAML null, which the API server rejects rather than reading as "unset".
+  priority_class_line = (
+      f"            priorityClassName: {args.priority_class_name}\n"
+      if args.priority_class_name
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -165,6 +184,7 @@ def main() -> None:
         NAMESPACE=args.namespace,
         QUEUE_NAME=args.queue_name,
         QUEUE_LABEL=queue_label,
+        PRIORITY_CLASS_LINE=priority_class_line,
         SERVER_IMAGE=args.pathways_server_image,
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,

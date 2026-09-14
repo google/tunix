@@ -107,6 +107,12 @@ export TRAINER_PORT=20002
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
 
+# PriorityClass for every pod of all three JobSets. Unset, pods run at priority 0 and
+# are the first thing evicted when the cluster fills up -- which for a multi-hour RL run
+# means losing the trainer, the rollout, or both, partway through. `medium` (500) is what
+# the rest of this cluster uses. Set it to the empty string to opt out.
+export PRIORITY_CLASS_NAME=${PRIORITY_CLASS_NAME-medium}
+
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5e:4x4}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
@@ -166,6 +172,7 @@ start_orchestrator() {
     --jobset_name="${ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${PRIORITY_CLASS_NAME:+--priority_class_name="${PRIORITY_CLASS_NAME}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -257,6 +264,7 @@ start_trainer() {
     --jobset_name="${TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${PRIORITY_CLASS_NAME:+--priority_class_name="${PRIORITY_CLASS_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
@@ -363,6 +371,7 @@ start_rollout_instance() {
     --jobset_name="${target_id}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${PRIORITY_CLASS_NAME:+--priority_class_name="${PRIORITY_CLASS_NAME}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
