@@ -141,6 +141,21 @@ their absence semantics. Regression: `tests/v1_system_optimization/
 test_onehost_defaults.py::OnehostDefaultsTest::
 test_optimized_capture_requires_the_explicit_pair` (package root).
 
+Admission-tool regression (numerics-admission R3): a sealed report still needs
+internal consistency checks. For fp64 re-pin metrics, reconcile all producer
+fields, shared control/candidate identities across comparison blocks, and the
+complete leaf/group/overall partition. Test coherent vector-based positive and
+numerical-red controls separately from malformed/stale/mixed-report negatives;
+exercise real CLI exit codes. Zero-reference derived infinities must follow
+the producer contract and may never admit a whole zero-signal run. For capture
+receipts, parse every terminal and plain-path marker before matching expected
+values. Wrong-count duplicates, malformed values, unknown tree names, and
+foreign manifest paths must fail, using an explicitly reviewed runtime-to-host
+path mapping. Preserve original failures and keep evidence-tool PASS separate
+from final-source numerical admission. Regression modules:
+`tests/p61_backward/test_check_fp64_repin.py` and
+`tests/p61_backward/test_compare_capture_bits.py` (package root).
+
 ## 7. Flag lifecycle
 
 Singleton-axis metadata regression: test the actual producer -> runtime-zero
