@@ -829,6 +829,14 @@ class SandboxNamespacePlacementTest(unittest.TestCase):
     # Sandbox preflight hard-fails on a secret it cannot read, so the Fleet
     # lane must name no pull secret at all.
     self.assertEqual(env["IMAGE_PULL_SECRET"], "")
+    # The 00_env.sh Fleet gate demands this pin, and only one of the twelve
+    # DeepSWE profiles ever exported it.  Cross-check against the runtime
+    # module so the renderer copy cannot drift away from the real checkout.
+    self.assertEqual(
+        env["CANON_AGENT_SANDBOX_COMMIT"], sandbox_fleet.AGENT_SANDBOX_COMMIT
+    )
+    self.assertEqual(p34.AGENT_SANDBOX_COMMIT,
+                     sandbox_fleet.AGENT_SANDBOX_COMMIT)
 
   def test_direct_never_carries_a_fleet_namespace(self):
     document = p44.render(

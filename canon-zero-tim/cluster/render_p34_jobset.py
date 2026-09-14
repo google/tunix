@@ -125,6 +125,17 @@ DEFAULT_SANDBOX_NAMESPACE = "default"
 # Docker Hub Pro's pull quota for being able to start.
 DEFAULT_SANDBOX_IMAGE_PULL_SECRET = ""
 
+# The Fleet gate in cluster/steps/00_env.sh refuses to run unless this exact
+# Agent Sandbox source commit is pinned.  Only one of the twelve DeepSWE
+# profiles (qwen3-32b-dp16-tp8-deepswe.env) ever exported it, so a lane on any
+# other profile -- for instance the P44 system-optimization lane, which runs
+# qwen3-4b-dp-parity-deepswe-v2-admission.env -- would have rendered clean,
+# passed a server-side dry run, and then failed the gate at launch.  The pin
+# belongs with the runtime selection, not with the model profile.  Mirrors
+# AGENT_SANDBOX_COMMIT in examples/deepswe/sandbox_fleet.py and the checkout in
+# cluster/steps/36_install_agent_sandbox.sh; the three must stay in sync.
+AGENT_SANDBOX_COMMIT = "7935857fee859bb18752ee04d8948b975e47ff20"
+
 
 def sandbox_runtime_environment(
     runtime: str,
@@ -159,6 +170,7 @@ def sandbox_runtime_environment(
       "R2E_SANDBOX_CAPACITY": str(capacity),
       "R2E_K8S_NAMESPACE": namespace,
       "IMAGE_PULL_SECRET": image_pull_secret,
+      "CANON_AGENT_SANDBOX_COMMIT": AGENT_SANDBOX_COMMIT,
   }
 
 
