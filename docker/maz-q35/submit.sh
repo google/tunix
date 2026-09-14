@@ -126,7 +126,25 @@ echo "    output     ${MAXTEXT_OUTPUT_DIR}"
 echo "    jobsets    ${USER}-orch ${USER}-train ${USER}-roll"
 echo
 
-gcloud container clusters get-credentials "${CLUSTER}" \
-  --region "${LOCATION_NAME}" --project "${PROJECT}" --quiet
+# Deliberately not `gcloud container clusters get-credentials`. That command rewrites the
+# context to use gke-gcloud-auth-plugin, which authenticates as gcloud's active account --
+# on the launch VM the default compute service account, which cannot create jobsets here.
+# The context is expected to already exist and to authenticate as a user with write
+# access. See the reproduction notes for how to create one from Application Default
+# Credentials.
+CONTEXT="$(kubectl config current-context)"
+if ! kubectl config view -o "jsonpath={.contexts[?(@.name=='${CONTEXT}')].context.cluster}" \
+     | grep -q "${CLUSTER}"; then
+  echo "ERROR: kubectl context '${CONTEXT}' does not point at ${CLUSTER}." >&2
+  exit 1
+fi
+if [[ "${DRY_RUN:-false}" != "true" ]] \
+   && [[ "$(kubectl auth can-i create jobsets.jobset.x-k8s.io -n "${K8S_NAMESPACE}")" != "yes" ]]; then
+  echo "ERROR: context '${CONTEXT}' cannot create jobsets in ${K8S_NAMESPACE}." >&2
+  echo "       Authenticating as: $(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')" >&2
+  exit 1
+fi
+echo "    context    ${CONTEXT} as $(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')"
+echo
 
 bash "${LAUNCHER}" "${ACTION}"
