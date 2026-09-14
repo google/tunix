@@ -93,9 +93,46 @@ _STAGE_STEPS = {
 }
 SANDBOX_RUNTIMES = ("direct", "fleet")
 
+# A Kueue LocalQueue is a namespaced object, so the same
+# `kueue.x-k8s.io/queue-name` string resolves to a *different* ClusterQueue in
+# each namespace.  On bodaborg-v5p-nap, default/default resolves to the
+# `default` ClusterQueue (cpu-user and tpu-v5p-flavor only) while
+# trellis/default resolves to the `trellis` ClusterQueue, which is the only one
+# carrying `sandbox-cpu-flavor` and therefore the only route onto
+# `sandbox-cpu-pool`.  Nothing in the Pod spec distinguishes the two, so the
+# namespace -- not the queue label -- is the knob that selects the pool.
+ADMITTED_SANDBOX_NAMESPACES = ("default", "trellis")
+DEFAULT_SANDBOX_NAMESPACE = "default"
+
+# The head ServiceAccount cannot read an image pull Secret, and it cannot be
+# granted that right.  GKE runs two authorizers: `kubectl auth can-i` consults
+# both RBAC and the Cloud IAM webhook, but the escalation check that guards
+# RoleBinding creation consults *only* the RBAC rule resolver.  Our `get
+# secrets` comes from the webhook, so RBAC considers us not to hold it and
+# refuses to let us grant it.  A binary search over known ClusterRoles (edit
+# rejected, admin rejected, power-users accepted) pins our RBAC identity to
+# exactly `power-users`, which carries no `secrets` rule -- so no Role we are
+# permitted to create can carry one either.
+#
+# Agent Sandbox's preflight performs a real `read_namespaced_secret` and treats
+# failure as a hard error, so naming a pull Secret here would abort every Fleet
+# run before it warms a single sandbox and burn the TPU allocation.  The R2E
+# task images are public: an anonymous Docker Hub token returned HTTP 200 for
+# both pinned manifests, and a live Pod on sandbox-cpu-pool pulled
+# namanjain12/pandas_final (742 MB) in 7.4s with no imagePullSecrets at all.
+# Set this back to "dockerhub-pro" the day an administrator grants the head
+# ServiceAccount `get secrets/dockerhub-pro`; until then the Fleet lane trades
+# Docker Hub Pro's pull quota for being able to start.
+DEFAULT_SANDBOX_IMAGE_PULL_SECRET = ""
+
 
 def sandbox_runtime_environment(
-    runtime: str, capacity: int | None, *, active_trajectories: int
+    runtime: str,
+    capacity: int | None,
+    *,
+    active_trajectories: int,
+    namespace: str = DEFAULT_SANDBOX_NAMESPACE,
+    image_pull_secret: str = DEFAULT_SANDBOX_IMAGE_PULL_SECRET,
 ) -> dict[str, str]:
   """Returns the fail-closed renderer payload for DeepSWE sandbox lifecycle."""
   if runtime not in SANDBOX_RUNTIMES:
@@ -112,9 +149,16 @@ def sandbox_runtime_environment(
         "fleet sandbox_capacity is below active + replacement warm: "
         f"capacity={capacity} minimum={minimum}"
     )
+  if namespace not in ADMITTED_SANDBOX_NAMESPACES:
+    raise ValueError(
+        "fleet sandbox_namespace must be one of "
+        f"{sorted(ADMITTED_SANDBOX_NAMESPACES)}; got {namespace!r}"
+    )
   return {
       "CANON_DEEPSWE_SANDBOX_RUNTIME": "fleet",
       "R2E_SANDBOX_CAPACITY": str(capacity),
+      "R2E_K8S_NAMESPACE": namespace,
+      "IMAGE_PULL_SECRET": image_pull_secret,
   }
 
 
@@ -124,9 +168,15 @@ def validate_sandbox_runtime_environment(
     capacity: int | None,
     *,
     active_trajectories: int,
+    namespace: str = DEFAULT_SANDBOX_NAMESPACE,
+    image_pull_secret: str = DEFAULT_SANDBOX_IMAGE_PULL_SECRET,
 ) -> None:
   expected = sandbox_runtime_environment(
-      runtime, capacity, active_trajectories=active_trajectories
+      runtime,
+      capacity,
+      active_trajectories=active_trajectories,
+      namespace=namespace,
+      image_pull_secret=image_pull_secret,
   )
   wrong = {
       key: env.get(key)
@@ -135,8 +185,10 @@ def validate_sandbox_runtime_environment(
   }
   if wrong:
     raise ValueError(f"rendered sandbox runtime environment mismatch: {wrong}")
-  if runtime == "direct" and "R2E_SANDBOX_CAPACITY" in env:
-    raise ValueError("direct sandbox runtime retained a Fleet capacity")
+  if runtime == "direct":
+    for key in ("R2E_SANDBOX_CAPACITY", "R2E_K8S_NAMESPACE"):
+      if key in env:
+        raise ValueError(f"direct sandbox runtime retained Fleet-only {key}")
 
 
 class _QuotedString(str):
@@ -323,6 +375,7 @@ def render(
     fixed_lm_head: bool = False,
     sandbox_runtime: str = "direct",
     sandbox_capacity: int | None = None,
+    sandbox_namespace: str = DEFAULT_SANDBOX_NAMESPACE,
 ) -> dict[str, Any]:
   """Returns a fail-closed P34 JobSet without mutating the base mapping."""
   if not _SHA.fullmatch(source_commit):
@@ -415,7 +468,10 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
   no_commit = "1" if stage == "backward-no-commit" else "0"
   _set_env(main, {
       **sandbox_runtime_environment(
-          sandbox_runtime, sandbox_capacity, active_trajectories=64
+          sandbox_runtime,
+          sandbox_capacity,
+          active_trajectories=64,
+          namespace=sandbox_namespace,
       ),
       "CANON_MODE": "run",
       "CANON_PROFILE_FILE": "cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env",
@@ -531,6 +587,7 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       fixed_lm_head=fixed_lm_head,
       sandbox_runtime=sandbox_runtime,
       sandbox_capacity=sandbox_capacity,
+      sandbox_namespace=sandbox_namespace,
   )
   return document
 
@@ -549,6 +606,7 @@ def validate(
     fixed_lm_head: bool = False,
     sandbox_runtime: str = "direct",
     sandbox_capacity: int | None = None,
+    sandbox_namespace: str = DEFAULT_SANDBOX_NAMESPACE,
 ) -> None:
   """Rejects any rendered object that weakens the P34 attempt-zero contract."""
   head = _head(document)
@@ -559,6 +617,7 @@ def validate(
       env,
       sandbox_runtime,
       sandbox_capacity,
+      namespace=sandbox_namespace,
       active_trajectories=64,
   )
   if document["metadata"]["labels"].get(
@@ -717,6 +776,15 @@ def main() -> None:
       type=int,
       help="total admitted sandbox Pods; required only for fleet",
   )
+  parser.add_argument(
+      "--sandbox-namespace",
+      choices=ADMITTED_SANDBOX_NAMESPACES,
+      default=DEFAULT_SANDBOX_NAMESPACE,
+      help=(
+          "namespace that holds the Fleet sandbox Pods; a Kueue LocalQueue is "
+          "namespaced, so this is what selects the admitting ClusterQueue"
+      ),
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -735,6 +803,7 @@ def main() -> None:
       fixed_lm_head=args.fixed_lm_head,
       sandbox_runtime=args.sandbox_runtime,
       sandbox_capacity=args.sandbox_capacity,
+      sandbox_namespace=args.sandbox_namespace,
   )
   args.output.write_text(dump_jobset(document))
   print(f"P34_JOBSET_RENDER_PASS output={args.output}")

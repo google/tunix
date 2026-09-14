@@ -1029,6 +1029,10 @@ case "${CANON_DEEPSWE_SANDBOX_RUNTIME:-direct}" in
       echo "[env] R2E_SANDBOX_CAPACITY is valid only with CANON_DEEPSWE_SANDBOX_RUNTIME=fleet" >&2
       fail=1
     fi
+    if [ -n "${R2E_K8S_NAMESPACE:-}" ]; then
+      echo "[env] R2E_K8S_NAMESPACE is valid only with CANON_DEEPSWE_SANDBOX_RUNTIME=fleet; the direct runtime always uses the r2egym default namespace" >&2
+      fail=1
+    fi
     ;;
   fleet)
     [ "${CANON_P34_DEEPSWE:-0}" = "1" ] || \
@@ -1049,6 +1053,17 @@ case "${CANON_DEEPSWE_SANDBOX_RUNTIME:-direct}" in
       echo "[env] Fleet sandbox runtime requires the registered Agent Sandbox commit" >&2
       fail=1
     }
+    # A Kueue LocalQueue is namespaced, so this is the field that decides which
+    # ClusterQueue admits the sandboxes and therefore which node pool they can
+    # reach.  Getting it wrong does not fail any render or dry run, so pin it
+    # here, before the head claims TPU.
+    case "${R2E_K8S_NAMESPACE:-}" in
+      default|trellis) ;;
+      *)
+        echo "[env] Fleet sandbox runtime requires R2E_K8S_NAMESPACE to be exactly default or trellis; got '${R2E_K8S_NAMESPACE:-}'" >&2
+        fail=1
+        ;;
+    esac
     positive_int R2E_SANDBOX_CAPACITY
     if [[ "${R2E_SANDBOX_CAPACITY:-}" =~ ^[1-9][0-9]*$ ]] && \
        [[ "${CANON_GLOBAL_TRAJECTORIES:-}" =~ ^[1-9][0-9]*$ ]]; then
@@ -1057,7 +1072,7 @@ case "${CANON_DEEPSWE_SANDBOX_RUNTIME:-direct}" in
         echo "[env] Fleet capacity too small: capacity=$R2E_SANDBOX_CAPACITY minimum=$_canon_fleet_minimum (active + replacement warm)" >&2
         fail=1
       fi
-      echo "[env] DeepSWE Fleet contract OK: active=$CANON_GLOBAL_TRAJECTORIES replacement_warm=$CANON_GLOBAL_TRAJECTORIES minimum_total=$_canon_fleet_minimum admitted_capacity=$R2E_SANDBOX_CAPACITY lookahead=0"
+      echo "[env] DeepSWE Fleet contract OK: active=$CANON_GLOBAL_TRAJECTORIES replacement_warm=$CANON_GLOBAL_TRAJECTORIES minimum_total=$_canon_fleet_minimum admitted_capacity=$R2E_SANDBOX_CAPACITY namespace=${R2E_K8S_NAMESPACE:-} lookahead=0"
       unset _canon_fleet_minimum
     fi
     ;;

@@ -119,6 +119,7 @@ def render(
     sandbox_nodepool: str | None = None,
     sandbox_runtime: str = "direct",
     sandbox_capacity: int | None = None,
+    sandbox_namespace: str = p34.DEFAULT_SANDBOX_NAMESPACE,
     fixed_lm_head: bool = False,
     system_optimization_arm: str | None = None,
 ) -> dict[str, Any]:
@@ -217,7 +218,10 @@ def render(
 
   environment = {
       **p34.sandbox_runtime_environment(
-          sandbox_runtime, sandbox_capacity, active_trajectories=16
+          sandbox_runtime,
+          sandbox_capacity,
+          active_trajectories=16,
+          namespace=sandbox_namespace,
       ),
       "CANON_PROFILE_FILE": (
           _STRICT_PROFILE
@@ -324,6 +328,7 @@ def render(
       sandbox_nodepool=effective_sandbox_nodepool,
       sandbox_runtime=sandbox_runtime,
       sandbox_capacity=sandbox_capacity,
+      sandbox_namespace=sandbox_namespace,
       fixed_lm_head=effective_fixed_lm_head,
       system_optimization_arm=system_optimization_arm,
   )
@@ -374,6 +379,7 @@ def validate(
     sandbox_nodepool: str | None = None,
     sandbox_runtime: str = "direct",
     sandbox_capacity: int | None = None,
+    sandbox_namespace: str = p34.DEFAULT_SANDBOX_NAMESPACE,
     fixed_lm_head: bool = False,
     system_optimization_arm: str | None = None,
 ) -> None:
@@ -398,7 +404,11 @@ def validate(
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
   p34.validate_sandbox_runtime_environment(
-      env, sandbox_runtime, sandbox_capacity, active_trajectories=16
+      env,
+      sandbox_runtime,
+      sandbox_capacity,
+      active_trajectories=16,
+      namespace=sandbox_namespace,
   )
   effective_sandbox_nodepool = (
       head.get("nodeSelector", {}).get("cloud.google.com/gke-nodepool")
@@ -559,6 +569,17 @@ def main() -> None:
       "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
   )
   parser.add_argument("--sandbox-capacity", type=int)
+  parser.add_argument(
+      "--sandbox-namespace",
+      choices=p34.ADMITTED_SANDBOX_NAMESPACES,
+      default=p34.DEFAULT_SANDBOX_NAMESPACE,
+      help=(
+          "Namespace that holds the Fleet sandbox Pods.  A Kueue LocalQueue is "
+          "namespaced, so this -- not the queue label -- is what decides which "
+          "ClusterQueue admits the sandboxes and therefore which node pool "
+          "they can land on.  Fleet runtime only."
+      ),
+  )
   parser.add_argument("--model-pvc", required=True)
   parser.add_argument("--whitelist", required=True)
   parser.add_argument("--whitelist-sha256", required=True)
@@ -594,6 +615,7 @@ def main() -> None:
       sandbox_nodepool=args.sandbox_nodepool,
       sandbox_runtime=args.sandbox_runtime,
       sandbox_capacity=args.sandbox_capacity,
+      sandbox_namespace=args.sandbox_namespace,
       fixed_lm_head=args.fixed_lm_head,
       system_optimization_arm=args.system_optimization_arm,
   )

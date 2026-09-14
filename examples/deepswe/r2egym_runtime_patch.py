@@ -139,9 +139,17 @@ def cleanup_orphaned_kubernetes_pods(resume_tag: str) -> int:
     k8s_config.load_incluster_config()
   except k8s_config.config_exception.ConfigException:
     k8s_config.load_kube_config()
+  # The sweep has to look where the sandboxes actually are.  The Fleet runtime
+  # can place them outside the head's namespace (only trellis/default reaches
+  # `sandbox-cpu-flavor`), and a sweep hard-coded to `default` would silently
+  # find nothing and leave stale Pods burning someone else's quota forever.
+  # Fall back to the r2egym default so the direct runtime is unchanged.
+  namespace = (
+      os.environ.get("R2E_K8S_NAMESPACE", "") or docker_mod.DEFAULT_NAMESPACE
+  )
   return _cleanup_orphaned_kubernetes_pods(
       client.CoreV1Api(),
-      namespace=docker_mod.DEFAULT_NAMESPACE,
+      namespace=namespace,
       resume_tag=resume_tag,
       api_exception_type=client.ApiException,
   )

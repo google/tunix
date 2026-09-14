@@ -9,6 +9,7 @@ import inspect
 import importlib.util
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,7 @@ import render_p43_deepswe_debug as p43  # pylint: disable=wrong-import-position
 import render_p44_deepswe_parity as p44  # pylint: disable=wrong-import-position
 import render_p46_deepswe_profiles as p46  # pylint: disable=wrong-import-position
 import render_p58_deepswe_tim as p58  # pylint: disable=wrong-import-position
+from tunix.rl import deepswe_contract  # pylint: disable=wrong-import-position
 
 
 class FakeFleet:
@@ -779,6 +781,183 @@ class SandboxFleetContractTest(unittest.TestCase):
     self.assertIn("DEEPSWE_ONEHOST_SANDBOX_FLEET_PASS", source)
     self.assertIn("ThreadPoolExecutor(max_workers=4)", source)
     self.assertIn(sandbox_fleet.AGENT_SANDBOX_COMMIT, source)
+
+
+class SandboxNamespacePlacementTest(unittest.TestCase):
+  """The namespace is what selects the ClusterQueue, so it is fail-closed.
+
+  A Kueue LocalQueue is a namespaced object: the identical
+  `kueue.x-k8s.io/queue-name: default` label resolves to the `default`
+  ClusterQueue from the default namespace and to the `trellis` ClusterQueue
+  from trellis, and only the latter carries `sandbox-cpu-flavor`.  Nothing in
+  the Pod spec shows the difference, so a wrong namespace here produces a
+  perfectly valid render whose sandboxes can never reach sandbox-cpu-pool --
+  or, worse, land somewhere the run-scoped cleanup never sweeps.
+  """
+
+  def _base(self):
+    return yaml.safe_load((CLUSTER / "jobset-64chip.yaml").read_text())
+
+  def _common(self, run_id):
+    return {
+        "source_commit": "1" * 40,
+        "source_branch": p34.DEFAULT_SOURCE_BRANCH,
+        "client_image": "registry.invalid/tunix@sha256:" + "2" * 64,
+        "run_id": run_id,
+        "cpu_nodepool": "cpu-np",
+        "worker_nodepool": "tpu-np",
+        "model_pvc": "model-pvc",
+        "whitelist": p34.P34_CLEAN_WHITELIST,
+        "whitelist_sha256": p34.P34_CLEAN_WHITELIST_SHA256,
+    }
+
+  def test_fleet_emits_namespace_and_drops_the_pull_secret(self):
+    document = p44.render(
+        self._base(),
+        stage="three-update",
+        topology="64",
+        sandbox_runtime="fleet",
+        sandbox_capacity=32,
+        sandbox_namespace="trellis",
+        sandbox_nodepool="sandbox-cpu-pool",
+        **self._common("nsa"),
+    )
+    env = p34._env(document)
+    self.assertEqual(env["R2E_K8S_NAMESPACE"], "trellis")
+    self.assertEqual(env["NODE_SELECTOR_VAL"], "sandbox-cpu-pool")
+    # The head ServiceAccount cannot be granted `get secrets`, and Agent
+    # Sandbox preflight hard-fails on a secret it cannot read, so the Fleet
+    # lane must name no pull secret at all.
+    self.assertEqual(env["IMAGE_PULL_SECRET"], "")
+
+  def test_direct_never_carries_a_fleet_namespace(self):
+    document = p44.render(
+        self._base(),
+        stage="three-update",
+        topology="64",
+        **self._common("nsb"),
+    )
+    env = p34._env(document)
+    self.assertNotIn("R2E_K8S_NAMESPACE", env)
+    self.assertNotIn("IMAGE_PULL_SECRET", env)
+
+  def test_unadmitted_namespace_is_rejected_by_the_renderer(self):
+    for bad in ("trelis", "kube-system", ""):
+      with self.subTest(namespace=bad):
+        with self.assertRaisesRegex(ValueError, "sandbox_namespace"):
+          p34.sandbox_runtime_environment(
+              "fleet", 128, active_trajectories=64, namespace=bad
+          )
+
+  def _resolve(self, *, overrides=None, **render_kwargs):
+    """Runs the real 00_env.sh so the contract sees a fully resolved profile.
+
+    validate_environment checks the whole DeepSWE profile, not just the JobSet
+    env overrides, so a rendered document alone is not a valid input to it.
+    """
+    document = p44.render(
+        self._base(),
+        stage="three-update",
+        topology="64",
+        sandbox_nodepool="sandbox-cpu-pool",
+        **render_kwargs,
+    )
+    environ = dict(os.environ, **p34._env(document))
+    environ.update(overrides or {})
+    with tempfile.TemporaryDirectory() as root_text:
+      state = Path(root_text) / "state"
+      state.mkdir()
+      environ.update({
+          "CANON_PKG": str(PKG),
+          "CANON_STATE": str(state),
+          "INJECTED_WANDB_API_KEY": "test-only",
+          "JAX_PLATFORMS": "cpu",
+      })
+      result = subprocess.run(
+          ["bash", str(PKG / "cluster/steps/00_env.sh")],
+          cwd=ROOT,
+          env=environ,
+          text=True,
+          stdout=subprocess.PIPE,
+          stderr=subprocess.STDOUT,
+          check=False,
+      )
+      resolved = state / "env.sh"
+      text = resolved.read_text() if resolved.is_file() else ""
+    values = {}
+    for line in text.splitlines():
+      if not line.startswith("export ") or "=" not in line:
+        continue
+      # env.sh is shell source, so values carry shell quoting and escapes
+      # (FL_SHARED_MESH is written as 4\,8).  Let shlex undo exactly what the
+      # shell would, rather than stripping quotes by hand and feeding the
+      # contract a value the running job would never see.
+      parts = shlex.split(line[len("export "):])
+      if not parts:
+        continue
+      key, _, value = parts[0].partition("=")
+      values[key] = value
+    return result, values
+
+  def test_runtime_contract_pins_the_namespace(self):
+    result, values = self._resolve(
+        sandbox_runtime="fleet",
+        sandbox_capacity=32,
+        sandbox_namespace="trellis",
+        **self._common("nsc"),
+    )
+    self.assertEqual(result.returncode, 0, result.stdout)
+    # NODE_SELECTOR_VAL reaches the process through the parent environment
+    # rather than the generated env.sh, so it is asserted on the rendered
+    # document instead (see test_fleet_emits_namespace_and_drops_the_pull_secret).
+    self.assertEqual(values["R2E_K8S_NAMESPACE"], "trellis")
+    deepswe_contract.validate_environment(values)
+
+    drifted = dict(values, R2E_K8S_NAMESPACE="trelis")
+    with self.assertRaisesRegex(ValueError, "R2E_K8S_NAMESPACE"):
+      deepswe_contract.validate_environment(drifted)
+
+    # The direct runtime ignores the namespace outright, so carrying one is a
+    # silent placement lie rather than a harmless leftover.
+    leaked = dict(values, CANON_DEEPSWE_SANDBOX_RUNTIME="direct")
+    leaked.pop("R2E_SANDBOX_CAPACITY", None)
+    with self.assertRaisesRegex(ValueError, "Fleet-only placement"):
+      deepswe_contract.validate_environment(leaked)
+
+  def test_entrypoint_rejects_a_drifted_namespace_before_tpu(self):
+    result, _ = self._resolve(
+        sandbox_runtime="fleet",
+        sandbox_capacity=32,
+        sandbox_namespace="trellis",
+        overrides={"R2E_K8S_NAMESPACE": "trelis"},
+        **self._common("nsd"),
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("R2E_K8S_NAMESPACE to be exactly default or trellis",
+                  result.stdout)
+
+  def test_orphan_sweep_follows_the_sandbox_namespace(self):
+    source = (ROOT / "examples/deepswe/r2egym_runtime_patch.py").read_text()
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "cleanup_orphaned_kubernetes_pods"
+    )
+    body = ast.get_source_segment(source, function)
+    # Sweeping a hard-coded namespace would find nothing and report success
+    # while leaving live Pods in someone else's namespace forever.
+    self.assertIn("R2E_K8S_NAMESPACE", body)
+
+  def test_entrypoint_rejects_an_unadmitted_namespace(self):
+    text = (PKG / "cluster/steps/00_env.sh").read_text()
+    self.assertIn("default|trellis)", text)
+    self.assertIn(
+        "R2E_K8S_NAMESPACE is valid only with"
+        " CANON_DEEPSWE_SANDBOX_RUNTIME=fleet",
+        text,
+    )
 
 
 if __name__ == "__main__":

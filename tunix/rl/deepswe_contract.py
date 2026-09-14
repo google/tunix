@@ -33,6 +33,10 @@ WEIGHT_ATTESTATION_SCHEMA = "canon.p34.deepswe.weight-attestation.v1"
 # to the sandbox Pod label. Both layers must agree on what a queue name is, or
 # the renderer emits a name the runtime then rejects.
 _KUBERNETES_DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z")
+# Namespaces the Fleet sandbox runtime may place Pods in.  Mirrors
+# ADMITTED_SANDBOX_NAMESPACES in canon-zero-tim/cluster/render_p34_jobset.py;
+# the two must stay in sync.
+_ADMITTED_SANDBOX_NAMESPACES = frozenset({"default", "trellis"})
 P44_TOPOLOGY_FIELDS = frozenset({
     "contract_name",
     "dp_size",
@@ -1247,6 +1251,29 @@ def validate_environment(values: Mapping[str, str]) -> None:
           "P34 R2E_K8S_QUEUE_NAME must be an exact Kubernetes DNS label, got"
           f" {queue_name!r}"
       )
+  # The Fleet sandbox runtime may place its Pods in a namespace other than the
+  # head's, because a Kueue LocalQueue is a namespaced object and only
+  # trellis/default resolves to the ClusterQueue that carries
+  # `sandbox-cpu-flavor`.  A typo here would not fail any render or any
+  # server-side dry run: it would put live sandbox Pods in a namespace nobody
+  # sweeps, and the run-scoped cleanup would never find them again.  Pin it to
+  # the same admitted set the renderer uses.  This mirrors
+  # ADMITTED_SANDBOX_NAMESPACES in canon-zero-tim/cluster/render_p34_jobset.py
+  # (which lives outside this package and cannot be imported here); the two
+  # must stay in sync.
+  sandbox_runtime = values.get("CANON_DEEPSWE_SANDBOX_RUNTIME", "direct")
+  sandbox_namespace = values.get("R2E_K8S_NAMESPACE", "")
+  if sandbox_runtime == "fleet" or sandbox_namespace:
+    if sandbox_namespace not in _ADMITTED_SANDBOX_NAMESPACES:
+      raise ValueError(
+          "DeepSWE R2E_K8S_NAMESPACE must be one of "
+          f"{sorted(_ADMITTED_SANDBOX_NAMESPACES)}, got {sandbox_namespace!r}"
+      )
+  if sandbox_runtime != "fleet" and sandbox_namespace:
+    raise ValueError(
+        "R2E_K8S_NAMESPACE is a Fleet-only placement and the direct sandbox "
+        "runtime ignores it; see r2egym_runtime_patch.py"
+    )
   flags = values.get("XLA_FLAGS", "")
   has_precision_pin = "--xla_allow_excess_precision=false" in flags
   if numerical_bundle and not has_precision_pin:
