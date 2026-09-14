@@ -46,7 +46,7 @@ def _values(
       "CANON_P34_CLEAN_ROWS": "1012",
       "CANON_P34_WHITELIST_SHA256": classifier._WHITELIST_SHA256,
   }
-  if topology != "128":
+  if topology != "128" or system_optimization_arm is not None:
     values["CANON_P58_TOPOLOGY"] = topology
   if system_optimization_arm is not None:
     values["CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"] = system_optimization_arm
@@ -144,16 +144,35 @@ def _update(
     })
   if system_optimization_arm is not None:
     treatment = system_optimization_arm == "treatment"
+    transactions = 32 if split else 16
     record.update({
         "system_optimization_arm": system_optimization_arm,
-        "dp_reduction_transactions": 1 if treatment else 32,
+        "dp_reduction_transactions": 1 if treatment else transactions,
         "dp_reduction_visibility": (
             "EXPLICIT_FIXED_TREE_REDUCE_ONCE"
             if treatment else "EXPLICIT_FIXED_TREE"
         ),
-        "dp_staged_accumulations": 32 if treatment else 0,
+        "dp_staged_accumulations": transactions if treatment else 0,
     })
   return record
+
+
+def _systemopt_log(topology: str, arm: str) -> str:
+  split = topology == "64split"
+  marker = "64SPLIT" if split else "128"
+  dp = 4 if split else 8
+  groups = 32 if split else 16
+  return (
+      _WANDB_PASS
+      + f"[P58.{marker}.SYSTEMOPT] arm={arm} stage=three-update "
+      + f"topology={topology} strict=1\n"
+      + (
+          f"[P32.LENGTH_SORT] enabled=1 rows=128 dp={dp} groups={groups} "
+          + "permutation_sha256=" + "a" * 64 + "\n"
+      ) * (3 if arm == "treatment" else 0)
+      + "[P59.CHECKED_VMA] enabled=1\n" * 3
+      + "[V1.FIRST_UPDATE]\n" * 2
+  )
 
 
 class P58ClassifierTest(unittest.TestCase):
@@ -179,16 +198,7 @@ class P58ClassifierTest(unittest.TestCase):
         arm=arm,
         stage="three-update",
         log_text=(
-            _WANDB_PASS
-            + "[P58.64SPLIT.SYSTEMOPT] "
-            f"arm={system_optimization_arm} stage=three-update "
-            "topology=64split strict=1\n"
-            + (
-                "[P32.LENGTH_SORT] enabled=1 rows=128 dp=4 groups=32 "
-                + "permutation_sha256=" + "a" * 64 + "\n"
-            ) * (3 if system_optimization_arm == "treatment" else 0)
-            + "[P59.CHECKED_VMA] enabled=1\n" * 3
-            + "[V1.FIRST_UPDATE]\n" * 2
+            _systemopt_log(topology, system_optimization_arm)
             if system_optimization_arm is not None
             else _WANDB_PASS
         ),
@@ -204,108 +214,196 @@ class P58ClassifierTest(unittest.TestCase):
         system_optimization_arm=system_optimization_arm,
     )
 
-  def test_64split_systemopt_requires_runtime_receipts(self):
-    for arm in ("control", "treatment"):
-      with self.subTest(arm=arm), tempfile.TemporaryDirectory() as directory:
+  def test_systemopt_requires_topology_exact_runtime_receipts(self):
+    for topology in ("128", "64split"):
+      for arm in ("control", "treatment"):
+        with (
+            self.subTest(topology=topology, arm=arm),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+          root = Path(directory)
+          report = self._classify(
+              root, "zero", topology, system_optimization_arm=arm
+          )
+          self.assertEqual(report["verdict"], "PASS")
+          self.assertEqual(
+              report["length_sort_receipts"],
+              3 if arm == "treatment" else None,
+          )
+          for missing_key in (
+              "dp_reduction_visibility",
+              "dp_staged_accumulations",
+          ):
+            bad_updates = [
+                _update(step, "zero", topology, arm) for step in range(3)
+            ]
+            del bad_updates[1][missing_key]
+            failed = classifier.classify(
+                arm="zero",
+                stage="three-update",
+                topology=topology,
+                system_optimization_arm=arm,
+                log_text=_systemopt_log(topology, arm),
+                debug_dir=root,
+                weights=[{"verdict": "PASS", "equal": True}],
+                pre_alignment=[_pre("zero")],
+                alignment=[_post("zero")],
+                updates=bad_updates,
+            )
+            self.assertIn(
+                "system_optimization_receipts", failed["failed"]
+            )
+
+  def test_treatment_rejects_wrong_or_malformed_length_sort_receipts(self):
+    corruptions = (
+        ("[P32.LENGTH_SORT]", 1),
+        (
+            "[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=16 "
+            "enabled=1 permutation_sha256=" + "a" * 64,
+            1,
+        ),
+        (
+            "[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=16 "
+            "unknown=1 permutation_sha256=" + "a" * 64,
+            1,
+        ),
+        (
+            "[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=15 "
+            "permutation_sha256=" + "a" * 64,
+            0,
+        ),
+        (
+            "[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=16 "
+            "permutation_sha256=not-a-sha256",
+            0,
+        ),
+    )
+    for corruption, expected_malformed in corruptions:
+      with (
+          self.subTest(corruption=corruption),
+          tempfile.TemporaryDirectory() as directory,
+      ):
         root = Path(directory)
-        report = self._classify(
-            root, "zero", "64split", system_optimization_arm=arm
+        self._classify(
+            root, "zero", "128", system_optimization_arm="treatment"
         )
-        self.assertEqual(report["verdict"], "PASS")
-        self.assertEqual(
-            report["length_sort_receipts"], 3 if arm == "treatment" else None
+        good = _systemopt_log("128", "treatment")
+        first = next(
+            line for line in good.splitlines()
+            if line.startswith("[P32.LENGTH_SORT]")
         )
-        bad_updates = [
-            _update(step, "zero", "64split", arm) for step in range(3)
-        ]
-        del bad_updates[1]["dp_reduction_visibility"]
         failed = classifier.classify(
             arm="zero",
             stage="three-update",
-            topology="64split",
-            system_optimization_arm=arm,
-            log_text=(
-                _WANDB_PASS
-                + "[P58.64SPLIT.SYSTEMOPT] "
-                f"arm={arm} stage=three-update topology=64split strict=1\n"
-                + (
-                    "[P32.LENGTH_SORT] enabled=1 rows=128 dp=4 groups=32 "
-                    + "permutation_sha256=" + "a" * 64 + "\n"
-                ) * (3 if arm == "treatment" else 0)
-                + "[P59.CHECKED_VMA] enabled=1\n" * 3
-                + "[V1.FIRST_UPDATE]\n" * 2
-            ),
+            topology="128",
+            system_optimization_arm="treatment",
+            log_text=good.replace(first, corruption, 1),
             debug_dir=root,
             weights=[{"verdict": "PASS", "equal": True}],
             pre_alignment=[_pre("zero")],
             alignment=[_post("zero")],
-            updates=bad_updates,
+            updates=[
+                _update(step, "zero", "128", "treatment")
+                for step in range(3)
+            ],
+        )
+        self.assertIn("system_optimization_receipts", failed["failed"])
+        self.assertEqual(
+            failed["length_sort_malformed_receipts"], expected_malformed
+        )
+
+  def test_treatment_rejects_missing_or_extra_length_sort_receipts(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(root, "zero", "128", system_optimization_arm="treatment")
+      good = _systemopt_log("128", "treatment")
+      receipt = next(
+          line for line in good.splitlines()
+          if line.startswith("[P32.LENGTH_SORT]")
+      )
+      for log_text in (
+          good.replace(receipt + "\n", "", 1),
+          good + receipt + "\n",
+      ):
+        with self.subTest(receipts=log_text.count("[P32.LENGTH_SORT]")):
+          failed = classifier.classify(
+              arm="zero",
+              stage="three-update",
+              topology="128",
+              system_optimization_arm="treatment",
+              log_text=log_text,
+              debug_dir=root,
+              weights=[{"verdict": "PASS", "equal": True}],
+              pre_alignment=[_pre("zero")],
+              alignment=[_post("zero")],
+              updates=[
+                  _update(step, "zero", "128", "treatment")
+                  for step in range(3)
+              ],
+          )
+          self.assertIn("system_optimization_receipts", failed["failed"])
+
+  def test_control_rejects_any_length_sort_marker(self):
+    for receipt in (
+        "[P32.LENGTH_SORT]",
+        "[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=16 "
+        "permutation_sha256=" + "a" * 64,
+    ):
+      with (
+          self.subTest(receipt=receipt),
+          tempfile.TemporaryDirectory() as directory,
+      ):
+        root = Path(directory)
+        self._classify(root, "zero", "128", system_optimization_arm="control")
+        failed = classifier.classify(
+            arm="zero",
+            stage="three-update",
+            topology="128",
+            system_optimization_arm="control",
+            log_text=_systemopt_log("128", "control") + receipt + "\n",
+            debug_dir=root,
+            weights=[{"verdict": "PASS", "equal": True}],
+            pre_alignment=[_pre("zero")],
+            alignment=[_post("zero")],
+            updates=[
+                _update(step, "zero", "128", "control")
+                for step in range(3)
+            ],
         )
         self.assertIn("system_optimization_receipts", failed["failed"])
 
-  def test_64split_treatment_requires_length_sort_receipts(self):
-    with tempfile.TemporaryDirectory() as directory:
-      root = Path(directory)
-      report = self._classify(
-          root, "zero", "64split", system_optimization_arm="treatment"
-      )
-      self.assertEqual(report["verdict"], "PASS")
-      text = (
-          _WANDB_PASS
-          + "[P58.64SPLIT.SYSTEMOPT] arm=treatment stage=three-update "
-          "topology=64split strict=1\n"
-          + "[P32.LENGTH_SORT] enabled=1 rows=128 dp=4 groups=31 "
-          + "permutation_sha256=" + "a" * 64 + "\n"
-          + "[P32.LENGTH_SORT] enabled=1 rows=128 dp=4 groups=32 "
-          + "permutation_sha256=" + "a" * 64 + "\n" * 2
-          + "[P59.CHECKED_VMA] enabled=1\n" * 3
-          + "[V1.FIRST_UPDATE]\n" * 2
-      )
-      failed = classifier.classify(
-          arm="zero",
-          stage="three-update",
-          topology="64split",
-          system_optimization_arm="treatment",
-          log_text=text,
-          debug_dir=root,
-          weights=[{"verdict": "PASS", "equal": True}],
-          pre_alignment=[_pre("zero")],
-          alignment=[_post("zero")],
-          updates=[
-              _update(step, "zero", "64split", "treatment")
-              for step in range(3)
-          ],
-      )
-      self.assertIn("system_optimization_receipts", failed["failed"])
-
-  def test_64split_full_admits_only_treatment(self):
-    with tempfile.TemporaryDirectory() as directory:
-      report = classifier.classify(
-          arm="zero",
-          stage="full",
-          topology="64split",
-          system_optimization_arm="treatment",
-          log_text="",
-          debug_dir=Path(directory),
-          weights=[],
-          pre_alignment=[],
-          alignment=[],
-          updates=[],
-      )
-      self.assertEqual(report["verdict"], "FAIL")
-    with self.assertRaises(ValueError):
-      classifier.classify(
-          arm="zero",
-          stage="full",
-          topology="64split",
-          system_optimization_arm="control",
-          log_text="",
-          debug_dir=Path("/nonexistent"),
-          weights=[],
-          pre_alignment=[],
-          alignment=[],
-          updates=[],
-      )
+  def test_systemopt_full_admits_only_treatment(self):
+    for topology in ("128", "64split"):
+      with (
+          self.subTest(topology=topology),
+          tempfile.TemporaryDirectory() as directory,
+      ):
+        report = classifier.classify(
+            arm="zero",
+            stage="full",
+            topology=topology,
+            system_optimization_arm="treatment",
+            log_text="",
+            debug_dir=Path(directory),
+            weights=[],
+            pre_alignment=[],
+            alignment=[],
+            updates=[],
+        )
+        self.assertEqual(report["verdict"], "FAIL")
+      with self.subTest(topology=topology), self.assertRaises(ValueError):
+        classifier.classify(
+            arm="zero",
+            stage="full",
+            topology=topology,
+            system_optimization_arm="control",
+            log_text="",
+            debug_dir=Path("/nonexistent"),
+            weights=[],
+            pre_alignment=[],
+            alignment=[],
+            updates=[],
+        )
 
   def test_64split_native_and_zero_use_split_evidence_geometry(self):
     for arm in ("native", "zero"):

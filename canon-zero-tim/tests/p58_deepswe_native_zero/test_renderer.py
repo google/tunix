@@ -93,6 +93,27 @@ class P58RendererTest(unittest.TestCase):
         treatment_full["metadata"]["name"],
         "canon-p58-64s-zsoptt-full-ptest",
     )
+    for arm, token in (("control", "zsoptc"), ("treatment", "zsoptt")):
+      document = self._render(
+          "zero",
+          "three-update",
+          topology="128",
+          system_optimization_arm=arm,
+      )
+      self.assertEqual(
+          document["metadata"]["name"],
+          f"canon-p58-128s-{token}-three-ptest",
+      )
+    treatment_full = self._render(
+        "zero",
+        "full",
+        topology="128",
+        system_optimization_arm="treatment",
+    )
+    self.assertEqual(
+        treatment_full["metadata"]["name"],
+        "canon-p58-128s-zsoptt-full-ptest",
+    )
 
     # A run id that pushes the name past the budget must be rejected by the
     # renderer rather than by the cluster.
@@ -222,80 +243,89 @@ class P58RendererTest(unittest.TestCase):
           "zero", "full", topology="64split", instance_type="4x4x8"
       )
 
-  def test_64split_systemopt_arms_are_exact_and_isolated(self):
-    for arm in ("control", "treatment"):
-      with self.subTest(arm=arm):
-        document = self._render(
-            "zero",
-            "three-update",
-            topology="64split",
-            system_optimization_arm=arm,
-        )
-        env = renderer.p34._env(document)
-        expected = renderer.full_system_optimization_base_additions(
-            "deepswe-qwen4b"
-        )
-        expected.update({
-            "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": arm,
-            "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-        })
-        if arm == "treatment":
+  def test_systemopt_arms_are_topology_exact_and_isolated(self):
+    for topology, profile in (
+        ("128", renderer.SYSTEMOPT_PROFILE),
+        ("64split", renderer.SPLIT_SYSTEMOPT_PROFILE),
+    ):
+      for arm in ("control", "treatment"):
+        with self.subTest(topology=topology, arm=arm):
+          document = self._render(
+              "zero",
+              "three-update",
+              topology=topology,
+              system_optimization_arm=arm,
+          )
+          env = renderer.p34._env(document)
+          expected = renderer.full_system_optimization_base_additions(
+              "deepswe-qwen4b"
+          )
           expected.update({
-              "CANON_P32_KEEP_TAPE": "stream",
-              "CANON_DP_REDUCE_ONCE": "1",
-              "CANON_P32_LENGTH_SORT": "1",
+              "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": arm,
+              "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
           })
-        self.assertEqual(
-            env["CANON_PROFILE_FILE"], renderer.SPLIT_SYSTEMOPT_PROFILE
-        )
-        self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
-        self.assertEqual(env["CANON_V1_HP_FULL"], "0")
-        for key, value in expected.items():
-          self.assertEqual(env[key], value)
-        for key in (
-            "CANON_DP_COLLECTIVE_REDUCE",
-            "CANON_P63_OVERFLOW_SAFE_CLIP",
-        ):
-          self.assertNotIn(key, env)
-        if arm == "control":
-          self.assertNotIn("CANON_P32_KEEP_TAPE", env)
-          self.assertNotIn("CANON_DP_REDUCE_ONCE", env)
-          self.assertNotIn("CANON_P32_LENGTH_SORT", env)
-        signature = renderer.treatment_signature(document)
-        self.assertEqual(signature["system_optimization_arm"], arm)
-        self.assertEqual(
-            signature["keep_tape"], "stream" if arm == "treatment" else None
-        )
-        self.assertEqual(
-            signature["dp_reduce_once"], "1" if arm == "treatment" else None
-        )
-        self.assertEqual(
-            signature["length_sort"], "1" if arm == "treatment" else None
-        )
+          if arm == "treatment":
+            expected.update({
+                "CANON_P32_KEEP_TAPE": "stream",
+                "CANON_DP_REDUCE_ONCE": "1",
+                "CANON_P32_LENGTH_SORT": "1",
+            })
+          self.assertEqual(env["CANON_PROFILE_FILE"], profile)
+          self.assertEqual(env["CANON_P58_TOPOLOGY"], topology)
+          self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+          self.assertEqual(env["CANON_V1_HP_FULL"], "0")
+          for key, value in expected.items():
+            self.assertEqual(env[key], value)
+          for key in (
+              "CANON_DP_COLLECTIVE_REDUCE",
+              "CANON_P63_OVERFLOW_SAFE_CLIP",
+          ):
+            self.assertNotIn(key, env)
+          if arm == "control":
+            self.assertNotIn("CANON_P32_KEEP_TAPE", env)
+            self.assertNotIn("CANON_DP_REDUCE_ONCE", env)
+            self.assertNotIn("CANON_P32_LENGTH_SORT", env)
+          signature = renderer.treatment_signature(document)
+          self.assertEqual(signature["system_optimization_arm"], arm)
+          self.assertEqual(
+              signature["keep_tape"],
+              "stream" if arm == "treatment" else None,
+          )
+          self.assertEqual(
+              signature["dp_reduce_once"],
+              "1" if arm == "treatment" else None,
+          )
+          self.assertEqual(
+              signature["length_sort"],
+              "1" if arm == "treatment" else None,
+          )
 
-    full = self._render(
-        "zero",
-        "full",
-        topology="64split",
-        system_optimization_arm="treatment",
-    )
-    full_env = renderer.p34._env(full)
-    self.assertEqual(full_env["CANON_P58_EXPECTED_UPDATES"], "1000")
-    self.assertIn("--max_steps=1000", full_env["CANON_RUN_CMD"])
-    self.assertEqual(full_env["CANON_P32_KEEP_TAPE"], "stream")
-    self.assertEqual(full_env["CANON_DP_REDUCE_ONCE"], "1")
-    self.assertEqual(full_env["CANON_P32_LENGTH_SORT"], "1")
-    self.assertEqual(full_env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"], "0")
-    self.assertNotIn("CANON_ALIGNMENT_AUDIT_EVERY", full_env)
-    self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", full_env)
+      full = self._render(
+          "zero",
+          "full",
+          topology=topology,
+          system_optimization_arm="treatment",
+      )
+      full_env = renderer.p34._env(full)
+      self.assertEqual(full_env["CANON_P58_EXPECTED_UPDATES"], "1000")
+      self.assertIn("--max_steps=1000", full_env["CANON_RUN_CMD"])
+      self.assertEqual(full_env["CANON_P32_KEEP_TAPE"], "stream")
+      self.assertEqual(full_env["CANON_DP_REDUCE_ONCE"], "1")
+      self.assertEqual(full_env["CANON_P32_LENGTH_SORT"], "1")
+      self.assertEqual(full_env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"], "0")
+      self.assertNotIn("CANON_ALIGNMENT_AUDIT_EVERY", full_env)
+      self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", full_env)
 
-  def test_64split_systemopt_rejects_neighboring_identities(self):
+  def test_systemopt_rejects_neighboring_identities(self):
     for overrides in (
-        {"topology": "128"},
         {"arm": "native", "topology": "64split"},
+        {"arm": "native", "topology": "128"},
         {"stage": "full", "topology": "64split"},
+        {"stage": "full", "topology": "128"},
         {"topology": "64split", "sampler_is": True},
+        {"topology": "128", "sampler_is": True},
         {"topology": "64split", "high_performance": True},
+        {"topology": "128", "high_performance": True},
     ):
       kwargs = {
           "arm": "zero",
@@ -307,13 +337,14 @@ class P58RendererTest(unittest.TestCase):
       stage = kwargs.pop("stage")
       with self.subTest(overrides=overrides), self.assertRaises(ValueError):
         self._render(arm, stage, **kwargs)
-    with self.assertRaises(ValueError):
-      self._render(
-          "zero",
-          "full",
-          topology="64split",
-          system_optimization_arm="control",
-      )
+    for topology in ("128", "64split"):
+      with self.subTest(topology=topology), self.assertRaises(ValueError):
+        self._render(
+            "zero",
+            "full",
+            topology=topology,
+            system_optimization_arm="control",
+        )
     with self.assertRaisesRegex(ValueError, "must be control or treatment"):
       self._render(
           "zero",

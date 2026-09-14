@@ -30,7 +30,14 @@ _COMPACT = {
 }
 _SHA = re.compile(r"[0-9a-f]{40}")
 _FIELD_RE = re.compile(r"([a-z0-9_]+)=([^ ]+)")
-_LENGTH_SORT_PREFIX = "[P32.LENGTH_SORT] "
+_LENGTH_SORT_MARKER = "[P32.LENGTH_SORT]"
+_LENGTH_SORT_FIELDS = frozenset({
+    "enabled",
+    "rows",
+    "dp",
+    "groups",
+    "permutation_sha256",
+})
 _ZERO_HP_AB_POLICY_ID = "deepswe-zero-hp-ab-warning-v1"
 _ZERO_HP_WARNING_ITEMS = {
     "S_decode_vs_S_prefill",
@@ -249,6 +256,33 @@ def _zero_hp_ab_policy_valid(record: dict[str, Any]) -> bool:
   )
 
 
+def _length_sort_receipts(
+    log_text: str,
+) -> tuple[list[dict[str, str]], int]:
+  """Parses exact P32 receipts without collapsing duplicate fields."""
+  receipts: list[dict[str, str]] = []
+  malformed = 0
+  for line in log_text.splitlines():
+    if not line.startswith(_LENGTH_SORT_MARKER):
+      continue
+    payload = line.removeprefix(_LENGTH_SORT_MARKER)
+    if not payload.startswith(" "):
+      malformed += 1
+      continue
+    raw_fields = payload[1:].split(" ")
+    matches = [_FIELD_RE.fullmatch(field) for field in raw_fields]
+    if not raw_fields or any(match is None for match in matches):
+      malformed += 1
+      continue
+    pairs = [match.groups() for match in matches if match is not None]
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)) or set(keys) != _LENGTH_SORT_FIELDS:
+      malformed += 1
+      continue
+    receipts.append(dict(pairs))
+  return receipts, malformed
+
+
 def classify(
     *,
     arm: str,
@@ -268,7 +302,7 @@ def classify(
     raise ValueError("P58 classifier admits systemopt control or treatment")
   if system_optimization_arm is not None and (
       arm != "zero"
-      or topology != "64split"
+      or topology not in ("128", "64split")
       or (
           stage != "three-update"
           and not (
@@ -277,8 +311,8 @@ def classify(
       )
   ):
     raise ValueError(
-        "P58 systemopt classification requires 64split Zero three-update, "
-        "or the treatment full candidate"
+        "P58 systemopt classification requires a registered Zero "
+        "three-update row, or the treatment full candidate"
     )
   expected_commits = _STAGE_UPDATES[stage]
   geometry = {
@@ -333,8 +367,12 @@ def classify(
           for record in alignment
       )
   )
-  zero_ab_warning_policy = topology == "128" and stage == "full" and bool(all_alignment) and all(
-      _zero_hp_ab_policy_valid(record) for record in all_alignment
+  zero_ab_warning_policy = (
+      topology == "128"
+      and stage == "full"
+      and system_optimization_arm is None
+      and bool(all_alignment)
+      and all(_zero_hp_ab_policy_valid(record) for record in all_alignment)
   )
   zero_ab_warning_dose = any(
       _boundary_valid(record, "S_decode_vs_S_prefill")
@@ -383,11 +421,9 @@ def classify(
         for record in updates
     )
   committed_steps = [record.get("train_steps_after") for record in committed]
-  length_sort_receipts = [
-      dict(_FIELD_RE.findall(line.removeprefix(_LENGTH_SORT_PREFIX)))
-      for line in log_text.splitlines()
-      if line.startswith(_LENGTH_SORT_PREFIX)
-  ]
+  length_sort_receipts, length_sort_malformed_receipts = (
+      _length_sort_receipts(log_text)
+  )
   expected_length_sort_receipt = {
       "enabled": "1",
       "rows": "128",
@@ -456,15 +492,18 @@ def classify(
               for record in updates
           )
           and log_text.count(
-              "[P58.64SPLIT.SYSTEMOPT] "
+              f"[P58.{('128' if topology == '128' else '64SPLIT')}"
+              ".SYSTEMOPT] "
               f"arm={system_optimization_arm} stage={stage} "
-              "topology=64split strict=1"
+              f"topology={topology} strict=1"
           ) == 1
           and (
               len(length_sort_receipts) == expected_commits
               and length_sort_receipts_valid
+              and length_sort_malformed_receipts == 0
               if system_optimization_arm == "treatment"
               else not length_sort_receipts
+              and length_sort_malformed_receipts == 0
           )
           and log_text.count("[P59.CHECKED_VMA] enabled=1")
           == expected_commits
@@ -492,6 +531,11 @@ def classify(
       "length_sort_receipts": (
           len(length_sort_receipts)
           if system_optimization_arm == "treatment"
+          else None
+      ),
+      "length_sort_malformed_receipts": (
+          length_sort_malformed_receipts
+          if system_optimization_arm is not None
           else None
       ),
       "verdict": "PASS" if not failed else "FAIL",

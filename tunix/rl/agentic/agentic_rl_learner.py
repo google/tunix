@@ -1959,9 +1959,26 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and os.environ.get("CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "1")
           == "0"
       )
-      exact_p58_64split_systemopt_geometry = (
+      p58_systemopt_geometry = {
+          "p58-qwen4b-tim-128": (
+              (8, 8, 2048),
+              "128",
+              "cluster/profiles/"
+              "qwen3-4b-dp8-tp8-deepswe-tim-systemopt.env",
+              "qwen3-4b-dp8-tp8-deepswe-tim-systemopt",
+          ),
+          "p58-qwen4b-tim-64split": (
+              (4, 8, 1024),
+              "64split",
+              "cluster/profiles/"
+              "qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env",
+              "qwen3-4b-dp4-tp8-deepswe-tim-systemopt",
+          ),
+      }.get(workload_identity)
+      exact_p58_systemopt_geometry = (
           full_train
           and not p33_no_commit
+          and p58_systemopt_geometry is not None
           and (
               run_stage == "three-update"
               or (
@@ -1969,21 +1986,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   and run_stage == "full"
               )
           )
-          and workload_identity == "p58-qwen4b-tim-64split"
           and (workload.dp_size, workload.tp_size, workload.global_m)
-          == (4, 8, 1024)
+          == p58_systemopt_geometry[0]
           and deepswe_system_optimization_arm in ("control", "treatment")
           and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1"
           and os.environ.get("CANON_P58_TIM_ADMITTED", "0") == "1"
           and os.environ.get("CANON_P58_TIM_ARM", "") == "zero"
-          and os.environ.get("CANON_P58_TOPOLOGY", "") == "64split"
+          and os.environ.get("CANON_P58_TOPOLOGY", "")
+          == p58_systemopt_geometry[1]
           and os.environ.get("CANON_PROFILE_FILE", "")
-          == (
-              "cluster/profiles/"
-              "qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
-          )
+          == p58_systemopt_geometry[2]
           and os.environ.get("CANON_PROFILE", "")
-          == "qwen3-4b-dp4-tp8-deepswe-tim-systemopt"
+          == p58_systemopt_geometry[3]
           and os.environ.get("CANON_V1_HP_FULL", "0") == "0"
           and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "0")
           == "1"
@@ -1995,7 +2009,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       exact_checked_vma_geometry = (
           exact_registered_full_geometry
           or exact_p44_v2_geometry
-          or exact_p58_64split_systemopt_geometry
+          or exact_p58_systemopt_geometry
       )
       if not exact_checked_vma_geometry or not (
           checked_vma_full and first_update_gate_enabled

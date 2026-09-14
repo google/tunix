@@ -1,5 +1,99 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
+## P58.128 P2c — same treatment, two disjoint DP8xTP8 roles
+
+As of 2026-09-14 20:06:14 UTC, the renderer has a new explicit P58-128
+system-optimization identity. One physical v5p `4x4x8` slice is split into a
+64-device rollout mesh and a disjoint 64-device trainer mesh; each role is
+DP8xTP8. This is the historical 128-chip geometry, not the later colocated
+64-chip A design. Target execution is still `TARGET NOT RUN`.
+
+The 128 and 64split treatment rows share the same optimization semantics:
+fixed lm-head, P59 rank-parallel checked-VMA/P67, first-update gate,
+fingerprint-hybrid comparison, first-group warmup, batched finite receipts,
+`P71=fwd`, streamed kept tape, reduce-once and length-sort. They deliberately
+keep separate profiles and geometry receipts:
+
+| Selector | Physical/roles | local trajectories | global M | length-sort/reduction groups |
+|---|---|---:|---:|---:|
+| `128` | `4x4x8`; rollout 64 + trainer 64; DP8xTP8 each | 16 | 2048 | 16 |
+| `64split` | `4x4x4`; rollout 32 + trainer 32; DP4xTP8 each | 32 | 1024 | 32 |
+
+The scientific recipe is otherwise identical: Qwen3-4B-Instruct-2507,
+B8xG16=128 trajectories/update, 16,384 response tokens, 50 turns, clean 1,012
+tasks, temperature/top-p/top-k `1.0/1.0/0`, seed 42, RLOO, beta 0, clip
+0.20/0.28, TPU-resident AdamW, prefix cache off, sampler IS/TIS off,
+checkpointing off and strict A=B=C on every treatment update. No P63,
+collective reduce, broad `--high-performance`, or alignment warning policy is
+admitted.
+
+Only the following new identities are valid:
+
+```text
+128 + zero + three-update/3 + systemopt=control
+128 + zero + three-update/3 + systemopt=treatment
+128 + zero + full/1000 + systemopt=treatment
+```
+
+Native, control/full, sampler-IS, diagnostics and treatment+HP fail closed.
+Leaving `--system-optimization-arm` absent preserves the historical 128
+render byte-for-byte. Never reconstruct the tuple by hand-editing YAML.
+
+After publication and matching image pinning, render the 128 treatment/full
+candidate with this exact command. Rendering, server dry-run and apply remain
+separate user stop points; this document does not authorize apply.
+
+```bash
+SOURCE_SHA=<published-readback-40-char-sha>
+CLIENT_IMAGE_DIGEST=<matching-image@sha256:digest>
+CPU_NODEPOOL=canon-cpu-pool
+SANDBOX_NODEPOOL=deepswe-cpu-pool-2
+TPU_NODEPOOL=auto
+MODEL_PVC=haoyugao-cpu-np-pvc
+P58_RUN_ID=<fresh-p58-128-treatment-full-id>
+P58_OUTPUT="/tmp/p58-128-treatment-full-${P58_RUN_ID}.yaml"
+
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output "$P58_OUTPUT" \
+  --source-commit "$SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$P58_RUN_ID" \
+  --stage full \
+  --arm zero \
+  --topology 128 \
+  --system-optimization-arm treatment \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --sandbox-nodepool "$SANDBOX_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC"
+sha256sum "$P58_OUTPUT"
+kubectl apply --server-side --dry-run=server -f "$P58_OUTPUT"
+```
+
+Before apply, inspect the rendered YAML for worker completions/parallelism 32,
+TPU topology `4x4x8`, explicit `CANON_P58_TOPOLOGY=128`, DP8xTP8 for both
+roles, max 16 sequences/DP, global M 2048, exact treatment tuple `stream/1/1`,
+strict alignment, TiTO, device optimizer and disabled checkpoints. Update 0
+must emit exactly one
+`[P58.128.SYSTEMOPT] arm=treatment stage=full topology=128 strict=1`, one
+valid `[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=16 ...`, one DP
+reduction transaction with 16 staged accumulations, exact A=B=C, finite
+nonzero gradients, exact replicas and exactly one optimizer commit. Any
+missing, duplicate, malformed or extra receipt is fatal. A complete update-0
+pass continues the same process toward 1,000 updates; it is not a separate
+three-step job.
+
+Local construction is green at the uncommitted P2c worktree: P58 `213 passed,
+218 subtests passed`; P44 `51 passed, 57 subtests passed`; the flag registry is
+exact at 435/435; forced-DP8 CPU reducer, whole-update length-sort and
+reduce-once update-norm controls pass; 12 historical/existing render cases are
+byte-identical. These are construction evidence only. Four-chip evidence
+cannot certify DP8xTP8, Pathways, 128-chip HBM or throughput. Do not claim
+P58.128 ready for production admission until the target update-0 receipts are
+returned.
+
 ## P58.64split P2 — one 64-chip slice, split roles
 
 This lane compresses the P58 Qwen3-4B Zero-TIM workload onto one physical

@@ -19,6 +19,9 @@ SPLIT_PROFILE = (
 SYSTEMOPT_PROFILE = (
     PKG / "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
 )
+SYSTEMOPT_128_PROFILE = (
+    PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim-systemopt.env"
+)
 RUN_STEP = PKG / "cluster/steps/90_run.sh"
 
 
@@ -198,6 +201,84 @@ printf '%s\n' "$CANON_PROFILE|$CANON_P34_RUN_STAGE|$CANON_P58_EXPECTED_UPDATES"
     )
     self.assertIn(
         "qwen3-4b-dp4-tp8-deepswe-tim-systemopt|full|1000",
+        full.stdout,
+    )
+
+  def test_128_systemopt_profile_accepts_exact_control_and_treatment(self):
+    common = """
+export CANON_P58_TOPOLOGY=128
+export CANON_P58_TIM_ARM=zero
+export CANON_P34_RUN_STAGE=three-update
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=3
+export CANON_P34_DISABLE_SAMPLER_IS=1
+export CANON_P34_DISABLE_TIS=1
+export CANON_P38_FIXED_LM_HEAD=1
+export CANON_P59_RANK_PARALLEL_BACKWARD=1
+export CANON_P59_CHECKED_VMA=1
+export CANON_P67_P66_VMA_P59_ONLY=1
+export CANON_V1_HP_FIRST_UPDATE_GATE=1
+export CANON_DP_COMPARE_MODE=fingerprint-hybrid
+export CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
+export CANON_DP_FINITE_FETCH=batched-commit
+export CANON_P71_SCAN=fwd
+"""
+    for arm in ("control", "treatment"):
+      treatment = (
+          "export CANON_P32_KEEP_TAPE=stream\n"
+          "export CANON_DP_REDUCE_ONCE=1\n"
+          "export CANON_P32_LENGTH_SORT=1\n"
+          if arm == "treatment" else ""
+      )
+      script = f"""
+set -euo pipefail
+source {CANON}
+{common}
+export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM={arm}
+{treatment}
+source {SYSTEMOPT_128_PROFILE}
+printf '%s\n' "$CANON_PROFILE|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_LOCAL_TRAJECTORIES|$MIN_TOKEN_BUCKET|$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+"""
+      result = subprocess.run(
+          ["bash", "-c", script], check=True, text=True, capture_output=True
+      )
+      self.assertIn(
+          "qwen3-4b-dp8-tp8-deepswe-tim-systemopt|8|8|16|2048|"
+          + arm,
+          result.stdout,
+      )
+
+    bad = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail; source {CANON}; {common}; "
+         "export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=control; "
+         "export CANON_P32_LENGTH_SORT=1; "
+         f"source {SYSTEMOPT_128_PROFILE}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    self.assertNotEqual(bad.returncode, 0)
+
+    full = subprocess.run(
+        ["bash", "-c", f"""
+set -euo pipefail
+source {CANON}
+{common}
+export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM=treatment
+export CANON_P34_RUN_STAGE=full
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_KEEP_TAPE=stream
+export CANON_DP_REDUCE_ONCE=1
+export CANON_P32_LENGTH_SORT=1
+source {SYSTEMOPT_128_PROFILE}
+printf '%s\n' "$CANON_PROFILE|$CANON_P34_RUN_STAGE|$CANON_P58_EXPECTED_UPDATES"
+"""],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    self.assertIn(
+        "qwen3-4b-dp8-tp8-deepswe-tim-systemopt|full|1000",
         full.stdout,
     )
 

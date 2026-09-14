@@ -36,6 +36,9 @@ SPLIT_PROFILE = "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
 SPLIT_SYSTEMOPT_PROFILE = (
     "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
 )
+SYSTEMOPT_PROFILE = (
+    "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim-systemopt.env"
+)
 TOPOLOGY = "4x4x8"
 WORKERS = 32
 ROLE_DP = 8
@@ -157,6 +160,11 @@ _TOPOLOGY_SPECS = {
         max_num_seqs=32,
         profile=SPLIT_PROFILE,
     ),
+}
+
+_SYSTEMOPT_PROFILES = {
+    "128": SYSTEMOPT_PROFILE,
+    "64split": SPLIT_SYSTEMOPT_PROFILE,
 }
 
 
@@ -305,8 +313,7 @@ def render(
         "P58 system-optimization arm must be control or treatment"
     )
   if system_optimization_arm is not None and (
-      topology != "64split"
-      or arm != "zero"
+      arm != "zero"
       or (
           stage != "three-update"
           and not (
@@ -317,8 +324,8 @@ def render(
       or sampler_is
   ):
     raise ValueError(
-        "P58 system optimization requires 64split Zero three-update, or "
-        "the treatment full candidate"
+        "P58 system optimization requires registered Zero three-update, or "
+        "a treatment full candidate"
     )
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
     raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
@@ -440,6 +447,12 @@ def render(
     name = name.replace("canon-p58-ds4b-", "canon-p58-64s-", 1)
     name = name.replace("-zero-systemopt-control-", "-zsoptc-", 1)
     name = name.replace("-zero-systemopt-treatment-", "-zsoptt-", 1)
+  elif system_optimization_arm is not None:
+    # The explicit 128-chip systemopt row also needs a compact name; topology,
+    # model and treatment remain pinned by labels plus the signed environment.
+    name = name.replace("canon-p58-ds4b-", "canon-p58-128s-", 1)
+    name = name.replace("-zero-systemopt-control-", "-zsoptc-", 1)
+    name = name.replace("-zero-systemopt-treatment-", "-zsoptt-", 1)
 
   if len(name) > p34.MAX_JOBSET_NAME_LEN:
     raise ValueError(
@@ -541,7 +554,7 @@ def render(
           sandbox_runtime, sandbox_capacity, active_trajectories=128
       ),
       "CANON_PROFILE_FILE": (
-          SPLIT_SYSTEMOPT_PROFILE
+          _SYSTEMOPT_PROFILES[topology]
           if system_optimization_arm is not None
           else HP_PROFILE if hp_bundle else spec.profile
       ),
@@ -613,7 +626,7 @@ def render(
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
   }
-  if topology != "128":
+  if topology != "128" or system_optimization_arm is not None:
     rendered_env["CANON_P58_TOPOLOGY"] = topology
   p34._set_env(main, rendered_env)
   if system_optimization_arm is not None:
@@ -870,8 +883,7 @@ def validate(
         "P58 system-optimization arm must be control or treatment"
     )
   if system_optimization_arm is not None and (
-      topology != "64split"
-      or arm != "zero"
+      arm != "zero"
       or (
           stage != "three-update"
           and not (
@@ -885,8 +897,8 @@ def validate(
       or bool(seam_localization)
   ):
     raise ValueError(
-        "P58 system optimization requires 64split Zero three-update, or "
-        "the treatment full candidate"
+        "P58 system optimization requires registered Zero three-update, or "
+        "a treatment full candidate"
     )
   spec = _topology_spec(topology)
   if (
@@ -999,7 +1011,7 @@ def validate(
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
       "CANON_PROFILE_FILE": (
-          SPLIT_SYSTEMOPT_PROFILE
+          _SYSTEMOPT_PROFILES[topology]
           if system_optimization_arm is not None
           else HP_PROFILE if hp_bundle else spec.profile
       ),
@@ -1028,7 +1040,9 @@ def validate(
       "NODE_SELECTOR_VAL": target_sandbox_nodepool,
   }
   if topology == "128":
-    if "CANON_P58_TOPOLOGY" in env:
+    if system_optimization_arm is not None:
+      expected["CANON_P58_TOPOLOGY"] = "128"
+    elif "CANON_P58_TOPOLOGY" in env:
       raise ValueError("historical P58-128 render must not add a topology flag")
   else:
     expected["CANON_P58_TOPOLOGY"] = topology

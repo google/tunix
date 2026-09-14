@@ -1,6 +1,42 @@
 # P58 DeepSWE native-first training handoff
 
-## START HERE — urgent 64-chip split-role treatment/full launch
+## START HERE — P2c gives 64split and 128 the same treatment semantics
+
+As of 2026-09-14 20:15:45 UTC, P2c is implemented locally over
+`15ae364b2cdf79a8b8d120eb0169be94c8b6fcca`; it is not published and neither
+target topology has run. The existing 64-chip `64split` row remains DP4xTP8
+per role on one `4x4x4` slice. The new explicit `--topology 128` row remains
+two disjoint 64-device roles, each DP8xTP8, on one `4x4x8` slice. Both can now
+select the same exact P2b treatment semantics without sharing geometry values:
+
+```text
+64split: local trajectories 32, global M 1024, groups/staged accumulations 32
+128:     local trajectories 16, global M 2048, groups/staged accumulations 16
+```
+
+The shared treatment is fixed lm-head + checked-VMA/P67 + first-update gate +
+fingerprint-hybrid/first-group-warmup/batched-commit + `P71=fwd` + streamed
+kept tape + reduce-once + length-sort. P63, collective reduce, broad
+high-performance, sampler IS and warning-only alignment stay out. The only
+full identity is `zero:treatment:full/1000`; `control` remains a three-update
+diagnostic. Old selector-absent 128 and all existing 64split renders were
+verified byte-identical against the source HEAD. The classifier now rejects
+bare, duplicate-key, unknown-key, malformed, missing and extra length-sort
+receipts rather than collapsing them into a dictionary. Final local gates are
+green: P58 `213 passed, 218 subtests passed`; P44 `51 passed, 57 subtests
+passed`; the flag registry is exact at 435/435; historical/previous rendering
+is byte-identical across 12 cases; forced-DP8 CPU reducer, whole-update
+length-sort, reduce-once update-norm, P34 and syntax/diff gates pass.
+
+Exact 128 rendering and update-0 receipts are at the top of
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Do not apply until this work is committed,
+published by explicit user approval, read back by full SHA and paired with the
+matching digest-pinned image. Local construction is not DP8xTP8 target proof;
+both 64 and 128 remain `TARGET NOT RUN`. The next stop point is user approval
+to commit/push, followed by a full-SHA readback and matching image. Render and
+apply are separate later approvals.
+
+## Urgent 64-chip split-role treatment/full launch
 
 **Launch verdict (2026-09-14 05:16:54 UTC): READY FOR THE FIRST 64-CHIP FULL
 LAUNCH; NOT TARGET-CERTIFIED.** The local contracts and factorized four-chip
@@ -21,6 +57,7 @@ apply the generic checked-in base YAML.
 |---|---|---|---|---:|---|
 | 1 | one-host factorized gate | DP2xTP2 reduction mechanics + Qwen3-4B DP1xTP4 DeepSWE replay | B2xG2 carrier | 0 | local launch evidence only |
 | 2 | target P58 B full | P58 `--topology 64split --arm zero --stage full --system-optimization-arm treatment` | B8xG16 = 128 | 1,000 | update 0 is inline fail-closed; then continue the same job |
+| 3 | target P58 128 full, when 128 chips are available | P58 `--topology 128 --arm zero --stage full --system-optimization-arm treatment` | B8xG16 = 128 | 1,000 | separate target row; update 0 uses DP8 receipts |
 
 The P58 model is exactly `Qwen/Qwen3-4B-Instruct-2507`. Its prompt budget is
 4,096 tokens and its response budget is 16,384 tokens for the entire
@@ -47,17 +84,18 @@ receipts + P71-fwd, layered on the existing P28/P29/P30 DeepSWE path. Control
 keeps `KEEP_TAPE`, `DP_REDUCE_ONCE` and length-sort absent. Treatment requires
 exactly `KEEP_TAPE=stream`, `DP_REDUCE_ONCE=1` and
 `CANON_P32_LENGTH_SORT=1`; its runtime receipts are one DP reduction
-transaction, 32 staged accumulations and one validated length permutation per
-update. The optimizer remains TPU-resident, TiTO is on, prefix cache and
+transaction, one staged accumulation per local group (32 on 64split; 16 on
+128) and one validated length permutation per update. The optimizer remains
+TPU-resident, TiTO is on, prefix cache and
 sampler IS/TIS are off. Collective reduce, P63, audit decimation and production
 `V1_HP_FULL` remain out.
 
-The selector is accepted only by exact P58 64split Zero `three-update/3`, or by
-the treatment-only `full/1000` profile. Renderer, authoritative `00_env.sh`,
-Python contract, learner, manifest, P58 classifier, and postflight all carry or
-verify the same arm/stage/tuple.
-Absent selector preserves the previous conservative 64split path and the
-historical P58-128 render. Local DP1xTP4 plus DP2xTP2 evidence is factorized
+The selector is accepted only by an exact registered P58 `64split` or `128`
+Zero `three-update/3`, or by the treatment-only `full/1000` profile. Renderer,
+authoritative `00_env.sh`, Python contract, learner, manifest, P58 classifier,
+and postflight all carry or verify the same arm/stage/topology/tuple. Absent
+selector preserves the previous conservative 64split path and the historical
+P58-128 render. Local DP1xTP4 plus DP2xTP2 evidence is factorized
 mechanism evidence only; the 64-chip target remains `TARGET NOT RUN` until the
 user applies it and returns complete artifacts.
 
