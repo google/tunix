@@ -258,7 +258,12 @@ class TrajectoryCollectEngine:
       ]
     elif mode == "Token":
       # flatten all steps into single batch dict
-      conversation_tokens, conversation_masks, logprobs = [], [], []
+      conversation_tokens, conversation_masks, logprobs, routed_experts_list = (
+          [],
+          [],
+          [],
+          [],
+      )
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
 
       for step in self.agent.trajectory.steps:
@@ -269,6 +274,7 @@ class TrajectoryCollectEngine:
         assistant_tokens = getattr(step, "assistant_tokens", None)
         env_tokens = getattr(step, "env_tokens", None)
         step_logprobs = getattr(step, "logprobs", None)
+        step_experts = getattr(step, "routed_experts", None)
         if assistant_tokens is not None:
           conversation_tokens.append(assistant_tokens)
           conversation_masks.append(step.assistant_masks)
@@ -280,6 +286,8 @@ class TrajectoryCollectEngine:
             logprobs.append(step_logprobs)
           else:
             logprobs.append(np.zeros(len(assistant_tokens)))
+          if step_experts is not None:
+            routed_experts_list.append(step_experts)
         if env_tokens is not None:
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
@@ -297,6 +305,9 @@ class TrajectoryCollectEngine:
           np.asarray(step_logprobs)
           for step_logprobs in logprobs
           if len(step_logprobs) > 0
+      ]
+      routed_experts = [
+          np.asarray(e) for e in routed_experts_list if len(e) > 0
       ]
       conversation_masks = (
           np.concatenate(conversation_masks, axis=0)
@@ -325,6 +336,11 @@ class TrajectoryCollectEngine:
           "reward_time": self.reward_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
+          ),
+          "routed_experts": (
+              np.concatenate(routed_experts, axis=0)
+              if routed_experts
+              else None
           ),
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
@@ -630,6 +646,13 @@ class TrajectoryCollectEngine:
     if cur_step is not None and rollout_output.logprobs is not None:
       cur_step.logprobs = rollout_output.logprobs[0]
 
+    if (
+        cur_step is not None
+        and getattr(rollout_output, "routed_experts", None) is not None
+        and rollout_output.routed_experts[0] is not None
+    ):
+      cur_step.routed_experts = rollout_output.routed_experts[0]
+
     step_timed_out = time.perf_counter() - self._start_ts > self.timeout
     if cur_step is not None and self.tokenizer and self.chat_parser:
       assistant_message, env_messages = (
@@ -654,6 +677,15 @@ class TrajectoryCollectEngine:
           cur_step.logprobs = np.concatenate(
               [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
           )
+        if cur_step.routed_experts is not None and n_append > 0:
+          pad_experts = np.full(
+              (n_append,) + cur_step.routed_experts.shape[1:],
+              common.UNSET_ROUTED_EXPERT,
+              dtype=cur_step.routed_experts.dtype,
+          )
+          cur_step.routed_experts = np.concatenate(
+              [cur_step.routed_experts, pad_experts], axis=0
+          )
 
       # Environment tokens/masks
       # Terminal-step environment messages are not appended to the response
@@ -668,6 +700,15 @@ class TrajectoryCollectEngine:
         )
         cur_step.env_tokens = np.array(e_tokens)
         cur_step.env_masks = np.array(e_masks)
+        if cur_step.routed_experts is not None and len(e_tokens) > 0:
+          env_pad_experts = np.full(
+              (len(e_tokens),) + cur_step.routed_experts.shape[1:],
+              common.UNSET_ROUTED_EXPERT,
+              dtype=cur_step.routed_experts.dtype,
+          )
+          cur_step.routed_experts = np.concatenate(
+              [cur_step.routed_experts, env_pad_experts], axis=0
+          )
         self._response_token_count += len(e_tokens)
 
     if step_timed_out:

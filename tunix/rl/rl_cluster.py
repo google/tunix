@@ -889,6 +889,12 @@ class RLEngine:
           itertools.chain.from_iterable(out.logits for out in outputs)  # pyrefly: ignore[bad-argument-type]
       )
 
+    routed_experts = None
+    if outputs[0].routed_experts is not None:
+      routed_experts = list(
+          itertools.chain.from_iterable(out.routed_experts for out in outputs)
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -899,6 +905,7 @@ class RLEngine:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
+        routed_experts=routed_experts,
     )
 
   def per_token_logps(

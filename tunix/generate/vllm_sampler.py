@@ -578,7 +578,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if top_p is not None:
         sampling_params.top_p = top_p
       if top_k is not None:
-        sampling_params.top_k = top_k
+        # In vLLM SamplingParams, -1 disables top_k. If caller passes 0, normalize to -1.
+        sampling_params.top_k = -1 if top_k <= 0 else top_k
       if seed is not None:
         sampling_params.seed = seed
 

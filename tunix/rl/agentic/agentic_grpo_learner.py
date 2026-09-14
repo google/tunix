@@ -342,8 +342,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         **optional_metrics,
         "sample_mask/kept_frac": common.mean_of_means,
         "sampler_is/token_logdiff_absmean": common.mean_of_means,
+        "sampler_is/token_logdiff_absmax": np.max,
+        "sampler_is/token_outlier_frac": common.mean_of_means,
+        # Already per-sequence within a micro-batch, so pooling is a mean of
+        # those means -- the same convention as the other per-sequence metrics.
+        "sampler_is/token_outliers_per_seq": common.mean_of_means,
         "sampler_is/token_weight_mean": common.mean_of_means,
         "sampler_is/token_weight_max": np.max,
+        "sampler_is/token_weight_min": np.min,
         "sampler_is/seq_geomean_mean": common.mean_of_means,
         "sampler_is/seq_geomean_min": np.min,
         "sampler_is/seq_geomean_max": np.max,
@@ -366,6 +372,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "advantage/nonzero_frac": common.mean_of_means,
         "sampler_is/weight_mean": common.mean_of_means,
         "sampler_is/weight_min": np.min,
+        "router_agreement/exact_match": common.mean_of_means,
+        "router_agreement/topk_overlap_frac": common.mean_of_means,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
@@ -616,6 +624,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_tokens_list: List[np.ndarray] = []
     completion_masks_list: List[np.ndarray] = []
     old_logprobs_list: List[np.ndarray] = []
+    routed_experts_list: List[np.ndarray | None] = []
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
     raw_completion_lengths: List[int] = []
@@ -639,6 +648,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
       completion_masks_list.append(item.traj.get("conversation_masks"))
       old_logprobs_list.append(item.traj.get("old_logprobs"))
+      routed_experts_list.append(item.traj.get("routed_experts"))
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
@@ -673,14 +683,29 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_completion_ids = []
     padded_completion_masks = []
     padded_old_logprobs = []
+    padded_routed_experts = []
+
+    has_routed_experts = any(re is not None for re in routed_experts_list)
+    ref_expert_shape = (
+        next(re.shape[1:] for re in routed_experts_list if re is not None)
+        if has_routed_experts
+        else None
+    )
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
-    for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
+    for (
+        prompt_tokens,
+        completion_tokens,
+        completion_mask,
+        old_logprobs,
+        routed_experts,
+    ) in zip(
         prompt_tokens_list,
         completion_tokens_list,
         completion_masks_list,
         old_logprobs_list,
+        routed_experts_list,
     ):
       raw_completion_lengths.append(
           min(len(completion_tokens), max_response_length)
@@ -720,11 +745,33 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           padded_old_logprobs.append(
               np.zeros(max_response_length, dtype=np.float32)
           )
+      if has_routed_experts:
+        if routed_experts is not None:
+          pad_width = max_response_length - len(routed_experts)
+          if pad_width > 0:
+            pad_arr = np.full(
+                (pad_width,) + ref_expert_shape,
+                common.UNSET_ROUTED_EXPERT,
+                dtype=routed_experts.dtype,
+            )
+            re_padded = np.concatenate([routed_experts, pad_arr], axis=0)
+          else:
+            re_padded = routed_experts[:max_response_length]
+        else:
+          re_padded = np.full(
+              (max_response_length,) + ref_expert_shape,
+              common.UNSET_ROUTED_EXPERT,
+              dtype=np.int32,
+          )
+        padded_routed_experts.append(re_padded)
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
     prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    routed_experts_arr = (
+        jnp.asarray(padded_routed_experts) if has_routed_experts else None
+    )
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
@@ -1012,6 +1059,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_weights=sampler_is_weights,
         rollout_per_token_logps=rollout_per_token_logps,
         overlong=jnp.asarray(overlong_flags, dtype=jnp.float32),
+        routed_experts=routed_experts_arr,
     )
     return [combined_batch]
 

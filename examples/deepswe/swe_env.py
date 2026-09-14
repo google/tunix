@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Optional, cast
 import numpy as np
 
@@ -144,6 +145,7 @@ def _init_global_fleet(
     effective_max_concurrent = max(
         max_concurrency, batch_size * num_generations * 2
     )
+    ready_timeout = int(os.getenv("SANDBOX_READY_TIMEOUT", "900"))
     fleet_cfg = FleetConfig(
         clusters=[
             ClusterConfig(
@@ -158,6 +160,7 @@ def _init_global_fleet(
         max_warmpool_size=max_warmpool_replicas
         if max_warmpool_replicas is not None
         else num_generations,
+        ready_timeout=ready_timeout,
         warm_per_task=True,
     )
     fleet_inst = SandboxFleet(fleet_cfg)
@@ -461,7 +464,45 @@ class SWEEnv(BaseTaskEnv):
             image=self.entry.get("docker_image", "default"),
             metadata={"ds": self.entry},
         )
-        self.handle = fleet.acquire(task)
+        max_acquire_attempts = int(os.getenv("SANDBOX_ACQUIRE_RETRIES", "3"))
+        for attempt in range(1, max_acquire_attempts + 1):
+          try:
+            self.handle = fleet.acquire(task)
+            break
+          except Exception as e:
+            err_str = str(e)
+            if "SandboxWarmPool" in type(e).__name__ or "SandboxWarmPool requested does not exist" in err_str:
+              logging.warning(
+                  "[SWEEnv] Warm pool missing for task image %s; creating on-demand warm pool...",
+                  task.image,
+              )
+              try:
+                # Evict from in-memory cache so warm_images doesn't think it already has replicas
+                if hasattr(fleet, "_warmed") and isinstance(fleet._warmed, dict):
+                  fleet._warmed.pop(task.image, None)
+                fleet.warm_images([task.image], replicas_override=1, wait=True)
+              except Exception as warm_err:
+                logging.warning("[SWEEnv] Dynamic warm_images note: %s", warm_err)
+            if attempt == max_acquire_attempts:
+              logging.error(
+                  "[SWEEnv] Failed to acquire SandboxHandle for task %s after"
+                  " %d attempts: %s",
+                  task.id,
+                  max_acquire_attempts,
+                  e,
+              )
+              raise
+            wait_s = 5 * attempt
+            logging.warning(
+                "[SWEEnv] acquire attempt %d/%d failed with %s: %s; retrying in"
+                " %ds...",
+                attempt,
+                max_acquire_attempts,
+                type(e).__name__,
+                e,
+                wait_s,
+            )
+            time.sleep(wait_s)
         # TODO(wuhao): Revisit command_files once other harnesses (such as OpenHands) are supported.
         cmd_files = r2egym_command_files()
         self.env = make_fleet_repo_env(self.handle, command_files=cmd_files)

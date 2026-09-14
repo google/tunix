@@ -407,6 +407,7 @@ def model_call_contains(model, target_arg: str) -> bool:
         "return_entropy",
         "temperature",
         "chunk_size",
+        "return_routed_experts",
     ),
 )
 def compute_per_token_logps(
@@ -424,7 +425,8 @@ def compute_per_token_logps(
     temperature: float = 1.0,
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    return_routed_experts: bool = False,
+) -> jax.Array | tuple[jax.Array, ...]:
   """Computes the per-token log probabilities.
 
   Args:
@@ -511,7 +513,7 @@ def compute_per_token_logps(
   ):
     model_kwargs["forced_routed_experts"] = routed_experts
 
-  outputs, _ = model(input_tokens, **model_kwargs)
+  outputs, extra = model(input_tokens, **model_kwargs)
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
@@ -522,6 +524,14 @@ def compute_per_token_logps(
     logits_to_keep = completion_tokens.shape[1]
 
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+
+  trainer_routed_experts = None
+  if extra is not None and hasattr(extra, "ndim") and extra.ndim >= 3:
+    # extra is [B, T_full, L, K], slice to completion tokens if not packed
+    if segment_ids is None and extra.shape[1] > logits_to_keep:
+      trainer_routed_experts = extra[:, -logits_to_keep:, ...]
+    else:
+      trainer_routed_experts = extra
 
   if chunk_size > 0:
     hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
@@ -552,6 +562,11 @@ def compute_per_token_logps(
       if return_entropy:
         per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
 
+    if return_routed_experts:
+      if return_entropy:
+        return per_token_logps, per_token_entropy, trainer_routed_experts
+      return per_token_logps, trainer_routed_experts
+
     if return_entropy:
       return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
     return per_token_logps
@@ -573,6 +588,12 @@ def compute_per_token_logps(
     if stop_gradient:
       per_token_logps = jax.lax.stop_gradient(per_token_logps)
       logits = jax.lax.stop_gradient(logits)
+
+    if return_routed_experts:
+      if return_entropy:
+        entropy = compute_entropy_from_logits(logits)
+        return per_token_logps, entropy, trainer_routed_experts
+      return per_token_logps, trainer_routed_experts
 
     if return_entropy:
       entropy = compute_entropy_from_logits(logits)

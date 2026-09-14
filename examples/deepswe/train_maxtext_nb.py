@@ -62,6 +62,56 @@ try:
 except Exception as e:
   logging.warning("Could not patch vLLM ModelConfig.uses_mrope: %s", e)
 
+# Patch tpu_inference _reconstruct_routed_experts to handle evicted/finished requests gracefully
+try:
+  import tpu_inference.runner.tpu_runner as tr
+  _orig_reconstruct = tr._reconstruct_routed_experts
+
+  def _safe_reconstruct_routed_experts(
+      runner,
+      scheduler_output,
+      expert_indices_cpu,
+      req_ids,
+      req_ids_dp,
+      padded_num_scheduled_tokens_per_dp_rank,
+  ):
+    # Wrap runner.requests with a defaultdict-like fallback if any req_id is missing
+    orig_requests = runner.requests
+    class _SafeRequestsDict(dict):
+      def __getitem__(self, key):
+        if key in self:
+          return super().__getitem__(key)
+        # Return a dummy CachedRequestState with empty block_ids so slots map to 0 without KeyError
+        from tpu_inference.runner.input_batch import CachedRequestState
+        return CachedRequestState(
+            req_id=key,
+            prompt_token_ids=[],
+            mm_features=[],
+            sampling_params=None,
+            pooling_params=None,
+            block_ids=(),
+            num_computed_tokens=0,
+            lora_request=None,
+        )
+    safe_requests = _SafeRequestsDict(orig_requests)
+    runner.requests = safe_requests
+    try:
+      return _orig_reconstruct(
+          runner,
+          scheduler_output,
+          expert_indices_cpu,
+          req_ids,
+          req_ids_dp,
+          padded_num_scheduled_tokens_per_dp_rank,
+      )
+    finally:
+      runner.requests = orig_requests
+
+  tr._reconstruct_routed_experts = _safe_reconstruct_routed_experts
+  logging.info("Successfully monkeypatched tpu_runner._reconstruct_routed_experts with SafeRequestsDict.")
+except Exception as e:
+  logging.warning("Could not patch tpu_runner._reconstruct_routed_experts: %s", e)
+
 faulthandler.register(signal.SIGINT, all_threads=True)
 
 Dataset = datasets_lib.Dataset
@@ -937,6 +987,8 @@ trainer_config = pyconfig.initialize(
         "skip_jax_distributed_system=True",
         "load_checkpoint_only_once=True",
         "use_standalone_converter=False",
+        "override_model_config=True",
+        "use_mrope=False",
         "log_config=False",
         "allow_split_physical_axes=True",
     ],
@@ -958,7 +1010,9 @@ sampler_config = pyconfig.initialize(
         f"max_prefill_predict_length={MAX_PROMPT_LENGTH}",
         f"dtype={args.dtype}",
         "attention=vllm_rpa",
+        f"float32_gate_logits={args.float32_gate_logits}",
         "use_mrope=False",
+        "override_model_config=True",
         "skip_jax_distributed_system=True",
         "remat_policy=none",
         "use_standalone_converter=False",
@@ -1131,6 +1185,7 @@ base_rollout_dict = {
     "top_k": TOP_K,
     "kv_cache_size": KV_CACHE_SIZE,
     "return_logprobs": USE_ROLLOUT_LOGPS,
+    "return_routed_experts": True,
 }
 
 vllm_rollout_dict = {
@@ -1152,6 +1207,7 @@ vllm_rollout_dict = {
         "tokenizer": tokenizer_path,
         "dtype": "bfloat16",
         "enable_expert_parallel": False,
+        "generation_config": "vllm",
         "hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
     },
     "rollout_mapping_config": {},
@@ -1166,6 +1222,7 @@ vllm_rollout_dict = {
             "prefuse_moe_weights": True,
             "remat_policy": "none",
             "enable_dp_attention": False,
+            "float32_gate_logits": args.float32_gate_logits,
             "vllm_hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
         }
     },
@@ -1253,6 +1310,12 @@ try:
       tokenizer=tokenizer,
       cluster_config=cluster_config,
   )
+  if hasattr(rl_engine, "actor_trainer") and rl_engine.actor_trainer.train_steps > 0:
+    print(
+        f"Restored actor_trainer at step {rl_engine.actor_trainer.train_steps}; syncing rl_engine.global_steps.",
+        flush=True,
+    )
+    rl_engine.global_steps = rl_engine.actor_trainer.train_steps
 except ValidationError as e:
   print("Failed to initialize RLEngine due to ValidationError:", flush=True)
   import pprint
@@ -1345,7 +1408,9 @@ except Exception as e:
   print(f"W&B initialization failed with error: {e}")
 
 print("Syncing initial checkpoint weights to rollout workers...", flush=True)
+_prev_steps = rl_engine.global_steps
 rl_engine.sync_weights()
+rl_engine.global_steps = _prev_steps
 
 if (
     CKPT_DIR

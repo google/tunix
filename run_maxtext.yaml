@@ -4,13 +4,11 @@ metadata:
   namespace: trellis
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: nt-ds-256-maxtext-v5
-  name: nt-ds-256-maxtext-v5
+    xpk.google.com/workload: nt-ds-256-maxtext-v11
+  name: nt-ds-256-maxtext-v11
 spec:
   coordinator:
     replicatedJob: pathways-head
-  failurePolicy:
-    restartStrategy: Recreate
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -19,7 +17,7 @@ spec:
     replicas: 1
     template:
       spec:
-        backoffLimit: 10
+        backoffLimit: 0
         completionMode: Indexed
         completions: 1
         parallelism: 1
@@ -28,6 +26,7 @@ spec:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
+            restartPolicy: Never
             serviceAccountName: xpk-sa
             priorityClassName: medium
             affinity:
@@ -68,7 +67,7 @@ spec:
               args:
               - --server_port=29000
               - --resource_manager_address=$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-maxtext-v5
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-maxtext-v11
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -93,7 +92,7 @@ spec:
               restartPolicy: Always
               args:
               - --server_port=29001
-              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-maxtext-v5
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-maxtext-v11
               - --node_type=resource_manager
               - --instance_count=1
               - --instance_type=tpuv5:4x8x8
@@ -107,7 +106,7 @@ spec:
               - name: ENABLE_PATHWAYS_PERSISTENCE
                 value: '1'
               - name: XLA_FLAGS
-                value: --xla_dump_to=gs://niting-storage-europe-west4/xla-dumps/qwen-35b-deepswe-v5p-256-maxtext-v5 --xla_dump_hlo_as_text --xla_dump_hlo_as_proto
+                value: --xla_dump_to=gs://niting-storage-europe-west4/xla-dumps/qwen-35b-deepswe-v5p-256-maxtext-v8 --xla_dump_hlo_as_text --xla_dump_hlo_as_proto
               ports:
               - containerPort: 29001
                 hostPort: 29001
@@ -133,16 +132,16 @@ spec:
                 echo XPK Start: $(date);
                 _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                 trap _sigterm SIGTERM;
-                (bash -c '(python3 examples/deepswe/train_maxtext_nb.py \
+                (python3 examples/deepswe/train_maxtext_nb.py \
                   --model_version Qwen3.5-35B-A3B \
                   --dataset_path gs://mlperf_dataset/r2e-gym-easy \
-                  --model_absolute_path /tmp/qwen3.5-35b-a3b \
+                  --model_absolute_path gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/scanned/0/items \
                   --scan_layers True \
                   --vllm_utilization 0.70 \
-                  --max_response_length 16384 \
+                  --max_response_length 61440 \
                   --max_prompt_length 4096 \
-                  --metric_logger_dir gs://niting-storage-europe-west4/deepswe-logs/qwen-35b-deepswe-v5p-256-maxtext-v5 \
-                  --ckpt_dir gs://niting-storage-europe-west4/deepswe-checkpoints/qwen-35b-deepswe-v5p-256-maxtext-v5 \
+                  --metric_logger_dir gs://niting-storage-europe-west4/deepswe-logs/qwen-35b-deepswe-v5p-256-maxtext-v11 \
+                  --ckpt_dir gs://niting-storage-europe-west4/deepswe-checkpoints/qwen-35b-deepswe-v5p-256-maxtext-v11 \
                   --vllm_reshard_chunk_size 1 \
                   --rollout_mesh_fsdp 32 \
                   --rollout_mesh_tp 4 \
@@ -156,7 +155,7 @@ spec:
                   --max_num_batched_tokens 32768 \
                   --overlong_filter True \
                   --enable_prefix_caching True \
-                  --save_interval_steps 5 \
+                  --save_interval_steps 1 \
                   --batch_size 16 \
                   --mini_batch_size 16 \
                   --compute_logps_micro_batch_size 4 \
@@ -166,7 +165,7 @@ spec:
                   --enable_jax_profiler True \
                   --jax_profiler_port 9999 \
                   --temperature 1.0 \
-                  --top_k 0 \
+                  --top_k -1 \
                   --top_p 1.0 \
                   --num_generations 16 \
                   --max_turns 30 \
@@ -194,12 +193,13 @@ spec:
                   --advantage_estimator grpo-loo \
                   --loss_agg_mode token-mean \
                   --float32_gate_logits True \
+                  --trainable_parameters_mask '["^(?!.*routed_experts/gate/kernel).*"]' \
                   --checkpoint_storage_use_ocdbt True \
                   --checkpoint_storage_use_zarr3 False \
                   --logging_level INFO \
                   --remat_policy decoder \
                   --docker_image_prefix europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix \
-                  --use_agent_sandbox) > >(tee -a /proc/1/fd/1 /tmp/combined.log) 2> >(tee -a /proc/1/fd/2 /tmp/combined.log >&2)') & PID=$!;
+                  --use_agent_sandbox) & PID=$!;
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
                 done;
@@ -251,15 +251,19 @@ spec:
                 value: '1'
               - name: NAMESPACE
                 value: trellis
+              - name: SANDBOX_READY_TIMEOUT
+                value: '900'
+              - name: SANDBOX_ACQUIRE_RETRIES
+                value: '3'
               - name: XLA_FLAGS
-                value: --xla_dump_to=gs://niting-storage-europe-west4/xla-dumps/qwen-35b-deepswe-v5p-256-maxtext-v5 --xla_dump_hlo_as_text --xla_dump_hlo_as_proto
+                value: --xla_dump_to=gs://niting-storage-europe-west4/xla-dumps/qwen-35b-deepswe-v5p-256-maxtext-v8 --xla_dump_hlo_as_text --xla_dump_hlo_as_proto
               resources:
                 limits:
                   cpu: '32'
-                  memory: 200Gi
+                  memory: 240Gi
                 requests:
                   cpu: '16'
-                  memory: 48Gi
+                  memory: 128Gi
               securityContext:
                 privileged: true
               volumeMounts:
@@ -274,7 +278,7 @@ spec:
     replicas: 1
     template:
       spec:
-        backoffLimit: 32
+        backoffLimit: 256
         completionMode: Indexed
         completions: 64
         parallelism: 64
@@ -285,7 +289,7 @@ spec:
               cloud.google.com/skip-tpu-webhook-check: 'true'
               cluster-autoscaler.kubernetes.io/safe-to-evict: 'false'
             labels:
-              xpk.google.com/workload: nt-ds-256-maxtext-v5
+              xpk.google.com/workload: nt-ds-256-maxtext-v11
           spec:
             serviceAccountName: xpk-sa
             priorityClassName: medium
@@ -314,7 +318,7 @@ spec:
                     - key: jobset.sigs.k8s.io/jobset-name
                       operator: In
                       values:
-                      - nt-ds-256-maxtext-v5
+                      - nt-ds-256-maxtext-v11
                     - key: jobset.sigs.k8s.io/replicatedjob-name
                       operator: In
                       values:
@@ -344,7 +348,7 @@ spec:
               args:
               - --server_port=29005
               - --resource_manager_address=$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-maxtext-v5
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-maxtext-v11
               - --node_type=worker
               - --instance_type=tpuv5:4x8x8
               env:
@@ -387,7 +391,7 @@ spec:
               - name: TPU_FLAGS
                 value: tpu_program_cache_eviction_policy=lru_program_eviction
               - name: XLA_FLAGS
-                value: --xla_dump_to=gs://niting-storage-europe-west4/xla-dumps/qwen-35b-deepswe-v5p-256-maxtext-v5 --xla_dump_hlo_as_text --xla_dump_hlo_as_proto
+                value: --xla_dump_to=gs://niting-storage-europe-west4/xla-dumps/qwen-35b-deepswe-v5p-256-maxtext-v8 --xla_dump_hlo_as_text --xla_dump_hlo_as_proto
               ports:
               - containerPort: 29005
                 protocol: TCP

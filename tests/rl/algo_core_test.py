@@ -354,6 +354,63 @@ class SequenceLossMaskTest(absltest.TestCase):
     )
 
 
+class TokenOutlierStatsTest(absltest.TestCase):
+  """Separating a few catastrophic tokens from broadly noisy ones."""
+
+  def test_uniform_small_noise_reports_no_outliers(self):
+    log_is = jnp.full((4, 100), 0.08)
+    absmax, frac, per_seq = algo_core.token_outlier_stats(
+        log_is, jnp.ones((4, 100)), 4.0
+    )
+    self.assertAlmostEqual(float(absmax), 0.08, places=5)
+    self.assertEqual(float(frac), 0.0)
+    self.assertEqual(float(per_seq), 0.0)
+
+  def test_one_catastrophic_token_per_sequence_is_counted(self):
+    # The case this metric exists for: a defect that fires once per
+    # conversation turn. Broad noise is small, but a few tokens are off by
+    # tens of nats and dominate the sequence geometric mean.
+    log_is = np.full((4, 100), 0.05, dtype=np.float32)
+    log_is[:, ::25] = -24.0  # four per sequence, as turn boundaries would be
+    absmax, frac, per_seq = algo_core.token_outlier_stats(
+        jnp.asarray(log_is), jnp.ones((4, 100)), 4.0
+    )
+    self.assertAlmostEqual(float(absmax), 24.0, places=4)
+    self.assertAlmostEqual(float(frac), 16 / 400, places=6)
+    self.assertAlmostEqual(float(per_seq), 4.0, places=5)
+
+  def test_absmean_alone_would_miss_it(self):
+    # Guards the premise. Both arrays have a similar mean |log_is|, but only
+    # one is pathological -- which is exactly why the mean cannot be the only
+    # thing reported.
+    spread = jnp.full((1, 100), 0.25)
+    spiky = np.zeros((1, 100), dtype=np.float32)
+    spiky[0, :1] = -25.0
+    spiky = jnp.asarray(spiky)
+    mask = jnp.ones((1, 100))
+    self.assertAlmostEqual(
+        float(jnp.abs(spread).mean()), float(jnp.abs(spiky).mean()), places=6
+    )
+    self.assertEqual(float(algo_core.token_outlier_stats(spread, mask, 1.0)[2]), 0.0)
+    self.assertEqual(float(algo_core.token_outlier_stats(spiky, mask, 1.0)[2]), 1.0)
+
+  def test_masked_tokens_are_ignored(self):
+    log_is = jnp.array([[0.0, 0.0, -30.0]])
+    mask = jnp.array([[1.0, 1.0, 0.0]])
+    absmax, frac, per_seq = algo_core.token_outlier_stats(log_is, mask, 1.0)
+    self.assertEqual(float(absmax), 0.0)
+    self.assertEqual(float(frac), 0.0)
+    self.assertEqual(float(per_seq), 0.0)
+
+  def test_fully_masked_batch_is_neutral(self):
+    absmax, frac, per_seq = algo_core.token_outlier_stats(
+        jnp.full((2, 3), -40.0), jnp.zeros((2, 3)), 1.0
+    )
+    self.assertEqual(float(absmax), 0.0)
+    self.assertEqual(float(frac), 0.0)
+    self.assertEqual(float(per_seq), 0.0)
+
+
 class SequenceMultProbErrorTest(absltest.TestCase):
   """The log-probability disagreement gate."""
 

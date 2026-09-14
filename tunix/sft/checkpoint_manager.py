@@ -67,15 +67,30 @@ def _replicate_if_pspec_uses_unknown_mesh_axis(
   return pspec
 
 
+def _is_sharding_leaf(x: Any) -> bool:
+  return isinstance(x, nnx.Variable) or type(x).__name__ == 'MaskedNode'
+
+
 def _get_named_sharding(
     state: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh
 ) -> Any:
   partition_specs = nnx.get_partition_spec(state)
+
+  def _to_sharding(pspec: Any) -> Any:
+    val = pspec.get_value() if isinstance(pspec, nnx.Variable) else pspec
+    if type(val).__name__ == 'MaskedNode':
+      return pspec
+    if val is None:
+      val = jax.sharding.PartitionSpec()
+    shd = jax.sharding.NamedSharding(
+        mesh, _replicate_if_pspec_uses_unknown_mesh_axis(val, mesh)
+    )
+    return nnx.Variable(shd) if isinstance(pspec, nnx.Variable) else shd
+
   return jax.tree_util.tree_map(
-      lambda pspec: jax.sharding.NamedSharding(
-          mesh, _replicate_if_pspec_uses_unknown_mesh_axis(pspec, mesh)
-      ),
+      _to_sharding,
       partition_specs,
+      is_leaf=_is_sharding_leaf,
   )
 
 
@@ -110,14 +125,24 @@ def _fix_sharding(state: Any) -> Any:
     return state
 
   target_shardings = _get_named_sharding(state, mesh)
+
+  def _to_shape_dtype(x: Any, shd: Any) -> Any:
+    val = x.get_value() if isinstance(x, nnx.Variable) else x
+    if type(val).__name__ == 'MaskedNode':
+      return x
+    sharding = shd.get_value() if isinstance(shd, nnx.Variable) else shd
+    struct = jax.ShapeDtypeStruct(
+        getattr(val, 'shape', ()),
+        getattr(val, 'dtype', jax.numpy.asarray(val).dtype),
+        sharding=sharding,
+    )
+    return nnx.Variable(struct) if isinstance(x, nnx.Variable) else struct
+
   return jax.tree_util.tree_map(
-      lambda x, shd: jax.ShapeDtypeStruct(
-          getattr(x, 'shape', ()),
-          getattr(x, 'dtype', jax.numpy.asarray(x).dtype),
-          sharding=shd,
-      ),
+      _to_shape_dtype,
       state,
       target_shardings,
+      is_leaf=_is_sharding_leaf,
   )
 
 

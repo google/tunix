@@ -83,6 +83,7 @@ class Step:
   env_tokens: Optional[np.ndarray] = None
   env_masks: Optional[np.ndarray] = None
   logprobs: Optional[np.ndarray] = None
+  routed_experts: Optional[np.ndarray] = None
 
 
 class TrajectoryStatus(Enum):

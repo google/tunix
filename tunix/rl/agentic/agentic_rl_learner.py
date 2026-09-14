@@ -1104,6 +1104,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 ("pg_clipfrac", "clipfrac"),
                 ("sample_mask/kept_frac", "kept_frac"),
                 ("tis/is_oob_ratio", "is_oob"),
+                ("router_agreement/exact_match", "router_match"),
+                ("router_agreement/topk_overlap_frac", "router_overlap"),
             ):
               if key in am:
                 vals, _ = am[key]

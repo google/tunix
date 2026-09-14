@@ -1,5 +1,5 @@
-maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@8c2e29218c01b6287ba85e8d0dc9555561f7634c
-maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@8c2e29218c01b6287ba85e8d0dc9555561f7634c#subdirectory=src/maxtext/integration/vllm
+maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@niting-rl_mlperf_temp
+maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@niting-rl_mlperf_temp#subdirectory=src/maxtext/integration/vllm
 aqtp
 tokamax>=0.0.4
 drjax>=0.1.4
