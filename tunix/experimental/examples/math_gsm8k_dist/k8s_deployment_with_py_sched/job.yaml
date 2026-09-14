@@ -1,0 +1,161 @@
+# GKE Job: 6-rollout-worker GSM8K GRPO demo with the py-inference-scheduler
+# sidecar, on a single ct5lp-hightpu-8t (TPU v5e 2x4, 8 chips) node.
+#
+# Chip layout inside the pod (one host, partitioned by launcher.sh):
+#   trainer: chip 0   rollout workers 0..5: chips 1..6 (1 chip each, chip 7 idle)
+#
+# The scheduler runs as a NATIVE SIDECAR (initContainer with
+# restartPolicy: Always, needs GKE >= 1.29): it starts before the main
+# container and does not block Job completion.
+#
+# Replace PROJECT_ID / repo names with your Artifact Registry paths.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tunix-gsm8k-grpo-6w
+  labels:
+    app: tunix-gsm8k-grpo
+spec:
+  # Spot preemptions kill pods through no fault of the workload; let the
+  # Job re-queue its pod so the next capacity grant is captured automatically.
+  backoffLimit: 8
+  template:
+    metadata:
+      labels:
+        app: tunix-gsm8k-grpo
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+        # The TPU pool runs on Spot capacity (cheaper, preemptible).
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        - name: scheduler
+          image: <path-to-your-docker-registry-here>/py-rl-scheduler:latest
+          restartPolicy: Always  # native sidecar
+          args:
+            - --host=0.0.0.0
+            - --port=8100
+            - --config=integration/tunix/examples/scheduler.yaml
+          ports:
+            - containerPort: 8100
+              name: http
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+      containers:
+        - name: tunix
+          image: <path-to-your-docker-registry-here>/tunix-tpu:latest
+          workingDir: /app
+          command:
+            - bash
+            - -c
+            # Pre-fetch the public model anonymously: the launcher's own
+            # downloader calls hf.login(), which dead-ends headless (verified
+            # in-cluster 2026-08-26).
+            - >-
+              python3 -c "from huggingface_hub import snapshot_download;
+              snapshot_download('Qwen/Qwen3-1.7B', local_dir='/artifacts/models')"
+              && exec bash tunix/experimental/examples/math_gsm8k_dist/launcher.sh
+          env:
+            - name: MODEL_ID
+              value: Qwen/Qwen3-1.7B
+            - name: MODEL_NAME
+              value: Qwen3-1.7B
+            - name: ARTIFACT_ROOT
+              value: /artifacts
+            - name: MODEL_DIR
+              value: /artifacts/models
+            - name: TOKENIZER_PATH
+              value: /artifacts/models
+            # 1-chip trainer needs a 1x1 mesh (launcher defaults are fsdp=1,tp=2
+            # for a 2-chip trainer; env names follow the launcher's knobs).
+            # Single-pod layout: discovery server and all workers share one
+            # container, so the discovery address must be localhost (the
+            # launcher default "orchestrator" is a multi-pod k8s service name).
+            # Topology: launcher defaults (trainer chips 0,1 + ONE rollout
+            # node on chips 2,3; bounds 1,2,1) — the post-review launcher runs
+            # a single rollout worker; multi-worker launch loop is a pending
+            # launcher restoration. Chips 4-7 idle on a v6e-8.
+            # GKE injects TPU_CHIPS_PER_HOST_BOUNDS with the FULL host topology
+            # (2,4,1 on v6e-8) into TPU containers; per-process bounds must be
+            # overridden to each worker's sub-slice (launcher default topology
+            # uses 2-chip processes) or libtpu fails with expected-8-actual-2.
+            - name: TPU_CHIPS_PER_HOST_BOUNDS
+              value: "1,2,1"
+            - name: TPU_HOST_BOUNDS
+              value: "1,1,1"
+            - name: ORCHESTRATOR_ID
+              value: localhost
+            # LoRA keeps the 1-chip trainer comfortably inside a single
+            # chip's HBM (16GB v5e / 32GB v6e).
+            # No reference inference worker in this layout; BETA=0 disables
+            # KL (launcher default is 0.04 which hard-requires one).
+            - name: BETA
+              value: "0"
+            - name: USE_LORA
+              value: "1"
+            # Enough per-step requests (4x4=16) to make 6-worker routing visible.
+            - name: BATCH_SIZE
+              value: "4"
+            - name: NUM_GENERATIONS
+              value: "4"
+            - name: MAX_STEPS
+              value: "3"
+            # Decision sidecar (same pod -> localhost).
+            - name: SCHEDULER_URL
+              value: http://localhost:8100
+            # Qwen3-1.7B is public; uncomment for gated models.
+            # - name: HF_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: hf-token
+            #       key: token
+            # --- W&B metrics (the only durable sink; TensorBoard files die
+            # with the pod). Without a key, wandb.init(anonymous="allow")
+            # logs to a throwaway anonymous account — avoid that.
+            # Create per cluster:
+            #   kubectl create secret generic wandb-credentials \
+            #     --from-literal=api-key=$WANDB_API_KEY
+            - name: WANDB_PROJECT
+              value: trellis-gsm8k
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-credentials
+                  key: api-key
+                  optional: true
+          resources:
+            requests:
+              google.com/tpu: "8"
+              cpu: "48"
+              memory: 200Gi
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: artifacts
+              mountPath: /artifacts
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: artifacts
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
