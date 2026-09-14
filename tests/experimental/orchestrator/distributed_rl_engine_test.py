@@ -1060,11 +1060,11 @@ class DistributedRLEngineTest(absltest.TestCase):
           router.calls,
           [
               (
-                  "generate",
+                  None,
                   {"route_key": 7, "request_id": "r1", "prompt": "p1"},
               ),
               (
-                  "generate",
+                  None,
                   {"route_key": "prompt_2", "request_id": "r2", "prompt": "p2"},
               ),
           ],
@@ -1096,7 +1096,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertLen(results, 1)
       self.assertEqual(
           router.calls,
-          [("generate", {"route_key": 3, "request_id": "r1", "prompt": "p1"})],
+          [(None, {"route_key": 3, "request_id": "r1", "prompt": "p1"})],
       )
       self.mock_rollout_1.generate.assert_called_once()
       self.mock_rollout_2.generate.assert_not_called()
@@ -1121,7 +1121,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertLen(results, 1)
       self.assertLen(router.calls, 1)
       method_name, hints = router.calls[0]
-      self.assertEqual(method_name, "generate")
+      self.assertIsNone(method_name)
       self.assertEqual(hints["route_key"], "h1")
       self.assertEqual(hints["prompt"], "p1")
       # request_id is auto-generated for dict items; only require presence.

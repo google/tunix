@@ -83,18 +83,20 @@ class _FakeSidecar:
 
 
 class _FakeActor:
+  """Mimics the ActorHandle surface: remote methods are invoked by name."""
 
   def __init__(self, worker_id, state=datatypes.WorkerState.READY, **report):
     self.worker_id = worker_id
     self.report = datatypes.HealthReport(state=state, **report)
 
-  def info(self):
-    return datatypes.WorkerInfo(
-        worker_id=self.worker_id, roles=frozenset({"rollout"})
-    )
-
-  def heartbeat(self):
-    return self.report
+  async def asubmit(self, method_name=None, *args, **kwargs):
+    if method_name == "info":
+      return datatypes.WorkerInfo(
+          worker_id=self.worker_id, roles=frozenset({"rollout"})
+      )
+    if method_name == "heartbeat":
+      return self.report
+    raise AttributeError(method_name)
 
 
 def _router(url, **kwargs):
@@ -121,7 +123,16 @@ class RemoteSchedulerRouterTest(absltest.TestCase):
       sidecar.pick_name = "rollout-1"
       router = _router(sidecar.url)
       try:
-        picked = router(actors, "generate", (), {"route_key": "k"})
+        # Worker names resolve asynchronously in the poller, so route until
+        # the payload carries the real worker_ids.
+        picked = _call_until(
+            router,
+            actors,
+            lambda: sidecar.payloads
+            and {c["name"] for c in sidecar.payloads[-1]["candidates"]}
+            == {"rollout-0", "rollout-1"},
+            route_key="k",
+        )
         self.assertIs(picked, actors[1])
       finally:
         router.stop()
