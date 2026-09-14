@@ -1,12 +1,14 @@
 # Distributed DeepSWE GRPO Pipeline
 
-This example is the first DeepSWE-specific version of the experimental
-distributed RL pipeline. It follows the same control-plane shape as the
-distributed GSM8K example:
+This example ports the non-experimental `examples/deepswe` recipe to the
+experimental distributed RL control plane. It reuses the recipe's
+`examples/deepswe/deepswe_data.py`, `examples/deepswe/swe_agent.py`, and
+`examples/deepswe/swe_env.py` directly; only the distributed registry and
+request wiring, orchestration, and launchers live in this directory.
 
 1. `run_deepswe_dist.py` runs the CPU orchestrator.
-2. `../common/run_rollout_node.py` runs a rollout worker configured with
-   DeepSWE's `SWEEnv` and `SWEAgent`.
+2. `../common/run_rollout_node.py` runs a rollout worker configured with the
+   original recipe's `swe_env.SWEEnv` and `swe_agent.SWEAgent` implementations.
 3. The trainer worker is reused from `../common/run_trainer_node.py` because it
    is already a generic PeftTrainer V2 worker.
 
