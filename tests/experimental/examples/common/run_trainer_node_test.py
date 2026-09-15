@@ -493,6 +493,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "8",
         "--train_micro_batch_size",
         "4",
+        "--sampler_type",
+        "vllm",
     ]
     args_custom = run_trainer_node._parse_args(custom_argv)
     self.assertEqual(args_custom.port, 20050)
@@ -519,6 +521,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.mini_batch_size, 2)
     self.assertEqual(args_custom.num_generations, 8)
     self.assertEqual(args_custom.train_micro_batch_size, 4)
+    self.assertEqual(args_custom.sampler_type, "vllm")
 
   def test_checkpointing_options_zero_is_read_only(self):
     args = mock.Mock(

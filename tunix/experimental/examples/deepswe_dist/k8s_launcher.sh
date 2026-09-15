@@ -251,7 +251,7 @@ start_trainer() {
         --learning_rate=${LEARNING_RATE} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --sampler=${SAMPLER} \
+        --sampler_type=${SAMPLER} \
         ${lora_args} \
         ${maxtext_args} \
         ${DEBUG:+--debug} \
