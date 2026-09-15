@@ -406,6 +406,37 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_create_maxtext.assert_called_once_with(args_maxtext)
     mock_create_tunix.assert_not_called()
 
+  @mock.patch.object(run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0)
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True)
+  def test_create_maxtext_trainer_factory_plumbs_max_seq_token_per_tpu(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--max_seq_token_per_tpu", "4096",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("max_seq_token_per_tpu"), 4096
+    )
+
+  @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer", return_value="/tmp/test")
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
+  def test_create_tunix_trainer_factory_plumbs_max_seq_token_per_tpu(
+      self, mock_training_config, mock_load_model, mock_create_mesh, mock_ensure_dir
+  ):
+    args = run_trainer_node._parse_args([
+        "--max_seq_token_per_tpu", "4096",
+    ])
+    run_trainer_node._create_tunix_trainer_factory(args)
+    mock_training_config.assert_called_once()
+    self.assertEqual(
+        mock_training_config.call_args.kwargs.get("max_seq_token_per_tpu"), 4096
+    )
+
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       run_trainer_node.main([], context=None)
@@ -452,6 +483,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.rollout_mesh_tp, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
+    self.assertEqual(args.max_seq_token_per_tpu, 0)
 
     custom_argv = [
         "--port",
@@ -466,6 +498,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "2",
         "--rollout_mesh_tp",
         "8",
+        "--max_seq_token_per_tpu",
+        "4096",
         "--prefuse_moe_weights=false",
         "--use_weight_converter=false",
         "--checkpoint_save_interval_steps",
@@ -503,6 +537,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.mesh_fsdp, 4)
     self.assertEqual(args_custom.mesh_tp, 2)
     self.assertEqual(args_custom.rollout_mesh_tp, 8)
+    self.assertEqual(args_custom.max_seq_token_per_tpu, 4096)
     self.assertFalse(args_custom.prefuse_moe_weights)
     self.assertFalse(args_custom.use_weight_converter)
     self.assertEqual(args_custom.checkpoint_save_interval_steps, 5)
