@@ -240,7 +240,9 @@ class TrajectoryCollectorEngine:
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata.setdefault("text", rl_traj.get("conversation_text", ""))
-    metadata["reward"] = float(rl_traj.get("trajectory_reward", 0.0) or 0.0)
+    metadata["trajectory_reward"] = float(
+        rl_traj.get("trajectory_reward", 0.0) or 0.0
+    )
     metadata["status"] = rl_traj.get("status", "")
     policy_version = getattr(
         self.request,

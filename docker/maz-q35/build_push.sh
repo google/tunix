@@ -45,8 +45,9 @@ python3 - <<PY
 import inspect
 
 from maxtext.training_engine import checkpointing, maxtext_engine
-from tunix.experimental.examples.common import run_rollout_node
-from tunix.experimental.rollout import vllm_sampler_adapter
+from tunix.experimental.examples.common import run_rollout_node, run_trainer_node
+from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.rollout import collector, vllm_sampler_adapter
 from tunix.experimental.worker import remote_execution
 from tunix.utils import maxtext_utils
 
@@ -72,7 +73,25 @@ assert "CKPT_D2H_CONCURRENT_GB" in inspect.getsource(
     maxtext_utils.build_maxtext_config)
 assert hasattr(remote_execution, "_is_unrecoverable_runtime_error")
 
-print("ok: all four overlay patches are live in the image")
+# tunix-0003: upstream bf13cd2c. Exercise _extract_reward rather than reading its
+# source: it must return the rollout key and refuse the old one, not default to 0.0.
+assert rl_program._extract_reward({"trajectory_reward": 1.5}) == 1.5
+try:
+  rl_program._extract_reward({"reward": 1.5})
+except KeyError:
+  pass
+else:
+  raise AssertionError("_extract_reward still accepts the pre-bf13cd2c key")
+assert "trajectory_reward" in inspect.getsource(
+    collector.TrajectoryCollectorEngine)
+
+# tunix-0004: the packing budget has to reach max_target_length through both the
+# trainer node argument and build_maxtext_config.
+assert "max_seq_token_per_tpu" in inspect.signature(
+    maxtext_utils.build_maxtext_config).parameters
+assert "--max_seq_token_per_tpu" in inspect.getsource(run_trainer_node)
+
+print("ok: all six overlay patches are live in the image")
 PY'
 
 if [ "${PUSH}" != "true" ]; then

@@ -39,9 +39,10 @@ export PRIORITY_CLASS_NAME=medium
 # --- Images ------------------------------------------------------------------
 # Pinned by digest, not tag. A tag can be repointed between the three `kubectl apply`s,
 # and weight sync requires the orchestrator, trainer and rollout to run identical code.
-# This is Yixuan's yixuann-e2e-0912head-v8 plus four patches: MaxText PR 5219 and 5234,
-# tunix PR 2229 and the in-image part of tunix PR 2228 (see docker/maz-q35/Dockerfile).
-export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:e1eebd24adc53e573863e509b22c352b82400d61fb7e00a91599d038ef8198f2
+# This is Yixuan's yixuann-e2e-0912head-v8 plus six patches: MaxText PR 5219 and 5234,
+# tunix PR 2229, the in-image part of tunix PR 2228, upstream tunix bf13cd2c for the
+# trajectory reward key, and the packing budget fix (see docker/maz-q35/Dockerfile).
+export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:3a8cab3879e655ade728ff3841911b1b2b6b2efa648d1e06b7cae42f6757a4dc
 export PATHWAYS_SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904
 export PATHWAYS_PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904
 

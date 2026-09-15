@@ -103,6 +103,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=0,
+      help=(
+          "Sequence packing budget per packed row. Must match the value the"
+          " orchestrator packs with, since it sets the trainer's"
+          " max_target_length. 0 leaves it at"
+          " max_prompt_length + max_response_length."
+      ),
+  )
+  parser.add_argument(
       "--mini_batch_size",
       type=int,
       default=1,
@@ -543,6 +554,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
       ("rollout_mesh_tp", args.rollout_mesh_tp),
       ("prefuse_moe_weights", args.prefuse_moe_weights),
       ("use_weight_converter", args.use_weight_converter),
+      ("max_seq_token_per_tpu", args.max_seq_token_per_tpu),
   ]:
     if k in sig.parameters:
       extra_cfg_kwargs[k] = v

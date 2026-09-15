@@ -1,0 +1,64 @@
+diff --git a/tunix/experimental/examples/common/run_trainer_node.py b/tunix/experimental/examples/common/run_trainer_node.py
+index eb4e261f..d34f2c7d 100644
+--- a/tunix/experimental/examples/common/run_trainer_node.py
++++ b/tunix/experimental/examples/common/run_trainer_node.py
+@@ -102,6 +102,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
+   parser.add_argument("--mesh_expert", type=int, default=1)
+   parser.add_argument("--max_prompt_length", type=int, default=512)
+   parser.add_argument("--max_response_length", type=int, default=128)
++  parser.add_argument(
++      "--max_seq_token_per_tpu",
++      type=int,
++      default=0,
++      help=(
++          "Sequence packing budget per packed row. Must match the value the"
++          " orchestrator packs with, since it sets the trainer's"
++          " max_target_length. 0 leaves it at"
++          " max_prompt_length + max_response_length."
++      ),
++  )
+   parser.add_argument(
+       "--mini_batch_size",
+       type=int,
+@@ -543,6 +554,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
+       ("rollout_mesh_tp", args.rollout_mesh_tp),
+       ("prefuse_moe_weights", args.prefuse_moe_weights),
+       ("use_weight_converter", args.use_weight_converter),
++      ("max_seq_token_per_tpu", args.max_seq_token_per_tpu),
+   ]:
+     if k in sig.parameters:
+       extra_cfg_kwargs[k] = v
+diff --git a/tunix/utils/maxtext_utils.py b/tunix/utils/maxtext_utils.py
+index ad8c0969..abac6d5d 100644
+--- a/tunix/utils/maxtext_utils.py
++++ b/tunix/utils/maxtext_utils.py
+@@ -120,10 +120,20 @@ def build_maxtext_config(
+     rollout_mesh_tp: int = 0,
+     prefuse_moe_weights: bool = False,
+     use_weight_converter: bool = True,
++    max_seq_token_per_tpu: int = 0,
+ ) -> Any:
+   """Builds the MaxText HyperParameters the training engine runs on."""
+   pyconfig, _, _ = maxtext_modules()
+ 
++  # A packed row holds several trajectories, so the trainer's sequence length is
++  # the packing budget, not one trajectory's worth. Pinning max_target_length to
++  # max_prompt_length + max_response_length makes packing a no-op by
++  # construction: batch_assembly rejects any budget below that sum, so the
++  # smallest legal budget is exactly one maximal trajectory per row.
++  max_target_length = max(
++      max_prompt_length + max_response_length, max_seq_token_per_tpu
++  )
++
+   # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
+   if rollout_mesh_tp > 0:
+     if kv_tp_size == 0:
+@@ -309,7 +319,7 @@ def build_maxtext_config(
+       "skip_jax_distributed_system=True",
+       f"per_device_batch_size={per_device_batch_size}",
+       f"gradient_accumulation_steps={gradient_accumulation_steps}",
+-      f"max_target_length={max_prompt_length + max_response_length}",
++      f"max_target_length={max_target_length}",
+       "attention=dot_product",
+       "use_tokamax_gmm=true",
+       "use_gmm_v2=true",

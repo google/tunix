@@ -120,9 +120,19 @@ def build_maxtext_config(
     rollout_mesh_tp: int = 0,
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
+    max_seq_token_per_tpu: int = 0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
+
+  # A packed row holds several trajectories, so the trainer's sequence length is
+  # the packing budget, not one trajectory's worth. Pinning max_target_length to
+  # max_prompt_length + max_response_length makes packing a no-op by
+  # construction: batch_assembly rejects any budget below that sum, so the
+  # smallest legal budget is exactly one maximal trajectory per row.
+  max_target_length = max(
+      max_prompt_length + max_response_length, max_seq_token_per_tpu
+  )
 
   # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
   if rollout_mesh_tp > 0:
@@ -309,7 +319,7 @@ def build_maxtext_config(
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
-      f"max_target_length={max_prompt_length + max_response_length}",
+      f"max_target_length={max_target_length}",
       "attention=dot_product",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",

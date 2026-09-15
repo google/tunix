@@ -43,22 +43,38 @@ BatchConfig = batch_assembly.BatchConfig
 
 
 def _extract_reward(item: Any) -> float:
-  """Safely extracts scalar reward from a TrajectoryItem or trajectory payload."""
-  if item is None:
-    return 0.0
+  """Extracts the scalar trajectory reward from a TrajectoryItem.
+
+  The orchestrator consumes only "Token"-mode trajectories, which are plain
+  dicts carrying `trajectory_reward` (see
+  `tunix.rl.agentic.trajectory.trajectory_collect_engine`). Anything else is
+  rejected rather than coerced.
+
+  There is deliberately no default to avoid a silent failure.
+
+  Args:
+    item: A `TrajectoryItem`, or a raw trajectory mapping.
+
+  Returns:
+    The trajectory reward as a float.
+
+  Raises:
+    TypeError: If the trajectory is not a mapping.
+    KeyError: If the mapping has no `trajectory_reward` entry.
+  """
   traj = getattr(item, "traj", item)
-  if isinstance(traj, dict):
-    return float(traj.get("reward", 0.0))
-  if hasattr(traj, "reward"):
-    return float(getattr(traj, "reward", 0.0))
-  if isinstance(item, dict):
-    return float(item.get("reward", 0.0))
-  if hasattr(item, "reward"):
-    try:
-      return float(item.reward)
-    except (AttributeError, TypeError):
-      pass
-  return 0.0
+  if not isinstance(traj, dict):
+    raise TypeError(
+        "Expected a Token-mode trajectory mapping, got"
+        f" {type(traj).__name__}."
+    )
+  if "trajectory_reward" not in traj:
+    raise KeyError(
+        "Trajectory is missing the 'trajectory_reward' key; present"
+        f" keys are {sorted(traj)}. Rollout backends and critique stage must"
+        " stamp the trajectory reward under 'trajectory_reward'."
+    )
+  return float(traj["trajectory_reward"])
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -386,7 +402,7 @@ class StandardRLProgram(RLProgram):
           steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
-          traj_dict["reward"] = reward_val
+          traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
           item = datatypes.TrajectoryItem(

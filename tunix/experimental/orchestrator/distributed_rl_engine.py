@@ -60,7 +60,7 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         group_index=group_index,
         traj={
             "status": datatypes.TrajectoryStatus.FAILED,
-            "reward": 0.0,
+            "trajectory_reward": 0.0,
         },
         metadata=metadata,
     )
