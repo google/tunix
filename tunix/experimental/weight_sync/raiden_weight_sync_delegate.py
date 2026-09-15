@@ -25,6 +25,16 @@ from tunix.experimental.weight_sync import raiden_synchronizer
 from tunix.experimental.weight_sync import weight_sync_coordinator
 
 
+def _free_kv_cache_during_weight_sync(sampler: Any) -> bool:
+  """Whether `sampler` wants its KV cache freed around the weight sync.
+
+  Mirrors `VllmConfig.free_kv_cache_during_weight_sync`; samplers without
+  that setting keep the historical free/re-allocate behaviour.
+  """
+  config = getattr(sampler, "config", None)
+  return bool(getattr(config, "free_kv_cache_during_weight_sync", True))
+
+
 class RaidenWeightSyncDelegate:
   """Manages weight synchronization over Raiden for sampler adapters.
 
@@ -104,7 +114,11 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
-    self._sampler.delete_cache()
+    if _free_kv_cache_during_weight_sync(self._sampler):
+      self._sampler.delete_cache()
+    else:
+      # The KV pool stays allocated; only its stale prefix entries go.
+      self._sampler.reset_prefix_cache()
     jax.effects_barrier()
 
     return True
@@ -146,7 +160,10 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
-    self._sampler.reinitialize_cache()
+    if _free_kv_cache_during_weight_sync(self._sampler):
+      self._sampler.reinitialize_cache()
+    else:
+      self._sampler.refresh_state_leaves()
 
     if self._has_round(sync_request):
       self._tracker.complete(sync_request, "committed")

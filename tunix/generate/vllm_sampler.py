@@ -74,6 +74,12 @@ class VllmConfig:
   # Default to True to ensure old weights are deleted to free up HBM memory
   delete_dst_buffers: bool = True
   reshard_chunk_size: Optional[int] = None
+  # The weight sync materializes a second copy of the sampler weights on HBM
+  # while the new values are resharded in; freeing the KV cache first makes
+  # room for that copy. When the copy fits next to the KV pool anyway (small
+  # model, large pool) set False to skip the two collective RPCs and the
+  # re-allocation (~2 s per RL step on Qwen3-0.6B with a 57 GB pool).
+  free_kv_cache_during_weight_sync: bool = True
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -193,10 +199,20 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
 
-  def reinitialize_cache(self) -> None:
+  def reset_prefix_cache(self) -> None:
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+
+  def refresh_state_leaves(self) -> None:
+    """Re-reads the runner's state leaves after its params were updated."""
     self._model_runner.state_leaves = tuple(
         jax.tree_util.tree_leaves(self._model_runner.state)
     )
+
+  def reinitialize_cache(self) -> None:
+    self.refresh_state_leaves()
 
     if self.llm is not None:
       self.llm.collective_rpc("reinitialize_kv_cache")
@@ -211,7 +227,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   ):
     del filter_types
 
-    self.delete_cache()
+    if self.config.free_kv_cache_during_weight_sync:
+      self.delete_cache()
+    else:
+      # Keep the KV pool allocated; only its (stale) prefix entries go.
+      self.reset_prefix_cache()
 
     # Synchronization point before weight sync
     jax.effects_barrier()
@@ -249,7 +269,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
-    self.reinitialize_cache()
+    if self.config.free_kv_cache_during_weight_sync:
+      self.reinitialize_cache()
+    else:
+      self.refresh_state_leaves()
 
   def _is_torchax_backend(self) -> bool:
     """True when tpu-inference runs the vLLM (torchax) model implementation.
