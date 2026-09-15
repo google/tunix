@@ -13,16 +13,25 @@ INSTALL_MAXTEXT=false
 INSTALL_RAIDEN=false
 RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
+# Where MaxText comes from. Defaults reproduce the historical pin exactly, so
+# omitting both flags builds what it always did. Pass a commit SHA to --maxtext-ref
+# for a reproducible image: the ref is part of the Docker layer cache key now, and
+# it is written to /app/.maxtext_ref inside the image.
+MAXTEXT_REPO=https://github.com/AI-Hypercomputer/maxtext.git
+MAXTEXT_REF=niting-rl_mlperf_temp
 
 usage() {
     cat <<'MSG'
 Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe]
+                            [--maxtext-repo URL] [--maxtext-ref REF]
 
 Options:
   --maxtext               Install MaxText-specific dependencies.
   --raiden                Install Raiden-specific dependencies.
   --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
   --deepswe               Install DeepSWE evaluation dependencies.
+  --maxtext-repo URL      Git URL MaxText is installed from.
+  --maxtext-ref REF       Branch, tag or (preferred) commit SHA to install.
 MSG
 }
 
@@ -40,6 +49,12 @@ while [[ "$#" -gt 0 ]]; do
             shift 2
             ;;
         --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        --maxtext-repo)
+            if [[ -z "$2" ]]; then echo "Error: --maxtext-repo requires a URL"; usage; exit 1; fi
+            MAXTEXT_REPO="$2"; shift 2 ;;
+        --maxtext-ref)
+            if [[ -z "$2" ]]; then echo "Error: --maxtext-ref requires a ref"; usage; exit 1; fi
+            MAXTEXT_REF="$2"; shift 2 ;;
         --help|-h)
             usage
             exit 0
@@ -68,6 +83,7 @@ echo "Starting to build your docker image. This will take a few minutes but the 
 build_ai_image() {
     COMMIT_HASH=$(git rev-parse --short HEAD)
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
+    echo "  MaxText: ${MAXTEXT_REPO}@${MAXTEXT_REF}"
 
     DOCKER_COMMAND="docker"
     if docker info >/dev/null 2>&1; then
@@ -96,6 +112,8 @@ MSG
         --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
         --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
+        --build-arg MAXTEXT_REPO=${MAXTEXT_REPO} \
+        --build-arg MAXTEXT_REF=${MAXTEXT_REF} \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }

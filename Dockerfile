@@ -43,17 +43,34 @@ COPY pyproject.toml README.md /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
 RUN uv pip install .
 
+# MaxText enters this image from a git ref in two places, and both were pinned
+# to a FLOATING branch inside a static RUN string. Docker's cache key for that
+# layer therefore never changed while the branch moved underneath it, so two
+# builds weeks apart could contain different MaxText -- or the same stale one --
+# with nothing in the image recording which. Making the ref a build argument
+# fixes both halves: the cache key now moves with the ref, and the resolved ref
+# is written into the image. MLPerf requires an immutable commit hash rather
+# than a branch name regardless (see the submission README), so prefer a SHA.
+ARG MAXTEXT_REPO=https://github.com/AI-Hypercomputer/maxtext.git
+ARG MAXTEXT_REF=niting-rl_mlperf_temp
+
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install --upgrade flax && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/AI-Hypercomputer/maxtext.git@niting-rl_mlperf_temp
+    printf 'MAXTEXT_REPO=%s\nMAXTEXT_REF=%s\n' "${MAXTEXT_REPO}" "${MAXTEXT_REF}" > /app/.maxtext_ref && \
+    uv pip install --no-deps "maxtext @ git+${MAXTEXT_REPO}@${MAXTEXT_REF}"
 
 # Build argument to conditionally install MaxText dependencies
 ARG INSTALL_MAXTEXT=false
 
-# Install MaxText specific dependencies conditionally
+# Install MaxText specific dependencies conditionally. The requirements file
+# still carries the historical default pin; rewrite it to the build arg so the
+# adapter and maxtext can never come from two different refs.
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
-      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+      sed -e "s|https://github.com/AI-Hypercomputer/maxtext.git@niting-rl_mlperf_temp|${MAXTEXT_REPO}@${MAXTEXT_REF}|g" \
+          /app/requirements/maxtext_requirements.txt > /tmp/maxtext_requirements.txt && \
+      echo "--- resolved maxtext requirements ---" && head -2 /tmp/maxtext_requirements.txt && \
+      uv pip install -r /tmp/maxtext_requirements.txt --torch-backend=cpu; \
     else \
       uv pip install numpy==2.3.5; \
 fi
