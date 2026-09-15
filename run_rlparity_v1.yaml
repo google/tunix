@@ -243,7 +243,7 @@ spec:
                 valueFrom:
                   secretKeyRef:
                     name: wandb-api-key
-                    key: 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
+                    key: WANDB_API_KEY
               - name: SKIP_JAX_PRECOMPILE
                 value: 'true'
               - name: XLA_PYTHON_CLIENT_PREALLOCATE
