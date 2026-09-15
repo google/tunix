@@ -204,24 +204,36 @@ def _restore_opt_state_float_dtypes(
       is_leaf=lambda value: isinstance(value, nnx.Variable),
   )
 
+@flax.struct.dataclass
 class GradientAccumulator:
-  """Running gradient sum for one optimizer step, held as a plain pytree.
-  Deliberately not an nnx.Module, so the running sum is handed oto the jitted
-  graph as a call-time argument and read back out of their outputs.
-  Now the model can be bound into nnx.jit_partial/nnx.cached_partial at every
-  accumulation depth. The old single-microstep path flipped grads between {} and
-  a full pytree. 
-  The running sum can bo donated, so accumulation is written in-place.
-  
+  """Running gradient sum for one optimizer step, as an immutable pytree value.
+
+  Deliberately not an nnx.Module: the running sum flows through the jitted
+  kernels as a call-time argument and comes back out of their outputs, so the
+  model can be bound into nnx.jit_partial/nnx.cached_partial at every
+  accumulation depth (the old single-microstep path flipped grads between {}
+  and a full pytree, which a frozen graphdef cannot follow). Being a regular
+  pytree it can also be donated, so accumulation is written in-place.
+
+  `grads` and `denom` are pytree children; everything else is static metadata
+  that becomes part of the jit cache key. Every mutation (`add`, `reset`)
+  returns a new value.
   """
 
-  def __init__(
-      self,
+  grads: Any
+  denom: jax.Array
+  wrt: type[nnx.Variable] = flax.struct.field(pytree_node=False)
+  accumulator_dtype: Any = flax.struct.field(pytree_node=False)
+  param_dtypes: Any = flax.struct.field(pytree_node=False)
+
+  @classmethod
+  def create(
+      cls,
       model: nnx.Module,
       wrt: type[nnx.Variable],
       *,
       accumulator_dtype: DTypeLike = jnp.float32,
-  ):
+  ) -> "GradientAccumulator":
     """Records the parameter dtypes. Allocates nothing.
 
     Args:
@@ -235,65 +247,65 @@ class GradientAccumulator:
         saves HBM but incurs numerical precision trade-offs without upcasting
         for large gradients.
     """
-    self.wrt = wrt
-    self.accumulator_dtype = accumulator_dtype
-    self._param_dtypes = jax.tree.map(
-      lambda x: x.dtype, nnx.to_pure_dict(nnx.state(model, wrt))
+    param_dtypes = jax.tree.map(
+        lambda x: x.dtype, nnx.to_pure_dict(nnx.state(model, wrt))
     )
-    self.grads: Any = None
-    # Kept as a scalar array rather than None so `denom[...]` reads 0.0 between
-    # steps. Grads is empty.
-    self.denom: Any = jnp.zeros((), dtype=jnp.float32)
+    return cls(
+        grads=None,
+        # Kept as a scalar array rather than None so `denom[...]` reads 0.0
+        # between steps.
+        denom=jnp.zeros((), dtype=jnp.float32),
+        wrt=wrt,
+        accumulator_dtype=jnp.dtype(accumulator_dtype),
+        param_dtypes=param_dtypes,
+    )
 
   @property
   def param_dtype(self) -> Any:
-    """Per-leaf dtype of the parameters this accumulator mirros."""
-    return self._param_dtypes
+    """Per-leaf dtype of the parameters this accumulator mirrors."""
+    return self.param_dtypes
 
   @property
   def is_empty(self) -> bool:
     return self.grads is None
 
-  def set(self, grads: Any, denom: Any) -> None:
-    """Adopts what a kernel returned. Bookkeeping only -- no device work."""
-    self.grads, self.denom = grads, denom
+  def add(self, grads: Any, denom: Any) -> "GradientAccumulator":
+    """Folds one micro-batch's unreduced gradients into the running sum.
 
-  def reset(self) -> None:
-    """Drops the running sum.
-    No zero-filling: the next micro-batch takes the `acc_grads is None` branch and
-    writes its gradients straight out, so there is never a buffer to clear.
+    The first micro-batch writes its gradients straight out (there is no
+    buffer to add to), so nothing is ever zero-filled.
     """
-    self.grads = None
-    self.denom = jnp.zeros_like(self.denom)
+    grads = jax.tree.map(lambda g: g.astype(self.accumulator_dtype), grads)
+    if self.grads is not None:
+      grads = jax.tree.map(jnp.add, self.grads, grads)
+    return self.replace(grads=grads, denom=self.denom + denom)
+
+  def reset(self) -> "GradientAccumulator":
+    """Drops the running sum. Safe to call on a donated value."""
+    return self.replace(grads=None, denom=jnp.zeros((), dtype=jnp.float32))
 
   def get(self) -> Any:
-    """ sum(grad) / sum(denom) across micro-batches. Pure dict, in the parameter dtypes. """
+    """sum(grad) / sum(denom) across micro-batches, exactly once.
+
+    Returns a pure dict in the parameter dtypes. A zero total means every
+    micro-batch was empty; yield zeros rather than NaN.
+    """
     if self.grads is None:
       raise ValueError(
-        "The gradient accumulator is empty. Either get() was called without a "
-        "preceding add()/set(), or the gradients written by an earlier executable were "
-        "discarded on the way out of jit -- nnx.cached_partial (cache_nnx_graph=True) "
-        "freezes the bound module's graphdef, so a step that changes the accumulator's "
-        "pytree structure cannot hand it to a later executable."
+          "The gradient accumulator is empty: get() must follow at least one "
+          "add() in this optimizer step."
       )
-    return _scale_accumulated(self.grads, self.denom, self.param_dtype)
-  
-def _scale_accumulated(acc_grads: Any, acc_denom: Any, param_dtypes: Any) -> Any:
-  """Divides the unreduced sum by the summed denominator, exactly once.
+    has_weights = self.denom > 0
+    safe = jnp.where(has_weights, self.denom, jnp.asarray(1.0, jnp.float32))
 
-  A zero total means every micro-batch was empty; yield zeros rather than NaN.
-  """
-  has_weights = acc_denom > 0
-  safe = jnp.where(has_weights, acc_denom, jnp.asarray(1.0, jnp.float32))
+    def _one(g, dtype):
+      # Divide in float32 regardless of the accumulator dtype: casting a large
+      # token count to bf16 first would lose ~0.4% of the scale.
+      g32 = g.astype(jnp.float32)
+      scaled = jnp.where(has_weights, g32 / safe, jnp.zeros_like(g32))
+      return scaled.astype(dtype)
 
-  def _one(g, dtype):
-    # Divide in float32 regardless of the accumulator dtype: casting a large
-    # token count to bf16 first would lose ~0.4% of the scale.
-    g32 = g.astype(jnp.float32)
-    scaled = jnp.where(has_weights, g32 / safe, jnp.zeros_like(g32))
-    return scaled.astype(dtype)
-
-  return jax.tree.map(_one, acc_grads, param_dtypes)
+    return jax.tree.map(_one, self.grads, self.param_dtypes)
 
 
 def _default_weight_sync_worker() -> Any:
@@ -356,7 +368,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self._param_shardings: Any | None = None
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=self._wrt_target)
-    self.grad_accumulator = GradientAccumulator(self.model, wrt=self._wrt_target)
+    self.grad_accumulator = GradientAccumulator.create(self.model, wrt=self._wrt_target)
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -530,19 +542,18 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self,
       model: nnx.Module,
       inputs: Any,
-      acc_grads: Any,
-      acc_denom: Any,
-  ) -> Tuple[ArrayLike, Any | None, Any, Any]:
+      acc: GradientAccumulator,
+  ) -> Tuple[ArrayLike, Any | None, GradientAccumulator]:
     """Forward and backward passes through grad_fn.
 
     Args:
       model: The model to train.
-      grad_accumulator: The gradient accumulator to use.
       inputs: The training input.
+      acc: The running gradient sum so far this optimizer step.
 
     Returns:
-      A tuple containing the loss, and auxiliary data (or None if has_aux is
-      False).
+      A tuple containing the loss, auxiliary data (or None if has_aux is
+      False), and the accumulator with this micro-batch folded in.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -578,31 +589,25 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       aux_out = aux if self._has_aux else None
 
     grads = self._constrain_grads(grads)
-    grads = jax.tree.map(lambda g: g.astype(self.grad_accumulator.accumulator_dtype), grads)
-    if acc_grads is None:
-      return loss_val, aux_out, grads, denom
-    return loss_val, aux_out, jax.tree.map(jnp.add, acc_grads, grads), acc_denom + denom
+    return loss_val, aux_out, acc.add(grads, denom)
 
   def _update_step(
       self,
       model: nnx.Module,
       optimizer: nnx.Optimizer,
-      acc_grads: Any,
-      acc_denom: Any,
+      acc: GradientAccumulator,
   ) -> ArrayLike:
     """Updates the model weights.
 
     Args:
       model: The model to train.
       optimizer: The optimizer to use.
-      grad_accumulator: The gradient accumulator to use.
+      acc: The accumulated gradients for this optimizer step.
 
     Returns:
       The gradient norm.
     """
-    grads = _scale_accumulated(
-      acc_grads, acc_denom, self.grad_accumulator._param_dtypes
-    )
+    grads = acc.get()
     # Compute the norm in float32. For production-size models the sum-of-squares
     # over bf16 grads quickly exhausts bf16, and float32 is needed for numerical
     # stability.
@@ -635,8 +640,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     The bodies are reused verbatim, so the fused and split paths are the same
     arithmetic in the same order; only XLA's buffer assignment differs.
     """
-    loss, aux, acc_grads, acc_denom = self._fwd_bwd_step(model, inputs, None, None)
-    return loss, aux, self._update_step(model, optimizer, acc_grads, acc_denom)
+    loss, aux, acc = self._fwd_bwd_step(
+        model, inputs, self.grad_accumulator.reset()
+    )
+    return loss, aux, self._update_step(model, optimizer, acc)
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -653,7 +660,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def create_fwd_bwd_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, Any, Any]]:
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, GradientAccumulator]]:
     """Creates the forward and backward step function."""
     return self._fwd_bwd_step
 
@@ -765,13 +772,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           fwd_bwd_step,
           self.model,
           graph_updates=False,
-          donate_argnames=("acc_grads", "acc_denom"),
+          donate_argnames=("acc",),
       )
       self._jitted_update_step_fn = jit_and_bind(
           update_step,
           self.model,
           self.optimizer,
-          donate_argnames=("model", "optimizer", "acc_grads"),
+          donate_argnames=("model", "optimizer", "acc"),
       )
       self._jitted_eval_step_fn = jit_and_bind(eval_step, self.model)
 
@@ -989,9 +996,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     skip_jit = kwargs.get("skip_jit", False)
     cache_nnx_graph = kwargs.get("cache_nnx_graph", True)
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph)
-    acc = self.grad_accumulator
-    loss, aux, acc_grads, acc_denom = fwd_bwd_step(self._prepare_payload(payload), acc.grads, acc.denom)
-    acc.set(acc_grads, acc_denom)
+    loss, aux, self.grad_accumulator = fwd_bwd_step(
+        self._prepare_payload(payload), self.grad_accumulator
+    )
     self._record_fwd_bwd(loss, aux)
 
   @override
@@ -1004,8 +1011,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if acc.is_empty:
       raise ValueError("update() was called with nothing accumulated: it must follow at"
                        "least one fwd_bwd() in this optimizer step")
-    grad_norm = update_step(acc.grads, acc.denom)
-    acc.reset()
+    grad_norm = update_step(acc)
+    self.grad_accumulator = acc.reset()
     return self._record_update(grad_norm)
 
   def train_step(
