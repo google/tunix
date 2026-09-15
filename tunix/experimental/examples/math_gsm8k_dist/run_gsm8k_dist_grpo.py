@@ -71,6 +71,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=4,
       help="Number of prompt groups per step.",
   )
+  parser.add_argument(
+      "--mini_batch_size",
+      type=int,
+      default=None,
+      help=(
+          "Number of prompt groups per optimizer update. Defaults to"
+          " batch_size."
+      ),
+  )
   parser.add_argument("--num_generations", type=int, default=8)
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
@@ -238,7 +247,8 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
-      mini_batch_size=args.batch_size,
+      mini_batch_size=args.mini_batch_size,
+      train_micro_batch_size=args.train_micro_batch_size,
       max_packed_len=(
           args.max_seq_token_per_tpu
           if args.max_seq_token_per_tpu is not None
@@ -313,23 +323,24 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.debug:
     # Enable canonical debug logging and print full sampler responses
     logging.getLogger().setLevel(logging.DEBUG)
+  if args.mini_batch_size is None:
+    args.mini_batch_size = args.batch_size
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:
     raise ValueError("batch_size must be positive.")
-  if args.train_micro_batch_size <= 0:
-    raise ValueError("train_micro_batch_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
   logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d (prompt groups), "
-      "num_generations=%d (%d rollouts/step), max_steps=%d, "
-      "train_micro_batch_size=%d, beta=%.4f, epsilon=%.2f, reward_mode=%s, "
-      "max_staleness=%d, weight_sync_mode=%s.",
+      "mini_batch_size=%d, num_generations=%d (%d rollouts/step), "
+      "max_steps=%d, train_micro_batch_size=%d, beta=%.4f, epsilon=%.2f, "
+      "reward_mode=%s, max_staleness=%d, weight_sync_mode=%s.",
       args.model_id,
       args.batch_size,
+      args.mini_batch_size,
       args.num_generations,
       args.batch_size * args.num_generations,
       args.max_steps,
@@ -422,6 +433,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       max_steps=args.max_steps,
       reward_fns=reward_fns,
       generation_args=generation_args,
+      batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
           max_prompt_length=args.max_prompt_length,
