@@ -93,7 +93,11 @@ export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
 
 # MoE & Weight Sync Flags
+# PREFUSE_MOE_WEIGHTS is the ROLLOUT's setting. The trainer's is separate and
+# defaults false -- the two ends are not supposed to agree. See the comment on
+# the trainer's --prefuse_moe_weights below.
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
+export TRAINER_PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false}
 export USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
 export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
 
@@ -251,6 +255,25 @@ start_trainer() {
         exit 1
       fi
     fi
+    # prefuse_moe_weights must NOT match the rollout's -- the flag means two
+    # different layouts on the two ends:
+    #
+    #   trainer (attention != vllm_rpa): moe.py reads `wi` as a *global*
+    #     concat, w0 = wi[..., :n] / w1 = wi[..., n:]. _fuse_moe_weights builds
+    #     that at checkpoint load using n_shards from the trainer's own
+    #     sharding of wi's last axis -- under FSDP that axis is unsharded, so
+    #     n_shards=1.
+    #   rollout (attention == vllm_rpa): `wi` goes whole into fused_moe_func ->
+    #     tokamax gmm_v2, which splits the *local* shard at its midpoint, i.e.
+    #     at TP=2 it wants [gate_s0|up_s0|gate_s1|up_s1].
+    #
+    # The converter bridges the two, but only when the source still holds
+    # wi_0/wi_1: convert_utils skips the fuse for an already-fused source. So
+    # the trainer stays unfused and the converter interleaves for the
+    # destination's shard count. Setting both true copies the trainer's
+    # global-concat `wi` verbatim, giving shard 0 all-gate and shard 1 all-up
+    # -- a permutation, so Raiden's abs-sum checksums still match 633/633 and
+    # the rollout emits fluent garbage at reward 0.
     extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
@@ -260,6 +283,7 @@ start_trainer() {
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
+      --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS} \
       ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     "
   fi
