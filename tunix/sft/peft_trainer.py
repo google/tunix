@@ -734,15 +734,18 @@ class PeftTrainer:
 
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
-    try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"].value
-    except AttributeError:
-      for chainpart in self.optimizer.opt_state:
-        if isinstance(chainpart, optax.EmptyState):
-          break
-        if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"].value
-      return None
+    opt_state = self.optimizer.opt_state
+    # `optax.chain` states are tuples, so also look at every part: a chained
+    # transformation (e.g. `clip_by_global_norm`, whose state holds no
+    # hyperparameters) runs ahead of the optimizer and comes first.
+    states = [opt_state]
+    if isinstance(opt_state, tuple):
+      states.extend(opt_state)
+    for state in states:
+      hyperparams = getattr(state, "hyperparams", None)
+      if hyperparams is not None and "learning_rate" in hyperparams:
+        return hyperparams["learning_rate"].value
+    return None
 
   def _log_metrics(
       self,
