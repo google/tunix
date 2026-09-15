@@ -566,17 +566,27 @@ def _create_vllm_sampler(args, tokenizer):
   )
   max_model_len = args.max_prompt_length + args.max_response_length
   tp_size = _get_tensor_parallel_size(args)
+  # The inprocess_vllm path maps mesh_fsdp onto data_parallel_size; this one
+  # dropped it, so the only way to occupy all the chips of a slice was to raise
+  # TP. For a model with fewer KV heads than TP, or an MoE dim that does not
+  # divide evenly, that is expensive: qwen3.5-35b-a3b at TP=4 replicates KV
+  # heads 2 -> 4 and pads the MoE MLP dim 512 -> 1024, roughly doubling the
+  # parameters the trainer has to hold. Replicating the engine across DP
+  # instead keeps TP at the model's natural width.
+  dp_size = max(1, int(args.mesh_fsdp or 1))
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
-      "max_model_len=%d...",
+      "data_parallel_size=%d max_model_len=%d...",
       vllm_model,
       tp_size,
+      dp_size,
       max_model_len,
   )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
       tensor_parallel_size=tp_size,
+      data_parallel_size=dp_size,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
