@@ -859,8 +859,89 @@ tokenizer = AutoTokenizer.from_pretrained(
     tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
 )
 tokenizer_for_agentic = tok_adapter.TokenizerAdapter(tokenizer)
-chat_parser = parser.QwenChatTemplateParser(tokenizer)
+class FixedQwenChatTemplateParser(parser.QwenChatTemplateParser):
+  """Fixes Qwen3/3.5 chat template formatting to match official HuggingFace chat_template:
+  1. Appends '<think>\n' to generation prompt when enable_thinking=True.
+  2. Strips '<think>...</think>' blocks from prior assistant messages in multi-turn history.
+  """
+
+  def _init_generation_prompt(self) -> str:
+    if self.enable_thinking:
+      return "<|im_start|>assistant\n<think>\n"
+    return "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+  def _parse_assistant(self, content: str) -> str:
+    if "</think>" in content:
+      content = content.split("</think>")[-1].lstrip("\n")
+    elif "<think>" in content:
+      content = content.split("<think>")[0].rstrip("\n")
+    return "<|im_start|>assistant\n" + content.strip() + self.tokens.eot_token
+
+
+chat_parser = FixedQwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
+
+# Install resilient XML action/parameter parsing for Qwen3.5 tool calls
+try:
+  from r2egym.agenthub.action import Action as _R2EAction
+
+  _orig_action_from_string = _R2EAction.from_string
+
+  @classmethod
+  def _resilient_action_from_string(cls, action_str: str):
+    action_obj = _orig_action_from_string(action_str)
+    fn = action_obj.function_name.strip() if action_obj.function_name else ""
+    if fn in (
+        "execute_b_bash",
+        "execute_bbash",
+        "execute_bcommand",
+        "execute_b",
+        "execute",
+        "bash",
+        "run_command",
+        "run_shell_command",
+    ):
+      fn = "execute_bash"
+    elif fn in ("str_replace", "file_editor"):
+      fn = "str_replace_editor"
+    action_obj.function_name = fn
+
+    if fn and not action_obj.parameters and "<parameter" in action_str:
+      params = {}
+      for m in re.finditer(
+          r"<parameter\s*=\s*([^>]+)>(.*?)(?=<parameter\s*=|</parameter>|</function>|$)",
+          action_str,
+          flags=re.DOTALL,
+      ):
+        k = m.group(1).strip()
+        v = m.group(2).strip()
+        if k and k not in params:
+          params[k] = v
+      action_obj.parameters = params
+    return action_obj
+
+  _R2EAction.from_string = _resilient_action_from_string
+  logger.info("Installed resilient Action.from_string parser.")
+except Exception as e:
+  logger.warning("Could not install resilient Action.from_string: %s", e)
+
+try:
+  try:
+    import swe_agent as _swe_agent_mod
+  except ImportError:
+    from examples.deepswe import swe_agent as _swe_agent_mod  # pytype: disable=import-error
+
+  _orig_parse_xml = _swe_agent_mod.parse_xml_response
+
+  def _resilient_parse_xml_response(response_text: str):
+    if "<function=" in response_text and "</function>" not in response_text:
+      response_text = response_text + "\n</function>"
+    return _orig_parse_xml(response_text)
+
+  _swe_agent_mod.parse_xml_response = _resilient_parse_xml_response
+  logger.info("Installed resilient parse_xml_response wrapper.")
+except Exception as e:
+  logger.warning("Could not install resilient parse_xml_response: %s", e)
 
 # The r2egym scaffold terminates every action with `</function>`; stopping
 # there matches the training rollouts and avoids generating past the action.
@@ -1361,7 +1442,7 @@ def model_call(
 class EvalTrajectoryCollectEngine(
     trajectory_collect_engine.TrajectoryCollectEngine
 ):
-  """Trajectory engine that converts prompt overflows into per-trajectory termination."""
+  """Trajectory engine that converts prompt overflows into per-trajectory termination and always grades working tree."""
 
   async def _one_step(self) -> bool:
     try:
@@ -1377,21 +1458,31 @@ class EvalTrajectoryCollectEngine(
       self.agent.trajectory.status = (
           agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
       )
-      self._skip_final_reward = True
       if self.agent.trajectory.steps:
         self.agent.trajectory.steps[-1].done = True
       return True
 
   async def _append_final_reward(self):
-    if getattr(self, "_skip_final_reward", False):
-      return
+    pair_index = self.env.extra_kwargs.get("pair_index")
+    instance_id = self.env.entry.get("instance_id", "unknown")
+    logger.info(
+        "[pair=%s instance=%s] final_reward_fn start (steps=%d status=%s)",
+        pair_index,
+        instance_id,
+        len(self.agent.trajectory.steps),
+        getattr(self.agent.trajectory, "status", "UNKNOWN"),
+    )
+    t0 = time.time()
     await super()._append_final_reward()
-
-  def compute_trajectory_reward(self):
-    if getattr(self, "_skip_final_reward", False):
-      self.agent.trajectory.reward = 0.0
-      return self.agent.trajectory
-    return super().compute_trajectory_reward()
+    last_step = self.agent.get_current_step()
+    rew = last_step.reward if last_step is not None else 0.0
+    logger.info(
+        "[pair=%s instance=%s] final_reward_fn end reward=%.1f (%.1fs)",
+        pair_index,
+        instance_id,
+        rew,
+        time.time() - t0,
+    )
 
 
 class _EvalLoggingEnvMixin:
@@ -1427,6 +1518,12 @@ class _EvalLoggingEnvMixin:
     )
     t0 = time.time()
     obs, reward, done, info = super().step(action)
+    if not obs and not done:
+      obs = (
+          "[ACTION GUARD] Your previous response did not include a valid function call. "
+          "You must output exactly one tool call in the required XML format "
+          "(<function=execute_bash>, <function=str_replace_editor>, or <function=submit>)."
+      )
     logger.info(
         "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
         " (%.1fs)",
@@ -1517,6 +1614,10 @@ async def run_evaluation():
           for step in traj.steps
           if (getattr(step, "info", {}) or {}).get("guard_blocked")
       })
+      step_actions = [
+          getattr(step, "action", "").split("\n", 1)[0][:80]
+          for step in traj.steps
+      ]
       result = {
           "pair_index": item.group_index,
           "entry_index": entry_index,
@@ -1530,6 +1631,7 @@ async def run_evaluation():
               if (getattr(step, "info", {}) or {}).get("guard_blocked")
           ),
           "guard_reasons": guard_reasons,
+          "step_actions": step_actions,
       }
       results.append(result)
       elapsed = time.time() - start_time
@@ -1657,6 +1759,7 @@ def save_results(results):
       for r in results:
         entry = entries[r["entry_index"]]
         record = {
+            "pair_index": r.get("pair_index", -1),
             "instance_id": entry.get("instance_id", r["instance_id"]),
             "docker_image": entry.get("docker_image", ""),
             "reward": r["reward"],
@@ -1664,6 +1767,7 @@ def save_results(results):
             "status": r["status"],
             "guard_blocked_steps": r["guard_blocked_steps"],
             "guard_reasons": r["guard_reasons"],
+            "step_actions": r.get("step_actions", []),
         }
         f.write(json.dumps(record) + "\n")
     logger.info("Results saved locally to %s", output_file)
