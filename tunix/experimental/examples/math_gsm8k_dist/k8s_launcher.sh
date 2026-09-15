@@ -108,6 +108,13 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+# Needed whenever the key's viewer has no defaultEntity, which is the common
+# case for a team key. metrax's WandbBackend calls wandb.init() with only
+# project/name, wandb then refuses to start the run, and tunix's metrics_logger
+# swallows the exception as a single INFO line ("WandbBackend skipped: ...").
+# The run proceeds with W&B silently off. wandb.init() reads WANDB_ENTITY from
+# the environment, so setting it here is enough.
+export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
@@ -194,6 +201,7 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
