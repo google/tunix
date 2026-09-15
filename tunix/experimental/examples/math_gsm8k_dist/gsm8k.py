@@ -15,6 +15,7 @@
 
 import collections.abc
 import logging
+import os
 from typing import Any
 
 import grain
@@ -33,6 +34,23 @@ except (ImportError, ModuleNotFoundError):
 
 GSM8K_ENV_NAME = "gsm8kenv"
 GSM8K_AGENT_NAME = "gsm8kagent"
+
+# Rate-limited rollout diagnostics.
+#
+# The orchestrator only ever logs the aggregate, so a run that reports
+# reward_mean 0.0000 / std 0.0000 gives no way to tell *why*. The distinction
+# matters: the VTC recipe still pays 0.1 for correct format with a wrong
+# answer, so an exact 0.0 across every generation means not one completion
+# closed its </reasoning><answer>\boxed{}</answer> -- which points at the
+# response-length cap truncating the completion, not at bad arithmetic.
+#
+# make_gsm8k_reward_fn already has a debug path, but it logs at DEBUG and only
+# covers the orchestrator-side reward_fn; under reward_mode=env the scoring
+# happens here instead. DEBUG is also unusable at this scale -- it routes
+# httpx/httpcore through the node loggers and buries the run in HTTP headers.
+# So: log the first few completions per worker at INFO, tail first.
+_COMPLETION_LOG_BUDGET = int(os.environ.get("GSM8K_LOG_COMPLETIONS", "3"))
+_completions_logged = 0
 
 # The recipe itself -- prompt template, format check, boxed-answer extraction,
 # graded reward -- is tunix.utils.gsm8k_vtc, shared verbatim with
@@ -176,6 +194,25 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
     completion = action.action if hasattr(action, "action") else str(action)
     reward, info = gsm8k_env_reward(self.task, action)
     info["correct"] = bool(info["answer_correct"])
+    global _completions_logged
+    if _completions_logged < _COMPLETION_LOG_BUDGET:
+      _completions_logged += 1
+      text = str(completion)
+      logging.info(
+          "[gsm8k] completion %d/%d: chars=%d reward=%.2f format_ok=%s"
+          " answer_ok=%s extracted=%r gold=%r closes_reasoning=%s"
+          " tail=%r",
+          _completions_logged,
+          _COMPLETION_LOG_BUDGET,
+          len(text),
+          reward,
+          info["format_correct"],
+          info["answer_correct"],
+          info["extracted_answer"],
+          info["gold_answer"],
+          "</reasoning>" in text,
+          text[-240:],
+      )
     return base_environment.EnvStepResult(
         observation={
             "answer": str(completion),

@@ -5,12 +5,17 @@
 # MaxText under /app/maxtext, the Raiden FFI bridge, and a tunix checkout at
 # /app/tunix that PYTHONPATH=/app makes win over the pip-installed copy).
 #
-# Only the files carrying a fix are patched in -- four under /app/tunix and one
-# under /app/maxtext. Everything else -- the launcher, the YAML generator, the
-# Kueue priority label -- runs on the host and needs no image change. Keep this
-# overlay this small: the base image's tunix is a different lineage from
-# github.com/google/tunix HEAD, so copying the whole tree in would silently
-# downgrade Yixuan's fixes and pick up unrelated churn.
+# Only the files carrying a fix or a diagnostic are patched in -- seven under
+# /app/tunix and one under /app/maxtext. Everything else -- the launcher, the
+# YAML generator, the Kueue priority label -- runs on the host and needs no
+# image change. Keep this overlay this small: the base image's tunix is a
+# different lineage from github.com/google/tunix HEAD, so copying the whole
+# tree in would silently downgrade Yixuan's fixes and pick up unrelated churn.
+#
+# Entries 6-8 are diagnostics only: each is off or nearly off by default and
+# none changes what the run computes. They are in the image because the
+# questions they answer -- what did the model actually generate, and was it
+# graded or silently dropped -- cannot be answered from outside the container.
 #
 #   1. maxtext training_engine/maxtext_engine.py
 #        MaxText PR #5219 (merged upstream as 59420af4): clear the dataclass
@@ -38,6 +43,23 @@
 #        trajectory therefore scored 0.0, which zeroes not just the logged
 #        reward_mean but the GRPO advantages fed to create_trainer_payloads,
 #        so the whole run was a no-op however good the completions were.
+#   6. rl/agentic/trajectory/trajectory_collect_engine.py
+#        log raw generations (TUNIX_LOG_GENERATIONS=N, default 0) before the
+#        overlong filter drops them. A trajectory that spends its whole
+#        response budget is marked MAX_CONTEXT_LIMIT_REACHED, skips
+#        _append_final_reward and never reaches env.step -- so it scores a hard
+#        0.0 and is invisible to the example's own completion logging, which
+#        hangs off env.step.
+#   7. examples/math_gsm8k_dist/gsm8k.py
+#        log the first few scored completions per rollout worker at INFO
+#        (GSM8K_LOG_COMPLETIONS, default 3), with the reward breakdown, so a
+#        run reporting reward_mean 0.0000 shows whether the completion was
+#        truncated before it could close its tags or merely scored wrong.
+#   8. experimental/rollout/collector.py
+#        log the raw sampler response at its source under
+#        TUNIX_LOG_ROLLOUT_TEXT=1 (which --debug now sets on the rollout node),
+#        to separate "the rollout generated garbage" from "the text was lost on
+#        the way to the reward fn".
 ARG BASE_IMAGE=gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0912head-v8
 FROM ${BASE_IMAGE}
 
@@ -51,6 +73,12 @@ COPY tunix/experimental/examples/common/run_trainer_node.py \
      /app/tunix/experimental/examples/common/run_trainer_node.py
 COPY tunix/experimental/orchestrator/rl_program.py \
      /app/tunix/experimental/orchestrator/rl_program.py
+COPY tunix/rl/agentic/trajectory/trajectory_collect_engine.py \
+     /app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py
+COPY tunix/experimental/examples/math_gsm8k_dist/gsm8k.py \
+     /app/tunix/experimental/examples/math_gsm8k_dist/gsm8k.py
+COPY tunix/experimental/rollout/collector.py \
+     /app/tunix/experimental/rollout/collector.py
 
 # Fail the build rather than the job if a path above ever moves. The MaxText
 # file is checked as text: importing maxtext.training_engine at build time
@@ -63,4 +91,10 @@ assert 'payload = dataclasses.replace(payload, metadata={})' in e, 'maxtext PR52
 assert 'max_seq_token_per_tpu' in inspect.signature(m.build_maxtext_config).parameters, m.__file__; \
 import tunix.experimental.orchestrator.rl_program as p; \
 assert 'trajectory_reward' in inspect.getsource(p._extract_reward), p.__file__; \
+import tunix.rl.agentic.trajectory.trajectory_collect_engine as t; \
+assert '_GEN_LOG_BUDGET' in inspect.getsource(t), t.__file__; \
+import tunix.experimental.examples.math_gsm8k_dist.gsm8k as g; \
+assert '_COMPLETION_LOG_BUDGET' in inspect.getsource(g), g.__file__; \
+import tunix.experimental.rollout.collector as c; \
+assert 'TUNIX_LOG_ROLLOUT_TEXT' in inspect.getsource(c), c.__file__; \
 print('overlay ok:', m.__file__)"

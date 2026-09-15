@@ -22,6 +22,7 @@ multi-pair trajectory collection.
 import asyncio
 import inspect
 import json
+import os
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
 
@@ -38,6 +39,19 @@ from tunix.rl.rollout import base_rollout
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
+
+# Rate-limited raw-generation diagnostics.
+#
+# A trajectory that spends its whole response budget in one turn is marked
+# MAX_CONTEXT_LIMIT_REACHED, and `collect` then skips _append_final_reward, so
+# it scores a hard 0.0 no matter what the model wrote. Those trajectories never
+# reach env.step either, which is where the GSM8K example logs completions --
+# so the majority of generations are invisible in the logs and a run reporting
+# reward_mean 0.0000 / std 0.0000 gives no way to tell a broken model from a
+# merely long-winded one. Log the raw text here, before any of that filtering,
+# so every trajectory is represented.
+_GEN_LOG_BUDGET = int(os.environ.get("TUNIX_LOG_GENERATIONS", "0"))
+_generations_logged = 0
 
 
 class TrajectoryCollectEngine:
@@ -553,6 +567,34 @@ class TrajectoryCollectEngine:
 
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
+
+    global _generations_logged
+    if _generations_logged < _GEN_LOG_BUDGET:
+      _generations_logged += 1
+      gen_text = rollout_output.text[0]
+      gen_tokens = rollout_output.tokens[0] if rollout_output.tokens else []
+      logging.info(
+          "[gen] %d/%d %s tokens=%d chars=%d budget=%s first_ids=%s"
+          " head=%r tail=%r",
+          _generations_logged,
+          _GEN_LOG_BUDGET,
+          self._debug_prefix,
+          len(gen_tokens),
+          len(gen_text),
+          max_generation_steps,
+          list(gen_tokens[:16]),
+          gen_text[:400],
+          gen_text[-200:],
+      )
+      if _generations_logged == 1:
+        # Once only, and only the first turn's messages: this is how we tell a
+        # broken model from a prompt that never asked for the VTC format (the
+        # rollout node renders these through chat_parser, which defaults to
+        # 'auto' and will wrap a raw VTC prompt in a ChatML turn).
+        logging.info(
+            "[gen] first-turn chat_completions=%s",
+            json.dumps(self.agent.chat_completions, default=str)[:2000],
+        )
 
     action = self.agent.update_from_model(rollout_output.text[0]).action
     logging.debug(

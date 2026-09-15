@@ -28,6 +28,9 @@ TUNIX_FILES=(
   tunix/utils/maxtext_utils.py
   tunix/experimental/examples/common/run_trainer_node.py
   tunix/experimental/orchestrator/rl_program.py
+  tunix/rl/agentic/trajectory/trajectory_collect_engine.py
+  tunix/experimental/examples/math_gsm8k_dist/gsm8k.py
+  tunix/experimental/rollout/collector.py
 )
 # Paths relative to MAXTEXT_DIR; staged under maxtext/ in the build context.
 MAXTEXT_FILES=(

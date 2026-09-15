@@ -105,6 +105,13 @@ export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
 # rollout sides during weight sync, for cross-verification of a real run.
 export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 
+# Rollout-side generation diagnostics, both rate-limited to the first N per
+# worker. TUNIX_LOG_GENERATIONS logs every raw generation, including the ones
+# that exhaust the response budget and are therefore dropped before env.step;
+# GSM8K_LOG_COMPLETIONS logs only the scored ones, with their reward breakdown.
+export TUNIX_LOG_GENERATIONS=${TUNIX_LOG_GENERATIONS:-0}
+export GSM8K_LOG_COMPLETIONS=${GSM8K_LOG_COMPLETIONS:-3}
+
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
@@ -153,6 +160,9 @@ export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-
 # rather than to the slice. The yaml generator's 100G default is fine for a 1.7B
 # model and OOM-kills the proxy partway through the first sync for a 35B one.
 export PATHWAYS_PROXY_MEMORY_LIMIT=${PATHWAYS_PROXY_MEMORY_LIMIT:-100G}
+# Extra `KEY=VAL` pairs prepended to the trainer's startup command, for ad-hoc
+# diagnostics (e.g. JAX_LOG_COMPILES=1) without rebuilding the image.
+export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
@@ -332,7 +342,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -446,7 +456,7 @@ start_rollout_instance() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} TUNIX_LOG_GENERATIONS=${TUNIX_LOG_GENERATIONS} GSM8K_LOG_COMPLETIONS=${GSM8K_LOG_COMPLETIONS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \

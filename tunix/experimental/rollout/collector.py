@@ -14,6 +14,8 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import logging
+import os
 from typing import Any, List
 import zlib
 import numpy as np
@@ -170,6 +172,25 @@ class TrajectoryCollectorEngine:
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
+
+      # L1 (local): the orchestrator's reward fn logs the text it receives, but
+      # it is only built when --reward_mode=exact, and it sits several hops
+      # downstream of the sampler. Log the RAW sampler output at the source so
+      # "the rollout generated garbage" can be told apart from "the text was
+      # lost on the way to the reward fn". Opt-in via TUNIX_LOG_ROLLOUT_TEXT so
+      # it costs nothing when off.
+      if os.environ.get("TUNIX_LOG_ROLLOUT_TEXT", "").lower() in ("1", "true"):
+        _tok = np.asarray(tokens).reshape(-1)
+        logging.info(
+            "[Rollout] %s raw sampler response: %d chars, %d tokens,"
+            " head=%r\n--- BEGIN RESPONSE ---\n%s\n--- END RESPONSE ---",
+            self.traj_id,
+            len(text),
+            _tok.size,
+            text[:200],
+            text,
+        )
+
       prompt_tokens = np.asarray(
           getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
           dtype=np.int32,

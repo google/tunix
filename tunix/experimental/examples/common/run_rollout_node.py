@@ -641,6 +641,13 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   args = _parse_args(argv)
+  if args.debug:
+    # --debug already lowers the orchestrator's log level; do the same here and
+    # switch on the collector's raw sampler-response log. The orchestrator-side
+    # [Sampled Response] log only exists under --reward_mode=exact, so in the
+    # default env reward mode this is the only rollout-text evidence there is.
+    logging.getLogger().setLevel(logging.DEBUG)
+    os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
   logging.info("Parsed args: %s", args)
 
   if REPO_ROOT not in sys.path:
