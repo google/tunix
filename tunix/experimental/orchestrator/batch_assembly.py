@@ -776,6 +776,10 @@ class PaddedBatchAssembler:
         "returns",
         "old_values",
         "sampler_is_weights",
+        # Per-token, same shape as old_per_token_logps, so it pads identically.
+        # `overlong` is deliberately NOT here: it is one bool per sequence, not
+        # per token, and needs its own handling.
+        "rollout_per_token_logps",
     )
     present_fields = []
     partially_present_fields = []

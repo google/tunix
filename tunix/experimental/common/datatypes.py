@@ -462,6 +462,16 @@ class RLTrainerPayload(TrainerPayload):
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+  # The rollout engine's own per-token log-probabilities, and the collector's
+  # verdict that a sequence was truncated by the response budget rather than
+  # finished. Both are per-sequence quantities the MLPerf GRPO recipe's loss
+  # needs and that nothing else carries: `seq-mask-tis` and
+  # `seq_logprob_error_threshold` compare the sampler against the trainer, and
+  # `overlong_loss_masking` drops truncated sequences from the loss while
+  # leaving them in the denominator. Without these two fields the loss silently
+  # runs with those features disabled.
+  rollout_per_token_logps: ArrayLike | None = None
+  overlong: ArrayLike | None = None
   routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
