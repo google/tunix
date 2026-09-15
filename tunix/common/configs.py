@@ -189,6 +189,12 @@ class RolloutConfig:
   # Set to a smaller value to reduce peak HBM pressure on large models.
   rollout_vllm_reshard_chunk_size: Optional[int] = None
 
+  # Whether to free the vLLM KV cache before each weight sync and re-allocate
+  # it afterwards. The sync holds a second copy of the sampler weights on HBM
+  # while resharding; keep True unless that copy fits next to the KV pool, in
+  # which case False skips the two collective RPCs and the re-allocation.
+  rollout_vllm_free_kv_cache_during_weight_sync: bool = True
+
   # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
