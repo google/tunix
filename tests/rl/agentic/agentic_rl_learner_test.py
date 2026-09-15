@@ -229,5 +229,120 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         learner.train(train_dataset)
 
 
+class ExactTokenContinuityConfigTest(absltest.TestCase):
+
+  def test_example_flag_maps_to_config_and_reaches_the_collector(self):
+    import argparse  # pylint: disable=g-import-not-at-top
+    import ast  # pylint: disable=g-import-not-at-top
+    import pathlib  # pylint: disable=g-import-not-at-top
+    import types  # pylint: disable=g-import-not-at-top
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    for example, parser_name in (
+        ("frozenlake/train_frozenlake_qwen3.py", "arg_parser"),
+        ("deepswe/train_deepswe_nb.py", "parser"),
+    ):
+      source = ast.parse((root / "examples" / example).read_text())
+      calls = [
+          node
+          for node in ast.walk(source)
+          if isinstance(node, ast.Call)
+          and isinstance(node.func, ast.Attribute)
+          and node.func.attr == "add_argument"
+          and any(
+              isinstance(arg, ast.Constant) and arg.value == "--tito"
+              for arg in node.args
+          )
+      ]
+      self.assertLen(calls, 1, example)
+      expressions = [
+          node.value
+          for node in ast.walk(source)
+          if isinstance(node, ast.keyword) and node.arg == "exact_token_continuity"
+      ]
+      for node in ast.walk(source):
+        if isinstance(node, ast.Dict):
+          expressions.extend(
+              value
+              for key, value in zip(node.keys, node.values)
+              if isinstance(key, ast.Constant) and key.value == "exact_token_continuity"
+          )
+      self.assertLen(expressions, 1, example)
+      for argv, expected in (([], False), (["--no-tito"], False), (["--tito"], True)):
+        parser = argparse.ArgumentParser()
+        exec(  # pylint: disable=exec-used
+            compile(ast.Expression(calls[0]), example, "eval"),
+            {"argparse": argparse, parser_name: parser},
+        )
+        value = eval(  # pylint: disable=eval-used
+            compile(ast.Expression(expressions[0]), example, "eval"),
+            {"args": parser.parse_args(argv)},
+        )
+        self.assertIs(value, expected, (example, argv))
+
+    for enabled in (False, True):
+      obj = types.SimpleNamespace(
+          algo_config=agentic_rl_learner.AgenticRLConfig(exact_token_continuity=enabled),
+          _model_call=mock.Mock(),
+          tokenizer=mock.Mock(),
+          chat_parser=mock.Mock(),
+          rl_engine=types.SimpleNamespace(perf_v2=mock.Mock()),
+          _rollout_sync_lock=mock.Mock(),
+      )
+      with mock.patch.object(
+          agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
+      ) as factory:
+        agentic_rl_learner.AgenticRLLearner._build_orchestrator(obj)
+      self.assertIs(
+          factory.call_args.kwargs["engine_kwargs"]["exact_token_continuity"], enabled
+      )
+
+  def test_exact_mode_rejects_backends_and_rollout_configs_it_cannot_honor(self):
+    import types  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
+
+    engine = types.SimpleNamespace(rollout=types.SimpleNamespace(supports_token_input=False))
+    with self.assertRaisesRegex(ValueError, "token-input backend"):
+      agentic_grpo_learner.GRPOLearner(
+          engine, agentic_grpo_learner.GRPOConfig(exact_token_continuity=True)
+      )
+    for option, value, message in (
+        ("return_logprobs", False, "sampled logprobs"),
+        ("return_routed_experts", True, "expert routing"),
+    ):
+      config = base_rollout.RolloutConfig(max_tokens_to_generate=1024, return_logprobs=True)
+      setattr(config, option, value)
+      engine = types.SimpleNamespace(
+          rollout=types.SimpleNamespace(supports_token_input=True),
+          tokenizer=object(),
+          cluster_config=types.SimpleNamespace(rollout_config=config),
+      )
+      with self.assertRaisesRegex(ValueError, message):
+        agentic_grpo_learner.GRPOLearner(
+            engine,
+            agentic_grpo_learner.GRPOConfig(exact_token_continuity=True),
+            chat_parser=object(),
+        )
+
+  def test_model_call_forwards_token_ids_without_parsing(self):
+    import types  # pylint: disable=g-import-not-at-top
+    import numpy as np  # pylint: disable=g-import-not-at-top
+
+    obj = types.SimpleNamespace(
+        algo_config=agentic_rl_learner.AgenticRLConfig(exact_token_continuity=True),
+        chat_parser=types.SimpleNamespace(
+            parse=mock.Mock(side_effect=AssertionError("history parse"))
+        ),
+        rl_engine=types.SimpleNamespace(generate=mock.Mock()),
+        policy_version=7,
+    )
+    agentic_rl_learner.AgenticRLLearner._model_call(obj, None, prompt_token_ids=np.array([0, 3]))
+    obj.chat_parser.parse.assert_not_called()
+    sent = obj.rl_engine.generate.call_args.kwargs
+    self.assertIsNone(sent["prompts"])
+    self.assertFalse(sent["apply_chat_template"])
+    np.testing.assert_array_equal(sent["prompt_token_ids"], [[0, 3]])
+
+
 if __name__ == "__main__":
   absltest.main()

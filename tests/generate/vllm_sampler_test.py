@@ -650,5 +650,145 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertNotIn("device_indexes", sharding["sharding_strategy"])
 
 
+class VllmSamplerTokenInputTest(absltest.TestCase):
+  """Explicit token-ID prompts through the real sampler with a fake engine."""
+
+  @staticmethod
+  def _result(request_id, prompt):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from vllm.outputs import CompletionOutput, RequestOutput  # pylint: disable=g-import-not-at-top
+
+    return RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=list(prompt),
+        prompt_logprobs=None,
+        finished=True,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[7, 0],
+                cumulative_logprob=-1.0,
+                logprobs=[
+                    {7: SimpleNamespace(logprob=-0.25)},
+                    {0: SimpleNamespace(logprob=-0.75)},
+                ],
+                finish_reason="stop",
+            )
+        ],
+    )
+
+  def _sampler(self):
+    import itertools  # pylint: disable=g-import-not-at-top
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from vllm.sampling_params import SamplingParams  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(vllm_sampler.VllmSampler)
+    obj.args = {"max_model_len": 64}
+    obj.config = SimpleNamespace(
+        return_logprobs=True, return_routed_experts=False, sampling_kwargs={}
+    )
+    obj._driver = None
+    obj._request_counter = itertools.count()
+    obj.tokenizer = SimpleNamespace(
+        encode=mock.Mock(side_effect=AssertionError("history was re-encoded")),
+        decode=mock.Mock(return_value="decoded"),
+        eos_id=lambda: 0,
+        bos_id=lambda: None,
+        pad_id=lambda: 0,
+        dedup_bos_ids=lambda ids: ids,
+    )
+    obj.llm = SimpleNamespace(
+        get_default_sampling_params=SamplingParams,
+        generate=mock.Mock(
+            side_effect=lambda **kw: [
+                self._result(str(i), prompt["prompt_token_ids"])
+                for i, prompt in enumerate(kw["prompts"])
+            ]
+        ),
+    )
+    return obj
+
+  def test_token_ids_are_submitted_without_re_encoding(self):
+    obj = self._sampler()
+    out = obj(None, 4, max_prompt_length=5, prompt_token_ids=[[0, 3], [4, 0, 5]])
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [{"prompt_token_ids": [0, 3]}, {"prompt_token_ids": [4, 0, 5]}],
+    )
+    obj.tokenizer.encode.assert_not_called()
+    np.testing.assert_array_equal(out.prompt_lengths, [2, 3])
+    np.testing.assert_array_equal(
+        out.padded_prompt_tokens, [[0, 0, 0, 0, 3], [0, 0, 4, 0, 5]]
+    )
+    np.testing.assert_array_equal(out.logprobs, [[-0.25, -0.75]] * 2)
+
+  def test_invalid_token_inputs_fail_before_submission(self):
+    for kwargs in (
+        {"input_strings": "text", "prompt_token_ids": [[1]]},
+        {"input_strings": None},
+        {"input_strings": None, "prompt_token_ids": [[1]], "n": 2},
+        {"input_strings": None, "prompt_token_ids": [[1] * 62]},
+    ):
+      obj = self._sampler()
+      with self.assertRaises(ValueError):
+        obj(max_generation_steps=4, **kwargs)
+      obj.llm.generate.assert_not_called()
+
+  def test_engine_echo_count_and_duplicate_ids_are_checked(self):
+    for outputs, message in (
+        ([self._result("0", [2, 2]), self._result("1", [1, 1])], "prompt echo"),
+        ([self._result("0", [1, 1])], "result count"),
+        (
+            [self._result("s", [1, 1]), self._result("s", [2, 2])],
+            "duplicate request",
+        ),
+    ):
+      obj = self._sampler()
+      obj.llm.generate = mock.Mock(return_value=outputs)
+      with self.assertRaisesRegex(ValueError, message):
+        obj(None, 4, prompt_token_ids=[[1, 1], [2, 2]])
+
+  def test_server_mode_binds_results_to_request_ids(self):
+    from concurrent.futures import Future  # pylint: disable=g-import-not-at-top
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+
+    for poison in (False, True):
+      obj = self._sampler()
+
+      def submit(requests, poison=poison):
+        futures = []
+        for i, req in enumerate(requests):
+          future = Future()
+          rid = requests[1 - i]["request_id"] if poison else req["request_id"]
+          future.set_result(
+              self._result(rid, req["prompt"]["prompt_token_ids"])
+          )
+          futures.append(future)
+        return futures
+
+      obj._driver = SimpleNamespace(
+          submit_requests=submit,
+          llm_engine=SimpleNamespace(
+              model_config=SimpleNamespace(get_diff_sampling_param=lambda: {})
+          ),
+      )
+      if poison:
+        with self.assertRaisesRegex(ValueError, "does not match its request ID"):
+          obj(None, 4, prompt_token_ids=[[1], [1]])
+      else:
+        self.assertLen(obj(None, 4, prompt_token_ids=[[1], [1]]).tokens, 2)
+
+  def test_text_path_still_encodes(self):
+    obj = self._sampler()
+    obj.tokenizer.encode.side_effect = None
+    obj.tokenizer.encode.return_value = [4, 0, 5]
+    out = obj("ordinary text", 4)
+    obj.tokenizer.encode.assert_called_once_with("ordinary text")
+    np.testing.assert_array_equal(out.prompt_lengths, [3])
+
+
 if __name__ == "__main__":
   absltest.main()

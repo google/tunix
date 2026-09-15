@@ -39,6 +39,12 @@ Dataset = datasets_lib.Dataset
 parser = argparse.ArgumentParser(
     description="DeepSWE Training with Multi-turn Agentic Framework"
 )
+parser.add_argument(
+    "--tito",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Preserve sampled token history on later turns (requires vLLM).",
+)
 
 # General Config
 parser.add_argument("--models_base_dir", type=str, default="models")
@@ -1064,6 +1070,7 @@ if RCP_LOGGING:
 # ==========================================
 
 config_kwargs = {
+    "exact_token_continuity": args.tito,
     "num_generations": NUM_GENERATIONS,
     "num_iterations": NUM_ITERATIONS,
     "max_response_length": MAX_RESPONSE_LENGTH,

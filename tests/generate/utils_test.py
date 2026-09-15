@@ -2451,6 +2451,30 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
     utils.detach_incompatible_vllm_cleanup_finalizer(None)
 
 
+class TokenIdsTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      ([0, 3],), ((0, np.int64(3)),), (np.array([0, 3], np.uint64),)
+  )
+  def test_as_token_ids_returns_owned_int32(self, value):
+    result = utils.as_token_ids(value)
+    np.testing.assert_array_equal(result, [0, 3])
+    self.assertEqual(result.dtype, np.int32)
+    if isinstance(value, np.ndarray):
+      value[0] = 9
+      self.assertEqual(result[0], 0)
+
+  def test_as_token_ids_rejects_non_vectors(self):
+    with self.assertRaises(ValueError):
+      utils.as_token_ids(np.array([[1]]))
+
+  def test_unpad_prompt_uses_explicit_length_not_pad_id(self):
+    source = np.array([0, 0, 4, 0, 5])
+    result = utils.unpad_prompt(source, 4)
+    np.testing.assert_array_equal(result, [0, 4, 0, 5])
+    source[:] = 9
+    np.testing.assert_array_equal(result, [0, 4, 0, 5])
+
 if __name__ == "__main__":
   absltest.main()
 

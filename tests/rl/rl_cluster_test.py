@@ -1009,5 +1009,132 @@ class RlEngineTest(parameterized.TestCase):
         )
 
 
+class RlEngineTokenInputTest(parameterized.TestCase):
+  """Explicit token rows through RLEngine.generate and VllmRollout.generate."""
+
+  def _fake_engine(self):
+    import contextlib  # pylint: disable=g-import-not-at-top
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from tunix.perf import trace  # pylint: disable=g-import-not-at-top
+    from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
+
+    def generate(prompts, cfg, *, prompt_token_ids=None):
+      del cfg
+      self.assertIsNone(prompts)
+      rows = prompt_token_ids
+      width = max(map(len, rows))
+      return base_rollout.RolloutOutput(
+          text=['out'] * len(rows),
+          logits=None,
+          tokens=[np.array([7])] * len(rows),
+          logprobs=[np.array([-0.5])] * len(rows),
+          left_padded_prompt_tokens=np.array(
+              [[0] * (width - len(row)) + list(row) for row in rows]
+          ),
+          prompt_lengths=np.array(list(map(len, rows))),
+      )
+
+    return SimpleNamespace(
+        rollout=SimpleNamespace(
+            supports_token_input=True,
+            generate=mock.Mock(side_effect=generate),
+            model=lambda: None,
+            pad_id=lambda: 0,
+        ),
+        cluster_config=SimpleNamespace(
+            offload_to_cpu=False,
+            rollout_config=base_rollout.RolloutConfig(max_tokens_to_generate=4),
+        ),
+        tokenizer=SimpleNamespace(
+            apply_chat_template=mock.Mock(
+                side_effect=AssertionError('history was templated')
+            )
+        ),
+        _get_mesh_and_logical_axis_rules_cm=lambda _: contextlib.nullcontext(
+            (SimpleNamespace(devices=[]), None)
+        ),
+        _maybe_load_model_from_cpu=mock.Mock(),
+        _maybe_offload_model_to_cpu=mock.Mock(),
+        _perf=trace.NoopTracer(),
+        _perf_v2=tracer.NoopTracer(),
+    )
+
+  def test_token_rows_split_into_microbatches_and_merge_back(self):
+    engine = self._fake_engine()
+    out = rl_engine_lib.RLEngine.generate(
+        engine, None, prompt_token_ids=[[0, 3], [4, 0, 5]], micro_batch_size=1
+    )
+    self.assertEqual(engine.rollout.generate.call_count, 2)
+    engine.tokenizer.apply_chat_template.assert_not_called()
+    np.testing.assert_array_equal(out.prompt_lengths, [2, 3])
+    np.testing.assert_array_equal(
+        out.left_padded_prompt_tokens, [[0, 0, 3], [4, 0, 5]]
+    )
+    self.assertLen(out.logprobs, 2)
+
+  def test_token_input_requires_backend_support(self):
+    engine = self._fake_engine()
+    engine.rollout.supports_token_input = False
+    with self.assertRaisesRegex(ValueError, 'does not support'):
+      rl_engine_lib.RLEngine.generate(engine, None, prompt_token_ids=[[1]])
+    engine._maybe_load_model_from_cpu.assert_not_called()
+
+  def test_vllm_rollout_forwards_token_rows_and_returns_own_result(self):
+    import threading  # pylint: disable=g-import-not-at-top
+    from concurrent.futures import ThreadPoolExecutor  # pylint: disable=g-import-not-at-top
+    from tunix.generate import base_sampler  # pylint: disable=g-import-not-at-top
+    from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(vllm_rollout.VllmRollout)
+    obj._sampler = mock.Mock(
+        return_value=base_sampler.SamplerOutput(
+            text=['x'],
+            logits=None,
+            tokens=[np.array([7])],
+            padded_prompt_tokens=np.array([[0, 3]]),
+            logprobs=[[-0.5]],
+            prompt_lengths=np.array([2]),
+        )
+    )
+    out = obj.generate(None, base_rollout.RolloutConfig(), prompt_token_ids=[[0, 3]])
+    self.assertEqual(obj._sampler.call_args.kwargs['prompt_token_ids'], [[0, 3]])
+    self.assertIsNone(obj._sampler.call_args.kwargs['input_strings'])
+    np.testing.assert_array_equal(out.prompt_lengths, [2])
+
+    # Two overlapping generate() calls must each return their own sampler
+    # result rather than whichever one last wrote self.output.
+    barrier = threading.Barrier(2)
+
+    class OverlappingRollout(vllm_rollout.VllmRollout):
+
+      def __init__(self):
+        self._sampler = lambda input_strings, **kw: base_sampler.SamplerOutput(
+            text=input_strings,
+            logits=None,
+            tokens=[np.array([int(input_strings[0])])],
+            padded_prompt_tokens=np.array([[int(input_strings[0])]]),
+            logprobs=[[-int(input_strings[0])]],
+            prompt_lengths=np.array([1]),
+        )
+
+      @property
+      def output(self):
+        return self._last
+
+      @output.setter
+      def output(self, value):
+        self._last = value
+        barrier.wait(timeout=5)
+
+    overlapping = OverlappingRollout()
+    cfg = base_rollout.RolloutConfig(max_tokens_to_generate=4)
+    with ThreadPoolExecutor(2) as pool:
+      futures = [pool.submit(overlapping.generate, [str(i)], cfg) for i in (1, 2)]
+      results = [f.result(timeout=10) for f in futures]
+    for i, result in enumerate(results, 1):
+      np.testing.assert_array_equal(result.tokens[0], [i])
+      np.testing.assert_array_equal(result.logprobs[0], [-i])
+
+
 if __name__ == '__main__':
   absltest.main()

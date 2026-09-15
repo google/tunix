@@ -76,6 +76,12 @@ import argparse
 arg_parser = argparse.ArgumentParser(
     description="Train FrozenLake on Qwen3-8B (single-host TPU)."
 )
+arg_parser.add_argument(
+    "--tito",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Preserve sampled token history on later turns (requires vLLM).",
+)
 # Effective on-policy batch is `batch_size * num_generations` per global step.
 # Tuned together with `num_generations=8` to keep per-step rollout latency
 # manageable on a single host while preserving enough samples per prompt for
@@ -478,6 +484,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
 )
 
 grpo_config = GRPOConfig(
+    exact_token_continuity=args.tito,
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,

@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import numpy as np
 import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.generate import utils as generate_utils
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
 
 
@@ -272,3 +273,53 @@ def get_or_create_loop():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
   return loop
+
+
+# ---- Exact token continuity ------------------------------------------------
+#
+# With `exact_token_continuity`, every later turn of a trajectory is prompted
+# with the integer history the engine actually consumed, never re-encoded text:
+#
+#     prompt_k = prompt_0 + sum_{i<k} (assistant_tokens_i + env_tokens_i)
+#
+# * prompt_0 is whatever rollout tokenized on the first turn (owned by the
+#   trajectory as `prompt_tokens[-prompt_length:]`).
+# * assistant_tokens_i are the sampled IDs plus any suffix the chat parser
+#   appends (e.g. an end-of-turn token); the loss mask marks the split.
+# * env_tokens_i are freshly encoded environment text for that turn only.
+#
+# Training consumes the same IDs; attention validity is carried separately from
+# the sampled-token loss mask so suffix/environment tokens are context with
+# zero loss weight. Anything the engine returns that breaks the invariant is
+# an error, never a silent fallback.
+
+
+def assistant_with_suffix(
+    sampled_tokens, assistant_tokens, n_append: int
+) -> np.ndarray:
+  """Returns assistant IDs after checking the parser only appended `n_append`.
+
+  Raises:
+    ValueError: the parser changed the sampled prefix or appended a different
+      number of tokens than it reported.
+  """
+  sampled = generate_utils.as_token_ids(sampled_tokens)
+  assistant = generate_utils.as_token_ids(assistant_tokens)
+  if assistant.size != sampled.size + n_append or not np.array_equal(
+      assistant[: sampled.size], sampled
+  ):
+    raise ValueError("chat parser must only append tokens to the sampled ids")
+  return assistant
+
+
+def continuation_prompt_tokens(trajectory) -> np.ndarray:
+  """Builds the later-turn prompt: owned first prompt + every recorded turn."""
+  segments = [
+      generate_utils.unpad_prompt(
+          trajectory.prompt_tokens, trajectory.prompt_length
+      )
+  ]
+  for step in trajectory.steps:
+    segments.append(generate_utils.as_token_ids(step.assistant_tokens))
+    segments.append(generate_utils.as_token_ids(step.env_tokens))
+  return np.concatenate(segments)

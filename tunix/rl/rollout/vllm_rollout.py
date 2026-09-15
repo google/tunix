@@ -27,6 +27,8 @@ from tunix.rl.rollout import base_rollout
 class VllmRollout(base_rollout.BaseRollout):
   """vLLM rollout worker."""
 
+  supports_token_input = True
+
   def __init__(
       self,
       model: Any,
@@ -94,12 +96,16 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | None,
       rollout_config: base_rollout.RolloutConfig,
+      *,
+      prompt_token_ids=None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
-    self.output = self._sampler(
+    if prompt_token_ids is not None:
+      kwargs["prompt_token_ids"] = prompt_token_ids
+    output = self._sampler(
         input_strings=prompts,
         max_generation_steps=rollout_config.max_tokens_to_generate,
         max_prompt_length=rollout_config.max_prompt_length,
@@ -111,14 +117,17 @@ class VllmRollout(base_rollout.BaseRollout):
         pad_output=True,
         **kwargs,
     )
+    # The legacy last-output accessor is not a per-request identity source.
+    self.output = output
 
     return base_rollout.RolloutOutput(
-        text=self.output.text,
+        text=output.text,
         logits=None,
-        tokens=self.output.tokens,  # pyrefly: ignore[bad-argument-type]
-        left_padded_prompt_tokens=self.output.padded_prompt_tokens,
-        logprobs=self.output.logprobs,  # pyrefly: ignore[bad-argument-type]
-        routed_experts=self.output.routed_experts,
+        tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
+        left_padded_prompt_tokens=output.padded_prompt_tokens,
+        logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        routed_experts=output.routed_experts,
+        prompt_lengths=output.prompt_lengths,
     )
 
   def get_per_token_logps(

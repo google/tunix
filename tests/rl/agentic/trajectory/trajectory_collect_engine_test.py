@@ -735,5 +735,281 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertIn('close_latency', trajectory.env_time)
 
 
+class _FreshTextTokenizer:
+  """Only freshly formatted observations are allowed into this encoder."""
+
+  def __init__(self, env_rows):
+    self.rows = iter(env_rows)
+    self.encoded = []
+
+  def encode(self, text, **kwargs):
+    assert text.startswith('fresh-env:'), 'history was re-encoded'
+    self.encoded.append(text)
+    return next(self.rows)
+
+  def dedup_bos_ids(self, ids):
+    return ids
+
+
+class _FreshTextParser:
+
+  def __init__(self, suffix):
+    self.suffix = suffix
+
+  def parse(self, messages, **kwargs):
+    assert len(messages) == 1 and messages[0]['role'] in ('user', 'tool')
+    return 'fresh-env:' + messages[0]['content']
+
+  def update_assistant_end_tokens(self, tokens):
+    return np.concatenate([tokens, np.array(self.suffix, np.int32)]), len(
+        self.suffix
+    )
+
+
+class _ToolFixtureEnv(base_environment.BaseTaskEnv):
+
+  def __init__(self):
+    super().__init__(task={'policy_version': 7}, max_steps=5)
+    self.close = mock.Mock()
+
+  def _initial_observation(self):
+    return 'Inspect the repository and fix the fixture bug.'
+
+  def _step_impl(self, action):
+    assert 'execute_bash' in action
+    return base_environment.EnvStepResult(
+        observation=f'tool stdout at turn {self.step_count}',
+        reward=0.0,
+        done=self.step_count >= 3,
+        info={},
+    )
+
+
+class ExactTokenContinuityCollectTest(absltest.TestCase):
+  """Later turns submit recorded IDs; the first turn keeps the text route."""
+
+  def _frozenlake(self):
+    try:
+      from examples.frozenlake.agent import FrozenLakeAgent  # pylint: disable=g-import-not-at-top
+      from examples.frozenlake.env import FrozenLakeEnv  # pylint: disable=g-import-not-at-top
+    except ImportError as e:
+      self.skipTest(f'requires tunix[frozenlake]: {e}')
+    size = 5
+    desc = ['SFFG' + 'F' * (size - 4)] + ['F' * size] * (size - 1)
+    env = FrozenLakeEnv(
+        {'size': size, 'seed': 0, 'p': 1.0},
+        desc=desc,
+        is_slippery=False,
+        max_steps=5,
+    )
+    env.task['policy_version'] = 7
+    env.close = mock.Mock(wraps=env.close)
+    return FrozenLakeAgent(use_multistep_prompt=False), env
+
+  def _collector(self, agent, env, *, tool=False, asynchronous=False, poison=None):
+    prompt = [200, 201] if tool else [0, 100, 101]
+    samples = [[30, 31], [32], [33, 34]] if tool else [[10, 11], [12], [13, 0]]
+    suffix = [91, 92] if tool else [90]
+    env_rows = [[40, 41, 42], [43, 44]] if tool else [[20, 21], [22]]
+    expected_inputs = (
+        [
+            [200, 201, 30, 31, 91, 92, 40, 41, 42],
+            [200, 201, 30, 31, 91, 92, 40, 41, 42, 32, 91, 92, 43, 44],
+        ]
+        if tool
+        else [
+            [0, 100, 101, 10, 11, 90, 20, 21],
+            [0, 100, 101, 10, 11, 90, 20, 21, 12, 90, 22],
+        ]
+    )
+    calls = []
+
+    def model_call(chat, environment, *, prompt_token_ids=None, **kwargs):
+      del environment, kwargs
+      index = len(calls)
+      if index == 0:
+        assert chat is not None and prompt_token_ids is None
+        submitted = prompt
+      else:
+        assert chat is None
+        np.testing.assert_array_equal(prompt_token_ids, expected_inputs[index - 1])
+        submitted = list(prompt_token_ids)
+      calls.append(list(submitted))
+      echoed = list(submitted)
+      if poison == 'echo' and index == 1:
+        echoed[-1] += 1
+      text = (
+          '<function=execute_bash><parameter=command>pwd</parameter></function>'
+          if tool
+          else '```Right```'
+      )
+      if poison == 'history' and index == 1:
+        agent.chat_completions[0]['content'] += ' edited'
+      return base_rollout.RolloutOutput(
+          text=[text],
+          logits=None,
+          tokens=[np.array(samples[index], np.int32)],
+          left_padded_prompt_tokens=np.array([[0, 0] + echoed], np.int32),
+          prompt_lengths=np.array([len(echoed)], np.int32),
+          logprobs=None
+          if poison == 'logprobs'
+          else [np.full(len(samples[index]), -0.5)],
+      )
+
+    async def async_model_call(*args, **kwargs):
+      return model_call(*args, **kwargs)
+
+    tokenizer = _FreshTextTokenizer(env_rows)
+    parser = _FreshTextParser(suffix)
+    if poison == 'suffix':
+      parser.update_assistant_end_tokens = lambda tokens: (np.array([9, 9, 9]), 1)
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=agent,
+        env=env,
+        tokenizer=tokenizer,
+        chat_parser=parser,
+        model_call=async_model_call if asynchronous else model_call,
+        max_response_length=64,
+        exact_token_continuity=True,
+    )
+    return engine, calls, tokenizer
+
+  def _assert_training_consumer(self, record):
+    """Feeds the collector record through actual batch construction/packing."""
+    import copy  # pylint: disable=g-import-not-at-top
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from tunix.rl import rl_cluster  # pylint: disable=g-import-not-at-top
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
+
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner.algo_config = agentic_grpo_learner.GRPOConfig(
+        exact_token_continuity=True,
+        max_response_length=24,
+        beta=0.0,
+        use_rollout_logps=True,
+    )
+    learner._trajectory_logger = None
+    learner.metric_fns = []
+    learner._compute_rewards = lambda **kw: np.array([0.0, 1.0])
+    learner.rl_engine = SimpleNamespace(
+        rollout=SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 255),
+        r2m={rl_cluster.Role.ACTOR: None},
+        perf_v2=perf_tracer_v2.NoopTracer(),
+        buffer_metrics_async=mock.Mock(),
+        cluster_config=SimpleNamespace(
+            rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
+            training_config=SimpleNamespace(
+                max_seq_token_per_tpu=64, compute_logps_micro_batch_size=1
+            ),
+        ),
+    )
+    items = [agent_types.TrajectoryItem(traj=copy.deepcopy(record)) for _ in range(2)]
+    batch = learner._process_results(items)[0]
+    for row in rl_utils.unpad_train_example(batch):
+      np.testing.assert_array_equal(row['completion_ids'], record['conversation_tokens'])
+      np.testing.assert_array_equal(row['completion_mask'], record['conversation_masks'])
+      np.testing.assert_array_equal(row['old_per_token_logps'], record['old_logprobs'])
+    packed = list(
+        rl_utils.pack_sequences(iter([[batch]]), max_token_budget=64, sequences_per_update=2)
+    )[0][0]
+    expected_ids = list(record['prompt_tokens']) + list(record['conversation_tokens'])
+    expected_mask = [0] * record['prompt_length'] + list(record['conversation_masks'])
+    for segment in (1, 2):
+      valid = np.asarray(packed.segment_ids[0]) == segment
+      np.testing.assert_array_equal(packed.completion_ids[0][valid], expected_ids)
+      np.testing.assert_array_equal(packed.completion_mask[0][valid], expected_mask)
+
+  def test_frozenlake_three_turns_submit_recorded_ids(self):
+    for asynchronous in (False, True):
+      agent, env = self._frozenlake()
+      engine, calls, tokenizer = self._collector(agent, env, asynchronous=asynchronous)
+      result = asyncio.run(engine.collect(mode='Token'))
+      self.assertEqual((len(calls), len(tokenizer.encoded)), (3, 2))
+      self.assertEqual((result['prompt_length'], result['policy_version']), (3, 7))
+      np.testing.assert_array_equal(result['prompt_tokens'], [0, 100, 101])
+      np.testing.assert_array_equal(
+          result['conversation_tokens'], [10, 11, 90, 20, 21, 12, 90, 22, 13, 0, 90]
+      )
+      np.testing.assert_array_equal(
+          result['conversation_masks'], [1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0]
+      )
+      np.testing.assert_array_equal(
+          result['old_logprobs'], [-0.5, -0.5, 0, 0, 0, -0.5, 0, 0, -0.5, -0.5, 0]
+      )
+      self.assertEqual(engine._response_token_count, 8)  # suffixes are not samples
+      env.close.assert_called_once()
+      self._assert_training_consumer(result)
+
+  def test_first_turn_terminal_keeps_suffix_without_env_encoding(self):
+    agent, env = self._frozenlake()
+    env.max_steps = 1
+    engine, calls, tokenizer = self._collector(agent, env)
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual((len(calls), tokenizer.encoded), (1, []))
+    np.testing.assert_array_equal(result['conversation_tokens'], [10, 11, 90])
+    np.testing.assert_array_equal(result['conversation_masks'], [1, 1, 0])
+    self.assertTrue(agent.trajectory.steps[0].done)
+
+  def test_negatives_fail_closed(self):
+    for poison, message in (
+        ('echo', 'differs from recorded history'),
+        ('history', 'rewrote previously recorded'),
+        ('suffix', 'must only append'),
+    ):
+      agent, env = self._frozenlake()
+      engine, _, _ = self._collector(agent, env, poison=poison)
+      with self.assertRaisesRegex(ValueError, message):
+        asyncio.run(engine.collect(mode='Token'))
+
+  def test_swe_agent_tool_turns_submit_recorded_ids(self):
+    import importlib.util  # pylint: disable=g-import-not-at-top
+    import pathlib  # pylint: disable=g-import-not-at-top
+    import sys  # pylint: disable=g-import-not-at-top
+    import types  # pylint: disable=g-import-not-at-top
+
+    # Only the unavailable R2E action parser is stubbed; the real SWEAgent
+    # message/step code runs. This does not certify R2E or a sandbox.
+    class FixtureAction:
+
+      @classmethod
+      def from_string(cls, text):
+        obj = cls()
+        obj.text = text
+        return obj
+
+      def to_xml_string(self):
+        return self.text
+
+    action_module = types.ModuleType('r2egym.agenthub.action')
+    action_module.Action = FixtureAction
+    fake_modules = {
+        'r2egym': types.ModuleType('r2egym'),
+        'r2egym.agenthub': types.ModuleType('r2egym.agenthub'),
+        'r2egym.agenthub.action': action_module,
+    }
+    root = pathlib.Path(__file__).resolve().parents[4]
+    with mock.patch.dict(sys.modules, fake_modules):
+      spec = importlib.util.spec_from_file_location(
+          'swe_agent_tito_fixture', root / 'examples/deepswe/swe_agent.py'
+      )
+      module = importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(module)
+      agent = module.SWEAgent(format_model_response=True)
+      env = _ToolFixtureEnv()
+      engine, calls, tokenizer = self._collector(agent, env, tool=True)
+      result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual((len(calls), len(tokenizer.encoded)), (3, 2))
+    np.testing.assert_array_equal(
+        result['conversation_tokens'],
+        [30, 31, 91, 92, 40, 41, 42, 32, 91, 92, 43, 44, 33, 34, 91, 92],
+    )
+    np.testing.assert_array_equal(
+        result['conversation_masks'], [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0]
+    )
+    env.close.assert_called_once()
+    self._assert_training_consumer(result)
+
+
 if __name__ == '__main__':
   absltest.main()

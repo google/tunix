@@ -2489,5 +2489,171 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertIn("off_policy_steps", mock_warn.call_args[0][0])
 
 
+class ExactTokenContinuityBatchTest(absltest.TestCase):
+  """Real batch/packing/loss methods on a recorded trajectory; no model training."""
+
+  @staticmethod
+  def _raw_trajectory():
+    return {
+        "prompt_tokens": np.array([0, 0, 0, 100, 101], np.int32),
+        "prompt_length": 3,
+        "conversation_tokens": np.array(
+            [10, 11, 90, 20, 21, 12, 90, 22, 13, 0, 90], np.int32
+        ),
+        "conversation_masks": np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.int32),
+        "old_logprobs": np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.float32) * -0.5,
+        "conversation_text": [{"role": "assistant", "content": "action"}],
+        "policy_version": 7,
+        "trajectory_reward": 1.0,
+        "original_input": {"prompts": ["fixture"]},
+    }
+
+  def _make_batch(self, *, exact=True, packed=False, raw=None):
+    import copy  # pylint: disable=g-import-not-at-top
+    from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(agentic_grpo_learner.GRPOLearner)
+    obj.algo_config = agentic_grpo_learner.GRPOConfig(
+        exact_token_continuity=exact,
+        max_response_length=20,
+        beta=0.0,
+        use_rollout_logps=True,
+    )
+    obj._trajectory_logger = None
+    obj.metric_fns = []
+    obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
+    obj.rl_engine = types.SimpleNamespace(
+        rollout=types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 255),
+        r2m={rl_engine_lib.Role.ACTOR: None},
+        perf_v2=tracer.NoopTracer(),
+        buffer_metrics_async=mock.Mock(),
+        cluster_config=types.SimpleNamespace(
+            rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
+            training_config=types.SimpleNamespace(
+                max_seq_token_per_tpu=32 if packed else None,
+                compute_logps_micro_batch_size=1,
+            ),
+        ),
+    )
+    record = self._raw_trajectory() if raw is None else raw
+    items = [agent_types.TrajectoryItem(traj=copy.deepcopy(record)) for _ in range(2)]
+    return obj._process_results(items)[0]
+
+  def test_validity_mask_is_separate_from_loss_mask_and_survives_packing(self):
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    raw = self._raw_trajectory()
+    batch = self._make_batch()
+    count = len(raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.completion_ids[0, :count], raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.completion_mask[0, :count], raw["conversation_masks"])
+    np.testing.assert_array_equal(
+        batch.completion_attention_mask[0], [1] * count + [0] * (20 - count)
+    )
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    unpadded = rl_utils.unpad_train_example(batch)[0]
+    np.testing.assert_array_equal(unpadded["completion_ids"], raw["conversation_tokens"])
+    np.testing.assert_array_equal(unpadded["old_per_token_logps"], raw["old_logprobs"])
+
+    packed = list(
+        rl_utils.pack_sequences(
+            iter([[self._make_batch(packed=True)]]), max_token_budget=64, sequences_per_update=2
+        )
+    )[0][0]
+    expected = [0, 100, 101] + list(raw["conversation_tokens"])
+    for segment in (1, 2):
+      positions = np.asarray(packed.segment_ids[0]) == segment
+      np.testing.assert_array_equal(packed.completion_ids[0][positions], expected)
+      np.testing.assert_array_equal(
+          packed.completion_mask[0][positions], [0, 0, 0] + list(raw["conversation_masks"])
+      )
+
+  def test_native_default_keeps_pad_id_validity(self):
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    batch = self._make_batch(exact=False)
+    self.assertIsNone(batch.completion_attention_mask)
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 0, 1, 1])
+    self.assertLen(rl_utils.unpad_train_example(batch)[0]["completion_ids"], 5)
+
+  def test_exact_batch_never_silently_truncates(self):
+    raw = self._raw_trajectory()
+    raw.update(
+        conversation_tokens=np.arange(21),
+        conversation_masks=np.ones(21, np.int32),
+        old_logprobs=np.zeros(21),
+    )
+    with self.assertRaisesRegex(ValueError, "exceeds training padding budget"):
+      self._make_batch(raw=raw)
+
+  def test_actor_ref_and_loss_consume_token_mask(self):
+    import contextlib  # pylint: disable=g-import-not-at-top
+    from tunix.rl.inference import inference_worker  # pylint: disable=g-import-not-at-top
+
+    class PositionModel(nnx.Module):
+
+      def __init__(self):
+        self.weight = nnx.Param(jnp.linspace(-0.2, 0.2, 256))
+
+      def __call__(self, tokens, positions, cache=None, attention_mask=None, segment_ids=None):
+        feature = positions.astype(jnp.float32) + 0.2 * segment_ids.astype(jnp.float32)
+        if attention_mask is not None:
+          feature += 0.1 * jnp.sum(attention_mask, axis=-1)
+        return feature[..., None] * self.weight[None, None, :], None
+
+    batch = self._make_batch()
+    model = PositionModel()
+    graph, state = nnx.split(model)
+    mask = jnp.concatenate([batch.prompt_mask, batch.completion_attention_mask], axis=1)
+    direct = rl_common.compute_per_token_logps(
+        graph, state, batch.prompt_ids, batch.completion_ids, 0, 255, token_mask=mask
+    )
+    legacy = rl_common.compute_per_token_logps(
+        graph, state, batch.prompt_ids, batch.completion_ids, 0, 255
+    )
+    self.assertFalse(np.array_equal(direct, legacy))
+    engine = types.SimpleNamespace(
+        actor_trainer=types.SimpleNamespace(model=model),
+        _anchor_policy_state=state,
+        inference_worker=inference_worker.InferenceWorker({"reference": model}),
+        _is_state_on_device=lambda _: True,
+        _get_mesh_and_logical_axis_rules_cm=lambda _: contextlib.nullcontext((None, None)),
+        _maybe_load_model_from_cpu=mock.Mock(),
+        _maybe_offload_model_to_cpu=mock.Mock(),
+        get_rollout_config=lambda **kw: types.SimpleNamespace(temperature=1.0),
+        cluster_config=types.SimpleNamespace(
+            offload_to_cpu=False,
+            training_config=types.SimpleNamespace(
+                data_sharding_axis="fsdp", compute_logps_chunk_size=0
+            ),
+        ),
+    )
+    with mock.patch.object(
+        rl_engine_lib.sharding_utils, "shard_input", lambda value, axis: value
+    ):
+      for method in (
+          rl_engine_lib.RLEngine.get_actor_per_token_logps,
+          rl_engine_lib.RLEngine.get_ref_per_token_logps,
+      ):
+        value = method(
+            engine, batch.prompt_ids, batch.completion_ids, 0, 255,
+            micro_batch_size=1, token_mask=mask,
+        )
+        np.testing.assert_array_equal(value, direct)
+    batch = batch.replace(
+        completion_ids=batch.completion_ids.at[1, 0].set(14), old_per_token_logps=None
+    )
+    config = agentic_grpo_learner.GRPOConfig(beta=0.0, temperature=1.0, exact_token_continuity=True)
+
+    def loss(m):
+      return algo_core.grpo_loss_fn(m, batch, config, 0, 255).primary_loss.compute()
+
+    value, grads = nnx.value_and_grad(loss)(model)
+    leaves = jax.tree.leaves(grads)
+    self.assertTrue(np.isfinite(value) and all(np.all(np.isfinite(x)) for x in leaves))
+    self.assertGreater(sum(float(jnp.sum(x * x)) for x in leaves), 0)
+
+
 if __name__ == "__main__":
   absltest.main()

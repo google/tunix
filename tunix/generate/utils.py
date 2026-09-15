@@ -2082,3 +2082,20 @@ def detach_incompatible_vllm_cleanup_finalizer(llm_engine: Any) -> None:
       'Detached vLLM cleanup finalizer for non-torch model type %s.',
       type(model).__name__,
   )
+
+
+def as_token_ids(value) -> np.ndarray:
+  """Copies token IDs into an owned 1-D int32 array.
+
+  Raises:
+    ValueError: `value` is not one-dimensional.
+  """
+  array = np.array(value, dtype=np.int32)
+  if array.ndim != 1:
+    raise ValueError(f'token ids must be 1-D, got shape {array.shape}')
+  return array
+
+
+def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
+  """Returns the last `length` tokens of a left-padded prompt row."""
+  return as_token_ids(padded_tokens)[-int(length):]

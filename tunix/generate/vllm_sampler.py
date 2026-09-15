@@ -480,6 +480,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       prompts: List[TokensPrompt],
       sampling_params: Union[SamplingParams, BeamSearchParams],
+      *,
+      check_request_ids: bool = False,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -498,20 +500,44 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       })
 
     futures = self._driver.submit_requests(requests)
+    if check_request_ids and len(futures) != len(requests):
+      raise ValueError("vLLM driver returned a different number of futures")
 
     outputs: List[RequestOutput] = []
-    for future in futures:
+    for index, future in enumerate(futures):
       result = future.result()
       if not isinstance(result, RequestOutput):
         raise TypeError(
             f"Expected RequestOutput from driver, received {type(result)}."
         )
+      if (
+          check_request_ids
+          and result.request_id != requests[index]["request_id"]
+      ):
+        raise ValueError("vLLM driver result does not match its request ID")
       outputs.append(result)
     return outputs
 
+  @staticmethod
+  def _check_prompt_echo(prompt_ids, outputs) -> None:
+    """Checks each result belongs to, and echoes, the submitted token row.
+
+    Raises:
+      ValueError: result count, request ids or echoed prompts disagree with
+        what was submitted.
+    """
+    if len(outputs) != len(prompt_ids):
+      raise ValueError("vLLM result count differs from submitted token rows")
+    request_ids = [output.request_id for output in outputs]
+    if len(set(request_ids)) != len(request_ids):
+      raise ValueError("vLLM returned duplicate request ids")
+    for expected, output in zip(prompt_ids, outputs):
+      if not np.array_equal(utils.as_token_ids(output.prompt_token_ids), expected):
+        raise ValueError("vLLM prompt echo differs from the submitted token row")
+
   def __call__(
       self,
-      input_strings: str | List[str],
+      input_strings: str | List[str] | None,
       max_generation_steps: int,
       max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,
@@ -525,11 +551,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      *,
+      prompt_token_ids: list[list[int] | np.ndarray] | None = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
     if isinstance(input_strings, str):
       input_strings = [input_strings]
+
+    exact_input = prompt_token_ids is not None
+    if exact_input == (input_strings is not None):
+      raise ValueError("Provide exactly one of input_strings or prompt_token_ids")
+    if exact_input:
+      prompt_ids = [utils.as_token_ids(row) for row in prompt_token_ids]
+      if beam_size is not None or multi_sampling != 1:
+        raise ValueError("prompt_token_ids requires exactly one output per row")
+      if any(
+          len(row) + max_generation_steps > self.args["max_model_len"]
+          for row in prompt_ids
+      ):
+        raise ValueError("prompt plus max_generation_steps exceeds max_model_len")
+      input_strings = [""] * len(prompt_ids)  # detokenize logs only
 
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
@@ -610,19 +652,30 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               f" {sampling_kwargs}. Error: {e}",
           )
 
-    prompt_ids = [self.tokenize(x) for x in input_strings]
+    if exact_input:
+      if (
+          getattr(sampling_params, "truncate_prompt_tokens", None) is not None
+          or getattr(sampling_params, "n", 1) != 1
+      ):
+        raise ValueError("prompt_token_ids requires exactly one output per row")
+    else:
+      prompt_ids = [self.tokenize(x) for x in input_strings]
     prompt_objects = cast(
         List[TokensPrompt],
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
     )
     if self._driver is not None:
-      outputs = self._generate_server_mode(prompt_objects, sampling_params)
+      outputs = self._generate_server_mode(
+          prompt_objects, sampling_params, check_request_ids=exact_input
+      )
     else:
       outputs = self.llm.generate(  # pyrefly: ignore[missing-attribute]
           prompts=prompt_objects,
           sampling_params=sampling_params,
           use_tqdm=True,
       )
+    if exact_input:
+      self._check_prompt_echo(prompt_ids, outputs)
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
     )
@@ -652,8 +705,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        logprobs=out_logprobs[0]
+        if self.config.return_logprobs
+        else None,  # pyrefly: ignore[bad-argument-type]
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
+        ),
+        prompt_lengths=np.array(
+            [len(row) for row in prompt_ids], dtype=np.int32
         ),
     )
