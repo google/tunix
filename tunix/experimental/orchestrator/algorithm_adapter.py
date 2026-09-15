@@ -239,20 +239,20 @@ class GRPOAdapter(AlgorithmAdapter):
     self.truncated_importance_sampling_ratio = truncated_importance_sampling_ratio
     self.sampler_is_report_bands = tuple(sampler_is_report_bands or ())
     self.sampler_is_length_buckets = sampler_is_length_buckets
-    # Both gates compare the sampler against the trainer, so both need the
-    # rollout engine's log-probabilities. Fail at construction rather than
-    # letting a correctness feature quietly do nothing for a whole run.
-    if (
+    # Deliberately NOT guarded against use_rollout_logps=False. That flag only
+    # decides whether the rollout's log-probabilities become the PPO ratio's
+    # denominator; `rollout_per_token_logps` is carried either way, so
+    # force_on_policy_ratio (use_rollout_logps=False) composes with seq-mask-tis
+    # rather than excluding it. The MLPerf recipe asks for both together.
+    #
+    # The real precondition -- that the rollout actually returned
+    # log-probabilities -- cannot be known at construction time, so
+    # `grpo_loss_fn` enforces it per batch and raises rather than silently
+    # running with the gate disabled.
+    self.requires_rollout_logps = (
         truncated_importance_sampling_type is not None
         or seq_logprob_error_threshold is not None
-    ) and not use_rollout_logps:
-      raise ValueError(
-          "truncated_importance_sampling_type and seq_logprob_error_threshold"
-          " require use_rollout_logps=True: they compare the sampler's"
-          " per-token log-probabilities against the trainer's, and with"
-          " use_rollout_logps=False the rollout log-probabilities are never"
-          " carried to the loss."
-      )
+    )
 
   def compute_advantages(
       self,
@@ -294,12 +294,25 @@ class GRPOAdapter(AlgorithmAdapter):
           else np.zeros(0, dtype=np.int32)
       )
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
-      old_lp = (
-          _extract_old_logps(item, len(c_arr))
-          if self.use_rollout_logps
-          else None
-      )
+      # The rollout's own per-token log-probabilities serve two unrelated
+      # purposes and must not share one switch.
+      #
+      #   old_per_token_logps      the PPO ratio's denominator. Setting it None
+      #                            makes the trainer recompute, which pins the
+      #                            ratio to 1 -- this stack's equivalent of
+      #                            force_on_policy_ratio. Gated on
+      #                            use_rollout_logps, unchanged.
+      #   rollout_per_token_logps  the sampler-vs-trainer comparison that
+      #                            seq-mask-tis and seq_logprob_error_threshold
+      #                            gate on. Always carried when the rollout
+      #                            returned it.
+      #
+      # The MLPerf recipe sets force_on_policy_ratio AND seq-mask-tis at once,
+      # so tying both to use_rollout_logps made the recipe inexpressible.
+      rollout_lp = _extract_old_logps(item, len(c_arr))
+      old_lp = rollout_lp if self.use_rollout_logps else None
       payload = datatypes.RLTrainerPayload(
+          rollout_per_token_logps=rollout_lp,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,

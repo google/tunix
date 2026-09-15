@@ -115,29 +115,42 @@ class AlgoConfigCarriesRecipeOptionsTest(absltest.TestCase):
     self.assertEqual(cfg.sampler_is_length_buckets, (512, 2048))
 
 
-class RolloutLogpsGuardTest(absltest.TestCase):
-  """Both gates compare sampler against trainer, so both need rollout logps."""
+class ForceOnPolicyComposesWithTisTest(absltest.TestCase):
+  """force_on_policy_ratio and seq-mask-tis must not be mutually exclusive.
 
-  def test_tis_without_rollout_logps_raises(self):
-    with self.assertRaisesRegex(ValueError, "use_rollout_logps"):
-      _mlperf_adapter(
-          seq_logprob_error_threshold=None, use_rollout_logps=False
-      )
+  The MLPerf recipe sets BOTH. In this stack there is no `force_on_policy_ratio`
+  flag; the equivalent is `use_rollout_logps=False`, which leaves
+  `old_per_token_logps` unset so the trainer recomputes and the PPO ratio pins to
+  1. That flag must not also suppress `rollout_per_token_logps`, which is what
+  the TIS gates compare against -- otherwise the recipe is inexpressible.
+  """
 
-  def test_mult_prob_error_gate_without_rollout_logps_raises(self):
-    with self.assertRaisesRegex(ValueError, "use_rollout_logps"):
-      _mlperf_adapter(
-          truncated_importance_sampling_type=None,
-          truncated_importance_sampling_ratio_min=None,
-          truncated_importance_sampling_ratio=None,
-          use_rollout_logps=False,
-      )
-
-  def test_no_rollout_logps_is_fine_when_neither_gate_is_on(self):
-    adapter = algorithm_adapter.GRPOAdapter(
-        group_size=4, use_rollout_logps=False
-    )
+  def test_tis_with_force_on_policy_is_allowed(self):
+    adapter = _mlperf_adapter(use_rollout_logps=False)
     self.assertFalse(adapter.use_rollout_logps)
+    self.assertEqual(
+        adapter.truncated_importance_sampling_type, "seq-mask-tis"
+    )
+    self.assertTrue(adapter.requires_rollout_logps)
+
+  def test_requires_rollout_logps_is_false_when_no_gate_is_on(self):
+    adapter = algorithm_adapter.GRPOAdapter(group_size=4)
+    self.assertFalse(adapter.requires_rollout_logps)
+
+  def test_either_gate_alone_sets_requires_rollout_logps(self):
+    self.assertTrue(
+        algorithm_adapter.GRPOAdapter(
+            group_size=4, seq_logprob_error_threshold=2.0
+        ).requires_rollout_logps
+    )
+    self.assertTrue(
+        algorithm_adapter.GRPOAdapter(
+            group_size=4,
+            truncated_importance_sampling_type="seq-mask-tis",
+            truncated_importance_sampling_ratio_min=0.999,
+            truncated_importance_sampling_ratio=1.002,
+        ).requires_rollout_logps
+    )
 
   def test_overlong_masking_alone_does_not_require_rollout_logps(self):
     """Overlong masking reads the collector's verdict, not the sampler."""
@@ -145,6 +158,19 @@ class RolloutLogpsGuardTest(absltest.TestCase):
         group_size=4, overlong_loss_masking=True, use_rollout_logps=False
     )
     self.assertTrue(adapter.overlong_loss_masking)
+    self.assertFalse(adapter.requires_rollout_logps)
+
+  def test_rollout_logps_are_carried_even_with_force_on_policy(self):
+    """The payload builder must split the two uses of the sampler logprobs."""
+    src = algorithm_adapter.__file__
+    with open(src, "r") as fh:
+      text = fh.read()
+    # rollout_lp is extracted unconditionally; only old_lp is gated.
+    self.assertIn("rollout_lp = _extract_old_logps(item, len(c_arr))", text)
+    self.assertIn(
+        "old_lp = rollout_lp if self.use_rollout_logps else None", text
+    )
+    self.assertIn("rollout_per_token_logps=rollout_lp", text)
 
 
 class PayloadCarriesRolloutInputsTest(absltest.TestCase):
