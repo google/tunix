@@ -1288,17 +1288,15 @@ def validate_environment(values: Mapping[str, str]) -> None:
   # must stay in sync.
   sandbox_runtime = values.get("CANON_DEEPSWE_SANDBOX_RUNTIME", "direct")
   sandbox_namespace = values.get("R2E_K8S_NAMESPACE", "")
-  if sandbox_runtime == "fleet" or sandbox_namespace:
-    if sandbox_namespace not in _ADMITTED_SANDBOX_NAMESPACES:
-      raise ValueError(
-          "DeepSWE R2E_K8S_NAMESPACE must be one of "
-          f"{sorted(_ADMITTED_SANDBOX_NAMESPACES)}, got {sandbox_namespace!r}"
-      )
-  if sandbox_runtime != "fleet" and sandbox_namespace:
+  if sandbox_namespace not in _ADMITTED_SANDBOX_NAMESPACES:
     raise ValueError(
-        "R2E_K8S_NAMESPACE is a Fleet-only placement and the direct sandbox "
-        "runtime ignores it; see r2egym_runtime_patch.py"
+        "DeepSWE R2E_K8S_NAMESPACE must be one of "
+        f"{sorted(_ADMITTED_SANDBOX_NAMESPACES)}, got {sandbox_namespace!r}"
     )
+  # Both runtimes need it.  The direct runtime creates sandbox Pods with the
+  # head's own namespaced ServiceAccount, so a head in `trellis` that placed
+  # sandboxes in `default` would be denied at rollout, not at render time.
+  del sandbox_runtime
   flags = values.get("XLA_FLAGS", "")
   has_precision_pin = "--xla_allow_excess_precision=false" in flags
   if numerical_bundle and not has_precision_pin:

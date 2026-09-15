@@ -1056,10 +1056,18 @@ case "${CANON_DEEPSWE_SANDBOX_RUNTIME:-direct}" in
       echo "[env] R2E_SANDBOX_CAPACITY is valid only with CANON_DEEPSWE_SANDBOX_RUNTIME=fleet" >&2
       fail=1
     fi
-    if [ -n "${R2E_K8S_NAMESPACE:-}" ]; then
-      echo "[env] R2E_K8S_NAMESPACE is valid only with CANON_DEEPSWE_SANDBOX_RUNTIME=fleet; the direct runtime always uses the r2egym default namespace" >&2
-      fail=1
-    fi
+    # The direct runtime creates R2E sandbox Pods with the head's own
+    # namespaced ServiceAccount, so the sandboxes have to live in the head's
+    # namespace: trellis/xpk-sa holds no core pods/exec grant in `default`.
+    # R2E-Gym's own DEFAULT_NAMESPACE is "default", so a default-namespace lane
+    # is unchanged by pinning this explicitly.
+    case "${R2E_K8S_NAMESPACE:-}" in
+      default|trellis) ;;
+      *)
+        echo "[env] direct sandbox runtime requires R2E_K8S_NAMESPACE to be exactly default or trellis; got '${R2E_K8S_NAMESPACE:-}'" >&2
+        fail=1
+        ;;
+    esac
     ;;
   fleet)
     [ "${CANON_P34_DEEPSWE:-0}" = "1" ] || \

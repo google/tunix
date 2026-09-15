@@ -148,10 +148,26 @@ def sandbox_runtime_environment(
   """Returns the fail-closed renderer payload for DeepSWE sandbox lifecycle."""
   if runtime not in SANDBOX_RUNTIMES:
     raise ValueError("sandbox_runtime must be exactly direct or fleet")
+  # Both runtimes place sandbox Pods, so both need an admitted namespace.  The
+  # direct runtime creates R2E Pods with the *head's own* ServiceAccount, which
+  # is namespaced: a head in `trellis` running as trellis/xpk-sa holds no core
+  # pods/exec grant in `default`, so a sandbox placed there is denied at
+  # rollout -- the same failure class that killed bd03.  Sandboxes therefore
+  # follow the head.  R2E-Gym pins DEFAULT_NAMESPACE = "default" at
+  # CANON_R2EGYM_COMMIT, so emitting "default" here is byte-for-byte the
+  # historical behaviour of every default-namespace lane.
+  if namespace not in ADMITTED_SANDBOX_NAMESPACES:
+    raise ValueError(
+        "sandbox namespace must be one of "
+        f"{sorted(ADMITTED_SANDBOX_NAMESPACES)}; got {namespace!r}"
+    )
   if runtime == "direct":
     if capacity is not None:
       raise ValueError("sandbox_capacity is valid only for fleet runtime")
-    return {"CANON_DEEPSWE_SANDBOX_RUNTIME": "direct"}
+    return {
+        "CANON_DEEPSWE_SANDBOX_RUNTIME": "direct",
+        "R2E_K8S_NAMESPACE": namespace,
+    }
   if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
     raise ValueError("fleet sandbox_capacity must be a positive integer")
   minimum = 2 * active_trajectories
@@ -159,11 +175,6 @@ def sandbox_runtime_environment(
     raise ValueError(
         "fleet sandbox_capacity is below active + replacement warm: "
         f"capacity={capacity} minimum={minimum}"
-    )
-  if namespace not in ADMITTED_SANDBOX_NAMESPACES:
-    raise ValueError(
-        "fleet sandbox_namespace must be one of "
-        f"{sorted(ADMITTED_SANDBOX_NAMESPACES)}; got {namespace!r}"
     )
   return {
       "CANON_DEEPSWE_SANDBOX_RUNTIME": "fleet",
@@ -198,9 +209,13 @@ def validate_sandbox_runtime_environment(
   if wrong:
     raise ValueError(f"rendered sandbox runtime environment mismatch: {wrong}")
   if runtime == "direct":
-    for key in ("R2E_SANDBOX_CAPACITY", "R2E_K8S_NAMESPACE"):
-      if key in env:
-        raise ValueError(f"direct sandbox runtime retained Fleet-only {key}")
+    # R2E_K8S_NAMESPACE is no longer Fleet-only: the direct runtime places its
+    # sandboxes in the head's own namespace and needs to be told which one.
+    # Capacity stays Fleet-only because only the Fleet pre-warms a pool.
+    if "R2E_SANDBOX_CAPACITY" in env:
+      raise ValueError(
+          "direct sandbox runtime retained Fleet-only R2E_SANDBOX_CAPACITY"
+      )
 
 
 class _QuotedString(str):

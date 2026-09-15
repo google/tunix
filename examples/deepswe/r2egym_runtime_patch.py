@@ -14,17 +14,25 @@ _KUBERNETES_DNS_LABEL = re.compile(
 _DEFAULT_NODE_SELECTOR_VAL = "cpu-np"
 # Admission stays fail-closed: the P58 production lane accepts only the pools
 # listed here and anything else still raises.  "cpu-np" is admitted for
-# bodaborg-v5p-nap, where "deepswe-cpu-pool-2" does not exist and the
-# "sandbox-cpu-flavor" ResourceFlavor is attached only to the "trellis"
-# ClusterQueue, so a sandbox Pod submitted from our "default" queue can never
-# be admitted onto sandbox-cpu-pool.  This mirrors
-# _ADMITTED_SANDBOX_NODEPOOLS in
-# canon-zero-tim/cluster/render_p58_deepswe_tim.py; the two must stay in sync,
-# otherwise a render passes, `kubectl apply --dry-run=server` passes, and the
-# run dies here when it spawns its first sandbox.
+# bodaborg-v5p-nap, where "deepswe-cpu-pool-2" does not exist.
+#
+# "sandbox-cpu-pool" is reachable only from the "trellis" namespace: a Kueue
+# LocalQueue is namespaced, and the "sandbox-cpu-flavor" ResourceFlavor
+# (nodeLabels {gke-nodepool: sandbox-cpu-pool}) hangs off the "trellis"
+# ClusterQueue alone, so a sandbox Pod submitted from a "default" queue still
+# cannot land there.  A trellis head therefore reaches it and a default head
+# does not; both stay fail-closed rather than silently falling back.  It is the
+# preferred sandbox pool because it is the only one whose node disk holds the
+# whole R2E per-task image corpus -- see _ADMITTED_SANDBOX_NODEPOOLS in
+# canon-zero-tim/cluster/render_p58_deepswe_tim.py for the measurements.
+#
+# This mirrors _ADMITTED_SANDBOX_NODEPOOLS in that renderer; the two must stay
+# in sync, otherwise a render passes, `kubectl apply --dry-run=server` passes,
+# and the run dies here when it spawns its first sandbox.
 _P58_SANDBOX_NODEPOOLS = frozenset({
     "deepswe-cpu-pool-2",
     "cpu-np",
+    "sandbox-cpu-pool",
 })
 
 
@@ -195,7 +203,16 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
   if getattr(docker_mod, "_tunix_repoenv_poll_patch_applied", False):
     return str(getattr(docker_mod, "__file__", ""))
 
-  namespace = docker_mod.DEFAULT_NAMESPACE
+  # Sandboxes follow the head.  This runtime creates, polls and deletes R2E
+  # Pods with the head Pod's own ServiceAccount, which is namespaced: a head in
+  # `trellis` running as trellis/xpk-sa holds no core pods/exec grant in
+  # `default`, so a hard-coded `default` here is denied at rollout rather than
+  # at render time.  Resolved exactly like the orphan sweep above so the two can
+  # never disagree about where the sandboxes are.  R2E-Gym pins
+  # DEFAULT_NAMESPACE = "default", so an unset variable is the historical value.
+  namespace = (
+      os.environ.get("R2E_K8S_NAMESPACE", "") or docker_mod.DEFAULT_NAMESPACE
+  )
   original_start_container = docker_mod.DockerRuntime.start_container
 
   def pod_name_for(runtime) -> str:
@@ -409,12 +426,14 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
                 "limits": {"cpu": cpu_limit, "memory": memory_limit},
             },
         }],
-        "tolerations": [{
-            "key": "node.kubernetes.io/disk-pressure",
-            "operator": "Exists",
-            "effect": "NoExecute",
-            "tolerationSeconds": 10800,
-        }],
+        # No disk-pressure toleration.  A 3h `node.kubernetes.io/disk-pressure`
+        # NoExecute toleration used to sit here, which inverted the eviction
+        # order we actually want: on a pressured node the node controller would
+        # evict every co-tenant Pod that lacks the toleration -- on cpu-np that
+        # is each team's orchestrator and Pathways head, including our own
+        # long-running ones -- while our sandboxes kept their seats for three
+        # hours.  Sandboxes are the cheapest thing on the node to lose and the
+        # thing generating the pressure, so they should go first.
     }
     if node_key and node_value:
       pod_spec["nodeSelector"] = {node_key: node_value}

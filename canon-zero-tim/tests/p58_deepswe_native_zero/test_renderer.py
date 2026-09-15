@@ -1002,6 +1002,53 @@ class P58RendererTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact Kueue LocalQueue"):
           self._render("native", base=base)
 
+  def test_namespace_selects_the_queue_and_the_sandbox_placement(self):
+    # A Kueue LocalQueue is namespaced, so the namespace -- not the queue
+    # string -- is what picks the admitting ClusterQueue and therefore the TPU
+    # quota.  On bodaborg-v5p-nap the `default` ClusterQueue caps
+    # google.com/tpu at 224 with no cohort to borrow from, so a 64-chip run
+    # cannot be admitted there at all.
+    expected = {"default": "default", "trellis": "multislice-queue"}
+    for namespace, queue in expected.items():
+      with self.subTest(namespace=namespace):
+        document = self._render("zero", "full", jobset_namespace=namespace)
+        self.assertEqual(document["metadata"]["namespace"], namespace)
+        self.assertEqual(
+            document["metadata"]["labels"]["kueue.x-k8s.io/queue-name"], queue
+        )
+        # The JobSet label and both Pod templates have to agree.
+        for replicated in document["spec"]["replicatedJobs"]:
+          pod = replicated["template"]["spec"]["template"]
+          self.assertEqual(
+              pod["metadata"]["labels"]["kueue.x-k8s.io/queue-name"], queue
+          )
+        # Sandboxes follow the head: the direct runtime creates them with the
+        # head's own namespaced ServiceAccount.
+        env = renderer.p34._env(document)
+        self.assertEqual(env["R2E_K8S_NAMESPACE"], namespace)
+        self.assertEqual(env["R2E_K8S_QUEUE_NAME"], queue)
+
+  def test_unadmitted_jobset_namespace_is_rejected(self):
+    for namespace in ("kube-system", "trelis", ""):
+      with self.subTest(namespace=namespace):
+        with self.assertRaisesRegex(ValueError, "admitted JobSet namespace"):
+          self._render("zero", "full", jobset_namespace=namespace)
+
+  def test_worker_reservation_is_opt_in_and_exact(self):
+    reservation = "cloudtpu-20260902214500-1810493672"
+    document = self._render("zero", "full", reservation=reservation)
+    worker = renderer.p34._worker(document)["template"]["spec"]
+    self.assertEqual(
+        worker["nodeSelector"]["cloud.google.com/reservation-name"],
+        reservation,
+    )
+    # Absent by default, so every existing lane renders byte-for-byte as before.
+    without = self._render("zero", "full")
+    self.assertNotIn(
+        "cloud.google.com/reservation-name",
+        renderer.p34._worker(without)["template"]["spec"]["nodeSelector"],
+    )
+
   def test_nonadmitted_cpu_nodepool_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "admitted CPU node pool"):
       self._render("native", cpu_nodepool="nonexistent-pool")
@@ -1009,6 +1056,61 @@ class P58RendererTest(unittest.TestCase):
   def test_nonadmitted_sandbox_nodepool_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "admitted sandbox node pool"):
       self._render("native", sandbox_nodepool="nonexistent-pool")
+
+  def test_sandbox_cpu_pool_is_admitted_and_independent_of_the_head(self):
+    # R2E-Gym ships one image per task, so the 1012-task clean whitelist is a
+    # ~699 GiB image corpus.  A cpu-np node has 94.3 GiB of ephemeral capacity
+    # and holds 13% of it; a sandbox-cpu-pool node has 980.2 GiB and holds all
+    # of it.  cpu-np is also where every team's orchestrator and Pathways head
+    # Pod lives, so image-GC pressure there evicts neighbours.  The head pool
+    # and the sandbox pool are therefore separate decisions and must stay
+    # separately selectable.
+    document = self._render(
+        "zero",
+        "full",
+        cpu_nodepool="cpu-np",
+        sandbox_nodepool="sandbox-cpu-pool",
+    )
+    env = renderer.p34._env(document)
+    self.assertEqual(env["NODE_SELECTOR_VAL"], "sandbox-cpu-pool")
+    head = renderer.p34._head(document)
+    self.assertEqual(
+        head["nodeSelector"]["cloud.google.com/gke-nodepool"], "cpu-np"
+    )
+    # Defaulting is unchanged: an unset sandbox pool still follows the head.
+    followed = self._render("zero", "full", cpu_nodepool="cpu-np")
+    self.assertEqual(
+        renderer.p34._env(followed)["NODE_SELECTOR_VAL"], "cpu-np"
+    )
+
+  def test_topology_global_m_versus_the_p38_fixed_lm_head_registry(self):
+    # A system-optimization arm forces CANON_P38_FIXED_LM_HEAD=1
+    # (render_p44_deepswe_parity.effective_fixed_lm_head) and both systemopt
+    # profiles hard-assert it is 1, so the fixed head cannot be turned off on
+    # that lane.  The fixed head is registered per (hidden, tp) geometry and
+    # admits an exact set of semantic M.  The learner hands it global M rows:
+    # canonical_qwen3_adapter pins local_m = CANON_LOGPROB_M = 256 and
+    # global_m = MIN_TOKEN_BUCKET = dp * local_m.
+    #
+    # For Qwen3-4B TP8 the registry admits 2048 but not 1024, so:
+    #   128     -> DP8 -> global_m 2048 -> registered   -> launchable
+    #   64split -> DP4 -> global_m 1024 -> unregistered -> update-0 abort,
+    #              observed on bd04 as `got (1024, 2560)` where 2560 is the
+    #              Qwen3-4B hidden size.
+    # Rendering is unaffected either way; this pins the arithmetic so the gap
+    # is visible here instead of 28 minutes into a run.
+    admitted = renderer._p38_admitted_semantic_m()
+    self.assertEqual(admitted, (8, 16, 32, 64, 128, 256, 2048, 4096))
+
+    specs = renderer._TOPOLOGY_SPECS
+    self.assertEqual(specs["128"].global_m, 256 * specs["128"].role_dp)
+    self.assertEqual(specs["64split"].global_m,
+                     256 * specs["64split"].role_dp)
+
+    self.assertIn(specs["128"].global_m, admitted)
+    self.assertNotIn(specs["64split"].global_m, admitted)
+    # Qwen3-8B TP8 does register the DP4 shape; only the 4B entry lacks it.
+    self.assertIn(1024, renderer._p38_admitted_semantic_m(hidden=4096))
 
   def test_canon_cpu_pool_and_large_head_limits(self):
     for arm in ("native", "zero"):
@@ -1046,13 +1148,17 @@ class P58RendererTest(unittest.TestCase):
   def test_legacy_nodepools_are_rejected(self):
     # "cpu-np" moved out of this list when it was admitted for
     # bodaborg-v5p-nap; see test_cpu_np_is_admitted_for_both_roles below.
-    # Admission stays fail-closed for everything else, and crucially each pool
-    # is still rejected for the *other* role.
+    # "sandbox-cpu-pool" moved out of the *sandbox* list for the same reason --
+    # see test_sandbox_cpu_pool_is_admitted_and_independent_of_the_head -- but
+    # stays rejected as a head pool.  Admission stays fail-closed for
+    # everything else, and crucially each pool is still rejected for the
+    # *other* role: sandbox-cpu-pool cannot host the head, and canon-cpu-pool
+    # cannot host sandboxes.
     for cpu_nodepool in ("deepswe-cpu-pool-2", "sandbox-cpu-pool"):
       with self.subTest(cpu_nodepool=cpu_nodepool):
         with self.assertRaisesRegex(ValueError, "admitted CPU node pool"):
           self._render("native", cpu_nodepool=cpu_nodepool)
-    for sandbox_nodepool in ("deepswe-cpu-pool", "sandbox-cpu-pool"):
+    for sandbox_nodepool in ("deepswe-cpu-pool", "canon-cpu-pool"):
       with self.subTest(sandbox_nodepool=sandbox_nodepool):
         with self.assertRaisesRegex(ValueError, "admitted sandbox node pool"):
           self._render("native", sandbox_nodepool=sandbox_nodepool)

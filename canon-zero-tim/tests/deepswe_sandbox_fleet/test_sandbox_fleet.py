@@ -838,7 +838,11 @@ class SandboxNamespacePlacementTest(unittest.TestCase):
     self.assertEqual(p34.AGENT_SANDBOX_COMMIT,
                      sandbox_fleet.AGENT_SANDBOX_COMMIT)
 
-  def test_direct_never_carries_a_fleet_namespace(self):
+  def test_direct_carries_the_head_namespace_but_no_fleet_keys(self):
+    # The direct runtime creates R2E Pods with the head's own namespaced
+    # ServiceAccount, so it has to be told where the head lives; placing them
+    # anywhere else is denied at rollout.  Capacity and the pull secret stay
+    # Fleet-only because only the Fleet pre-warms a pool.
     document = p44.render(
         self._base(),
         stage="three-update",
@@ -846,16 +850,27 @@ class SandboxNamespacePlacementTest(unittest.TestCase):
         **self._common("nsb"),
     )
     env = p34._env(document)
-    self.assertNotIn("R2E_K8S_NAMESPACE", env)
+    self.assertEqual(env["R2E_K8S_NAMESPACE"], p34.DEFAULT_SANDBOX_NAMESPACE)
     self.assertNotIn("IMAGE_PULL_SECRET", env)
+    self.assertNotIn("R2E_SANDBOX_CAPACITY", env)
+
+    trellis = p44.render(
+        self._base(),
+        stage="three-update",
+        topology="64",
+        sandbox_namespace="trellis",
+        **self._common("nsb2"),
+    )
+    self.assertEqual(p34._env(trellis)["R2E_K8S_NAMESPACE"], "trellis")
 
   def test_unadmitted_namespace_is_rejected_by_the_renderer(self):
-    for bad in ("trelis", "kube-system", ""):
-      with self.subTest(namespace=bad):
-        with self.assertRaisesRegex(ValueError, "sandbox_namespace"):
-          p34.sandbox_runtime_environment(
-              "fleet", 128, active_trajectories=64, namespace=bad
-          )
+    for runtime, capacity in (("fleet", 128), ("direct", None)):
+      for bad in ("trelis", "kube-system", ""):
+        with self.subTest(runtime=runtime, namespace=bad):
+          with self.assertRaisesRegex(ValueError, "sandbox namespace"):
+            p34.sandbox_runtime_environment(
+                runtime, capacity, active_trajectories=64, namespace=bad
+            )
 
   def _resolve(self, *, overrides=None, **render_kwargs):
     """Runs the real 00_env.sh so the contract sees a fully resolved profile.
@@ -925,12 +940,18 @@ class SandboxNamespacePlacementTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "R2E_K8S_NAMESPACE"):
       deepswe_contract.validate_environment(drifted)
 
-    # The direct runtime ignores the namespace outright, so carrying one is a
-    # silent placement lie rather than a harmless leftover.
-    leaked = dict(values, CANON_DEEPSWE_SANDBOX_RUNTIME="direct")
-    leaked.pop("R2E_SANDBOX_CAPACITY", None)
-    with self.assertRaisesRegex(ValueError, "Fleet-only placement"):
-      deepswe_contract.validate_environment(leaked)
+    # Direct now carries the namespace too, because its sandboxes live beside
+    # the head.  What must still fail closed is a *missing* or drifted value:
+    # falling back to r2egym's built-in `default` from a trellis head is the
+    # bd03 denial, one rollout later.
+    direct = dict(values, CANON_DEEPSWE_SANDBOX_RUNTIME="direct")
+    direct.pop("R2E_SANDBOX_CAPACITY", None)
+    deepswe_contract.validate_environment(direct)
+
+    absent = dict(direct)
+    absent.pop("R2E_K8S_NAMESPACE", None)
+    with self.assertRaisesRegex(ValueError, "R2E_K8S_NAMESPACE"):
+      deepswe_contract.validate_environment(absent)
 
   def test_entrypoint_rejects_a_drifted_namespace_before_tpu(self):
     result, _ = self._resolve(
@@ -960,10 +981,18 @@ class SandboxNamespacePlacementTest(unittest.TestCase):
 
   def test_entrypoint_rejects_an_unadmitted_namespace(self):
     text = (PKG / "cluster/steps/00_env.sh").read_text()
-    self.assertIn("default|trellis)", text)
+    # Both runtime branches now gate the namespace against the same admitted
+    # set: direct places sandboxes beside the head rather than ignoring the
+    # value, so neither branch may fall through to r2egym's built-in default.
+    self.assertEqual(text.count("default|trellis)"), 2)
     self.assertIn(
-        "R2E_K8S_NAMESPACE is valid only with"
-        " CANON_DEEPSWE_SANDBOX_RUNTIME=fleet",
+        "direct sandbox runtime requires R2E_K8S_NAMESPACE to be exactly"
+        " default or trellis",
+        text,
+    )
+    self.assertIn(
+        "Fleet sandbox runtime requires R2E_K8S_NAMESPACE to be exactly"
+        " default or trellis",
         text,
     )
 

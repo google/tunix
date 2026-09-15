@@ -9,6 +9,7 @@ import dataclasses
 from pathlib import Path
 import re
 import shlex
+import sys
 from typing import Any, Mapping
 
 import yaml
@@ -70,13 +71,61 @@ _ADMITTED_CPU_NODEPOOLS = frozenset({
     "canon-cpu-pool",
     "cpu-np",
 })
+# The sandbox side has a second, independent dimension the vCPU/memory count
+# above never measured: node disk.  R2E-Gym ships one image per task, so the
+# P58 clean whitelist is 1012 distinct images of ~0.691 GiB each -- a 699 GiB
+# corpus.  Measured 2026-09-15 on bodaborg-v5p-nap:
+#
+#   cpu-np            n2d-standard-64    94.3 GiB ephemeral capacity/node
+#                     already 20.4 GiB median / 55.9 GiB peak of cached images
+#   sandbox-cpu-pool  n2-standard-32    980.2 GiB ephemeral capacity/node
+#                     (1000 GB pd-ssd), autoscaling 20..40, no taint
+#
+# A cpu-np node holds 13% of the corpus, so a 1000-update run parks it
+# permanently between the kubelet image-GC high threshold (85%) and the hard
+# eviction threshold (90%).  cpu-np is also where every team's orchestrator and
+# Pathways head Pod lives, so that eviction lands on neighbours -- and on our
+# own long-running heads.  A sandbox-cpu-pool node holds the whole corpus.
+# Sandbox placement is independent of the head pool: render_p44_deepswe_parity
+# overrides NODE_SELECTOR_VAL with the sandbox pool, so the head stays on
+# cpu-np.  Admission here must stay in sync with _P58_SANDBOX_NODEPOOLS in
+# examples/deepswe/r2egym_runtime_patch.py.
 _ADMITTED_SANDBOX_NODEPOOLS = frozenset({
     "deepswe-cpu-pool-2",
     "cpu-np",
+    "sandbox-cpu-pool",
 })
 _DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
 _DEFAULT_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
 _CPU_NODEPOOL = _DEFAULT_CPU_NODEPOOL
+# A Kueue LocalQueue is a namespaced object, so the *namespace* -- not the queue
+# string -- is what selects the admitting ClusterQueue.  On bodaborg-v5p-nap:
+#
+#   default/default, default/multislice-queue  -> ClusterQueue "default"
+#       tpu-v5p-flavor google.com/tpu nominalQuota = 224
+#   trellis/default, trellis/multislice-queue  -> ClusterQueue "trellis"
+#       tpu-v5p-flavor google.com/tpu nominalQuota = 800
+#       plus sandbox-cpu-flavor, which `default` does not have at all
+#
+# A 64-chip P58 cannot be admitted by the `default` ClusterQueue while that
+# queue already reserves 272 chips against a 224 nominal quota, and the queue
+# has no cohort so it cannot borrow.  Running in `trellis` is therefore a
+# placement decision, not a convenience.
+_ADMITTED_JOBSET_NAMESPACES = frozenset({"default", "trellis"})
+_DEFAULT_JOBSET_NAMESPACE = "default"
+# Derived from the namespace rather than exposed as its own flag: the pair has
+# to be consistent, and a second knob is a second thing to get wrong.  Every
+# TPU JobSet that trellis actually runs uses `multislice-queue`.
+_NAMESPACE_LOCAL_QUEUE = {
+    "default": "default",
+    "trellis": "multislice-queue",
+}
+# Every TPU JobSet actually running on this cluster -- 40 of 40 at the time of
+# writing, including our own r10/r11 -- pins the reservation on the worker.
+# Nodes backed by a reservation carry this label; leaving it unset is permissive
+# rather than restrictive, but no admitted workload relies on that, so the pin
+# stays explicit and opt-in.
+_TPU_RESERVATION_LABEL = "cloud.google.com/reservation-name"
 # Keep the historical head requests and generous hard limits.  Matching every
 # request to these limits would reserve roughly 700 GB for one head Pod and can
 # make it unschedulable; the very-high PriorityClass remains the eviction lever.
@@ -166,6 +215,35 @@ _SYSTEMOPT_PROFILES = {
     "128": SYSTEMOPT_PROFILE,
     "64split": SPLIT_SYSTEMOPT_PROFILE,
 }
+
+# Qwen3-4B hidden size.  The P38 fixed lm_head registry is keyed on
+# (hidden, tp_size), and this is the value that appears in its rejection
+# message, e.g. `got (1024, 2560)`.
+_QWEN4B_HIDDEN = 2560
+
+
+def _p38_admitted_semantic_m(hidden: int = _QWEN4B_HIDDEN) -> tuple[int, ...]:
+  """Returns the semantic M the P38 fixed lm_head admits for one geometry.
+
+  Read out of the shim rather than copied, so a reader of this module cannot
+  drift from the registry it is quoting.  The shim keeps its jax imports inside
+  its kernels, so importing it here stays cheap and TPU-free.
+
+  This matters because a system-optimization arm forces
+  CANON_P38_FIXED_LM_HEAD=1 and the learner hands the fixed head global M rows,
+  where global M = dp * 256.  For Qwen3-4B TP8 the registry admits 2048 (DP8,
+  the "128" topology) but not 1024 (DP4, the "64split" topology), so the
+  64split systemopt lane still *renders* but aborts at update 0.  See
+  tests/p58_deepswe_native_zero/test_renderer.py::
+  test_topology_global_m_versus_the_p38_fixed_lm_head_registry.
+  """
+  shim_dir = Path(__file__).resolve().parent.parent / "src" / "engine_shims"
+  if str(shim_dir) not in sys.path:
+    sys.path.insert(0, str(shim_dir))
+  import p38_fixed_lm_head  # pylint: disable=g-import-not-at-top
+
+  geometry = p38_fixed_lm_head.resolve_geometry(hidden, ROLE_TP)
+  return p38_fixed_lm_head._semantic_m_for_geometry(geometry)  # pylint: disable=protected-access
 
 
 def _topology_spec(topology: str) -> _TopologySpec:
@@ -278,6 +356,8 @@ def render(
     sandbox_nodepool: str | None = None,
     sandbox_runtime: str = "direct",
     sandbox_capacity: int | None = None,
+    jobset_namespace: str = _DEFAULT_JOBSET_NAMESPACE,
+    reservation: str | None = None,
     topology: str = "128",
     instance_type: str | None = None,
     whitelist: str = CLEAN_WHITELIST,
@@ -490,15 +570,32 @@ def render(
         "canon.zero-tim/backward": "0",
         "canon.zero-tim/optimizer-commits": "0",
     })
-  queue_name = str(
+  # Validate what the base manifest carries *before* overwriting it.  The
+  # namespace-derived value below is drawn from a constant and is always well
+  # formed, so checking only the final value would silently retire this guard
+  # against a malformed base.
+  base_queue_name = str(
       document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL, "")
   )
   if (
-      not queue_name
-      or len(queue_name) > 63
-      or not _KUBERNETES_DNS_LABEL.fullmatch(queue_name)
+      not base_queue_name
+      or len(base_queue_name) > 63
+      or not _KUBERNETES_DNS_LABEL.fullmatch(base_queue_name)
   ):
     raise ValueError("P58 requires an exact Kueue LocalQueue label")
+  if jobset_namespace not in _ADMITTED_JOBSET_NAMESPACES:
+    raise ValueError(
+        "P58 requires an admitted JobSet namespace "
+        f"({sorted(_ADMITTED_JOBSET_NAMESPACES)}); got {jobset_namespace!r}"
+    )
+  document["metadata"]["namespace"] = jobset_namespace
+  queue_name = _NAMESPACE_LOCAL_QUEUE[jobset_namespace]
+  document["metadata"]["labels"][_KUEUE_QUEUE_LABEL] = queue_name
+  for replicated in document["spec"]["replicatedJobs"]:
+    pod_metadata = replicated["template"]["spec"]["template"].setdefault(
+        "metadata", {}
+    )
+    pod_metadata.setdefault("labels", {})[_KUEUE_QUEUE_LABEL] = queue_name
 
   head = p34._head(document)
   # Pathways heads intentionally keep the proven host-network transport.  The
@@ -551,7 +648,10 @@ def render(
   }
   rendered_env = {
       **p34.sandbox_runtime_environment(
-          sandbox_runtime, sandbox_capacity, active_trajectories=128
+          sandbox_runtime,
+          sandbox_capacity,
+          active_trajectories=128,
+          namespace=jobset_namespace,
       ),
       "CANON_PROFILE_FILE": (
           _SYSTEMOPT_PROFILES[topology]
@@ -748,6 +848,8 @@ def render(
   worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = (
       spec.instance_type
   )
+  if reservation:
+    worker_pod["nodeSelector"][_TPU_RESERVATION_LABEL] = reservation
   worker_container = p34._container(worker_pod["containers"], "pathways-worker")
   p34._replace_arg(
       worker_container["args"],
@@ -775,6 +877,8 @@ def render(
       sandbox_nodepool=sandbox_nodepool,
       sandbox_runtime=sandbox_runtime,
       sandbox_capacity=sandbox_capacity,
+      jobset_namespace=jobset_namespace,
+      reservation=reservation,
       topology=topology,
       instance_type=instance_type,
       sampler_is=sampler_is,
@@ -867,6 +971,8 @@ def validate(
     sandbox_nodepool: str | None = None,
     sandbox_runtime: str = "direct",
     sandbox_capacity: int | None = None,
+    jobset_namespace: str = _DEFAULT_JOBSET_NAMESPACE,
+    reservation: str | None = None,
     topology: str = "128",
     instance_type: str | None = None,
     sampler_is: bool = False,
@@ -945,8 +1051,44 @@ def validate(
         f"{p34.HEAD_SERVICE_ACCOUNT!r}, got "
         f"{head.get('serviceAccountName')!r}"
     )
+  # Placement is the one class of defect that renders green, dry-runs green and
+  # then either never gets admitted or gets denied at rollout.  Re-derive it
+  # from the document rather than trusting the render path.
+  if jobset_namespace not in _ADMITTED_JOBSET_NAMESPACES:
+    raise ValueError(
+        "P58 requires an admitted JobSet namespace "
+        f"({sorted(_ADMITTED_JOBSET_NAMESPACES)}); got {jobset_namespace!r}"
+    )
+  actual_namespace = document["metadata"].get("namespace")
+  if actual_namespace != jobset_namespace:
+    raise ValueError(
+        "P58 JobSet namespace drifted: "
+        f"expected {jobset_namespace!r}, got {actual_namespace!r}"
+    )
+  expected_queue = _NAMESPACE_LOCAL_QUEUE[jobset_namespace]
+  actual_queue = document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL)
+  if actual_queue != expected_queue:
+    raise ValueError(
+        "P58 Kueue LocalQueue must match the namespace: "
+        f"namespace={jobset_namespace} expected={expected_queue!r} "
+        f"actual={actual_queue!r}"
+    )
+  actual_reservation = (
+      p34._worker(document)["template"]["spec"]
+      .get("nodeSelector", {})
+      .get(_TPU_RESERVATION_LABEL)
+  )
+  if actual_reservation != reservation:
+    raise ValueError(
+        "P58 worker TPU reservation drifted: "
+        f"expected {reservation!r}, got {actual_reservation!r}"
+    )
   p34.validate_sandbox_runtime_environment(
-      env, sandbox_runtime, sandbox_capacity, active_trajectories=128
+      env,
+      sandbox_runtime,
+      sandbox_capacity,
+      active_trajectories=128,
+      namespace=jobset_namespace,
   )
   if _RETIRED_DEVICE_PROBE_TRIGGER in env:
     raise ValueError(
@@ -1329,6 +1471,24 @@ def main() -> None:
       "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
   )
   parser.add_argument("--sandbox-capacity", type=int)
+  parser.add_argument(
+      "--jobset-namespace",
+      choices=tuple(sorted(_ADMITTED_JOBSET_NAMESPACES)),
+      default=_DEFAULT_JOBSET_NAMESPACE,
+      help=(
+          "namespace that owns the JobSet.  A Kueue LocalQueue is namespaced, "
+          "so this is what selects the admitting ClusterQueue and therefore "
+          "the TPU quota; it also decides where the sandbox Pods live"
+      ),
+  )
+  parser.add_argument(
+      "--reservation",
+      default=None,
+      help=(
+          "value for the worker cloud.google.com/reservation-name selector; "
+          "every TPU JobSet currently running on bodaborg-v5p-nap sets it"
+      ),
+  )
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--topology", choices=tuple(_TOPOLOGY_SPECS), default="128")
   parser.add_argument("--instance-type", default=None)
@@ -1360,6 +1520,8 @@ def main() -> None:
       sandbox_nodepool=args.sandbox_nodepool,
       sandbox_runtime=args.sandbox_runtime,
       sandbox_capacity=args.sandbox_capacity,
+      jobset_namespace=args.jobset_namespace,
+      reservation=args.reservation,
       worker_nodepool=args.worker_nodepool,
       topology=args.topology,
       instance_type=args.instance_type,

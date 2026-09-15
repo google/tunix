@@ -144,20 +144,25 @@ esac
         "some-other-pool",
     )
     # Still fail-closed: an unadmitted pool must raise under the P58 marker.
+    # "bigcpu-standby" is R2E-Gym's own hard-coded nodeSelector value upstream
+    # and does not exist on this cluster, so it is the honest negative here.
     with self.assertRaisesRegex(ValueError, "P58 requires NODE_SELECTOR_VAL"):
       r2egym_runtime_patch.resolve_node_selector_value({
           "CANON_P58_DEEPSWE_TIM": "1",
-          "NODE_SELECTOR_VAL": "sandbox-cpu-pool",
+          "NODE_SELECTOR_VAL": "bigcpu-standby",
       })
     with self.assertRaisesRegex(ValueError, "P58 requires NODE_SELECTOR_VAL"):
       r2egym_runtime_patch.resolve_node_selector_value({
           "CANON_P58_DEEPSWE_TIM": "1",
       })
-    # Both admitted pools must pass.  cpu-np is what bodaborg-v5p-nap renders;
-    # pinning only deepswe-cpu-pool-2 here used to make the rendered 64split
-    # job raise on its first sandbox spawn even though the render and the
-    # server-side dry-run both succeeded.
-    for pool in ("deepswe-cpu-pool-2", "cpu-np"):
+    # Every admitted pool must pass.  cpu-np is what bodaborg-v5p-nap renders
+    # by default; pinning only deepswe-cpu-pool-2 here used to make the
+    # rendered 64split job raise on its first sandbox spawn even though the
+    # render and the server-side dry-run both succeeded.  sandbox-cpu-pool was
+    # admitted afterwards because it is the only pool whose node disk holds the
+    # whole R2E per-task image corpus; it is reachable only from the trellis
+    # namespace, where the sandbox-cpu-flavor ResourceFlavor lives.
+    for pool in ("deepswe-cpu-pool-2", "cpu-np", "sandbox-cpu-pool"):
       with self.subTest(pool=pool):
         self.assertEqual(
             r2egym_runtime_patch.resolve_node_selector_value({
