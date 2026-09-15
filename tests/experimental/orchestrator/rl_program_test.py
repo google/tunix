@@ -173,6 +173,33 @@ def _set_mock_poll_batches(
   mock_engine.poll_rollouts.side_effect = _mock_poll
 
 
+class ExtractRewardTest(absltest.TestCase):
+
+  def test_token_mode_trajectory_reward_key(self):
+    # TrajectoryCollectEngine emits "trajectory_reward" in Token mode, which is
+    # the mode the distributed rollout path runs in. Falling back to 0.0 here
+    # zeroes the GRPO advantages, not just the logged metric.
+    self.assertEqual(
+        rl_program._extract_reward({"trajectory_reward": 0.75}), 0.75
+    )
+
+  def test_reward_key_wins_over_trajectory_reward(self):
+    # The scoring path writes traj_dict["reward"] back before the payload moves
+    # downstream, so it is the more specific of the two.
+    self.assertEqual(
+        rl_program._extract_reward({"reward": 1.0, "trajectory_reward": 0.0}),
+        1.0,
+    )
+
+  def test_missing_and_none_rewards_are_zero(self):
+    self.assertEqual(rl_program._extract_reward({}), 0.0)
+    self.assertEqual(rl_program._extract_reward({"reward": None}), 0.0)
+    self.assertEqual(
+        rl_program._extract_reward({"trajectory_reward": None}), 0.0
+    )
+    self.assertEqual(rl_program._extract_reward(None), 0.0)
+
+
 class RLProgramTest(absltest.TestCase):
 
   def setUp(self):
