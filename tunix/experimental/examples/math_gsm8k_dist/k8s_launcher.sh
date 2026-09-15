@@ -148,6 +148,11 @@ export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 
 export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
 export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+# Raiden stages tensors on the proxy host on their way from the trainer's HBM
+# to the rollout workers, so the proxy needs headroom proportional to the model
+# rather than to the slice. The yaml generator's 100G default is fine for a 1.7B
+# model and OOM-kills the proxy partway through the first sync for a 35B one.
+export PATHWAYS_PROXY_MEMORY_LIMIT=${PATHWAYS_PROXY_MEMORY_LIMIT:-100G}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
@@ -323,6 +328,7 @@ start_trainer() {
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
+    --pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
@@ -436,6 +442,7 @@ start_rollout_instance() {
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
+    --pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \

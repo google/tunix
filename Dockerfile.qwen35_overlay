@@ -1,0 +1,66 @@
+# Minimal overlay on top of Yixuan's end-to-end RL image.
+#
+# The base image already carries everything the Qwen3.5-35B-A3B distributed RL
+# run needs (jax 0.11.0 / libtpu 0.0.44 / vllm 0.28.1rc1 with the TPU backend,
+# MaxText under /app/maxtext, the Raiden FFI bridge, and a tunix checkout at
+# /app/tunix that PYTHONPATH=/app makes win over the pip-installed copy).
+#
+# Only the files carrying a fix are patched in -- four under /app/tunix and one
+# under /app/maxtext. Everything else -- the launcher, the YAML generator, the
+# Kueue priority label -- runs on the host and needs no image change. Keep this
+# overlay this small: the base image's tunix is a different lineage from
+# github.com/google/tunix HEAD, so copying the whole tree in would silently
+# downgrade Yixuan's fixes and pick up unrelated churn.
+#
+#   1. maxtext training_engine/maxtext_engine.py
+#        MaxText PR #5219 (merged upstream as 59420af4): clear the dataclass
+#        payload's `metadata` before handing it to _gen_model_input_fn.
+#        RLTrainerPayload.metadata is a static PyTree field, so its
+#        microbatch-varying keys change the treedef and make the trainer
+#        recompile the whole 35B graph on every microbatch. _prepare_batch
+#        already dropped metadata on its dict fallback path but forwarded it
+#        intact when a _gen_model_input_fn was set, which is our path.
+#        This file also carries the local Pathways checkpoint-drain commit
+#        (639cbe7b); that code is unreachable while checkpoint saving is off.
+#   2. examples/common/run_rollout_node.py
+#        pass data_parallel_size to the `vllm` sampler's AsyncEngineArgs, so a
+#        4-chip slice can be filled with DP instead of being forced to TP=4.
+#   3. utils/maxtext_utils.py
+#   4. examples/common/run_trainer_node.py
+#        let max_seq_token_per_tpu raise MaxText's max_target_length. Stock, it
+#        is pinned to max_prompt+max_response, which is also the packing
+#        budget's enforced lower bound -- so a packed row can hold exactly one
+#        trajectory and sequence packing does nothing.
+#   5. experimental/orchestrator/rl_program.py
+#        read the episode reward from the key the rollout actually emits.
+#        _extract_reward looked only for traj["reward"], but Token mode --
+#        the mode this path runs in -- emits "trajectory_reward". Every
+#        trajectory therefore scored 0.0, which zeroes not just the logged
+#        reward_mean but the GRPO advantages fed to create_trainer_payloads,
+#        so the whole run was a no-op however good the completions were.
+ARG BASE_IMAGE=gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0912head-v8
+FROM ${BASE_IMAGE}
+
+COPY maxtext/src/maxtext/training_engine/maxtext_engine.py \
+     /app/maxtext/src/maxtext/training_engine/maxtext_engine.py
+COPY tunix/experimental/examples/common/run_rollout_node.py \
+     /app/tunix/experimental/examples/common/run_rollout_node.py
+COPY tunix/utils/maxtext_utils.py \
+     /app/tunix/utils/maxtext_utils.py
+COPY tunix/experimental/examples/common/run_trainer_node.py \
+     /app/tunix/experimental/examples/common/run_trainer_node.py
+COPY tunix/experimental/orchestrator/rl_program.py \
+     /app/tunix/experimental/orchestrator/rl_program.py
+
+# Fail the build rather than the job if a path above ever moves. The MaxText
+# file is checked as text: importing maxtext.training_engine at build time
+# pulls in the full jax/TPU stack for no benefit.
+RUN python -c "\
+import inspect, pathlib; \
+import tunix.utils.maxtext_utils as m; \
+e = pathlib.Path('/app/maxtext/src/maxtext/training_engine/maxtext_engine.py').read_text(); \
+assert 'payload = dataclasses.replace(payload, metadata={})' in e, 'maxtext PR5219 missing'; \
+assert 'max_seq_token_per_tpu' in inspect.signature(m.build_maxtext_config).parameters, m.__file__; \
+import tunix.experimental.orchestrator.rl_program as p; \
+assert 'trajectory_reward' in inspect.getsource(p._extract_reward), p.__file__; \
+print('overlay ok:', m.__file__)"
