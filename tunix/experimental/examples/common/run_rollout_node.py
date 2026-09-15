@@ -515,17 +515,26 @@ def _create_vllm_sampler(args):
   )
   max_model_len = args.max_prompt_length + args.max_response_length
   tp_size = _get_tensor_parallel_size(args)
+  dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
-      "max_model_len=%d...",
+      "data_parallel_size=%d (%d chips) max_model_len=%d...",
       vllm_model,
       tp_size,
+      dp_size,
+      tp_size * dp_size,
       max_model_len,
   )
+  if dp_size > 1 and args.use_lora:
+    raise ValueError(
+        "LoRA is not supported with rollout data parallelism: "
+        f"--mesh_fsdp={dp_size} with --use_lora. Set --mesh_fsdp=1 or drop LoRA."
+    )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
       tensor_parallel_size=tp_size,
+      data_parallel_size=dp_size,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",

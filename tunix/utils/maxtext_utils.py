@@ -362,6 +362,15 @@ def build_maxtext_config(
         "checkpoint_storage_use_zarr3=false",
     ])
 
+  _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
+  if _d2h_gb:
+    logging.info(
+        "CKPT_D2H_CONCURRENT_GB=%s; overriding "
+        "checkpoint_storage_device_host_concurrent_gb.",
+        _d2h_gb,
+    )
+    argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
 
