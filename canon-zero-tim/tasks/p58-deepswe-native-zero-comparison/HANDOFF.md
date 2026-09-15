@@ -1,5 +1,63 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — bd06 cleared placement/sandbox/rollout; update 0 hit the Pathways 2 GiB compile ceiling
+
+**Status (2026-09-15 18:54 UTC): the 128-chip lane is unblocked everywhere except
+one compile-size ceiling. TARGET NOT CERTIFIED; no update completed.**
+
+Full incident package, self-contained and written for a fresh reader:
+`debug_logs/canon_p58_deepswe_bd06_compile_limit_20260915/`
+(`ERROR_REPORT.md` + `run.log` 18,326 lines + `crash_traceback.log` + `SHA256SUMS`).
+
+`canon-p58-128s-zsoptt-three-timbd06` ran 08:44Z→10:24Z on source commit
+`fdc67a38f6c50d6da1e3542ac6e739e00ff46c96` with
+`qwen3-4b-dp8-tp8-deepswe-tim-systemopt.env`, arm `zero:treatment:three-update/3`.
+It died in `update 0`'s old-policy logprob forward:
+
+```text
+DATA_LOSS: learning_pathways.CompilationResponseProto (2715131245 bytes)
+           exceeds maximum supported size 2147418111
+computation name: jit_compute_per_token_logps
+third_party/pathways/data_parallel/pipe.cc:307
+[PERF] step=0 stage=trainer_old seconds=3698.687 rows=128
+```
+
+The size driver is `tunix/rl/canonical_qwen3_adapter.py:14432`
+`for chunk_index in range(num_chunks)` — a python loop inlined whole into the
+HLO — with `num_chunks = (4096 + 16384) / local_M 256 = 80`, each chunk holding
+a complete 36-layer forward. Runtime receipt at `run.log:17041`:
+`CANON_ADAPTER_DP_FIXED_M_CHUNKS data=8 static_width=20480 chunks=80
+global_M=2048 local_M=256`. That is **one SPMD program: its size does not
+depend on device count.** 2,715,131,245 / 80 ≈ 33.9 MB per chunk, so clearing
+the ceiling needs ≥21% off, i.e. `num_chunks ≤ 63`. Note the failure costs
+**62 minutes of compile** before it reports.
+
+**Do not re-derive the unroll factor from PATHTRACE counts.** In the
+`trainer_old` window they read `SWIGLU 36 / ALL_PROJ 252 / P38 1`, which looks
+like "traced once". `canon-zero-tim/src/engine_shims/p38_fixed_lm_head.py:524`
+has no once/dedup guard yet prints once while 80 chunks each call the head, so
+the layer stack and `_trainer_compute_logits_fn` are cached programs traced once
+and then inlined 80×. PATHTRACE counts are not HLO expansion counts.
+
+Five repair paths are already falsified with code citations in `ERROR_REPORT.md`
+§4 — `compute_logps_micro_batch_size`, `compute_logps_chunk_size`,
+`CANON_P78_SEGMENTED_ACTOR_LOGPS`, raising `local_M`/`MIN_TOKEN_BUCKET`, and
+dropping to `64split`. In particular `MIN_TOKEN_BUCKET` is simultaneously the
+vLLM rollout scheduler token capacity (`tunix/rl/deepswe_contract.py:232/303/309`
+force `local_m == 256`), and bd04 cannot be cited as evidence that DP4 compiles
+— it was a 16-trajectory P44 parity probe that never reached this computation.
+Remaining candidates are B (shorten sequence width), C′ (double only the
+trainer-side logprob chunk width, leaving the rollout contract untouched;
+semantic_M 4096 is already registered at `p38_fixed_lm_head.py:19`), and C
+(convert the python loop to `lax.scan`). Selection is still open.
+
+Everything upstream of the compile is now proven on target and must not be
+re-litigated: `devices=128 / rollout_devices=64 / trainer_devices=64`,
+`total_hbm_avail_gb=3588.04GiB` with zero OOM, all 128 R2E sandboxes Running on
+`sandbox-cpu-pool` in the `trellis` namespace, `pods/exec` 403 count **0**
+(bd05's failure mode, fixed in `fdc67a38`), 1,864 `[PERF] rollout_generate`
+phases, and `observed_trajectories=128`.
+
 ## START HERE — P2c gives 64split and 128 the same treatment semantics
 
 P2c implementation commit
