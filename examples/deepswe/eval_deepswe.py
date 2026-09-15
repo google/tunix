@@ -862,7 +862,9 @@ tokenizer_for_agentic = tok_adapter.TokenizerAdapter(tokenizer)
 class FixedQwenChatTemplateParser(parser.QwenChatTemplateParser):
   """Fixes Qwen3/3.5 chat template formatting to match official HuggingFace chat_template:
   1. Appends '<think>\n' to generation prompt when enable_thinking=True.
-  2. Strips '<think>...</think>' blocks from prior assistant messages in multi-turn history.
+  2. Preserves '<think>...</think>' blocks in multi-step tool-use turns (after last user query).
+  3. Wraps environment observations (idx >= 2) in '<tool_response>...</tool_response>'.
+  4. Strips trailing '<|im_end|>' from sampler outputs to prevent double '<|im_end|>' tokens.
   """
 
   def _init_generation_prompt(self) -> str:
@@ -870,12 +872,68 @@ class FixedQwenChatTemplateParser(parser.QwenChatTemplateParser):
       return "<|im_start|>assistant\n<think>\n"
     return "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-  def _parse_assistant(self, content: str) -> str:
-    if "</think>" in content:
-      content = content.split("</think>")[-1].lstrip("\n")
-    elif "<think>" in content:
-      content = content.split("<think>")[0].rstrip("\n")
-    return "<|im_start|>assistant\n" + content.strip() + self.tokens.eot_token
+  def parse(
+      self,
+      messages,
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    if len(messages) > 1:
+      norm_messages = []
+      for idx, m in enumerate(messages):
+        role = m.get("role", "user")
+        content = str(m.get("content", "")).strip()
+        if role == "assistant":
+          while content.endswith("<|im_end|>") or content.endswith("<|endoftext|>"):
+            if content.endswith("<|im_end|>"):
+              content = content[:-len("<|im_end|>")].rstrip()
+            elif content.endswith("<|endoftext|>"):
+              content = content[:-len("<|endoftext|>")].rstrip()
+          if "</think>" in content:
+            if not content.lstrip().startswith("<think>"):
+              content = "<think>\n" + content.lstrip()
+          else:
+            if "<function=" in content:
+              f_idx = content.find("<function=")
+              thought = content[:f_idx].strip()
+              if thought.startswith("<think>"):
+                thought = thought[len("<think>"):].strip()
+              func_part = content[f_idx:].strip()
+              content = f"<think>\n{thought}\n</think>\n\n{func_part}"
+            else:
+              thought = content
+              if thought.startswith("<think>"):
+                thought = thought[len("<think>"):].strip()
+              content = f"<think>\n{thought}\n</think>\n\n"
+        elif role == "user" and idx >= 2:
+          if not content.startswith("<tool_response>"):
+            content = f"<tool_response>\n{content}\n</tool_response>"
+        norm_messages.append({"role": role, "content": content})
+      return self.tokenizer.apply_chat_template(
+          norm_messages, tokenize=False, add_generation_prompt=add_generation_prompt
+      )
+    # Single message case (used by tokenize_and_generate_masks)
+    msg = messages[0]
+    role = msg.get("role", "user")
+    content = str(msg.get("content", "")).strip()
+    if role == "system":
+      res = f"<|im_start|>system\n{content}<|im_end|>"
+    elif role == "user":
+      res = f"<|im_start|>user\n{content}<|im_end|>"
+    elif role == "assistant":
+      while content.endswith("<|im_end|>") or content.endswith("<|endoftext|>"):
+        if content.endswith("<|im_end|>"):
+          content = content[:-len("<|im_end|>")].rstrip()
+        elif content.endswith("<|endoftext|>"):
+          content = content[:-len("<|endoftext|>")].rstrip()
+      res = f"<|im_start|>assistant\n{content}<|im_end|>"
+    else:
+      res = f"<|im_start|>{role}\n{content}<|im_end|>"
+    if add_generation_prompt:
+      res += "\n" + self._init_generation_prompt()
+    if not is_first_msg:
+      res = "\n" + res
+    return res
 
 
 chat_parser = FixedQwenChatTemplateParser(tokenizer)
@@ -1545,11 +1603,54 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
   pass
 
 
+class Qwen35SWEAgent(SWEAgent):
+  """SWEAgent subclass that formats Qwen3.5 tool responses and normalizes assistant thoughts."""
+
+  def _observation_to_messages(
+      self, observation, reward: float, done: bool, info: dict
+  ) -> None:
+    obs_str = str(observation)
+    if len(self._trajectory.steps) > 0 and not obs_str.strip().startswith("<tool_response>"):
+      obs_str = f"<tool_response>\n{obs_str.strip()}\n</tool_response>"
+    self._messages.append({"role": "user", "content": obs_str})
+
+  def update_from_model(self, response: str, **kwargs):
+    clean_resp = response.strip()
+    while clean_resp.endswith("<|im_end|>") or clean_resp.endswith("<|endoftext|>"):
+      if clean_resp.endswith("<|im_end|>"):
+        clean_resp = clean_resp[:-len("<|im_end|>")].rstrip()
+      elif clean_resp.endswith("<|endoftext|>"):
+        clean_resp = clean_resp[:-len("<|endoftext|>")].rstrip()
+    if "</think>" in clean_resp:
+      if not clean_resp.lstrip().startswith("<think>"):
+        clean_resp = "<think>\n" + clean_resp.lstrip()
+    else:
+      if "<function=" in clean_resp:
+        f_idx = clean_resp.find("<function=")
+        thought = clean_resp[:f_idx].strip()
+        if thought.startswith("<think>"):
+          thought = thought[len("<think>"):].strip()
+        func_part = clean_resp[f_idx:].strip()
+        clean_resp = f"<think>\n{thought}\n</think>\n\n{func_part}"
+      else:
+        thought = clean_resp
+        if thought.startswith("<think>"):
+          thought = thought[len("<think>"):].strip()
+        clean_resp = f"<think>\n{thought}\n</think>\n\n"
+    action_res = super().update_from_model(clean_resp, **kwargs)
+    cur_step = self._trajectory.steps[-1]
+    if cur_step.action and "<function=" in cur_step.action:
+      if "</think>" in clean_resp:
+        think_block = clean_resp.split("</think>")[0] + "</think>"
+        self._messages[-1]["content"] = f"{think_block}\n\n{cur_step.action}"
+    return action_res
+
+
 def pairs_generator():
   """Yield NUM_ROLLOUTS_PER_INSTANCE trajectory tasks per dataset entry."""
   for pair_index in range(len(entries) * NUM_ROLLOUTS_PER_INSTANCE):
     entry = entries[pair_index // NUM_ROLLOUTS_PER_INSTANCE]
-    agent = SWEAgent(scaffold=SCAFFOLD)
+    agent = Qwen35SWEAgent(scaffold=SCAFFOLD)
     env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
     env = env_cls(
         entry=entry,
