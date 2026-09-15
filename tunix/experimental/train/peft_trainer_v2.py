@@ -241,7 +241,8 @@ class GradientAccumulator(nnx.Module):
   Persistent vs. non-persistent mode (`self.persistent`):
     Controlled by `allocate_grads` at initialization:
     * Persistent mode (`allocate_grads=True`, `self.persistent=True`): Used
-      when accumulating across multiple micro-steps (`gradient_accumulation_steps
+      when accumulating across multiple micro-steps
+      (`gradient_accumulation_steps
       > 1`). A parameter-sized buffer is allocated at initialization and zeroed
       in-place when `reset()` is called so the buffer persists across updates.
     * Non-persistent mode (`allocate_grads=False`, `self.persistent=False`):
@@ -321,10 +322,10 @@ class GradientAccumulator(nnx.Module):
 
     if jax.tree_util.tree_leaves(self.grads):
       jax.tree_util.tree_map(
-        _add,
-        self.grads,
-        grads,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
+          _add,
+          self.grads,
+          grads,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
       )
     else:
       # No buffer held: either it was never allocated, or a non-persistent
@@ -353,10 +354,10 @@ class GradientAccumulator(nnx.Module):
       raise ValueError(
           "The gradient accumulator is empty. Either get() was called without a"
           " preceding add()/set(), or the gradients written by an earlier"
-          " executable were discarded on the way out of jit -- nnx.cached_partial"
-          " (cache_nnx_graph=True) freezes the bound module's graphdef, so a"
-          " step that changes the accumulator's pytree structure cannot hand it"
-          " to a later executable."
+          " executable were discarded on the way out of jit --"
+          " nnx.cached_partial (cache_nnx_graph=True) freezes the bound"
+          " module's graphdef, so a step that changes the accumulator's pytree"
+          " structure cannot hand it to a later executable."
       )
 
     if not jax.tree_util.tree_leaves(self._param_dtypes):
@@ -789,7 +790,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
 
   def jit_fwd_bwd_update_and_eval_step(
-      self, skip_jit: bool = False, cache_nnx_graph: bool = False
+      self, skip_jit: bool = False, cache_nnx_graph: bool = True
   ):
     """Creates and returns the train and eval step functions.
 
@@ -823,7 +824,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       else:
         donate_argnames = ("model", "grad_accumulator")
       self._jitted_fwd_bwd_step_fn = nnx.jit(
-          fwd_bwd_step, donate_argnames=donate_argnames,
+          fwd_bwd_step,
+          donate_argnames=donate_argnames,
       )
       self._jitted_update_step_fn = nnx.jit(
           update_step, donate_argnames=("optimizer", "grad_accumulator")
@@ -1068,7 +1070,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
-    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
+    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
+    skip_jit = kwargs.pop("skip_jit", False)
+    fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
+        skip_jit, cache_nnx_graph
+    )
     self._record_fwd_bwd(
         *fwd_bwd_step(
             grad_accumulator=self.grad_accumulator,
@@ -1079,7 +1085,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def update(self, **kwargs) -> int:
     """Applies the accumulated gradients."""
-    _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
+    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
+    skip_jit = kwargs.pop("skip_jit", False)
+    _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(
+        skip_jit, cache_nnx_graph
+    )
     return self._record_update(update_step())
 
   def train_step(
@@ -1093,7 +1103,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     available in the single-microstep regime; when accumulating there is work
     between the two halves, so they must stay separate.
     """
-    self.jit_fwd_bwd_update_and_eval_step()
+    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
+    skip_jit = kwargs.pop("skip_jit", False)
+    self.jit_fwd_bwd_update_and_eval_step(skip_jit, cache_nnx_graph)
     if self._jitted_train_step_fn is None:
       raise ValueError(
           "train_step() requires exactly one micro-batch per update. Use"
@@ -1121,7 +1133,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     a sequence of eval_step calls with eval_context() so that the metrics
     mode is set to EVAL and buffered metrics are written on exit.
     """
-    _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step()
+    skip_jit = kwargs.pop("skip_jit", False)
+    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
+    _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step(
+        skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph,
+    )
     loss, aux = eval_step_fn(self._prepare_payload(payload))
     loss = jax.lax.stop_gradient(loss)
     self._buffered_eval_metrics = self._buffer_metrics(
@@ -1302,9 +1318,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       worker = _default_weight_sync_worker()
       self._weight_sync_worker = worker
 
-    backend = (
-        "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
-    )
+    backend = "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
     mapping_config = getattr(self.config, "mapping_config", None)
     if (
         mapping_config is None
@@ -1313,6 +1327,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     ):
       try:
         from tunix.generate import mappings as mappings_lib  # pylint: disable=g-import-not-at-top
+
         mapping_config = mappings_lib.MappingConfig.build(
             model=self.model, backend=backend
         )
@@ -1325,6 +1340,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         and mapping_config.to_hf_mappings
     ):
       from tunix.generate import utils as gen_utils  # pylint: disable=g-import-not-at-top
+
       converted_state = gen_utils.transfer_state_with_mappings(
           src_state=nnx.state(self.model),
           dst_state=self._target_state,
@@ -1501,15 +1517,23 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             tags=tags,
         ) as span_v2:
           if self._jitted_train_step_fn is not None and is_update_step_val:
-            self.train_step(train_example)
+            self.train_step(
+                train_example,
+                skip_jit=skip_jit,
+                cache_nnx_graph=cache_nnx_graph,
+            )
             computation_to_track = self._last_update_grad_norm
           else:
-            self.fwd_bwd(train_example)
+            self.fwd_bwd(
+                train_example,
+                skip_jit=skip_jit,
+                cache_nnx_graph=cache_nnx_graph,
+            )
             assert self._buffered_train_metrics is not None
             train_loss = self._buffered_train_metrics.losses[-1]
             computation_to_track = train_loss
             if is_update_step_val:
-              self.update()
+              self.update(skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph)
               computation_to_track = getattr(
                   self, "_last_update_grad_norm", train_loss
               )
