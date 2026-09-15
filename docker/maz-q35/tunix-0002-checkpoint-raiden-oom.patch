@@ -1,0 +1,112 @@
+diff --git a/tunix/experimental/worker/remote_execution.py b/tunix/experimental/worker/remote_execution.py
+index 333acd61..9f075c2c 100644
+--- a/tunix/experimental/worker/remote_execution.py
++++ b/tunix/experimental/worker/remote_execution.py
+@@ -37,6 +37,8 @@ import abc
+ import asyncio
+ import contextlib
+ import inspect
++import logging
++import os
+ import threading
+ import traceback as traceback_lib
+ from typing import (
+@@ -223,6 +225,60 @@ class ExecutionResponse:
+     return self.result
+ 
+ 
++_UNRECOVERABLE_HARDWARE_SIGNATURES = (
++    "detected dead by scheduler",
++    "device set permanently lost",
++)
++
++_UNRECOVERABLE_TRANSPORT_SIGNATURES = (
++    "data_loss",
++    "stream removed",
++)
++
++_FATAL_EXIT_GRACE_SECONDS = 3.0
++_fatal_exit_scheduled = threading.Event()
++
++
++def _is_unrecoverable_runtime_error(exc: BaseException) -> bool:
++  """Returns whether `exc` indicates the accelerator device set is lost."""
++  text = f"{type(exc).__name__}: {exc}".lower()
++  if any(sig in text for sig in _UNRECOVERABLE_HARDWARE_SIGNATURES):
++    return True
++  exc_type = type(exc).__name__.lower()
++  is_runtime_transport = any(
++      t in exc_type or t in text
++      for t in ("pathways", "xla", "grpc", "unavailable", "channel")
++  )
++  if is_runtime_transport and any(
++      sig in text for sig in _UNRECOVERABLE_TRANSPORT_SIGNATURES
++  ):
++    return True
++  return False
++
++
++def _schedule_fatal_exit(exc: BaseException) -> None:
++  """Answers the caller, then exits the process so the JobSet can rebuild it."""
++  if _fatal_exit_scheduled.is_set():
++    return
++  _fatal_exit_scheduled.set()
++
++  logging.error(
++      "Unrecoverable runtime error: accelerator device set lost. Exiting in"
++      " %.0fs to allow clean container restart. Triggering error: %s: %s",
++      _FATAL_EXIT_GRACE_SECONDS,
++      type(exc).__name__,
++      exc,
++  )
++
++  def _exit() -> None:
++    logging.error("Exiting process now with status 1.")
++    os._exit(1)  # pylint: disable=protected-access
++
++  timer = threading.Timer(_FATAL_EXIT_GRACE_SECONDS, _exit)
++  timer.daemon = True
++  timer.start()
++
++
+ class RemoteExecutionServer(abc.ABC):
+   """Daemon that binds a target domain object and executes method calls dynamically."""
+ 
+@@ -328,6 +384,8 @@ class RemoteExecutionServer(abc.ABC):
+       result = method(*request.args, **request.kwargs)
+       return ExecutionResponse(result=result, request_id=request.request_id)
+     except Exception as e:  # pylint: disable=broad-exception-caught
++      if _is_unrecoverable_runtime_error(e):
++        _schedule_fatal_exit(e)
+       return ExecutionResponse(
+           error_message=str(e),
+           error_type=type(e).__name__,
+@@ -362,6 +420,8 @@ class RemoteExecutionServer(abc.ABC):
+         result = method(*request.args, **request.kwargs)
+       return ExecutionResponse(result=result, request_id=request.request_id)
+     except Exception as e:  # pylint: disable=broad-exception-caught
++      if _is_unrecoverable_runtime_error(e):
++        _schedule_fatal_exit(e)
+       return ExecutionResponse(
+           error_message=str(e),
+           error_type=type(e).__name__,
+diff --git a/tunix/utils/maxtext_utils.py b/tunix/utils/maxtext_utils.py
+index d9044bd5..ad8c0969 100644
+--- a/tunix/utils/maxtext_utils.py
++++ b/tunix/utils/maxtext_utils.py
+@@ -362,6 +362,15 @@ def build_maxtext_config(
+         "checkpoint_storage_use_zarr3=false",
+     ])
+ 
++  _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
++  if _d2h_gb:
++    logging.info(
++        "CKPT_D2H_CONCURRENT_GB=%s; overriding "
++        "checkpoint_storage_device_host_concurrent_gb.",
++        _d2h_gb,
++    )
++    argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
++
+   logging.info("MaxText config argv: %s", argv)
+   return pyconfig.initialize(argv)
+ 

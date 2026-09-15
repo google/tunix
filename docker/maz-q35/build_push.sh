@@ -34,21 +34,46 @@ DOCKER_BUILDKIT=1 ${DOCKER_CMD} build \
   -f "${SCRIPT_DIR}/Dockerfile" \
   "${SCRIPT_DIR}"
 
-# The Dockerfile's own grep proves the patch landed in the layer; this proves the image
-# that came out of the build is the one that will be pulled, and that maxtext still
-# imports -- a syntactically valid file that fails at import time would otherwise only
-# surface as a crash-looping trainer pod.
+# The Dockerfile's own greps prove the patches landed in the layer; this proves the
+# image that came out of the build is the one that will be pulled, and that the patched
+# modules still import -- a syntactically valid file that fails at import time would
+# otherwise only surface as a crash-looping pod. Each assertion reads the symbol through
+# the import system rather than off disk, so a stale copy earlier on sys.path fails here.
 echo "=== Verifying the built image"
 ${DOCKER_CMD} run --rm --entrypoint bash "${TARGET_IMAGE}" -c '
-  set -e
-  f=/app/maxtext/src/maxtext/training_engine/maxtext_engine.py
-  grep -q "dataclasses.replace(payload, metadata={})" "$f"
-  python3 -c "
-from maxtext.training_engine import maxtext_engine
+python3 - <<PY
 import inspect
-assert \"metadata={}\" in inspect.getsource(maxtext_engine.MaxTextTrainingEngine._prepare_batch)
-print(\"ok: _prepare_batch clears payload metadata\")
-"'
+
+from maxtext.training_engine import checkpointing, maxtext_engine
+from tunix.experimental.examples.common import run_rollout_node
+from tunix.experimental.rollout import vllm_sampler_adapter
+from tunix.experimental.worker import remote_execution
+from tunix.utils import maxtext_utils
+
+# maxtext-0001: PR 5219
+assert "metadata={}" in inspect.getsource(
+    maxtext_engine.MaxTextTrainingEngine._prepare_batch)
+
+# maxtext-0002: PR 5234. The config field has to survive pyconfig as well as exist in
+# types.py, and the handler has to be the one that consumes it.
+assert hasattr(checkpointing, "_maybe_register_pathways_persistence")
+assert "save_device_host_concurrent_gb" in inspect.getsource(
+    checkpointing.CheckpointManager.__init__)
+from maxtext.configs import types
+assert "checkpoint_storage_device_host_concurrent_gb" in types.OrbaxStorage.model_fields
+
+# tunix-0001: PR 2229
+assert hasattr(vllm_sampler_adapter, "_canonicalize_variable_names")
+assert "data_parallel_size" in inspect.getsource(
+    run_rollout_node._create_vllm_sampler)
+
+# tunix-0002: PR 2228, the two parts the base image lacks
+assert "CKPT_D2H_CONCURRENT_GB" in inspect.getsource(
+    maxtext_utils.build_maxtext_config)
+assert hasattr(remote_execution, "_is_unrecoverable_runtime_error")
+
+print("ok: all four overlay patches are live in the image")
+PY'
 
 if [ "${PUSH}" != "true" ]; then
   echo "=== PUSH=${PUSH}, stopping after build: ${TARGET_IMAGE}"
