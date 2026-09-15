@@ -54,6 +54,52 @@ _REQUIRED_RAIDEN_METHODS = (
 )
 
 
+def _round_uuid(sync_request: Any) -> int:
+  """Extracts this weight-sync round's transfer generation.
+
+  The coordinator stamps each round with a monotonic `uuid` in
+  `extra_config` and passes that same value to Raiden as the transfer
+  `generation`, so it is what the destination must wait on to be sure it
+  observed *this* round's transfer rather than a neighbouring one.
+
+  Args:
+    sync_request: The `WeightSyncRequest` for this round, or any object
+      carrying an `extra_config` mapping.
+
+  Returns:
+    The round's transfer generation, always positive.
+
+  Raises:
+    ValueError: If the uuid is absent, non-positive, or malformed. This
+      mirrors the send side, which rejects a non-positive generation in
+      `raiden_handler.transfer`. Degrading to an untargeted wait instead
+      would silently reintroduce the cross-round race that waiting on a
+      specific generation exists to prevent, so it is refused loudly.
+  """
+  extra = getattr(sync_request, "extra_config", None) or {}
+  raw = extra.get("uuid")
+  if raw is None:
+    raise ValueError(
+        "weight sync round is missing a usable transfer uuid:"
+        " extra_config['uuid'] is unset. The coordinator always stamps one;"
+        " a hand-built WeightSyncRequest must supply one too."
+    )
+  try:
+    uuid = int(raw)
+  except (TypeError, ValueError) as e:
+    raise ValueError(
+        f"weight sync round is missing a usable transfer uuid: got {raw!r},"
+        " which is not an integer."
+    ) from e
+  if uuid <= 0:
+    raise ValueError(
+        f"weight sync round carries a non-positive transfer uuid ({uuid});"
+        " Raiden generations start at 1, and 0 is WorkerRoundTracker's"
+        " 'no round' sentinel."
+    )
+  return uuid
+
+
 def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
   """Formats raw sampler output into a standardized SamplingResponse."""
   if isinstance(r, base_sampler_lib.SamplingResponse):
@@ -333,7 +379,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         return True
 
       logger.info("Executing weight_sync barrier on Raiden synchronizers...")
-      checksums = await sampler.raiden_h2d()
+      checksums = await sampler.raiden_h2d(uuid=_round_uuid(sync_request))
       if checksums:
         logger.info("Destination weights checksums: %s", checksums)
 

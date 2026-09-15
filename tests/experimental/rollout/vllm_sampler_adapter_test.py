@@ -158,7 +158,7 @@ class VllmSamplerAdapterTest(absltest.TestCase):
 
     res_sync = asyncio.run(self.sampler_adapter.weight_sync(sync_req))
     self.assertTrue(res_sync)
-    self.mock_sampler_instance.raiden_h2d.assert_called_once()
+    self.mock_sampler_instance.raiden_h2d.assert_called_once_with(uuid=1)
 
     res_post = asyncio.run(self.sampler_adapter.post_weight_sync(sync_req))
     self.assertEqual(res_post, 1)
@@ -300,6 +300,45 @@ class VllmSamplerAdapterTest(absltest.TestCase):
         sampler_instance=self.mock_sampler_instance,
     )
     self.assertEqual(adapter.raiden_job_name, "replica_worker-42")
+
+
+class RoundUuidTest(absltest.TestCase):
+  """Covers the extra_config -> Raiden transfer generation extraction."""
+
+  def test_extracts_positive_uuid(self):
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": 7}
+    )
+    self.assertEqual(vllm_sampler_adapter._round_uuid(req), 7)
+
+  def test_absent_extra_config_raises(self):
+    with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
+      vllm_sampler_adapter._round_uuid(None)
+
+  def test_absent_uuid_key_raises(self):
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1"}
+    )
+    with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
+      vllm_sampler_adapter._round_uuid(req)
+
+  def test_non_positive_uuid_raises(self):
+    # Raiden generations start at 1, and 0 is WorkerRoundTracker's "no round"
+    # sentinel. Forwarding either would silently degrade to an untargeted
+    # wait, which is the cross-round race this plumbing exists to prevent.
+    for sentinel in (0, -1):
+      req = base_sampler_lib.WeightSyncRequest(
+          policy_version=1, extra_config={"req_id": "r1", "uuid": sentinel}
+      )
+      with self.assertRaisesRegex(ValueError, "non-positive transfer uuid"):
+        vllm_sampler_adapter._round_uuid(req)
+
+  def test_malformed_uuid_raises(self):
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": "not-an-int"}
+    )
+    with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
+      vllm_sampler_adapter._round_uuid(req)
 
 
 if __name__ == "__main__":

@@ -288,6 +288,36 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         asyncio.run(run_lifecycle_test())
 
+    @patch("tunix.experimental.rollout.vllm_sampler_v2."
+           "RLVllmSampler._call_worker_method")
+    def test_raiden_h2d_forwards_uuid(self, mock_call_worker_method):
+        """Verifies raiden_h2d threads the transfer generation to the worker."""
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            await sampler.raiden_h2d(uuid=123)
+            mock_call_worker_method.assert_called_once_with("raiden_h2d",
+                                                            uuid=123)
+
+        asyncio.run(run_test())
+
+    @patch("tunix.experimental.rollout.vllm_sampler_v2."
+           "RLVllmSampler._call_worker_method")
+    def test_raiden_h2d_defaults_uuid_to_none(self, mock_call_worker_method):
+        """Omitting uuid still reaches the worker, which waits untargeted."""
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            await sampler.raiden_h2d()
+            mock_call_worker_method.assert_called_once_with("raiden_h2d",
+                                                            uuid=None)
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()
