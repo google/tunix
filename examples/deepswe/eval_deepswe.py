@@ -351,13 +351,13 @@ parser_cli.add_argument(
 parser_cli.add_argument(
     "--enable_prefix_caching",
     type=str2bool,
-    default=os.getenv("ENABLE_PREFIX_CACHING", "true").lower() == "true",
+    default=os.getenv("ENABLE_PREFIX_CACHING", "false").lower() == "true",
     help="Whether to enable vLLM prefix caching",
 )
 parser_cli.add_argument(
     "--patch_qwen_mrope",
     type=str2bool,
-    default=os.getenv("PATCH_QWEN_MROPE", "true").lower() == "true",
+    default=os.getenv("PATCH_QWEN_MROPE", "false").lower() == "true",
     help=(
         "Whether to patch Qwen3OmniMoeThinkerTextRotaryEmbedding for 3D MRoPE"
         " position normalization. Training does not apply this patch."
@@ -1214,6 +1214,22 @@ try:
   def _patched_step_openhands(env, action_obj):
     max_steps = getattr(env, "max_steps", None)
     fn = getattr(action_obj, "function_name", "")
+    if fn in ("submit", "finish") and getattr(env, "step_count", 0) < 25 and getattr(env, "workspace", None) is not None:
+      try:
+        st_res = env.workspace.execute_command("cd /testbed 2>/dev/null && git status --porcelain", timeout=10.0)
+        if st_res.exit_code == 0 and not st_res.stdout.strip():
+          return _EnvStepResult(
+              observation=(
+                  "[ACTION GUARD] You cannot submit yet because no files in the repository have been modified. "
+                  "Please inspect the code, modify the relevant files to fix the issue, and verify the changes "
+                  "before calling submit."
+              ),
+              reward=0.0,
+              done=False,
+              info={"max_steps": max_steps, "guard_blocked": True, "guard_reason": "empty_git_status_submit"},
+          )
+      except Exception as e:
+        logger.warning("Git status check before submit failed: %s", e)
     if fn == "execute_bash" and getattr(env, "workspace", None) is not None:
       params = getattr(action_obj, "parameters", {}) or {}
       cmd = params.get("command") or params.get("cmd")
@@ -1302,6 +1318,11 @@ STOP_TOKEN_IDS = [
 
 # Mesh Setup
 devices = jax.devices()
+try:
+  jax.device_put(jnp.ones((1,), dtype=jnp.int32), devices[0]).block_until_ready()
+  logger.info("TPU slice placement verified via warmup barrier.")
+except Exception as e:
+  logger.warning("TPU warmup barrier note: %s", e)
 total_mesh_devices = MESH_FSDP * MESH_TP
 if total_mesh_devices > len(devices):
   raise ValueError(
@@ -1428,6 +1449,7 @@ if ROLLOUT_ENGINE == "vllm":
     engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
     engine_kwargs["dtype"] = "bfloat16"
     engine_kwargs["enable_expert_parallel"] = False
+    engine_kwargs["enable_prefix_caching"] = False
 
   # Must be set here rather than at the call site: `VllmSampler.__call__`
   # forwards unknown kwargs via `setattr` and swallows failures. Stop strings
@@ -1899,15 +1921,17 @@ class _EvalLoggingEnvMixin:
         and "<function=" in action
         and not action.startswith("<function=>")
     )
-    if not obs and not done:
-      if has_valid_fn:
-        obs = "(Command executed successfully with no output.)"
-      else:
-        obs = (
-            "[ACTION GUARD] Your previous response did not include a valid function call. "
-            "You must output exactly one tool call in the required XML format "
-            "(<function=execute_bash>, <function=str_replace_editor>, or <function=submit>)."
-        )
+    if not has_valid_fn and not done:
+      obs = (
+          "[ACTION GUARD] Your previous response did not include a valid function call. "
+          "You must output exactly one tool call in the required XML format. For example:\n"
+          "<function=execute_bash>\n"
+          "<parameter=command>git status</parameter>\n"
+          "</function>\n"
+          "Do NOT call submit until you have modified code and verified the fix."
+      )
+    elif not obs and not done:
+      obs = "(Command executed successfully with no output.)"
     if isinstance(obs, str) and len(obs) > 12000:
       obs = obs[:6000] + "\n...<response clipped>...\n" + obs[-6000:]
     logger.info(
@@ -1974,8 +1998,13 @@ class Qwen35SWEAgent(SWEAgent):
     ):
       self._messages[-1]["content"] = f"{think_block}\n\n{cur_step.action}"
     else:
-      # Never leave <function=> or broken tags in assistant chat history
-      self._messages[-1]["content"] = think_block
+      # Never leave <function=> or bare </think> without tool call in assistant chat history
+      synthetic_tool_call = (
+          "<function=execute_bash>\n"
+          "<parameter=command>echo 'Error: missing function call'</parameter>\n"
+          "</function>"
+      )
+      self._messages[-1]["content"] = f"{think_block}\n\n{synthetic_tool_call}"
     return action_res
 
 
