@@ -415,6 +415,7 @@ class StandardRLProgram(RLProgram):
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
+              routed_experts=getattr(src_item, "routed_experts", None),
               policy_version=getattr(src_item, "policy_version", 0),
               metadata=metadata,
               # TODO: b/552087289 - Stream RLTrainerPayload directly instead of

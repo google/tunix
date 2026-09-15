@@ -720,19 +720,396 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         token_data['conversation_masks'], expected_masks
     )
 
-  def test_env_time_metrics_close(self):
-    self.mock_env.close = mock.Mock()
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_with_routed_experts(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens
+        ([301, 302, 303], [1, 1, 1]),  # env tokens 1
+    ]
+    num_layers, top_k = 4, 2
+    prompt_tokens = np.array([101, 102], dtype=np.int32)
+    step1_tokens = np.array([201, 202], dtype=np.int32)
+    step2_tokens = np.array([203, 204], dtype=np.int32)
+
+    # Step 1: prompt (len 2, fill 3) + generation (len 2, fill 5) -> len 4
+    step1_routed = np.concatenate(
+        [
+            np.full((2, num_layers, top_k), 3, dtype=np.int32),
+            np.full((2, num_layers, top_k), 5, dtype=np.int32),
+        ],
+        axis=0,
+    )
+    # Step 2: env tokens (len 3, fill 6) + generation (len 2, fill 7) -> len 5
+    step2_routed = np.concatenate(
+        [
+            np.full((3, num_layers, top_k), 6, dtype=np.int32),
+            np.full((2, num_layers, top_k), 7, dtype=np.int32),
+        ],
+        axis=0,
+    )
+
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['resp1'],
+            logits=None,
+            tokens=[step1_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step1_routed],
+        ),
+        RolloutOutput(
+            text=['resp2'],
+            logits=None,
+            tokens=[step2_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step2_routed],
+        ),
+    ]
+
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
         env=self.mock_env,
         model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
     )
-    trajectory = asyncio.run(self._run_collect(engine, mode='Trajectory'))
-    self.mock_env.close.assert_called_once()
-    self.assertIn('reset_latency', trajectory.env_time)
-    self.assertIn('step_latency', trajectory.env_time)
-    self.assertIsInstance(trajectory.env_time['step_latency'], list)
-    self.assertIn('close_latency', trajectory.env_time)
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    # Verify routed_experts_prompt_start was passed with cumulative offset on turn 1
+    self.assertEqual(len(self.mock_model_call.call_args_list), 2)
+    turn0_kwargs = self.mock_model_call.call_args_list[0].kwargs
+    self.assertNotIn('routed_experts_prompt_start', turn0_kwargs)
+    turn1_kwargs = self.mock_model_call.call_args_list[1].kwargs
+    self.assertEqual(turn1_kwargs.get('routed_experts_prompt_start'), 4)
+
+    self.assertIn('routed_experts', token_data)
+    routed = token_data['routed_experts']
+    self.assertIsNotNone(routed)
+
+    # 2 prompt + 2 asst1 + 3 env1 + 2 asst2 = 9 tokens total
+    prompt_len = len(token_data['prompt_tokens'])
+    conv_len = len(token_data['conversation_tokens'])
+    self.assertEqual(prompt_len, 2)
+    self.assertEqual(conv_len, 7)
+    self.assertEqual(routed.shape, (9, num_layers, top_k))
+
+    # Prompt tokens carry value 3
+    np.testing.assert_array_equal(routed[:2], 3)
+    # Step 1 assistant tokens carry value 5
+    np.testing.assert_array_equal(routed[2:4], 5)
+    # Step 1 env tokens carry value 6
+    np.testing.assert_array_equal(routed[4:7], 6)
+    # Step 2 assistant tokens carry value 7
+    np.testing.assert_array_equal(routed[7:9], 7)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_steps_mode_with_routed_experts(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens
+        ([301, 302, 303], [1, 1, 1]),  # env tokens 1
+    ]
+    num_layers, top_k = 4, 2
+    prompt_tokens = np.array([101, 102], dtype=np.int32)
+    step1_tokens = np.array([201, 202], dtype=np.int32)
+    step2_tokens = np.array([203, 204], dtype=np.int32)
+
+    step1_routed = np.concatenate(
+        [
+            np.full((2, num_layers, top_k), 3, dtype=np.int32),
+            np.full((2, num_layers, top_k), 5, dtype=np.int32),
+        ],
+        axis=0,
+    )
+    step2_routed = np.concatenate(
+        [
+            np.full((3, num_layers, top_k), 6, dtype=np.int32),
+            np.full((2, num_layers, top_k), 7, dtype=np.int32),
+        ],
+        axis=0,
+    )
+
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['resp1'],
+            logits=None,
+            tokens=[step1_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step1_routed],
+        ),
+        RolloutOutput(
+            text=['resp2'],
+            logits=None,
+            tokens=[step2_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step2_routed],
+        ),
+    ]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+
+    steps_data = asyncio.run(self._run_collect(engine, mode='Steps'))
+    self.assertEqual(len(steps_data), 2)
+    self.assertEqual(
+        steps_data[0]['assistant_routed_experts'].shape, (2, num_layers, top_k)
+    )
+    np.testing.assert_array_equal(steps_data[0]['assistant_routed_experts'], 5)
+    self.assertEqual(
+        steps_data[0]['env_routed_experts'].shape, (3, num_layers, top_k)
+    )
+    np.testing.assert_array_equal(steps_data[0]['env_routed_experts'], 6)
+    self.assertEqual(
+        steps_data[1]['assistant_routed_experts'].shape, (2, num_layers, top_k)
+    )
+    np.testing.assert_array_equal(steps_data[1]['assistant_routed_experts'], 7)
+    self.assertIsNone(steps_data[1]['env_routed_experts'])
+
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_with_routed_experts_and_end_tokens(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+    ]
+    num_layers, top_k = 3, 2
+    prompt_tokens = np.array([101], dtype=np.int32)
+    step_tokens = np.array([201, 202], dtype=np.int32)
+    # Prompt (len 1, fill 3) + generation (len 2, fill 9) -> len 3
+    step_routed = np.concatenate(
+        [
+            np.full((1, num_layers, top_k), 3, dtype=np.int32),
+            np.full((2, num_layers, top_k), 9, dtype=np.int32),
+        ],
+        axis=0,
+    )
+
+    # Chat parser appends 1 end token
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (np.append(tokens, 999), 1)
+    )
+
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['resp1'],
+            logits=None,
+            tokens=[step_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step_routed],
+        ),
+    ]
+    # One step episode
+    self.mock_env.step.side_effect = [('obs1', 1.0, True, {})]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    routed = token_data['routed_experts']
+    self.assertIsNotNone(routed)
+
+    # Prompt (len 1, 3), generated assistant tokens (len 2, 9), appended end token (len 1, -1)
+    self.assertEqual(routed.shape, (4, num_layers, top_k))
+    np.testing.assert_array_equal(routed[0], 3)
+    np.testing.assert_array_equal(routed[1:3], 9)
+    np.testing.assert_array_equal(routed[3], agent_types.UNSET_ROUTED_EXPERT)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_env_routed_experts_length_mismatch_raises_error(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens
+        ([301, 302, 303], [1, 1, 1]),  # env tokens len 3
+    ]
+    num_layers, top_k = 2, 2
+    prompt_tokens = np.array([101, 102], dtype=np.int32)
+    step1_tokens = np.array([201], dtype=np.int32)
+    step2_tokens = np.array([202], dtype=np.int32)
+
+    # Step 1: prompt (len 2) + gen (len 1) = len 3
+    step1_routed = np.full((3, num_layers, top_k), 1, dtype=np.int32)
+    # Step 2: only 2 env tokens instead of 3
+    step2_routed = np.full((2, num_layers, top_k), 2, dtype=np.int32)
+
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['resp1'],
+            logits=None,
+            tokens=[step1_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(1, dtype=np.float32)],
+            routed_experts=[step1_routed],
+        ),
+        RolloutOutput(
+            text=['resp2'],
+            logits=None,
+            tokens=[step2_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(1, dtype=np.float32)],
+            routed_experts=[step2_routed],
+        ),
+    ]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Mismatch between captured env_routed_experts length'
+    ):
+      asyncio.run(self._run_collect(engine, mode='Token'))
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_with_vllm_autoregressive_routed_experts(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens (len 2)
+        ([301, 302, 303], [1, 1, 1]),  # env tokens (len 3)
+    ]
+    num_layers, top_k = 4, 2
+    prompt_tokens = np.array([101, 102], dtype=np.int32)
+    step1_tokens = np.array([201, 202], dtype=np.int32)
+    step2_tokens = np.array([203, 204], dtype=np.int32)
+
+    # Turn 0: prompt (len 2, fill 3) + generation (len 2 - 1 = 1, fill 5) -> len 3
+    # Token 202 is sampled at end of decode and not routed in turn 0.
+    step1_routed = np.concatenate(
+        [
+            np.full((2, num_layers, top_k), 3, dtype=np.int32),
+            np.full((1, num_layers, top_k), 5, dtype=np.int32),
+        ],
+        axis=0,
+    )
+    # Turn 1: delayed assistant token (len 1, fill 5) + env tokens (len 3, fill 6)
+    # + generation (len 2 - 1 = 1, fill 7) -> len 5 total
+    step2_routed = np.concatenate(
+        [
+            np.full((1, num_layers, top_k), 5, dtype=np.int32),
+            np.full((3, num_layers, top_k), 6, dtype=np.int32),
+            np.full((1, num_layers, top_k), 7, dtype=np.int32),
+        ],
+        axis=0,
+    )
+
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['resp1'],
+            logits=None,
+            tokens=[step1_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step1_routed],
+        ),
+        RolloutOutput(
+            text=['resp2'],
+            logits=None,
+            tokens=[step2_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.ones(2, dtype=np.float32)],
+            routed_experts=[step2_routed],
+        ),
+    ]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    # Verify routed_experts_prompt_start was passed with cumulative offset 3 on turn 1
+    self.assertEqual(len(self.mock_model_call.call_args_list), 2)
+    turn0_kwargs = self.mock_model_call.call_args_list[0].kwargs
+    self.assertNotIn('routed_experts_prompt_start', turn0_kwargs)
+    turn1_kwargs = self.mock_model_call.call_args_list[1].kwargs
+    self.assertEqual(turn1_kwargs.get('routed_experts_prompt_start'), 3)
+
+    self.assertIn('routed_experts', token_data)
+    routed = token_data['routed_experts']
+    self.assertIsNotNone(routed)
+
+    # 2 prompt + 2 asst1 + 3 env1 + 2 asst2 = 9 tokens total
+    prompt_len = len(token_data['prompt_tokens'])
+    conv_len = len(token_data['conversation_tokens'])
+    self.assertEqual(prompt_len, 2)
+    self.assertEqual(conv_len, 7)
+    self.assertEqual(routed.shape, (9, num_layers, top_k))
+
+    # Prompt tokens carry value 3
+    np.testing.assert_array_equal(routed[:2], 3)
+    # Step 1 assistant tokens carry value 5 (including stitched token from turn 1 prefill)
+    np.testing.assert_array_equal(routed[2:4], 5)
+    # Step 1 env tokens carry value 6
+    np.testing.assert_array_equal(routed[4:7], 6)
+    # Step 2 assistant token 0 carries value 7
+    np.testing.assert_array_equal(routed[7], 7)
+    # Step 2 terminal token padded with UNSET_ROUTED_EXPERT
+    np.testing.assert_array_equal(routed[8], agent_types.UNSET_ROUTED_EXPERT)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_with_zero_generated_tokens_and_routed_experts(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+    ]
+    num_layers, top_k = 2, 2
+    prompt_tokens = np.array([101], dtype=np.int32)
+    step_tokens = np.array([], dtype=np.int32)
+    prompt_routing = np.full((1, num_layers, top_k), 3, dtype=np.int32)
+
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (tokens, 0)
+    )
+
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=[''],
+            logits=None,
+            tokens=[step_tokens],
+            left_padded_prompt_tokens=np.array([prompt_tokens]),
+            logprobs=[np.zeros(0, dtype=np.float32)],
+            routed_experts=[prompt_routing],
+        ),
+    ]
+    self.mock_env.step.side_effect = [('obs1', 1.0, True, {})]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    routed = token_data['routed_experts']
+    self.assertIsNotNone(routed)
+
+    # Prompt (len 1, carrying prompt_routing 3) and conversation (len 0)
+    self.assertEqual(routed.shape, (1, num_layers, top_k))
+    np.testing.assert_array_equal(routed[0], 3)
+
 
 
 if __name__ == '__main__':

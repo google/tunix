@@ -216,6 +216,7 @@ class RolloutWorker(abstract_worker.Worker):
       return list(responses)
     return [responses]
 
+  # TODO(tunix-dev): can we remove the config knobs and only rely on self.config?
   async def sample_prompts(
       self,
       prompts: str | Sequence[str],
@@ -226,6 +227,7 @@ class RolloutWorker(abstract_worker.Worker):
       top_k: int | None = None,
       seed: int | None = None,
       return_logprobs: bool = True,
+      return_routed_experts: bool = False,
   ) -> base_rollout.RolloutOutput:
     """Direct single-turn prompt sampling path using the worker's Sampler."""
     if self.state == WorkerState.PENDING:
@@ -238,9 +240,14 @@ class RolloutWorker(abstract_worker.Worker):
           tokens=[],
           left_padded_prompt_tokens=np.zeros((0, 1), dtype=np.int32),
           logprobs=[] if return_logprobs else None,
+          routed_experts=[] if return_routed_experts else None,
       )
 
     config = self.config or base_rollout.RolloutConfig()
+    return_routed = (
+        return_routed_experts
+        or getattr(config, "return_routed_experts", False)
+    )
     sampling_params = sampler_lib.SamplingParams(
         max_tokens=(
             max_generation_steps
@@ -254,6 +261,7 @@ class RolloutWorker(abstract_worker.Worker):
         top_k=top_k if top_k is not None else config.top_k,
         seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
         return_logprobs=return_logprobs,
+        return_routed_experts=return_routed,
     )
     requests = [
         sampler_lib.SamplingRequest(
@@ -283,6 +291,17 @@ class RolloutWorker(abstract_worker.Worker):
         assert response.logprobs is not None
         logprobs.append(response.logprobs)
 
+    routed_experts: list[np.ndarray | None] | None = None
+    if return_routed:
+      routed_experts = [
+          (
+              np.asarray(response.routed_experts)
+              if response.routed_experts is not None
+              else None
+          )
+          for response in responses
+      ]
+
     return base_rollout.RolloutOutput(
         text=[response.text for response in responses],
         logits=None,
@@ -291,6 +310,7 @@ class RolloutWorker(abstract_worker.Worker):
             prompt_token_ids
         ),
         logprobs=logprobs,
+        routed_experts=routed_experts,
     )
 
   def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
