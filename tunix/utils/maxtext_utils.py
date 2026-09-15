@@ -113,6 +113,7 @@ def build_maxtext_config(
     rollout_mesh_tp: int = 0,
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
+    max_seq_token_per_tpu: int | None = 0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -148,6 +149,10 @@ def build_maxtext_config(
   if rollout_mesh_tp < 0:
     raise ValueError(
         f"rollout_mesh_tp must be non-negative, got {rollout_mesh_tp}"
+    )
+  if max_seq_token_per_tpu is not None and max_seq_token_per_tpu < 0:
+    raise ValueError(
+        f"max_seq_token_per_tpu must be non-negative, got {max_seq_token_per_tpu}"
     )
 
   if train_micro_batch_size % mesh_fsdp:
@@ -279,13 +284,39 @@ def build_maxtext_config(
     argv.append("enable_checkpointing=True")
   else:
     argv.append("enable_checkpointing=False")
+  # A packed row holds several trajectories end to end, so it is longer than any
+  # single one. Pinning max_target_length to max_prompt+max_response caps the
+  # packing budget at exactly one maximal trajectory (validate_packing_budget
+  # enforces the matching lower bound), which makes sequence packing a no-op.
+  max_target_length = max_prompt_length + max_response_length
+  if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > max_target_length:
+    logging.info(
+        "Raising max_target_length %d -> %d so packed rows of"
+        " max_seq_token_per_tpu tokens fit.",
+        max_target_length,
+        max_seq_token_per_tpu,
+    )
+    max_target_length = max_seq_token_per_tpu
+  elif (
+      max_seq_token_per_tpu is not None
+      and 0 < max_seq_token_per_tpu < max_target_length
+  ):
+    logging.warning(
+        "max_seq_token_per_tpu=%d is smaller than max_prompt_length + "
+        "max_response_length (%d + %d = %d); keeping max_target_length=%d.",
+        max_seq_token_per_tpu,
+        max_prompt_length,
+        max_response_length,
+        max_target_length,
+        max_target_length,
+    )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
-      f"max_target_length={max_prompt_length + max_response_length}",
+      f"max_target_length={max_target_length}",
       "attention=dot_product",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
