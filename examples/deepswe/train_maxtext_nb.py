@@ -237,6 +237,29 @@ parser.add_argument("--max_grad_norm", type=float, default=1)
 parser.add_argument("--warmup_steps_fraction", type=float, default=0.0)
 parser.add_argument("--learning_rate_final_fraction", type=float, default=1.0)
 parser.add_argument("--float32_gate_logits", type=str2bool, default=False)
+# Runs the [*, emb] x [emb, vocab] unembedding matmul in fp32 instead of bf16
+# (decoders.py:832-846). Applied to BOTH the trainer and the rollout, because
+# the quantity the TIS band gates on is the *difference* between the two, and
+# an independent bf16 rounding on each side is a symmetric noise source whose
+# Jensen term shows up as a negative bias in seq_geomean.
+parser.add_argument("--logits_dot_in_fp32", type=str2bool, default=False)
+# Recipe requires thinking OFF (grpo_qwen35_397b_swe_openhands_async.yaml:434).
+# `BaseChatTemplateParser.__init__` defaults it to True and this entrypoint was
+# not passing it, so every run so far has had chain-of-thought on inside all 30
+# assistant turns.
+parser.add_argument("--enable_thinking", type=str2bool, default=False)
+# Stop STRINGS handed to vLLM. The reference sets `stop_strings: null`
+# (grpo_qwen35_397b_swe_openhands_async.yaml:286-287). Ours terminate the turn
+# on "</function>", strictly before the model emits <|im_end|>, so the recorded
+# token_ids carry no terminator -- while the sampler's own next-turn prompt
+# always does, because `_parse_assistant` appends eot unconditionally. Pass an
+# empty string to match the reference and rely on stop_token_ids alone.
+parser.add_argument(
+    "--rollout_stop_strings",
+    type=str,
+    default="</function>,<|im_end|>,<|endoftext|>",
+    help="Comma-separated vLLM stop strings; empty string disables them.",
+)
 parser.add_argument("--trainable_parameters_mask", type=str, default=None)
 parser.add_argument(
     "--optimizer_offload",
@@ -723,7 +746,15 @@ tokenizer = AutoTokenizer.from_pretrained(
     tokenizer_path, local_files_only=False, trust_remote_code=True
 )
 
-chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
+chat_parser = template_parser.QwenChatTemplateParser(
+    tokenizer, enable_thinking=args.enable_thinking
+)
+print(
+    f"chat parser: {type(chat_parser).__name__} "
+    f"enable_thinking={args.enable_thinking} "
+    f"generation_prompt={chat_parser.generation_prompt!r}",
+    flush=True,
+)
 
 print("Loading Dataset...")
 
@@ -979,6 +1010,7 @@ trainer_config = pyconfig.initialize(
         f"checkpoint_storage_use_zarr3={args.checkpoint_storage_use_zarr3}",
         f"checkpoint_storage_concurrent_gb={args.checkpoint_storage_concurrent_gb}",
         f"float32_gate_logits={args.float32_gate_logits}",
+        f"logits_dot_in_fp32={args.logits_dot_in_fp32}",
         *(
             [f"trainable_parameters_mask={args.trainable_parameters_mask}"]
             if args.trainable_parameters_mask
@@ -996,6 +1028,32 @@ trainer_config = pyconfig.initialize(
     vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
 )
 
+# `log_config=False` above suppresses MaxText's own config dump, which is why no
+# run log has ever contained a trainer/sampler diff. Print the keys that decide
+# the numerics. The adapter prints the matching line for the model vLLM actually
+# builds, so the two can be diffed by grepping one log for "resolved".
+#
+# getattr with a default throughout: this is diagnostics, and a MaxText version
+# that renamed a key must not take the run down at startup.
+NUMERICS_KEYS = (
+    "model_name", "dtype", "weight_dtype", "attention", "use_mrope",
+    "logits_dot_in_fp32", "float32_logits", "float32_qk_product",
+    "float32_gate_logits", "float32_weight_sum", "matmul_precision",
+    "scan_layers", "prefuse_moe_weights", "padded_base_moe_mlp_dim",
+    "base_num_kv_heads", "use_qk_norm_in_gdn", "capacity_factor",
+    "sparse_matmul", "megablox", "normalization_layer_epsilon",
+    "max_target_length", "remat_policy", "dropout_rate", "model_call_mode",
+)
+
+
+def describe_maxtext_config(label, cfg):
+  return f"[deepswe] resolved {label} config: " + " ".join(
+      f"{k}={getattr(cfg, k, '<absent>')}" for k in NUMERICS_KEYS
+  )
+
+
+print(describe_maxtext_config("TRAINER", trainer_config), flush=True)
+
 sampler_config = pyconfig.initialize(
     [
         "",
@@ -1011,6 +1069,14 @@ sampler_config = pyconfig.initialize(
         f"dtype={args.dtype}",
         "attention=vllm_rpa",
         f"float32_gate_logits={args.float32_gate_logits}",
+        f"logits_dot_in_fp32={args.logits_dot_in_fp32}",
+        # NOTE: nothing in this list reaches the model vLLM executes. This
+        # object only supplies the rollout device mesh
+        # (model_creation_utils.py:831-833). The model is built by
+        # `maxtext_vllm_adapter.generate_maxtext_config`, which reads
+        # `rollout_vllm_additional_config["maxtext_config"]` below and nothing
+        # else. Anything that has to reach the sampler must be set in BOTH
+        # places -- see the `use_mrope` comment there.
         "use_mrope=False",
         "override_model_config=True",
         "skip_jax_distributed_system=True",
@@ -1022,6 +1088,12 @@ sampler_config = pyconfig.initialize(
     config_class=types.RLConfig,
     vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
 )
+
+# Printed for completeness, but note the label: this is the MESH config, not the
+# model config. Compare the adapter's "resolved SAMPLER config" line against the
+# TRAINER line above; where this one disagrees with the adapter's, the key never
+# reached the sampler.
+print(describe_maxtext_config("SAMPLER-MESH (not the model)", sampler_config), flush=True)
 
 sampler_devices = devices[:num_rollout_devices]
 trainer_devices = devices[
@@ -1211,6 +1283,11 @@ vllm_rollout_dict = {
         "hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
     },
     "rollout_mapping_config": {},
+    # THIS dict, not `sampler_config` above, is what the vLLM-side MaxText model
+    # is built from: `maxtext_vllm_adapter/adapter.py:82-186` layers exactly
+    # these keys over `configs/inference/vllm.yml` and the model yml. A key that
+    # is absent here takes the model yml's value regardless of what
+    # `sampler_config` says.
     "rollout_vllm_additional_config": {
         "maxtext_config": {
             "model_name": model_name_slug,
@@ -1223,11 +1300,30 @@ vllm_rollout_dict = {
             "remat_policy": "none",
             "enable_dp_attention": False,
             "float32_gate_logits": args.float32_gate_logits,
+            # configs/models/qwen3.5-35b-a3b.yml sets `use_mrope: true`, so
+            # without this the sampler builds Qwen3OmniMoeThinkerTextRotaryEmbedding
+            # (fp32 cos/sin) while the trainer builds PartialRotaryEmbedding
+            # (bf16 cos/sin). Setting it on `sampler_config` does nothing --
+            # that was the bug.
+            "use_mrope": False,
+            "logits_dot_in_fp32": args.logits_dot_in_fp32,
             "vllm_hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
         }
     },
     "rollout_vllm_sampling_kwargs": {
-        "stop": ["</function>", "<|im_end|>", "<|endoftext|>"],
+        # A stop STRING ends generation before the model emits <|im_end|>, so
+        # the recorded token_ids have no turn terminator while the sampler's own
+        # next-turn prompt always does (`_parse_assistant` appends eot
+        # unconditionally). vllm_sampler.py:447-453 records that this same
+        # omission once "produced 30+ nat sampler-trainer logp diffs".
+        # Measured on a production CSV: 87.5% of assistant turns end without one.
+        # The reference sets `stop_strings: null`; pass --rollout_stop_strings ""
+        # to match it.
+        **(
+            {"stop": [s for s in args.rollout_stop_strings.split(",") if s]}
+            if args.rollout_stop_strings
+            else {}
+        ),
         "stop_token_ids": [
             tokenizer.encode("<|im_end|>")[0],
             tokenizer.encode("<|endoftext|>")[0],
