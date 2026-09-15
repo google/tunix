@@ -23,8 +23,8 @@ from typing import Any
 
 import numpy as np
 from tunix.experimental.rl.agentic import registry
-
 from examples.deepswe import deepswe_data
+from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 
@@ -237,7 +237,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
           "(max_concurrency=%s).",
           group_size,
       )
-      kwargs["fleet"] = swe_env._init_global_fleet(  # pylint: disable=protected-access
+      kwargs["fleet"] = sandbox_utils.init_global_fleet(
           tasks=[entry],
           max_concurrency=group_size,
       )

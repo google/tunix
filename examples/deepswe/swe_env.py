@@ -1,388 +1,56 @@
-import atexit
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Software Engineering Environment (SWEEnv) for code-related tasks."""
+
+from __future__ import annotations
+
 import json
 import logging
 import os
-import threading
 import time
 from typing import Any, Optional, cast
+
 import numpy as np
 from examples.deepswe import openhands_utils
-from examples.deepswe import template as template_mod
+from examples.deepswe import sandbox_utils
+from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
+from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
-
-_GLOBAL_FLEET = None
-_FLEET_LOCK = threading.Lock()
-_PATCH_LOCK = threading.Lock()
-_R2EGYM_PATCHED = False
-
-
-def _patch_r2egym_for_agent_sandbox() -> None:
-  """In-memory compatibility patch for r2egym to route 'kubernetes-sandbox' backend."""
-  global _R2EGYM_PATCHED
-  with _PATCH_LOCK:
-    if _R2EGYM_PATCHED:
-      return
-    _R2EGYM_PATCHED = True
-  try:
-    import huggingface_hub  # pytype: disable=import-error
-
-    if not hasattr(huggingface_hub, "HfFolder"):
-      try:
-        from huggingface_hub._login import HfFolder  # pytype: disable=import-error
-
-        huggingface_hub.HfFolder = HfFolder
-      except Exception:
-
-        class DummyHfFolder:
-
-          @staticmethod
-          def get_token():
-            return None
-
-        huggingface_hub.HfFolder = DummyHfFolder  # pytype: disable=bad-assignment
-  except Exception as e:
-    logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
-
-  try:
-    from r2egym.agenthub.runtime import docker as docker_mod  # pytype: disable=import-error
-
-    orig_init = getattr(docker_mod.DockerRuntime, "_orig_init", None)
-    if orig_init is None:
-      docker_mod.DockerRuntime._orig_init = docker_mod.DockerRuntime.__init__
-
-      def _patched_init(self, *args, **kwargs):
-        if kwargs.get("backend") == "kubernetes-sandbox":
-          kwargs["backend"] = "kubernetes"
-          self._actual_backend = "kubernetes-sandbox"
-        return self._orig_init(*args, **kwargs)
-
-      docker_mod.DockerRuntime.__init__ = _patched_init
-
-    orig_start = getattr(
-        docker_mod.DockerRuntime, "_orig_start_container", None
-    )
-    if orig_start is None:
-      docker_mod.DockerRuntime._orig_start_container = (
-          docker_mod.DockerRuntime.start_container
-      )
-
-      def _patched_start_container(
-          self, docker_image, command, ctr_name, **kwargs
-      ):
-        if (
-            getattr(self, "_actual_backend", None) == "kubernetes-sandbox"
-            or getattr(self, "backend", None) == "kubernetes-sandbox"
-        ):
-          return self._start_kubernetes_sandbox()
-        return self._orig_start_container(
-            docker_image, command, ctr_name, **kwargs
-        )
-
-      docker_mod.DockerRuntime.start_container = _patched_start_container
-  except Exception as e:
-    logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
-
-
+# Re-exports for backward compatibility
+PrewarmDatasetIterator = sandbox_utils.PrewarmDatasetIterator
+_init_global_fleet = sandbox_utils.init_global_fleet
+_get_global_fleet = sandbox_utils.get_global_fleet
+_teardown_global_fleet = sandbox_utils.teardown_global_fleet
+_patch_r2egym_for_agent_sandbox = sandbox_utils.patch_r2egym_for_agent_sandbox
+_normalize_tasks_for_fleet = sandbox_utils.normalize_tasks_for_fleet
 _get_image_rewrite_fn = openhands_utils.get_image_rewrite_fn
-
-
-def _normalize_tasks_for_fleet(
-    tasks: Any, scaffold: str = "r2egym"
-) -> list[Any]:
-  """Normalize heterogeneous dataset entries into Task objects for SandboxFleet."""
-  from agent_sandbox_rl import Task  # pytype: disable=import-error
-
-  normalized = []
-  for item in tasks:
-    if hasattr(item, "image") and hasattr(item, "id"):
-      normalized.append(item)
-    elif isinstance(item, dict):
-      img = item.get("docker_image") or item.get("image", "default")
-      if isinstance(img, (list, np.ndarray)):
-        img = img[0] if len(img) > 0 else "default"
-      t_id = item.get("instance_id") or item.get("id") or img
-      if isinstance(t_id, (list, np.ndarray)):
-        t_id = t_id[0] if len(t_id) > 0 else "default"
-      normalized.append(
-          Task(id=str(t_id), image=str(img), metadata={"ds": item})
-      )
-    else:
-      normalized.append(item)
-  return normalized
-
-
-def _init_global_fleet(
-    tasks: list[Any],
-    max_concurrency: int = 128,
-    num_generations: int = 8,
-    batch_size: int = 8,
-    max_warmpool_replicas: int | None = None,
-    scaffold: str = "r2egym",
-    image_rewrite: Any | None = None,
-) -> Any:
-  """Initialize the process-wide SandboxFleet instance once upfront."""
-  global _GLOBAL_FLEET
-  with _FLEET_LOCK:
-    if _GLOBAL_FLEET is not None:
-      return _GLOBAL_FLEET
-
-    _patch_r2egym_for_agent_sandbox()
-
-    try:
-      from agent_sandbox_rl import (  # pytype: disable=import-error
-          ClusterConfig,
-          FleetConfig,
-          SandboxFleet,
-          Task,
-      )
-    except ImportError as e:
-      raise ImportError(
-          "use_agent_sandbox=True strictly requires the 'agent_sandbox_rl'"
-          " package. Install via: pip install"
-          " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
-      ) from e
-
-    fleet_ns = os.getenv("NAMESPACE", "rl-tunix-swebench")
-    key = os.environ.get("NODE_SELECTOR_KEY")
-    val = os.environ.get("NODE_SELECTOR_VAL")
-    node_sel = {key: val} if (key and val) else None
-
-    in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
-    effective_max_concurrent = max(
-        max_concurrency, batch_size * num_generations * 2
-    )
-
-    template = template_mod.get_template(scaffold, node_sel)
-
-    fleet_kwargs: dict[str, Any] = {
-        "clusters": [
-            ClusterConfig(
-                name="default",
-                namespace=fleet_ns,
-                node_selector=node_sel,
-                in_cluster=in_cluster,
-            )
-        ],
-        "max_concurrent": effective_max_concurrent,
-        "window_size": batch_size,
-        "max_warmpool_size": (
-            max_warmpool_replicas
-            if max_warmpool_replicas is not None
-            else num_generations
-        ),
-        "warm_per_task": True,
-    }
-    if template is not None:
-      fleet_kwargs["template"] = template
-    if scaffold == "openhands":
-      fleet_kwargs["template_name_prefix"] = "oh-img-"
-    fleet_cfg = FleetConfig(**fleet_kwargs)
-    fleet_inst = SandboxFleet(fleet_cfg)
-    image_rewrite_fn = _get_image_rewrite_fn(image_rewrite)
-    fleet_inst._image_rewrite_fn = image_rewrite_fn
-    if tasks is not None:
-      normalized_tasks = _normalize_tasks_for_fleet(tasks, scaffold=scaffold)
-      if image_rewrite_fn is not None:
-        fleet_inst.load_tasks(normalized_tasks, image_rewrite=image_rewrite_fn)
-      else:
-        fleet_inst.load_tasks(normalized_tasks)
-    msg = (
-        f"[SandboxFleet] Initializing pipelined fleet in namespace={fleet_ns}"
-        f" (max_concurrent={effective_max_concurrent},"
-        f" window_size={batch_size},"
-        f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
-        " warm_per_task=True)..."
-    )
-    logging.info(msg)
-    if fleet_cfg.install_teardown_hooks:
-      fleet_inst._install_teardown_hooks()
-    fleet_inst._torndown = False
-    fleet_inst.preflight()
-    fleet_inst.plan()
-    _GLOBAL_FLEET = fleet_inst
-    atexit.register(_teardown_global_fleet)
-    return _GLOBAL_FLEET
-
-
-def _get_global_fleet() -> Any:
-  """Retrieve the active process-wide SandboxFleet instance."""
-  if _GLOBAL_FLEET is None:
-    raise RuntimeError(
-        "SandboxFleet has not been initialized. Call _init_global_fleet()"
-        " first."
-    )
-  return _GLOBAL_FLEET
-
 _MAX_IN_FLIGHT_BATCHES = 2
-
-class PrewarmDatasetIterator:
-  """2-slot Lookahead iterator: guarantees the upcoming batch is always pre-warming ahead on K8s."""
-
-  def __init__(
-      self,
-      dataset: Any,
-      fleet: Any | None = None,
-      num_generations: int = 8,
-      batch_size: int = 8,
-      max_warmpool_replicas: int | None = None,
-      scaffold: str = "r2egym",
-      image_rewrite: Any | None = None,
-  ):
-    self.dataset_iter = iter(dataset)
-    self.num_generations = num_generations
-    self.batch_size = batch_size
-    self.max_warmpool_replicas = max_warmpool_replicas
-    self.scaffold = scaffold
-    self.fleet = fleet or _get_global_fleet()
-    self.image_rewrite = _get_image_rewrite_fn(
-        image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
-    )
-    self.current_batch = None
-    self.next_batch = None
-    self.in_flight_batches: list[list[str]] = []
-    self.max_in_flight_batches = _MAX_IN_FLIGHT_BATCHES
-
-    # 1. Prime Slot 1 (Current Batch - wait until pods are ready before training starts)
-    try:
-      self.current_batch = next(self.dataset_iter)
-      logging.info(
-          "[PrewarmDatasetIterator] Warming initial batch on K8s and waiting"
-          " for pods to be ready..."
-      )
-      self._warm_batch(self.current_batch, wait=True)
-    except StopIteration:
-      pass
-
-    # 2. Prime Slot 2 (Next Batch - Pre-warming in background!)
-    try:
-      self.next_batch = next(self.dataset_iter)
-      self._warm_batch(self.next_batch, wait=False)
-    except StopIteration:
-      pass
-
-  def _extract_images(self, batch: Any) -> list[str]:
-    raw_images = []
-    if isinstance(batch, dict) and "docker_image" in batch:
-      raw = batch["docker_image"]
-      if isinstance(raw, (list, np.ndarray)):
-        raw_images = np.array(raw).flatten().tolist()
-      elif isinstance(raw, str):
-        raw_images = [raw]
-      elif hasattr(raw, "decode"):
-        raw_images = [raw]
-    elif isinstance(batch, list):
-      raw_images = [
-          item.get("docker_image")
-          for item in batch
-          if isinstance(item, dict) and item.get("docker_image")
-      ]
-
-    # Safely decode/stringify all elements and apply rewrite if configured
-    rewrite_fn = getattr(self, "image_rewrite", None) or _get_image_rewrite_fn()
-    str_images = []
-    for img in raw_images:
-      s = img.decode("utf-8") if hasattr(img, "decode") else str(img)
-      if rewrite_fn is not None:
-        s = rewrite_fn(s)
-      str_images.append(s)
-
-    return list(dict.fromkeys(str_images))
-
-  def _warm_batch(self, batch: Any, wait: bool = False):
-    images = self._extract_images(batch)
-    if images and self.fleet:
-      target_replicas = self.max_warmpool_replicas or self.num_generations
-      try:
-        self.fleet.warm_images(
-            images, replicas_override=target_replicas, wait=wait
-        )
-        logging.info(
-            "[PrewarmDatasetIterator] Pre-warming %d image(s) (%d replicas"
-            " each) on K8s: %s",
-            len(images),
-            target_replicas,
-            images[:3],
-        )
-      except Exception as e:
-        logging.warning("[PrewarmDatasetIterator] Warm note: %s", e)
-
-  def _unwarm_batch(self, images: list[str]):
-    if images and self.fleet:
-      for img in images:
-        try:
-          self.fleet.unwarm_image(img)
-          logging.info(
-              "[PrewarmDatasetIterator] Unwarmed finished pool on K8s: %s",
-              img,
-          )
-        except Exception as e:
-          logging.warning("[PrewarmDatasetIterator] Unwarm note: %s", e)
-
-  def __iter__(self):
-    return self
-
-  def __next__(self):
-    if self.current_batch is None:
-      raise StopIteration
-
-    # 1. Deliver current batch to Tunix
-    batch_to_return = self.current_batch
-    current_images = self._extract_images(batch_to_return)
-
-    # 2. Add current batch to in-flight window
-    self.in_flight_batches.append(current_images)
-
-    # 3. 🧹 Only unwarm batches that have truly exited the in-flight window
-    if len(self.in_flight_batches) > self.max_in_flight_batches:
-      retired_images = self.in_flight_batches.pop(0)
-      active_images = set()
-      for b in self.in_flight_batches:
-        active_images.update(b)
-      if self.next_batch:
-        active_images.update(self._extract_images(self.next_batch))
-      for old_img in retired_images:
-        if old_img not in active_images:
-          self._unwarm_batch([old_img])
-
-    # 4. Shift window: next becomes current
-    self.current_batch = self.next_batch
-
-    # 5. 🚀 Pull fresh next batch and kick off background pre-warm on K8s!
-    try:
-      self.next_batch = next(self.dataset_iter)
-      self._warm_batch(self.next_batch, wait=False)
-    except StopIteration:
-      self.next_batch = None
-
-    return batch_to_return
+_GLOBAL_FLEET = None
 
 
-def _teardown_global_fleet() -> None:
-  """Atexit handler to cleanly tear down warm pools on process exit."""
-  global _GLOBAL_FLEET
-  if _GLOBAL_FLEET is not None:
-    logging.info(
-        "[SandboxFleet] Automatically tearing down warm pools on exit..."
-    )
-    try:
-      _GLOBAL_FLEET.teardown()
-    except Exception as e:
-      logging.warning("[SandboxFleet] Teardown note: %s", e)
-    _GLOBAL_FLEET = None
-
-
+# pylint: disable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
 try:
   import r2egym  # pytype: disable=import-error
-  from r2egym.agenthub.action import Action  # pytype: disable=import-error  # pytype: disable=import-error
-  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error  # pytype: disable=import-error
+  from r2egym.agenthub.action import Action  # pytype: disable=import-error
+  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
 except ImportError:
   r2egym = cast(Any, None)
   EnvArgs = cast(Any, None)
   RepoEnv = cast(Any, None)
   Action = cast(Any, None)
-
-
-from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
+# pylint: enable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
 
 if r2egym:
   R2EGYM_PATH = os.path.dirname(r2egym.__file__)
@@ -486,14 +154,14 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["pair_index"] = pair_index
 
   def _init_agent_sandbox_env(self) -> None:
-    _patch_r2egym_for_agent_sandbox()
+    sandbox_utils.patch_r2egym_for_agent_sandbox()
     from agent_sandbox_rl import Task  # pytype: disable=import-error
     from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
         make_fleet_repo_env,
         r2egym_command_files,
     )
 
-    fleet = self.fleet or _get_global_fleet()
+    fleet = self.fleet or sandbox_utils.get_global_fleet()
     msg = "[SWEEnv] Acquiring SandboxHandle from SandboxFleet!"
     logging.info(msg)
     task_id = str(
@@ -543,7 +211,10 @@ class SWEEnv(BaseTaskEnv):
         ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
       ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
       self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
-    cmd_files = r2egym_command_files()
+    try:
+      cmd_files = r2egym_command_files()
+    except Exception:  # pylint: disable=broad-exception-caught
+      cmd_files = None
     self.env = make_fleet_repo_env(
         self.handle,
         command_files=cmd_files,
@@ -638,7 +309,7 @@ class SWEEnv(BaseTaskEnv):
         logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
       self.workspace = None
 
-    fleet = self.fleet or _GLOBAL_FLEET
+    fleet = self.fleet or getattr(sandbox_utils, "_GLOBAL_FLEET", None)
     if (
         hasattr(self, "handle")
         and self.handle is not None
