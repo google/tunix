@@ -20,8 +20,6 @@ Defines the pure ML algorithmic core of a trainer.
 import abc
 from typing import Any, Callable, List, Optional
 
-import numpy as np
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
 
@@ -141,37 +139,23 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def per_token_logps(
-      self,
-      *,
-      prompt_tokens: ArrayLike,
-      completion_tokens: ArrayLike,
-      pad_id: int,
-      eos_id: int,
-      temperature: float | None = None,
-      segment_ids: ArrayLike | None = None,
-      segment_positions: ArrayLike | None = None,
-      micro_batch_size: int | None = None,
-  ) -> np.ndarray:
-    """Scores per-token log-probabilities of completions under live weights.
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Read-only.
 
-    Unlike a frozen reference scorer, this uses the trainer's current (actor)
-    parameters, so callers can measure sampler-vs-trainer agreement. Must not
-    mutate trainer state (no gradient accumulation, no optimizer update).
+    Runs a forward pass with the trainer model and caller-supplied function.
+
+    The trainer owns model access and shards `args`/`kwargs` on its data axis;
+    `fn` owns the computation and must not mutate the model.
     Args:
-      prompt_tokens: [B, P] token ids, LEFT-padded (or [B, 0] in packed mode).
-      completion_tokens: [B, C] token ids, RIGHT-padded; results align to these.
-      pad_id: Pad token id.
-      eos_id: End-of-sequence token id.
-      temperature: Softmax temperature to score under; defaults to 1.0 when None.
-      segment_ids: Optional packing segment ids (sequence packing).
-      segment_positions: Optional packing local position indices.
-      micro_batch_size: Optional row chunk size to bound peak memory.
+      fn: Called as `fn(model, *args, **kwargs)`.
+      *args: Positional arguments forwarded to `fn` after sharding.
+      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+
     Returns:
-      [B, C] per-token log-probabilities aligned to `completion_tokens`.
+      Whatever `fn` returns.
     """
     raise NotImplementedError(
-        f"{type(self).__name__} does not implement per_token_logps."
+        f"{type(self).__name__} does not implement fwd_only."
     )
 
   @abc.abstractmethod
