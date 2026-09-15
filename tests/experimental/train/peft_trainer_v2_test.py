@@ -110,10 +110,10 @@ class PeftTrainerTest(parameterized.TestCase):
   def test_compile_once(self):
     class CountCompiledTimesTrainer(peft_trainer_v2.PeftTrainer):
 
-      def _fwd_bwd_step(self, model, grad_accumulator, inputs):
+      def _fwd_bwd_step(self, model, inputs, acc_grads, acc_denom):
         global global_counter
         global_counter += 1
-        return super()._fwd_bwd_step(model, grad_accumulator, inputs)
+        return super()._fwd_bwd_step(model, inputs, acc_grads, acc_denom)
 
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)
