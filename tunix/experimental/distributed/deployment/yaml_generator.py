@@ -54,6 +54,16 @@ def main() -> None:
       default=os.environ.get("KUEUE_QUEUE_NAME", ""),
       help="Kueue local queue name for scheduling (optional).",
   )
+  parser.add_argument(
+      "--priority_class",
+      default=os.environ.get("KUEUE_PRIORITY_CLASS", ""),
+      help=(
+          "Kueue WorkloadPriorityClass name (optional). Workloads default to"
+          " priority 0 and are preempted by anything above them in the cohort,"
+          " which on a shared cluster means a multi-hour run can lose its"
+          " chips at any point."
+      ),
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -164,9 +174,14 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  labels = {}
+  if args.queue_name:
+    labels["kueue.x-k8s.io/queue-name"] = args.queue_name
+  if args.priority_class:
+    labels["kueue.x-k8s.io/priority-class"] = args.priority_class
   queue_label = (
-      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
-      if args.queue_name
+      "  labels:\n" + "".join(f"    {k}: {v}\n" for k, v in labels.items())
+      if labels
       else ""
   )
 

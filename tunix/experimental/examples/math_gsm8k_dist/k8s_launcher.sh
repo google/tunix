@@ -157,6 +157,9 @@ export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
 export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${QUEUE_NAME:-}}
+# Kueue WorkloadPriorityClass. Unset means priority 0, which on a shared
+# cohort means any other workload can preempt the run mid-training.
+export KUEUE_PRIORITY_CLASS=${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS:-}}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {
@@ -191,6 +194,7 @@ start_orchestrator() {
     --max_restarts="${ORCHESTRATOR_MAX_RESTARTS}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${KUEUE_PRIORITY_CLASS:+--priority_class="${KUEUE_PRIORITY_CLASS}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -313,6 +317,7 @@ start_trainer() {
     --jobset_name="${TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${KUEUE_PRIORITY_CLASS:+--priority_class="${KUEUE_PRIORITY_CLASS}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
@@ -426,6 +431,7 @@ start_rollout_instance() {
     --jobset_name="${target_id}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${KUEUE_PRIORITY_CLASS:+--priority_class="${KUEUE_PRIORITY_CLASS}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
