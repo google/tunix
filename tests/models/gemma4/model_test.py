@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from unittest import mock
 
 from absl.testing import absltest
@@ -29,8 +30,36 @@ from tunix.models import cache_utils
 from tunix.models.gemma4 import attention as attention_lib
 from tunix.models.gemma4 import model as model_lib
 
+AttentionType = model_lib.AttentionType
+RematConfig = model_lib.RematConfig
+
 
 class ModelTest(parameterized.TestCase):
+
+  def _tiny_gemma4_config(self, **overrides):
+    config_dict = dict(
+        num_layers=4,
+        num_embed=128,
+        embed_dim=128,
+        hidden_dim=256,
+        num_heads=2,
+        head_dim=64,
+        num_kv_heads=1,
+        sliding_window_size=16,
+        use_sliding_window_kv_cache=True,
+        frac_shared_layers=0.5,
+        prefix_bucket_boundaries=(0, 16, 32),
+        attention_pattern=(
+            model_lib.AttentionType.LOCAL_SLIDING,
+            model_lib.AttentionType.GLOBAL,
+        ),
+        flash_attention_block_size=8,
+        flash_attention_compute_block_size=8,
+    )
+    config_dict.update(overrides)
+    return dataclasses.replace(
+        model_lib.ModelConfig.gemma4_e2b(), **config_dict
+    )
 
   def test_gemma4_12b_config(self):
     config = model_lib.ModelConfig.gemma4_12b()
@@ -724,34 +753,26 @@ class ModelTest(parameterized.TestCase):
     )
     self.assertEqual(logits.shape, (batch_size, seq_len, config.num_embed))
 
-  def test_forward_pass_chunked_prefill_with_kv_cache_sharing(self):
-    config = model_lib.ModelConfig.gemma4_e2b()
-    config.num_layers = 4
-    config.num_embed = 128
-    config.embed_dim = 128
-    config.hidden_dim = 256
-    config.num_heads = 2
-    config.head_dim = 64
-    config.num_kv_heads = 1
-    config.sliding_window_size = 16
-    config.use_sliding_window_kv_cache = True
-    config.frac_shared_layers = 0.5
-    config.prefix_bucket_boundaries = (0, 16, 32)
-    config.attention_pattern = (
-        model_lib.AttentionType.LOCAL_SLIDING,
-        model_lib.AttentionType.GLOBAL,
+  @parameterized.named_parameters(
+      ('no_remat_no_split', RematConfig.NONE, False),
+      ('no_remat_with_split', RematConfig.NONE, True),
+      ('block_remat_no_split', RematConfig.BLOCK, False),
+      ('block_remat_with_split', RematConfig.BLOCK, True),
+  )
+  def test_forward_pass_chunked_prefill_with_kv_cache_sharing(
+      self, remat_config, use_split_attention
+  ):
+    config = self._tiny_gemma4_config(
+        remat_config=remat_config,
+        use_flash_attention=use_split_attention,
+        use_split_attention=use_split_attention,
     )
-
-    rngs = nnx.Rngs(0)
-    model = model_lib.Gemma4(config, rngs=rngs)
-
-    # Initialize cache: layers 0 and 1 are unshared origins, layers 2 and 3 share.
+    model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
     cache = model.init_cache(batch_size=1, max_seq_len=16, dtype=jnp.float32)
     cache['layer_0']['end_index'] = jnp.array([16])
     cache['layer_1']['end_index'] = jnp.array([16])
 
-    suffix_len = 8
-    prefix_len = 16
+    suffix_len, prefix_len = 8, 16
     total_len = prefix_len + suffix_len
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, suffix_len), 0, config.num_embed
@@ -759,58 +780,68 @@ class ModelTest(parameterized.TestCase):
     positions = jnp.arange(prefix_len, total_len, dtype=jnp.int32)[None, :]
     attn_mask = jnp.ones((1, suffix_len, total_len), dtype=jnp.bool_)
 
-    logits, updated_cache = model(
-        tokens,
-        positions=positions,
-        cache=cache,
-        attention_mask=attn_mask,
-        is_chunked_prefill=True,
-        prefix_length=prefix_len,
-    )
+    fake_split_called = []
 
-    self.assertEqual(logits.shape, (1, suffix_len, config.num_embed))
-    self.assertFalse(jnp.isnan(logits).any())
-    self.assertIsNotNone(updated_cache)
-    self.assertEqual(set(updated_cache.keys()), {'layer_0', 'layer_1'})
-    self.assertNotIn('layer_2', updated_cache)
-    self.assertNotIn('layer_3', updated_cache)
-    self.assertEqual(int(updated_cache['layer_0']['end_index'][0]), 24)
-    self.assertEqual(int(updated_cache['layer_1']['end_index'][0]), 24)
+    def fake_split(q, k, v, *args, **kwargs):
+      split_k = kwargs.get('split_prefix_k', args[0] if len(args) > 0 else None)
+      split_v = kwargs.get('split_prefix_v', args[1] if len(args) > 1 else None)
+      fake_split_called.append((split_k, split_v))
+      return (
+          jnp.zeros_like(q).transpose(0, 2, 1, 3),
+          k.transpose(0, 2, 1, 3),
+          v.transpose(0, 2, 1, 3),
+      )
+
+    with mock.patch.object(
+        attention_lib.Attention,
+        '_make_splash_kernel',
+        return_value=(mock.MagicMock(), None),
+    ), mock.patch.object(
+        attention_lib.Attention,
+        '_flash_attention_split',
+        side_effect=fake_split,
+    ):
+      mesh = jax.sharding.Mesh(
+          np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+      )
+      with mesh:
+        logits, updated_cache = model(
+            tokens,
+            positions=positions,
+            cache=cache,
+            attention_mask=attn_mask,
+            is_chunked_prefill=True,
+            prefix_length=prefix_len,
+        )
+
+      self.assertEqual(logits.shape, (1, suffix_len, config.num_embed))
+      self.assertFalse(jnp.isnan(logits).any())
+      self.assertEqual(set(updated_cache.keys()), {'layer_0', 'layer_1'})
+      for layer in ('layer_0', 'layer_1'):
+        self.assertEqual(int(updated_cache[layer]['end_index'][0]), 24)
+
+      if use_split_attention:
+        self.assertTrue(fake_split_called)
+        split_prefix_k, split_prefix_v = fake_split_called[-1]
+        self.assertIsNotNone(split_prefix_k)
+        self.assertIsNotNone(split_prefix_v)
+        self.assertEqual(split_prefix_k.shape[1], prefix_len)
+        self.assertEqual(split_prefix_v.shape[1], prefix_len)
 
   def test_forward_pass_chunked_prefill_shared_layer_respects_partial_valid_mask(
       self,
   ):
-    config = model_lib.ModelConfig.gemma4_e2b()
-    config.num_layers = 4
-    config.num_embed = 128
-    config.embed_dim = 128
-    config.hidden_dim = 256
-    config.num_heads = 2
-    config.head_dim = 64
-    config.num_kv_heads = 1
-    config.sliding_window_size = 16
-    config.use_sliding_window_kv_cache = True
-    config.frac_shared_layers = 0.5
-    config.prefix_bucket_boundaries = (0, 16, 32)
-    config.attention_pattern = (
-        model_lib.AttentionType.LOCAL_SLIDING,
-        model_lib.AttentionType.GLOBAL,
-    )
+    config = self._tiny_gemma4_config()
+    model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
+    cache_len, prefix_len, suffix_len = 16, 8, 8
+    total_len = cache_len + suffix_len
 
-    rngs = nnx.Rngs(0)
-    model = model_lib.Gemma4(config, rngs=rngs)
-
-    # Initialize cache: 16 slots, partially filled with prefix_len=8.
-    cache_len = 16
-    prefix_len = 8
     clean_cache = model.init_cache(
         batch_size=1, max_seq_len=cache_len, dtype=jnp.float32
     )
     clean_cache['layer_0']['end_index'] = jnp.array([prefix_len])
     clean_cache['layer_1']['end_index'] = jnp.array([prefix_len])
 
-    suffix_len = 8
-    total_len = cache_len + suffix_len
     tokens = jax.random.randint(
         jax.random.PRNGKey(0), (1, suffix_len), 0, config.num_embed
     )
@@ -819,92 +850,76 @@ class ModelTest(parameterized.TestCase):
     )[None, :]
     attn_mask = jnp.ones((1, suffix_len, total_len), dtype=jnp.bool_)
 
-    clean_logits, _ = model(
+    run_model = lambda c: model(
         tokens,
         positions=positions,
-        cache=clean_cache,
+        cache=c,
         attention_mask=attn_mask,
         is_chunked_prefill=True,
         prefix_length=prefix_len,
-    )
+    )[0]
+    clean_logits = run_model(clean_cache)
 
     # Inject 999.0 noise into uninitialized slots [8:16] of cache['layer_0'].
-    corrupt_cache = model.init_cache(
-        batch_size=1, max_seq_len=cache_len, dtype=jnp.float32
-    )
-    corrupt_cache['layer_0']['end_index'] = jnp.array([prefix_len])
-    corrupt_cache['layer_1']['end_index'] = jnp.array([prefix_len])
-    corrupt_cache['layer_0']['k'] = (
-        corrupt_cache['layer_0']['k'].at[:, prefix_len:, ...].set(999.0)
-    )
-    corrupt_cache['layer_0']['v'] = (
-        corrupt_cache['layer_0']['v'].at[:, prefix_len:, ...].set(999.0)
-    )
-
-    corrupt_logits, _ = model(
-        tokens,
-        positions=positions,
-        cache=corrupt_cache,
-        attention_mask=attn_mask,
-        is_chunked_prefill=True,
-        prefix_length=prefix_len,
-    )
+    corrupt_cache = {
+        'layer_0': {
+            'k': clean_cache['layer_0']['k'].at[:, prefix_len:, ...].set(999.0),
+            'v': clean_cache['layer_0']['v'].at[:, prefix_len:, ...].set(999.0),
+            'end_index': clean_cache['layer_0']['end_index'],
+        },
+        'layer_1': clean_cache['layer_1'],
+    }
+    corrupt_logits = run_model(corrupt_cache)
 
     self.assertFalse(jnp.isnan(clean_logits).any())
     self.assertFalse(jnp.isnan(corrupt_logits).any())
     np.testing.assert_allclose(corrupt_logits, clean_logits, atol=1e-5)
 
   def test_shared_cache_prefix_bucketing_when_cache_is_none(self):
-    """Verifies Attention and DecoderLayer bucket prefix_length when cache is None and kv_shared_cache is passed."""
-    config = model_lib.ModelConfig.gemma4_e2b()
-    config.num_layers = 2
-    config.num_embed = 128
-    config.embed_dim = 64
-    config.hidden_dim = 128
-    config.num_heads = 2
-    config.head_dim = 32
-    config.num_kv_heads = 2
-    config.global_key_size = 32
-    config.num_global_kv_heads = 2
-    config.k_eq_v_global = False
-    config.sliding_window_size = 16
-    config.prefix_bucket_boundaries = (0, 8, 16)
-    config.use_flash_attention = False
-
-    rngs = nnx.Rngs(0)
+    """Verifies Attention and DecoderLayer bucket prefix when cache is None."""
+    config = dataclasses.replace(
+        model_lib.ModelConfig.gemma4_e2b(),
+        num_layers=2,
+        num_embed=128,
+        embed_dim=64,
+        hidden_dim=128,
+        num_heads=2,
+        head_dim=32,
+        num_kv_heads=2,
+        global_key_size=32,
+        num_global_kv_heads=2,
+        k_eq_v_global=False,
+        sliding_window_size=16,
+        prefix_bucket_boundaries=(0, 8, 16),
+        use_flash_attention=False,
+    )
     decoder_layer = model_lib.GemmaDecoderLayer(
         config,
-        attn_type=model_lib.AttentionType.GLOBAL,
-        rngs=rngs,
+        attn_type=AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
     )
     attn = decoder_layer.attn
 
-    prefix_len = 5
-    expected_bucketed_prefix = 8
-    suffix_len = 4
+    prefix_len, expected_bucketed_prefix, suffix_len = 5, 8, 4
     total_kv_len = expected_bucketed_prefix + suffix_len
-
     kv_shared_cache = {
         'k': jnp.zeros((1, total_kv_len, attn.num_kv_heads, attn.head_dim)),
         'v': jnp.zeros((1, total_kv_len, attn.num_kv_heads, attn.head_dim)),
         'prior_end_index': jnp.array([prefix_len]),
     }
-
     x = jnp.zeros((1, suffix_len, config.embed_dim))
-    segment_pos = jnp.arange(prefix_len, prefix_len + suffix_len)[None, :]
-    attn_mask = jnp.ones((1, suffix_len, total_kv_len + 8), dtype=jnp.bool_)
+    call_kwargs = dict(
+        segment_pos=jnp.arange(prefix_len, prefix_len + suffix_len)[None, :],
+        cache=None,
+        attn_mask=jnp.ones((1, suffix_len, total_kv_len + 8), dtype=jnp.bool_),
+        kv_shared_cache=kv_shared_cache,
+        is_chunked_prefill=True,
+        prefix_length=prefix_len,
+    )
 
-    # 1. Test Attention.__call__ directly (non-remat)
+    # 1. Attention.__call__ directly (non-remat)
     with mock.patch.object(attn, 'block', wraps=attn.block) as mock_attn_block:
-      _, attn_out, _ = attn(
-          x,
-          segment_pos,
-          cache=None,
-          attn_mask=attn_mask,
-          kv_shared_cache=kv_shared_cache,
-          is_chunked_prefill=True,
-          prefix_length=prefix_len,
-      )
+      _, attn_out, _ = attn(x, **call_kwargs)
       self.assertEqual(
           mock_attn_block.call_args.kwargs['prefix_length'],
           expected_bucketed_prefix,
@@ -912,85 +927,65 @@ class ModelTest(parameterized.TestCase):
       self.assertEqual(attn_out.shape, x.shape)
       self.assertFalse(jnp.isnan(attn_out).any())
 
-    # 2. Test Attention.__call__ with BLOCK remat
+    # 2. Attention.__call__ with BLOCK remat
     attn.config.remat_config = attention_lib.RematConfig.BLOCK
     with mock.patch.object(
         attention_lib.cache_utils,
         'maybe_bucket_prefix_length',
         wraps=cache_utils.maybe_bucket_prefix_length,
     ) as mock_bucket:
-      _, attn_out, _ = attn(
-          x,
-          segment_pos,
-          cache=None,
-          attn_mask=attn_mask,
-          kv_shared_cache=kv_shared_cache,
-          is_chunked_prefill=True,
-          prefix_length=prefix_len,
-      )
+      _, attn_out, _ = attn(x, **call_kwargs)
       self.assertEqual(mock_bucket.call_args.args[0], prefix_len)
       self.assertIs(mock_bucket.call_args.args[1], kv_shared_cache)
-      self.assertEqual(attn_out.shape, x.shape)
       self.assertFalse(jnp.isnan(attn_out).any())
     attn.config.remat_config = attention_lib.RematConfig.NONE
 
-    # 3. Test GemmaDecoderLayer.__call__
+    # 3. GemmaDecoderLayer.__call__
     with mock.patch.object(
         decoder_layer, 'block', wraps=decoder_layer.block
     ) as mock_layer_block:
-      _, layer_out, _ = decoder_layer(
-          x,
-          segment_pos,
-          cache=None,
-          attn_mask=attn_mask,
-          kv_shared_cache=kv_shared_cache,
-          is_chunked_prefill=True,
-          prefix_length=prefix_len,
-      )
+      _, layer_out, _ = decoder_layer(x, **call_kwargs)
       self.assertEqual(
           mock_layer_block.call_args.kwargs['prefix_length'],
           expected_bucketed_prefix,
       )
-      self.assertEqual(layer_out.shape, x.shape)
       self.assertFalse(jnp.isnan(layer_out).any())
 
     # Sanity check helper behavior with vs without kv_shared_cache
-    unbucketed_len = cache_utils.maybe_bucket_prefix_length(
-        prefix_len,
-        None,
-        is_chunked_prefill=True,
-        boundaries=config.prefix_bucket_boundaries,
-    )
-    self.assertEqual(unbucketed_len, prefix_len)
-
-    bucketed_len = cache_utils.maybe_bucket_prefix_length(
-        prefix_len,
-        kv_shared_cache,
-        is_chunked_prefill=True,
-        boundaries=config.prefix_bucket_boundaries,
-    )
-    self.assertEqual(bucketed_len, expected_bucketed_prefix)
+    for c, expected in (
+        (None, prefix_len),
+        (kv_shared_cache, expected_bucketed_prefix),
+    ):
+      self.assertEqual(
+          cache_utils.maybe_bucket_prefix_length(
+              prefix_len,
+              c,
+              is_chunked_prefill=True,
+              boundaries=config.prefix_bucket_boundaries,
+          ),
+          expected,
+      )
 
   def test_chunked_prefill_bucket_padding_forces_eager(self):
-    """Verifies DecoderLayer forces eager attention if and only if bucket padding was introduced."""
-    config = model_lib.ModelConfig.gemma4_e2b()
-    config.num_layers = 1
-    config.num_embed = 128
-    config.embed_dim = 64
-    config.hidden_dim = 128
-    config.num_heads = 2
-    config.head_dim = 32
-    config.num_kv_heads = 2
-    config.global_key_size = 32
-    config.num_global_kv_heads = 2
-    config.k_eq_v_global = False
-    config.prefix_bucket_boundaries = (0, 8, 16)
-
-    rngs = nnx.Rngs(0)
+    """Verifies DecoderLayer forces eager attention on bucket padding."""
+    config = dataclasses.replace(
+        model_lib.ModelConfig.gemma4_e2b(),
+        num_layers=1,
+        num_embed=128,
+        embed_dim=64,
+        hidden_dim=128,
+        num_heads=2,
+        head_dim=32,
+        num_kv_heads=2,
+        global_key_size=32,
+        num_global_kv_heads=2,
+        k_eq_v_global=False,
+        prefix_bucket_boundaries=(0, 8, 16),
+    )
     decoder_layer = model_lib.GemmaDecoderLayer(
         config,
-        attn_type=model_lib.AttentionType.GLOBAL,
-        rngs=rngs,
+        attn_type=AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
     )
     suffix_len = 4
     x = jnp.zeros((1, suffix_len, config.embed_dim))
@@ -999,44 +994,110 @@ class ModelTest(parameterized.TestCase):
         'v': jnp.zeros((1, 16, 2, 32)),
         'end_index': jnp.array([16]),
     }
-
-    # Case 1: prefix_len = 5, bucketed_prefix = 8 (padding introduced -> force_eager must be True)
-    segment_pos = jnp.arange(5, 5 + suffix_len)[None, :]
     attn_mask = jnp.ones((1, suffix_len, 8 + suffix_len), dtype=jnp.bool_)
-    with mock.patch.object(
-        decoder_layer, 'block', wraps=decoder_layer.block
-    ) as mock_block:
-      decoder_layer(
-          x,
-          segment_pos,
-          cache=cache,
-          attn_mask=attn_mask,
-          is_chunked_prefill=True,
-          prefix_length=5,
+
+    # Test padding forces eager (5 -> 8) vs exact bucket boundary (8 -> 8)
+    for prefix_len, expected_eager in ((5, True), (8, False)):
+      with mock.patch.object(
+          decoder_layer, 'block', wraps=decoder_layer.block
+      ) as mock_block:
+        decoder_layer(
+            x,
+            segment_pos=jnp.arange(prefix_len, prefix_len + suffix_len)[
+                None, :
+            ],
+            cache=cache,
+            attn_mask=attn_mask,
+            is_chunked_prefill=True,
+            prefix_length=prefix_len,
+        )
+        self.assertEqual(
+            mock_block.call_args.kwargs['force_eager'], expected_eager
+        )
+
+  def test_multi_chunk_prefill_and_decode_lifecycle(self):
+    def run_lifecycle(use_split: bool):
+      config = self._tiny_gemma4_config(
+          prefix_bucket_boundaries=(0, 8, 16),
+          use_flash_attention=use_split,
+          use_split_attention=use_split,
       )
-      self.assertTrue(
-          mock_block.call_args.kwargs['force_eager'],
-          'Expected force_eager=True when bucketed_prefix != prefix_length',
+      model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
+      cur_cache = model.init_cache(
+          batch_size=1, max_seq_len=16, dtype=jnp.float32
+      )
+      logits, caches = [], []
+
+      # Prefill chunk 1 (len=8, prefix=0) and chunk 2 (len=4, prefix=8)
+      for key, chunk_len, prefix in ((0, 8, 0), (1, 4, 8)):
+        tok = jax.random.randint(
+            jax.random.PRNGKey(key), (1, chunk_len), 0, config.num_embed
+        )
+        pos = jnp.arange(prefix, prefix + chunk_len, dtype=jnp.int32)[None, :]
+        mask = jnp.tril(
+            jnp.ones((1, chunk_len, prefix + chunk_len), dtype=jnp.bool_)
+        )
+        l, cur_cache = model(
+            tok,
+            positions=pos,
+            cache=cur_cache,
+            attention_mask=mask,
+            is_chunked_prefill=True,
+            prefix_length=prefix,
+        )
+        logits.append(l)
+        caches.append(cur_cache)
+
+      # Decode step 1 (tok=42, pos=12) and step 2 (tok=99, pos=13)
+      for tok_val, pos_val in ((42, 12), (99, 13)):
+        l, cur_cache = model(
+            jnp.array([[tok_val]], dtype=jnp.int32),
+            positions=jnp.array([[pos_val]], dtype=jnp.int32),
+            cache=cur_cache,
+            attention_mask=(jnp.arange(16)[None, None, :] <= pos_val),
+            is_chunked_prefill=False,
+        )
+        logits.append(l)
+        caches.append(cur_cache)
+
+      return logits, caches
+
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+    )
+
+    def fake_split(q, k, v, *args, **kwargs):
+      del args, kwargs
+      return (
+          jnp.zeros_like(q).transpose(0, 2, 1, 3),
+          k.transpose(0, 2, 1, 3),
+          v.transpose(0, 2, 1, 3),
       )
 
-    # Case 2: prefix_len = 8, bucketed_prefix = 8 (no padding -> force_eager must remain False)
-    segment_pos = jnp.arange(8, 8 + suffix_len)[None, :]
-    attn_mask = jnp.ones((1, suffix_len, 8 + suffix_len), dtype=jnp.bool_)
-    with mock.patch.object(
-        decoder_layer, 'block', wraps=decoder_layer.block
-    ) as mock_block:
-      decoder_layer(
-          x,
-          segment_pos,
-          cache=cache,
-          attn_mask=attn_mask,
-          is_chunked_prefill=True,
-          prefix_length=8,
-      )
-      self.assertFalse(
-          mock_block.call_args.kwargs['force_eager'],
-          'Expected force_eager=False when bucketed_prefix == prefix_length',
-      )
+    with mesh, mock.patch.object(
+        attention_lib.Attention,
+        '_make_splash_kernel',
+        return_value=(lambda q, *a, **kw: jnp.zeros_like(q), None),
+    ), mock.patch.object(
+        attention_lib.Attention,
+        '_flash_attention_split',
+        side_effect=fake_split,
+    ):
+      _, caches_base = run_lifecycle(use_split=False)
+      logits_split, caches_split = run_lifecycle(use_split=True)
+
+    for l_split in logits_split:
+      self.assertFalse(jnp.isnan(l_split).any())
+      self.assertEqual(l_split.shape[-1], 128)
+
+    for c_base, c_split in zip(caches_base, caches_split):
+      for layer in ('layer_0', 'layer_1'):
+        expected_head_dim = 512 if layer == 'layer_1' else 64
+        self.assertEqual(c_split[layer]['k'].shape[-1], expected_head_dim)
+        self.assertEqual(
+            int(c_split[layer]['end_index'][0]),
+            int(c_base[layer]['end_index'][0]),
+        )
 
   def test_chunked_prefill_preconditions_and_defaults(self):
     config = model_lib.ModelConfig.gemma4_e2b()

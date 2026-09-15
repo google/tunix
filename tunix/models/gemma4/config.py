@@ -207,6 +207,12 @@ class ModelConfig:
   # When enabled, block_q_dq and block_kv_dq are ignored (set to None).
   flash_attention_use_fused_bwd: bool = False
 
+  # When True and flash attention is enabled, chunked prefill uses split
+  # attention with logsumexp merge instead of concatenating prefix+suffix KV,
+  # eliminating the jnp.concatenate copy. Requires save_residuals=True from JAX
+  # splash attention.
+  use_split_attention: bool = False
+
   # MoE config
   enable_moe: bool = False
   num_experts: int | None = None
@@ -229,6 +235,11 @@ class ModelConfig:
       raise ValueError(
           'prefix_bucket_boundaries must be non-negative and sorted strictly '
           f'ascending with no duplicates; got {boundaries}'
+      )
+    if self.use_split_attention and not self.use_flash_attention:
+      raise ValueError(
+          'use_split_attention=True requires use_flash_attention=True: split '
+          'attention optimization requires Splash flash attention kernels.'
       )
 
   @classmethod
