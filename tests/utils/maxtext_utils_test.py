@@ -387,6 +387,31 @@ class MaxTextUtilsTest(absltest.TestCase):
       maxtext_utils.build_maxtext_config(model_name="gemma2-9b", **kwargs)
     return mock_pyconfig.initialize.call_args[0][0]
 
+  def test_max_seq_token_per_tpu_raises_max_target_length(self):
+    # A packed row holds several trajectories, so it is longer than any single
+    # one. Left at max_prompt+max_response, max_target_length caps the packing
+    # budget at exactly one maximal trajectory and packing becomes a no-op.
+    argv = self._build_config_argv(
+        max_prompt_length=512,
+        max_response_length=1024,
+        max_seq_token_per_tpu=4096,
+    )
+    self.assertIn("max_target_length=4096", argv)
+
+  def test_max_seq_token_per_tpu_below_floor_is_ignored(self):
+    argv = self._build_config_argv(
+        max_prompt_length=512,
+        max_response_length=1024,
+        max_seq_token_per_tpu=1024,
+    )
+    self.assertIn("max_target_length=1536", argv)
+
+  def test_max_seq_token_per_tpu_unset_keeps_default(self):
+    argv = self._build_config_argv(
+        max_prompt_length=512, max_response_length=1024
+    )
+    self.assertIn("max_target_length=1536", argv)
+
   def test_checkpoint_save_interval_zero_disables_saving(self):
     # Saving off, but the warm start from load_parameters_path is untouched.
     argv = self._build_config_argv(

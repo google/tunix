@@ -386,6 +386,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=0,
+      help=(
+          "Packed row length used by the orchestrator's"
+          " SequencePackedBatchAssembler. The trainer needs it so MaxText's"
+          " max_target_length is wide enough to hold a packed row; at 0 the"
+          " rows are capped at max_prompt_length + max_response_length, which"
+          " fits exactly one trajectory and makes packing a no-op."
+      ),
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -606,6 +618,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
       ("rollout_mesh_tp", args.rollout_mesh_tp),
       ("prefuse_moe_weights", args.prefuse_moe_weights),
       ("use_weight_converter", args.use_weight_converter),
+      ("max_seq_token_per_tpu", args.max_seq_token_per_tpu),
   ]:
     if k in sig.parameters:
       extra_cfg_kwargs[k] = v
