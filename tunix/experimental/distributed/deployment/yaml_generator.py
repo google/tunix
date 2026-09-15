@@ -99,6 +99,19 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--max_restarts",
+      type=int,
+      default=3,
+      help=(
+          "JobSet failurePolicy.maxRestarts. Pass 0 for the orchestrator: on a"
+          " restart the JobSet recreates its pod (discarding the crash logs)"
+          " while the rollout and trainer workers stay registered with the"
+          " discovery server that died with it, so the replacement waits for"
+          " registrations that never come and the whole run deadlocks with"
+          " every pod still reading Running."
+      ),
+  )
 
   args = parser.parse_args()
 
@@ -183,6 +196,7 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        MAX_RESTARTS=args.max_restarts,
     )
     print(content)
 

@@ -112,6 +112,12 @@ export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
+# Restarting the orchestrator does not recover the run, it deadlocks it: the
+# JobSet recreates the pod (discarding the crash logs) while the rollout and
+# trainer workers stay registered with the discovery server that died with it,
+# so the replacement waits forever for registrations that never come while
+# every pod still reads Running. Fail fast instead.
+export ORCHESTRATOR_MAX_RESTARTS=${ORCHESTRATOR_MAX_RESTARTS:-0}
 
 export ROLLOUT_ID=$USER-roll
 export ROLLOUT_PORT=20001
@@ -171,6 +177,7 @@ start_orchestrator() {
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
+    --max_restarts="${ORCHESTRATOR_MAX_RESTARTS}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --cpu_machine=${CPU_MACHINE} \
