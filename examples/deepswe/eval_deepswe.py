@@ -8,6 +8,7 @@ models (e.g. Qwen3.5-35B-A3B) and configurable JAX/vLLM sharding meshes.
 
 import argparse
 import asyncio
+import base64
 import collections
 import concurrent.futures
 import gc
@@ -16,6 +17,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -940,67 +942,355 @@ class FixedQwenChatTemplateParser(parser.QwenChatTemplateParser):
 chat_parser = FixedQwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
-# Install resilient XML action/parameter parsing for Qwen3.5 tool calls
+# Install resilient XML action/parameter parsing and OpenHands step patches
 try:
   from r2egym.agenthub.action import Action as _R2EAction
 
-  _orig_action_from_string = _R2EAction.from_string
+  def _resilient_to_xml_string(self) -> str:
+    if not getattr(self, "function_name", ""):
+      return ""
+    xml_str = f"<function={self.function_name}>\n"
+    for param_key, param_value in (self.parameters or {}).items():
+      xml_str += f"  <parameter={param_key}>{param_value}</parameter>\n"
+    xml_str += "</function>"
+    return xml_str
+
+  def _resilient_to_bashcmd(self) -> str:
+    if not getattr(self, "function_name", ""):
+      return ""
+    elif self.function_name in ("finish", "submit"):
+      return "echo '<<<Finished>>>'"
+    cmd_parts = [shlex.quote(self.function_name)]
+    base_command = (self.parameters or {}).get("command")
+    if base_command is not None:
+      cmd_parts.append(shlex.quote(str(base_command)))
+    for param_key, param_value in (self.parameters or {}).items():
+      if param_key == "command":
+        continue
+      param_value_quoted = shlex.quote(str(param_value))
+      cmd_parts.append(f"--{param_key}={param_value_quoted}")
+    return " ".join(cmd_parts)
 
   @classmethod
   def _resilient_action_from_string(cls, action_str: str):
-    action_obj = _orig_action_from_string(action_str)
-    fn = action_obj.function_name.strip() if action_obj.function_name else ""
-    if fn in (
-        "execute_b_bash",
-        "execute_bbash",
-        "execute_bcommand",
-        "execute_b",
-        "execute",
-        "bash",
-        "run_command",
-        "run_shell_command",
-    ):
-      fn = "execute_bash"
-    elif fn in ("str_replace", "file_editor"):
-      fn = "str_replace_editor"
-    action_obj.function_name = fn
+    if not action_str or not isinstance(action_str, str):
+      return cls("", {})
 
-    if fn and not action_obj.parameters and "<parameter" in action_str:
-      params = {}
+    fn = ""
+    default_cmd = None
+    fn_match = re.search(r"<function\s*=\s*([^\s>]+)", action_str)
+    if fn_match:
+      fn = fn_match.group(1).strip()
+    elif "<tool_call>" in action_str:
+      try:
+        tc_body = action_str.split("<tool_call>", 1)[1].split("</tool_call>")[0].strip()
+        tc_json = json.loads(tc_body)
+        fn = tc_json.get("name", "")
+        params = tc_json.get("arguments", tc_json.get("parameters", {}))
+        if isinstance(params, str):
+          params = json.loads(params)
+        if isinstance(params, dict):
+          return cls(fn, {str(k): str(v) for k, v in params.items()})
+      except Exception:
+        pass
+
+    fn = re.sub(r"</?function.*$", "", fn, flags=re.IGNORECASE)
+    fn = re.sub(r"</?tool_call.*$", "", fn, flags=re.IGNORECASE)
+    fn = fn.strip('<>\x22\x27 `/\\')
+    fn_lower = fn.lower()
+
+    if "submit" in fn_lower or "finish" in fn_lower:
+      fn = "submit"
+    elif any(k in fn_lower for k in ("str", "replace", "edit", "view", "create", "insert", "undo")):
+      if fn_lower in ("view", "create", "insert", "str_replace", "undo_edit"):
+        default_cmd = fn_lower
+      fn = "str_replace_editor"
+    elif any(k in fn_lower for k in ("bash", "exec", "cmd", "run", "shell")):
+      fn = "execute_bash"
+    else:
+      fn = ""
+
+    if not fn:
+      return cls("", {})
+    if fn == "submit":
+      return cls("submit", {})
+
+    params = {}
+    code_keys = {"old_str", "new_str", "file_text"}
+
+    def _clean_val(k: str, v: str) -> str:
+      if k in code_keys:
+        v = re.sub(r"^\r?\n", "", v)
+        v = re.sub(r"\r?\n[ \t]*$", "", v)
+        return v
+      return v.strip()
+
+    param_starts = list(re.finditer(r"<parameter\s*=\s*([^>]+)>", action_str))
+    for idx, m in enumerate(param_starts):
+      key = m.group(1).strip().strip("\"'")
+      val_start = m.end()
+      next_tag_start = param_starts[idx + 1].start() if idx + 1 < len(param_starts) else len(action_str)
+      segment = action_str[val_start:next_tag_start]
+      if "</parameter>" in segment:
+        val = segment.split("</parameter>", 1)[0]
+      else:
+        val = re.sub(r"</function>.*$", "", segment, flags=re.DOTALL)
+      if key and key not in params:
+        params[key] = _clean_val(key, val)
+
+    if not params:
       for m in re.finditer(
-          r"<parameter\s*=\s*([^>]+)>(.*?)(?=<parameter\s*=|</parameter>|</function>|$)",
+          r"<parameter\s+name=[\"']?([^\"'>]+)[\"']?>(.*?)(?=</parameter>|<parameter|</function>|$)",
           action_str,
           flags=re.DOTALL,
       ):
-        k = m.group(1).strip()
-        v = m.group(2).strip()
-        if k and k not in params:
-          params[k] = v
-      action_obj.parameters = params
-    return action_obj
+        key = m.group(1).strip()
+        val = m.group(2)
+        if key and key not in params:
+          params[key] = _clean_val(key, val)
+
+    for tag in ("command", "cmd", "path", "file_path", "file_text", "old_str", "new_str", "insert_line", "view_range"):
+      if tag not in params:
+        m = re.search(rf"<{tag}>(.*?)</{tag}>", action_str, flags=re.DOTALL)
+        if m:
+          params[tag] = _clean_val(tag, m.group(1))
+
+    if fn == "str_replace_editor":
+      if "path" not in params:
+        for alt in ("file_path", "filepath", "file", "target_file"):
+          if alt in params:
+            params["path"] = params.pop(alt)
+            break
+      if "path" in params:
+        params["path"] = re.sub(r"<.*$", "", params["path"]).strip().strip("\"'")
+      if "command" not in params:
+        if default_cmd:
+          params["command"] = default_cmd
+        elif "old_str" in params:
+          params["command"] = "str_replace"
+        elif "file_text" in params:
+          params["command"] = "create"
+        elif "insert_line" in params:
+          params["command"] = "insert"
+        elif "path" in params:
+          params["command"] = "view"
+      if not params.get("command") or not params.get("path"):
+        return cls("", {})
+
+    elif fn == "execute_bash":
+      if "command" not in params and "cmd" in params:
+        params["command"] = params.pop("cmd")
+      if "command" not in params:
+        body = re.sub(r"^.*?<function[^>]*>", "", action_str, flags=re.DOTALL)
+        body = re.sub(r"</function>.*$", "", body, flags=re.DOTALL)
+        body = re.sub(r"</?parameter[^>]*>", "", body).strip()
+        if body:
+          params["command"] = body
+      if not params.get("command"):
+        return cls("", {})
+
+    return cls(fn, params)
 
   _R2EAction.from_string = _resilient_action_from_string
-  logger.info("Installed resilient Action.from_string parser.")
+  _R2EAction.to_xml_string = _resilient_to_xml_string
+  _R2EAction.to_bashcmd = _resilient_to_bashcmd
+  logger.info("Installed resilient Action methods (from_string, to_xml_string, to_bashcmd).")
 except Exception as e:
-  logger.warning("Could not install resilient Action.from_string: %s", e)
+  logger.warning("Could not install resilient Action methods: %s", e)
 
 try:
+  def _resilient_parse_xml_response(response_text: str):
+    if not response_text or not isinstance(response_text, str):
+      return "", _R2EAction("", {})
+    if "<function=" in response_text:
+      idx = response_text.find("<function=")
+      thought = response_text[:idx].strip()
+      action_block = response_text[idx:].strip()
+    elif "<tool_call>" in response_text:
+      idx = response_text.find("<tool_call>")
+      thought = response_text[:idx].strip()
+      action_block = response_text[idx:].strip()
+    else:
+      thought = response_text.strip()
+      action_block = ""
+    action_obj = _R2EAction.from_string(action_block)
+    return thought, action_obj
+
+  SWEAgent.update_from_model.__globals__["parse_xml_response"] = _resilient_parse_xml_response
   try:
     import swe_agent as _swe_agent_mod
-  except ImportError:
-    from examples.deepswe import swe_agent as _swe_agent_mod  # pytype: disable=import-error
-
-  _orig_parse_xml = _swe_agent_mod.parse_xml_response
-
-  def _resilient_parse_xml_response(response_text: str):
-    if "<function=" in response_text and "</function>" not in response_text:
-      response_text = response_text + "\n</function>"
-    return _orig_parse_xml(response_text)
-
-  _swe_agent_mod.parse_xml_response = _resilient_parse_xml_response
-  logger.info("Installed resilient parse_xml_response wrapper.")
+    _swe_agent_mod.parse_xml_response = _resilient_parse_xml_response
+  except Exception:
+    pass
+  try:
+    from examples.deepswe import swe_agent as _swe_agent_mod2
+    _swe_agent_mod2.parse_xml_response = _resilient_parse_xml_response
+  except Exception:
+    pass
+  logger.info("Installed resilient parse_xml_response across SWEAgent modules.")
 except Exception as e:
   logger.warning("Could not install resilient parse_xml_response: %s", e)
+
+try:
+  from tunix.rl.agentic.environments.base_environment import EnvStepResult as _EnvStepResult
+
+  def _strip_cat_n_line_numbers(text: str) -> str:
+    lines = text.splitlines()
+    non_empty = [l for l in lines if l.strip()]
+    if not non_empty:
+      return text
+    if all(re.match(r"^[ \t]*\d+[\t ]", l) for l in non_empty):
+      return "\n".join(re.sub(r"^[ \t]*\d+[\t ]?", "", l) for l in lines)
+    return text
+
+  def _try_fallback_str_replace(file_content: str, old_str: str, new_str: str):
+    clean_old = _strip_cat_n_line_numbers(old_str)
+    clean_new = _strip_cat_n_line_numbers(new_str)
+    if clean_old != old_str and file_content.count(clean_old) == 1:
+      return True, file_content.replace(clean_old, clean_new, 1)
+
+    old_lines = clean_old.splitlines()
+    new_lines = clean_new.splitlines()
+    while old_lines and not old_lines[0].strip():
+      old_lines.pop(0)
+    while old_lines and not old_lines[-1].strip():
+      old_lines.pop()
+    if not old_lines:
+      return False, file_content
+
+    file_lines = file_content.splitlines()
+    n_old = len(old_lines)
+    matches = []
+    for i in range(len(file_lines) - n_old + 1):
+      window = file_lines[i : i + n_old]
+      if all(w.strip() == o.strip() for w, o in zip(window, old_lines)):
+        matches.append(i)
+
+    if len(matches) != 1:
+      return False, file_content
+
+    match_idx = matches[0]
+    matched_window = file_lines[match_idx : match_idx + n_old]
+
+    def _get_indent(s: str) -> int:
+      return len(s) - len(s.lstrip(" "))
+
+    file_indent_0 = _get_indent(matched_window[0])
+    old_indent_0 = _get_indent(old_lines[0])
+    new_indent_0 = _get_indent(new_lines[0]) if new_lines and new_lines[0].strip() else 0
+
+    if n_old > 1:
+      deltas = [
+          _get_indent(w) - _get_indent(o)
+          for w, o in zip(matched_window[1:], old_lines[1:])
+          if w.strip() and o.strip()
+      ]
+      common_delta = deltas[0] if deltas else (file_indent_0 - old_indent_0)
+    else:
+      common_delta = file_indent_0 - old_indent_0
+
+    adjusted_new_lines = []
+    for idx, nl in enumerate(new_lines):
+      if not nl.strip():
+        adjusted_new_lines.append("")
+        continue
+      cur_indent = _get_indent(nl)
+      if idx == 0 and old_indent_0 == 0 and file_indent_0 > 0 and new_indent_0 == 0:
+        adjusted_new_lines.append(" " * file_indent_0 + nl.lstrip(" "))
+      elif common_delta > 0 and cur_indent + common_delta >= 0:
+        adjusted_new_lines.append(" " * (cur_indent + common_delta) + nl.lstrip(" "))
+      else:
+        adjusted_new_lines.append(nl)
+
+    updated_lines = file_lines[:match_idx] + adjusted_new_lines + file_lines[match_idx + n_old :]
+    updated_content = "\n".join(updated_lines)
+    if file_content.endswith("\n") and not updated_content.endswith("\n"):
+      updated_content += "\n"
+    return True, updated_content
+
+  _oh_mod = SWEEnv._step_impl.__globals__["openhands_utils"]
+  _orig_step_openhands = _oh_mod.step_openhands
+
+  def _patched_step_openhands(env, action_obj):
+    max_steps = getattr(env, "max_steps", None)
+    fn = getattr(action_obj, "function_name", "")
+    if fn == "execute_bash" and getattr(env, "workspace", None) is not None:
+      params = getattr(action_obj, "parameters", {}) or {}
+      cmd = params.get("command") or params.get("cmd")
+      if not cmd:
+        return _EnvStepResult(
+            observation="ERROR: No command specified for execute_bash.",
+            reward=0,
+            done=False,
+            info={"max_steps": max_steps},
+        )
+      try:
+        step_timeout = getattr(env, "step_timeout", 30.0)
+        wrapped_cmd = f"(cd /testbed 2>/dev/null || cd /workspace) && {cmd}"
+        result = env.workspace.execute_command(wrapped_cmd, timeout=float(step_timeout))
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        if stderr:
+          obs = f"{stdout}\n{stderr}".strip() if stdout else stderr.strip()
+        else:
+          obs = stdout
+        if not obs.strip() and result.exit_code == 0:
+          obs = "(Command executed successfully with no output.)"
+      except Exception as e:
+        obs = f"Command execution failed: {e}"
+      if hasattr(env, "total_steps"):
+        env.total_steps += 1
+      return _EnvStepResult(
+          observation=obs,
+          reward=0,
+          done=False,
+          info={"max_steps": max_steps},
+      )
+
+    res = _orig_step_openhands(env, action_obj)
+
+    # Fallback whitespace-tolerant str_replace when exact match fails
+    if (
+        fn in ("str_replace_editor", "file_editor")
+        and (getattr(action_obj, "parameters", {}) or {}).get("command") == "str_replace"
+        and getattr(env, "workspace", None) is not None
+        and ("ERROR: No occurrences of" in str(res.observation) or "ERROR: Multiple occurrences of" in str(res.observation))
+    ):
+      params = action_obj.parameters
+      path = params.get("path")
+      old_str = params.get("old_str")
+      new_str = params.get("new_str", "")
+      if path and old_str:
+        try:
+          read_res = env.workspace.execute_command(f"cat {shlex.quote(path)}", timeout=15.0)
+          if read_res.exit_code == 0 and read_res.stdout:
+            ok, updated_text = _try_fallback_str_replace(read_res.stdout, old_str, new_str)
+            if ok:
+              b64 = base64.b64encode(updated_text.encode("utf-8")).decode("ascii")
+              write_cmd = (
+                  f"python3 -c 'import base64, sys; "
+                  f"open(sys.argv[1], \"w\").write(base64.b64decode(sys.argv[2]).decode(\"utf-8\"))' "
+                  f"{shlex.quote(path)} {b64}"
+              )
+              if path.endswith(".py"):
+                write_cmd += f" && python3 -m py_compile {shlex.quote(path)}"
+              w_res = env.workspace.execute_command(write_cmd, timeout=15.0)
+              if w_res.exit_code == 0:
+                logger.info("Applied fallback str_replace successfully on %s", path)
+                res = _EnvStepResult(
+                    observation=f"The file {path} has been edited successfully.",
+                    reward=0,
+                    done=False,
+                    info=res.info,
+                )
+        except Exception as e:
+          logger.warning("Fallback str_replace failed on %s: %s", path, e)
+    return res
+
+  _oh_mod.step_openhands = _patched_step_openhands
+  logger.info("Installed patched step_openhands with stderr preservation & fallback str_replace.")
+except Exception as e:
+  logger.warning("Could not install patched step_openhands: %s", e)
 
 # The r2egym scaffold terminates every action with `</function>`; stopping
 # there matches the training rollouts and avoids generating past the action.
@@ -1603,12 +1893,23 @@ class _EvalLoggingEnvMixin:
     )
     t0 = time.time()
     obs, reward, done, info = super().step(action)
+    has_valid_fn = bool(
+        action
+        and isinstance(action, str)
+        and "<function=" in action
+        and not action.startswith("<function=>")
+    )
     if not obs and not done:
-      obs = (
-          "[ACTION GUARD] Your previous response did not include a valid function call. "
-          "You must output exactly one tool call in the required XML format "
-          "(<function=execute_bash>, <function=str_replace_editor>, or <function=submit>)."
-      )
+      if has_valid_fn:
+        obs = "(Command executed successfully with no output.)"
+      else:
+        obs = (
+            "[ACTION GUARD] Your previous response did not include a valid function call. "
+            "You must output exactly one tool call in the required XML format "
+            "(<function=execute_bash>, <function=str_replace_editor>, or <function=submit>)."
+        )
+    if isinstance(obs, str) and len(obs) > 12000:
+      obs = obs[:6000] + "\n...<response clipped>...\n" + obs[-6000:]
     logger.info(
         "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
         " (%.1fs)",
@@ -1666,10 +1967,15 @@ class Qwen35SWEAgent(SWEAgent):
         clean_resp = f"<think>\n{thought}\n</think>\n\n"
     action_res = super().update_from_model(clean_resp, **kwargs)
     cur_step = self._trajectory.steps[-1]
-    if cur_step.action and "<function=" in cur_step.action:
-      if "</think>" in clean_resp:
-        think_block = clean_resp.split("</think>")[0] + "</think>"
-        self._messages[-1]["content"] = f"{think_block}\n\n{cur_step.action}"
+    think_block = clean_resp.split("</think>")[0] + "</think>" if "</think>" in clean_resp else clean_resp
+    if (
+        cur_step.action
+        and cur_step.action.startswith(("<function=execute_bash>", "<function=str_replace_editor>", "<function=submit>", "<function=finish>"))
+    ):
+      self._messages[-1]["content"] = f"{think_block}\n\n{cur_step.action}"
+    else:
+      # Never leave <function=> or broken tags in assistant chat history
+      self._messages[-1]["content"] = think_block
     return action_res
 
 
