@@ -783,11 +783,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self._jitted_eval_step_fn = jit_and_bind(eval_step, self.model)
 
       # Fused single-executable step, used by `train()` when each update
-      # consumes one micro-batch. Donation deliberately mirrors the split path
-      # (`optimizer` + `grad_accumulator`, model not donated) so the two are
-      # structurally comparable and switching between them cannot change
-      # numerics. Compilation is lazy, so building the wrapper here costs
-      # nothing if the fused path is never called.
+      # consumes one micro-batch. Donation deliberately mirrors `update_step`
+      # (`model` + `optimizer`) so the two paths are structurally comparable
+      # and switching between them cannot change numerics. There is no
+      # accumulator argument: the gradient sum is a temporary inside the trace,
+      # never a program input or output. Compilation is lazy, so building the
+      # wrapper here costs nothing if the fused path is never called.
       if self._is_single_microstep():
         self._jitted_train_step_fn = jit_and_bind(
             self.create_train_step_fn(),
