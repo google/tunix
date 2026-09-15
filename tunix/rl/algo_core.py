@@ -367,6 +367,155 @@ def token_outlier_stats(
   return absmax, outlier_frac, outliers.sum() / n_seq
 
 
+# Magnitude bins for the per-token log-ratio. Chosen so that the reported
+# per-bin *mass* sums to `token_logdiff_mean` exactly, which is what turns
+# "the centre is -0.16 nats" into "and here is which tokens paid for it".
+LOG_IS_BIN_EDGES = (
+    -10.0, -5.0, -2.0, -1.0, -0.5, -0.2, -0.05,
+    0.0, 0.05, 0.2, 0.5, 1.0, 2.0, 5.0,
+)
+# Relative position within each sequence's own scored tokens, not absolute
+# position: completions are right-padded to `max_response_length` and their real
+# lengths differ by an order of magnitude, so absolute buckets would put
+# everything in bucket 0.
+N_LOG_IS_POS_BUCKETS = 8
+# Sampler log-probability thresholds, ascending. Separates "the trainer
+# disagrees about tokens the sampler was certain of" from "about tokens it was
+# guessing at" -- different causes, and the two are indistinguishable in a mean.
+LOG_IS_CONF_EDGES = (-1.0, -0.1, -0.01)
+
+
+def _log_is_edge_label(value: float) -> str:
+  text = f"{abs(value):g}".replace(".", "p")
+  return f"m{text}" if value < 0 else text
+
+
+def log_is_bin_labels() -> list[str]:
+  """Metric-name-safe labels for `LOG_IS_BIN_EDGES`, low to high."""
+  edges = LOG_IS_BIN_EDGES
+  labels = [f"lt_{_log_is_edge_label(edges[0])}"]
+  labels += [
+      f"{_log_is_edge_label(lo)}_{_log_is_edge_label(hi)}"
+      for lo, hi in zip(edges, edges[1:])
+  ]
+  labels.append(f"ge_{_log_is_edge_label(edges[-1])}")
+  return labels
+
+
+def log_is_attribution_metric_names() -> list[str]:
+  """Every key `log_is_attribution` emits.
+
+  The learner registers metric aggregators up front and raises on a registered
+  key that is missing from `aux`, so the two lists have to be generated from
+  the same place.
+  """
+  names = ["sampler_is/token_logdiff_mean"]
+  for label in log_is_bin_labels():
+    names.append(f"sampler_is/hist_frac/{label}")
+    names.append(f"sampler_is/hist_mass/{label}")
+  for i in range(N_LOG_IS_POS_BUCKETS):
+    names.append(f"sampler_is/pos_signed/{i}")
+    names.append(f"sampler_is/pos_absmean/{i}")
+  for i in range(len(LOG_IS_CONF_EDGES) + 1):
+    names.append(f"sampler_is/conf_signed/{i}")
+    names.append(f"sampler_is/conf_frac/{i}")
+  return names
+
+
+def log_is_attribution(
+    log_is: jax.Array | None,
+    completion_mask: jax.Array,
+    rollout_logps: jax.Array | None,
+) -> dict[str, jax.Array]:
+  """Attribute the per-token sampler-trainer disagreement to its sources.
+
+  `seq_geomean` says the two engines disagree; `token_logdiff_absmean` says by
+  how much on average. Neither says *which* tokens pay for it, and that is the
+  only thing that distinguishes the remaining hypotheses from each other. Three
+  decompositions, all cheap masked reductions on arrays the loss already has:
+
+  magnitude
+    Per-bin share of scored tokens (`hist_frac/*`) and per-bin contribution to
+    the mean (`hist_mass/*`). The masses sum to `token_logdiff_mean`, so you can
+    read "of the -0.16 nats, -0.09 came from tokens between -1 and -0.5" off the
+    dashboard. A sparse catastrophic tail and a diffuse bias look identical in
+    the mean and completely different here.
+
+  position
+    Mean signed and mean absolute ratio in eight buckets of *relative* position
+    within each sequence's scored tokens. Flat means a per-token cause; rising
+    means something that accumulates along the sequence -- a recurrent state, a
+    KV-cache effect, a drifting position index.
+
+  sampler confidence
+    The same, bucketed by the sampler's own log-probability for the token. A
+    defect in the shared forward math shows up everywhere; one that only bites
+    where the distribution is sharp shows up in the high-confidence buckets.
+
+  Note `sampler_is/token_logdiff_mean` itself is new. Every sampler-IS metric
+  emitted until now was absolute-valued, so the *sign* of the disagreement --
+  the thing the TIS band actually gates on -- could only be recovered
+  indirectly, via `ln(seq_geomean)`.
+
+  Args:
+    log_is: Per-token trainer-minus-sampler log ratio, `[B, T]`, or None when
+      the rollout engine returned no log-probabilities.
+    completion_mask: Per-token mask over scored tokens, `[B, T]`.
+    rollout_logps: The sampler's own per-token log-probabilities, `[B, T]`, or
+      None. Only the confidence buckets need it; they report zeros without it.
+
+  Returns:
+    A dict keyed exactly by `log_is_attribution_metric_names()`.
+  """
+  names = log_is_attribution_metric_names()
+  if log_is is None:
+    return {name: jnp.float32(0.0) for name in names}
+
+  mask = completion_mask.astype(jnp.float32)
+  denom = jnp.maximum(mask.sum(), 1.0)
+  out = {"sampler_is/token_logdiff_mean": (log_is * mask).sum() / denom}
+
+  edges = jnp.asarray(LOG_IS_BIN_EDGES, dtype=jnp.float32)
+  bin_idx = jnp.searchsorted(edges, log_is, side="right")
+  for i, label in enumerate(log_is_bin_labels()):
+    sel = mask * (bin_idx == i)
+    out[f"sampler_is/hist_frac/{label}"] = sel.sum() / denom
+    out[f"sampler_is/hist_mass/{label}"] = (log_is * sel).sum() / denom
+
+  # (cumsum - 1) / total puts the first scored token of every sequence at 0.0
+  # and the last just under 1.0, independently of how long the sequence is.
+  cum = jnp.cumsum(mask, axis=-1)
+  total = jnp.maximum(mask.sum(axis=-1, keepdims=True), 1.0)
+  rel = (cum - 1.0) / total
+  pos_idx = jnp.clip(
+      (rel * N_LOG_IS_POS_BUCKETS).astype(jnp.int32),
+      0,
+      N_LOG_IS_POS_BUCKETS - 1,
+  )
+  for i in range(N_LOG_IS_POS_BUCKETS):
+    sel = mask * (pos_idx == i)
+    sel_denom = jnp.maximum(sel.sum(), 1.0)
+    out[f"sampler_is/pos_signed/{i}"] = (log_is * sel).sum() / sel_denom
+    out[f"sampler_is/pos_absmean/{i}"] = (jnp.abs(log_is) * sel).sum() / sel_denom
+
+  n_conf = len(LOG_IS_CONF_EDGES) + 1
+  if rollout_logps is None:
+    for i in range(n_conf):
+      out[f"sampler_is/conf_signed/{i}"] = jnp.float32(0.0)
+      out[f"sampler_is/conf_frac/{i}"] = jnp.float32(0.0)
+  else:
+    conf_edges = jnp.asarray(LOG_IS_CONF_EDGES, dtype=jnp.float32)
+    conf_idx = jnp.searchsorted(
+        conf_edges, jnp.astype(rollout_logps, jnp.float32), side="right"
+    )
+    for i in range(n_conf):
+      sel = mask * (conf_idx == i)
+      sel_denom = jnp.maximum(sel.sum(), 1.0)
+      out[f"sampler_is/conf_signed/{i}"] = (log_is * sel).sum() / sel_denom
+      out[f"sampler_is/conf_frac/{i}"] = sel.sum() / denom
+  return out
+
+
 def truncated_importance_weights(
     log_is_raw: jax.Array,
     seq_geomean: jax.Array,
@@ -1205,6 +1354,10 @@ def grpo_loss_fn(
   # and a registered metric that is missing from `aux` raises.
   report_bands = tuple(getattr(algo_config, "sampler_is_report_bands", ()) or ())
   bucket_edges = getattr(algo_config, "sampler_is_length_buckets", None)
+  # Where the disagreement lives, by magnitude / position / sampler confidence.
+  # Emitted unconditionally and neutral when there are no rollout logprobs, for
+  # the same reason as everything else in this block.
+  aux.update(log_is_attribution(log_is, completion_mask, rollout_logps))
   if log_is is None:
     aux["sampler_is/token_logdiff_absmean"] = jnp.float32(0.0)
     aux["sampler_is/token_logdiff_absmax"] = jnp.float32(0.0)

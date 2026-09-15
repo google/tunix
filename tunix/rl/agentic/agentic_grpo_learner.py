@@ -38,7 +38,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.perf.experimental import constants as perf_constants
-from tunix.rl import algo_core  # pylint: disable=unused-import
+from tunix.rl import algo_core
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_engine_lib
@@ -338,8 +338,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
       optional_metrics["sample_mask/mult_prob_error_max"] = np.max
 
+    # Magnitude / position / confidence attribution of the per-token
+    # sampler-trainer log ratio. All of them are masked means over the same
+    # scored-token set, so they pool the way every other per-token metric in
+    # this block does. See `algo_core.log_is_attribution`.
+    log_is_attribution_metrics = {
+        name: common.mean_of_means
+        for name in algo_core.log_is_attribution_metric_names()
+    }
+
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
         **optional_metrics,
+        **log_is_attribution_metrics,
         "sample_mask/kept_frac": common.mean_of_means,
         "sampler_is/token_logdiff_absmean": common.mean_of_means,
         "sampler_is/token_logdiff_absmax": np.max,
