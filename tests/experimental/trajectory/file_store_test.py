@@ -1,7 +1,10 @@
+"""Unit tests for FileTrajectoryStore file layout and on-disk write behavior."""
+
 import tempfile
 import threading
 from unittest import mock
 
+from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
@@ -182,6 +185,47 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     )
     self.assertEqual(recovered_traj, expected_traj)
 
+  def test_snapshot_on_enqueue_isolates_metadata_mutation(self) -> None:
+    """Verifies metadata mutation after enqueue does not alter saved file."""
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_snapshot_meta",
+        agent=trajectory_lib.Agent(name="agent_v1", version="1.0"),
+        extra={"status": "INITIAL"},
+    )
+    self.file_s.add_step(trajectory_testing.STEP_1_1, meta)
+    # Mutate the caller's metadata dictionary after enqueue.
+    meta_extra = meta.extra
+    self.assertIsNotNone(meta_extra)
+    meta_extra["status"] = "MUTATED_AFTER_ENQUEUE"
+    self.file_s.flush()
+
+    meta_path = self.file_s.get_trajectory_metadata_path("traj_snapshot_meta")
+    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+        meta_path.read_text()
+    )
+    self.assertEqual(saved_meta.extra, {"status": "INITIAL"})
+
+  def test_snapshot_on_enqueue_isolates_step_mutation(self) -> None:
+    """Verifies step mutation after enqueue does not alter saved file."""
+    step = trajectory_lib.Step(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="Initial message",
+        extra={"notes": "initial note"},
+    )
+    self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    # Mutate the caller's step object after enqueue.
+    step_extra = step.extra
+    self.assertIsNotNone(step_extra)
+    step_extra["notes"] = "MUTATED_AFTER_ENQUEUE"
+    self.file_s.flush()
+
+    step_path = self.file_s.get_step_path(
+        trajectory_testing.TRAJECTORY_ID_1, step_id=1
+    )
+    saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
+    self.assertEqual(saved_step.extra, {"notes": "initial note"})
+
   def test_add_step_is_non_blocking(self) -> None:
     """Verifies that add_step returns immediately without waiting for disk I/O."""
     block_event = threading.Event()
@@ -209,42 +253,6 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       block_event.set()
       self.file_s.flush()
       self.assertTrue(step_path.exists())
-
-  def test_store_recovery_and_persistence_across_instances(self) -> None:
-    """Simulates process restart by initializing a new FileTrajectoryStore instance on existing directory."""
-    run_id = "persistent_run_42"
-
-    # Instance 1: write initial steps
-    store_instance_1 = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id=run_id
-    )
-
-    meta = trajectory_testing.METADATA_2
-    store_instance_1.add_step(trajectory_testing.STEP_2_1, meta)
-    store_instance_1.flush()
-
-    # Instance 2: new process reading and appending to same run_id
-    store_instance_2 = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id=run_id
-    )
-
-    metas_2 = store_instance_2.get_trajectories_metadata()
-    self.assertEqual(metas_2, [meta])
-
-    store_instance_2.add_step(trajectory_testing.STEP_2_2, meta)
-    store_instance_2.add_step(trajectory_testing.STEP_2_3, meta)
-    store_instance_2.add_step(trajectory_testing.STEP_2_4, meta)
-    store_instance_2.add_step(trajectory_testing.STEP_2_5, meta)
-    store_instance_2.flush()
-
-    # Instance 3: verify complete recovered state
-    store_instance_3 = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id=run_id
-    )
-    (recovered_traj,) = store_instance_3.get_trajectories(
-        [trajectory_testing.TRAJECTORY_ID_2]
-    )
-    self.assertEqual(recovered_traj, trajectory_testing.TRAJECTORY_2)
 
   def test_mkdir_called_only_once_per_trajectory_across_multiple_steps(
       self,
@@ -433,6 +441,154 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         meta_path.read_text()
     )
     self.assertEqual(saved_meta, meta_failed)
+
+  def test_update_metadata_creates_directory_and_only_metadata_file(
+      self,
+  ) -> None:
+    """Verifies update_metadata creates directory and only metadata file."""
+    traj_id = "traj_meta_only"
+    meta = trajectory_testing.make_metadata(trajectory_id=traj_id)
+    traj_dir = self.file_s.get_trajectory_dir(traj_id)
+    meta_path = self.file_s.get_trajectory_metadata_path(traj_id)
+
+    self.assertFalse(traj_dir.exists())
+    self.file_s.update_metadata(meta)
+    self.file_s.flush()
+
+    self.assertTrue(traj_dir.exists())
+    self.assertTrue(meta_path.exists())
+    files_in_dir = list(traj_dir.iterdir())
+    self.assertEqual(files_in_dir, [meta_path])
+
+  def test_add_step_when_step_write_fails_logs_destination_path(self) -> None:
+    """Verifies a failed step write is logged with its destination path."""
+    traj_id = "traj_log_err"
+    meta = trajectory_testing.make_metadata(trajectory_id=traj_id)
+    step = trajectory_testing.make_step(step_id=3)
+    step_path = self.file_s.get_step_path(traj_id, 3)
+    path_cls = type(self.tmp_dir)
+    original_write_text = path_cls.write_text
+
+    def fail_only_on_step_write(path_self, *args, **kwargs):
+      if path_self == step_path:
+        raise OSError("Disk full while writing step")
+      return original_write_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "write_text",
+        autospec=True,
+        side_effect=fail_only_on_step_write,
+    ):
+      with mock.patch.object(logging, "exception") as mock_log_exc:
+        self.file_s.add_step(step, meta)
+        self.file_s.flush()
+
+    mock_log_exc.assert_called_once_with(
+        "Failed to write trajectory %s (trajectory_id=%s) to %s.",
+        "step 3",
+        traj_id,
+        step_path,
+    )
+
+  def test_update_metadata_when_write_fails_logs_metadata_path(self) -> None:
+    """Verifies a failed metadata write is logged with its metadata path."""
+    traj_id = "traj_meta_log_err"
+    meta = trajectory_testing.make_metadata(trajectory_id=traj_id)
+    meta_path = self.file_s.get_trajectory_metadata_path(traj_id)
+    path_cls = type(self.tmp_dir)
+
+    with mock.patch.object(
+        path_cls,
+        "write_text",
+        autospec=True,
+        side_effect=OSError("Disk full while writing metadata"),
+    ):
+      with mock.patch.object(logging, "exception") as mock_log_exc:
+        self.file_s.update_metadata(meta)
+        self.file_s.flush()
+
+    mock_log_exc.assert_called_once_with(
+        "Failed to write trajectory %s (trajectory_id=%s) to %s.",
+        "metadata",
+        traj_id,
+        meta_path,
+    )
+
+  def test_metadata_write_retried_after_failure(self) -> None:
+    """Verifies metadata write is retried after a transient disk error."""
+    meta = trajectory_testing.make_metadata(trajectory_id="traj_retry")
+    step_1 = trajectory_testing.make_step(step_id=1)
+    step_2 = trajectory_testing.make_step(step_id=2)
+    meta_path = self.file_s.get_trajectory_metadata_path("traj_retry")
+
+    fail_once = True
+    path_cls = type(self.tmp_dir)
+    orig_write_text = path_cls.write_text
+
+    def write_text_with_transient_failure(path_self, *args, **kwargs):
+      nonlocal fail_once
+      if path_self == meta_path and fail_once:
+        fail_once = False
+        raise IOError("Transient disk I/O error during metadata write")
+      return orig_write_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "write_text",
+        autospec=True,
+        side_effect=write_text_with_transient_failure,
+    ):
+      # Step 1: metadata write fails. Hash should not be cached.
+      self.file_s.add_step(step_1, meta)
+      self.file_s.flush()
+      self.assertFalse(meta_path.exists())
+
+      # Step 2: retry occurs because hash was not cached on failure.
+      self.file_s.add_step(step_2, meta)
+      self.file_s.flush()
+      self.assertTrue(meta_path.exists())
+
+    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+        meta_path.read_text()
+    )
+    self.assertEqual(saved_meta, meta)
+
+  def test_store_recovery_and_persistence_across_instances(self) -> None:
+    """Simulates process restart by opening existing run in new store."""
+    run_id = "persistent_run_42"
+
+    # Instance 1: write initial steps.
+    store_instance_1 = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id=run_id
+    )
+
+    meta = trajectory_testing.METADATA_2
+    store_instance_1.add_step(trajectory_testing.STEP_2_1, meta)
+    store_instance_1.flush()
+
+    # Instance 2: new process reading and appending to same run_id.
+    store_instance_2 = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id=run_id
+    )
+
+    metas_2 = store_instance_2.get_trajectories_metadata()
+    self.assertEqual(metas_2, [meta])
+
+    store_instance_2.add_step(trajectory_testing.STEP_2_2, meta)
+    store_instance_2.add_step(trajectory_testing.STEP_2_3, meta)
+    store_instance_2.add_step(trajectory_testing.STEP_2_4, meta)
+    store_instance_2.add_step(trajectory_testing.STEP_2_5, meta)
+    store_instance_2.flush()
+
+    # Instance 3: verify complete recovered state.
+    store_instance_3 = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id=run_id
+    )
+    (recovered_traj,) = store_instance_3.get_trajectories(
+        [trajectory_testing.TRAJECTORY_ID_2]
+    )
+    self.assertEqual(recovered_traj, trajectory_testing.TRAJECTORY_2)
 
   def test_close_shuts_down_writer_and_rejects_further_writes(self) -> None:
     """Verifies close() drains the background writer and seals the store."""
