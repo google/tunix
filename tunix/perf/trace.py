@@ -126,6 +126,10 @@ class PerfTracer(NoopTracer):
 
     self._main_thread_id = create_thread_timeline_id()
 
+    # Lock to protect _thread_timelines and _device_timelines from concurrent
+    # access when timelines are created or looked up from multiple threads.
+    self._timelines_lock = threading.Lock()
+
     self._thread_timelines: dict[str, ThreadTimeline] = {
         self._main_thread_id: ThreadTimeline(self._main_thread_id, self._born)
     }
@@ -135,32 +139,35 @@ class PerfTracer(NoopTracer):
         self._get_or_create_device_timeline(device)
 
   def _get_timelines(self) -> dict[str, Timeline]:
-    timelines: dict[str, Timeline] = {}
-    for timeline in self._thread_timelines.values():
-      timelines[timeline.id] = timeline
-    for timeline in self._device_timelines.values():
-      timelines[timeline.id] = timeline
-    return timelines
+    with self._timelines_lock:
+      timelines: dict[str, Timeline] = {}
+      for timeline in self._thread_timelines.values():
+        timelines[timeline.id] = timeline
+      for timeline in self._device_timelines.values():
+        timelines[timeline.id] = timeline
+      return timelines
 
   def _get_or_create_thread_timeline(self, id: str) -> ThreadTimeline:
-    if id not in self._thread_timelines:
-      self._thread_timelines[id] = ThreadTimeline(
-          id,
-          self._born,
-          span.span_group_stack_clone(
-              self._thread_timelines[self._main_thread_id].stack
-          ),
-      )
-    return self._thread_timelines[id]
+    with self._timelines_lock:
+      if id not in self._thread_timelines:
+        self._thread_timelines[id] = ThreadTimeline(
+            id,
+            self._born,
+            span.span_group_stack_clone(
+                self._thread_timelines[self._main_thread_id].stack
+            ),
+        )
+      return self._thread_timelines[id]
 
   def _get_or_create_device_timeline(
       self, id: str | JaxDevice
   ) -> DeviceTimeline:
     tid = create_device_timeline_id(id)
 
-    if tid not in self._device_timelines:
-      self._device_timelines[tid] = DeviceTimeline(tid, self._born)
-    return self._device_timelines[tid]
+    with self._timelines_lock:
+      if tid not in self._device_timelines:
+        self._device_timelines[tid] = DeviceTimeline(tid, self._born)
+      return self._device_timelines[tid]
 
   def _get_or_create_device_timelines(
       self, ids: list[str | JaxDevice] | np.ndarray | None
@@ -247,7 +254,9 @@ class Timeline:
       self.stack = stack
 
     self._last_span: Span | None = None
-    # TODO(yangmu): add lock to protect stack and _last_span.
+    # Lock to protect stack and _last_span from concurrent access by
+    # background threads (e.g. async device span callbacks).
+    self._lock = threading.Lock()
 
   def _stack_debug(self) -> str:
     out = f"{self.root.name}"
@@ -256,28 +265,28 @@ class Timeline:
     return out
 
   def span_group_begin(self, name: str, begin: float) -> SpanGroup:
-    if self._last_span and not self._last_span.ended:
-      logging.warning(
-          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
-          f" group stack: {self._stack_debug()}"
-      )
-    inner = SpanGroup(name, self.stack[-1])
-    inner.begin = begin
-    self.stack.append(inner)
-    # print(f"{self.id}: begin {name}")
-    return inner
+    with self._lock:
+      if self._last_span and not self._last_span.ended:
+        logging.warning(
+            f"{self.id}: last span '{self._last_span.name}' is not ended."
+            f" current group stack: {self._stack_debug()}"
+        )
+      inner = SpanGroup(name, self.stack[-1])
+      inner.begin = begin
+      self.stack.append(inner)
+      return inner
 
   def span_group_end(self, end: float) -> None:
-    if len(self.stack) == 1:
-      raise ValueError(f"{self.id}: no more span groups to end.")
-    if self._last_span and not self._last_span.ended:
-      logging.warning(
-          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
-          f" group stack: {self._stack_debug()}"
-      )
-    inner = self.stack.pop()
-    inner.end = end
-    # print(f"{self.id}: end {inner.name}")
+    with self._lock:
+      if len(self.stack) == 1:
+        raise ValueError(f"{self.id}: no more span groups to end.")
+      if self._last_span and not self._last_span.ended:
+        logging.warning(
+            f"{self.id}: last span '{self._last_span.name}' is not ended."
+            f" current group stack: {self._stack_debug()}"
+        )
+      inner = self.stack.pop()
+      inner.end = end
 
   def device_span(
       self,
@@ -304,43 +313,46 @@ class Timeline:
         before calling this method.
     """
 
-    if self._last_span and not self._last_span.ended:
-      raise ValueError(
-          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
-          f" group stack: {self._stack_debug()}"
-      )
+    with self._lock:
+      if self._last_span and not self._last_span.ended:
+        raise ValueError(
+            f"{self.id}: last span '{self._last_span.name}' is not ended."
+            f" current group stack: {self._stack_debug()}"
+        )
 
-    if self._last_span and self._last_span.end > thread_begin:
-      inner = Span(name, self._last_span.end)
-    else:
-      inner = Span(name, thread_begin)
-    inner.end = end
-    active_group = group or self.stack[-1]
-    active_group.inner.append(inner)
+      if self._last_span and self._last_span.end > thread_begin:
+        inner = Span(name, self._last_span.end)
+      else:
+        inner = Span(name, thread_begin)
+      inner.end = end
+      active_group = group or self.stack[-1]
+      active_group.inner.append(inner)
 
-    self._last_span = inner
+      self._last_span = inner
 
   def thread_span_begin(self, name: str, begin: float) -> Span:
-    if self._last_span and not self._last_span.ended:
-      raise ValueError(
-          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
-          f" group stack: {self._stack_debug()}"
-      )
+    with self._lock:
+      if self._last_span and not self._last_span.ended:
+        raise ValueError(
+            f"{self.id}: last span '{self._last_span.name}' is not ended."
+            f" current group stack: {self._stack_debug()}"
+        )
 
-    inner = Span(name, begin)
-    self.stack[-1].inner.append(inner)
+      inner = Span(name, begin)
+      self.stack[-1].inner.append(inner)
 
-    self._last_span = inner
-    return inner
+      self._last_span = inner
+      return inner
 
   def thread_span_end(self, end: float) -> None:
-    if self._last_span is None:
-      raise ValueError(f"{self.id}: no span to end.")
-    if self._last_span.ended:
-      raise ValueError(
-          f"{self.id}: span '{self._last_span.name}' is already ended."
-      )
-    self._last_span.end = end
+    with self._lock:
+      if self._last_span is None:
+        raise ValueError(f"{self.id}: no span to end.")
+      if self._last_span.ended:
+        raise ValueError(
+            f"{self.id}: span '{self._last_span.name}' is already ended."
+        )
+      self._last_span.end = end
 
 
 class ThreadTimeline(Timeline):
@@ -380,14 +392,12 @@ class DeviceTimeline(Timeline):
       waitlist: The JAX computation to be tracked, used to infer the end time of
         the span on the device.
     """
-    # Capture the current group when the span is initiated.
+    # Capture the current group when the span is initiated under the lock.
     # This ensures that even if the stack changes (e.g. a new group is pushed)
     # before the async wait finishes, the span is attached to the correct
     # parent group.
-    # TODO(b/481789498): With multiple threads, this might still not be assigned
-    # to the correct group in rare cases. We need a proper design to track the
-    # true parent group for each device span.
-    parent_group = self.stack[-1]
+    with self._lock:
+      parent_group = self.stack[-1]
 
     def on_success():
       self.device_span(
@@ -404,10 +414,13 @@ class DeviceTimeline(Timeline):
       on_success()
     else:
       t = _async_wait(waitlist=waitlist, success=on_success, failure=on_failure)
-      self._threads.append(t)
+      with self._lock:
+        self._threads.append(t)
 
   def wait_pending_spans(self) -> None:
-    for t in self._threads:
+    with self._lock:
+      threads = list(self._threads)
+    for t in threads:
       t.join()
 
 
