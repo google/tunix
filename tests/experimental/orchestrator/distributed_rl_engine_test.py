@@ -117,7 +117,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="p1",
               group_index=0,
               traj={
-                  "reward": 1.0,
+                  "trajectory_reward": 1.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -129,7 +129,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="p2",
               group_index=0,
               traj={
-                  "reward": 2.0,
+                  "trajectory_reward": 2.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -143,7 +143,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           {"prompt": "p2", "prompt_id": "p2"},
       ])
       self.assertLen(results, 2)
-      rewards = {res.traj["reward"] for res in results}
+      rewards = {res.traj["trajectory_reward"] for res in results}
       self.assertEqual(rewards, {1.0, 2.0})
 
       # Which prompt lands on which worker is decided by hashing its traj_id,
@@ -173,7 +173,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="p1",
               group_index=0,
               traj={
-                  "reward": 1.0,
+                  "trajectory_reward": 1.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -228,7 +228,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="prompt_1",
               group_index=0,
               traj={
-                  "reward": 1.0,
+                  "trajectory_reward": 1.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -254,7 +254,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="p1",
               group_index=0,
               traj={
-                  "reward": 1.0,
+                  "trajectory_reward": 1.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -264,7 +264,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
-      self.assertEqual(results[0].traj["reward"], 1.0)
+      self.assertEqual(results[0].traj["trajectory_reward"], 1.0)
 
       self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
       self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
@@ -1108,7 +1108,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="p1",
               group_index=0,
               traj={
-                  "reward": 1.5,
+                  "trajectory_reward": 1.5,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
               metadata={"lineage": ctx},
@@ -1216,7 +1216,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="prompt_1",
               group_index=0,
               traj={
-                  "reward": 1.0,
+                  "trajectory_reward": 1.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -1255,7 +1255,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               prompt_id="prompt_dict_1",
               group_index=2,
               traj={
-                  "reward": 1.0,
+                  "trajectory_reward": 1.0,
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
               },
           ),
@@ -1292,7 +1292,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         group_index=1,
         policy_version=2,
         traj={
-            "reward": 2.0,
+            "trajectory_reward": 2.0,
             "status": datatypes.TrajectoryStatus.SUCCEEDED,
         },
         prompt_tokens=np.array([10], dtype=np.int32),
@@ -1327,7 +1327,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         prompt_id="p_lp",
         group_index=0,
         policy_version=1,
-        traj={"reward": 1.0},
+        traj={"trajectory_reward": 1.0},
         prompt_tokens=np.array([10], dtype=np.int32),
         completion_tokens=np.array([1, 2, 3], dtype=np.int32),
         action_mask=np.array([1.0, 1.0, 1.0], dtype=np.float32),

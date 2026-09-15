@@ -749,7 +749,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     self.assertEqual(item.group_index, 2)
     self.assertEqual(item.policy_version, 5)
     self.assertEqual(item.metadata.get("custom_key"), "custom_val")
-    self.assertEqual(item.metadata.get("reward"), 2.5)
+    self.assertEqual(item.metadata.get("trajectory_reward"), 2.5)
     self.assertEqual(item.metadata.get("text"), "first step second step")
     np.testing.assert_array_equal(item.prompt_tokens, [1, 2, 3])
     np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 12])
