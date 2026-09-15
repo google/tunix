@@ -287,7 +287,10 @@ def _scale_accumulated(acc_grads: Any, acc_denom: Any, param_dtypes: Any) -> Any
   safe = jnp.where(has_weights, acc_denom, jnp.asarray(1.0, jnp.float32))
 
   def _one(g, dtype):
-    scaled = jnp.where(has_weights, g / safe.astype(g.dtype), jnp.zeros_like(g))
+    # Divide in float32 regardless of the accumulator dtype: casting a large
+    # token count to bf16 first would lose ~0.4% of the scale.
+    g32 = g.astype(jnp.float32)
+    scaled = jnp.where(has_weights, g32 / safe, jnp.zeros_like(g32))
     return scaled.astype(dtype)
 
   return jax.tree.map(_one, acc_grads, param_dtypes)
