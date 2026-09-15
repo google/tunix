@@ -195,6 +195,11 @@ class RolloutConfig:
   # which case False skips the two collective RPCs and the re-allocation.
   rollout_vllm_free_kv_cache_during_weight_sync: bool = True
 
+  # Decode text / extract logprobs of each finished request in a thread pool
+  # while vLLM keeps decoding the rest of the batch (offline and server mode).
+  # Outputs are identical; False post-processes after generation as before.
+  rollout_vllm_overlap_postprocessing: bool = True
+
   # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
