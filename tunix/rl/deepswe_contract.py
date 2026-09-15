@@ -435,6 +435,42 @@ def is_p58_q4_tim_workload(workload: DeepSWEWorkload) -> bool:
   )
 
 
+def p58_segmented_actor_logps_identity(
+    values: Mapping[str, str], *, dp_size: int, tp_size: int
+) -> str | None:
+  """Returns the exact P58 identity admitted for P78 actor scoring.
+
+  P78 changes the program boundary used to recompute old-policy logps. It is
+  therefore admitted by the complete workload/treatment identity, never by a
+  DP/TP shape alone. Disabled values deliberately return ``None`` so the
+  historical giant-jit path remains selected.
+  """
+  raw = values.get("CANON_P78_SEGMENTED_ACTOR_LOGPS", "")
+  if raw not in ("", "0", "1"):
+    raise ValueError(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS must be unset/0/1"
+    )
+  if raw != "1":
+    return None
+  workload = active_workload(values)
+  admitted = bool(
+      values.get("CANON_P34_DEEPSWE") == "1"
+      and workload.contract_name == "p58-qwen4b-tim-128"
+      and values.get("CANON_P58_TIM_ARM") == "zero"
+      and values.get("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM") == "treatment"
+      and values.get("CANON_P34_NO_COMMIT") == "0"
+      and values.get("CANON_P34_RUN_STAGE") in ("three-update", "full")
+      and int(dp_size) == workload.dp_size
+      and int(tp_size) == workload.tp_size
+  )
+  if not admitted:
+    raise ValueError(
+        "P78 segmented actor logps require the exact P58 Qwen3-4B 128-chip "
+        "Zero system-optimization treatment identity and DP8xTP8 geometry"
+    )
+  return workload.contract_name
+
+
 def p46_q32_workload(topology: str) -> DeepSWEWorkload:
   """Returns the exact 64/256 Qwen3-32B full-training topology."""
   if topology == "64":
@@ -887,6 +923,33 @@ def validate_environment(values: Mapping[str, str]) -> None:
       )
       and system_optimization_arm in ("control", "treatment")
   )
+  segmented_actor_logps = values.get(
+      "CANON_P78_SEGMENTED_ACTOR_LOGPS", ""
+  )
+  if segmented_actor_logps not in ("", "0", "1"):
+    raise ValueError(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS must be unset/0/1"
+    )
+  expected_segmented_actor_logps = bool(
+      p58_systemopt
+      and workload.contract_name == "p58-qwen4b-tim-128"
+      and system_optimization_arm == "treatment"
+  )
+  if segmented_actor_logps == "1":
+    p58_segmented_actor_logps_identity(
+        values, dp_size=workload.dp_size, tp_size=workload.tp_size
+    )
+  if p58_systemopt and segmented_actor_logps != (
+      "1" if expected_segmented_actor_logps else "0"
+  ):
+    raise ValueError(
+        "P58 system optimization requires segmented actor logps on only for "
+        "treatment and explicitly off for control"
+    )
+  if not p58_systemopt and segmented_actor_logps == "1":
+    raise ValueError(
+        "segmented actor logps are admitted only by the exact P58 treatment"
+    )
   if system_optimization_arm and not (
       (
           parity
@@ -1056,6 +1119,11 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_P58_TIM_ARM": p58_arm if p58_tim else "none",
       "CANON_P58_EXPECTED_UPDATES": (
           str(requested_max_steps(values)) if p58_tim else "0"
+      ),
+      "CANON_P78_SEGMENTED_ACTOR_LOGPS": (
+          "1" if expected_segmented_actor_logps else (
+              "0" if p58_systemopt else None
+          )
       ),
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),

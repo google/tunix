@@ -72,6 +72,7 @@ FULL_SYSTEM_OPTIMIZATION_ENV_NAMES = tuple(_BASE_ADDITIONS) + (
     "CANON_P67_P66_VMA_P59_ONLY",
     "CANON_P32_KEEP_TAPE",
     "CANON_DP_REDUCE_ONCE",
+    "CANON_P78_SEGMENTED_ACTOR_LOGPS",
 )
 
 # These values are resolved by the exact full profile, not duplicated in each

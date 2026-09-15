@@ -16,6 +16,7 @@ q4_tp4_continue_kv_diagnostic="${CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC:-0}"
 q4_tp4_short_backward="${CANON_P58_Q4_TP4_SHORT_BACKWARD:-0}"
 q4_tp4_carrier_screen="${CANON_P58_Q4_TP4_CARRIER_SCREEN:-0}"
 q4_tp4_trajectory_replay="${CANON_P58_Q4_TP4_TRAJECTORY_REPLAY:-0}"
+p78_segmented_actor_logps="${CANON_P78_SEGMENTED_ACTOR_LOGPS:-0}"
 case "$q4_tp4_zero_admission" in
   0|1) ;;
   *) echo "[P58.20] CANON_P58_Q4_TP4_ZERO_ADMISSION must be 0 or 1" >&2; exit 2 ;;
@@ -40,6 +41,10 @@ case "$q4_tp4_trajectory_replay" in
   0|1) ;;
   *) echo "[P58.22] trajectory replay must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$p78_segmented_actor_logps" in
+  0|1) ;;
+  *) echo "[P78.ONEHOST] selector must be 0 or 1" >&2; exit 2 ;;
+esac
 if [ -n "$q4_tp4_seam_diagnostic" ] && \
    [ "$q4_tp4_zero_admission" != "1" ]; then
   echo "[P58.21] seam diagnostic requires P58.20 admission" >&2
@@ -61,6 +66,13 @@ if [ "$q4_tp4_trajectory_replay" = 1 ] && \
    { [ "$q4_tp4_short_backward" != 1 ] || \
      [ "$q4_tp4_carrier_screen" != 0 ]; }; then
   echo "[P58.22] trajectory replay requires short backward and forbids carrier screen" >&2
+  exit 2
+fi
+if [ "$p78_segmented_actor_logps" = 1 ] && \
+   { [ "$q4_tp4_zero_admission" != 1 ] || \
+     [ "$q4_tp4_short_backward" != 1 ] || \
+     [ "$q4_tp4_trajectory_replay" != 1 ]; }; then
+  echo "[P78.ONEHOST] selector requires exact TP4 trajectory replay" >&2
   exit 2
 fi
 sampling_temperature=0.7
@@ -355,6 +367,7 @@ if [ "$q4_tp4_trajectory_replay" = 1 ]; then
   runner_inputs+=(
     "$script_dir/run_onehost_deepswe_zero_trajectory_replay.sh"
     "$script_dir/run_onehost_deepswe_zero_trajectory_replay_docker.sh"
+    "$script_dir/run_onehost_deepswe_zero_p78_actor_logps_docker.sh"
     "$script_dir/classify_trajectory_replay.py"
     "$script_dir/prepare_q4_b2g2_replay.py"
     "$replay_journal"
@@ -386,6 +399,7 @@ export CANON_P58_Q4_TP4_CONTINUE_KV_DIAGNOSTIC="$q4_tp4_continue_kv_diagnostic"
 export CANON_P58_Q4_TP4_SHORT_BACKWARD="$q4_tp4_short_backward"
 export CANON_P58_Q4_TP4_CARRIER_SCREEN="$q4_tp4_carrier_screen"
 export CANON_P58_Q4_TP4_TRAJECTORY_REPLAY="$q4_tp4_trajectory_replay"
+export CANON_P78_SEGMENTED_ACTOR_LOGPS="$p78_segmented_actor_logps"
 if [ "$q4_tp4_trajectory_replay" = 1 ]; then
   export CANON_P58_REPLAY_JOURNAL="$replay_journal"
   export CANON_P58_REPLAY_JOURNAL_SHA256="$replay_journal_sha256"
@@ -833,6 +847,24 @@ if [ "$probe_profile" = seam ]; then
     exit 0
   fi
   if [ "$q4_tp4_trajectory_replay" = 1 ]; then
+    if [ "$p78_segmented_actor_logps" = 1 ]; then
+      for marker in \
+        "[P78.ACTOR_LOGPS] segmented_engine_ready data=1 tp=4" \
+        "workload=p58-qwen4b-tp4-onehost-replay" \
+        "[P78.ACTOR_LOGPS] deferred_weight_map_ready" \
+        "[P78.ACTOR_LOGPS] dispatch" \
+        "outer_jit=0 d2h_lengths=0" \
+        "[P78.ACTOR_LOGPS] program_cache_release"; do
+        if ! grep -Fq "$marker" "$raw_log"; then
+          echo "[P78.ONEHOST] missing runtime marker: $marker" >&2
+          exit 2
+        fi
+      done
+      echo "[P78.ONEHOST] PASS carrier=p58-qwen4b-tp4-onehost-replay"
+    elif grep -Fq "[P78.ACTOR_LOGPS]" "$raw_log"; then
+      echo "[P78.ONEHOST] flag-off replay emitted P78 markers" >&2
+      exit 2
+    fi
     classification="$artifact_dir/trajectory_replay.classification.json"
     set +e
     "$python_bin" "$script_dir/classify_trajectory_replay.py" \

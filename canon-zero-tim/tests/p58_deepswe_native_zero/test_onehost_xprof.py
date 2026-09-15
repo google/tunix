@@ -662,6 +662,9 @@ class OnehostXprofTest(unittest.TestCase):
     trajectory_replay_docker = (
         SCRIPTS / "run_onehost_deepswe_zero_trajectory_replay_docker.sh"
     ).read_text()
+    p78_actor_logps = (
+        SCRIPTS / "run_onehost_deepswe_zero_p78_actor_logps_docker.sh"
+    ).read_text()
     self.assertIn("common.sh\" native", native)
     self.assertIn("common.sh\" zero-hp", zero)
     self.assertIn("P58_ONEHOST_PROBE_PROFILE=seam", seam)
@@ -707,6 +710,13 @@ class OnehostXprofTest(unittest.TestCase):
         "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY=1",
         trajectory_replay_docker,
     )
+    self.assertIn("CANON_P78_SEGMENTED_ACTOR_LOGPS=1", p78_actor_logps)
+    self.assertIn(
+        "run_onehost_deepswe_zero_trajectory_replay_docker.sh",
+        p78_actor_logps,
+    )
+    self.assertIn("CANON_P78_SEGMENTED_ACTOR_LOGPS", docker)
+    self.assertIn("[P78.ONEHOST] PASS", common)
     self.assertIn("1800", trajectory_replay)
     self.assertIn("1800", trajectory_replay_docker)
     self.assertIn(

@@ -72,6 +72,45 @@ def _p78_segmented_actor_logps_enabled() -> bool:
   return value == "1"
 
 
+def _p78_segmented_actor_logps_identity(
+    *, data_size: int, tp_size: int
+) -> str:
+  """Returns the exact workload identity owning the enabled P78 path."""
+  onehost_replay = bool(
+      data_size == 1
+      and tp_size == 4
+      and os.environ.get("CANON_P58_Q4_TP4_ZERO_ADMISSION", "0") == "1"
+      and os.environ.get("CANON_P58_Q4_TP4_SHORT_BACKWARD", "0") == "1"
+      and os.environ.get("CANON_P58_Q4_TP4_TRAJECTORY_REPLAY", "0") == "1"
+      and os.environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0") == "1"
+      and os.environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0") == "1"
+      and os.environ.get("CANON_P58_ONEHOST_XPROF_ARM", "") == "zero-hp"
+      and os.environ.get("CANON_P34_DEEPSWE", "0") == "0"
+      and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
+  )
+  if onehost_replay:
+    return "p58-qwen4b-tp4-onehost-replay"
+  workload_name = os.environ.get("CANON_P32_WORKLOAD", "")
+  if (
+      workload_name == "frozenlake-p45-onehost-dp4-tp1"
+      and data_size == 4
+      and tp_size == 1
+  ):
+    return workload_name
+  try:
+    identity = deepswe_contract.p58_segmented_actor_logps_identity(
+        os.environ, dp_size=data_size, tp_size=tp_size
+    )
+  except ValueError as exc:
+    raise FunctionalMappingError(str(exc)) from exc
+  if identity is not None:
+    return identity
+  raise FunctionalMappingError(
+      "segmented actor logps require the exact P45 DP4xTP1 one-host, P58 "
+      "Qwen3-4B TP4 replay, or 128-chip Zero treatment identity"
+  )
+
+
 def _p62_numeric_debug_enabled() -> bool:
   """Parses the exact default-off Attempt-7 numerical observer."""
   value = os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "")
@@ -10035,6 +10074,12 @@ class Qwen3EngineForwardAdapter:
         == "gsm8k-p66-dp1-tp4"
         and bool(_p66_tp4_arm())
     )
+    p58_p78_tp4_proxy = bool(
+        _p78_segmented_actor_logps_enabled()
+        and _p78_segmented_actor_logps_identity(
+            data_size=self._data_size, tp_size=self._tp_size
+        ) == "p58-qwen4b-tp4-onehost-replay"
+    )
     workload_name = os.environ.get("CANON_P32_WORKLOAD", "")
     # Closed one-host long-context carriers.  Each tuple signs both the
     # workload identity and the physical DP/TP geometry; no prefix admission.
@@ -10058,12 +10103,13 @@ class Qwen3EngineForwardAdapter:
         and not p59_two_by_two_proxy
         and not long_four_chip_proxy
         and not p66_tp4_proxy
+        and not p58_p78_tp4_proxy
     ):
       raise FunctionalMappingError(
           "P32 grouped reverse requires data size 8 or 16, the exact "
           "P59 four-chip proxy, the exact P59 DP2xTP2 proxy, the "
           "registered long-context four-chip proxy, or the exact P66 "
-          "DP1xTP4 proxy; "
+          "DP1xTP4 proxy, or the exact P58 P78 TP4 replay; "
           f"got {self._data_size}"
       )
     prompt = jnp.asarray(prompt)
@@ -14686,16 +14732,13 @@ class Qwen3EngineForwardAdapter:
       raise FunctionalMappingError(
           "segmented actor logps require CANON_P78_SEGMENTED_ACTOR_LOGPS=1"
       )
-    workload_name = os.environ.get("CANON_P32_WORKLOAD", "")
-    if (
-        workload_name != "frozenlake-p45-onehost-dp4-tp1"
-        or self._data_size != 4
-        or self._tp_size != 1
-    ):
+    workload_identity = _p78_segmented_actor_logps_identity(
+        data_size=self._data_size, tp_size=self._tp_size
+    )
+    if _p71_scan_mode() == "fwd_block":
       raise FunctionalMappingError(
-          "segmented actor logps require the exact P45 DP4xTP1 one-host "
-          f"carrier, got workload={workload_name!r} "
-          f"dp={self._data_size} tp={self._tp_size}"
+          "segmented actor logps require CANON_P71_SCAN=fwd or off; "
+          "the deferred trainer mapping has no fused forward-block program"
       )
     if not stop_gradient:
       raise FunctionalMappingError(
@@ -14774,7 +14817,8 @@ class Qwen3EngineForwardAdapter:
       print(
           "[P78.ACTOR_LOGPS] segmented_engine_ready "
           f"data={self._data_size} tp={self._tp_size} "
-          f"local_M={self._sequence_bucket} global_M={self._bucket}",
+          f"local_M={self._sequence_bucket} global_M={self._bucket} "
+          f"workload={workload_identity}",
           flush=True,
       )
     deferred = getattr(self, "_p78_deferred_trainer_forward", None)
@@ -14887,12 +14931,13 @@ class Qwen3EngineForwardAdapter:
           "segmented actor program release requires a completed P78 scorer"
       )
     outputs = jax.block_until_ready(outputs)
-    module_programs = deferred.release_program_caches()
+    module_programs, chunk_programs = deferred.release_program_caches()
     del self._p78_deferred_trainer_forward
     print(
         "[P78.ACTOR_LOGPS] program_cache_release "
         f"module_programs={module_programs} outputs_ready=1 "
-        "shared_engine=retained global_jax_clear_caches=0",
+        "shared_engine=retained global_jax_clear_caches=0 "
+        f"chunk_programs={chunk_programs}",
         flush=True,
     )
     return outputs
@@ -15479,12 +15524,16 @@ class _P78DeferredTrainerForward:
   def release_program_caches(self):
     """Clears only the wrapper programs owned by this standalone scorer."""
     self._require_active()
-    programs = (
+    module_programs = (
         self._embed_program,
         *self._layer_programs,
         self._norm_program,
         self._head_program,
     )
+    chunk_programs = tuple(
+        self.__dict__.get("_p32_forward_chunk_programs", {}).values()
+    )
+    programs = (*module_programs, *chunk_programs)
     clearers = tuple(
         getattr(program, "clear_cache", None) for program in programs
     )
@@ -15494,8 +15543,9 @@ class _P78DeferredTrainerForward:
       )
     for clear in clearers:
       clear()
+    self.__dict__.pop("_p32_forward_chunk_programs", None)
     self._released = True
-    return len(programs)
+    return len(module_programs), len(chunk_programs)
 
   def _make_program(
       self, target_indices, local_program, *, module_name, scope_name
@@ -15602,6 +15652,39 @@ class _P78DeferredTrainerForward:
       raise FunctionalMappingError("P78 head requires trainer state leaves")
     return self._head_program(
         self._select_sources(state_leaves, self._head_sources), hidden
+    )
+
+  def forward_chunk_callables(self, state_leaves):
+    """Returns deferred module programs and current trainer operands.
+
+    P32's bounded chunk-batch wrapper still receives every selected trainer
+    leaf as an operand. Mapping, slicing and casting remain inside the P78
+    module programs, so a complete engine state is never an output.
+    """
+    self._require_active()
+    state_leaves = tuple(state_leaves)
+    return (
+        (
+            self._embed_program,
+            self._select_sources(state_leaves, self._embed_sources),
+        ),
+        tuple(
+            (
+                program,
+                self._select_sources(state_leaves, sources),
+            )
+            for program, sources in zip(
+                self._layer_programs, self._layer_sources, strict=True
+            )
+        ),
+        (
+            self._norm_program,
+            self._select_sources(state_leaves, self._norm_sources),
+        ),
+        (
+            self._head_program,
+            self._select_sources(state_leaves, self._head_sources),
+        ),
     )
 
 

@@ -1,5 +1,17 @@
 # Plan
 
+## Active addendum: P58.128 P2d segmented actor-logps compile unblock
+
+The `bd06` incident supersedes the older launch-ready statement for the
+128-chip treatment lane. Preserve 4096+16384, local M256 and DP8xTP8 per role;
+admit P78 only for exact `128:zero:treatment` so the 80 chunks dispatch outside
+the giant common scorer JIT. 128 control and all 64split rows keep P78 off.
+Local construction, the P78-only pinned-image gate and DP1xTP4 replay pass;
+a fresh, separately approved 128-chip update 0 is the only proof that the
+Pathways 2 GiB compile ceiling is cleared. See
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md` and the outer
+`tasks/deepswe_4b_64chip/phases/p2d-p78-actor-logps.md` ledger.
+
 ## Active phase: P58.38 canon head and dedicated sandbox pool migration
 
 Make `canon-cpu-pool` (Pathways head) and `deepswe-cpu-pool-2` (R2E

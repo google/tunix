@@ -741,6 +741,11 @@ def render(
           "CANON_DP_REDUCE_ONCE": "1",
           "CANON_P32_LENGTH_SORT": "1",
       })
+    systemopt["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = (
+        "1"
+        if system_optimization_arm == "treatment" and topology == "128"
+        else "0"
+    )
     p34._set_env(main, systemopt)
   if high_performance:
     p34._set_env(
@@ -956,6 +961,9 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
     signature["keep_tape"] = env.get("CANON_P32_KEEP_TAPE")
     signature["dp_reduce_once"] = env.get("CANON_DP_REDUCE_ONCE")
     signature["length_sort"] = env.get("CANON_P32_LENGTH_SORT")
+    signature["segmented_actor_logps"] = env.get(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS"
+    )
   return signature
 
 
@@ -1256,6 +1264,11 @@ def validate(
           "CANON_DP_REDUCE_ONCE": "1",
           "CANON_P32_LENGTH_SORT": "1",
       })
+    optimization_additions["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = (
+        "1"
+        if system_optimization_arm == "treatment" and topology == "128"
+        else "0"
+    )
   optimization_wrong = {
       key: env.get(key)
       for key, value in optimization_additions.items()

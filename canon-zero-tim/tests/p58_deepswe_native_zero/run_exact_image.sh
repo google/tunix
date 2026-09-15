@@ -46,6 +46,7 @@ $DOCKER run --rm \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_carrier_screen_docker.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_trajectory_replay.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_trajectory_replay_docker.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_p78_actor_logps_docker.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_off_diagnostic.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_aba_wave.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_coarse_seam_localization.sh \
@@ -134,7 +135,11 @@ $DOCKER run --rm \
       PYTHONPATH=/workspace python3 -m unittest \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_observer_only_attestation_compares_stock_live_state_exactly \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_deepswe_weight_report_normalizes_and_validates_logical_mesh \
-        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p58_replay_segmented_loss_geometry_is_b2g2
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p58_replay_segmented_loss_geometry_is_b2g2 \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p78_segmented_actor_logps_reuses_p32_without_d2h \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p78_deferred_mapping_keeps_scanned_weights_inside_modules \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p78_identity_admits_only_p58_128_treatment \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p78_identity_admits_exact_p58_tp4_replay_only
     )
     (
       cd tests/rl
@@ -185,7 +190,9 @@ $DOCKER run --rm \
     (
       cd tests/rl
       PYTHONPATH=/workspace python3 -m unittest \
-        rl_cluster_test.RlClusterTest.test_batch_size_config
+        rl_cluster_test.RlClusterTest.test_batch_size_config \
+        rl_cluster_test.RlClusterTest.test_p78_actor_logps_dispatches_segmented_scorer_with_host_lengths \
+        rl_cluster_test.RlClusterTest.test_p78_flag_off_dispatches_existing_outer_jit_scorer
     )
     (
       cd tests/sft

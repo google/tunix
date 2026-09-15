@@ -953,6 +953,8 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     adapter._max_model_len = 64  # pylint: disable=protected-access
     adapter._max_num_reqs = 16  # pylint: disable=protected-access
     adapter._blocks_per_req = 4  # pylint: disable=protected-access
+    adapter._metadata_cls = _AttentionMetadata  # pylint: disable=protected-access
+    adapter._engine_array = lambda value: value  # pylint: disable=protected-access
     adapter._engine_state_contract = runner.state  # pylint: disable=protected-access
     adapter._key_mappings = {}  # pylint: disable=protected-access
     adapter._transpose_keys = None  # pylint: disable=protected-access
@@ -979,6 +981,24 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
 
     adapter._p32_group_chunk_inputs = types.MethodType(  # pylint: disable=protected-access
         group_chunk_inputs, adapter
+    )
+
+    def group_chunk_inputs_traced(self, spec, start):
+      del self
+      ids = jax.lax.dynamic_slice(
+          spec["packed_ids"],
+          (0, start),
+          (spec["packed_ids"].shape[0], sequence_bucket),
+      ).reshape(-1)
+      targets = jax.lax.dynamic_slice(
+          spec["next_ids"],
+          (0, start),
+          (spec["next_ids"].shape[0], sequence_bucket),
+      ).reshape(-1)
+      return ids, targets, start
+
+    adapter._p32_chunk_inputs_traced = types.MethodType(  # pylint: disable=protected-access
+        group_chunk_inputs_traced, adapter
     )
 
     def processed_rows(logits, target_ids, temperature):
@@ -1110,6 +1130,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "CANON_P28_SEGMENTED_FORWARD": "1",
         "CANON_P28_SEGMENTED_TRAIN": "1",
         "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1",
+        "CANON_P71_SCAN": "fwd",
     }
     with (
         mock.patch.dict(os.environ, env, clear=False),
@@ -1237,8 +1258,11 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           rebuilt._norm_program,  # pylint: disable=protected-access
           rebuilt._head_program,  # pylint: disable=protected-access
       )
+      rebuilt_chunk_programs = tuple(  # pylint: disable=protected-access
+          rebuilt._p32_forward_chunk_programs.values()
+      )
       self.assertTrue(
-          all(program._cache_size() for program in rebuilt_programs)  # pylint: disable=protected-access
+          all(program._cache_size() for program in rebuilt_chunk_programs)  # pylint: disable=protected-access
       )
       self.assertIs(  # The training reverse will reuse this exact object.
           adapter._p32_d3b_segmented_engine,  # pylint: disable=protected-access
@@ -1254,6 +1278,16 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           "mapped_leaf_outputs=0 source=trainer-state",
           p78_output.getvalue(),
       )
+      second_release = io.StringIO()
+      with contextlib.redirect_stdout(second_release):
+        adapter.release_segmented_actor_logps_programs(outputs=mismatched)
+      self.assertTrue(
+          all(program._cache_size() == 0 for program in rebuilt_programs)  # pylint: disable=protected-access
+      )
+      self.assertTrue(
+          all(program._cache_size() == 0 for program in rebuilt_chunk_programs)  # pylint: disable=protected-access
+      )
+      self.assertIn("chunk_programs=1", second_release.getvalue())
 
   def test_p78_deferred_mapping_keeps_scanned_weights_inside_modules(self):
     source = _state({
@@ -1392,6 +1426,66 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "trainer state contract changed",
     ):
       deferred.source_leaves(changed)
+
+  def test_p78_identity_admits_only_p58_128_treatment(self):
+    exact = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TOPOLOGY": "128",
+        "CANON_P58_TIM_ARM": "zero",
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": "treatment",
+        "CANON_P34_NO_COMMIT": "0",
+        "CANON_P34_RUN_STAGE": "full",
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1",
+    }
+    with mock.patch.dict(os.environ, exact, clear=True):
+      self.assertEqual(
+          canonical_qwen3_adapter._p78_segmented_actor_logps_identity(  # pylint: disable=protected-access
+              data_size=8, tp_size=8
+          ),
+          "p58-qwen4b-tim-128",
+      )
+    with mock.patch.dict(
+        os.environ, {**exact, "CANON_P58_TOPOLOGY": "64split"}, clear=True
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError, "128-chip"
+      ):
+        canonical_qwen3_adapter._p78_segmented_actor_logps_identity(  # pylint: disable=protected-access
+            data_size=4, tp_size=8
+        )
+
+  def test_p78_identity_admits_exact_p58_tp4_replay_only(self):
+    exact = {
+        "CANON_P58_Q4_TP4_ZERO_ADMISSION": "1",
+        "CANON_P58_Q4_TP4_SHORT_BACKWARD": "1",
+        "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY": "1",
+        "CANON_DEEPSWE_ONEHOST_SMOKE": "1",
+        "CANON_DEEPSWE_ONEHOST_NO_COMMIT": "1",
+        "CANON_P58_ONEHOST_XPROF_ARM": "zero-hp",
+        "CANON_P34_DEEPSWE": "0",
+        "CANON_P58_DEEPSWE_TIM": "0",
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS": "1",
+    }
+    with mock.patch.dict(os.environ, exact, clear=True):
+      self.assertEqual(
+          canonical_qwen3_adapter._p78_segmented_actor_logps_identity(  # pylint: disable=protected-access
+              data_size=1, tp_size=4
+          ),
+          "p58-qwen4b-tp4-onehost-replay",
+      )
+    for key in (
+        "CANON_P58_Q4_TP4_TRAJECTORY_REPLAY",
+        "CANON_DEEPSWE_ONEHOST_NO_COMMIT",
+        "CANON_P58_ONEHOST_XPROF_ARM",
+    ):
+      with mock.patch.dict(os.environ, {**exact, key: "0"}, clear=True):
+        with self.assertRaises(
+            canonical_qwen3_adapter.FunctionalMappingError
+        ):
+          canonical_qwen3_adapter._p78_segmented_actor_logps_identity(  # pylint: disable=protected-access
+              data_size=1, tp_size=4
+          )
 
   def test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2(self):
     if len(jax.devices()) < 4:

@@ -1390,6 +1390,9 @@ def _manifest(
         "keep_tape": values.get("CANON_P32_KEEP_TAPE") or None,
         "dp_reduce_once": values.get("CANON_DP_REDUCE_ONCE") or None,
         "length_sort": values.get("CANON_P32_LENGTH_SORT") or None,
+        "segmented_actor_logps": (
+            values.get("CANON_P78_SEGMENTED_ACTOR_LOGPS") or None
+        ),
     }
   return manifest
 

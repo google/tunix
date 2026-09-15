@@ -1,5 +1,78 @@
 # P58 Qwen3-4B DeepSWE native-first runbook
 
+## P58.128 P2d — segmented actor-logps compile unblock
+
+Run `bd06` completed all 128 real trajectories, then failed before update 0:
+Pathways rejected the old-policy `jit_compute_per_token_logps` compilation
+response at 2,715,131,245 bytes, above its 2,147,418,111-byte limit. The
+failure is therefore in trainer old-logprob compilation, not rollout, reward,
+the 1,012-task clean list, or the signed B8xG16 batch.
+
+The P2d treatment reuses P78's host-segmented actor-logps engine for the exact
+P58.128 identity only. It keeps prompt/response 4096+16384, local M256, global
+M2048, DP8xTP8 per role, token/logprob math, sampling, loss, optimizer, and
+strict A=B=C unchanged. Host-known sequence lengths dispatch the existing 80
+M256 chunks outside the single giant common outer JIT; the bounded
+`CANON_P32_CHUNK_BATCH=2` module programs still execute on device. Trainer
+leaves are mapped inside each module program, lengths are never copied from
+device to host, and per-update program caches are released after scoring.
+
+The renderer derives `CANON_P78_SEGMENTED_ACTOR_LOGPS=1` only for
+`--topology 128 --arm zero --system-optimization-arm treatment`. It must be
+literal `0` for 128 control and every 64split row. Do not hand-set it. P78 is
+not yet admitted for 64split DP4xTP8/M1024, and P2d does not make the 64-chip
+lane launch-ready.
+
+Before any user-approved 128-chip apply, inspect the rendered YAML for P78=1.
+Update 0 must additionally contain exactly one engine-ready receipt and one
+dispatch/release transaction:
+
+```text
+[P78.ACTOR_LOGPS] segmented_engine_ready data=8 tp=8 ...
+[P78.ACTOR_LOGPS] deferred_weight_map_ready ...
+[P78.ACTOR_LOGPS] dispatch ... outer_jit=0 d2h_lengths=0 ...
+[P78.ACTOR_LOGPS] program_cache_release ...
+```
+
+Missing/duplicate/malformed receipts, any P78 receipt in an off row, a
+Pathways compilation-response overflow, nonfinite values, nonzero A-B/B-C,
+bad replicas/gradients, or an optimizer-commit mismatch remains fatal. Only a
+fresh target run proves that P2d clears the Pathways limit; CPU and four-chip
+tests prove construction and shared mechanics only.
+
+For a development-only DP1xTP4 trajectory-replay check on the named one-host
+carrier, use a fresh label and the normal idle-120/container discipline:
+
+```bash
+P58_ONEHOST_EXPECT_HOSTNAME=t1v-n-4a77ebd0-w-0 \
+  bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_zero_p78_actor_logps_docker.sh \
+  <fresh-label>
+```
+
+The one-host runner requires its exact short-backward, no-commit, trajectory
+replay identity and fails closed otherwise. It cannot certify DP8xTP8,
+Pathways, the 20,480-token target compile, target HBM, or 128-chip throughput.
+
+Fresh local evidence (2026-09-15) is
+`/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p78_actor_20260915t2006z`
+on fixed image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+It passed the exact DP1xTP4/B2xG2 recorded-trajectory carrier: deferred map
+398/398, two `chunks=9,9 outer_jit=0 d2h_lengths=0` dispatches, bounded release
+of 39 module programs and one chunk program, bitwise A=B=C over 1,254 action
+tokens, two finite/nonzero repeat-exact backward passes, unchanged parameters
+and device-resident optimizer state, zero commits, and peak HBM
+55,706,425,344 bytes/device. The return-bundle checksum verifies and the
+classifier outcome is `ZERO_TIM_RECORDED_TRAJECTORY_BACKWARD_NO_COMMIT_PASS`.
+
+The P78-only pinned-image gate passed 6/6; log
+`/mnt/disks/tunix-data/p78_targeted_exact_image_20260915T203352Z.log`, SHA-256
+`d7d1aa34284d375c67c6886b800975666a20051e470c0f4bfa9f1d9de81ff442`.
+The full P58 image umbrella is not claimed green: it stopped at an unchanged
+P3 baseline assertion expecting flag count 439 while the base registry and
+Appendix both say 435. This unrelated baseline failure must not be described
+as a P78 regression or silently repaired in this lane.
+
 ## P58.128 P2c — same treatment, two disjoint DP8xTP8 roles
 
 As of 2026-09-14 20:06:14 UTC, the renderer has a new explicit P58-128
@@ -8,11 +81,12 @@ system-optimization identity. One physical v5p `4x4x8` slice is split into a
 DP8xTP8. This is the historical 128-chip geometry, not the later colocated
 64-chip A design. Target execution is still `TARGET NOT RUN`.
 
-The 128 and 64split treatment rows share the same optimization semantics:
+The 128 and 64split treatment rows share the P2c optimization semantics:
 fixed lm-head, P59 rank-parallel checked-VMA/P67, first-update gate,
 fingerprint-hybrid comparison, first-group warmup, batched finite receipts,
 `P71=fwd`, streamed kept tape, reduce-once and length-sort. They deliberately
-keep separate profiles and geometry receipts:
+keep separate profiles and geometry receipts. P2d additionally enables P78
+only for 128 treatment; it remains off for 64split:
 
 | Selector | Physical/roles | local trajectories | global M | length-sort/reduction groups |
 |---|---|---:|---:|---:|
@@ -75,7 +149,8 @@ kubectl apply --server-side --dry-run=server -f "$P58_OUTPUT"
 Before apply, inspect the rendered YAML for worker completions/parallelism 32,
 TPU topology `4x4x8`, explicit `CANON_P58_TOPOLOGY=128`, DP8xTP8 for both
 roles, max 16 sequences/DP, global M 2048, exact treatment tuple `stream/1/1`,
-strict alignment, TiTO, device optimizer and disabled checkpoints. Update 0
+`CANON_P78_SEGMENTED_ACTOR_LOGPS=1`, strict alignment, TiTO, device optimizer
+and disabled checkpoints. Update 0
 must emit exactly one
 `[P58.128.SYSTEMOPT] arm=treatment stage=full topology=128 strict=1`, one
 valid `[P32.LENGTH_SORT] enabled=1 rows=128 dp=8 groups=16 ...`, one DP

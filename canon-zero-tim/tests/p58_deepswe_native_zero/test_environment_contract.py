@@ -230,6 +230,10 @@ class P58EnvironmentContractTest(unittest.TestCase):
               values.get("CANON_P32_LENGTH_SORT"),
               "1" if arm == "treatment" else None,
           )
+          self.assertEqual(
+              values.get("CANON_P78_SEGMENTED_ACTOR_LOGPS"),
+              "1" if topology == "128" and arm == "treatment" else "0",
+          )
           deepswe_contract.validate_environment(values)
           manifest = deepswe_debug._manifest(
               values,
@@ -248,6 +252,11 @@ class P58EnvironmentContractTest(unittest.TestCase):
                   ),
                   "length_sort": (
                       "1" if arm == "treatment" else None
+                  ),
+                  "segmented_actor_logps": (
+                      "1"
+                      if topology == "128" and arm == "treatment"
+                      else "0"
                   ),
               },
           )
@@ -271,6 +280,12 @@ class P58EnvironmentContractTest(unittest.TestCase):
                   "CANON_P32_LENGTH_SORT",
                   "0" if arm == "treatment" else "1",
               ),
+              (
+                  "CANON_P78_SEGMENTED_ACTOR_LOGPS",
+                  "0"
+                  if topology == "128" and arm == "treatment"
+                  else "1",
+              ),
           ):
             with (
                 self.subTest(topology=topology, arm=arm, key=key),
@@ -280,6 +295,18 @@ class P58EnvironmentContractTest(unittest.TestCase):
                   **values,
                   key: replacement,
               })
+
+          if topology == "128" and arm == "treatment":
+            self.assertEqual(
+                deepswe_contract.p58_segmented_actor_logps_identity(
+                    values, dp_size=8, tp_size=8
+                ),
+                "p58-qwen4b-tim-128",
+            )
+            with self.assertRaisesRegex(ValueError, "DP8xTP8"):
+              deepswe_contract.p58_segmented_actor_logps_identity(
+                  values, dp_size=4, tp_size=8
+              )
 
       with self.subTest(topology=topology), self.assertRaises(ValueError):
         self._rendered_env(

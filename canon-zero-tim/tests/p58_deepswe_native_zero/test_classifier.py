@@ -50,6 +50,11 @@ def _values(
     values["CANON_P58_TOPOLOGY"] = topology
   if system_optimization_arm is not None:
     values["CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"] = system_optimization_arm
+    values["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = (
+        "1"
+        if topology == "128" and system_optimization_arm == "treatment"
+        else "0"
+    )
     if system_optimization_arm == "treatment":
       values.update({
           "CANON_P32_KEEP_TAPE": "stream",
@@ -172,6 +177,22 @@ def _systemopt_log(topology: str, arm: str) -> str:
       ) * (3 if arm == "treatment" else 0)
       + "[P59.CHECKED_VMA] enabled=1\n" * 3
       + "[V1.FIRST_UPDATE]\n" * 2
+      + (
+          "[P78.ACTOR_LOGPS] segmented_engine_ready "
+          "data=8 tp=8 local_M=256 global_M=2048 "
+          "workload=p58-qwen4b-tim-128\n"
+          + "[P78.ACTOR_LOGPS] deferred_weight_map_ready "
+          "source_leaves=311 target_leaves=311 module_programs=39 "
+          "mapped_leaf_outputs=0 source=trainer-state\n" * 3
+          + "[P78.ACTOR_LOGPS] dispatch batch=128 groups=16 "
+          "chunks=80 local_M=256 global_M=2048 outer_jit=0 "
+          "d2h_lengths=0 length_guard=device-finite\n" * 3
+          + "[P78.ACTOR_LOGPS] program_cache_release "
+          "module_programs=39 outputs_ready=1 shared_engine=retained "
+          "global_jax_clear_caches=0 chunk_programs=1\n" * 3
+          if not split and arm == "treatment"
+          else ""
+      )
   )
 
 
@@ -342,6 +363,61 @@ class P58ClassifierTest(unittest.TestCase):
               ],
           )
           self.assertIn("system_optimization_receipts", failed["failed"])
+
+  def test_128_treatment_rejects_p78_receipt_drift(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(root, "zero", "128", system_optimization_arm="treatment")
+      good = _systemopt_log("128", "treatment")
+      for marker in (
+          "[P78.ACTOR_LOGPS] segmented_engine_ready ",
+          "[P78.ACTOR_LOGPS] deferred_weight_map_ready ",
+          "[P78.ACTOR_LOGPS] dispatch ",
+          "[P78.ACTOR_LOGPS] program_cache_release ",
+      ):
+        first = next(line for line in good.splitlines() if line.startswith(marker))
+        failed = classifier.classify(
+            arm="zero",
+            stage="three-update",
+            topology="128",
+            system_optimization_arm="treatment",
+            log_text=good.replace(first + "\n", "", 1),
+            debug_dir=root,
+            weights=[{"verdict": "PASS", "equal": True}],
+            pre_alignment=[_pre("zero")],
+            alignment=[_post("zero")],
+            updates=[
+                _update(step, "zero", "128", "treatment")
+                for step in range(3)
+            ],
+        )
+        self.assertIn("segmented_actor_logps_receipts", failed["failed"])
+
+  def test_non_128_systemopt_rejects_p78_receipts(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(
+          root, "zero", "64split", system_optimization_arm="treatment"
+      )
+      failed = classifier.classify(
+          arm="zero",
+          stage="three-update",
+          topology="64split",
+          system_optimization_arm="treatment",
+          log_text=(
+              _systemopt_log("64split", "treatment")
+              + "[P78.ACTOR_LOGPS] segmented_engine_ready data=4 tp=8\n"
+          ),
+          debug_dir=root,
+          weights=[{"verdict": "PASS", "equal": True}],
+          pre_alignment=[_pre("zero")],
+          alignment=[_post("zero")],
+          updates=[
+              _update(step, "zero", "64split", "treatment")
+              for step in range(3)
+          ],
+      )
+      self.assertIn("segmented_actor_logps_receipts", failed["failed"])
 
   def test_control_rejects_any_length_sort_marker(self):
     for receipt in (

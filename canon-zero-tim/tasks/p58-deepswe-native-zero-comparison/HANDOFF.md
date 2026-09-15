@@ -1,5 +1,28 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — P2d selects P78 for the exact 128 treatment identity
+
+The repair selection left open below is now resolved locally: preserve the
+signed 4096+16384 width and local M256, and route trainer old-policy scoring
+through the existing P78 host-segmented engine. The implementation is
+committed on the operator branch and remains target-unverified. Do not rerun
+`bd06`, render, apply, or claim the Pathways ceiling fixed until publication
+readback is confirmed and a fresh 128-chip update 0 returns its receipts.
+
+Scope is deliberately asymmetric. Exact `128:zero:treatment` derives
+`CANON_P78_SEGMENTED_ACTOR_LOGPS=1`; 128 control and every 64split row derive
+literal 0. The 64split DP4xTP8/M1024 fixed-head identity remains unadmitted and
+is not a fallback launch. The development-only DP1xTP4 replay carrier passed
+on 2026-09-15: strict A=B=C over 1,254 action tokens, finite/nonzero
+repeat-exact backward, unchanged device-resident optimizer/state, zero
+commits, and P78 `outer_jit=0 d2h_lengths=0`. Evidence root:
+`/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p78_actor_20260915t2006z`.
+The P78-only pinned-image gate also passed 6/6. These prove shared Qwen3-4B
+mechanics only; they cannot prove DP8xTP8, target 20,480-token Pathways
+compilation, target HBM/throughput, or optimizer commit. Exact commands and
+required runtime receipts are in `cluster/P58_DEEPSWE_TIM_RUNBOOK.md` under
+P58.128 P2d.
+
 ## START HERE — bd06 cleared placement/sandbox/rollout; update 0 hit the Pathways 2 GiB compile ceiling
 
 **Status (2026-09-15 18:54 UTC): the 128-chip lane is unblocked everywhere except
@@ -39,17 +62,17 @@ has no once/dedup guard yet prints once while 80 chunks each call the head, so
 the layer stack and `_trainer_compute_logits_fn` are cached programs traced once
 and then inlined 80×. PATHTRACE counts are not HLO expansion counts.
 
-Five repair paths are already falsified with code citations in `ERROR_REPORT.md`
+The incident report originally marked five repair paths as falsified with code citations
 §4 — `compute_logps_micro_batch_size`, `compute_logps_chunk_size`,
 `CANON_P78_SEGMENTED_ACTOR_LOGPS`, raising `local_M`/`MIN_TOKEN_BUCKET`, and
 dropping to `64split`. In particular `MIN_TOKEN_BUCKET` is simultaneously the
 vLLM rollout scheduler token capacity (`tunix/rl/deepswe_contract.py:232/303/309`
 force `local_m == 256`), and bd04 cannot be cited as evidence that DP4 compiles
 — it was a 16-trajectory P44 parity probe that never reached this computation.
-Remaining candidates are B (shorten sequence width), C′ (double only the
-trainer-side logprob chunk width, leaving the rollout contract untouched;
-semantic_M 4096 is already registered at `p38_fixed_lm_head.py:19`), and C
-(convert the python loop to `lax.scan`). Selection is still open.
+That P78 conclusion meant “not admitted by the old selector,” not “the
+mechanism is invalid.” P2d adds an exact P58.128 identity and is now the chosen
+repair. Shortening sequence width, changing semantic M, or converting the loop
+to `lax.scan` are not part of this change.
 
 Everything upstream of the compile is now proven on target and must not be
 re-litigated: `devices=128 / rollout_devices=64 / trainer_devices=64`,

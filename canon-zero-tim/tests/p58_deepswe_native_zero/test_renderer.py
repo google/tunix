@@ -299,6 +299,10 @@ class P58RendererTest(unittest.TestCase):
               signature["length_sort"],
               "1" if arm == "treatment" else None,
           )
+          self.assertEqual(
+              signature["segmented_actor_logps"],
+              "1" if topology == "128" and arm == "treatment" else "0",
+          )
 
       full = self._render(
           "zero",

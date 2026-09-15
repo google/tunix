@@ -215,6 +215,12 @@ def _artifact_checks(
               "length_sort": (
                   "1" if system_optimization_arm == "treatment" else None
               ),
+              "segmented_actor_logps": (
+                  "1"
+                  if topology == "128"
+                  and system_optimization_arm == "treatment"
+                  else "0"
+              ),
           }
           if system_optimization_arm is not None
           else "system_optimization_tuple" not in manifest
@@ -510,6 +516,18 @@ def classify(
           and log_text.count("[V1.FIRST_UPDATE]") == 2
           if system_optimization_arm is not None
           else True
+      ),
+      "segmented_actor_logps_receipts": (
+          log_text.count("[P78.ACTOR_LOGPS] segmented_engine_ready ") == 1
+          and log_text.count("[P78.ACTOR_LOGPS] deferred_weight_map_ready ")
+          == expected_commits
+          and log_text.count("[P78.ACTOR_LOGPS] dispatch ")
+          == expected_commits
+          and log_text.count("[P78.ACTOR_LOGPS] program_cache_release ")
+          == expected_commits
+          if topology == "128"
+          and system_optimization_arm == "treatment"
+          else "[P78.ACTOR_LOGPS]" not in log_text
       ),
       "optimizer_commit_count": len(committed) == expected_commits,
       "optimizer_steps_monotonic": committed_steps == list(range(1, expected_commits + 1)),
