@@ -395,7 +395,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         yield micro_batch
 
   def _create_agent_env_pair(
-      self, single_example: TrainingInputT, group_id: int, pair_index: int
+      self,
+      single_example: TrainingInputT,
+      prompt_id: int,
+      group_index: int,
   ) -> tuple[base_agent.ConversationAgentBase, base_environment.BaseTaskEnv]:
     """Constructs an (agent, environment) pair for a single input sample.
 
@@ -403,23 +406,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     Args:
       single_example: A training input containing a single prompt.
-      group_id: An identifier for group generations from the same original
+      prompt_id: An identifier for group generations from the same original
         prompt.
-      pair_index: The index of the pair within the group.
+      group_index: The index of the pair within the group.
 
     Returns:
       A tuple of agent and environment.
     """
-
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
 
-    assert "group_id" not in self.env_kwargs
-    assert "pair_index" not in self.env_kwargs
+    assert "prompt_id" not in self.env_kwargs
+    assert "group_index" not in self.env_kwargs
     env = self.env_class(
         single_example,
-        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
+        **{"prompt_id": prompt_id, "group_index": group_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
     )
 
     return agent, env
@@ -442,14 +444,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
-      if "group_id" in env.extra_kwargs:
-        tags[perf_constants.GROUP_ID] = env.extra_kwargs["group_id"]
+      if "prompt_id" in env.extra_kwargs:
+        tags[perf_constants.PROMPT_ID] = env.extra_kwargs["prompt_id"]
         if self._full_batch_size > 0:
           tags[perf_constants.STEP] = (
-              env.extra_kwargs["group_id"] // self._full_batch_size
+              env.extra_kwargs["prompt_id"] // self._full_batch_size
           )
-      if "pair_index" in env.extra_kwargs:
-        tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
+      if "group_index" in env.extra_kwargs:
+        tags[perf_constants.GROUP_INDEX] = env.extra_kwargs["group_index"]
 
     prompts = [chat_lists]
     result = self.rl_engine.generate(
@@ -502,10 +504,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     is_async_iterator = hasattr(prompt_iterator, "__aiter__")
 
     async def pairs_stream_generator():
-      """Yield (agent, env) pairs with unique group_id per original prompt."""
-      # TODO (tsbao): fix the group id when we can resume from mid global step
+      """Yield (agent, env) pairs with unique prompt_id per original prompt."""
+      # TODO (tsbao): fix the prompt_id when we can resume from mid global step
       # with mini-batch.
-      group_id = self.rl_engine.global_steps * self._full_batch_size
+      prompt_id = self.rl_engine.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
           # Create agent-env pairs in parallel for a group to handle potential
@@ -515,14 +517,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   None,
                   self._create_agent_env_pair,
                   copy.deepcopy(single_example),
-                  group_id,
-                  pair_index,
+                  prompt_id,
+                  group_index,
               )
-              for pair_index in range(num_generations)
+              for group_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
             yield agent, env
-          group_id += 1
+          prompt_id += 1
       else:
         for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
           agent_env_pairs = await asyncio.gather(*[
@@ -530,21 +532,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   None,
                   self._create_agent_env_pair,
                   copy.deepcopy(single_example),
-                  group_id,
-                  pair_index,
+                  prompt_id,
+                  group_index,
               )
-              for pair_index in range(num_generations)
+              for group_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
             yield agent, env
-          group_id += 1
+          prompt_id += 1
 
     # Start producers in the background.
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pairs_stream_generator(),
             group_size=self.algo_config.num_generations,
-            group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
+            group_key_fn=lambda i, env, traj: env.extra_kwargs["prompt_id"],
             collect_mode=collect_mode,
         )
     )
@@ -595,7 +597,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
     if mode == rl_engine_lib.Mode.TRAIN:
-      expected_step = batch_results[0].group_id // self._full_batch_size
+      expected_step = batch_results[0].prompt_id // self._full_batch_size
     else:
       expected_step = self.rl_engine.global_steps
 

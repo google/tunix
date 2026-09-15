@@ -60,12 +60,12 @@ def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
       perf_constants.ADVANTAGE_COMPUTATION,
       perf_constants.ENVIRONMENT,
   ]:
-    if perf_constants.GROUP_ID in tags:
-      parts.append(f"group_id={tags[perf_constants.GROUP_ID]}")
+    if perf_constants.PROMPT_ID in tags:
+      parts.append(f"prompt_id={tags[perf_constants.PROMPT_ID]}")
 
   if name in [perf_constants.ROLLOUT, perf_constants.ENVIRONMENT]:
-    if perf_constants.PAIR_INDEX in tags:
-      parts.append(f"pair_index={tags[perf_constants.PAIR_INDEX]}")
+    if perf_constants.GROUP_INDEX in tags:
+      parts.append(f"group_index={tags[perf_constants.GROUP_INDEX]}")
 
   if name == perf_constants.QUEUE:
     if perf_constants.NAME in tags:

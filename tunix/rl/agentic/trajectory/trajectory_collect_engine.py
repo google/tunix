@@ -328,7 +328,7 @@ class TrajectoryCollectEngine:
           ),
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
-          "group_id": self.env.extra_kwargs.get("group_id"),
+          "prompt_id": self.env.extra_kwargs.get("prompt_id"),
       }
     elif mode == "Conversation":
       # return raw conversation history
@@ -368,7 +368,7 @@ class TrajectoryCollectEngine:
           to use for performance measurements.
 
     Yields:
-        Tuple[int, Any]: `(pair_index, result)`. The type of `result`
+        Tuple[int, Any]: `(group_index, result)`. The type of `result`
           depends on the `mode` argument. See the `collect` method for details.
     """
 
@@ -437,13 +437,13 @@ class TrajectoryCollectEngine:
 
   @property
   def _debug_prefix(self) -> str:
-    """Returns a consistent log prefix with step_idx, pair_index, and group_id."""
+    """Returns a consistent log prefix with step_idx, group_index, and prompt_id."""
     extra = getattr(self.env, "extra_kwargs", {}) or {}
     step_idx = len(self.agent.trajectory.steps)
-    pair_index = extra.get("pair_index")
-    group_id = extra.get("group_id")
+    group_index = extra.get("group_index")
+    prompt_id = extra.get("prompt_id")
     return (
-        f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
+        f"[step_idx={step_idx}, group_index={group_index}, prompt_id={prompt_id}]"
     )
 
   def _rollout_state_info(
@@ -459,12 +459,13 @@ class TrajectoryCollectEngine:
     """Extracts performance tracing tags from the environment."""
     tags = {}
     if hasattr(self.env, "extra_kwargs"):
-      group_id = self.env.extra_kwargs.get("group_id")
-      if group_id is not None:
-        tags[perf_constants.GROUP_ID] = group_id
-      pair_index = self.env.extra_kwargs.get("pair_index")
-      if pair_index is not None:
-        tags[perf_constants.PAIR_INDEX] = pair_index
+      prompt_id = self.env.extra_kwargs.get("prompt_id")
+      if prompt_id is not None:
+        tags[perf_constants.PROMPT_ID] = prompt_id
+
+      group_index = self.env.extra_kwargs.get("group_index")
+      if group_index is not None:
+        tags[perf_constants.GROUP_INDEX] = group_index
     if hasattr(self.env, "task"):
       policy_version = self.env.task.get("policy_version")
       if policy_version is not None:

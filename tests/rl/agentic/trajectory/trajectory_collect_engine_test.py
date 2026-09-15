@@ -125,8 +125,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
   def test_get_perf_tags(self):
     self.mock_env.extra_kwargs = {
-        'group_id': 'test_group',
-        'pair_index': 42,
+        'prompt_id': 'test_group',
+        'group_index': 42,
     }
     self.mock_env.task = {
         'policy_version': 'v1.0',
@@ -138,8 +138,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     tags = engine._get_perf_tags()
     expected_tags = {
-        perf_constants.GROUP_ID: 'test_group',
-        perf_constants.PAIR_INDEX: 42,
+        perf_constants.PROMPT_ID: 'test_group',
+        perf_constants.GROUP_INDEX: 42,
         perf_constants.STEP: 'v1.0',
     }
     self.assertEqual(tags, expected_tags)
@@ -158,7 +158,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   def test_perf_v2_and_noop_used_by_default(self):
     self.mock_env.max_steps = 1
     self.mock_env.step.return_value = ('obs1', 1.0, True, {})
-    self.mock_env.extra_kwargs = {'group_id': 'test_group'}
+    self.mock_env.extra_kwargs = {'prompt_id': 'test_group'}
 
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
@@ -173,7 +173,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       asyncio.run(self._run_collect(engine, mode='Trajectory'))
       mock_span.assert_called_once_with(
           perf_constants.ENVIRONMENT,
-          tags={perf_constants.GROUP_ID: 'test_group'},
+          tags={perf_constants.PROMPT_ID: 'test_group'},
       )
 
   def test_collect_trajectory_mode(self):
@@ -336,7 +336,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1]),
         'policy_version': None,
         'original_input': {'some': 'task'},
-        'group_id': None,
+        'prompt_id': None,
         'status': 'SUCCEEDED',
     }
 

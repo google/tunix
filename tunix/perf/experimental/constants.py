@@ -20,8 +20,8 @@ STEP = "step"
 MINI_BATCH = "mini_batch_step"
 MICRO_BATCH = "micro_batch_step"
 ROLE = "role"
-GROUP_ID = "group_id"
-PAIR_INDEX = "pair_index"
+PROMPT_ID = "prompt_id"
+GROUP_INDEX = "group_index"
 NAME = "NAME"
 # Common Span / Event names.
 

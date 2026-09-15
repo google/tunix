@@ -356,10 +356,10 @@ def _is_prompt_overflow_error(exc: Exception) -> bool:
 
 def model_call(chat_completions, env_unused):
   """Model inference via tunix sampler."""
-  pair_index = None
+  group_index = None
   instance_id = "unknown"
   if env_unused is not None:
-    pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
+    group_index = getattr(env_unused, "extra_kwargs", {}).get("group_index")
     instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
 
   prompt = chat_parser.parse(
@@ -369,9 +369,9 @@ def model_call(chat_completions, env_unused):
   )
   prompt_token_count = len(tokenizer.encode(prompt))
   logger.info(
-      "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
+      "[group=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
       " max_model_len=%d",
-      pair_index,
+      group_index,
       instance_id,
       len(prompt),
       prompt_token_count,
@@ -404,8 +404,8 @@ def model_call(chat_completions, env_unused):
       raise PromptTooLongError(str(exc)) from exc
     raise
   logger.info(
-      "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
-      pair_index,
+      "[group=%s instance=%s] model_call end response_chars=%d (%.1fs)",
+      group_index,
       instance_id,
       len(out.text[0]) if out.text else 0,
       time.time() - t0,
@@ -426,9 +426,9 @@ class EvalTrajectoryCollectEngine(
       return await super()._one_step()
     except PromptTooLongError as exc:
       logger.warning(
-          "[pair=%s instance=%s] terminating trajectory due to prompt"
+          "[group=%s instance=%s] terminating trajectory due to prompt"
           " overflow: %s",
-          self.env.extra_kwargs.get("pair_index"),
+          self.env.extra_kwargs.get("group_index"),
           self.env.entry.get("instance_id", "unknown"),
           exc,
       )
@@ -464,14 +464,14 @@ class _EvalLoggingEnvMixin:
     Returns:
       The observation and info returned by the superclass's reset method.
     """
-    pair_index = self.extra_kwargs.get("pair_index")
+    group_index = self.extra_kwargs.get("group_index")
     instance_id = self.entry.get("instance_id", "unknown")
-    logger.info("[pair=%s instance=%s] reset start", pair_index, instance_id)
+    logger.info("[group=%s instance=%s] reset start", group_index, instance_id)
     t0 = time.time()
     obs, info = super().reset()
     logger.info(
-        "[pair=%s instance=%s] reset end (%.1fs)",
-        pair_index,
+        "[group=%s instance=%s] reset end (%.1fs)",
+        group_index,
         instance_id,
         time.time() - t0,
     )
@@ -479,15 +479,15 @@ class _EvalLoggingEnvMixin:
 
   def step(self, action):
     """Steps the environment and logs the action and timing."""
-    pair_index = self.extra_kwargs.get("pair_index")
+    group_index = self.extra_kwargs.get("group_index")
     instance_id = self.entry.get("instance_id", "unknown")
     step_idx = self.step_count + 1
     action_name = action
     if isinstance(action, str):
       action_name = action.split("\n", 1)[0][:120]
     logger.info(
-        "[pair=%s instance=%s] env.step start step=%s action=%s",
-        pair_index,
+        "[group=%s instance=%s] env.step start step=%s action=%s",
+        group_index,
         instance_id,
         step_idx,
         action_name,
@@ -495,9 +495,9 @@ class _EvalLoggingEnvMixin:
     t0 = time.time()
     obs, reward, done, info = super().step(action)
     logger.info(
-        "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
+        "[group=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
         " (%.1fs)",
-        pair_index,
+        group_index,
         instance_id,
         step_idx,
         reward,
@@ -517,14 +517,14 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
 
 def pairs_generator():
   """Yield one full (agent, env) trajectory task per dataset entry."""
-  for pair_index, entry in enumerate(entries):
+  for group_index, entry in enumerate(entries):
     agent = SWEAgent()
     env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
     env = env_cls(
         entry=entry,
         max_steps=MAX_STEPS,
-        pair_index=pair_index,
-        group_id=pair_index,
+        group_index=group_index,
+        prompt_id=group_index,
     )
     yield agent, env
 
@@ -553,7 +553,7 @@ async def run_evaluation():
       orchestrator.run_producers_from_stream(
           pairs_stream=pairs_generator(),
           group_size=1,
-          group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
+          group_key_fn=lambda i, env, traj: env.extra_kwargs.get("prompt_id"),
           collect_mode="Trajectory",
       )
   )
@@ -570,7 +570,7 @@ async def run_evaluation():
           if (getattr(step, "info", {}) or {}).get("guard_blocked")
       })
       result = {
-          "pair_index": item.group_index,
+          "group_index": item.group_index,
           "instance_id": entry.get("instance_id", item.group_index),
           "reward": float(traj.reward),
           "num_steps": len(traj.steps),
@@ -670,7 +670,7 @@ def save_results(results):
 
   Args:
     results: A list of dictionaries, where each dictionary contains the
-      evaluation results for a single instance, including 'pair_index',
+      evaluation results for a single instance, including 'group_index',
       'reward', 'num_steps', 'status', 'guard_blocked_steps', and
       'guard_reasons'.
 
@@ -685,7 +685,7 @@ def save_results(results):
 
   with open(output_file, "w") as f:
     for r in results:
-      entry = entries[r["pair_index"]]
+      entry = entries[r["group_index"]]
       record = {
           "instance_id": entry.get("instance_id", r["instance_id"]),
           "docker_image": entry.get("docker_image", ""),

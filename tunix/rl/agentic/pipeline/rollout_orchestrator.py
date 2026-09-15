@@ -114,16 +114,16 @@ class RolloutOrchestrator:
       collect_mode: Optional[str],
   ):
     """Collects one trajectory and queues it."""
-    pair_idx = env.extra_kwargs["pair_index"]
+    group_idx = env.extra_kwargs["group_index"]
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
-    gid = group_key_fn(pair_idx, env, traj)
+    prompt_id = group_key_fn(group_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
     item = TrajectoryItem(
-        prompt_id=gid,
-        group_index=pair_idx,
+        prompt_id=prompt_id,
+        group_index=group_idx,
         start_step=start_step,
         traj=traj,
-        metadata={"generation_id": pair_idx},
+        metadata={"generation_id": group_idx},
     )
     await manager.put(item)
     return 1
@@ -154,9 +154,10 @@ class RolloutOrchestrator:
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
+    group_idx = env.extra_kwargs["group_index"]
     logging.debug(
-        "Starting generating trajectories(_runner) for pair %d",
-        env.extra_kwargs["pair_index"],
+        "Starting generating trajectories(_runner) for group index %d",
+        group_idx,
     )
 
     try:
@@ -177,14 +178,14 @@ class RolloutOrchestrator:
       if isinstance(e, ExceptionGroup):
         for sub_e in e.exceptions:
           logging.error(
-              "Fatal error in runner for pair %d: %s",
-              env.extra_kwargs["pair_index"],
+              "Fatal error in runner for group index %d: %s",
+              group_idx,
               sub_e,
           )
       else:
         logging.error(
-            "Fatal error in runner for pair %d: %s",
-            env.extra_kwargs["pair_index"],
+            "Fatal error in runner for group index %d: %s",
+            group_idx,
             e,
         )
       traceback.print_exc()
@@ -192,8 +193,8 @@ class RolloutOrchestrator:
       raise e
     finally:
       logging.debug(
-          "Runner for pair %d completed with %d episodes",
-          env.extra_kwargs["pair_index"],
+          "Runner for group index %d completed with %d episodes",
+          group_idx,
           episode_count,
       )
 
@@ -224,12 +225,12 @@ class RolloutOrchestrator:
       pairs_stream: An iterable of tuples, where each tuple contains an
         ConversationAgentBase and a BaseTaskEnv instance.
       group_size: The number of trajectories to collect before forming a group.
-      group_key_fn: A callable that takes `(pair_index, env, trajectory)` and
+      group_key_fn: A callable that takes `(group_index, env, trajectory)` and
         returns a hashable group identifier. Using a callable allows for
         flexible grouping strategies. For example, trajectories can be grouped
         by task properties from the environment (`env`) or by outcomes within
         the collected trajectory (`trajectory`). The default is to group by the
-        agent-environment pair index.
+        group index.
       collect_mode: An optional string to select the collection mode for
         `TrajectoryCollectEngine`.
       start_step_fn: An optional callable to get the starting step for each
