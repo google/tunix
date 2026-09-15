@@ -213,6 +213,22 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
   namespace = (
       os.environ.get("R2E_K8S_NAMESPACE", "") or docker_mod.DEFAULT_NAMESPACE
   )
+  # Rebinding the module constant is the point, not a convenience.  The
+  # replacements below cover creation, polling and deletion, but R2E-Gym reads
+  # DEFAULT_NAMESPACE at ten call sites and the ones this patch does *not*
+  # replace still have to find the same Pods: `RepoEnv.add_commands` reaches a
+  # freshly created sandbox through `copy_to_container` ->
+  # `_copy_to_container_kubernetes` -> `connect_get_namespaced_pod_exec`, and
+  # `run` execs a second time.  Leaving the constant at "default" while the
+  # Pods live in `trellis` made every rollout fail its first turn with
+  #   pods "<uuid>" is forbidden: User "system:serviceaccount:trellis:xpk-sa"
+  #   cannot get resource "pods/exec" ... in the namespace "default"
+  # surfaced as `'NoneType' object has no attribute 'decode'`, because the
+  # Kubernetes client cannot decode an empty websocket error body (see
+  # `_is_empty_kubernetes_error_body_decode`).  When R2E_K8S_NAMESPACE is unset
+  # this assignment is a no-op, so the historical single-namespace behaviour is
+  # bit-for-bit unchanged.
+  docker_mod.DEFAULT_NAMESPACE = namespace
   original_start_container = docker_mod.DockerRuntime.start_container
 
   def pod_name_for(runtime) -> str:

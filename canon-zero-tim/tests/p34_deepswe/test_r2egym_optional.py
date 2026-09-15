@@ -376,6 +376,68 @@ class R2egymOptionalContractTest(unittest.TestCase):
       docker_runtime.start_container("image", "command", "docker-1")
       self.assertEqual(docker_runtime.original_start_calls, 1)
 
+  def test_poll_patch_points_the_whole_module_at_the_head_namespace(self):
+    """The exec paths this patch does not replace must follow the head too.
+
+    `RepoEnv.add_commands` copies files into a fresh sandbox through
+    `copy_to_container` -> `_copy_to_container_kubernetes` ->
+    `connect_get_namespaced_pod_exec`, and that call site reads the module
+    constant rather than anything this patch owns.  A run that created its
+    sandboxes in `trellis` while the constant still said `default` died on the
+    first turn of every rollout with a 403 on `pods/exec`, so pin the rebinding
+    here rather than rediscovering it on a 128-chip slice.
+    """
+
+    def fresh_docker_module():
+      docker_mod = types.ModuleType("r2egym.agenthub.runtime.docker")
+      docker_mod.__file__ = "/fake/r2egym/docker.py"
+      docker_mod.DEFAULT_NAMESPACE = "default"
+      docker_mod.DOCKER_PATH = "/usr/local/bin:/usr/bin:/bin"
+      docker_mod.client = types.SimpleNamespace(ApiException=Exception)
+      docker_mod.DockerRuntime = type(
+          "FakeDockerRuntime",
+          (),
+          {
+              "start_container": lambda self, *a, **k: None,
+              # The patch fail-closes unless the runtime exposes a cleanup
+              # method, so the fake has to carry one to reach the assertion.
+              "stop": lambda self, *a, **k: None,
+          },
+      )
+      runtime_pkg = types.ModuleType("r2egym.agenthub.runtime")
+      runtime_pkg.docker = docker_mod
+      agenthub = types.ModuleType("r2egym.agenthub")
+      agenthub.runtime = runtime_pkg
+      package = types.ModuleType("r2egym")
+      package.agenthub = agenthub
+      sys.modules.update({
+          "r2egym": package,
+          "r2egym.agenthub": agenthub,
+          "r2egym.agenthub.runtime": runtime_pkg,
+          "r2egym.agenthub.runtime.docker": docker_mod,
+      })
+      return docker_mod
+
+    module = importlib.import_module(_PATCH_MODULE)
+
+    for namespace in ("trellis", "default"):
+      with self.subTest(namespace=namespace):
+        docker_mod = fresh_docker_module()
+        with mock.patch.dict(
+            os.environ, {"R2E_K8S_NAMESPACE": namespace}, clear=False
+        ):
+          module.apply_repoenv_kubernetes_poll_patch()
+        self.assertEqual(docker_mod.DEFAULT_NAMESPACE, namespace)
+
+    # An unset variable must leave the historical single-namespace behaviour
+    # bit-for-bit unchanged, so the rebinding can never become a silent move.
+    with self.subTest(namespace="unset"):
+      docker_mod = fresh_docker_module()
+      environ = {k: v for k, v in os.environ.items() if k != "R2E_K8S_NAMESPACE"}
+      with mock.patch.dict(os.environ, environ, clear=True):
+        module.apply_repoenv_kubernetes_poll_patch()
+      self.assertEqual(docker_mod.DEFAULT_NAMESPACE, "default")
+
   def test_swe_agent_binds_action_when_r2egym_is_present(self):
     self._require_agent_import_chain()
     parsed = []
