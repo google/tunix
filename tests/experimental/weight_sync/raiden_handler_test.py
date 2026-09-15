@@ -302,6 +302,19 @@ class RaidenHandlerTest(absltest.TestCase):
     kwargs = self.controller.register_work_unit.call_args.kwargs
     self.assertEqual(kwargs["host_subgrid"], [1, 4])
 
+  def test_register_falls_back_when_controller_lacks_host_subgrid(self):
+    def register_work_unit_legacy(**kwargs):
+      if "host_subgrid" in kwargs:
+        raise TypeError(
+            "RaidenController.register_work_unit() got an unexpected keyword"
+            " argument 'host_subgrid'"
+        )
+
+    self.controller.register_work_unit.side_effect = register_work_unit_legacy
+    self.handler.register_work_unit(make_metadata(SRC, host_subgrid=(1, 4)))
+    self.assertIn(SRC, self.handler.registered_units)
+    self.assertEqual(self.controller.register_work_unit.call_count, 2)
+
   def test_register_rejects_a_unit_without_a_data_address(self):
     # The synchronizer assigns ports on construction; registering beforehand
     # would publish an address that does not exist yet.

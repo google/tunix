@@ -215,7 +215,7 @@ class _RaidenTransport:
           " so its assigned ports are known"
       )
     self._validate_metadata(metadata)
-    self._controller.register_work_unit(
+    kwargs = dict(
         unit=self._to_raiden_id(metadata.unit),
         shards=list(metadata.shards),
         control_plane_rpc_address=metadata.control_plane_rpc_address or None,
@@ -229,10 +229,21 @@ class _RaidenTransport:
             if metadata.variables
             else None
         ),
-        host_subgrid=(
-            list(metadata.host_subgrid) if metadata.host_subgrid else None
-        ),
     )
+    if metadata.host_subgrid:
+      kwargs["host_subgrid"] = list(metadata.host_subgrid)
+    try:
+      self._controller.register_work_unit(**kwargs)
+    except TypeError as e:
+      if "host_subgrid" in str(e) and "host_subgrid" in kwargs:
+        logging.warning(
+            "Underlying RaidenController.register_work_unit does not accept"
+            " 'host_subgrid'; retrying without it for backward compatibility."
+        )
+        kwargs.pop("host_subgrid")
+        self._controller.register_work_unit(**kwargs)
+      else:
+        raise
     with self._registered_lock:
       self._registered.add(metadata.unit)
 
