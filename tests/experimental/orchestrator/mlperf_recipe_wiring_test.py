@@ -198,22 +198,76 @@ class PayloadCarriesRolloutInputsTest(absltest.TestCase):
     np.testing.assert_allclose(payload.rollout_per_token_logps, logps)
     self.assertEqual(payload.overlong, 1.0)
 
-  def test_rollout_logps_is_in_the_packer_allowlist(self):
-    """Per-token, so it must pad with the other per-token optional fields.
+  def test_packer_actually_returns_padded_rollout_logps(self):
+    """Run the real packer. Registering the name is not enough.
 
-    `overlong` must NOT be in that list: it is one value per sequence, and the
-    packer pads along the token axis.
+    `optional_fields` only makes `_pack_chunk` STACK a field; the payload it
+    returns has to be handed the array too. The first version of this port
+    registered the name and omitted the kwarg, so the padded rows were computed
+    and dropped -- and a test that grepped `optional_fields` passed anyway.
     """
     from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 
-    src = batch_assembly.__file__
-    with open(src, "r") as fh:
-      text = fh.read()
-    start = text.index("optional_fields = (")
-    block = text[start : text.index(")", start)]
-    self.assertIn('"rollout_per_token_logps"', block)
-    self.assertIn('"old_per_token_logps"', block)
-    self.assertNotIn('"overlong"', block)
+    max_prompt, max_resp = 4, 6
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=max_prompt,
+        max_response_length=max_resp,
+        pad_id=0,
+        group_size=2,
+        mini_batch_size=1,
+    )
+    # Two rows of DIFFERENT completion length, so padding is actually exercised.
+    rows = []
+    for n in (3, 5):
+      rows.append(
+          datatypes.RLTrainerPayload(
+              prompt_ids=np.arange(2, dtype=np.int32),
+              prompt_mask=np.ones(2, np.float32),
+              completion_ids=np.arange(n, dtype=np.int32),
+              completion_mask=np.ones(n, np.float32),
+              advantages=np.full(n, 0.5, np.float32),
+              rollout_per_token_logps=np.full(n, -0.25, np.float32),
+          )
+      )
+    packed = assembler._pack_chunk(rows)  # pylint: disable=protected-access
+
+    self.assertIsNotNone(
+        packed.rollout_per_token_logps,
+        "packer dropped rollout_per_token_logps despite the allowlist entry",
+    )
+    got = np.asarray(packed.rollout_per_token_logps)
+    self.assertEqual(got.shape, (2, max_resp))
+    # Real values preserved, tail padded, and padded exactly like the field it
+    # is supposed to mirror.
+    np.testing.assert_allclose(got[0, :3], -0.25)
+    np.testing.assert_allclose(got[1, :5], -0.25)
+    np.testing.assert_allclose(got[0, 3:], 0.0)
+
+  def test_packer_omits_the_field_when_no_row_carries_it(self):
+    """Optional means optional: absent everywhere must stay None, not zeros."""
+    from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
+
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=6,
+        pad_id=0,
+        group_size=2,
+        mini_batch_size=1,
+    )
+    rows = [
+        datatypes.RLTrainerPayload(
+            prompt_ids=np.arange(2, dtype=np.int32),
+            prompt_mask=np.ones(2, np.float32),
+            completion_ids=np.arange(3, dtype=np.int32),
+            completion_mask=np.ones(3, np.float32),
+            advantages=np.full(3, 0.5, np.float32),
+        )
+        for _ in range(2)
+    ]
+    packed = assembler._pack_chunk(rows)  # pylint: disable=protected-access
+    self.assertIsNone(packed.rollout_per_token_logps)
 
 
 if __name__ == "__main__":

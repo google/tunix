@@ -956,6 +956,10 @@ class PaddedBatchAssembler:
         returns=stacked_optional.get("returns"),
         old_values=stacked_optional.get("old_values"),
         sampler_is_weights=stacked_optional.get("sampler_is_weights"),
+        # Registering a name in `optional_fields` only makes `_pack_chunk`
+        # STACK it; the field still has to be handed to the payload here or the
+        # padded rows are computed and thrown away.
+        rollout_per_token_logps=stacked_optional.get("rollout_per_token_logps"),
         routed_experts=(
             np.stack(routed_experts_rows) if routed_experts_rows else None
         ),
