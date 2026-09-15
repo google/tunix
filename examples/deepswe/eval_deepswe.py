@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -1502,6 +1503,22 @@ class EvalTrajectoryCollectEngine(
 ):
   """Trajectory engine that converts prompt overflows into per-trajectory termination and always grades working tree."""
 
+  async def collect(self, mode: str = "Conversation"):
+    try:
+      return await super().collect(mode=mode)
+    except Exception as exc:
+      logger.exception(
+          "[pair=%s instance=%s] unexpected fatal error in collect(), returning partial trajectory: %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
+      )
+      try:
+        await self._close()
+      except Exception:
+        pass
+      return self.agent.trajectory
+
   async def _one_step(self) -> bool:
     try:
       return await super()._one_step()
@@ -1515,6 +1532,16 @@ class EvalTrajectoryCollectEngine(
       )
       self.agent.trajectory.status = (
           agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+      )
+      if self.agent.trajectory.steps:
+        self.agent.trajectory.steps[-1].done = True
+      return True
+    except Exception as exc:
+      logger.exception(
+          "[pair=%s instance=%s] unexpected exception in _one_step, terminating trajectory gracefully: %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
       )
       if self.agent.trajectory.steps:
         self.agent.trajectory.steps[-1].done = True
