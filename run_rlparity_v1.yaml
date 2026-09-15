@@ -1,0 +1,422 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  namespace: trellis
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: nt-ds-256-rlparity-v1
+  name: nt-ds-256-rlparity-v1
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+          spec:
+            restartPolicy: Never
+            serviceAccountName: xpk-sa
+            priorityClassName: medium
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/replicatedjob-name
+                      operator: In
+                      values:
+                      - pathways-head
+                  namespaceSelector: {}
+                  topologyKey: kubernetes.io/hostname
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            - effect: NoExecute
+              key: node.kubernetes.io/not-ready
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoExecute
+              key: node.kubernetes.io/unreachable
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoSchedule
+              key: cloud.google.com/gke-nodepool
+              operator: Equal
+              value: cpu-np
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260730-jax_0.10.2
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-rlparity-v1
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: '1'
+              ports:
+              - containerPort: 29000
+                hostPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '64'
+                  memory: 400Gi
+                requests:
+                  cpu: '6'
+                  memory: 24Gi
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260730-jax_0.10.2
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-rlparity-v1
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpuv5:4x8x8
+              env:
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: 'true'
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: '1'
+              ports:
+              - containerPort: 29001
+                hostPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                hostPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '64'
+                  memory: 400Gi
+                requests:
+                  cpu: '4'
+                  memory: 16Gi
+            containers:
+            - name: jax-tpu
+              image: gcr.io/cloud-tpu-multipod-dev/jfacevedo_tunix_deepswe:rlparity
+              imagePullPolicy: Always
+              command:
+              - bash
+              - -c
+              - |
+                echo XPK Start: $(date);
+                _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                trap _sigterm SIGTERM;
+                (bash -c '(python3 examples/deepswe/train_maxtext_nb.py \
+                  --model_version Qwen3.5-35B-A3B \
+                  --dataset_path gs://mlperf_dataset/r2e-gym-easy \
+                  --model_absolute_path /tmp/qwen3.5-35b-a3b \
+                  --scan_layers True \
+                  --vllm_utilization 0.70 \
+                  --max_response_length 8192 \
+                  --max_prompt_length 4096 \
+                  --metric_logger_dir gs://jfacevedo-maxdiffusion/rl_parity/run1 \
+                  --ckpt_dir gs://jfacevedo-maxdiffusion/rl_parity/run1/ckpt \
+                  --vllm_reshard_chunk_size 1 \
+                  --rollout_mesh_fsdp 32 \
+                  --rollout_mesh_tp 4 \
+                  --train_mesh_fsdp 64 \
+                  --train_mesh_tp 2 \
+                  --node_selector_val sandbox-cpu-pool \
+                  --max_steps 3 \
+                  --rollout_micro_batch_size 4 \
+                  --max_concurrency 16 \
+                  --max_warmpool_size 2 \
+                  --max_num_batched_tokens 32768 \
+                  --overlong_filter True \
+                  --enable_prefix_caching True \
+                  --save_interval_steps 10000 \
+                  --batch_size 4 \
+                  --mini_batch_size 4 \
+                  --compute_logps_micro_batch_size 4 \
+                  --train_micro_batch_size 4 \
+                  --use_flash_attention True \
+                  --colocated_checkpointing False \
+                  --enable_jax_profiler True \
+                  --jax_profiler_port 9999 \
+                  --temperature 1.0 \
+                  --top_k -1 \
+                  --top_p 1.0 \
+                  --num_generations 4 \
+                  --max_turns 6 \
+                  --step_timeout_secs 60 \
+                  --reward_timeout_secs 180 \
+                  --per_turn_timeout_secs 60 \
+                  --episode_timeout_secs 1200 \
+                  --beta 0.0 \
+                  --epsilon 0.2 \
+                  --epsilon_high 0.28 \
+                  --learning_rate 1e-6 \
+                  --b1 0.9 \
+                  --b2 0.999 \
+                  --weight_decay 0.0 \
+                  --max_grad_norm 0.125 \
+                  --warmup_steps_fraction 0.0 \
+                  --learning_rate_final_fraction 1.0 \
+                  --use_rollout_logps True \
+                  --force_on_policy_ratio True \
+                  --overlong_loss_masking True \
+                  --seq_logprob_error_threshold 2.0 \
+                  --truncated_importance_sampling_type seq-mask-tis \
+                  --truncated_importance_sampling_ratio_min 0.999 \
+                  --truncated_importance_sampling_ratio 1.002 \
+                  --advantage_estimator grpo-loo \
+                  --loss_agg_mode token-mean \
+                  --float32_gate_logits True \
+                  --enable_thinking True \
+                  --logits_dot_in_fp32 False \
+                  --trainable_parameters_mask '"'"'["^(?!.*routed_experts/gate/kernel).*"]'"'"' \
+                  --checkpoint_storage_use_ocdbt True \
+                  --checkpoint_storage_use_zarr3 False \
+                  --logging_level INFO \
+                  --remat_policy decoder \
+                  --docker_image_prefix europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix \
+                  --use_agent_sandbox) > >(tee -a /proc/1/fd/1 /tmp/combined.log) 2> >(tee -a /proc/1/fd/2 /tmp/combined.log >&2)') & PID=$!;
+                while kill -0 $PID 2>/dev/null;
+                    do sleep 5;
+                done;
+                wait $PID;
+                EXIT_CODE=$?;
+
+                echo XPK End: $(date);
+                echo EXIT_CODE=$EXIT_CODE;
+
+                exit $EXIT_CODE
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JAX_PLATFORMS
+                value: proxy,cpu
+              - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: '0'
+              - name: NEW_MODEL_DESIGN
+                value: '1'
+              - name: VLLM_TPU_USING_PATHWAYS
+                value: '1'
+              - name: TOKENIZERS_PARALLELISM
+                value: 'false'
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: TPU_MIN_LOG_LEVEL
+                value: '0'
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: '0'
+              - name: TPU_STDERR_LOG_LEVEL
+                value: '0'
+              - name: NUM_SLICES
+                value: '1'
+              - name: PYTHONPATH
+                value: /app
+              - name: WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: wandb-api-key
+                    key: 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
+              - name: SKIP_JAX_PRECOMPILE
+                value: 'true'
+              - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                value: 'false'
+              - name: TPU_FLAGS
+                value: tpu_program_cache_eviction_policy=lru_program_eviction
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: '1'
+              - name: NAMESPACE
+                value: trellis
+              - name: SANDBOX_READY_TIMEOUT
+                value: '900'
+              - name: SANDBOX_ACQUIRE_RETRIES
+                value: '3'
+              resources:
+                limits:
+                  cpu: '32'
+                  memory: 240Gi
+                requests:
+                  cpu: '16'
+                  memory: 128Gi
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  - name: worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 256
+        completionMode: Indexed
+        completions: 64
+        parallelism: 64
+        template:
+          metadata:
+            annotations:
+              cloud.google.com/gke-tpu-slice-topology: 4x8x8
+              cloud.google.com/skip-tpu-webhook-check: 'true'
+              cluster-autoscaler.kubernetes.io/safe-to-evict: 'false'
+            labels:
+              xpk.google.com/workload: nt-ds-256-rlparity-v1
+          spec:
+            serviceAccountName: xpk-sa
+            priorityClassName: medium
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 30
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x8x8
+              cloud.google.com/reservation-name: cloudtpu-20260902214500-1810493672
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: cloud.google.com/gke-tpu-topology
+                      operator: In
+                      values:
+                      - 4x8x8
+              podAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: cloud.google.com/gke-nodepool
+                  labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: In
+                      values:
+                      - nt-ds-256-rlparity-v1
+                    - key: jobset.sigs.k8s.io/replicatedjob-name
+                      operator: In
+                      values:
+                      - worker
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            - effect: NoSchedule
+              key: google.com/tpu
+              operator: Exists
+            - effect: NoExecute
+              key: node.kubernetes.io/not-ready
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoExecute
+              key: node.kubernetes.io/unreachable
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoSchedule
+              key: cloud.google.com/reservation-name
+              operator: Equal
+              value: cloudtpu-20260902214500-1810493672
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260730-jax_0.10.2
+              imagePullPolicy: Always
+              args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/nt-ds-256-rlparity-v1
+              - --node_type=worker
+              - --instance_type=tpuv5:4x8x8
+              env:
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: '1'
+              - name: TPU_MIN_LOG_LEVEL
+                value: '0'
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: '0'
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: 'false'
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                value: 'false'
+              - name: TPU_FLAGS
+                value: tpu_program_cache_eviction_policy=lru_program_eviction
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: '4'
+                requests:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  suspend: false
