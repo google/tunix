@@ -15,6 +15,7 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import atexit
+import concurrent.futures
 import dataclasses
 import gc
 from itertools import count
@@ -31,11 +32,13 @@ from tunix.generate import utils
 from tunix.generate.mappings import MappingConfig
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver
 from tunix.rl import reshard
+import tqdm
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.sampling_params import SamplingParams
 
 # Colocate vllm engine and worker in the main process
@@ -74,6 +77,15 @@ class VllmConfig:
   # Default to True to ensure old weights are deleted to free up HBM memory
   delete_dst_buffers: bool = True
   reshard_chunk_size: Optional[int] = None
+  # Decode the text and extract the logprobs of each request as soon as it
+  # finishes, in a thread pool, while the engine keeps decoding the rest of
+  # the batch. Otherwise all of that runs serially after the last request
+  # finishes. Outputs are identical either way; False keeps the plain
+  # `LLM.generate` call (offline mode) / post-processing after all driver
+  # futures resolved (server mode).
+  overlap_postprocessing: bool = True
+  # Threads decoding finished requests when `overlap_postprocessing` is on.
+  postprocessing_threads: int = 4
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -104,6 +116,11 @@ class VllmConfig:
           f" via engine_kwargs: {sorted(illegal)}"
       )
     self._processed_engine_kwargs = engine_kwargs
+    if self.postprocessing_threads < 1:
+      raise ValueError(
+          "postprocessing_threads must be >= 1, got"
+          f" {self.postprocessing_threads}"
+      )
     if engine_kwargs:
       for key, value in engine_kwargs.items():
         logging.info(
@@ -152,6 +169,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
+    self._postprocess_pool: Optional[concurrent.futures.ThreadPoolExecutor] = (
+        None
+    )
+    self._postprocessed: Optional[Dict[str, list[Any]]] = None
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -443,9 +464,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     out_logprobs = [[] for _ in range(generations)]
     out_tokens = [[] for _ in range(generations)]
     out_routed_experts = [[] for _ in range(generations)]
+    precomputed = self._postprocessed or {}
+    self._postprocessed = None
     for input_string, multi_sampling_output in zip(
         input_strings, request_outputs
     ):
+      ready = precomputed.get(multi_sampling_output.request_id)
       for idx, single_output in enumerate(multi_sampling_output.outputs):
         # KEEP the eos token in the returned token_ids — needed so multi-turn
         # consumers (agentic engine) can reconstruct the exact sequence the
@@ -458,12 +482,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         out_tokens[idx].append(
             np.array(single_output.token_ids, dtype=np.int32)
         )
-        decoded_outputs[idx].append(
-            self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
-        )
-        logprobs = utils.get_logprobs_from_vllm_output(
-            list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
-        )
+        if ready is not None:
+          text, logprobs = ready[idx]
+        else:
+          text, logprobs = self._decode_single_output(single_output)
+        decoded_outputs[idx].append(text)
         out_logprobs[idx].append(logprobs)
         # `[length, num_layers, top_k]`, or None when capture is disabled.
         out_routed_experts[idx].append(
@@ -475,6 +498,96 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             decoded_outputs[idx][-1],
         )
     return decoded_outputs, out_logprobs, out_tokens, out_routed_experts
+
+  def _decode_single_output(
+      self, single_output: Any
+  ) -> Tuple[str, List[float] | None]:
+    """Text and per-token logprobs of one sampled completion."""
+    text = self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
+    logprobs = utils.get_logprobs_from_vllm_output(
+        list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
+    )
+    return text, logprobs
+
+  def _postprocess_request_output(
+      self, request_output: RequestOutput
+  ) -> List[Tuple[str, List[float] | None]]:
+    """Decodes every sample of a finished request (runs in the thread pool)."""
+    return [self._decode_single_output(o) for o in request_output.outputs]
+
+  def _get_postprocess_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+    if self._postprocess_pool is None:
+      self._postprocess_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self.config.postprocessing_threads,
+          thread_name_prefix="vllm-postprocess",
+      )
+    return self._postprocess_pool
+
+  def _postprocess_as_completed(
+      self, futures: List[concurrent.futures.Future[Any]]
+  ) -> None:
+    """Server mode: decodes each request as its driver future resolves."""
+    pool = self._get_postprocess_pool()
+    self._postprocessed = None
+    pending: Dict[str, concurrent.futures.Future[Any]] = {}
+    for future in concurrent.futures.as_completed(futures):
+      result = future.result()
+      if isinstance(result, RequestOutput):
+        pending[result.request_id] = pool.submit(
+            self._postprocess_request_output, result
+        )
+    self._postprocessed = {rid: f.result() for rid, f in pending.items()}
+
+  def _generate_offline(
+      self,
+      prompts: List[TokensPrompt],
+      sampling_params: Union[SamplingParams, BeamSearchParams],
+  ) -> List[RequestOutput]:
+    """Offline generation; overlaps post-processing with decode when enabled.
+
+    Beam search keeps the plain `LLM.generate` path: `BeamSearchParams` are
+    expanded by vLLM itself and never reach the engine as one request.
+    """
+    if not self.config.overlap_postprocessing or not isinstance(
+        sampling_params, SamplingParams
+    ):
+      return self.llm.generate(  # pyrefly: ignore[missing-attribute]
+          prompts=prompts,
+          sampling_params=sampling_params,
+          use_tqdm=True,
+      )
+    # Same loop as vllm's LLM.generate -> _run_engine, except that every
+    # finished request is handed to the thread pool right away, so decoding
+    # its text and extracting its logprobs overlap with the remaining decode
+    # steps instead of running serially after the last one. Request ids come
+    # from the LLM's own counter so they stay unique alongside any
+    # `LLM.generate` call on the same engine.
+    pool = self._get_postprocess_pool()
+    self._postprocessed = None
+    engine = self.llm.llm_engine  # pyrefly: ignore[missing-attribute]
+    counter = self.llm.request_counter  # pyrefly: ignore[missing-attribute]
+    sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
+    for prompt in prompts:
+      engine.add_request(str(next(counter)), prompt, sampling_params)
+    outputs: List[RequestOutput] = []
+    futures: Dict[str, concurrent.futures.Future[Any]] = {}
+    progress = tqdm.tqdm(
+        total=len(prompts), desc="Processed prompts", dynamic_ncols=True
+    )
+    try:
+      while engine.has_unfinished_requests():
+        for output in engine.step():
+          if output.finished:
+            outputs.append(output)
+            futures[output.request_id] = pool.submit(
+                self._postprocess_request_output, output
+            )
+            progress.update(1)
+    finally:
+      progress.close()
+    self._postprocessed = {rid: f.result() for rid, f in futures.items()}
+    # vLLM's LLM.generate returns outputs sorted by request id as well.
+    return sorted(outputs, key=lambda o: int(o.request_id))
 
   def _generate_server_mode(
       self,
@@ -498,6 +611,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       })
 
     futures = self._driver.submit_requests(requests)
+    if self.config.overlap_postprocessing:
+      self._postprocess_as_completed(futures)
 
     outputs: List[RequestOutput] = []
     for future in futures:
@@ -618,11 +733,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:
-      outputs = self.llm.generate(  # pyrefly: ignore[missing-attribute]
-          prompts=prompt_objects,
-          sampling_params=sampling_params,
-          use_tqdm=True,
-      )
+      outputs = self._generate_offline(prompt_objects, sampling_params)
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
     )
