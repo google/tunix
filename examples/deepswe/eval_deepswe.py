@@ -483,10 +483,6 @@ VLLM_HBM_UTILIZATION = args.vllm_utilization
 VLLM_SERVER_MODE = args.vllm_server_mode
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = args.vllm_max_batched_tokens
-VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
-VLLM_INIT_RANDOM_WEIGHTS = args.vllm_init_random_weights or (
-    args.vllm_reshard_chunk_size > 0
-)
 
 SGLANG_MEM_FRACTION_STATIC = args.sglang_mem_fraction_static
 SGLANG_INIT_RANDOM_WEIGHTS = args.sglang_init_random_weights
@@ -1334,8 +1330,7 @@ if ROLLOUT_ENGINE == "vllm":
             CHECKPOINT_STORAGE_CONCURRENT_GB
         ),
     }
-    if not VLLM_INIT_RANDOM_WEIGHTS:
-      maxtext_cfg["load_parameters_path"] = MODEL_PATH
+    maxtext_cfg["load_parameters_path"] = MODEL_PATH
 
     additional_config = {
         "enable_continue_decode": ENABLE_CONTINUE_DECODE,
@@ -1395,123 +1390,25 @@ if ROLLOUT_ENGINE == "vllm":
   vllm_config = VllmConfig(
       mesh=mesh,
       hbm_utilization=VLLM_HBM_UTILIZATION,
-      init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
+      init_with_random_weights=False,
       tpu_backend_type="jax",
       server_mode=VLLM_SERVER_MODE,
       tensor_parallel_size=mesh.shape["tp"],
       data_parallel_size=mesh.shape["fsdp"],
       mapping_config=mapping_config,
       additional_config=additional_config,
-      reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE
-      if VLLM_RESHARD_CHUNK_SIZE > 0
-      else None,
       engine_kwargs=engine_kwargs,
       sampling_kwargs=sampling_kwargs,
   )
 
-  if VLLM_INIT_RANDOM_WEIGHTS:
-    from flax import nnx
-
-    logger.info("Loading base model weights to transfer into VllmSampler...")
-    if MODEL_SOURCE == "maxtext":
-      logger.info(
-          "Loading MaxText model %s from %s (scan_layers=%s)...",
-          MODEL_VERSION,
-          MODEL_PATH,
-          SCAN_LAYERS,
-      )
-      from maxtext.configs import pyconfig
-      from maxtext import model_creation_utils
-
-      base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
-      model_name_slug = MODEL_VERSION.lower().split("/")[-1]
-
-      trainer_config = pyconfig.initialize(
-          [
-              "",
-              base_yml,
-              "num_slices=1",
-              f"model_name={model_name_slug}",
-              f"load_parameters_path={MODEL_PATH}",
-              f"ici_fsdp_parallelism={MESH_FSDP}",
-              f"ici_tensor_parallelism={MESH_TP}",
-              f"scan_layers={SCAN_LAYERS}",
-              f"max_target_length={MAX_MODEL_LEN}",
-              f"max_prefill_predict_length={MAX_PREFILL_LENGTH}",
-              "remat_policy=none",
-              f"dtype={WEIGHT_DTYPE}",
-              f"attention={'flash' if MAXTEXT_ATTENTION == 'flash' else 'dot_product'}",
-              f"prefuse_moe_weights={PREFUSE_MOE_WEIGHTS}",
-              f"checkpoint_storage_use_ocdbt={CHECKPOINT_STORAGE_USE_OCDBT}",
-              f"checkpoint_storage_use_zarr3={CHECKPOINT_STORAGE_USE_ZARR3}",
-              f"checkpoint_storage_concurrent_gb={CHECKPOINT_STORAGE_CONCURRENT_GB}",
-              f"allow_split_physical_axes={ALLOW_SPLIT_PHYSICAL_AXES}",
-              "skip_jax_distributed_system=True",
-              "load_checkpoint_only_once=True",
-              "use_standalone_converter=False",
-              "log_config=False",
-          ],
-          vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
-      )
-
-      model, _ = model_creation_utils.from_pretrained(
-          trainer_config,
-          devices=devices[:total_mesh_devices],
-          wrap_with_tunix_adapter=True,
-          tokenizer_pad_id=tokenizer.pad_token_id,
-      )
-    else:
-      logger.info(
-          "Loading model weights via AutoModel for %s ...", MODEL_VERSION
-      )
-      model, _ = AutoModel.from_pretrained(
-          model_id=MODEL_VERSION,
-          mesh=mesh,
-          model_source=ModelSource.HUGGINGFACE,
-          model_path=MODEL_PATH,
-      )
-
-    logger.info(
-        "Initializing VllmSampler with random weights (chunked sync enabled)..."
-    )
-    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-
-    model_state = nnx.state(model)
-    if "qwen" in MODEL_VERSION.lower() and SCAN_LAYERS:
-      from maxtext.integration.vllm.maxtext_vllm_rollout import (
-          unroll_qwen_scanned_weights,
-          validate_direct_sync_layer_coverage,
-      )
-      logger.info("Unrolling Qwen scanned weights (heterogeneous cycle=4)...")
-      model_state = unroll_qwen_scanned_weights(model_state, scan_axis=1)
-      covered_params = validate_direct_sync_layer_coverage(
-          model_state, sampler.transformer_state
-      )
-      logger.info(
-          "Successfully validated direct sync coverage for all %d Qwen layer parameters!",
-          covered_params,
-      )
-
-    logger.info(
-        "Transferring model weights to VllmSampler with reshard_chunk_size=%s...",
-        VLLM_RESHARD_CHUNK_SIZE,
-    )
-    sampler.update_params(model_state)
-    logger.info(
-        "Weight transfer complete. Freeing temporary model weights..."
-    )
-    del model, model_state
-    gc.collect()
-    sft_utils.show_hbm_usage()
-  else:
-    logger.info(
-        "Initializing VllmSampler directly with checkpoint from %s ...",
-        MODEL_PATH,
-    )
-    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-    logger.info(
-        "VllmSampler successfully initialized directly with model weights."
-    )
+  logger.info(
+      "Initializing VllmSampler directly with checkpoint from %s ...",
+      MODEL_PATH,
+  )
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+  logger.info(
+      "VllmSampler successfully initialized directly with model weights."
+  )
 
 elif ROLLOUT_ENGINE in ("vanilla", "sglang_jax"):
   if MODEL_SOURCE == "maxtext":
