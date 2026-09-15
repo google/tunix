@@ -147,6 +147,28 @@ class CheckpointOptionsTest(parameterized.TestCase):
     )
     self.assertFalse(opts.enable_async_checkpointing)
 
+  def test_checkpointing_options_from_dict_with_keep_every_nth_step(self):
+    opts_dict = {
+        'max_to_keep': 5,
+        'keep_every_nth_step': 100,
+    }
+    opts = checkpoint_options.checkpointing_options_from_dict(opts_dict)
+    self.assertIsInstance(
+        opts.preservation_policy,
+        ocp.training.preservation_policies.AnyPreservationPolicy,
+    )
+    # pytype: disable=attribute-error
+    self.assertLen(opts.preservation_policy.policies, 2)
+    self.assertIsInstance(
+        opts.preservation_policy.policies[0],
+        ocp.training.preservation_policies.LatestN,
+    )
+    self.assertIsInstance(
+        opts.preservation_policy.policies[1],
+        ocp.training.preservation_policies.EveryNSteps,
+    )
+    # pytype: enable=attribute-error
+
   def test_to_v1_options_with_timeout_secs_from_dict(self):
     opts_dict = {'timeout_secs': 900}
     opts = checkpoint_options.checkpointing_options_from_dict(opts_dict)
