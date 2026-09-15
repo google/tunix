@@ -191,6 +191,8 @@ class WorkUnitMetadata:
       unreported, not a default. Source and destination need not match.
     use_ffi: `transport_mode == "ffi"` as a bool, for consumers that would
       otherwise compare strings. None when unreported.
+    host_subgrid: Optional local host subgrid shape (e.g. from
+      `mesh.local_mesh.devices.shape`) for decomposing physical mesh slices.
   """
 
   unit: WorkUnitId
@@ -204,6 +206,7 @@ class WorkUnitMetadata:
   mesh_axes: Optional[tuple[str, ...]] = None
   transport_mode: Optional[str] = None
   use_ffi: Optional[bool] = None
+  host_subgrid: Optional[tuple[int, ...]] = None
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -273,6 +276,11 @@ class WorkUnitMetadata:
         ),
         transport_mode=d.get("transport_mode"),
         use_ffi=d.get("use_ffi"),
+        host_subgrid=(
+            tuple(d["host_subgrid"])
+            if d.get("host_subgrid") is not None
+            else None
+        ),
     )
 
 

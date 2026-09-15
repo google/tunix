@@ -295,6 +295,13 @@ class RaidenHandlerTest(absltest.TestCase):
     self.assertEqual(kwargs["itemsize"], 4)
     self.assertIn(SRC, self.handler.registered_units)
 
+  def test_register_forwards_host_subgrid(self):
+    self.handler.register_work_unit(make_metadata(SRC, host_subgrid=(1, 4)))
+
+    self.controller.register_work_unit.assert_called_once()
+    kwargs = self.controller.register_work_unit.call_args.kwargs
+    self.assertEqual(kwargs["host_subgrid"], [1, 4])
+
   def test_register_rejects_a_unit_without_a_data_address(self):
     # The synchronizer assigns ports on construction; registering beforehand
     # would publish an address that does not exist yet.

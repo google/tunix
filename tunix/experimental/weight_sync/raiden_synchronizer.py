@@ -355,6 +355,36 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   )
 
 
+def _compute_host_subgrid(
+    array_mesh: Optional[Any],
+) -> Optional[Tuple[int, ...]]:
+  """Extracts host_subgrid from environment or the local JAX mesh devices.
+
+  Args:
+    array_mesh: Optional JAX Mesh associated with the bound arrays.
+
+  Returns:
+    A tuple of integers representing the host subgrid shape, or None.
+  """
+  host_subgrid_env = os.environ.get("RAIDEN_HOST_SUBGRID")
+  if host_subgrid_env:
+    try:
+      return tuple(int(x.strip()) for x in host_subgrid_env.split(","))
+    except ValueError:
+      pass
+  if array_mesh is not None:
+    try:
+      if (
+          hasattr(array_mesh, "local_mesh")
+          and array_mesh.local_mesh is not None
+          and hasattr(array_mesh.local_mesh, "devices")
+      ):
+        return tuple(array_mesh.local_mesh.devices.shape)
+    except (AttributeError, ValueError, TypeError):
+      pass
+  return None
+
+
 class RaidenSynchronizer:
   """One host's weights on the raiden transport, plus its registration metadata.
 
@@ -389,6 +419,7 @@ class RaidenSynchronizer:
     self._listeners: List[str] = []
     self._ffi_mesh: Any = None
     self._ffi_shard_idx: Any = None
+    self._host_subgrid: Optional[Tuple[int, ...]] = None
     if state is not None:
       self.bind(state)
 
@@ -599,6 +630,12 @@ class RaidenSynchronizer:
     )
     del state
     _log_rss("bind:after_flatten")
+    array_mesh = None
+    for arr in self.arrays:
+      array_mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
+      if array_mesh is not None:
+        break
+    self._host_subgrid = _compute_host_subgrid(array_mesh)
     logging.info(
         "%s bind prepared %d arrays (proxy_runtime=%s)",
         self.job_name,
@@ -855,6 +892,7 @@ class RaidenSynchronizer:
         mesh_axes=mesh_axes or None,
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
+        host_subgrid=self._host_subgrid,
     )
 
 

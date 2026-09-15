@@ -229,6 +229,9 @@ class _RaidenTransport:
             if metadata.variables
             else None
         ),
+        host_subgrid=(
+            list(metadata.host_subgrid) if metadata.host_subgrid else None
+        ),
     )
     with self._registered_lock:
       self._registered.add(metadata.unit)
