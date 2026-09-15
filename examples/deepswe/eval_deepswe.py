@@ -2,8 +2,8 @@
 """DeepSWE evaluation with deepscaler-style task-level parallelism.
 
 This script runs SWE evaluation trajectories and uses RolloutOrchestrator to
-parallelize tasks across a TPU cluster. It supports both HuggingFace and MaxText
-models (e.g. Qwen3.5-35B-A3B) and configurable JAX/vLLM sharding meshes.
+parallelize tasks across a TPU cluster for MaxText models (e.g. Qwen3.5-35B-A3B)
+with configurable JAX/vLLM sharding meshes.
 """
 
 import argparse
@@ -39,24 +39,9 @@ for root in [
     sys.path.insert(0, root)
 
 
-def _early_model_source() -> str:
-  """Reads --model_source before argparse runs.
-
-  `VLLM_TPU_RPA_VERSION` and `DISABLE_MOSAIC_ATTN` are read at import time by
-  the vLLM TPU backend, so they must be set before JAX is imported -- which is
-  well before the argument parser is built.
-  """
-  for i, arg in enumerate(sys.argv):
-    if arg == "--model_source" and i + 1 < len(sys.argv):
-      return sys.argv[i + 1]
-    if arg.startswith("--model_source="):
-      return arg.split("=", 1)[1]
-  return os.getenv("MODEL_SOURCE", "huggingface")
-
-
-if _early_model_source() == "maxtext":
-  os.environ["VLLM_TPU_RPA_VERSION"] = "2"
-  os.environ["DISABLE_MOSAIC_ATTN"] = "1"
+# vLLM TPU backend environment configuration for MaxText
+os.environ["VLLM_TPU_RPA_VERSION"] = "2"
+os.environ["DISABLE_MOSAIC_ATTN"] = "1"
 
 if "proxy" in os.getenv("JAX_PLATFORMS", ""):
   try:
@@ -122,13 +107,6 @@ parser_cli.add_argument(
     type=str,
     default=os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B"),
     help="Model identifier",
-)
-parser_cli.add_argument(
-    "--model_source",
-    type=str,
-    default=os.getenv("MODEL_SOURCE", "huggingface"),
-    choices=["huggingface", "maxtext"],
-    help="Model source (huggingface or maxtext)",
 )
 parser_cli.add_argument(
     "--model_absolute_path",
@@ -223,7 +201,7 @@ parser_cli.add_argument(
     "--rollout_engine",
     type=str,
     default=os.getenv("ROLLOUT_ENGINE", "vllm"),
-    choices=["vllm", "vanilla", "sglang_jax"],
+    choices=["vllm", "vanilla"],
     help="Rollout engine",
 )
 parser_cli.add_argument(
@@ -260,21 +238,6 @@ parser_cli.add_argument(
     type=str2bool,
     default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "false").lower() == "true",
     help="Initialize vLLM with random weights and sync real weights chunked",
-)
-parser_cli.add_argument(
-    "--sglang_mem_fraction_static",
-    type=float,
-    default=float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")),
-)
-parser_cli.add_argument(
-    "--sglang_init_random_weights",
-    type=str2bool,
-    default=os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "true").lower() == "true",
-)
-parser_cli.add_argument(
-    "--sglang_max_running_requests",
-    type=int,
-    default=int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1")),
 )
 parser_cli.add_argument(
     "--mesh_fsdp",
@@ -459,7 +422,7 @@ DATASET_CACHE = args.dataset_cache
 DATASET_NUM_PROC = args.dataset_num_proc
 
 MODEL_VERSION = args.model_version
-MODEL_SOURCE = args.model_source
+MODEL_SOURCE = "maxtext"
 MODEL_PATH = args.model_absolute_path or os.path.join(
     "/scratch/models/", MODEL_VERSION
 )
@@ -483,10 +446,6 @@ VLLM_HBM_UTILIZATION = args.vllm_utilization
 VLLM_SERVER_MODE = args.vllm_server_mode
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = args.vllm_max_batched_tokens
-
-SGLANG_MEM_FRACTION_STATIC = args.sglang_mem_fraction_static
-SGLANG_INIT_RANDOM_WEIGHTS = args.sglang_init_random_weights
-SGLANG_MAX_RUNNING_REQUESTS = args.sglang_max_running_requests
 
 MESH_FSDP = args.mesh_fsdp
 MESH_TP = args.mesh_tp
@@ -544,15 +503,14 @@ logger.info("JAX backend initialized.")
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-# Register MaxText vLLM adapter if using a MaxText model
-if MODEL_SOURCE == "maxtext":
-  try:
-    from maxtext.integration.vllm import maxtext_vllm_adapter  # pytype: disable=import-error
+# Register MaxText vLLM adapter
+try:
+  from maxtext.integration.vllm import maxtext_vllm_adapter  # pytype: disable=import-error
 
-    maxtext_vllm_adapter.register()
-    logger.info("Successfully registered MaxTextForCausalLM model with vLLM.")
-  except ImportError as e:
-    logger.warning("Could not import maxtext_vllm_adapter: %s", e)
+  maxtext_vllm_adapter.register()
+  logger.info("Successfully registered MaxTextForCausalLM model with vLLM.")
+except ImportError as e:
+  logger.warning("Could not import maxtext_vllm_adapter: %s", e)
 
 # ========================== Dataset ==========================
 
@@ -776,7 +734,7 @@ if USE_AGENT_SANDBOX:
 # Tokenizer Setup
 tokenizer_path = MODEL_PATH
 local_files_only = True
-if MODEL_SOURCE == "maxtext" and MODEL_PATH.startswith("gs://"):
+if MODEL_PATH.startswith("gs://"):
   if MODEL_VERSION.startswith("Qwen/"):
     tokenizer_path = MODEL_VERSION
   else:
@@ -1274,28 +1232,27 @@ logger.info(
 # shards on the Pathways workers but does not support OCDBT yet (b/365549911).
 # Fall back to the standard ArrayHandler only when the checkpoint really is
 # OCDBT, since that path materializes whole arrays in the head container's RAM.
-if MODEL_SOURCE == "maxtext":
-  try:
-    from etils import epath
-    from orbax.checkpoint._src.serialization import jax_array_handlers
-    from orbax.checkpoint._src.serialization import type_handler_registry
+try:
+  from etils import epath
+  from orbax.checkpoint._src.serialization import jax_array_handlers
+  from orbax.checkpoint._src.serialization import type_handler_registry
 
-    if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
-      type_handler_registry.register_type_handler(
-          jax.Array, jax_array_handlers.ArrayHandler(), override=True
-      )
-      logger.info(
-          "Checkpoint is OCDBT; registered the standard ArrayHandler: %s",
-          MODEL_PATH,
-      )
-    else:
-      logger.info(
-          "Checkpoint is not OCDBT; keeping the registered handler so reads"
-          " stay on the Pathways workers: %s",
-          MODEL_PATH,
-      )
-  except Exception as e:
-    logger.warning("Could not inspect checkpoint storage format: %s", e)
+  if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
+    type_handler_registry.register_type_handler(
+        jax.Array, jax_array_handlers.ArrayHandler(), override=True
+    )
+    logger.info(
+        "Checkpoint is OCDBT; registered the standard ArrayHandler: %s",
+        MODEL_PATH,
+    )
+  else:
+    logger.info(
+        "Checkpoint is not OCDBT; keeping the registered handler so reads"
+        " stay on the Pathways workers: %s",
+        MODEL_PATH,
+    )
+except Exception as e:
+  logger.warning("Could not inspect checkpoint storage format: %s", e)
 
 # ========================== Sampler ==========================
 
@@ -1307,75 +1264,71 @@ if ROLLOUT_ENGINE == "vllm":
 
   os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
-  additional_config = None
-  if MODEL_SOURCE == "maxtext":
-    maxtext_cfg = {
-        "model_name": MODEL_VERSION.lower().split("/")[-1],
-        "model_call_mode": "inference",
-        # vLLM inference requires unrolled layers for PagedAttention KV cache indexing (see maxtext vllm.yml).
-        # The base checkpoint remains scanned; weight_converter automatically unrolls scanned layers into vLLM.
-        "scan_layers": False,
-        "enable_dp_attention": False,
-        "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
-        "log_config": False,
-        "weight_dtype": WEIGHT_DTYPE,
-        "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
-        "attention": MAXTEXT_ATTENTION,
-        "remat_policy": "none",
-        "max_target_length": MAX_MODEL_LEN,
-        "max_prefill_predict_length": MAX_PREFILL_LENGTH,
-        "checkpoint_storage_use_ocdbt": CHECKPOINT_STORAGE_USE_OCDBT,
-        "checkpoint_storage_use_zarr3": CHECKPOINT_STORAGE_USE_ZARR3,
-        "checkpoint_storage_concurrent_gb": (
-            CHECKPOINT_STORAGE_CONCURRENT_GB
-        ),
-    }
-    maxtext_cfg["load_parameters_path"] = MODEL_PATH
+  maxtext_cfg = {
+      "model_name": MODEL_VERSION.lower().split("/")[-1],
+      "model_call_mode": "inference",
+      # vLLM inference requires unrolled layers for PagedAttention KV cache indexing (see maxtext vllm.yml).
+      # The base checkpoint remains scanned; weight_converter automatically unrolls scanned layers into vLLM.
+      "scan_layers": False,
+      "enable_dp_attention": False,
+      "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
+      "log_config": False,
+      "weight_dtype": WEIGHT_DTYPE,
+      "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
+      "attention": MAXTEXT_ATTENTION,
+      "remat_policy": "none",
+      "max_target_length": MAX_MODEL_LEN,
+      "max_prefill_predict_length": MAX_PREFILL_LENGTH,
+      "checkpoint_storage_use_ocdbt": CHECKPOINT_STORAGE_USE_OCDBT,
+      "checkpoint_storage_use_zarr3": CHECKPOINT_STORAGE_USE_ZARR3,
+      "checkpoint_storage_concurrent_gb": (
+          CHECKPOINT_STORAGE_CONCURRENT_GB
+      ),
+      "load_parameters_path": MODEL_PATH,
+  }
 
-    additional_config = {
-        "enable_continue_decode": ENABLE_CONTINUE_DECODE,
-        "maxtext_config": maxtext_cfg,
-    }
+  additional_config = {
+      "enable_continue_decode": ENABLE_CONTINUE_DECODE,
+      "maxtext_config": maxtext_cfg,
+  }
 
-    # The adapter regenerates the MaxText config and would otherwise reinstate
-    # a remat policy, which is pure overhead for inference.
-    try:
-      from maxtext.integration.vllm.maxtext_vllm_adapter import adapter  # pytype: disable=import-error
+  # The adapter regenerates the MaxText config and would otherwise reinstate
+  # a remat policy, which is pure overhead for inference.
+  try:
+    from maxtext.integration.vllm.maxtext_vllm_adapter import adapter  # pytype: disable=import-error
 
-      _orig_generate_maxtext_config = adapter.generate_maxtext_config
+    _orig_generate_maxtext_config = adapter.generate_maxtext_config
 
-      def _generate_maxtext_config_with_no_remat(vllm_config_param):
-        if "maxtext_config" not in vllm_config_param.additional_config:
-          vllm_config_param.additional_config["maxtext_config"] = {}
-        mc = vllm_config_param.additional_config["maxtext_config"]
-        mc["remat_policy"] = "none"
-        mc["scan_layers"] = False
-        if getattr(vllm_config_param, "load_config", None) and getattr(vllm_config_param.load_config, "load_format", None) == "dummy":
-          mc.pop("load_parameters_path", None)
-        return _orig_generate_maxtext_config(vllm_config_param)
+    def _generate_maxtext_config_with_no_remat(vllm_config_param):
+      if "maxtext_config" not in vllm_config_param.additional_config:
+        vllm_config_param.additional_config["maxtext_config"] = {}
+      mc = vllm_config_param.additional_config["maxtext_config"]
+      mc["remat_policy"] = "none"
+      mc["scan_layers"] = False
+      if getattr(vllm_config_param, "load_config", None) and getattr(vllm_config_param.load_config, "load_format", None) == "dummy":
+        mc.pop("load_parameters_path", None)
+      return _orig_generate_maxtext_config(vllm_config_param)
 
-      adapter.generate_maxtext_config = _generate_maxtext_config_with_no_remat
-      logger.info("Patched generate_maxtext_config to force remat_policy=none.")
-    except ImportError as e:
-      logger.warning("Could not patch generate_maxtext_config: %s", e)
+    adapter.generate_maxtext_config = _generate_maxtext_config_with_no_remat
+    logger.info("Patched generate_maxtext_config to force remat_policy=none.")
+  except ImportError as e:
+    logger.warning("Could not patch generate_maxtext_config: %s", e)
 
   mapping_config = mappings.MappingConfig()
   engine_kwargs = {
-      "model": tokenizer_path if MODEL_SOURCE == "maxtext" else MODEL_PATH,
+      "model": tokenizer_path,
       "max_model_len": MAX_MODEL_LEN,
       "max_num_seqs": VLLM_MAX_NUM_SEQS,
       "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      "enable_prefix_caching": ENABLE_PREFIX_CACHING,
+      "enable_prefix_caching": False,
       "async_scheduling": True,
       "kv_cache_metrics": True,
       "disable_log_stats": False,
       "tokenizer": tokenizer_path,
+      "hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
+      "dtype": "bfloat16",
+      "enable_expert_parallel": False,
   }
-  if MODEL_SOURCE == "maxtext":
-    engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
-    engine_kwargs["dtype"] = "bfloat16"
-    engine_kwargs["enable_expert_parallel"] = False
-    engine_kwargs["enable_prefix_caching"] = False
 
   # Must be set here rather than at the call site: `VllmSampler.__call__`
   # forwards unknown kwargs via `setattr` and swallows failures. Stop strings
@@ -1410,89 +1363,49 @@ if ROLLOUT_ENGINE == "vllm":
       "VllmSampler successfully initialized directly with model weights."
   )
 
-elif ROLLOUT_ENGINE in ("vanilla", "sglang_jax"):
-  if MODEL_SOURCE == "maxtext":
-    logger.info(
-        "Loading MaxText model %s from %s (scan_layers=%s)...",
-        MODEL_VERSION,
-        MODEL_PATH,
-        SCAN_LAYERS,
-    )
-    model, _ = AutoModel.from_pretrained(
-        model_id=MODEL_VERSION,
-        mesh=mesh,
-        model_source=ModelSource.MAXTEXT,
-        model_path=MODEL_PATH,
-        enable_checkpointing=True,
-        allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
-        scan_layers=SCAN_LAYERS,
-        checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
-    )
-  else:
-    logger.info("Loading model weights via AutoModel for %s ...", MODEL_VERSION)
-    model, _ = AutoModel.from_pretrained(
-        model_id=MODEL_VERSION,
-        mesh=mesh,
-        model_source=ModelSource.HUGGINGFACE,
-        model_path=MODEL_PATH,
-    )
+elif ROLLOUT_ENGINE == "vanilla":
+  logger.info(
+      "Loading MaxText model %s from %s (scan_layers=%s)...",
+      MODEL_VERSION,
+      MODEL_PATH,
+      SCAN_LAYERS,
+  )
+  model, _ = AutoModel.from_pretrained(
+      model_id=MODEL_VERSION,
+      mesh=mesh,
+      model_source=ModelSource.MAXTEXT,
+      model_path=MODEL_PATH,
+      enable_checkpointing=True,
+      allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
+      scan_layers=SCAN_LAYERS,
+      checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
+  )
 
   sft_utils.show_hbm_usage()
 
-  if ROLLOUT_ENGINE == "vanilla":
-    from tunix.generate import sampler as sampler_lib
+  from tunix.generate import sampler as sampler_lib
 
-    sampler = sampler_lib.Sampler(
-        model,
-        tokenizer,
-        sampler_lib.CacheConfig(
-            cache_size=16384,
-            num_layers=getattr(model, "config", None)
-            and getattr(model.config, "num_layers", 32)
-            or 32,
-            num_kv_heads=getattr(model, "config", None)
-            and getattr(model.config, "num_kv_heads", 8)
-            or 8,
-            head_dim=getattr(model, "config", None)
-            and getattr(model.config, "head_dim", 128)
-            or 128,
-        ),
-    )
-
-  elif ROLLOUT_ENGINE == "sglang_jax":
-    from flax import nnx
-    from tunix.generate import mappings
-    from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
-
-    mapping_config = mappings.MappingConfig.build(
-        mapping_obj=None,
-        model=model,
-        backend="sglang_jax",
-    )
-    sampler = SglangJaxSampler(
-        tokenizer=tokenizer,
-        config=SglangJaxConfig(
-            mesh=mesh,
-            mapping_config=mapping_config,
-            model_version=MODEL_VERSION,
-            context_length=MAX_MODEL_LEN,
-            mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
-            init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
-            disable_radix_cache=True,
-            enable_deterministic_sampling=False,
-            precompile_token_paddings=[8192, 16384],
-            precompile_bs_paddings=[1],
-            max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
-        ),
-    )
-    if SGLANG_INIT_RANDOM_WEIGHTS:
-      sampler.load_checkpoint(nnx.state(model))
-      logger.info("Synced model weights to sglang_jax engine.")
+  sampler = sampler_lib.Sampler(
+      model,
+      tokenizer,
+      sampler_lib.CacheConfig(
+          cache_size=16384,
+          num_layers=getattr(model, "config", None)
+          and getattr(model.config, "num_layers", 32)
+          or 32,
+          num_kv_heads=getattr(model, "config", None)
+          and getattr(model.config, "num_kv_heads", 8)
+          or 8,
+          head_dim=getattr(model, "config", None)
+          and getattr(model.config, "head_dim", 128)
+          or 128,
+      ),
+  )
 
 else:
   raise ValueError(
       f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
-      "Choose from: 'vanilla', 'vllm', 'sglang_jax'"
+      "Choose from: 'vllm', 'vanilla'"
   )
 
 # ========================== Model Call ==========================
