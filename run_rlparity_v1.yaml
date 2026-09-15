@@ -136,7 +136,7 @@ spec:
                   --model_absolute_path /tmp/qwen3.5-35b-a3b \
                   --scan_layers True \
                   --vllm_utilization 0.70 \
-                  --max_response_length 8192 \
+                  --max_response_length 61440 \
                   --max_prompt_length 4096 \
                   --metric_logger_dir gs://jfacevedo-maxdiffusion/rl_parity/run1 \
                   --ckpt_dir gs://jfacevedo-maxdiffusion/rl_parity/run1/ckpt \
@@ -166,11 +166,11 @@ spec:
                   --top_k -1 \
                   --top_p 1.0 \
                   --num_generations 4 \
-                  --max_turns 6 \
+                  --max_turns 30 \
                   --step_timeout_secs 60 \
                   --reward_timeout_secs 180 \
                   --per_turn_timeout_secs 60 \
-                  --episode_timeout_secs 1200 \
+                  --episode_timeout_secs 3600 \
                   --beta 0.0 \
                   --epsilon 0.2 \
                   --epsilon_high 0.28 \
