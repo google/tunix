@@ -193,6 +193,18 @@ class GRPOAdapter(AlgorithmAdapter):
       kl_loss_mode: str = "mse_kl",
       kl_clamp_value: float | None = None,
       use_rollout_logps: bool = True,
+      # MLPerf GRPO recipe knobs. All default to off, so a run that does not set
+      # them behaves exactly as before. `grpo_loss_fn` reads every one of these
+      # off `algo_config` with getattr and raises rather than silently
+      # no-op'ing when a combination cannot work -- e.g. TIS configured without
+      # rollout log-probabilities, or any of them under sequence packing.
+      overlong_loss_masking: bool = False,
+      seq_logprob_error_threshold: float | None = None,
+      truncated_importance_sampling_type: str | None = None,
+      truncated_importance_sampling_ratio_min: float | None = None,
+      truncated_importance_sampling_ratio: float | None = None,
+      sampler_is_report_bands: Sequence[tuple[float, float]] = (),
+      sampler_is_length_buckets: Sequence[int] | None = None,
   ):
     if group_size <= 1:
       raise ValueError(
@@ -218,6 +230,29 @@ class GRPOAdapter(AlgorithmAdapter):
     self.kl_clamp_value = kl_clamp_value
     self.requires_reference_kl = beta_kl != 0.0
     self.use_rollout_logps = use_rollout_logps
+    self.overlong_loss_masking = overlong_loss_masking
+    self.seq_logprob_error_threshold = seq_logprob_error_threshold
+    self.truncated_importance_sampling_type = truncated_importance_sampling_type
+    self.truncated_importance_sampling_ratio_min = (
+        truncated_importance_sampling_ratio_min
+    )
+    self.truncated_importance_sampling_ratio = truncated_importance_sampling_ratio
+    self.sampler_is_report_bands = tuple(sampler_is_report_bands or ())
+    self.sampler_is_length_buckets = sampler_is_length_buckets
+    # Both gates compare the sampler against the trainer, so both need the
+    # rollout engine's log-probabilities. Fail at construction rather than
+    # letting a correctness feature quietly do nothing for a whole run.
+    if (
+        truncated_importance_sampling_type is not None
+        or seq_logprob_error_threshold is not None
+    ) and not use_rollout_logps:
+      raise ValueError(
+          "truncated_importance_sampling_type and seq_logprob_error_threshold"
+          " require use_rollout_logps=True: they compare the sampler's"
+          " per-token log-probabilities against the trainer's, and with"
+          " use_rollout_logps=False the rollout log-probabilities are never"
+          " carried to the loss."
+      )
 
   def compute_advantages(
       self,
@@ -296,6 +331,19 @@ class GRPOAdapter(AlgorithmAdapter):
         temperature=self.temperature,
         kl_loss_mode=self.kl_loss_mode,
         kl_clamp_value=self.kl_clamp_value,
+        overlong_loss_masking=self.overlong_loss_masking,
+        seq_logprob_error_threshold=self.seq_logprob_error_threshold,
+        truncated_importance_sampling_type=(
+            self.truncated_importance_sampling_type
+        ),
+        truncated_importance_sampling_ratio_min=(
+            self.truncated_importance_sampling_ratio_min
+        ),
+        truncated_importance_sampling_ratio=(
+            self.truncated_importance_sampling_ratio
+        ),
+        sampler_is_report_bands=self.sampler_is_report_bands,
+        sampler_is_length_buckets=self.sampler_is_length_buckets,
     )
     return functools.partial(
         _algo_model_input,

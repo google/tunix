@@ -123,6 +123,19 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # Per-token log-probabilities the rollout engine reported for the tokens it
+  # generated -- the *behaviour* policy. Distinct from ``old_per_token_logps``,
+  # which is whatever policy the surrogate ratio is taken against: the two
+  # coincide in the common case but diverge when the ratio is taken against a
+  # trainer recompute or pinned to 1.0. Kept separate so a correction can
+  # always reference the policy that actually produced the samples. ``None``
+  # when the rollout engine does not return log-probabilities.
+  rollout_per_token_logps: ArrayType | None = None
+  # `[B]`, 1.0 where the rollout engine exhausted the response budget without
+  # emitting an end-of-sequence token, i.e. the sample is a truncated prefix of
+  # a trajectory rather than a trajectory. ``None`` when the engine reports no
+  # truncation verdict.
+  overlong: ArrayType | None = None
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
@@ -394,6 +407,7 @@ def model_call_contains(model, target_arg: str) -> bool:
         "return_entropy",
         "temperature",
         "chunk_size",
+        "return_routed_experts",
     ),
 )
 def compute_per_token_logps(
@@ -411,7 +425,8 @@ def compute_per_token_logps(
     temperature: float = 1.0,
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    return_routed_experts: bool = False,
+) -> jax.Array | tuple[jax.Array, ...]:
   """Computes the per-token log probabilities.
 
   Args:
@@ -498,7 +513,7 @@ def compute_per_token_logps(
   ):
     model_kwargs["forced_routed_experts"] = routed_experts
 
-  outputs, _ = model(input_tokens, **model_kwargs)
+  outputs, extra = model(input_tokens, **model_kwargs)
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
@@ -509,6 +524,14 @@ def compute_per_token_logps(
     logits_to_keep = completion_tokens.shape[1]
 
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+
+  trainer_routed_experts = None
+  if extra is not None and hasattr(extra, "ndim") and extra.ndim >= 3:
+    # extra is [B, T_full, L, K], slice to completion tokens if not packed
+    if segment_ids is None and extra.shape[1] > logits_to_keep:
+      trainer_routed_experts = extra[:, -logits_to_keep:, ...]
+    else:
+      trainer_routed_experts = extra
 
   if chunk_size > 0:
     hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
@@ -539,6 +562,11 @@ def compute_per_token_logps(
       if return_entropy:
         per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
 
+    if return_routed_experts:
+      if return_entropy:
+        return per_token_logps, per_token_entropy, trainer_routed_experts
+      return per_token_logps, trainer_routed_experts
+
     if return_entropy:
       return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
     return per_token_logps
@@ -560,6 +588,12 @@ def compute_per_token_logps(
     if stop_gradient:
       per_token_logps = jax.lax.stop_gradient(per_token_logps)
       logits = jax.lax.stop_gradient(logits)
+
+    if return_routed_experts:
+      if return_entropy:
+        entropy = compute_entropy_from_logits(logits)
+        return per_token_logps, entropy, trainer_routed_experts
+      return per_token_logps, trainer_routed_experts
 
     if return_entropy:
       entropy = compute_entropy_from_logits(logits)
