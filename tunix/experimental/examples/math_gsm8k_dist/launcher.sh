@@ -75,6 +75,11 @@ USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
+# run_gsm8k_dist_grpo.py exposes --debug ("Enable debug logging and print full
+# sampler responses") but nothing plumbed it through, so a run that scores every
+# rollout 0.0 gave no way to see whether the model produced bad text or the
+# reward path never saw any text at all. DEBUG=1 turns it on.
+DEBUG=${DEBUG:-0}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
@@ -706,6 +711,9 @@ echo "Launching CPU orchestrator..."
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )
+  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--debug)
+  fi
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)
   else
