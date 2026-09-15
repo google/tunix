@@ -90,6 +90,12 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+# metrax calls wandb.init() with no entity (metrax/logging/wandb_backend.py), and wandb
+# refuses to start a run when the key's viewer has no defaultEntity. tunix catches that
+# and logs it at INFO (sft/metrics_logger.py), so the run proceeds with metrics silently
+# off. wandb.init() reads WANDB_ENTITY from the environment, so naming the team here is
+# what makes the difference.
+export WANDB_ENTITY=${WANDB_ENTITY:-}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
@@ -126,6 +132,15 @@ export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-
 # saves; if those overlap, two full copies must fit. yaml_generator's own default
 # of 100G is below 2x a 35B model and OOM-kills the proxy.
 export PATHWAYS_PROXY_MEMORY_LIMIT=${PATHWAYS_PROXY_MEMORY_LIMIT:-100G}
+# Request and ceiling for the orchestrator/user container on the trainer's CPU head
+# node, and the request for each pathways-worker container on a TPU node. Until
+# tunix PR 2228 these were absent from jobset.pathways.yaml, so every container on
+# the trainer jobset was bounded only by its node. A request of 0 lets the
+# scheduler place the pathways-worker alongside anything, and the proxy's staged
+# copy of the model is then competing for host RAM it was never promised.
+export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-60G}
+export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
+export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-165G}
 # Extra `KEY=VAL` pairs prepended to the trainer's startup command, for ad-hoc
 # diagnostics (e.g. JAX_LOG_COMPILES=1) without rebuilding the image.
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
@@ -179,6 +194,7 @@ start_orchestrator() {
     --worker_startup_command=" \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
+      ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       python -m tunix.experimental.distributed.runtime.main \
@@ -270,6 +286,9 @@ start_trainer() {
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}" \
+    --user_container_memory="${USER_CONTAINER_MEMORY}" \
+    --user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}" \
+    --pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}" \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \

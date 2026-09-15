@@ -69,7 +69,7 @@ ${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
               resources:
                 limits:
                   cpu: "24"
-                  memory: 32G
+                  memory: 16G
               args:
               - --server_port=29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
@@ -122,10 +122,11 @@ ${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 32G
+              resources:
+                requests:
+                  memory: ${USER_CONTAINER_MEMORY}
+                limits:
+                  memory: ${USER_CONTAINER_MEMORY_LIMIT}
               command:
                 - bash
                 - -c
@@ -294,6 +295,7 @@ ${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
                   google.com/tpu: "4"
                 requests:
                   google.com/tpu: "4"
+                  memory: ${PATHWAYS_WORKER_MEMORY}
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp

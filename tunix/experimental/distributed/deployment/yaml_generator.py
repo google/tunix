@@ -88,6 +88,21 @@ def main() -> None:
       default="100G",
       help="Memory limit of the Pathways proxy container",
   )
+  parser.add_argument(
+      "--user_container_memory",
+      default="60G",
+      help="Memory request for the user/worker container",
+  )
+  parser.add_argument(
+      "--user_container_memory_limit",
+      default="70G",
+      help="Memory limit for the user/worker container",
+  )
+  parser.add_argument(
+      "--pathways_worker_memory",
+      default="165G",
+      help="Memory request for the pathways-worker container",
+  )
 
   parser.add_argument(
       "--worker_container_name",
@@ -190,6 +205,9 @@ def main() -> None:
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,
         PATHWAYS_PROXY_MEMORY_LIMIT=args.pathways_proxy_memory_limit,
+        USER_CONTAINER_MEMORY=args.user_container_memory,
+        USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
+        PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,
         CPU_MACHINE=args.cpu_machine,
         TPU_MACHINE=tpu_machine,
         TPU_TYPE=tpu_type,
