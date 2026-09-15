@@ -1,0 +1,12 @@
+# WandB console logs are deliberately never versioned.
+#
+# r11's alone is 368,020,804 B, above GitHub's hard 100 MB per-file limit, and a
+# console log contributes nothing to the per-step curves that this directory
+# exists to serve -- every plotted series lives in history.csv.  Git would also
+# keep the blob forever, taxing every future clone, with no way to drop it short
+# of rewriting history.  WandB retains these server-side, so re-pull on demand
+# with the wandb-export skill instead.
+#
+# This rule exists so that a stray `git add -A` cannot commit one by accident.
+console.log
+*/console.log
