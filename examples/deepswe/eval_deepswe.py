@@ -90,8 +90,6 @@ except ImportError:
 from huggingface_hub import snapshot_download
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.automodel import AutoModel, ModelSource
-from tunix.models.qwen3 import model as model_lib
-from tunix.models.qwen3 import params as params_lib
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -355,15 +353,6 @@ parser_cli.add_argument(
     help="Whether to enable vLLM prefix caching",
 )
 parser_cli.add_argument(
-    "--patch_qwen_mrope",
-    type=str2bool,
-    default=os.getenv("PATCH_QWEN_MROPE", "false").lower() == "true",
-    help=(
-        "Whether to patch Qwen3OmniMoeThinkerTextRotaryEmbedding for 3D MRoPE"
-        " position normalization. Training does not apply this patch."
-    ),
-)
-parser_cli.add_argument(
     "--temperature",
     type=float,
     default=float(os.getenv("TEMPERATURE", "0.0")),
@@ -513,7 +502,6 @@ PREFUSE_MOE_WEIGHTS = args.prefuse_moe_weights
 MAXTEXT_ATTENTION = args.maxtext_attention
 ENABLE_CONTINUE_DECODE = args.enable_continue_decode
 ENABLE_PREFIX_CACHING = args.enable_prefix_caching
-PATCH_QWEN_MROPE = args.patch_qwen_mrope
 CHECKPOINT_STORAGE_USE_OCDBT = args.checkpoint_storage_use_ocdbt
 CHECKPOINT_STORAGE_USE_ZARR3 = args.checkpoint_storage_use_zarr3
 
@@ -569,55 +557,6 @@ if MODEL_SOURCE == "maxtext":
     logger.info("Successfully registered MaxTextForCausalLM model with vLLM.")
   except ImportError as e:
     logger.warning("Could not import maxtext_vllm_adapter: %s", e)
-
-  # Not applied by train_maxtext_nb.py. If the model being evaluated routes
-  # through this rotary class, leaving this enabled makes eval diverge from the
-  # behavior the model was trained with.
-  if PATCH_QWEN_MROPE:
-    try:
-      import jax.numpy as jnp
-      from maxtext.layers.embeddings import Qwen3OmniMoeThinkerTextRotaryEmbedding
-
-      _orig_qwen_mrope_call = Qwen3OmniMoeThinkerTextRotaryEmbedding.__call__
-
-      def _patched_qwen_mrope_call(self, inputs, position, *args, **kwargs):
-        if position is not None:
-          # Case 1: vLLM (3, N, 1) -> (N, 1, 3)
-          if (
-              position.ndim == 3
-              and position.shape[0] == 3
-              and position.shape[-1] == 1
-          ):
-            position = jnp.transpose(position.squeeze(-1), (1, 0))[:, None, :]
-          # Case 2: vLLM (3, N) -> (N, 1, 3)
-          elif position.ndim == 2 and position.shape[0] == 3:
-            position = jnp.transpose(position, (1, 0))[:, None, :]
-          # Case 3: (N,) -> (N, 1, 3)
-          elif position.ndim == 1:
-            position = jnp.broadcast_to(
-                position[:, None, None], (position.shape[0], 1, 3)
-            )
-          # Case 4: (B, S) -> (B, S, 3)
-          elif position.ndim == 2:
-            position = jnp.broadcast_to(
-                position[..., None], position.shape + (3,)
-            )
-          # Case 5: (B, S, 1) -> (B, S, 3)
-          elif position.ndim == 3 and position.shape[-1] == 1:
-            position = jnp.broadcast_to(position, position.shape[:-1] + (3,))
-        return _orig_qwen_mrope_call(self, inputs, position, *args, **kwargs)
-
-      Qwen3OmniMoeThinkerTextRotaryEmbedding.__call__ = (
-          _patched_qwen_mrope_call
-      )
-      logger.info(
-          "Successfully patched Qwen3OmniMoeThinkerTextRotaryEmbedding for 3D"
-          " MRoPE position normalization."
-      )
-    except Exception as e:
-      logger.warning(
-          "Failed to patch Qwen3OmniMoeThinkerTextRotaryEmbedding: %s", e
-      )
 
 # ========================== Dataset ==========================
 
@@ -1116,18 +1055,10 @@ try:
     action_obj = _R2EAction.from_string(action_block)
     return thought, action_obj
 
-  SWEAgent.update_from_model.__globals__["parse_xml_response"] = _resilient_parse_xml_response
-  try:
-    import swe_agent as _swe_agent_mod
-    _swe_agent_mod.parse_xml_response = _resilient_parse_xml_response
-  except Exception:
-    pass
-  try:
-    from examples.deepswe import swe_agent as _swe_agent_mod2
-    _swe_agent_mod2.parse_xml_response = _resilient_parse_xml_response
-  except Exception:
-    pass
-  logger.info("Installed resilient parse_xml_response across SWEAgent modules.")
+  SWEAgent.update_from_model.__globals__["parse_xml_response"] = (
+      _resilient_parse_xml_response
+  )
+  logger.info("Installed resilient parse_xml_response on SWEAgent.")
 except Exception as e:
   logger.warning("Could not install resilient parse_xml_response: %s", e)
 
@@ -1523,36 +1454,11 @@ if ROLLOUT_ENGINE == "vllm":
           vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
       )
 
-      try:
-        from etils import epath
-        from orbax.checkpoint._src.serialization import jax_array_handlers
-        from orbax.checkpoint._src.serialization import type_handler_registry
-
-        if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
-          type_handler_registry.register_type_handler(
-              jax.Array, jax_array_handlers.ArrayHandler(), override=True
-          )
-          logger.info("Registered standard ArrayHandler for OCDBT checkpoint.")
-      except Exception as e:
-        logger.warning("Could not register ArrayHandler for OCDBT: %s", e)
-
       model, _ = model_creation_utils.from_pretrained(
           trainer_config,
           devices=devices[:total_mesh_devices],
           wrap_with_tunix_adapter=True,
           tokenizer_pad_id=tokenizer.pad_token_id,
-      )
-    elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
-      model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
-      logger.info("Loading model weights from %s ...", MODEL_PATH)
-      model = params_lib.create_model_from_safe_tensors(
-          MODEL_PATH, model_config, mesh, dtype=jnp.float32
-      )
-    elif MODEL_VERSION in ("Qwen/Qwen3-32B", "Qwen3-32B"):
-      model_config = model_lib.ModelConfig.qwen3_32b()
-      logger.info("Loading model weights from %s ...", MODEL_PATH)
-      model = params_lib.create_model_from_safe_tensors(
-          MODEL_PATH, model_config, mesh, dtype=jnp.float32
       )
     else:
       logger.info(
@@ -1624,18 +1530,6 @@ elif ROLLOUT_ENGINE in ("vanilla", "sglang_jax"):
         allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
         scan_layers=SCAN_LAYERS,
         checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
-    )
-  elif MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
-    model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
-    logger.info("Loading model weights from %s ...", MODEL_PATH)
-    model = params_lib.create_model_from_safe_tensors(
-        MODEL_PATH, model_config, mesh, dtype=jnp.float32
-    )
-  elif MODEL_VERSION in ("Qwen/Qwen3-32B", "Qwen3-32B"):
-    model_config = model_lib.ModelConfig.qwen3_32b()
-    logger.info("Loading model weights from %s ...", MODEL_PATH)
-    model = params_lib.create_model_from_safe_tensors(
-        MODEL_PATH, model_config, mesh, dtype=jnp.float32
     )
   else:
     logger.info("Loading model weights via AutoModel for %s ...", MODEL_VERSION)
@@ -2214,26 +2108,31 @@ def save_results(results):
   timestamp = time.strftime("%Y%m%d_%H%M%S")
   filename = f"eval_{MODEL_VERSION.replace('/', '_')}_{timestamp}.jsonl"
 
+  local_dir = (
+      "/tmp/eval_results" if OUTPUT_DIR.startswith("gs://") else OUTPUT_DIR
+  )
+  os.makedirs(local_dir, exist_ok=True)
+  output_file = os.path.join(local_dir, filename)
+
+  with open(output_file, "w") as f:
+    for r in results:
+      entry = entries[r["entry_index"]]
+      record = {
+          "pair_index": r.get("pair_index", -1),
+          "instance_id": entry.get("instance_id", r["instance_id"]),
+          "docker_image": entry.get("docker_image", ""),
+          "reward": r["reward"],
+          "num_steps": r["num_steps"],
+          "status": r["status"],
+          "guard_blocked_steps": r["guard_blocked_steps"],
+          "guard_reasons": r["guard_reasons"],
+          "step_actions": r.get("step_actions", []),
+      }
+      f.write(json.dumps(record) + "\n")
+
+  logger.info("Results saved to %s", output_file)
+
   if OUTPUT_DIR.startswith("gs://"):
-    local_output_dir = "/tmp/eval_results"
-    os.makedirs(local_output_dir, exist_ok=True)
-    output_file = os.path.join(local_output_dir, filename)
-    with open(output_file, "w") as f:
-      for r in results:
-        entry = entries[r["entry_index"]]
-        record = {
-            "pair_index": r.get("pair_index", -1),
-            "instance_id": entry.get("instance_id", r["instance_id"]),
-            "docker_image": entry.get("docker_image", ""),
-            "reward": r["reward"],
-            "num_steps": r["num_steps"],
-            "status": r["status"],
-            "guard_blocked_steps": r["guard_blocked_steps"],
-            "guard_reasons": r["guard_reasons"],
-            "step_actions": r.get("step_actions", []),
-        }
-        f.write(json.dumps(record) + "\n")
-    logger.info("Results saved locally to %s", output_file)
     try:
       from google.cloud import storage
 
@@ -2260,25 +2159,8 @@ def save_results(results):
         logger.info("Uploaded results via gcloud storage to %s", gcs_target)
       except Exception as ex:
         logger.warning("Failed to upload to GCS via gcloud: %s", ex)
-    return output_file
-  else:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_file = os.path.join(OUTPUT_DIR, filename)
-    with open(output_file, "w") as f:
-      for r in results:
-        entry = entries[r["entry_index"]]
-        record = {
-            "instance_id": entry.get("instance_id", r["instance_id"]),
-            "docker_image": entry.get("docker_image", ""),
-            "reward": r["reward"],
-            "num_steps": r["num_steps"],
-            "status": r["status"],
-            "guard_blocked_steps": r["guard_blocked_steps"],
-            "guard_reasons": r["guard_reasons"],
-        }
-        f.write(json.dumps(record) + "\n")
-    logger.info("Results saved to %s", output_file)
-    return output_file
+
+  return output_file
 
 
 # ========================== Main ==========================
