@@ -265,6 +265,10 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       group_size=args.num_generations,
       # StandardRLProgram consumes this many prompt groups per trainer update.
       mini_batch_size=args.batch_size,
+      # Rows per payload the assembler hands the trainer. Left at the adapter
+      # default this is 1, which makes every per-batch metric (is_oob_ratio,
+      # kept_frac) a single-sequence coin flip rather than a fraction.
+      train_micro_batch_size=args.train_micro_batch_size,
       max_packed_len=(
           args.max_seq_token_per_tpu
           if args.max_seq_token_per_tpu is not None

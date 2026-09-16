@@ -371,6 +371,24 @@ class TrainerNodeGradAccumWiringTest(absltest.TestCase):
     # The value the trainer silently fell back to when the flag was missing.
     self.assertEqual(steps(1), 2)
 
+  def test_example_forwards_train_micro_batch_size_to_the_adapter(self):
+    """`--train_micro_batch_size` was parsed, validated, logged -- and dropped.
+
+    `rl_program` reads it back off the adapter
+    (`getattr(algo, "train_micro_batch_size", 1)`) to size the assembler's
+    payloads, so leaving it at the adapter default put exactly one sequence in
+    every loss call. Per-batch fractions like `tis/is_oob_ratio` and
+    `sample_mask/kept_frac` then quantize to {0.0, 1.0} and read as a collapsed
+    gate rather than the sampling noise they actually are.
+    """
+    from tunix.experimental.examples.math_gsm8k_dist import run_gsm8k_dist_grpo  # pylint: disable=g-import-not-at-top
+
+    args = run_gsm8k_dist_grpo._parse_args(["--train_micro_batch_size=4"])  # pylint: disable=protected-access
+    self.assertEqual(args.train_micro_batch_size, 4)
+
+    algo = run_gsm8k_dist_grpo._build_algo(args)  # pylint: disable=protected-access
+    self.assertEqual(algo.train_micro_batch_size, 4)
+
 
 if __name__ == "__main__":
   absltest.main()
