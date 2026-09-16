@@ -1085,7 +1085,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
           workload.sandbox_active_deadline_secs
       ),
       "R2E_POD_DELETE_TIMEOUT_SECONDS": "300",
-      "R2E_K8S_CPU": "2",
+      "R2E_K8S_CPU": "1",
       "R2E_K8S_MEM": "4Gi",
       "R2E_K8S_CPU_LIMIT": "4",
       "R2E_K8S_MEM_LIMIT": "8Gi",

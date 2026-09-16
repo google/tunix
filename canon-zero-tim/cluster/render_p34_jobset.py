@@ -567,7 +567,20 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "R2E_ACTIVE_DEADLINE_SECONDS": "5100",
       "R2E_POD_START_TIMEOUT_SECONDS": "1200",
       "R2E_POD_DELETE_TIMEOUT_SECONDS": "300",
-      "R2E_K8S_CPU": "2",
+      # A sandbox spends its life blocked on the model: measured over bd10's
+      # first batch the median trajectory ran 468 s, of which environment_step,
+      # environment_reset, final_reward and cleanup together accounted for
+      # 16.6 s, a 3.5% duty cycle.  Requesting 2 CPU for that reserved 256 CPU
+      # across 128 sandboxes, 40% of sandbox-cpu-pool's 637, and the scheduler
+      # reserves on the request whether or not the process is runnable.  bd10
+      # died when 100 of 128 sandboxes could not be placed (56 Insufficient
+      # cpu, 43 gated behind the Kueue quota).  One CPU puts the request at
+      # 20% of the pool, level with the 22% the memory request already takes,
+      # so CPU stops being the binding dimension; dropping further buys no
+      # scheduling headroom because memory caps it, and would cut the cgroup
+      # cpu.shares we get when a node is genuinely contended.  The limit stays
+      # at 4 so the bursty phases are unaffected.
+      "R2E_K8S_CPU": "1",
       "R2E_K8S_MEM": "4Gi",
       "R2E_K8S_CPU_LIMIT": "4",
       "R2E_K8S_MEM_LIMIT": "8Gi",
@@ -709,7 +722,7 @@ def validate(
       "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "1800",
       "R2E_ACTIVE_DEADLINE_SECONDS": "5100",
       "R2E_POD_DELETE_TIMEOUT_SECONDS": "300",
-      "R2E_K8S_CPU": "2",
+      "R2E_K8S_CPU": "1",
       "R2E_K8S_MEM": "4Gi",
       "R2E_K8S_CPU_LIMIT": "4",
       "R2E_K8S_MEM_LIMIT": "8Gi",
