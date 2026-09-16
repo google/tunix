@@ -214,70 +214,40 @@ def _restore_opt_state_float_dtypes(
   )
 
 
-class GradientAccumulator(nnx.Module):
-  """Accumulates gradients over multiple micro-steps.
+class GradientAccumulator(flax.struct.PyTreeNode):
+  """Accumulates gradients over multiple micro-steps, as an immutable pytree value.
 
-  Unifies standard (unweighted) micro-batch averaging with sequence packing
-  (weighted, denom-aware) accumulation.
+  Deliberately not an nnx.Module: the running sum flows through the jitted
+  kernels as a call-time argument and comes back out of their outputs, so the
+  model can be bound into nnx.jit_partial/nnx.cached_partial at every
+  accumulation depth (the old single-microstep path flipped grads between {}
+  and a full pytree, which a frozen graphdef cannot follow). Being a regular
+  pytree it can also be donated, so accumulation is written in-place.
 
-  Averaging behavior (optax.MultiSteps semantics):
-    When `add(grads)` is called without a denom, each micro-step implicitly
-    adds 1.0 to the denominator. `get()` computes `Σ_grads / Σ_1`, which
-    is the exact mean of the micro-step gradients. This is mathematically
-    equivalent to a single optimization step on a batch of size `B =
-    micro_batch_size * grad_acc_steps` when the loss is a mean-reduction
-    (e.g., standard cross-entropy).
-
-  Packing-aware behavior (Sum of Grads / Sum of Sizes):
-    Under sequence packing, each yielded micro-batch contains a varying
-    number of valid target tokens or training examples. The loss is
-    computed as an *unreduced sum* over the packed batch. Callers pass the
-    true size of the pack via `add(grads, denom=size)`. `get()` computes
-    `Σ_grad(sum_loss_i) / Σ_size_i`, recovering the true global mean
-    gradient across all items in the accumulated batch, avoiding the bias
-    introduced by averaging pre-scaled micro-batch gradients of unequal
-    sizes.
-
-  Persistent vs. non-persistent mode (`self.persistent`):
-    Controlled by `allocate_grads` at initialization:
-    * Persistent mode (`allocate_grads=True`, `self.persistent=True`): Used
-      when accumulating across multiple micro-steps
-      (`gradient_accumulation_steps
-      > 1`). A parameter-sized buffer is allocated at initialization and zeroed
-      in-place when `reset()` is called so the buffer persists across updates.
-    * Non-persistent mode (`allocate_grads=False`, `self.persistent=False`):
-      Used on single-microstep fast paths (`gradient_accumulation_steps == 1`).
-      No buffer is allocated at initialization (`self.grads` starts as `{}`).
-      `add()` adopts the reference to incoming backward-pass gradients directly,
-      and `reset()` drops the reference (`self.grads = nnx.data({})`) instead of
-      writing a full parameter-sized copy of zeros that would never be read.
-
-  Attributes:
-    persistent: Whether the accumulator operates in persistent mode
-      (`allocate_grads=True`) or non-persistent mode (`allocate_grads=False`).
-    grads: The accumulated gradient pytree (`nnx.data`), or an empty dictionary
-      `{}` before gradients are added in non-persistent mode.
-    denom: The denominator (`nnx.Variable`) used for averaging or packing-aware
-      normalization.
+  `grads` and `denom` are pytree children; everything else is static metadata
+  that becomes part of the jit cache key. Every mutation (`add`, `reset`)
+  returns a new value.
   """
 
-  def __init__(
-      self,
+  grads: Any
+  denom: jax.Array
+  wrt: type[nnx.Variable] = flax.struct.field(pytree_node=False)
+  accumulator_dtype: Any = flax.struct.field(pytree_node=False)
+  param_dtypes: Any = flax.struct.field(pytree_node=False)
+
+  @classmethod
+  def create(
+      cls,
       model: nnx.Module,
       wrt: type[nnx.Variable],
       *,
-      allocate_grads: bool = True,
       accumulator_dtype: DTypeLike = jnp.float32,
-  ):
-    """Initializes the gradient accumulator.
+  ) -> "GradientAccumulator":
+    """Records the parameter dtypes. Allocates nothing.
 
     Args:
       model: The model whose state to accumulate gradients for.
       wrt: The target variable type (e.g., `nnx.Param` or `nnx.LoRAParam`).
-      allocate_grads: Whether to allocate an accumulated gradient buffer
-        matching the model's parameter structure. When `False` (used on depth-1
-        fast paths where accumulation is skipped), an empty dictionary is
-        allocated to save HBM without altering the JIT signature.
       accumulator_dtype: The dtype used for accumulated gradient buffers.
         Defaults to `jnp.float32` to prevent low-precision underflow and
         rounding errors during multi-step accumulation. When returning
@@ -286,115 +256,65 @@ class GradientAccumulator(nnx.Module):
         saves HBM but incurs numerical precision trade-offs without upcasting
         for large gradients.
     """
-    state = nnx.state(model, wrt)
-    self._param_dtypes = nnx.data(
-        jax.tree_util.tree_map(
-            lambda x: getattr(
-                x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
-            ),
-            state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
+    param_dtypes = jax.tree.map(
+        lambda x: x.dtype, nnx.to_pure_dict(nnx.state(model, wrt))
     )
-    self.persistent = allocate_grads
-    if allocate_grads:
-      self.grads = nnx.data(
-          jax.tree_util.tree_map(
-              lambda x: jnp.zeros_like(x, dtype=accumulator_dtype), state
-          )
-      )
-    else:
-      # When every update consumes exactly one micro-batch, `set()` overwrites
-      # the whole tree before anything reads it, so the initial zeros are dead
-      # on arrival. Skipping them avoids writing a full copy of the parameter
-      # tree (~3.5 GiB per device for gemma4-e2b at 12 layers in fp32).
-      self.grads = nnx.data({})
-      self._param_dtypes = nnx.data({})
-    self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
-
-  def add(self, grads: Any, denom: jax.Array | None = None):
-    def _add(acc_var, g_var):
-      g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      # set_value (no index) avoids the indexed __setitem__ "slow" path, whose
-      # `.sharding` check on tracers triggers a per-leaf provenance scan that
-      # dominates trace time; the stored value is identical.
-      acc_var.set_value(acc_var[...] + g)
-
-    if jax.tree_util.tree_leaves(self.grads):
-      jax.tree_util.tree_map(
-          _add,
-          self.grads,
-          grads,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
-    else:
-      # No buffer held: either it was never allocated, or a non-persistent
-      # `reset()` released it.
-      self.grads = nnx.data(grads)
-
-    if denom is None:
-      denom_val = jnp.asarray(1.0, dtype=jnp.float32)
-    else:
-      denom_val = denom.astype(jnp.float32)
-    self.denom.set_value(self.denom[...] + denom_val)
-
-  def get(self):
-    scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
-
-    def _scale(v):
-      return type(v)(v[...] * scale.astype(v[...].dtype))
-
-    def _scale_and_cast(v, target_dtype):
-      res = v[...] * scale.astype(v[...].dtype)
-      return type(v)(res.astype(target_dtype) if target_dtype else res)
-
-    if not jax.tree_util.tree_leaves(self.grads):
-      # Fail here rather than inside optax, where the same problem surfaces as
-      # "Mismatch custom node data: ('embedder', ...) != (); value: State({})".
-      raise ValueError(
-          "The gradient accumulator is empty. Either get() was called without a"
-          " preceding add()/set(), or the gradients written by an earlier"
-          " executable were discarded on the way out of jit --"
-          " nnx.cached_partial (cache_nnx_graph=True) freezes the bound"
-          " module's graphdef, so a step that changes the accumulator's pytree"
-          " structure cannot hand it to a later executable."
-      )
-
-    if not jax.tree_util.tree_leaves(self._param_dtypes):
-      # When `allocate_grads=False` dtype map is empty. Gradients already carry
-      # the right parameter dtype.
-      return jax.tree_util.tree_map(
-          _scale, self.grads, is_leaf=lambda x: isinstance(x, nnx.Variable)
-      )
-
-    return jax.tree_util.tree_map(
-        _scale_and_cast,
-        self.grads,
-        self._param_dtypes,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    return cls(
+        grads=None,
+        # Kept as a scalar array rather than None so `denom[...]` reads 0.0
+        # between steps.
+        denom=jnp.zeros((), dtype=jnp.float32),
+        wrt=wrt,
+        accumulator_dtype=jnp.dtype(accumulator_dtype),
+        param_dtypes=param_dtypes,
     )
 
-  def reset(self):
-    """Clears the accumulator, either by zeroing the buffer or by dropping it.
+  @property
+  def param_dtype(self) -> Any:
+    """Per-leaf dtype of the parameters this accumulator mirrors."""
+    return self.param_dtypes
 
-    When self.persistent, the buffer must survive and be zeroed in place. If
-    not persistent: zeroing would write a full parameter-sized copy that is
-    never read. Drop the reference instead; `add()` re-adopts the incoming
-    gradients.
+  @property
+  def is_empty(self) -> bool:
+    return self.grads is None
+
+  def add(self, grads: Any, denom: Any) -> "GradientAccumulator":
+    """Folds one micro-batch's unreduced gradients into the running sum.
+
+    The first micro-batch writes its gradients straight out (there is no
+    buffer to add to), so nothing is ever zero-filled.
     """
-    if self.persistent:
-      def _zero_in_place(v):
-        # `x * 0` rather than `jnp.zeros_like(x)`, to preserve the buffer's
-        # sharding.
-        v.set_value(v[...] * 0)
-      jax.tree_util.tree_map(
-          _zero_in_place,
-          self.grads,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
+    grads = jax.tree.map(lambda g: g.astype(self.accumulator_dtype), grads)
+    if self.grads is not None:
+      grads = jax.tree.map(jnp.add, self.grads, grads)
+    return self.replace(grads=grads, denom=self.denom + denom)
+
+  def reset(self) -> "GradientAccumulator":
+    """Drops the running sum. Safe to call on a donated value."""
+    return self.replace(grads=None, denom=jnp.zeros((), dtype=jnp.float32))
+
+  def get(self) -> Any:
+    """sum(grad) / sum(denom) across micro-batches, exactly once.
+
+    Returns a pure dict in the parameter dtypes. A zero total means every
+    micro-batch was empty; yield zeros rather than NaN.
+    """
+    if self.grads is None:
+      raise ValueError(
+          "The gradient accumulator is empty: get() must follow at least one "
+          "add() in this optimizer step."
       )
-    else:
-      self.grads = nnx.data({})
-    self.denom.set_value(jnp.zeros_like(self.denom[...]))
+    has_weights = self.denom > 0
+    safe = jnp.where(has_weights, self.denom, jnp.asarray(1.0, jnp.float32))
+
+    def _one(g, dtype):
+      # Divide in float32 regardless of the accumulator dtype: casting a large
+      # token count to bf16 first would lose ~0.4% of the scale.
+      g32 = g.astype(jnp.float32)
+      scaled = jnp.where(has_weights, g32 / safe, jnp.zeros_like(g32))
+      return scaled.astype(dtype)
+
+    return jax.tree.map(_one, self.grads, self.param_dtypes)
 
 
 def _default_weight_sync_worker() -> Any:
@@ -452,11 +372,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    self.grad_accumulator = GradientAccumulator(
-        self.model, wrt_target, allocate_grads=not self._is_single_microstep()
-    )
+    self._wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=self._wrt_target)
+    self._param_shardings: Any | None = None
+    self.grad_accumulator = GradientAccumulator.create(self.model, wrt=self._wrt_target)
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -558,6 +477,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._param_shardings = None
+
+  def _capture_param_shardings(self) -> None:
+    self._param_shardings = jax.tree.map(
+        lambda p: p.sharding,
+        nnx.to_pure_dict(nnx.state(self.model, self._wrt_target)),
+    )
+
+  def _constrain_grads(self, grads: Any) -> Any:
+    if self._param_shardings is None:
+      return grads
+    return jax.tree.map(
+        jax.lax.with_sharding_constraint, grads, self._param_shardings
+    )
 
   @override
   def with_loss_fn(
@@ -605,7 +538,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       model: nnx.Module,
       grad_accumulator: GradientAccumulator,
       inputs: Any,
-  ) -> Tuple[ArrayLike, Any | None]:
+  ) -> Tuple[ArrayLike, Any | None, GradientAccumulator]:
     """Forward and backward passes through grad_fn.
 
     Args:
@@ -614,8 +547,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       inputs: The training input.
 
     Returns:
-      A tuple containing the loss, and auxiliary data (or None if has_aux is
-      False).
+      A tuple containing the loss, auxiliary data (or None if has_aux is
+      False), and the accumulator with this micro-batch folded in.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -635,6 +568,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         has_aux=True,
     )
     (loss_val, aux), grads = grad_fn(model, **inputs)
+    grads = nnx.to_pure_dict(grads)
 
     if isinstance(aux, utils.LossOutput):
       # Compute exactly equivalent legacy loss val
@@ -643,24 +577,22 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # loss's real denominator, so the optimizer step sees the GLOBAL weighted
       # mean (Sum grads / Sum denom) across micro-batches rather than a
       # mean-of-means.
-      grad_accumulator.add(grads, denom=aux.primary_loss.denominator)
+      denom = aux.primary_loss.denominator.astype(jnp.float32)
+      aux_out = aux.aux_metrics
     else:
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+      denom = jnp.asarray(1.0, dtype=jnp.float32)
+      aux_out = aux if self._has_aux else None
 
-    if isinstance(aux, utils.LossOutput):
-      return loss_val, aux.aux_metrics
-    elif self._has_aux:
-      return loss_val, aux
-    else:
-      return loss_val, None
+    grads = self._constrain_grads(grads)
+    return loss_val, aux_out, grad_accumulator.add(grads, denom)
 
   def _update_step(
       self,
       model: nnx.Module,
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
-  ) -> ArrayLike:
-    """Updates the model weights.
+  )  -> Tuple[ArrayLike, GradientAccumulator]:
+    """Updates the model weights and empties the accumulator.
 
     Args:
       model: The model to train.
@@ -668,7 +600,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       grad_accumulator: The gradient accumulator to use.
 
     Returns:
-      The gradient norm.
+      A tuple of the gradient norm and the emptied accumulator.
     """
     acc_grads = grad_accumulator.get()
     # Compute the norm in float32. For production-size models the sum-of-squares
@@ -677,17 +609,19 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     norm = optax.global_norm(
         jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
+    grads_state = nnx.state(model, self._wrt_target)
+    nnx.replace_by_pure_dict(grads_state, acc_grads)
+
     opt_state_dtypes = _opt_state_dtypes(optimizer)
-    optimizer.update(model, acc_grads)
+    optimizer.update(model, grads_state)
     _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
-    grad_accumulator.reset()
-    return norm
+    grad_accumulator = grad_accumulator.reset()
+    return norm, grad_accumulator
 
   def _train_step(
       self,
       model: nnx.Module,
       optimizer: nnx.Optimizer,
-      grad_accumulator: GradientAccumulator,
       inputs: Any,
   ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
     """`_fwd_bwd_step` followed by `_update_step`, in one traced function.
@@ -702,8 +636,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     The bodies are reused verbatim, so the fused and split paths are the same
     arithmetic in the same order; only XLA's buffer assignment differs.
     """
-    loss, aux = self._fwd_bwd_step(model, grad_accumulator, inputs)
-    return loss, aux, self._update_step(model, optimizer, grad_accumulator)
+    loss, aux, acc = self._fwd_bwd_step(
+        model, self.grad_accumulator.reset(), inputs
+    )
+    norm, _ = self._update_step(model, optimizer, acc)
+    return loss, aux, norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -720,13 +657,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def create_fwd_bwd_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None]]:
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, GradientAccumulator]]:
     """Creates the forward and backward step function."""
     return self._fwd_bwd_step
 
   def create_update_step_fn(
       self,
-  ) -> Callable[..., ArrayLike]:
+  ) -> Callable[..., Tuple[ArrayLike, GradientAccumulator]]:
     """Creates the update step function."""
     return self._update_step
 
@@ -773,21 +710,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-    # Partition Gradients similar to the model. Skipped when the accumulator was
-    # not allocated: there is nothing to shard, and the gradients that flow
-    # `fwd_bwd` -> `update` are jit outputs whose sharding XLA derives from the
-    # parameters.
-    if jax.tree_util.tree_leaves(self.grad_accumulator.grads):
-      grad_pspecs = nnx.get_partition_spec(self.grad_accumulator.grads)
-      self.grad_accumulator.grads = jax.tree.map(
-          _shard, self.grad_accumulator.grads, grad_pspecs
-      )
-
-    # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.device_put(
-        self.grad_accumulator.denom[...],
-        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
-    )
 
   def jit_fwd_bwd_update_and_eval_step(
       self, skip_jit: bool = False, cache_nnx_graph: bool = True
@@ -811,64 +733,67 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       return (
           functools.partial(fwd_bwd_step, self.model),
           functools.partial(
-              update_step, self.model, self.optimizer, self.grad_accumulator
+              update_step, self.model, self.optimizer
           ),
           functools.partial(eval_step, self.model),
       )
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      if self._is_single_microstep():
-        # No grad_accumulator is created in this case.
-        donate_argnames = ("model",)
-      else:
-        donate_argnames = ("model", "grad_accumulator")
-      self._jitted_fwd_bwd_step_fn = nnx.jit(
-          fwd_bwd_step,
-          donate_argnames=donate_argnames,
-      )
-      self._jitted_update_step_fn = nnx.jit(
-          update_step, donate_argnames=("optimizer", "grad_accumulator")
-      )
-      self._jitted_eval_step_fn = nnx.jit(eval_step)
+      self._capture_param_shardings()
 
-      def maybe_cache_and_partial(f, *args):
+      def jit_and_bind(f, *bound, **jit_kwargs):
+        """JITs `f` and binds `bound` as its leading arguments.
+
+        Under `cache_nnx_graph` the nnx graph traversal of the bound nodes is
+        paid once here instead of on every call. Which binding API applies is
+        decided by the jit's own mode, and the two are not interchangeable:
+        `nnx.cached_partial` hands the flattened graph to the callee through
+        `GRAPH_CONTEXT`, and the only consumer is the update context that
+        `nnx.jit` enters for `graph_updates=True`. A `graph_updates=False` jit
+        never enters one, so the cache is left unclaimed and the call dies in
+        `static_cache` with "tmp_static_cache should be None, no context
+        consumed it". `nnx.jit_partial` is the equivalent for that mode: it
+        pre-flattens the bound arguments at construction time.
+        """
+        if cache_nnx_graph and not jit_kwargs.get("graph_updates", True):
+          return nnx.jit_partial(f, *bound, **jit_kwargs)
+        jitted = nnx.jit(f, **jit_kwargs)
         if cache_nnx_graph:
           # wrap with partial so we can access jitted_fn in a consistent way.
-          return functools.partial(nnx.cached_partial(f, *args))
-        else:
-          return functools.partial(f, *args)
+          return functools.partial(nnx.cached_partial(jitted, *bound))
+        return functools.partial(jitted, *bound)
 
-      self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
-          self._jitted_fwd_bwd_step_fn,
+      self._jitted_fwd_bwd_step_fn = jit_and_bind(
+          fwd_bwd_step,
           self.model,
+          graph_updates=False,
+          donate_argnames=("grad_accumulator",),
       )
-      self._jitted_update_step_fn = maybe_cache_and_partial(
-          self._jitted_update_step_fn,
+      # `grad_accumulator` is deliberately NOT donated here. The buffers are
+      # freed anyway when `update()` rebinds `self.grad_accumulator` to the
+      # emptied value returned here.
+      self._jitted_update_step_fn = jit_and_bind(
+          update_step,
           self.model,
           self.optimizer,
-          self.grad_accumulator,
+          donate_argnames=("model", "optimizer"),
       )
-      self._jitted_eval_step_fn = maybe_cache_and_partial(
-          self._jitted_eval_step_fn, self.model
-      )
+      self._jitted_eval_step_fn = jit_and_bind(eval_step, self.model)
 
       # Fused single-executable step, used by `train()` when each update
-      # consumes one micro-batch. Donation deliberately mirrors the split path
-      # (`optimizer` + `grad_accumulator`, model not donated) so the two are
-      # structurally comparable and switching between them cannot change
-      # numerics. Compilation is lazy, so building the wrapper here costs
-      # nothing if the fused path is never called.
-      _jitted_train_step_fn = nnx.jit(
-          self.create_train_step_fn(),
-          donate_argnames=("optimizer", "grad_accumulator"),
-      )
+      # consumes one micro-batch. Donation deliberately mirrors `update_step`
+      # (`model` + `optimizer`) so the two paths are structurally comparable
+      # and switching between them cannot change numerics. There is no
+      # accumulator argument: the gradient sum is a temporary inside the trace,
+      # never a program input or output. Compilation is lazy, so building the
+      # wrapper here costs nothing if the fused path is never called.
       if self._is_single_microstep():
-        self._jitted_train_step_fn = maybe_cache_and_partial(
-            _jitted_train_step_fn,
+        self._jitted_train_step_fn = jit_and_bind(
+            self.create_train_step_fn(),
             self.model,
             self.optimizer,
-            self.grad_accumulator,
+            donate_argnames=("optimizer", "model"),
         )
       else:
         self._jitted_train_step_fn = None
@@ -1075,12 +1000,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    self._record_fwd_bwd(
-        *fwd_bwd_step(
-            grad_accumulator=self.grad_accumulator,
-            inputs=self._prepare_payload(payload),
-        )
+    loss, aux, self.grad_accumulator = fwd_bwd_step(
+        grad_accumulator=self.grad_accumulator,
+        inputs=self._prepare_payload(payload),
     )
+    self._record_fwd_bwd(loss, aux)
 
   @override
   def update(self, **kwargs) -> int:
@@ -1090,7 +1014,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    return self._record_update(update_step())
+    if self.grad_accumulator.is_empty:
+      raise ValueError(
+          "update() was called with nothing accumulated: it must follow at"
+          " least one fwd_bwd() in this optimizer step."
+      )
+    grad_norm, self.grad_accumulator = update_step(
+        grad_accumulator=self.grad_accumulator
+    )
+    return self._record_update(grad_norm)
 
   def train_step(
       self, payload: datatypes.TrainerPayload | Any, **kwargs
@@ -1111,6 +1043,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           "train_step() requires exactly one micro-batch per update. Use"
           " fwd_bwd() followed by update() when gradient_accumulation_steps > 1"
           " or sequence packing is enabled."
+      )
+    if not self.grad_accumulator.is_empty:
+      raise ValueError(
+          "train_step() consumes one micro-batch and applies the optimizer to"
+          " it immediately, but gradients are already accumulated. Use"
+          " fwd_bwd() followed by update() when accumulating."
       )
     train_loss, aux, grad_norm = self._jitted_train_step_fn(
         self._prepare_payload(payload)
@@ -1398,13 +1336,21 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # regime `fwd_bwd_step`'s executable is never compiled, so its cache size
       # would stay at zero and the log would say nothing.
       traced_step = self._jitted_train_step_fn or fwd_bwd_step
-      cache_size = traced_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
-      logging.log_if(
-          logging.INFO,
-          f"Compiled fwd_bwd_step cache size: {cache_size}",
-          condition=cache_size not in self._jit_cache,
-      )
-      self._jit_cache.add(cache_size)
+      # `jit_and_bind` returns one of three shapes: a `functools.partial` over
+      # an `nnx.jit` wrapper, the same over an `nnx.cached_partial` wrapper, or
+      # an `nnx.jit_partial` wrapper. Only the first two are reachable through
+      # `.func`; `jit_partial` exposes `jitted_fn` directly.
+      jitted_fn = getattr(traced_step, "jitted_fn", None)
+      if jitted_fn is None:
+        jitted_fn = getattr(getattr(traced_step, "func", None), "jitted_fn", None)
+      if jitted_fn is not None:
+        cache_size = jitted_fn._cache_size()  # pylint: disable=protected-access
+        logging.log_if(
+            logging.INFO,
+            f"Compiled fwd_bwd_step cache size: {cache_size}",
+            condition=cache_size not in self._jit_cache,
+        )
+        self._jit_cache.add(cache_size)
 
     if eval_ds:
       self._run_eval(eval_ds)
@@ -1516,7 +1462,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          if self._jitted_train_step_fn is not None and is_update_step_val:
+          if self._is_single_microstep() and is_update_step_val:
             self.train_step(
                 train_example,
                 skip_jit=skip_jit,
