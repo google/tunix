@@ -16,7 +16,7 @@ import os
 import re
 import statistics
 
-RUNS = ["tis4", "mb1", "mb2", "mb4", "tok1", "tok4", "hp0", "hp1", "hp2"]
+RUNS = ["tis4", "mb1", "mb2", "mb4", "tok1", "tok4", "hp0", "hp1", "hp2", "fop1"]
 
 
 def sampler_is(path, key):
@@ -201,6 +201,20 @@ def main():
     d = summary[run]
     print(f"  {run:5s} {labels[run]:32s} {d['oob_mean']:8.4f}"
           f" {100 * (1 - d['oob_mean']):8.2f} {d['absmean']:11.6f}")
+
+  print()
+  print("=" * 68)
+  print("CLAIM 4c  force_on_policy_ratio does not touch the gate")
+  print("=" * 68)
+  if "hp0" in summary and "fop1" in summary:
+    lp = os.path.join(args.logs, "hp0", "trainer.log")
+    lf = os.path.join(args.logs, "fop1", "trainer.log")
+    for key in ("tis/is_oob_ratio", "sampler_is/seq_geomean_mean",
+                "sampler_is/token_logdiff_absmean", "sample_mask/kept_frac"):
+      a = sampler_is(lp, key)[:4]   # step 0: same weights, same rollouts
+      b = sampler_is(lf, key)[:4]
+      print(f"  step-0 calls, {key:38s} {'IDENTICAL' if a == b else 'DIFFER'}")
+    print("  (later calls diverge because the weights moved differently)")
 
   print()
   print("=" * 68)
