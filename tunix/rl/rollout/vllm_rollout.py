@@ -68,6 +68,9 @@ class VllmRollout(base_rollout.BaseRollout):
             free_kv_cache_during_weight_sync=(
                 rollout_config.rollout_vllm_free_kv_cache_during_weight_sync
             ),
+            overlap_postprocessing=(
+                rollout_config.rollout_vllm_overlap_postprocessing
+            ),
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,

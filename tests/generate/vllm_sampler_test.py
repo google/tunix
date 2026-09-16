@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+import concurrent.futures
+import itertools
 
 import os
 import tempfile
@@ -576,6 +578,138 @@ class VllmSamplerConfigTest(absltest.TestCase):
 
     rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
     self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
+
+  def test_overlap_postprocessing_decodes_finished_requests_early(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+    sampler.llm.request_counter = itertools.count()
+    engine = sampler.llm.llm_engine
+
+    def output(rid, finished):
+      out = mock.MagicMock()
+      out.request_id = rid
+      out.finished = finished
+      sample = mock.MagicMock()
+      sample.token_ids = [int(rid), int(rid) + 1]
+      sample.logprobs = None
+      out.outputs = [sample]
+      return out
+
+    engine.has_unfinished_requests.side_effect = [True, True, False]
+    engine.step.side_effect = [
+        [output("1", True), output("0", False)],
+        [output("0", True)],
+    ]
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    outputs = sampler._generate_offline(prompts, vllm_sampler.SamplingParams())
+
+    sampler.llm.generate.assert_not_called()
+    self.assertEqual(engine.add_request.call_count, 2)
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, tokens, _ = sampler.detokenize(["a", "b"], outputs)
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[0, 1], [1, 2]])
+    # Each finished request was decoded once, in the pool, not in detokenize.
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_overlap_postprocessing_off_uses_llm_generate(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False, overlap_postprocessing=False
+    )
+    sampler = self._make_sampler(config)
+    prompts = [{"prompt_token_ids": [1]}]
+    params = vllm_sampler.SamplingParams()
+
+    outputs = sampler._generate_offline(prompts, params)
+
+    sampler.llm.generate.assert_called_once_with(
+        prompts=prompts, sampling_params=params, use_tqdm=True
+    )
+    sampler.llm.llm_engine.add_request.assert_not_called()
+    self.assertIs(outputs, sampler.llm.generate.return_value)
+
+  def test_beam_search_keeps_llm_generate_path(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    params = vllm_sampler.BeamSearchParams(beam_width=2, max_tokens=4)
+
+    sampler._generate_offline([{"prompt_token_ids": [1]}], params)
+
+    sampler.llm.generate.assert_called_once()
+    sampler.llm.llm_engine.add_request.assert_not_called()
+
+  def test_detokenize_without_precomputed_results_decodes_inline(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.return_value = "text"
+    sample = mock.MagicMock()
+    sample.token_ids = [4, 5]
+    sample.logprobs = None
+    output = mock.MagicMock()
+    output.request_id = "7"
+    output.outputs = [sample]
+
+    texts, logprobs, tokens, _ = sampler.detokenize(["a"], [output])
+
+    self.assertEqual(texts, [["text"]])
+    self.assertEqual(logprobs, [[[]]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[4, 5]])
+    sampler.tokenizer.decode.assert_called_once_with([4, 5])
+
+  def test_server_mode_overlap_decodes_as_futures_resolve(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+
+    def request_output(rid):
+      out = mock.MagicMock(spec=vllm_sampler.RequestOutput)
+      out.request_id = rid
+      sample = mock.MagicMock()
+      sample.token_ids = [int(rid), int(rid) + 1]
+      sample.logprobs = None
+      out.outputs = [sample]
+      return out
+
+    futures = []
+    for rid in ("0", "1"):
+      future = concurrent.futures.Future()
+      future.set_result(request_output(rid))
+      futures.append(future)
+    sampler._driver = mock.MagicMock()
+    sampler._driver.submit_requests.return_value = futures
+
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    outputs = sampler._generate_server_mode(
+        prompts, vllm_sampler.SamplingParams()
+    )
+
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, _, _ = sampler.detokenize(["a", "b"], outputs)
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_postprocessing_threads_must_be_positive(self):
+    with self.assertRaisesRegex(ValueError, "postprocessing_threads"):
+      vllm_sampler.VllmConfig(postprocessing_threads=0)
+
+  def test_stop_shuts_down_postprocess_pool(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    pool = sampler._get_postprocess_pool()
+    sampler.stop()
+    self.assertIsNone(sampler._postprocess_pool)
+    with self.assertRaises(RuntimeError):
+      pool.submit(lambda: None)
 
   def test_expert_parallel_size_plumbed_to_sharding(self):
     mesh = self._make_mock_mesh(8)
