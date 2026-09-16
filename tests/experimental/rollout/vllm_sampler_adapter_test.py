@@ -301,6 +301,52 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     )
     self.assertEqual(adapter.raiden_job_name, "replica_worker-42")
 
+  def test_canonicalize_variable_names_bracketed_to_dotted(self):
+    entry = {
+        "unit": {"job_name": "destination"},
+        "variables": [
+            {"name": "['base']['decoder']['layers_0']['w']", "shape": (10, 10)},
+            {"name": "['model']['decoder']['w2'].value", "shape": (20, 20)},
+            {"name": "already.canonical.key", "shape": (30, 30)},
+        ],
+    }
+    canonical = vllm_sampler_adapter._canonicalize_variable_names(entry)
+    names = [v["name"] for v in canonical["variables"]]
+    self.assertEqual(
+        names, ["decoder.layers.0.w", "decoder.w2", "already.canonical.key"]
+    )
+
+  def test_canonicalize_variable_names_empty_key_raises(self):
+    entry = {
+        "variables": [
+            {"name": "['base'].value"},
+        ]
+    }
+    with self.assertRaisesRegex(ValueError, "canonicalised to an empty key"):
+      vllm_sampler_adapter._canonicalize_variable_names(entry)
+
+  def test_canonicalize_variable_names_collision_raises(self):
+    entry = {
+        "variables": [
+            {"name": "['base']['decoder']['layers_0']['w']"},
+            {"name": "['model']['decoder']['layers'][0]['w'].value"},
+        ]
+    }
+    with self.assertRaisesRegex(ValueError, "both canonicalise to"):
+      vllm_sampler_adapter._canonicalize_variable_names(entry)
+
+  def test_canonicalize_variable_names_passthrough(self):
+    self.assertIsNone(vllm_sampler_adapter._canonicalize_variable_names(None))
+    self.assertEqual(
+        vllm_sampler_adapter._canonicalize_variable_names("not_a_dict"),
+        "not_a_dict",
+    )
+    empty_entry = {"unit": {"job_name": "dst"}}
+    self.assertEqual(
+        vllm_sampler_adapter._canonicalize_variable_names(empty_entry),
+        empty_entry,
+    )
+
 
 class RoundUuidTest(absltest.TestCase):
   """Covers the extra_config -> Raiden transfer generation extraction."""
