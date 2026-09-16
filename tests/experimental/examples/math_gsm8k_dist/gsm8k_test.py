@@ -249,14 +249,14 @@ class GSM8KTest(absltest.TestCase):
     )
     self.assertEqual(reward_fn(item5), 1.0)
 
-  def test_launchers_default_chat_parser_to_raw(self):
+  def test_launchers_default_chat_parser_to_vtc(self):
     base_dir = pathlib.Path(gsm8k.__file__).parent
     launcher = (base_dir / "launcher.sh").read_text(encoding="utf-8")
-    self.assertIn("CHAT_PARSER=${CHAT_PARSER:-raw}", launcher)
+    self.assertIn("CHAT_PARSER=${CHAT_PARSER:-vtc}", launcher)
     self.assertIn('--chat_parser="$CHAT_PARSER"', launcher)
 
     k8s_launcher = (base_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
-    self.assertIn("export CHAT_PARSER=${CHAT_PARSER:-raw}", k8s_launcher)
+    self.assertIn("export CHAT_PARSER=${CHAT_PARSER:-vtc}", k8s_launcher)
     self.assertIn("--chat_parser=${CHAT_PARSER}", k8s_launcher)
 
 

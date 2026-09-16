@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GSM8K "VTC" recipe: prompt template, reward, rollout metrics, raw parser.
+"""GSM8K "VTC" recipe: prompt template, reward, rollout metrics, VTC chat parser.
 
 Single source of truth for the GSM8K GRPO recipe, shared by
 `examples/math_gsm8k/qwen3_grpo_demo.py` and the distributed experimental
@@ -21,12 +21,13 @@ cannot drift.
 
 The recipe's contract, all in one place:
 
-* The prompt (`VTC_PROMPT_TEMPLATE`) ends by opening `<reasoning>` for the
-  model. It is meant to be fed verbatim (`VTCRawTextParser`), so the model
-  continues the reasoning block rather than seeing the tag closed inside a
-  chat-template user turn.
-* Because the prompt opens the tag, `is_vtc_format_correct` checks the
-  completion for exactly one `</reasoning>` and one ordered
+* The user prompt (`VTC_PROMPT_TEMPLATE`) carries the problem and formatting
+  instructions, while `VTCChatTemplateParser` (`QwenVtcChatTemplateParser`)
+  applies ChatML system/user framing and prefills `<reasoning>\n` in the
+  assistant generation prompt so the model continues the reasoning block
+  directly inside the assistant turn.
+* Because the generation prompt opens `<reasoning>`, `is_vtc_format_correct`
+  checks the completion for exactly one `</reasoning>` and one ordered
   `<answer>..</answer>` pair -- it does NOT require the opening tag.
 * The reward is graded: 1.0 format + correct answer, 0.1 format only,
   0.5 correct answer without the format, 0.0 otherwise.
@@ -45,9 +46,7 @@ VTC_PROMPT_TEMPLATE = """Solve the following math problem.
 First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
 Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. Do not put anything else in the answer tags.
 
-Problem: {}
-<reasoning>
-"""
+Problem: {}"""
 
 
 # ====== Dataset helpers ======
@@ -247,7 +246,6 @@ def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
 # ====== Prompt parser ======
 
 
-# The raw-text (no chat template) parser is a generic prompting mode, not part
-# of this recipe; it lives with the other parsers. Kept as an alias so the
-# recipe's name for it stays stable.
-VTCRawTextParser = chat_parser_lib.RawTextParser
+VTCChatTemplateParser = chat_parser_lib.QwenVtcChatTemplateParser
+# Backward-compatible alias for callers using the previous name.
+VTCRawTextParser = VTCChatTemplateParser

@@ -71,12 +71,13 @@ def _chat_parser_for(
     *,
     enable_thinking: bool = False,
 ):
-  """Selects the chat parser: `raw` text, or the model family's template.
+  """Selects the chat parser: `raw` text, `vtc`, or the model family's template.
 
   Args:
     model_id: Model name used to pick the family-specific template parser.
     tokenizer: Tokenizer handed to the parser.
-    mode: Either `auto` (model family's template) or `raw` (no template).
+    mode: Either `auto` (model family's template), `vtc` (Qwen ChatML with
+      reasoning prefill), or `raw` (no template).
     enable_thinking: Whether the template parser opens a thinking block.
 
   Returns:
@@ -84,6 +85,10 @@ def _chat_parser_for(
   """
   if mode == "raw":
     return chat_parser_lib.RawTextParser(tokenizer)
+  if mode == "vtc":
+    return chat_parser_lib.QwenVtcChatTemplateParser(
+        tokenizer, enable_thinking=enable_thinking
+    )
   name = model_id.lower()
   for family, parser_cls in CHAT_PARSERS.items():
     if family in name:
@@ -163,9 +168,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--chat_parser",
       type=str,
       default=os.getenv("CHAT_PARSER", "auto"),
-      choices=["auto", "raw"],
+      choices=["auto", "raw", "vtc"],
       help=(
           "auto: the model family's chat template parser (Qwen/Llama/Gemma);"
+          " vtc: Qwen ChatML template with reasoning prefill in assistant turn;"
           " raw: feed message contents verbatim with no template, for"
           " completion-style prompts the model is meant to continue."
       ),

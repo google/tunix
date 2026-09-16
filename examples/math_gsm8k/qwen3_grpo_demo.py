@@ -250,6 +250,7 @@ normalize_answer = gsm8k_vtc.normalize_answer
 _vtc_completion_outcome = gsm8k_vtc.vtc_completion_outcome
 vtc_env_reward = gsm8k_vtc.vtc_env_reward
 vtc_metric_fn = gsm8k_vtc.vtc_metric_fn
+VTCChatTemplateParser = gsm8k_vtc.VTCChatTemplateParser
 VTCRawTextParser = gsm8k_vtc.VTCRawTextParser
 
 
@@ -469,7 +470,7 @@ def main() -> None:
       token=os.getenv("HF_TOKEN"),
       trust_remote_code=True,
   )
-  chat_parser = VTCRawTextParser()
+  chat_parser = VTCChatTemplateParser(tokenizer)
   qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)  # pyrefly: ignore[missing-attribute]
 
   reference, actor = create_reference_and_actor(shared_mesh)

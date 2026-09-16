@@ -23,10 +23,10 @@ from tunix.utils import gsm8k_vtc
 
 class Gsm8kVtcTest(absltest.TestCase):
 
-  def test_prompt_opens_reasoning_block(self):
+  def test_prompt_does_not_open_reasoning_block_in_user_turn(self):
     prompt = gsm8k_vtc.build_prompt("How many clips?")
     self.assertIn("Problem: How many clips?", prompt)
-    self.assertTrue(prompt.endswith("<reasoning>\n"))
+    self.assertFalse(prompt.endswith("<reasoning>\n"))
     self.assertIn("<answer>\\boxed{}</answer>", prompt)
 
   def test_extract_hash_answer(self):
@@ -110,8 +110,8 @@ class Gsm8kVtcTest(absltest.TestCase):
     self.assertEqual(metrics["rewards/solve_none"][0], 0)
     self.assertEqual(metrics["rewards/solve_partial"][0], 1)
 
-  def test_raw_text_parser_joins_verbatim(self):
-    parser = gsm8k_vtc.VTCRawTextParser()
+  def test_vtc_chat_template_parser_prefills_reasoning_in_assistant_turn(self):
+    parser = gsm8k_vtc.VTCChatTemplateParser()
     text = parser.parse(
         [
             {"role": "system", "content": ""},
@@ -120,8 +120,10 @@ class Gsm8kVtcTest(absltest.TestCase):
         add_generation_prompt=True,
         is_first_msg=True,
     )
-    self.assertEqual(text, gsm8k_vtc.build_prompt("Q?"))
-    self.assertTrue(text.endswith("<reasoning>\n"))
+    self.assertIn("<|im_start|>system\n", text)
+    self.assertIn("<|im_start|>user\n", text)
+    self.assertIn(gsm8k_vtc.build_prompt("Q?") + "<|im_end|>\n", text)
+    self.assertTrue(text.endswith("<|im_start|>assistant\n<reasoning>\n"))
     tokens, extra = parser.update_assistant_end_tokens(np.array([1, 2]))
     self.assertEqual(extra, 0)
     np.testing.assert_array_equal(tokens, [1, 2])
