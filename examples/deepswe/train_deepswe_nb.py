@@ -1858,7 +1858,10 @@ if ONEHOST_SMOKE:
     vllm_rollout_dict["rollout_vllm_async_scheduling"] = False
 
 canon_continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
-if canon_continue_decode:
+# "0" is the registered off value (the one-host native carrier exports it and
+# the instrumentation pin above expects it); only a positive K enables the
+# device-side continue-decode loop and its Zero-HP-only admission.
+if canon_continue_decode not in ("", "0"):
   p58_hp = (
       P34_DEEPSWE
       and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1"
