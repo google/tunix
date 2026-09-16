@@ -207,5 +207,38 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("namespace: test-namespace", rendered)
 
 
+  def test_generate_yaml_default_namespace(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-default-ns-job",
+        "--cpu_machine=n2-standard-64",
+    ]
+    env = dict(os.environ)
+    env.pop("K8S_NAMESPACE", None)
+    with mock.patch.dict(os.environ, env, clear=True):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+          self.assertIn("namespace: default", rendered)
+
+  def test_generate_yaml_empty_namespace(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-empty-ns-job",
+        "--cpu_machine=n2-standard-64",
+    ]
+    with mock.patch.dict(os.environ, {"K8S_NAMESPACE": ""}, clear=False):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+          self.assertIn("namespace: \n", rendered)
+
+
 if __name__ == "__main__":
   absltest.main()
