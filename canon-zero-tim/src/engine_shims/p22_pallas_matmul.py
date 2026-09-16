@@ -223,7 +223,15 @@ def matmul(
         acc_ref[...] = acc_ref[...] + jnp.dot(
             x_ref[...], y_ref[...], preferred_element_type=jnp.float32
         )
-        out_ref[...] = acc_ref[...].astype(out_ref.dtype)
+
+        # tasks/deepswe_4b_perf P4a: the (i, j) output block is written back
+        # only after its last k step, so store it once there instead of on
+        # every k step.  The f32 accumulation sequence and the single final
+        # bf16 cast are unchanged, so every element is bitwise the
+        # per-step-store form; only the per-k-step VMEM store goes away.
+        @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
+        def _finalize():
+            out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
     return pl.pallas_call(
         _kernel,
