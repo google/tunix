@@ -62,7 +62,11 @@ def make_tokens(tokenizer, n_seq, prompt_len, completion_len, seed=0):
     p = (ids * ((prompt_len // max(len(ids), 1)) + 1))[:prompt_len]
     # Completions are the part that gets scored; vary their content and the
     # real (unpadded) length the way rollouts do.
-    real = int(rng.integers(110, min(200, completion_len)))
+    # Scored length must scale with the buffer, or a sequence-length sweep
+    # silently keeps measuring ~150 tokens and shows a flat non-result.
+    lo = max(8, int(0.70 * completion_len))
+    hi = max(lo + 1, int(0.95 * completion_len))
+    real = int(rng.integers(lo, hi))
     c = list(rng.integers(1000, 40000, size=real))
     c = c + [tokenizer.pad_id] * (completion_len - real)
     prompts.append(p)
