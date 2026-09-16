@@ -1,0 +1,20 @@
+2026-09-16 13:44:06,839 - [RolloutNode] Auto-derived tensor_parallel_size=2 from mesh_tp
+2026-09-16 13:44:06,841 - [RolloutNode] Parsed args: Namespace(port=20001, worker_id='vllm-rollout-0', model_id='Qwen/Qwen3-1.7B', model_dir='/mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models', tokenizer_path='/mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models', mesh_fsdp=1, mesh_tp=2, max_prompt_length=512, max_response_length=768, use_lora=False, lora_rank=64, lora_alpha=64.0, model_name='Qwen3-1.7B', sampler='vanilla', maxtext_model_name='qwen3-1.7b', maxtext_attention='', debug=False, registry_module='tunix.experimental.examples.math_gsm8k_dist.gsm8k', env_name='gsm8kenv', agent_name='gsm8kagent', agent_config_json='{}', max_concurrency=64, enable_thinking=False, weight_sync_mode=<WeightSyncMode.RAIDEN: 'raiden'>, prefuse_moe_weights=True, enable_prefix_caching=False, tensor_parallel_size=2)
+2026-09-16 13:44:06,841 - [RolloutNode] Repo root inserted into sys.path: /mnt/disks/maxdiffusion-data/trellis/tunix
+2026-09-16 13:44:06,841 - [RolloutNode] Importing rollout registry module: tunix.experimental.examples.math_gsm8k_dist.gsm8k
+2026-09-16 13:44:10,135 - [RolloutNode] Loading tokenizer from /mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models...
+2026-09-16 13:44:10,712 - [RolloutNode] Creating rollout worker service...
+2026-09-16 13:44:10,823 - [RolloutNode] Creating native sampler on the rollout mesh...
+2026-09-16 13:44:16,608 - [RolloutNode] Rollout mesh: Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+2026-09-16 13:44:18,587 - [RolloutNode] Creating rollout gRPC server...
+2026-09-16 13:44:18,590 - [RolloutNode] Serving vLLM rollout worker on port 20001.
+2026-09-16 13:44:18,590 - [RolloutNode] register to discovery server at localhost:30000
+2026-09-16 13:44:35,597 - [RolloutNode] registered to discovery server at localhost:30000
+2026-09-16 13:44:35,597 - [RolloutNode] Rollout worker is registered.
+2026-09-16 13:44:36,432 - [RolloutNode] rollout bind prepared 310 arrays (proxy_runtime=False)
+2026-09-16 13:44:36,526 - [RolloutNode] rollout creating native WeightSynchronizer for 310 arrays
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+W0000 00:00:1789566276.551625  680181 raiden_manager_base.cc:72] Incoming PJRT buffers are associated with more than one NUMA node (0 vs 1). Picking the first detected NUMA node: 0
+InitTransportServer: target_numa=0
+InitTransportServer: Local IP: 10.164.0.82
+2026-09-16 13:44:40,753 - [RolloutNode] rollout native WeightSynchronizer ready: data_port=36827 listener_port=33901 num_shards=2

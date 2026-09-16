@@ -3,7 +3,7 @@
 First end-to-end bring-up of the GRPO recipe gates (`seq-mask-TIS`, `grpo-loo`,
 overlong loss masking) on the Trellis distributed orchestrator, on a single v5p-8.
 
-Four results:
+Five results:
 
 1. **It trains.** `grad_norm` is nonzero and the reward signal is live. The
    plumbing — rollout log-probs reaching the trainer, both recipe gates
@@ -13,11 +13,14 @@ Four results:
 3. **The trainer's own log-probs depend on its forward-pass micro-batch shape**
    — 6.2× more divergence at micro-batch 4 than at micro-batch 1, on identical
    data and identical weights.
-4. **Our rejection rate is in family with the reference at micro-batch 1, and
-   out of family above it.** Calibrated against NVIDIA's published seq-mask-TIS
-   acceptance curves (§3), micro-batch 1 sits inside their range and
-   micro-batch 4 sits below their worst. The batch-shape effect in (3) is the
-   open item, not the rejection rate as such.
+4. **Root cause found: bf16 matmul rounding on the MXU**, whose tiling and
+   accumulation order are keyed on matmul shape. Established by elimination —
+   true fp32 arithmetic removes the batch-dependence entirely (~20,000×). §5.
+5. **It is fixable, and the sequence dropping is entirely numerical.** With
+   fp32 activations + 3-pass matmuls, acceptance goes 18.75% → 42.71%
+   (trainer-side only) → 100% (both sides), on the real GRPO loop. §6 explains
+   why the 100% is an ideal-case result that will not transfer intact to a vLLM
+   sampler.
 
 Everything below is recomputed from the logs in [`logs/`](logs/) by
 [`verify_report_numbers.py`](verify_report_numbers.py). Run it yourself:
@@ -71,6 +74,29 @@ for T in 1 2 4; do
 done
 
 python3 $D/verify_report_numbers.py --logs $TRELLIS_ROOT   # or against logs/
+```
+
+The precision A/B/C in §6. `HP_TRAINER_*` is read inside the trainer process and
+re-exported under the name `models.py` looks for, so it does **not** reach the
+rollout node; setting `TRAINER_ACT_DTYPE` / `JAX_DEFAULT_MATMUL_PRECISION`
+directly hits both:
+
+```bash
+RUN_ID=hp0 MAX_STEPS=6 TRAIN_MICRO_BATCH_SIZE=4 bash $D/run_bringup.sh
+
+HP_TRAINER_ACT_DTYPE=float32 HP_TRAINER_PRECISION=high \
+  RUN_ID=hp1 MAX_STEPS=6 TRAIN_MICRO_BATCH_SIZE=4 bash $D/run_bringup.sh
+
+TRAINER_ACT_DTYPE=float32 JAX_DEFAULT_MATMUL_PRECISION=high \
+  RUN_ID=hp2 MAX_STEPS=6 TRAIN_MICRO_BATCH_SIZE=4 bash $D/run_bringup.sh
+```
+
+The standalone probe behind §5 needs no orchestrator and runs in seconds:
+
+```bash
+python3 $D/probe_batch_shape.py --model_dir $MODEL_DIR --tp 2 \
+  --test logps,same,jit,accuracy,bench [--model_dtype float32] \
+  [--weights bf16|fp32] [--precision high|highest] [--hp_scope head|nohead|all]
 ```
 
 Runs are deterministic: `mb1` and `tok1` are independent executions of the same
@@ -315,16 +341,109 @@ micro-batch 4 with one optimizer step, `is_oob_ratio` is 1.0 on all four calls.
 Anyone tuning the band, or reading the gate as a health signal, is partly
 reading this.
 
-**This is the open item.** Against the reference span in §3, micro-batch 1
-(31.25% accepted, `absmean` 0.011337) is in family; micro-batch 4 (0% accepted,
-`absmean` 0.070474) is not. Because out-of-band sequences are zeroed but stay in
-the loss denominator (`truncated_importance_weights` leaves the denominator
-alone by design, `algo_core.py`), a rejection rate driven by numerics is a
-direct loss of gradient signal for no modelling reason.
+Because out-of-band sequences are zeroed but stay in the loss denominator
+(`truncated_importance_weights` leaves the denominator alone by design,
+`algo_core.py`), a rejection rate driven by numerics is a direct loss of
+gradient signal for no modelling reason.
+
+**Do not read micro-batch 1 as the good configuration.** Its low
+sampler-vs-trainer number is *correlated error*, not accuracy: it rounds the way
+the sampler does. Against a genuine fp32 ground truth the bf16 path is 0.0247 at
+bs=1, 0.0228 at bs=2 and 0.0220 at bs=4 — **bs=1 is marginally the worst.**
+Keep `train_micro_batch_size: 1` for recipe fidelity with the reference, not for
+numerical accuracy. §5 resolves the mechanism.
 
 ---
 
-## 5. Caveats
+## 5. Root cause: bf16 matmul rounding, established by elimination
+
+`probe_batch_shape.py` (committed here) reproduces the effect with no
+orchestrator, rollout or GRPO — just the model, fixed tokens, and different
+forward batch sizes through the real jitted `compute_per_token_logps`. [M]
+
+Ruled out, each by measurement:
+
+| hypothesis | test | result |
+|---|---|---|
+| tensor parallelism | rerun at `tp=1` | survives, 0.0276 |
+| padding / ragged lengths / cross-row leakage | batch of N **identical** copies | still shifts; all rows agree with each other, none with bs=1 |
+| log-prob chunking | `chunk_size` 128/256/768/2048 | no change at any size |
+| `default_matmul_precision` alone | `high`, `highest` on the bf16 model | **bit-identical no-op** |
+
+The last one is the clue. `jax.lax.Precision` only affects **f32** operands
+(`jax/_src/lax/lax.py:2135`), and this path already has bf16 operands
+everywhere, so the flag could never do anything. Widening the operands is what
+matters:
+
+| weights | acts | precision | fwd bs=1 | fwd bs=4 | \|Δ\| bs=4 vs bs=1 | `seq_geomean` shift |
+|---|---|---|---|---|---|---|
+| bf16 | bf16 | DEFAULT *(production)* | 13.8 ms | 44.6 ms | 0.03134 | up to **0.0107** |
+| bf16 | fp32 | DEFAULT | 17.3 ms | 58.6 ms | 0.01132 | up to 0.0021 |
+| **bf16** | **fp32** | **HIGH** | **24.7 ms** | **87.7 ms** | **0.0000299** | **≤ 6e-6** |
+| bf16 | fp32 | HIGHEST | 31.2 ms | 111.4 ms | 0.0000016 | exactly 1.0 |
+
+**Mechanism: bf16 matmul rounding on the MXU**, whose tiling and accumulation
+order are keyed on matmul shape — and batch size is part of that shape. True
+fp32 arithmetic removes it entirely (~20,000×).
+
+Two scoping results that matter for cost:
+
+- **An fp32 output head alone does not work.** It buys 8% (0.03134 → 0.02870)
+  and leaves the hidden-state divergence untouched at 1.50 max. The variance is
+  born in the transformer body; the head only adds to it. [M]
+- **fp32 *weights* are not needed** — bf16 weights with fp32 activations measured
+  marginally *better* than fp32 weights (0.0000299 vs 0.0000344), so weight
+  memory is unchanged. Only activations widen. [M]
+
+On cost: for **f32 × bf16** operands the TPU pass counts are **1 / 2 / 3**, not
+1 / 3 / 6, and `HIGHEST` buys zero accuracy over `HIGH` in that mixed case
+(verified against `lax.py:2129-2175` and measured on this v5p). `HIGH` is the
+right setting.
+
+---
+
+## 6. Does it fix `is_oob`? Yes — and it shows the dropping is entirely numerics
+
+Real GRPO loop, identical config, 24 loss calls each. Precision is the only
+variable. [M]
+
+| run | configuration | `is_oob_ratio` | **accepted** | `token_logdiff_absmean` |
+|---|---|---|---|---|
+| [hp0](logs/hp0/) | bf16 both sides *(production)* | 0.8125 | **18.75%** | 0.067160 |
+| [hp1](logs/hp1/) | fp32 acts + HIGH, **trainer only** | 0.5729 | **42.71%** | 0.008290 |
+| [hp2](logs/hp2/) | fp32 acts + HIGH, **both sides** | **0.0000** | **100.00%** | **0.000008** |
+
+All three still train (`grad_norm` peaks 0.5863 / 0.8952 / 1.431). Step time is
+~10 s in every case — the ~2× trainer forward is hidden because rollout
+generation dominates.
+
+### Why hp2 reaches zero, and why that will not transfer intact
+
+hp2 is the *ideal* case and should not be read as a production forecast:
+
+- **Both sides are the same tunix JAX model.** hp2 makes two copies of one
+  implementation agree. Production pairs **vLLM** against MaxText/tunix —
+  different kernels, layouts and fused ops. Agreement across engines is a
+  strictly harder problem that precision alone may not close.
+- **`max_staleness=0`** [M, from the orchestrator config]. Sampler and trainer
+  hold identical weights, so the run is exactly on-policy. The reference recipe
+  is **async**, where rollouts can be scored against a newer policy.
+- The agreement is 1.0e-5 – 1.6e-5, not literally 0, confirming the two sides
+  are genuinely independent computations rather than the same array.
+
+**The tell that separates the two effects: our rejection rate is flat across
+steps (1.00, 0.69, 0.81, 0.88, 0.69, 0.81 — no trend), while the reference's
+*rises* (GBS1024: 49% → 86.5% over 7 steps).** Flat means numerics; rising means
+policy drift. Precision fixes the floor, not the drift. The reference's ~49%
+step-1 rejection is plausibly its numerics floor — that is the part this finding
+speaks to.
+
+**hp1 is the portable result**: trainer-side precision alone, which is the half
+we control when the sampler is vLLM.
+
+---
+
+## 7. Caveats
 
 - One model (Qwen3-1.7B **dense**), one task (GSM8K), 4 chips, ≤ 6 steps.
   Nothing here is confirmed on MoE, at scale, or with vLLM as the rollout engine.
@@ -343,10 +462,21 @@ direct loss of gradient signal for no modelling reason.
   different model, task and rollout engine at far longer sequences. They
   calibrate what rejection rate is normal for this gate; they are not a
   like-for-like comparison with a 1.7B dense model on GSM8K.
+- **§6's hp2 (100% acceptance) is an ideal case**: one model implementation on
+  both sides, `max_staleness=0`, 6 steps, one seed. It demonstrates the *cause*
+  is numerics. It does not predict production, where the sampler is a different
+  engine and the recipe is async.
+- Completions here are 152 scored tokens against the reference's 65536.
+  `seq_geomean` averages over T, so sequence length changes how per-token noise
+  projects onto the gate.
+- The ~2x trainer forward cost in §5 is measured on this model at these shapes,
+  forward only. Backward was not measured, so no step-time delta is claimed.
+- Precision was applied globally within each process. Scoping it to only the
+  log-prob pass is possible (`precision=` is a per-op kwarg) but untested.
 
 ---
 
-## 6. Branch
+## 8. Branch
 
 `jfacevedo/trellis-mlperf`, 15 commits on `origin/e2e-head` @ `7d995511`.
 **12 source files** touched, all under `tunix/` and `tests/`, plus this

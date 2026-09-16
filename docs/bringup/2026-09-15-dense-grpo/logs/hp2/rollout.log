@@ -1,0 +1,62 @@
+2026-09-16 13:54:36,097 - [RolloutNode] Auto-derived tensor_parallel_size=2 from mesh_tp
+2026-09-16 13:54:36,097 - [RolloutNode] Parsed args: Namespace(port=20001, worker_id='vllm-rollout-0', model_id='Qwen/Qwen3-1.7B', model_dir='/mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models', tokenizer_path='/mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models', mesh_fsdp=1, mesh_tp=2, max_prompt_length=512, max_response_length=768, use_lora=False, lora_rank=64, lora_alpha=64.0, model_name='Qwen3-1.7B', sampler='vanilla', maxtext_model_name='qwen3-1.7b', maxtext_attention='', debug=False, registry_module='tunix.experimental.examples.math_gsm8k_dist.gsm8k', env_name='gsm8kenv', agent_name='gsm8kagent', agent_config_json='{}', max_concurrency=64, enable_thinking=False, weight_sync_mode=<WeightSyncMode.RAIDEN: 'raiden'>, prefuse_moe_weights=True, enable_prefix_caching=False, tensor_parallel_size=2)
+2026-09-16 13:54:36,098 - [RolloutNode] Repo root inserted into sys.path: /mnt/disks/maxdiffusion-data/trellis/tunix
+2026-09-16 13:54:36,098 - [RolloutNode] Importing rollout registry module: tunix.experimental.examples.math_gsm8k_dist.gsm8k
+2026-09-16 13:54:39,387 - [RolloutNode] Loading tokenizer from /mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models...
+2026-09-16 13:54:39,967 - [RolloutNode] Creating rollout worker service...
+2026-09-16 13:54:40,081 - [RolloutNode] Creating native sampler on the rollout mesh...
+2026-09-16 13:54:46,352 - [RolloutNode] Rollout mesh: Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+2026-09-16 13:54:48,363 - [RolloutNode] Creating rollout gRPC server...
+2026-09-16 13:54:48,366 - [RolloutNode] Serving vLLM rollout worker on port 20001.
+2026-09-16 13:54:48,366 - [RolloutNode] register to discovery server at localhost:30000
+2026-09-16 13:54:57,373 - [RolloutNode] registered to discovery server at localhost:30000
+2026-09-16 13:54:57,373 - [RolloutNode] Rollout worker is registered.
+2026-09-16 13:54:57,601 - [RolloutNode] rollout bind prepared 310 arrays (proxy_runtime=False)
+2026-09-16 13:54:57,695 - [RolloutNode] rollout creating native WeightSynchronizer for 310 arrays
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+W0000 00:00:1789566897.721265  687295 raiden_manager_base.cc:72] Incoming PJRT buffers are associated with more than one NUMA node (0 vs 1). Picking the first detected NUMA node: 0
+InitTransportServer: target_numa=0
+InitTransportServer: Local IP: 10.164.0.82
+2026-09-16 13:55:01,887 - [RolloutNode] rollout native WeightSynchronizer ready: data_port=40489 listener_port=42353 num_shards=2
+2026-09-16 13:59:38,823 - [RolloutNode] Draining rollout worker...
+2026-09-16 13:59:38,823 - [RolloutNode] Rollout worker drained.
+E0000 00:00:1789567179.294052  690057 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294132  690056 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294069  690059 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294094  690062 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294121  690061 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294107  690063 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294141  690060 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
+E0000 00:00:1789567179.294150  690058 raw_buffer_transport.cc:426] ProcessPeerRequest failed: INTERNAL: recv eof
+=== Source Location Trace: === 
+tpu_sync/transport/peregrine/src/internal/socket/tcp_socket_util.cc:106
+tpu_sync/transport/lib/raw_buffer_transport.cc:231
+
