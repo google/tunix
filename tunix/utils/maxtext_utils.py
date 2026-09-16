@@ -21,6 +21,12 @@ import os
 from typing import Any
 
 
+# MaxText requires enable_checkpointing=True to restore weights via load_parameters_path.
+# When checkpoint saving is disabled (save_interval_steps=0), setting an astronomically
+# large period allows restoration at initialization while preventing periodic checkpoint saves.
+_NEVER_SAVE_CHECKPOINT_PERIOD = 1_000_000_000
+
+
 def maxtext_modules():
   """Imports MaxText lazily; some installs nest it under maxtext.src.maxtext."""
   from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
@@ -270,11 +276,24 @@ def build_maxtext_config(
         f"max_num_checkpoints_to_keep={checkpointing_options.max_to_keep}",
     ])
   elif checkpointing_options is not None:
-    logging.info(
-        "checkpoint save_interval_steps=0; disabling checkpoint saving "
-        "(load_parameters_path still restores)."
-    )
-    argv.append("enable_checkpointing=False")
+    if load_parameters_path:
+      # MaxText requires enable_checkpointing=True to restore weights. Set a very
+      # large checkpoint_period to allow restoring while suppressing periodic saves.
+      logging.info(
+          "checkpoint save_interval_steps=0 with load_parameters_path set; "
+          "keeping enable_checkpointing=True and setting checkpoint_period=%d.",
+          _NEVER_SAVE_CHECKPOINT_PERIOD,
+      )
+      argv.extend([
+          "enable_checkpointing=True",
+          f"checkpoint_period={_NEVER_SAVE_CHECKPOINT_PERIOD}",
+      ])
+    else:
+      logging.info(
+          "checkpoint save_interval_steps=0 and nothing to restore; "
+          "disabling checkpointing entirely."
+      )
+      argv.append("enable_checkpointing=False")
   elif load_parameters_path:
     argv.append("enable_checkpointing=True")
   else:
@@ -337,6 +356,15 @@ def build_maxtext_config(
         "checkpoint_storage_use_ocdbt=false",
         "checkpoint_storage_use_zarr3=false",
     ])
+
+  _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
+  if _d2h_gb:
+    logging.info(
+        "CKPT_D2H_CONCURRENT_GB=%s; overriding "
+        "checkpoint_storage_device_host_concurrent_gb.",
+        _d2h_gb,
+    )
+    argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)

@@ -66,7 +66,14 @@ ${QUEUE_LABEL}spec:
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
+              # requests set the scheduling floor; limits stay generous so the
+              # container is burstable. Omitting requests makes Kubernetes
+              # default them to limits, which over-reserves this node because
+              # podAffinity co-locates the head pod with pw-node.
               resources:
+                requests:
+                  cpu: "2"
+                  memory: ${PATHWAYS_RM_MEMORY}
                 limits:
                   cpu: "24"
                   memory: 32G
@@ -101,6 +108,9 @@ ${QUEUE_LABEL}spec:
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
               resources:
+                requests:
+                  cpu: "4"
+                  memory: ${PATHWAYS_PROXY_MEMORY}
                 limits:
                   cpu: "16"
                   memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}
@@ -122,10 +132,11 @@ ${QUEUE_LABEL}spec:
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 32G
+              resources:
+                requests:
+                  memory: ${USER_CONTAINER_MEMORY}
+                limits:
+                  memory: ${USER_CONTAINER_MEMORY_LIMIT}
               command:
                 - bash
                 - -c
@@ -294,6 +305,7 @@ ${QUEUE_LABEL}spec:
                   google.com/tpu: "4"
                 requests:
                   google.com/tpu: "4"
+                  memory: ${PATHWAYS_WORKER_MEMORY}
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp
