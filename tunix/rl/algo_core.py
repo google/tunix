@@ -409,7 +409,10 @@ def log_is_attribution_metric_names() -> list[str]:
   key that is missing from `aux`, so the two lists have to be generated from
   the same place.
   """
-  names = ["sampler_is/token_logdiff_mean"]
+  names = [
+      "sampler_is/token_logdiff_mean",
+      "sampler_is/scored_tokens_per_seq",
+  ]
   for label in log_is_bin_labels():
     names.append(f"sampler_is/hist_frac/{label}")
     names.append(f"sampler_is/hist_mass/{label}")
@@ -474,6 +477,13 @@ def log_is_attribution(
   mask = completion_mask.astype(jnp.float32)
   denom = jnp.maximum(mask.sum(), 1.0)
   out = {"sampler_is/token_logdiff_mean": (log_is * mask).sum() / denom}
+  # Every other metric here is a ratio, so a mask that is too wide (padding
+  # leaking in) or too narrow (tokens silently dropped) rescales all of them
+  # identically and is invisible. This is the denominator itself: scored tokens
+  # per sequence. It also pins down whether two runs saw the same rollouts.
+  out["sampler_is/scored_tokens_per_seq"] = mask.sum() / jnp.maximum(
+      jnp.float32(mask.shape[0]), 1.0
+  )
 
   edges = jnp.asarray(LOG_IS_BIN_EDGES, dtype=jnp.float32)
   bin_idx = jnp.searchsorted(edges, log_is, side="right")
