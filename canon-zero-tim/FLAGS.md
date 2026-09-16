@@ -28,7 +28,7 @@ admitted 值即当前默认:来自代码默认、bundle `cluster/v1_full_system_
 
 | 名 | 家族 | 默认/取值 | 来源/读者 | 备注 |
 |---|---|---|---|---|
-| `CANON_ALIGNMENT_AUDIT_EVERY` | new | 10 | canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:100 | 10-step alignment audit period of the zero_tim_perf3 KEEP set (canon-zero-tim/cluster/v1_full_system_optimization.py:11); parser tunix/rl/alignment.py:496 |
+| `CANON_ALIGNMENT_AUDIT_EVERY` | new | 10 | canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:100; canon-zero-tim/cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env (tasks/deepswe_4b_perf 1e) | 10-step alignment audit period of the zero_tim_perf3 KEEP set (canon-zero-tim/cluster/v1_full_system_optimization.py:11); parser tunix/rl/alignment.py:496 |
 | `CANON_DP_COMPARE_MODE` | g1 | fingerprint-hybrid | canon-zero-tim/cluster/v1_full_system_optimization.py:36 (_BASE_ADDITIONS) | bundle addition; code default "" at tunix/rl/dp_training.py:711 |
 | `CANON_DP_DISTINCT_SCHEDULE` | g1 | first-group-warmup | canon-zero-tim/cluster/v1_full_system_optimization.py:37 (_BASE_ADDITIONS) | bundle addition; code default "" at tunix/rl/dp_training.py:722 |
 | `CANON_DP_FINITE_FETCH` | g1 | batched-commit | canon-zero-tim/cluster/v1_full_system_optimization.py:38 (_BASE_ADDITIONS) | bundle addition; code default "" at tunix/rl/dp_training.py:878 |

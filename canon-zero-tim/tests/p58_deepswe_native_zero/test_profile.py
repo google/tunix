@@ -237,14 +237,16 @@ source {CANON}
 export CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM={arm}
 {treatment}
 source {SYSTEMOPT_128_PROFILE}
-printf '%s\n' "$CANON_PROFILE|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_LOCAL_TRAJECTORIES|$MIN_TOKEN_BUCKET|$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+printf '%s\n' "$CANON_PROFILE|$CANON_DP_SIZE|$CANON_TP_SIZE|$CANON_LOCAL_TRAJECTORIES|$MIN_TOKEN_BUCKET|$CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM|$CANON_ALIGNMENT_AUDIT_EVERY"
 """
       result = subprocess.run(
           ["bash", "-c", script], check=True, text=True, capture_output=True
       )
+      # tasks/deepswe_4b_perf 1e: the 10-step alignment audit period is part of the
+      # 128-chip tuple for both arms.
       self.assertIn(
           "qwen3-4b-dp8-tp8-deepswe-tim-systemopt|8|8|16|2048|"
-          + arm,
+          + arm + "|10",
           result.stdout,
       )
 
