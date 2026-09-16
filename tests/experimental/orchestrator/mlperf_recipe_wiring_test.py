@@ -322,5 +322,55 @@ class AuxMetricsReachTheMetricStreamTest(absltest.TestCase):
     self.assertTrue(dataclasses.is_dataclass(peft_trainer_v2.MetricsBuffer))
 
 
+class TrainerNodeGradAccumWiringTest(absltest.TestCase):
+  """The optimizer cadence depends on a flag the launcher has to pass.
+
+  `run_trainer_node._gradient_accumulation_steps` is
+  `mini_batch_size * num_generations / train_micro_batch_size`, and
+  `--num_generations` defaults to 1. When the launcher omits it the trainer
+  still receives all `mini_batch_size * num_generations` trajectories -- the
+  orchestrator chunks them by `train_micro_batch_size` regardless -- but steps
+  the optimizer every `mini_batch_size / train_micro_batch_size` chunks. The
+  effective batch is `num_generations` times too small and the LR schedule runs
+  `num_generations` times too fast. Nothing raises: the run just trains wrong.
+  """
+
+  def _trainer_cmd_block(self) -> str:
+    import os  # pylint: disable=g-import-not-at-top
+    import tunix  # pylint: disable=g-import-not-at-top
+
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(tunix.__file__)),
+        "experimental", "examples", "math_gsm8k_dist", "launcher.sh",
+    )
+    with open(path) as f:
+      text = f.read()
+    start = text.index("TRAINER_CMD=(")
+    # The array literal ends at the first line that is just a closing paren.
+    end = text.index("\n  )\n", start)
+    return text[start:end]
+
+  def test_launcher_passes_num_generations_to_the_trainer_node(self):
+    self.assertIn("--num_generations=", self._trainer_cmd_block())
+
+  def test_grad_accum_formula_still_depends_on_num_generations(self):
+    """If this ever stops mattering, the wiring test above is dead weight."""
+    import argparse  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.examples.common import run_trainer_node  # pylint: disable=g-import-not-at-top
+
+    def steps(num_generations):
+      return run_trainer_node._gradient_accumulation_steps(  # pylint: disable=protected-access
+          argparse.Namespace(
+              mini_batch_size=2,
+              num_generations=num_generations,
+              train_micro_batch_size=1,
+          )
+      )
+
+    self.assertEqual(steps(8), 16)
+    # The value the trainer silently fell back to when the flag was missing.
+    self.assertEqual(steps(1), 2)
+
+
 if __name__ == "__main__":
   absltest.main()
