@@ -1,0 +1,362 @@
+{
+  "all_env_timeout_batch": false,
+  "all_failed_prompt_groups": 0,
+  "all_sandbox_start_timeout_batch": false,
+  "all_solved_prompt_groups": 0,
+  "compact_filtered_prompt_groups": 8,
+  "compact_filtered_trajectories": 101,
+  "compact_filtered_trajectory_ratio": 0.7890625,
+  "complete_trajectories": 27,
+  "complete_trajectory_solve_ratio": 0.0,
+  "effective_prompt_groups": 0,
+  "env_timeout_trajectories": 100,
+  "env_timeout_trajectory_ratio": 0.78125,
+  "groups": [
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 9,
+      "complete_trajectories": 7,
+      "completion_seconds": 1925.3874163809232,
+      "group_id": "40",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 11,
+      "complete_trajectories": 5,
+      "completion_seconds": 1729.6342194089666,
+      "group_id": "41",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 11,
+      "complete_trajectories": 5,
+      "completion_seconds": 1954.3466534737963,
+      "group_id": "42",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 10,
+      "complete_trajectories": 6,
+      "completion_seconds": 2221.7307191109285,
+      "group_id": "43",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 12,
+      "complete_trajectories": 4,
+      "completion_seconds": 2163.3007880039513,
+      "group_id": "44",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 16,
+      "complete_trajectories": 0,
+      "completion_seconds": 1281.3639304998796,
+      "group_id": "45",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 16,
+      "complete_trajectories": 0,
+      "completion_seconds": 1285.3549420468044,
+      "group_id": "46",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    },
+    {
+      "category": "incomplete",
+      "compact_filtered_trajectories": 16,
+      "complete_trajectories": 0,
+      "completion_seconds": 1281.3905690489337,
+      "group_id": "47",
+      "nonzero_advantages": 0,
+      "raw_nonzero_advantages": 0,
+      "raw_rewards": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "solved_trajectories": 0
+    }
+  ],
+  "incomplete_prompt_groups": 8,
+  "incomplete_trajectories": 101,
+  "insufficient_cpu_trajectories": 56,
+  "insufficient_memory_trajectories": 0,
+  "mixed_prompt_groups": 0,
+  "nonbinary_final_rewards": 0,
+  "nonzero_advantage_ratio": 0.0,
+  "nonzero_advantages": 0,
+  "optimizer_step": 5,
+  "prompt_groups": 8,
+  "raw_final_reward_histogram": {
+    "0": 128
+  },
+  "raw_nonzero_advantage_ratio": 0.0,
+  "raw_nonzero_advantages": 0,
+  "sandbox_start_timeout_trajectories": 100,
+  "sandbox_start_timeout_trajectory_ratio": 0.78125,
+  "scheduling_gated_trajectories": 43,
+  "schema": "canon.p58.deepswe.batch-metrics.v1",
+  "solve_definition": "r2egym_final_reward_eq_1",
+  "solved_trajectories": 0,
+  "status_histogram": {
+    "ENV_TIMEOUT": 100,
+    "MAX_CONTEXT_LIMIT_REACHED": 1,
+    "SUCCEEDED": 27
+  },
+  "step": 5,
+  "timeout_resource_histogram": {
+    "cpu": 56
+  },
+  "timeout_scheduler_reason_histogram": {
+    "scheduling_gated": 43,
+    "unschedulable": 56
+  },
+  "timeout_stage_histogram": {
+    "sandbox_start": 100
+  },
+  "timeout_trajectories": 100,
+  "timeout_trajectory_ratio": 0.78125,
+  "timing": {
+    "batch_elapsed_seconds": 2221.7307191109285,
+    "batch_persisted_unix_secs": 1789555597.480866,
+    "batch_started_unix_secs": 1789553374.9582593,
+    "group_completion_seconds": [
+      1925.3874163809232,
+      1729.6342194089666,
+      1954.3466534737963,
+      2221.7307191109285,
+      2163.3007880039513,
+      1281.3639304998796,
+      1285.3549420468044,
+      1281.3905690489337
+    ],
+    "stage_seconds": {
+      "batch_completion": {
+        "max": 2221.7307191109285,
+        "p50": 1244.166868681903,
+        "p90": 1558.110630761366,
+        "p99": 2106.8831716808104
+      },
+      "cleanup": {
+        "max": 145.14485912583768,
+        "p50": 0.000804734998382628,
+        "p90": 5.29961619870736,
+        "p99": 58.70252266807953
+      },
+      "collector_start_skew": {
+        "max": 0.9663878418505192,
+        "p50": 0.4445664369268343,
+        "p90": 0.9654990789247677,
+        "p99": 0.9663137907371856
+      },
+      "environment_reset": {
+        "max": 5.636908186133951,
+        "p50": 0.0,
+        "p90": 4.189956057118252,
+        "p99": 5.456443538139577
+      },
+      "environment_step": {
+        "max": 30.44715602369979,
+        "p50": 0.0,
+        "p90": 4.693418433936312,
+        "p99": 17.69321539341473
+      },
+      "final_reward": {
+        "max": 20.972646536072716,
+        "p50": 0.0,
+        "p90": 5.322967920266091,
+        "p99": 20.38106872129487
+      },
+      "model_generation": {
+        "max": 1033.0795939106029,
+        "p50": 0.0,
+        "p90": 380.98360909414464,
+        "p99": 945.8647108541895
+      },
+      "sandbox_acquire": {
+        "max": 0.5313191700261086,
+        "p50": 0.0,
+        "p90": 0.2838117869570851,
+        "p99": 0.4445256670447998
+      },
+      "sandbox_start": {
+        "max": 1284.339349586051,
+        "p50": 1229.5963553438196,
+        "p90": 1278.1771332720296,
+        "p99": 1282.4290217918322
+      },
+      "trajectory": {
+        "max": 2221.3400322680827,
+        "p50": 1243.2504652140196,
+        "p90": 1557.729336397443,
+        "p99": 2106.4353351705226
+      }
+    },
+    "trajectory_deadline_unix_secs": 1789556374.9582593
+  },
+  "trajectories": 128,
+  "trajectory_path": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-128s-zsoptt-full-timbd10/debug/batch-000005.trajectories.jsonl.gz",
+  "trajectory_sha256": "f9a0e3d590f28b1c60c842c6d410b7241ba74608b94f8ff41143e1881f35acc9",
+  "trajectory_solve_ratio": 0.0,
+  "unschedulable_trajectories": 56
+}
