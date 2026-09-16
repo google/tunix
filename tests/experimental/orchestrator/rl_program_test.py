@@ -137,7 +137,7 @@ def _create_rollout_response(
 
 def _make_trajectory_group(
     prompt_id: str = "prompt_0",
-    group_size: int = 2,
+    num_generations: int = 2,
     reward: float = 1.0,
 ) -> list[datatypes.TrajectoryItem]:
   return [
@@ -149,7 +149,7 @@ def _make_trajectory_group(
               reward=reward,
           )
       )
-      for idx in range(group_size)
+      for idx in range(num_generations)
   ]
 
 
@@ -207,7 +207,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    self.mock_algo.group_size = 2
+    self.mock_algo.num_generations = 2
     self.mock_algo.mini_batch_size = 1
     self.mock_algo.max_turns = 1
     self.mock_algo.max_packed_len = 16
@@ -231,7 +231,7 @@ class RLProgramTest(absltest.TestCase):
     ]
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=4,
         max_packed_len=16,
     )
@@ -268,14 +268,14 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group(prompt_id="p0", group_size=2),
+          _make_trajectory_group(prompt_id="p0", num_generations=2),
           [],
       )
 
       p = self._create_program(
           dataset=(
               "p0",
-          ),  # Just 1 prompt. Dispatches 2 rollouts since group_size=2.
+          ),  # Just 1 prompt. Dispatches 2 rollouts since num_generations=2.
           max_steps=10,
       )
 
@@ -299,7 +299,7 @@ class RLProgramTest(absltest.TestCase):
         assembler=self.assembler,
     )
     self.assertEqual(program.step, 0)
-    self.assertEqual(program.group_size, 2)
+    self.assertEqual(program.num_generations, 2)
     self.assertEqual(program.mini_batch_size, 1)
     self.assertEqual(program.full_batch_size, 1)
     self.assertIsNotNone(program.raw_q)
@@ -317,22 +317,22 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertEqual(program.assembler.batch_size, 2)
 
-  def test_program_inherits_group_size_and_mini_batch_size_from_algo(self):
-    self.mock_algo.group_size = 5
+  def test_program_inherits_num_generations_and_mini_batch_size_from_algo(self):
+    self.mock_algo.num_generations = 5
     self.mock_algo.mini_batch_size = 3
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
     )
-    self.assertEqual(program.group_size, 5)
+    self.assertEqual(program.num_generations, 5)
     self.assertEqual(program.mini_batch_size, 3)
 
-  def test_unexpected_group_size_argument_raises_type_error(self):
+  def test_unexpected_num_generations_argument_raises_type_error(self):
     with self.assertRaises(TypeError):
       rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]
           dataset=["prompt_1"],
           algo=self.mock_algo,
-          group_size=4,
+          num_generations=4,
       )
 
   def test_unexpected_mini_batch_size_argument_raises_type_error(self):
@@ -405,7 +405,7 @@ class RLProgramTest(absltest.TestCase):
       )
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
           [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
-          group_size=2,
+          num_generations=2,
           policy_version=0,
           generation_args=datatypes.GenerationArgs(
               max_response_length=1024,
@@ -712,7 +712,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_train_stage_updates_only_on_last_microbatch(self):
     class TwoMicrobatchAssembler:
-      group_size: int = 1
+      num_generations: int = 1
       mini_batch_size: int = 1
 
       def feed(self, items):
@@ -782,7 +782,7 @@ class RLProgramTest(absltest.TestCase):
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=4,
       )
       program = rl_program.StandardRLProgram(
@@ -835,7 +835,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_full_batch_contains_multiple_optimizer_updates_and_one_sync(self):
     async def _run():
-      self.mock_algo.group_size = 2
+      self.mock_algo.num_generations = 2
       self.mock_algo.mini_batch_size = 2
       self.mock_engine.train_step.side_effect = [
           "queued",
@@ -848,7 +848,7 @@ class RLProgramTest(absltest.TestCase):
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
@@ -914,14 +914,14 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      self.mock_algo.group_size = 1
+      self.mock_algo.num_generations = 1
       self.mock_algo.mini_batch_size = 4
       padded_assembler = batch_assembly.PaddedBatchAssembler(
           batch_size=4,
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=1,
+          num_generations=1,
           mini_batch_size=4,
       )
       program = rl_program.StandardRLProgram(
@@ -981,14 +981,14 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      self.mock_algo.group_size = 1
+      self.mock_algo.num_generations = 1
       self.mock_algo.mini_batch_size = 2
       padded_assembler = batch_assembly.PaddedBatchAssembler(
           batch_size=2,
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=1,
+          num_generations=1,
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
@@ -1047,7 +1047,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_train_stage_save_checkpoint_handles_none_train_step(self):
     async def _run():
-      self.mock_algo.group_size = 1
+      self.mock_algo.num_generations = 1
       self.mock_algo.mini_batch_size = 1
       self.mock_engine.train_step.return_value = {"train_step": None}
       program = self._create_program(batch_size=1)
@@ -1085,13 +1085,13 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      self.mock_algo.group_size = 3
+      self.mock_algo.num_generations = 3
       self.mock_algo.mini_batch_size = 1
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1,
           max_packed_len=16,
           pad_id=0,
-          group_size=3,
+          num_generations=3,
           mini_batch_size=1,
       )
       program = rl_program.StandardRLProgram(
@@ -1146,13 +1146,13 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      self.mock_algo.group_size = 2
+      self.mock_algo.num_generations = 2
       self.mock_algo.mini_batch_size = 2
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1,
           max_packed_len=16,
           pad_id=0,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
@@ -1207,13 +1207,13 @@ class RLProgramTest(absltest.TestCase):
   def test_train_stage_sequence_packed_with_batch_size_greater_than_one(self):
     async def _run():
       self.mock_algo.train_micro_batch_size = 2
-      self.mock_algo.group_size = 2
+      self.mock_algo.num_generations = 2
       self.mock_algo.mini_batch_size = 2
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=2,
           max_packed_len=16,
           pad_id=0,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
@@ -1277,13 +1277,13 @@ class RLProgramTest(absltest.TestCase):
   ):
     async def _run():
       self.mock_algo.train_micro_batch_size = 2
-      self.mock_algo.group_size = 3
+      self.mock_algo.num_generations = 3
       self.mock_algo.mini_batch_size = 1
       packed_assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=2,
           max_packed_len=16,
           pad_id=0,
-          group_size=3,
+          num_generations=3,
           mini_batch_size=1,
       )
       program = rl_program.StandardRLProgram(
@@ -1342,13 +1342,13 @@ class RLProgramTest(absltest.TestCase):
 
   def test_train_stage_logs_prompt_ids(self):
     class TwoMicrobatchAssembler:
-      group_size: int = 2
+      num_generations: int = 2
       mini_batch_size: int = 1
       groups_per_assembly_batch: int = 1
 
       @property
       def assembly_batch_size(self) -> int:
-        return self.groups_per_assembly_batch * self.group_size
+        return self.groups_per_assembly_batch * self.num_generations
 
       def feed(self, items):
         del items
@@ -1419,14 +1419,14 @@ class RLProgramTest(absltest.TestCase):
 
   def test_train_stage_logs_multi_group_packed_microbatch(self):
     async def _run():
-      self.mock_algo.group_size = 2
+      self.mock_algo.num_generations = 2
       self.mock_algo.mini_batch_size = 2
       padded_assembler = batch_assembly.PaddedBatchAssembler(
           batch_size=4,
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
       )
       program = rl_program.StandardRLProgram(
@@ -1551,7 +1551,7 @@ class RLProgramTest(absltest.TestCase):
 
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
           [dict_item],
-          group_size=2,
+          num_generations=2,
           policy_version=0,
           generation_args=datatypes.GenerationArgs(
               max_response_length=1024,
@@ -1677,7 +1677,7 @@ class RLProgramTest(absltest.TestCase):
       )
       assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
           max_packed_len=8,
       )
@@ -1709,7 +1709,7 @@ class RLProgramTest(absltest.TestCase):
       )
       assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=2,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
           max_packed_len=8,
       )
@@ -2696,7 +2696,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_pipelined_multi_prompt_microbatch_execution(self):
     async def _run():
-      self.mock_algo.group_size = 2
+      self.mock_algo.num_generations = 2
       self.mock_algo.mini_batch_size = 4
       mock_payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
@@ -2714,16 +2714,16 @@ class RLProgramTest(absltest.TestCase):
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=2,
+          num_generations=2,
           mini_batch_size=4,
       )
 
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group("prompt_0", group_size=2),
-          _make_trajectory_group("prompt_1", group_size=2),
-          _make_trajectory_group("prompt_2", group_size=2),
-          _make_trajectory_group("prompt_3", group_size=2),
+          _make_trajectory_group("prompt_0", num_generations=2),
+          _make_trajectory_group("prompt_1", num_generations=2),
+          _make_trajectory_group("prompt_2", num_generations=2),
+          _make_trajectory_group("prompt_3", num_generations=2),
       )
 
       program = self._create_program(
@@ -2757,7 +2757,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_pipelined_sub_prompt_microbatch_execution(self):
     async def _run():
-      self.mock_algo.group_size = 4
+      self.mock_algo.num_generations = 4
       self.mock_algo.mini_batch_size = 1
       mock_payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
@@ -2775,13 +2775,13 @@ class RLProgramTest(absltest.TestCase):
           max_prompt_length=4,
           max_response_length=4,
           pad_id=0,
-          group_size=4,
+          num_generations=4,
           mini_batch_size=1,
       )
 
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group("prompt_0", group_size=4),
+          _make_trajectory_group("prompt_0", num_generations=4),
       )
 
       program = self._create_program(
@@ -2813,14 +2813,14 @@ class RLProgramTest(absltest.TestCase):
   def test_non_positive_batch_dimensions_rejected(self):
     self.mock_algo.mini_batch_size = 0
     with self.assertRaisesRegex(
-        ValueError, "mini_batch_size and group_size must be positive"
+        ValueError, "mini_batch_size and num_generations must be positive"
     ):
       self._create_program()
 
     self.mock_algo.mini_batch_size = 1
-    self.mock_algo.group_size = 0
+    self.mock_algo.num_generations = 0
     with self.assertRaisesRegex(
-        ValueError, "mini_batch_size and group_size must be positive"
+        ValueError, "mini_batch_size and num_generations must be positive"
     ):
       self._create_program()
 
@@ -2829,7 +2829,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group(prompt_id="p0", group_size=2),
+          _make_trajectory_group(prompt_id="p0", num_generations=2),
           [],
       )
       gen_args = datatypes.GenerationArgs(
@@ -2862,7 +2862,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group(prompt_id="p0", group_size=2),
+          _make_trajectory_group(prompt_id="p0", num_generations=2),
           [],
       )
       p = self._create_program(
@@ -2883,7 +2883,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_temperature_matching_sets_algo_config(self):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
+    mock_algo.num_generations = 2
     mock_algo.mini_batch_size = 1
     mock_algo.max_turns = 1
     mock_algo.max_packed_len = 16
@@ -2905,7 +2905,7 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
+    mock_algo.num_generations = 2
     mock_algo.mini_batch_size = 1
     mock_algo.max_turns = 1
     mock_algo.max_packed_len = 16
@@ -2925,7 +2925,7 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.group_size = 2
+    mock_algo.num_generations = 2
     mock_algo.mini_batch_size = 1
     mock_algo.max_turns = 1
     mock_algo.max_packed_len = 16

@@ -543,7 +543,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pairs_stream_generator(),
-            group_size=self.algo_config.num_generations,
+            num_generations=self.algo_config.num_generations,
             group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
             collect_mode=collect_mode,
         )

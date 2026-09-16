@@ -245,7 +245,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
   def _make_assembler(self, max_packed_len=16, **kwargs):
     defaults = dict(
         batch_size=1,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
         max_packed_len=max_packed_len,
     )
@@ -316,7 +316,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
   def test_streaming_feed_buffers_and_packs_across_groups(self):
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=3,
         max_packed_len=10,
     )
@@ -359,7 +359,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     payload2 = _make_payload(2, 2, metadata={"lineage": ctx2})
 
     assembler = batch_assembly.SequencePackedBatchAssembler(
-        batch_size=1, group_size=2, mini_batch_size=1, max_packed_len=16
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
     )
     batches = assembler.feed([payload1, payload2])
 
@@ -392,7 +392,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     p2 = _make_payload(4, 4, metadata={"lineage": ctx2})
 
     assembler = batch_assembly.SequencePackedBatchAssembler(
-        batch_size=1, group_size=2, mini_batch_size=1, max_packed_len=12
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=12
     )
     batches = assembler.feed([p1, p2])
 
@@ -415,7 +415,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
   def test_feed_without_lineage_returns_clean_payload(self):
     p = _make_payload(1, 1)
     assembler = batch_assembly.SequencePackedBatchAssembler(
-        batch_size=1, group_size=1, mini_batch_size=1, max_packed_len=8
+        batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
     )
     batches = assembler.feed([p])
     self.assertLen(batches, 1)
@@ -427,7 +427,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     )
     p = _make_payload(1, 1, metadata={"lineage": ctx})
     assembler = batch_assembly.SequencePackedBatchAssembler(
-        batch_size=1, group_size=1, mini_batch_size=1, max_packed_len=8
+        batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
     )
     out1 = assembler.feed([p])
     out2 = assembler.feed([p])
@@ -441,7 +441,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     p = _make_payload(1, 1, metadata={"lineage": ctx})
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=1,
         max_packed_len=8,
         start_batch_index=42,
@@ -464,7 +464,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # mini_batch_size is large, so the optimizer-update boundary is not reached.
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=10,
         max_packed_len=6,
     )
@@ -490,7 +490,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
   def test_streaming_flush_and_reset(self):
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
         max_packed_len=16,
     )
@@ -533,7 +533,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=3,  # rollouts_per_optimizer_update = 3
     )
     # 3 groups with 4 tokens each (total 12 tokens < 16)
@@ -563,7 +563,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=3,  # rollouts_per_optimizer_update = 3
     )
     # Item 1: 8 tokens -> buffers (8 < 16)
@@ -588,7 +588,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=2,
         max_packed_len=16,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=2,
     )
     # Item 1 has 10 tokens
@@ -613,7 +613,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=4,
     )
     assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=1)])
@@ -628,7 +628,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=4,
     )
     assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=1)])
@@ -640,7 +640,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Group 1: 2 items of 4 tokens each (8 tokens total) -> buffers
@@ -675,7 +675,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
     )
 
@@ -751,7 +751,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=1,
         max_packed_len=16,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
 
@@ -785,7 +785,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=2,
         max_packed_len=16,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=1,
     )
     item1 = self._make_streaming_payload(prompt_length=3, completion_length=3, val=1)
@@ -805,7 +805,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=2,
         max_packed_len=16,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=1,
     )
     item = datatypes.RLTrainerPayload(
@@ -824,7 +824,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         batch_size=2,
         max_packed_len=16,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=4,  # rollouts_per_optimizer_update = 4
     )
     # chunk_capacity = batch_size * max_packed_len = 2 * 16 = 32 tokens.
@@ -942,7 +942,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         max_prompt_length=4,
         max_response_length=5,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
     )
     defaults.update(kwargs)
@@ -953,13 +953,13 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         dict(batch_size=0),
         dict(max_prompt_length=0),
         dict(max_response_length=-1),
-        dict(group_size=0),
+        dict(num_generations=0),
         dict(mini_batch_size=0),
     ):
       with self.assertRaises(ValueError):
         self._assembler(**bad)
 
-  def test_requires_group_size_and_mini_batch_size(self):
+  def test_requires_num_generations_and_mini_batch_size(self):
     with self.assertRaises(TypeError):
       batch_assembly.PaddedBatchAssembler(  # pyrefly: ignore[missing-parameter]
           batch_size=2,
@@ -973,7 +973,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
           max_prompt_length=4,
           max_response_length=5,
           pad_id=0,
-          group_size=1,
+          num_generations=1,
       )
 
   def test_max_seq_len_is_sum_of_prompt_and_response_lengths(self):
@@ -1286,7 +1286,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         max_prompt_length=4,
         max_response_length=4,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=1,
     )
     payloads = assembler.pack([item1, item2])
@@ -1316,7 +1316,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         max_prompt_length=4,
         max_response_length=4,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=1,
     )
     out1 = assembler.pack([item])
@@ -1334,7 +1334,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         max_prompt_length=4,
         max_response_length=4,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=1,
         start_batch_index=10,
     )
@@ -1358,7 +1358,7 @@ class SequencePackedConversionTest(absltest.TestCase):
   def _make_assembler(self, max_packed_len=16, **kwargs):
     defaults = dict(
         batch_size=1,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
         max_packed_len=max_packed_len,
     )
@@ -1449,8 +1449,8 @@ class SequencePackedConversionTest(absltest.TestCase):
       self._make_assembler(max_packed_len=0)
     with self.assertRaisesRegex(ValueError, "batch_size must be positive"):
       self._make_assembler(max_packed_len=16, batch_size=0)
-    with self.assertRaisesRegex(ValueError, "group_size must be positive"):
-      self._make_assembler(max_packed_len=16, group_size=0)
+    with self.assertRaisesRegex(ValueError, "num_generations must be positive"):
+      self._make_assembler(max_packed_len=16, num_generations=0)
     with self.assertRaisesRegex(ValueError, "mini_batch_size must be positive"):
       self._make_assembler(max_packed_len=16, mini_batch_size=0)
     with self.assertRaisesRegex(
@@ -1710,13 +1710,13 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
   MAX_PROMPT = 4
   MAX_RESPONSE = 4
 
-  def _assembler(self, batch_size=2, group_size=1, mini_batch_size=1):
+  def _assembler(self, batch_size=2, num_generations=1, mini_batch_size=1):
     return batch_assembly.PaddedBatchAssembler(
         batch_size=batch_size,
         max_prompt_length=self.MAX_PROMPT,
         max_response_length=self.MAX_RESPONSE,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
     )
 
@@ -1795,7 +1795,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_prompt_length=2,
         max_response_length=2,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Feed half an optimizer update: should buffer and return an empty list.
@@ -1824,7 +1824,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_prompt_length=2,
         max_response_length=2,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Feed 2 items: reaches batch_size=2, but not the optimizer-update boundary.
@@ -1847,7 +1847,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_prompt_length=2,
         max_response_length=2,
         pad_id=0,
-        group_size=3,
+        num_generations=3,
         mini_batch_size=1,  # rollouts_per_optimizer_update = 3
     )
     # Feed 3 items: hits rollouts_per_optimizer_update=3 and auto-flushes.
@@ -1870,7 +1870,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_prompt_length=2,
         max_response_length=2,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Feed only 2 items mid-step
@@ -1893,7 +1893,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_prompt_length=2,
         max_response_length=2,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
     )
     assembler.feed(
@@ -1908,7 +1908,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         max_prompt_length=2,
         max_response_length=2,
         pad_id=0,
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     items = [
@@ -1933,7 +1933,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
 
   def test_create_sequence_packed_assembler_with_mesh_dims(self):
     assembler = batch_assembly.create_batch_assembler(
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
         train_micro_batch_size=1,
         batch_config=batch_assembly.BatchConfig(
@@ -1953,12 +1953,12 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(assembler.max_packed_len, 1024)
     self.assertEqual(assembler.pad_id, 42)
     self.assertEqual(assembler.max_segments_per_packed_row, 8)
-    self.assertEqual(assembler.group_size, 2)
+    self.assertEqual(assembler.num_generations, 2)
     self.assertEqual(assembler.mini_batch_size, 2)
 
   def test_create_sequence_packed_assembler_defaults_pack_size(self):
     assembler = batch_assembly.create_batch_assembler(
-        group_size=4,
+        num_generations=4,
         mini_batch_size=2,
         train_micro_batch_size=3,
         batch_config=batch_assembly.BatchConfig(
@@ -1974,7 +1974,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_sequence_packed_assembler_validates_budget(self):
     with self.assertRaises(ValueError):
       batch_assembly.create_batch_assembler(
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
           train_micro_batch_size=1,
           batch_config=batch_assembly.BatchConfig(
@@ -1986,7 +1986,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
 
   def test_create_padded_batch_assembler(self):
     assembler = batch_assembly.create_batch_assembler(
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
         train_micro_batch_size=4,
         batch_config=batch_assembly.BatchConfig(
@@ -2003,7 +2003,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
 
   def test_create_padded_batch_assembler_with_config_response_length(self):
     assembler = batch_assembly.create_batch_assembler(
-        group_size=2,
+        num_generations=2,
         mini_batch_size=2,
         train_micro_batch_size=4,
         batch_config=batch_assembly.BatchConfig(
@@ -2019,7 +2019,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_sequence_packed_assembler_validates_budget_from_config(self):
     with self.assertRaises(ValueError):
       batch_assembly.create_batch_assembler(
-          group_size=2,
+          num_generations=2,
           mini_batch_size=2,
           train_micro_batch_size=1,
           batch_config=batch_assembly.BatchConfig(
@@ -2031,7 +2031,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
 
   def test_create_default_batch_assembler(self):
     assembler = batch_assembly.create_batch_assembler(
-        group_size=2,
+        num_generations=2,
         mini_batch_size=1,
         train_micro_batch_size=2,
         batch_config=batch_assembly.BatchConfig(),

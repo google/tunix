@@ -30,7 +30,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
   def __init__(
       self,
       *,
-      group_size: Optional[int] = None,
+      num_generations: Optional[int] = None,
       group_fn: Optional[GroupFn] = None,
       filter_fn: Optional[FilterFn] = None,
       key_fn: Optional[Callable[[datatypes.TrajectoryItem], Hashable]] = None,
@@ -38,10 +38,10 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     """Initializes TrajectoryQueueManager.
 
     Args:
-      group_size: Optional target number of trajectories per ready group when
-        using default grouping.
-      group_fn: Optional custom grouping function. If None, `group_size` must be
-        provided.
+      num_generations: Optional target number of trajectories per ready group
+        when using default grouping.
+      group_fn: Optional custom grouping function. If None, `num_generations` must
+        be provided.
       filter_fn: Optional pluggable function to filter candidate groups.
       key_fn: Optional function to extract grouping key. Defaults to prompt_id
         fallback.
@@ -57,7 +57,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       key_fn = _default_key_fn
 
     super().__init__(
-        group_size=group_size,
+        num_generations=num_generations,
         group_fn=group_fn,
         filter_fn=filter_fn,
         key_fn=key_fn,
@@ -66,7 +66,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
   @classmethod
   def create(
       cls,
-      group_size: int = 1,
+      num_generations: int = 1,
       max_staleness: int = 0,
       current_policy_version: Callable[[], int] | None = None,
       filter_fn: Any | None = None,
@@ -98,7 +98,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       combined_filter = _staleness_filter
 
     return cls(
-        group_size=group_size,
+        num_generations=num_generations,
         filter_fn=combined_filter,  # pyrefly: ignore[bad-argument-type]
     )
 
@@ -132,7 +132,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
         out.extend(g)
       return out
     actual_batch_size = (
-        batch_size if batch_size is not None else self.group_size
+        batch_size if batch_size is not None else self.num_generations
     )
     return await super().get_batch(batch_size=actual_batch_size)  # pyrefly: ignore[bad-argument-type]
 

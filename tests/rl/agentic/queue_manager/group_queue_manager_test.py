@@ -33,11 +33,11 @@ def _create_item(
   )
 
 
-def _create_manager(group_size: int) -> group_queue_manager.GroupQueueManager:
+def _create_manager(num_generations: int) -> group_queue_manager.GroupQueueManager:
   """Helper to create a GroupQueueManager with the default test key_fn."""
   return group_queue_manager.GroupQueueManager(
       key_fn=lambda x: getattr(x, "prompt_id", id(x)),
-      group_size=group_size,
+      num_generations=num_generations,
   )
 
 
@@ -47,7 +47,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests basic put and get functionality."""
 
     async def _run_test():
-      manager = _create_manager(group_size=2)
+      manager = _create_manager(num_generations=2)
       item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
@@ -67,7 +67,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that prompt_id=0 (integer zero) is correctly grouped and not treated as falsy fallback."""
 
     async def _run_test():
-      manager = _create_manager(group_size=2)
+      manager = _create_manager(num_generations=2)
       item1 = _create_item(prompt_id=0, group_index=0)
       item2 = _create_item(prompt_id=0, group_index=1)
 
@@ -87,7 +87,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that get_batch waits until a group is ready."""
 
     async def _run_test():
-      manager = _create_manager(group_size=2)
+      manager = _create_manager(num_generations=2)
       item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
@@ -109,7 +109,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests batching where a group is split across two get_batch calls."""
 
     async def _run_test():
-      manager = _create_manager(group_size=3)
+      manager = _create_manager(num_generations=3)
       items = [_create_item("g1", i) for i in range(3)]
       for item in items:
         await manager.put(item)
@@ -130,7 +130,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that an exception is propagated to put and get calls."""
 
     async def _run_test():
-      manager = _create_manager(group_size=2)
+      manager = _create_manager(num_generations=2)
       exc = ValueError("Test Exception")
       await manager.put_exception(exc)
 
@@ -143,7 +143,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     asyncio.run(_run_test())
 
   def test_invalid_init_raises_value_error(self):
-    """Tests that init raises ValueError if neither group_size nor group_fn is given."""
+    """Tests that init raises ValueError if neither num_generations nor group_fn is given."""
     with self.assertRaises(ValueError):
       group_queue_manager.GroupQueueManager()
 
@@ -151,7 +151,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that leftover items notify concurrent consumers via _have_ready."""
 
     async def _run_test():
-      manager = _create_manager(group_size=4)
+      manager = _create_manager(num_generations=4)
       items = [_create_item("g1", i) for i in range(4)]
 
       # Consumer 2 waits for 1 item
@@ -177,7 +177,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests prepare_clear interrupts operations and clear resets state."""
 
     async def _run_test():
-      manager = _create_manager(group_size=2)
+      manager = _create_manager(num_generations=2)
       item1 = _create_item("g1", 0)
 
       # Start a consumer waiting for a batch
@@ -204,7 +204,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that close unblocks consumers and returns empty lists."""
 
     async def _run_test():
-      manager = _create_manager(group_size=2)
+      manager = _create_manager(num_generations=2)
 
       # Start a consumer waiting for a batch
       consumer_task = asyncio.create_task(manager.get_batch(2))
@@ -233,7 +233,7 @@ class GroupQueueManagerTest(absltest.TestCase):
         return getattr(item, "custom_id", id(item))
 
       manager = group_queue_manager.GroupQueueManager(
-          group_size=2, key_fn=my_key_fn
+          num_generations=2, key_fn=my_key_fn
       )
 
       class MockItem:

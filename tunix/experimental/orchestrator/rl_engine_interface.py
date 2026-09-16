@@ -48,27 +48,27 @@ class AbstractRLEngine(Protocol):
       self,
       prompts: Sequence[Any],
       *,
-      group_size: int = 1,
+      num_generations: int = 1,
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
-    """High-level convenience: Expands prompts by group_size and dispatches rollouts.
+    """High-level convenience: Expands prompts by num_generations and dispatches rollouts.
 
     Contract & Invariants:
       1. Every item in `prompts` MUST have a unique, collision-free `prompt_id`
          (provided as an attribute `p.prompt_id` or dict key `p["prompt_id"]`).
          The engine does not synthesize fallback IDs; missing IDs raise a
          `ValueError` immediately.
-      2. The engine expands each prompt into `group_size` independent rollout
+      2. The engine expands each prompt into `num_generations` independent rollout
          requests with deterministic IDs `req_{prompt_id}_g{g_idx}_v{version}`
          and sets `group_index = g_idx` (0..G-1).
 
     Args:
       prompts: Sequence of prompt items (dicts, objects, or RolloutRequests).
         Every prompt item MUST provide a unique `prompt_id`.
-      group_size: Number of rollout trajectories to generate per prompt (G).
+      num_generations: Number of rollout trajectories to generate per prompt (G).
       policy_version: Active policy version for generation.
       generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's

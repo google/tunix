@@ -552,7 +552,7 @@ async def run_evaluation():
   producer = asyncio.create_task(
       orchestrator.run_producers_from_stream(
           pairs_stream=pairs_generator(),
-          group_size=1,
+          num_generations=1,
           group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
           collect_mode="Trajectory",
       )

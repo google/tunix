@@ -348,20 +348,22 @@ class MockGlobalOrchestrator:
   async def collect_rollout_batch(
       self,
       requests: Sequence[datatypes.RolloutRequest],
-      group_size: int = 1,
+      num_generations: int = 1,
   ) -> List[TrajectoryOrError]:
     """Dispatches requests via ActorPool and collects out-of-order results."""
     if not self.actor_handles:
       raise ValueError(
           "No valid ActorHandles available in MockGlobalOrchestrator."
       )
-    if group_size < 1:
-      raise ValueError(f"group_size must be at least 1, got {group_size}")
+    if num_generations < 1:
+      raise ValueError(
+          f"num_generations must be at least 1, got {num_generations}"
+      )
 
     fanned_out_requests = []
     for req in requests:
-      if group_size > 1:
-        for group_index in range(group_size):
+      if num_generations > 1:
+        for group_index in range(num_generations):
           fanned_out_requests.append(
               dataclasses.replace(req, group_index=group_index)
           )

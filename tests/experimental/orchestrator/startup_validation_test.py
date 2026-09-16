@@ -130,7 +130,7 @@ class StartupValidationTest(absltest.TestCase):
         any("divisible by train_micro_batch_size" in e for e in errors)
     )
 
-  def test_run_geometry_grpo_group_size_one_rejected(self):
+  def test_run_geometry_grpo_num_generations_one_rejected(self):
     self.alg_config.algo_variant = "grpo"
     self.alg_config.num_generations = 1
     validator = startup_validation.RunGeometryValidator()
@@ -138,10 +138,10 @@ class StartupValidationTest(absltest.TestCase):
         self.registry, self.alg_config, self.training_config
     )
     self.assertTrue(
-        any("num_generations (group_size) must be > 1" in e for e in errors)
+        any("num_generations must be > 1" in e for e in errors)
     )
 
-  def test_run_geometry_grpo_group_size_none_or_string_rejected(self):
+  def test_run_geometry_grpo_num_generations_none_or_string_rejected(self):
     self.alg_config.algo_variant = "grpo"
     self.alg_config.num_generations = None
     validator = startup_validation.RunGeometryValidator()
@@ -149,7 +149,7 @@ class StartupValidationTest(absltest.TestCase):
         self.registry, self.alg_config, self.training_config
     )
     self.assertTrue(
-        any("num_generations (group_size) must be > 1" in e for e in errors)
+        any("num_generations must be > 1" in e for e in errors)
     )
 
   def test_run_geometry_valid_configuration_passes(self):

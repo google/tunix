@@ -489,8 +489,8 @@ from tunix.experimental.orchestrator import batch_assembly
 class AlgorithmAdapter(abc.ABC):
   """Abstract algorithm adapter for returns math, advantages, and loss functions."""
 
-  def __init__(self, group_size: int = 8, mini_batch_size: int = 4, max_turns: int = 1, max_packed_len: int = 8192):
-    self.group_size = group_size
+  def __init__(self, num_generations: int = 8, mini_batch_size: int = 4, max_turns: int = 1, max_packed_len: int = 8192):
+    self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_turns = max_turns
     self.max_packed_len = max_packed_len
@@ -535,7 +535,7 @@ class GRPOAdapter(AlgorithmAdapter):
       ref_logps: Any | None = None,
   ) -> list[batch_assembly.TrainExample]:
     """Packages group trajectories, advantages, and tool observation masks into TrainExamples."""
-    advs = self.compute_advantages(rewards, num_generations=self.group_size)
+    advs = self.compute_advantages(rewards, num_generations=self.num_generations)
     examples = []
     for i, traj in enumerate(group.trajectories):
       examples.append(
@@ -600,9 +600,9 @@ class RLProgram:
   def __init__(self):
     self._is_running = False
 
-  def make_group_queue(self, name: str, group_size: int = 1) -> Any:
+  def make_group_queue(self, name: str, num_generations: int = 1) -> Any:
     """Requests an infrastructure-managed, checkpointable TrajectoryQueue."""
-    return TrajectoryQueueManager(group_size=group_size)
+    return TrajectoryQueueManager(num_generations=num_generations)
 
 
 class StandardRLProgram(RLProgram):
@@ -620,8 +620,8 @@ class StandardRLProgram(RLProgram):
     self.algo = algo
     self.reward_fns = reward_fns
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(max_packed_len=algo.max_packed_len)
-    self.raw_q = self.make_group_queue("raw", group_size=algo.group_size)
-    self.scored_q = self.make_group_queue("scored", group_size=algo.group_size)
+    self.raw_q = self.make_group_queue("raw", num_generations=algo.num_generations)
+    self.scored_q = self.make_group_queue("scored", num_generations=algo.num_generations)
     self.current_policy_version = 0
 
   async def rollout_dispatch_stage(self, engine: distributed_rl_engine.DistributedRLEngine):
@@ -633,7 +633,7 @@ class StandardRLProgram(RLProgram):
       prompt_id = f"prompt_{prompt_idx}"
       group_id = f"group_{prompt_idx}"
       requests = []
-      for g_idx in range(self.algo.group_size):
+      for g_idx in range(self.algo.num_generations):
         req = datatypes.RolloutRequest(
             request_id=f"req_{prompt_idx}_{g_idx}",
             prompt=prompt_item,

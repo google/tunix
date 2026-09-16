@@ -155,7 +155,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       prompts: Sequence[Any],
       *,
-      group_size: int = 1,
+      num_generations: int = 1,
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
@@ -213,15 +213,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if isinstance(p, Mapping):
         max_turns = p.get("max_turns", max_turns)
 
-      for group_index in range(group_size):
+      for group_index in range(num_generations):
         request_metadata = dict(base_metadata)
         request_metadata.update(item_metadata)
         request_metadata["group_index"] = group_index
-        request_metadata["group_size"] = group_size
+        request_metadata["num_generations"] = num_generations
         if isinstance(request_metadata.get("env_config"), Mapping):
           env_config = dict(request_metadata["env_config"])
           env_config["group_index"] = group_index
-          env_config["group_size"] = group_size
+          env_config["num_generations"] = num_generations
           env_config["policy_version"] = version
           request_metadata["env_config"] = env_config
 
@@ -243,10 +243,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     prompt_ids = list(dict.fromkeys(req.prompt_id for req in rollout_reqs))
     logging.info(
-        "Created rollout requests for %d prompts (group_size=%d,"
+        "Created rollout requests for %d prompts (num_generations=%d,"
         " total_requests=%d, policy_version=%d). Prompt IDs: %s",
         len(prompts),
-        group_size,
+        num_generations,
         len(rollout_reqs),
         version,
         _summarize_list(prompt_ids),
@@ -275,7 +275,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       prompts: Sequence[Any],
       *,
-      group_size: int = 1,
+      num_generations: int = 1,
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
@@ -289,7 +289,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     """
     rollout_reqs = self._build_rollout_requests(
         prompts,
-        group_size=group_size,
+        num_generations=num_generations,
         policy_version=policy_version,
         generation_args=generation_args,
         route_metadata=route_metadata,

@@ -204,7 +204,7 @@ class RolloutOrchestrator:
           | AsyncIterable[Tuple[ConversationAgentBase, BaseTaskEnv]]
       ),
       *,
-      group_size: int,
+      num_generations: int,
       group_key_fn: Callable[
           [int, BaseTaskEnv, Trajectory], Hashable
       ] = lambda i, _, __: i,
@@ -223,7 +223,8 @@ class RolloutOrchestrator:
     Args:
       pairs_stream: An iterable of tuples, where each tuple contains an
         ConversationAgentBase and a BaseTaskEnv instance.
-      group_size: The number of trajectories to collect before forming a group.
+      num_generations: The number of trajectories to collect before forming a
+        group.
       group_key_fn: A callable that takes `(pair_index, env, trajectory)` and
         returns a hashable group identifier. Using a callable allows for
         flexible grouping strategies. For example, trajectories can be grouped
@@ -251,7 +252,7 @@ class RolloutOrchestrator:
 
     self._group_queue_manager = GroupQueueManager(
         key_fn=lambda x: getattr(x, "prompt_id", id(x)),
-        group_size=group_size,
+        num_generations=num_generations,
     )
     self._stop.clear()
     self._tasks.clear()

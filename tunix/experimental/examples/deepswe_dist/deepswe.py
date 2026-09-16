@@ -218,7 +218,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
       entry: dict[str, Any] | None = None,
       prompt_id: str = "",
       group_index: int = 0,
-      group_size: int = 1,
+      num_generations: int = 1,
       policy_version: int = 0,
       group_id: Any = None,
       pair_index: int | None = None,
@@ -235,11 +235,11 @@ class DeepSWEEnv(swe_env.SWEEnv):
       logging.info(
           "Initializing DeepSWE SandboxFleet in rollout worker "
           "(max_concurrency=%s).",
-          group_size,
+          num_generations,
       )
       kwargs["fleet"] = sandbox_utils.init_global_fleet(
           tasks=[entry],
-          max_concurrency=group_size,
+          max_concurrency=num_generations,
       )
 
     super().__init__(
@@ -252,7 +252,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
         **entry,
         "prompt_id": prompt_id,
         "group_index": group_index,
-        "group_size": group_size,
+        "num_generations": num_generations,
         "policy_version": policy_version,
     }
 

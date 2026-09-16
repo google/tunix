@@ -51,7 +51,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertLen(advs, 4)
     np.testing.assert_allclose(advs, np.zeros(4, dtype=np.float32), atol=1e-5)
 
-  def test_grpo_invalid_group_size(self):
+  def test_grpo_invalid_num_generations(self):
     with self.assertRaises(ValueError):
       algorithm_config.GRPOConfig(num_generations=1)
     with self.assertRaises(ValueError):
@@ -204,7 +204,9 @@ class AlgorithmAdapterTest(absltest.TestCase):
       adapter.create_trainer_payloads([item1, item2], rewards=[1.0, 2.0])
 
   def test_ppo_advantages_and_trainer_payloads(self):
-    adapter = algorithm_adapter.PPOAdapter(group_size=2, gamma=0.99, lam=0.95)
+    adapter = algorithm_adapter.PPOAdapter(
+        num_generations=2, gamma=0.99, lam=0.95
+    )
     item = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -365,7 +367,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
     np.testing.assert_allclose(payloads[1].ref_per_token_logps, [-0.3, -0.4])
 
   def test_ppo_with_ref_and_old_logps(self):
-    adapter = algorithm_adapter.PPOAdapter(group_size=1)
+    adapter = algorithm_adapter.PPOAdapter(num_generations=1)
     item = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id="g1",
@@ -395,9 +397,9 @@ class AlgorithmAdapterTest(absltest.TestCase):
         algorithm_adapter.GRPOAdapter(
             algo_config=algorithm_config.GRPOConfig(num_generations=2)
         ),
-        algorithm_adapter.PPOAdapter(group_size=1),
+        algorithm_adapter.PPOAdapter(num_generations=1),
     ]:
-      g = adapter.group_size
+      g = adapter.num_generations
       rewards = [float(i + 1) for i in range(g)]
 
       # 1. Both prompt_tokens and conversation_tokens are empty.
@@ -474,7 +476,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
         np.testing.assert_array_equal(payload.completion_ids, [3, 4])
         self.assertLen(payload.advantages, 2)
 
-  def test_grpo_group_size_guard(self):
+  def test_grpo_num_generations_guard(self):
     """Verifies Discrepancy D7: num_generations <= 1 must raise ValueError."""
     with self.assertRaisesRegex(
         ValueError, "num_generations must be greater than 1"
@@ -501,7 +503,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
         algo_config=canonical_config,
     )
     self.assertIs(adapter.algo_config, canonical_config)
-    self.assertEqual(adapter.group_size, 4)
+    self.assertEqual(adapter.num_generations, 4)
     self.assertEqual(adapter.algo_config.epsilon, 0.15)
     self.assertEqual(adapter.algo_config.beta, 0.03)
     self.assertEqual(adapter.algo_config.temperature, 1.0)
@@ -517,7 +519,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
     adapter = algorithm_adapter.GRPOAdapter()
     self.assertIsInstance(adapter.algo_config, algorithm_config.GRPOConfig)
     self.assertEqual(adapter.algo_config.num_generations, 2)
-    self.assertEqual(adapter.group_size, 2)
+    self.assertEqual(adapter.num_generations, 2)
     self.assertEqual(adapter.algo_config.kl_loss_mode, "kl")
     self.assertEqual(adapter.algo_config.epsilon, 0.2)
     self.assertEqual(adapter.algo_config.epsilon_high, 0.2)

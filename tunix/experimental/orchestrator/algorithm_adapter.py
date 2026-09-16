@@ -123,7 +123,7 @@ class AlgorithmAdapter(abc.ABC):
   def __init__(
       self,
       algo_config: algorithm_config.AlgorithmConfig | None = None,
-      group_size: int = 8,
+      num_generations: int = 8,
       mini_batch_size: int = 4,
       train_micro_batch_size: int = 1,
       max_turns: int = 1,
@@ -135,7 +135,7 @@ class AlgorithmAdapter(abc.ABC):
         if algo_config is not None
         else algorithm_config.AlgorithmConfig()
     )
-    self.group_size = group_size
+    self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.train_micro_batch_size = train_micro_batch_size
     self.max_turns = max_turns
@@ -193,8 +193,8 @@ class GRPOAdapter(AlgorithmAdapter):
 
     Args:
       algo_config: Canonical GRPO configuration. It is the single source of
-        truth for all algorithm hyperparameters, including the group size
-        (`num_generations`). Defaults to `GRPOConfig()` when omitted.
+        truth for all algorithm hyperparameters, including the
+        `num_generations`. Defaults to `GRPOConfig()` when omitted.
       mini_batch_size: Number of prompt groups per optimizer step.
       train_micro_batch_size: Number of sequences per trainer forward pass.
       max_turns: Maximum number of environment turns per rollout.
@@ -206,7 +206,7 @@ class GRPOAdapter(AlgorithmAdapter):
 
     super().__init__(
         algo_config=algo_config,
-        group_size=algo_config.num_generations,
+        num_generations=algo_config.num_generations,
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=train_micro_batch_size,
         max_turns=max_turns,
@@ -227,7 +227,7 @@ class GRPOAdapter(AlgorithmAdapter):
   ) -> jnp.ndarray:
     """Computes returns and advantages using the registered advantage estimator."""
     del kwargs
-    g = num_generations or self.group_size
+    g = num_generations or self.num_generations
     estimator = function_registry.get_advantage_estimator(
         self.algo_config.advantage_estimator
     )
@@ -243,7 +243,7 @@ class GRPOAdapter(AlgorithmAdapter):
   ) -> list[datatypes.RLTrainerPayload]:
     """Packages group trajectories, advantages, and tool observation masks into unbatched RLTrainerPayloads."""
     del kwargs
-    advs = self.compute_advantages(rewards, num_generations=self.group_size)
+    advs = self.compute_advantages(rewards, num_generations=self.num_generations)
     payloads = []
 
     for i, item in enumerate(group):
@@ -311,7 +311,7 @@ class PPOAdapter(AlgorithmAdapter):
 
   def __init__(
       self,
-      group_size: int = 1,
+      num_generations: int = 1,
       mini_batch_size: int = 4,
       max_turns: int = 1,
       max_packed_len: int = 8192,
@@ -331,7 +331,7 @@ class PPOAdapter(AlgorithmAdapter):
     )
     super().__init__(
         algo_config=algo_config,
-        group_size=group_size,
+        num_generations=num_generations,
         mini_batch_size=mini_batch_size,
         max_turns=max_turns,
         max_packed_len=max_packed_len,

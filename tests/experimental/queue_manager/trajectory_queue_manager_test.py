@@ -42,11 +42,11 @@ def _create_item(
 class QueueManagerTest(absltest.TestCase):
 
   def test_default_trajectory_grouping(self):
-    """Tests default trajectory grouping by prompt_id up to group_size."""
+    """Tests default trajectory grouping by prompt_id up to num_generations."""
 
     async def _run_test():
       manager = trajectory_queue_manager.TrajectoryQueueManager(
-          group_size=2
+          num_generations=2
       )
       item1 = _create_item("g1", group_index=0)
       item2 = _create_item("g1", group_index=1)
@@ -134,7 +134,7 @@ class QueueManagerTest(absltest.TestCase):
         return [item for item in group if item.traj.reward > 0]
 
       manager = trajectory_queue_manager.TrajectoryQueueManager(
-          group_size=2, filter_fn=positive_reward_filter_fn
+          num_generations=2, filter_fn=positive_reward_filter_fn
       )
 
       item_good = _create_item("g1", group_index=0, reward=1.0)
@@ -157,7 +157,7 @@ class QueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = trajectory_queue_manager.TrajectoryQueueManager(
-          group_size=3
+          num_generations=3
       )
       items = [_create_item("g1", group_index=i) for i in range(3)]
       for item in items:
@@ -180,7 +180,7 @@ class QueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = trajectory_queue_manager.TrajectoryQueueManager(
-          group_size=2
+          num_generations=2
       )
       exc = ValueError("Test Exception")
       await manager.put_exception(exc)

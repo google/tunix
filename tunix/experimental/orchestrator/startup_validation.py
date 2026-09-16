@@ -91,7 +91,7 @@ class RunGeometryValidator:
       if mini_batch_size % num_generations != 0:
         errors.append(
             f"mini_batch_size {mini_batch_size} is not divisible by "
-            f"num_generations (group_size) {num_generations}"
+            f"num_generations {num_generations}"
         )
 
     # 3. Batch/micro-batch divisibility.
@@ -124,7 +124,7 @@ class RunGeometryValidator:
         not isinstance(num_generations, int) or num_generations <= 1
     ):
       errors.append(
-          f"num_generations (group_size) must be > 1 for {algo_variant!r}, "
+          f"num_generations must be > 1 for {algo_variant!r}, "
           f"got {num_generations}"
       )
 

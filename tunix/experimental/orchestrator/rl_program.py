@@ -186,10 +186,10 @@ class StandardRLProgram(RLProgram):
     )
 
     self.reward_fns = list(reward_fns) if reward_fns else []
-    self.group_size = algo.group_size
+    self.num_generations = algo.num_generations
     self.mini_batch_size = algo.mini_batch_size
-    if self.mini_batch_size <= 0 or self.group_size <= 0:
-      raise ValueError("mini_batch_size and group_size must be positive.")
+    if self.mini_batch_size <= 0 or self.num_generations <= 0:
+      raise ValueError("mini_batch_size and num_generations must be positive.")
     self.full_batch_size = (
         self.mini_batch_size if batch_size is None else batch_size
     )
@@ -211,11 +211,11 @@ class StandardRLProgram(RLProgram):
       )
     if assembler is not None:
       self.assembler = assembler
-      self.assembler.group_size = self.group_size
+      self.assembler.num_generations = self.num_generations
       self.assembler.mini_batch_size = self.mini_batch_size
     else:
       self.assembler = batch_assembly.create_batch_assembler(
-          group_size=self.group_size,
+          num_generations=self.num_generations,
           mini_batch_size=self.mini_batch_size,
           train_micro_batch_size=getattr(algo, "train_micro_batch_size", 1),
           batch_config=self.batch_config,
@@ -248,12 +248,12 @@ class StandardRLProgram(RLProgram):
     self._dispatch_done = asyncio.Event()
 
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
-        group_size=self.group_size,
+        num_generations=self.num_generations,
         max_staleness=max_staleness,
         current_policy_version=lambda: self.policy_version,
     )
     self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
-        group_size=self.group_size
+        num_generations=self.num_generations
     )
 
   def close(self) -> None:
@@ -324,9 +324,9 @@ class StandardRLProgram(RLProgram):
               "prompt_id": f"prompt_{prompt_idx}",
           }
 
-        self._in_flight_rollouts += self.group_size
+        self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
-            "group_size": self.group_size,
+            "num_generations": self.num_generations,
             "policy_version": self.policy_version,
         }
         if self.generation_args is not None:

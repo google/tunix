@@ -85,17 +85,17 @@ class BatchAssembler(Generic[T], Protocol):
   """Universal batch assembly protocol for microbatch packing.
 
   Attributes:
-    group_size: Number of rollout trajectories / generations generated per
+    num_generations: Number of rollout trajectories / generations generated per
       prompt group (G). Must be a positive integer.
   """
 
-  group_size: int
+  num_generations: int
   mini_batch_size: int
 
   @property
   def rollouts_per_optimizer_update(self) -> int:
     """Total number of rollouts expected per optimizer update."""
-    return self.mini_batch_size * self.group_size
+    return self.mini_batch_size * self.num_generations
 
   def feed(
       self,
@@ -412,7 +412,7 @@ class SequencePackedBatchAssembler:
       self,
       *,
       batch_size: int,
-      group_size: int,
+      num_generations: int,
       mini_batch_size: int,
       max_packed_len: int = 8192,
       pad_id: int = 0,
@@ -423,7 +423,7 @@ class SequencePackedBatchAssembler:
 
     Args:
       batch_size: Target batch dim for packed sequences.
-      group_size: Number of rollout generations per prompt group (G).
+      num_generations: Number of rollout generations per prompt group (G).
       mini_batch_size: Number of prompt groups per model update.
       max_packed_len: Maximum packed sequence length per row.
       pad_id: Token ID used for padding.
@@ -433,8 +433,8 @@ class SequencePackedBatchAssembler:
     """
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
-    if group_size <= 0:
-      raise ValueError(f"group_size must be positive, got {group_size}.")
+    if num_generations <= 0:
+      raise ValueError(f"num_generations must be positive, got {num_generations}.")
     if mini_batch_size <= 0:
       raise ValueError(
           f"mini_batch_size must be positive, got {mini_batch_size}."
@@ -452,7 +452,7 @@ class SequencePackedBatchAssembler:
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
-    self.group_size = group_size
+    self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
     self._batch_counter = start_batch_index
@@ -466,7 +466,7 @@ class SequencePackedBatchAssembler:
   @property
   def rollouts_per_optimizer_update(self) -> int:
     """Total number of rollouts expected per optimizer update."""
-    return self.mini_batch_size * self.group_size
+    return self.mini_batch_size * self.num_generations
 
   def _emit_one_chunk(
       self, *, max_segments: int, drain_all: bool
@@ -602,7 +602,7 @@ class PaddedBatchAssembler:
       max_prompt_length: int,
       max_response_length: int,
       pad_id: int,
-      group_size: int,
+      num_generations: int,
       mini_batch_size: int,
       start_batch_index: int = 0,
   ):
@@ -614,7 +614,7 @@ class PaddedBatchAssembler:
       max_prompt_length: Maximum padded prompt sequence length.
       max_response_length: Maximum padded response sequence length.
       pad_id: Token ID used for padding prompts and completions.
-      group_size: Number of rollout generations per prompt group (G).
+      num_generations: Number of rollout generations per prompt group (G).
       mini_batch_size: Number of prompt groups per optimizer update.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
@@ -628,8 +628,8 @@ class PaddedBatchAssembler:
       raise ValueError(
           f"max_response_length must be positive, got {max_response_length}."
       )
-    if group_size <= 0:
-      raise ValueError(f"group_size must be positive, got {group_size}.")
+    if num_generations <= 0:
+      raise ValueError(f"num_generations must be positive, got {num_generations}.")
     if mini_batch_size <= 0:
       raise ValueError(
           f"mini_batch_size must be positive, got {mini_batch_size}."
@@ -638,7 +638,7 @@ class PaddedBatchAssembler:
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
-    self.group_size = group_size
+    self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self._batch_counter = start_batch_index
 
@@ -650,7 +650,7 @@ class PaddedBatchAssembler:
   @property
   def rollouts_per_optimizer_update(self) -> int:
     """Total number of rollouts expected per optimizer update."""
-    return self.mini_batch_size * self.group_size
+    return self.mini_batch_size * self.num_generations
 
   @property
   def max_seq_len(self) -> int:
@@ -961,7 +961,7 @@ class PaddedBatchAssembler:
 
 def create_batch_assembler(
     *,
-    group_size: int,
+    num_generations: int,
     mini_batch_size: int,
     train_micro_batch_size: int,
     batch_config: BatchConfig,
@@ -982,7 +982,7 @@ def create_batch_assembler(
   Otherwise, falls back to `SequencePackedBatchAssembler`.
 
   Args:
-    group_size: Number of rollout generations per prompt group (G).
+    num_generations: Number of rollout generations per prompt group (G).
     mini_batch_size: Number of prompt groups per model update.
     train_micro_batch_size: Micro-batch size for training.
     batch_config: BatchConfig containing packing, padding, and mesh dimension
@@ -1023,7 +1023,7 @@ def create_batch_assembler(
     )
     return SequencePackedBatchAssembler(
         batch_size=pack_size,
-        group_size=group_size,
+        num_generations=num_generations,
         mini_batch_size=mini_batch_size,
         max_packed_len=batch_config.max_seq_token_per_tpu,
         pad_id=batch_config.pad_id,
@@ -1041,13 +1041,13 @@ def create_batch_assembler(
         max_prompt_length=batch_config.max_prompt_length,
         max_response_length=batch_config.max_response_length,
         pad_id=batch_config.pad_id,
-        group_size=group_size,
+        num_generations=num_generations,
         mini_batch_size=mini_batch_size,
     )
 
   return SequencePackedBatchAssembler(
       batch_size=train_micro_batch_size,
-      group_size=group_size,
+      num_generations=num_generations,
       mini_batch_size=mini_batch_size,
       pad_id=batch_config.pad_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,

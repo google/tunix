@@ -46,7 +46,7 @@ class GroupQueueManager(Generic[_T]):
   def __init__(
       self,
       *,
-      group_size: Optional[int] = None,
+      num_generations: Optional[int] = None,
       key_fn: Optional[Callable[[_T], Hashable]] = None,
       group_fn: Optional[GroupFn[_T]] = None,
       filter_fn: Optional[FilterFn[_T]] = None,
@@ -54,17 +54,17 @@ class GroupQueueManager(Generic[_T]):
     """Initializes GroupQueueManager.
 
     Args:
-      group_size: Optional target size for default grouping.
+      num_generations: Optional target size for default grouping.
       key_fn: Optional function to extract a grouping key from an item. Defaults to id(item).
       group_fn: Optional custom grouping function `Callable[[buckets, item],
-        Optional[List[_T]]]`. If None, `group_size` must be provided.
+        Optional[List[_T]]]`. If None, `num_generations` must be provided.
       filter_fn: Optional filtering function `Callable[[candidate_group],
         valid_items]`.
     """
     if group_fn is None:
-      if group_size is None:
+      if num_generations is None:
         raise ValueError(
-            "Must specify either group_size or a custom group_fn for"
+            "Must specify either num_generations or a custom group_fn for"
             " GroupQueueManager."
         )
 
@@ -78,14 +78,14 @@ class GroupQueueManager(Generic[_T]):
         key = key_fn(item)
         bucket = buckets[key]
         bucket.append(item)
-        if len(bucket) == group_size:
+        if len(bucket) == num_generations:
           del buckets[key]
           return bucket
         return None
 
       group_fn = default_group_fn
 
-    self.group_size = group_size
+    self.num_generations = num_generations
     self.group_fn = group_fn
     self.filter_fn = filter_fn
 

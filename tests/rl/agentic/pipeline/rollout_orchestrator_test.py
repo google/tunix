@@ -61,43 +61,47 @@ class RolloutOrchestratorTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='group_size_1_batch_size_2',
+          testcase_name='num_generations_1_batch_size_2',
           num_pairs=3,
-          group_size=1,
+          num_generations=1,
           batch_size=2,
       ),
       dict(
-          testcase_name='group_size_2_batch_size_2',
+          testcase_name='num_generations_2_batch_size_2',
           num_pairs=4,
-          group_size=2,
+          num_generations=2,
           batch_size=2,
       ),
       dict(
-          testcase_name='group_size_1_batch_size_5',
+          testcase_name='num_generations_1_batch_size_5',
           num_pairs=5,
-          group_size=1,
+          num_generations=1,
           batch_size=5,
       ),
       dict(
-          testcase_name='group_size_3_batch_size_3',
+          testcase_name='num_generations_3_batch_size_3',
           num_pairs=6,
-          group_size=3,
+          num_generations=3,
           batch_size=3,
       ),
       dict(
-          testcase_name='group_size_2_batch_size_4',
+          testcase_name='num_generations_2_batch_size_4',
           num_pairs=6,
-          group_size=2,
+          num_generations=2,
           batch_size=4,
       ),
   )
-  def test_streaming_successful_run(self, num_pairs, group_size, batch_size):
+  def test_streaming_successful_run(
+      self, num_pairs, num_generations, batch_size
+  ):
     asyncio.run(
-        self._test_streaming_successful_run(num_pairs, group_size, batch_size)
+        self._test_streaming_successful_run(
+            num_pairs, num_generations, batch_size
+        )
     )
 
   async def _test_streaming_successful_run(
-      self, num_pairs, group_size, batch_size
+      self, num_pairs, num_generations, batch_size
   ):
     orchestrator = rollout_orchestrator.RolloutOrchestrator(
         max_concurrency=2,
@@ -117,8 +121,8 @@ class RolloutOrchestratorTest(parameterized.TestCase):
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
-            group_size=group_size,
-            group_key_fn=lambda i, env, traj: i // group_size,
+            num_generations=num_generations,
+            group_key_fn=lambda i, env, traj: i // num_generations,
         )
     )
     await asyncio.sleep(0)
@@ -132,9 +136,9 @@ class RolloutOrchestratorTest(parameterized.TestCase):
     self.assertLen(batches, math.ceil(num_pairs / batch_size))
     for batch in batches:
       self.assertLessEqual(len(batch), batch_size)
-      if group_size > 1 and batch_size <= group_size:
-        # If group_size > 1 and batch_size <= group_size, items in a batch
-        # are expected to come from the same group.
+      if num_generations > 1 and batch_size <= num_generations:
+        # If num_generations > 1 and batch_size <= num_generations, items in a
+        # batch are expected to come from the same group.
         group_ids = set(item.prompt_id for item in batch)
         self.assertLen(group_ids, 1)
 
@@ -152,21 +156,21 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       self.assertEqual(
           item.traj, {'trajectory': [f'traj_for_env_{item.group_index}']}
       )
-      self.assertEqual(item.prompt_id, item.group_index // group_size)
+      self.assertEqual(item.prompt_id, item.group_index // num_generations)
       if item.prompt_id not in items_by_group:
         items_by_group[item.prompt_id] = []
       items_by_group[item.prompt_id].append(item)
 
-    self.assertLen(items_by_group, num_pairs // group_size)
+    self.assertLen(items_by_group, num_pairs // num_generations)
     for group_id in items_by_group:
-      self.assertLen(items_by_group[group_id], group_size)
+      self.assertLen(items_by_group[group_id], num_generations)
       pair_indices_in_group = sorted(
           [item.group_index for item in items_by_group[group_id]]
       )
       expected_pair_indices = list(
           range(
-              group_id * group_size,
-              group_id * group_size + group_size,
+              group_id * num_generations,
+              group_id * num_generations + num_generations,
           )
       )
       self.assertEqual(pair_indices_in_group, expected_pair_indices)
@@ -197,7 +201,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
-            group_size=1,
+            num_generations=1,
             group_key_fn=lambda i, *_: i,
         )
     )
@@ -231,7 +235,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=faulty_generator(),
-            group_size=1,
+            num_generations=1,
             group_key_fn=lambda i, *_: i,
         )
     )

@@ -755,7 +755,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       # A single prompt: every request shares one prompt_id, which used to pin
       # the whole group to a single worker.
       await self.engine.dispatch_rollouts(
-          [{"prompt": "p1", "prompt_id": "p1"}], group_size=4
+          [{"prompt": "p1", "prompt_id": "p1"}], num_generations=4
       )
 
       dispatched_1 = [
@@ -850,14 +850,14 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dispatch_rollouts_expands_group_size(self):
+  def test_dispatch_rollouts_expands_num_generations(self):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(
           [
               {"prompt": "p1", "prompt_id": "p1"},
               {"prompt": "p2", "prompt_id": "p2"},
           ],
-          group_size=3,
+          num_generations=3,
           policy_version=5,
       )
       self.assertLen(req_ids, 6)
@@ -887,7 +887,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           },
       }
       req_ids = await self.engine.dispatch_rollouts(
-          [dict_item], group_size=2, policy_version=1
+          [dict_item], num_generations=2, policy_version=1
       )
       self.assertLen(req_ids, 2)
 
@@ -912,7 +912,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           {0, 1},
       )
       self.assertTrue(
-          all(r.metadata["group_size"] == 2 for r in all_dispatched)
+          all(r.metadata["num_generations"] == 2 for r in all_dispatched)
       )
       self.assertEqual(
           {r.metadata["env_config"]["group_index"] for r in all_dispatched},
@@ -920,7 +920,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.assertTrue(
           all(
-              r.metadata["env_config"]["group_size"] == 2
+              r.metadata["env_config"]["num_generations"] == 2
               for r in all_dispatched
           )
       )
@@ -941,7 +941,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         "metadata": {"env_config": original_env_config},
     }]
     requests = self.engine._build_rollout_requests(
-        prompts, group_size=3, policy_version=4
+        prompts, num_generations=3, policy_version=4
     )
     self.assertLen(requests, 3)
 
@@ -949,13 +949,13 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(req.group_index, idx)
       self.assertEqual(req.target_policy_version, 4)
       self.assertEqual(req.metadata["group_index"], idx)
-      self.assertEqual(req.metadata["group_size"], 3)
+      self.assertEqual(req.metadata["num_generations"], 3)
       # Verify env_config deep injection
       env_cfg = req.metadata["env_config"]
       self.assertEqual(env_cfg["env_name"], "math_arena")
       self.assertEqual(env_cfg["timeout_s"], 30)
       self.assertEqual(env_cfg["group_index"], idx)
-      self.assertEqual(env_cfg["group_size"], 3)
+      self.assertEqual(env_cfg["num_generations"], 3)
       self.assertEqual(env_cfg["policy_version"], 4)
 
     # Verify original env_config was not mutated in place
@@ -971,7 +971,7 @@ class DistributedRLEngineTest(absltest.TestCase):
             "prompt_id": "p1",
             "metadata": {"env_config": "env_v1"},
         }],
-        group_size=2,
+        num_generations=2,
         policy_version=1,
     )
     self.assertLen(requests_str, 2)
@@ -984,7 +984,7 @@ class DistributedRLEngineTest(absltest.TestCase):
             "prompt_id": "p2",
             "metadata": {"env_config": None},
         }],
-        group_size=1,
+        num_generations=1,
         policy_version=1,
     )
     self.assertLen(requests_none, 1)
@@ -993,7 +993,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     # 3. env_config is omitted
     requests_omitted = self.engine._build_rollout_requests(
         [{"prompt": "p3", "prompt_id": "p3"}],
-        group_size=1,
+        num_generations=1,
         policy_version=1,
     )
     self.assertLen(requests_omitted, 1)
@@ -1006,7 +1006,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "p1", "prompt_id": "p1"}],
-          group_size=1,
+          num_generations=1,
           generation_args=gen_args,
           route_metadata={"custom_key": "custom_value"},
       )
@@ -1030,7 +1030,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "Hello", "prompt_id": "p_123"}],
-          group_size=2,
+          num_generations=2,
           policy_version=3,
       )
       self.assertEqual(req_ids, ["req_p_123_g0_v3", "req_p_123_g1_v3"])
@@ -1041,7 +1041,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "p1", "prompt_id": "p1"}],
-          group_size=1,
+          num_generations=1,
           metadata=None,
           route_metadata=None,
       )
@@ -1060,7 +1060,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "Hello world", "prompt_id": "prompt_42"}],
-          group_size=2,
+          num_generations=2,
           policy_version=5,
       )
       self.assertLen(req_ids, 2)
@@ -1401,7 +1401,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "Test 0", "prompt_id": 0}],
-          group_size=1,
+          num_generations=1,
           policy_version=0,
       )
       self.assertEqual(req_ids, ["req_0_g0_v0"])

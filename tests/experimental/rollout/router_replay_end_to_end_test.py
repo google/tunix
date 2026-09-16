@@ -201,7 +201,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         max_prompt_length=PROMPT_LEN,
         max_response_length=GEN_LEN,
         pad_id=0,
-        group_size=1,
+        num_generations=1,
         mini_batch_size=1,
     ).pack([payload])
 
