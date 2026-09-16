@@ -1367,11 +1367,47 @@ class GradientAccumulatorTest(parameterized.TestCase):
     model = nnx.Linear(
         in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
     )
-    acc = peft_trainer_v2.GradientAccumulator(model, nnx.Param)
-    param_dtypes = jax.tree_util.tree_leaves(acc._param_dtypes)
+    acc = peft_trainer_v2.GradientAccumulator.create(model, nnx.Param)
+    param_dtypes = jax.tree_util.tree_leaves(acc.param_dtype)
     self.assertNotEmpty(param_dtypes)
     for dt in param_dtypes:
       self.assertEqual(dt, jnp.bfloat16)
+
+  def test_gradient_accumulator_is_a_jittable_value(self):
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(
+        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
+    )
+    acc = peft_trainer_v2.GradientAccumulator.create(model, nnx.Param)
+    self.assertTrue(acc.is_empty)
+    with self.assertRaisesRegex(ValueError, 'empty'):
+      acc.get()
+
+    ones = jax.tree.map(
+        lambda dt: jnp.ones((), jnp.bfloat16), acc.param_dtype
+    )
+
+    @jax.jit
+    def step(acc, g, d):
+      return acc.add(g, d)
+
+    # Two micro-batches of unequal size: 3 tokens then 1 token.
+    acc = step(acc, ones, jnp.asarray(3.0, jnp.float32))
+    acc = step(acc, ones, jnp.asarray(1.0, jnp.float32))
+    self.assertFalse(acc.is_empty)
+    self.assertEqual(float(acc.denom), 4.0)
+    for g in jax.tree_util.tree_leaves(acc.grads):
+      self.assertEqual(g.dtype, jnp.float32)  # accumulator dtype
+      self.assertEqual(float(g), 2.0)
+
+    scaled = jax.jit(lambda a: a.get())(acc)
+    for g in jax.tree_util.tree_leaves(scaled):
+      self.assertEqual(g.dtype, jnp.bfloat16)  # back in the param dtype
+      self.assertEqual(float(g), 0.5)  # (1 + 1) / (3 + 1)
+
+    acc = acc.reset()
+    self.assertTrue(acc.is_empty)
+    self.assertEqual(float(acc.denom), 0.0)
 
 
 if __name__ == '__main__':
