@@ -1,14 +1,15 @@
-# Qwen3.5-35B-A3B distributed GRPO on TPU v5p — run 6 failure report (v9)
+# Qwen3.5-35B-A3B distributed GRPO on TPU v5p — wide-topology failure report (v9)
 
 Companion to `qwen35_report_v8.md`, which measured a completed 100-step run on a
 **narrow** topology (one 4-chip rollout replica, 32 rollouts/step, 2 h 15 m).
-This report covers `maz-q35-6`, the first attempt to move that pipeline onto
-v7's **wide** topology — 8 rollout replicas, 32 chips, 256 rollouts/step,
-1024-token responses.
+This report covers `maz-q35-6` and `maz-q35-7`, the first two attempts to move
+that pipeline onto v7's **wide** topology — 8 rollout replicas, 32 chips, 256
+rollouts/step, 1024-token responses. It is written around run 6; run 7 is the
+control that narrows the cause.
 
-**It failed before step 0, in the initial weight sync.** No training step ran,
+**Both failed before step 0, in the initial weight sync.** No training step ran,
 so there are no step times, no rewards and no W&B run to report. What follows is
-the failure analysis and the two things the attempt did establish.
+the failure analysis and the things the attempts did establish.
 
 Everything below was measured on cluster `bodaborg-v5p-nap`, project
 `cloud-tpu-shared-capacity`, region `europe-west4`, namespace `default`, on
@@ -38,9 +39,23 @@ The single variable this run introduced over `maz-q35-5` that touches the
 transfer path is `RAIDEN_BROADCAST_K=1`. §2.3 shows the traceback proves that
 variable took effect and selected the tree-broadcast code path.
 
-**What is not yet known** is whether the hang is specific to `fanout_k=1` or
-affects `_execute_slice_broadcast` at any K. `maz-q35-7` is running the same
-configuration with `RAIDEN_BROADCAST_K=4` to separate those; see §6.
+**`maz-q35-7` then ruled out `fanout_k=1` as the cause.** It is the identical
+configuration with `RAIDEN_BROADCAST_K=4` — still below 8, so still on the
+tree-broadcast path, but four concurrent pushes per node instead of one. It
+failed in exactly the same place:
+
+| | `maz-q35-6` (K=1) | `maz-q35-7` (K=4) |
+|---|---|---|
+| Schedule generated | 18:53:10 | 19:35:44 |
+| Orchestrator raises | 19:04:34 | 19:45:59 |
+| `Weight sync finished in` | 684.18 s | **694.83 s** |
+| Failing frame | `_execute_slice_broadcast` → `_send_rpc` | **identical** |
+| Destinations that received data | 0 of 8 | **0 of 8** |
+
+So the defect is in the `_execute_slice_broadcast` path itself, not in the
+degree of serialisation. §2.5 has the strongest lead: the tree path generates a
+structurally different schedule from the direct path for the same 633
+variables.
 
 ---
 
@@ -250,7 +265,38 @@ Raising this deadline would not obviously help, since the symptom is a hang
 rather than slow progress, but it is worth recording that it cannot currently be
 tried without patching the wheel.
 
-### 2.5 The wedge afterwards
+### 2.5 The tree path generates a different schedule — 884 blocks against 180 million
+
+The orchestrator logs the schedule it generated before it starts pushing. On the
+same image and the same `tpu_sync_jax 0.0.1.dev20260914193202` wheel, for the
+same 633 variables:
+
+```
+maz-q35-5  18:35:07  [trainer] -> [replica_maz-q35-5-roll]
+                     (633 variable(s), 180063636 expected blocks)      -> synced in 86.44 s
+
+maz-q35-7  19:35:44  [trainer] -> [replica_maz-q35-7-roll-0 ... -roll-7]
+                     (633 variable(s), 884 expected blocks)            -> hung
+```
+
+**Block count is therefore a property of the code path, not of the wheel
+version.** The direct branch produces 180,063,636 blocks — v8 §3.3 measured that
+as roughly 390 bytes per block over ~70 GB. The tree branch produces 884, which
+over the same ~70 GB is ~79 MB per block, a factor of ~200,000 coarser.
+
+This is the most concrete lead in the failure, and it is where a Raiden owner
+should start. Two readings, not distinguished by anything measured here:
+
+- The tree path genuinely re-blocks at a much coarser granularity, and the
+  resulting first RPC does not complete within 600 s.
+- `expected blocks` is simply accounted differently on the tree path (for
+  example, counted per transfer group rather than per block), and the number is
+  a reporting difference rather than a behavioural one.
+
+TODO(raiden): establish which of the two, by logging the per-block byte size on
+both paths.
+
+### 2.6 The wedge afterwards
 
 When the outcome is unknown the coordinator deliberately declines to clean up:
 source staging stays pinned and destinations are not aborted, because a
@@ -391,29 +437,49 @@ kubectl delete jobset maz-q35-6-orch maz-q35-6-train \
   maz-q35-6-roll-{0,1,2,3,4,5,6,7} -n default
 ```
 
-**The next experiment is `maz-q35-7`: identical, with
-`RAIDEN_BROADCAST_K=4`.** 8 destinations still exceed K, so it stays on the
-`_execute_slice_broadcast` path, but each node may have four pushes in flight
-instead of one. Two outcomes, both informative:
+**`maz-q35-7` has already run that experiment** — identical configuration with
+`RAIDEN_BROADCAST_K=4`, still below 8 and so still on the
+`_execute_slice_broadcast` path, but four concurrent pushes per node instead of
+one. It hung the same way, first hop, 694.83 s (§0). `fanout_k` is not the
+variable.
 
-- **Syncs and trains** — `fanout_k=1` was too serial for the 600 s per-hop
-  deadline, and the tree-broadcast path itself is sound.
-- **Hangs the same way, first hop, ~650 s** — the tree-broadcast path does not
-  work at this topology regardless of K, and the next test is dropping
-  `ORCHESTRATOR_EXTRA_ENV` entirely to see whether the direct 8-way push works.
+**The next experiment is `maz-q35-8`: drop `ORCHESTRATOR_EXTRA_ENV`
+entirely.** At the default `RAIDEN_BROADCAST_K=64`, 8 destinations do not
+exceed K, `is_tree_broadcast` is false, and the group takes the direct branch —
+the source pushes to all 8 itself, which is the path `maz-q35-5` exercised
+successfully at 1 destination and the path that produces the 180 M-block
+schedule of §2.5:
+
+```bash
+# in submit.sh, comment out:
+# export ORCHESTRATOR_EXTRA_ENV="RAIDEN_BROADCAST_K=4"
+bash docker/maz-q35/submit.sh 8 100
+```
+
+Two outcomes:
+
+- **Syncs and trains** — the wide topology is usable today via the direct push,
+  the tree broadcast is simply broken, and the remaining question is only how
+  much slower 8 sequential direct pushes are than a working tree would be.
+- **Hangs too** — the problem is fan-out itself rather than the tree code, and
+  nothing about this topology works until Raiden is fixed. In that case the
+  fallback is v8's narrow shape with more steps, or reducing to 2–4 rollout
+  replicas to find where it breaks.
 
 ---
 
 ## 7. Open issues — reported, not fixed
 
-- **§2 Weight sync hangs on the first hop of `_execute_slice_broadcast` with
-  `RAIDEN_BROADCAST_K=1` and 8 destinations.** This is the blocker for the wide
-  topology. Needs a Raiden owner. Not yet isolated to `fanout_k=1` versus the
-  tree path in general; `maz-q35-7` is the discriminating run.
+- **§2 Weight sync hangs on the first hop of `_execute_slice_broadcast` with 8
+  destinations, at `RAIDEN_BROADCAST_K=1` and at 4.** This is the blocker for
+  the wide topology and it needs a Raiden owner. `fanout_k` has been ruled out
+  as the variable; §2.5's 884-versus-180 M block-count difference between the
+  tree and direct schedules is the concrete lead. Not yet known whether the
+  direct 8-way push works — that is `maz-q35-8`, §6.
 - **§2.4 `_send_rpc`'s 600 s deadline is hardcoded** and `start_transfer` does
   not override it, so per-hop transfer time cannot be extended without patching
   the wheel.
-- **§2.5 A failed weight sync wedges the job rather than failing it.** The
+- **§2.6 A failed weight sync wedges the job rather than failing it.** The
   orchestrator restarts, the workers do not, and the restarted orchestrator
   waits for registrations that never come — holding 40 chips until someone
   intervenes.
