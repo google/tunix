@@ -591,8 +591,12 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       raise RuntimeError("grpc is not installed or available.")
     self.target_address = target_address
     self._host_port = target_address.replace("grpc://", "")
-    self._channel: Optional[Any] = None
-    self._rpc: Optional[Any] = None
+    # grpc.aio channels bind to the event loop they were created on, so the
+    # handle keeps one channel per loop (orchestrator loop, router poller
+    # loop, successive asyncio.run() loops, ...). Entries for closed loops are
+    # pruned on access.
+    self._channels: Dict[Any, Any] = {}
+    self._channels_lock = threading.Lock()
     self._rpc_timeout_s = rpc_timeout_s
     # Blocking submit() runs on a persistent background event loop so repeated
     # calls reuse one channel. gRPC aio channels are bound to the loop that
@@ -611,14 +615,23 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         response_deserializer=lambda b: ExecutionResponse.deserialize(b),
     )
 
+  def _get_channel(self) -> Any:
+    """Returns the channel bound to the running event loop, creating it once."""
+    loop = asyncio.get_running_loop()
+    with self._channels_lock:
+      channel = self._channels.get(loop)
+      if channel is None:
+        for stale in [l for l in self._channels if l.is_closed()]:
+          del self._channels[stale]
+        assert _grpc_aio_lib is not None
+        channel = _grpc_aio_lib.insecure_channel(
+            self._host_port, options=_grpc_options()
+        )
+        self._channels[loop] = channel
+    return channel
+
   def _get_rpc(self) -> Any:
-    if self._rpc is None:
-      assert _grpc_aio_lib is not None
-      self._channel = _grpc_aio_lib.insecure_channel(
-          self._host_port, options=_grpc_options()
-      )
-      self._rpc = self._make_rpc(self._channel)
-    return self._rpc
+    return self._make_rpc(self._get_channel())
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
@@ -706,10 +719,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       **kwargs,
   ) -> str:
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
-    if self._channel is None:
-      self._get_rpc()
-    assert self._channel is not None
-    rpc = self._make_dispatch_task_rpc(self._channel)
+    rpc = self._make_dispatch_task_rpc(self._get_channel())
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
@@ -719,20 +729,20 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
-    if self._channel is None:
-      self._get_rpc()
-    assert self._channel is not None
-    rpc = self._make_poll_responses_rpc(self._channel)
+    rpc = self._make_poll_responses_rpc(self._get_channel())
     resp_bytes = await rpc(timeout_s, timeout=self._rpc_timeout_s)
     if not resp_bytes:
       return None
     return ExecutionResponse.deserialize(resp_bytes)
 
   async def close(self) -> None:
-    if self._channel is not None:
-      await self._channel.close()
-      self._channel = None
-      self._rpc = None
+    # Only the running loop's channel can be closed from here; channels bound
+    # to other (live) loops are dropped and left to GC.
+    with self._channels_lock:
+      current = self._channels.pop(asyncio.get_running_loop(), None)
+      self._channels.clear()
+    if current is not None:
+      await current.close()
     sync_loop = self._sync_loop
     if sync_loop is not None:
 
