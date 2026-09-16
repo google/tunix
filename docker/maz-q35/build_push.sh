@@ -14,6 +14,15 @@ TAG="${1:-q35-$(date +%m%d)-v1}"
 TARGET_IMAGE="${IMAGE_REPO}:${TAG}"
 PUSH="${PUSH:-true}"
 
+# The Raiden wheel is 109 MB and .gitignore excludes *.whl, so it is not in the branch.
+# Fetch it into the build context; the Dockerfile bind-mounts it by name.
+TPU_SYNC_WHEEL="tpu_sync_jax-0.0.1.dev20260914193202-cp312-cp312-manylinux_2_31_x86_64.whl"
+TPU_SYNC_WHEEL_URI="gs://cloud-tpu-inference-test-datenglin/${TPU_SYNC_WHEEL}"
+if [ ! -f "${SCRIPT_DIR}/${TPU_SYNC_WHEEL}" ]; then
+  echo "=== Fetching ${TPU_SYNC_WHEEL_URI}"
+  gcloud storage cp "${TPU_SYNC_WHEEL_URI}" "${SCRIPT_DIR}/${TPU_SYNC_WHEEL}"
+fi
+
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 if ! ${DOCKER_CMD} info >/dev/null 2>&1; then
   if sudo -n docker info >/dev/null 2>&1; then
@@ -120,7 +129,23 @@ assert "max_seq_token_per_tpu" in inspect.signature(
     maxtext_utils.build_maxtext_config).parameters
 assert "--max_seq_token_per_tpu" in inspect.getsource(run_trainer_node)
 
-print("ok: all six overlay patches are live in the image, PR 2228 at head 3421417e")
+# The Raiden wheel replacement. Check the version through the metadata and the FFI
+# extension through an actual import: a wheel whose .so cannot load against this image
+# libtpu would otherwise only surface at the first weight sync.
+import importlib.metadata as _md
+
+assert _md.version("tpu_sync_jax") == "0.0.1.dev20260914193202", _md.version(
+    "tpu_sync_jax")
+try:
+  _md.version("tpu_raiden_jax")
+except _md.PackageNotFoundError:
+  pass
+else:
+  raise AssertionError("the superseded tpu_raiden_jax distribution is still installed")
+from tpu_sync.frameworks.jax import weight_synchronizer_ffi  # noqa: F401
+
+print("ok: all six overlay patches are live in the image, PR 2228 at head 3421417e,")
+print("    tpu_sync_jax 0.0.1.dev20260914193202")
 PY'
 
 if [ "${PUSH}" != "true" ]; then

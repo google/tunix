@@ -12,6 +12,12 @@
 #   tunix-0003    tunix bf13cd2c    read the trajectory reward key the rollout emits
 #   tunix-0004    (local)           let the packing budget raise max_target_length
 #
+# Plus one wheel replacement: the Raiden weight-sync engine is moved from the base
+# image's 2026-09-08 build to the 2026-09-14 one, to match the Pathways images. The wheel
+# is not in this branch -- .gitignore excludes *.whl and it is 109 MB -- so build through
+# docker/maz-q35/build_push.sh, which fetches it from
+# gs://cloud-tpu-inference-test-datenglin/ into the build context first.
+#
 # tunix-0002 carries tunix PR 2228 at head 3421417e. The base image already contains an
 # independently written version of most of it, so the patch holds only the differences:
 # the CKPT_D2H_CONCURRENT_GB override, the lost-device-set exit, and the four
@@ -41,6 +47,26 @@
 # did nothing.
 ARG BASE_IMAGE=gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0912head-v8
 FROM ${BASE_IMAGE}
+
+# Raiden weight-sync engine, upgraded from the base image's 2026-09-08 build to the
+# 2026-09-14 one that matches the raiden_20260914 Pathways server and proxy.
+#
+# The distribution was renamed between the two: tpu_raiden_jax -> tpu_sync_jax, same
+# top-level `tpu_sync` package. pip has no way to know they are the same thing, so
+# installing over the top would leave the old build's files in place wherever the new
+# wheel does not happen to overwrite them, and two dist-info directories claiming the
+# same paths. Uninstall by the old name first.
+#
+# --no-deps: the wheel pins jax==0.11.0, jaxlib==0.11.0 and libtpu==0.0.47. The first two
+# already match. libtpu here is 0.0.44 and moving it is not a change this overlay should
+# be making silently -- it is the runtime for the rollout's vLLM as well. The .so files in
+# the wheel are the thing being upgraded; if they turn out to need 0.0.47 it will show up
+# as a load failure at weight-sync time, not as a subtle wrong answer.
+ARG TPU_SYNC_WHEEL=tpu_sync_jax-0.0.1.dev20260914193202-cp312-cp312-manylinux_2_31_x86_64.whl
+RUN --mount=type=bind,source=${TPU_SYNC_WHEEL},target=/tmp/${TPU_SYNC_WHEEL} \
+    pip uninstall -y tpu_raiden_jax \
+ && pip install --no-deps --force-reinstall /tmp/${TPU_SYNC_WHEEL} \
+ && python3 -c "import importlib.metadata as m; print('tpu_sync_jax', m.version('tpu_sync_jax'))"
 
 COPY maxtext-0001-clear-payload-metadata.patch \
      maxtext-0002-checkpoint-device-host-concurrency.patch \

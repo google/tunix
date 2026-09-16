@@ -41,11 +41,16 @@ export PRIORITY_CLASS_NAME=medium
 # and weight sync requires the orchestrator, trainer and rollout to run identical code.
 # This is Yixuan's yixuann-e2e-0912head-v8 plus six patches: MaxText PR 5219 and 5234,
 # tunix PR 2229, the in-image part of tunix PR 2228 at head 3421417e, upstream tunix
-# bf13cd2c for the trajectory reward key, and the packing budget fix (see
-# docker/maz-q35/Dockerfile).
-export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:e473f60f74c866e8f9f410c3692b4818c87bfdc6ff0696ecdb47b263cb808452
-export PATHWAYS_SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904
-export PATHWAYS_PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904
+# bf13cd2c for the trajectory reward key, and the packing budget fix. Plus the
+# tpu_sync_jax 2026-09-14 Raiden wheel in place of the base image's 2026-09-08 one
+# (see docker/maz-q35/Dockerfile).
+export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:37d4070d501a54c8a167ba2287bbe9626726e65224a6019750430b5d2ff9aaf5
+# The two Pathways halves are deliberately on different tags: the server carries a fix
+# on top of raiden_20260914 and the proxy does not have one. Both are the 2026-09-14
+# Raiden generation, which is what the tpu_sync_jax wheel in the image above matches;
+# runs up to maz-q35-4 used raiden_20260904 against the base image's 2026-09-08 wheel.
+export PATHWAYS_SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260914_fix
+export PATHWAYS_PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260914
 
 # --- Model -------------------------------------------------------------------
 export TRAINER_BACKEND=maxtext
@@ -142,16 +147,19 @@ export MAX_SEQ_TOKEN_PER_TPU=4096
 export MAX_STEPS="${STEPS}"
 
 # --- Output ------------------------------------------------------------------
-# Saving at step 10 of maz-q35-2 OOM-killed the trainer's user container: the cgroup
-# killed python at 64.9 GiB against the 70G limit, 36 s into the save, with no weight
-# sync running. MaxText PR 5234's CKPT_D2H_CONCURRENT_GB=8 bound was already in force.
-# maz-q35-3 ran 100 steps clean with saving off. Saving is back on here to exercise
-# tunix PR 2228 at head 3421417e, which is the only thing that changed: that head
-# removes the drain from prepare_weight_sync, so a save and the next step's Raiden
-# transfer are now meant to overlap rather than serialise. Nothing in it lowers the
-# peak of a save on its own, so this may reproduce the same OOM at step 10 -- which is
-# the result worth having. See qwen35_report_v8.md section 6.1. Set to 0 to disable.
-export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-10}
+# Checkpointing is off, because the save's host footprint is unbounded. Two runs have
+# now been OOM-killed writing the step-10 checkpoint, and each was killed at roughly 93%
+# of whatever ceiling it was given:
+#
+#   maz-q35-2   70G limit    killed at  64.9 GiB   36 s into the save
+#   maz-q35-4  120G limit    killed at 110.7 GiB   59 s into the save
+#
+# Both had MaxText PR 5234's CKPT_D2H_CONCURRENT_GB=8 in force and neither had a weight
+# sync running, so neither that bound nor tunix PR 2228's overlap handling is reaching
+# the path that allocates. Raising the limit again is not a fix: the node is 245 GiB and
+# the Pathways proxy needs ~70 of it. maz-q35-3 ran 100 steps clean with saving off.
+# See qwen35_report_v8.md section 6.1. Set to 10 to reproduce.
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 # PR 5234 already defaults `checkpoint_storage_device_host_concurrent_gb` to 8 in
 # base.yml. Setting it explicitly in the trainer's environment makes the value visible
 # in the trainer log ("CKPT_D2H_CONCURRENT_GB=8; overriding ..."), which is the only
