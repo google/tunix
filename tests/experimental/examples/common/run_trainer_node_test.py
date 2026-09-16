@@ -561,6 +561,55 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     ):
       run_trainer_node._checkpointing_options(args)
 
+  def test_checkpoint_root_directory_kept_when_saving_enabled(self):
+    args = mock.Mock(
+        checkpoint_save_interval_steps=5,
+        checkpoint_root_directory="/checkpoints/test",
+    )
+    self.assertEqual(
+        run_trainer_node._checkpoint_root_directory(args),
+        "/checkpoints/test",
+    )
+
+  def test_checkpoint_root_directory_dropped_when_saving_disabled(self):
+    """Interval 0 with a root hits `step % 0` and force-saves on close."""
+    args = mock.Mock(
+        checkpoint_save_interval_steps=0,
+        checkpoint_root_directory="/checkpoints/test",
+    )
+    self.assertIsNone(run_trainer_node._checkpoint_root_directory(args))
+
+  @mock.patch.object(peft_trainer_v2, "TrainingConfig", autospec=True)
+  @mock.patch.object(run_trainer_node, "_load_actor_model", autospec=True)
+  @mock.patch.object(run_trainer_node, "_create_mesh", autospec=True)
+  @mock.patch.object(
+      run_trainer_node, "_ensure_model_dir_for_trainer", autospec=True
+  )
+  def test_tunix_trainer_factory_disables_checkpoint_root_when_interval_zero(
+      self,
+      mock_ensure_model_dir,
+      mock_create_mesh,
+      mock_load_actor_model,
+      mock_training_config,
+  ):
+    mock_ensure_model_dir.return_value = "/models/test"
+    mock_create_mesh.return_value = mock.MagicMock(spec=Mesh)
+    mock_load_actor_model.return_value = mock.MagicMock()
+    args = run_trainer_node._parse_args([
+        "--model_dir=/models/test",
+        "--mini_batch_size=2",
+        "--num_generations=4",
+        "--train_micro_batch_size=1",
+        "--checkpoint_save_interval_steps=0",
+        "--checkpoint_root_directory=/checkpoints/test",
+    ])
+
+    run_trainer_node._create_tunix_trainer_factory(args)
+
+    self.assertIsNone(
+        mock_training_config.call_args.kwargs["checkpoint_root_directory"]
+    )
+
   def test_gradient_accumulation_uses_prompt_level_mini_batch(self):
     # pylint: disable=protected-access
     args = run_trainer_node._parse_args(

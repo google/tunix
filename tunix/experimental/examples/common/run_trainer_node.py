@@ -582,6 +582,21 @@ def _checkpointing_options(args) -> Any:
   )
 
 
+def _checkpoint_root_directory(args) -> str | None:
+  """Returns the checkpoint root, or None when saving is disabled.
+
+  `read_only=True` is dropped by Tunix's `CheckpointManager`, so keeping a root
+  with `save_interval_steps=0` makes `save_checkpoint()` hit `step % 0` and
+  `close()` force-save anyway. Without a root there is no checkpointer at all.
+  """
+  if args.checkpoint_save_interval_steps > 0:
+    return args.checkpoint_root_directory
+  logging.info(
+      "checkpoint_save_interval_steps=0; withholding checkpoint_root_directory."
+  )
+  return None
+
+
 def _create_maxtext_trainer_factory(args) -> Any:
   """Creates the trainer factory function for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
@@ -689,7 +704,7 @@ def _create_tunix_trainer_factory(args) -> Any:
       pbar_description="Actor Training",
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
-      checkpoint_root_directory=args.checkpoint_root_directory,
+      checkpoint_root_directory=_checkpoint_root_directory(args),
       # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
       # Orchestrator needs to realign its step/policy_version from the returned
       # metadata.
