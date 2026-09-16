@@ -673,7 +673,7 @@ class SamplerTest(parameterized.TestCase):
         num_kv_heads=1,
         per_layer_input_dim=16,
         sliding_window_size=4,
-        param_dtype=jnp.bfloat16,
+        param_dtype=jnp.bfloat16,  # pyrefly: ignore[bad-argument-type]
         attention_pattern=(
             gemma4_model_lib.AttentionType.LOCAL_SLIDING,
             gemma4_model_lib.AttentionType.GLOBAL,
@@ -718,7 +718,7 @@ class SamplerTest(parameterized.TestCase):
         num_kv_heads=1,
         per_layer_input_dim=16,
         sliding_window_size=4,
-        param_dtype=jnp.bfloat16,
+        param_dtype=jnp.bfloat16,  # pyrefly: ignore[bad-argument-type]
         attention_pattern=(
             gemma4_model_lib.AttentionType.LOCAL_SLIDING,
             gemma4_model_lib.AttentionType.GLOBAL,
@@ -934,7 +934,7 @@ class SamplerTest(parameterized.TestCase):
   def test_update_params_precision_conversion(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=jnp.float32),
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=jnp.float32),  # pyrefly: ignore[bad-argument-type]
         rngs=nnx.Rngs(0),
     )
 
@@ -952,7 +952,7 @@ class SamplerTest(parameterized.TestCase):
     # Source model configured with bfloat16 parameters
     source_model = tc.ToyTransformer(
         config=tc.ModelConfig(
-            vocab_size=vocab.GetPieceSize(), dtype=jnp.bfloat16
+            vocab_size=vocab.GetPieceSize(), dtype=jnp.bfloat16  # pyrefly: ignore[bad-argument-type]
         ),
         rngs=nnx.Rngs(1),
     )

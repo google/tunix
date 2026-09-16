@@ -50,7 +50,7 @@ def create_model_from_checkpoint(
     checkpoint_path: str,
     model_config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
-    dtype: jnp.dtype = jnp.bfloat16,
+    dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
     text_only: bool = True,
 ) -> model_lib.Gemma4:
   """Load a Gemma4 model from an Orbax checkpoint.

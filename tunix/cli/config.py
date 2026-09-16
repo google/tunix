@@ -351,7 +351,7 @@ def create_optimizer(
   # dtypes (e.g. max_norm) so they do not conflict with bfloat16 updates.
   if learning_rate_val is not None:
     opt_func_to_call = optax.inject_hyperparams(
-        opt_func, hyperparam_dtype=jax.numpy.float32
+        opt_func, hyperparam_dtype=jax.numpy.float32  # pyrefly: ignore[bad-argument-type]
     )
   else:
     opt_func_to_call = opt_func

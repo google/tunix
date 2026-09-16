@@ -78,7 +78,7 @@ def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
 class Decoder(nnx.Module):
   """Toy decoder for testing."""
 
-  def __init__(self, rngs: nnx.Rngs, dtype: jnp.dtype = jnp.float32):
+  def __init__(self, rngs: nnx.Rngs, dtype: jnp.dtype = jnp.float32):  # pyrefly: ignore[bad-function-definition]
     self.attn = nnx.MultiHeadAttention(
         num_heads=4,
         in_features=16,
@@ -141,7 +141,7 @@ class ModelConfig:
   vocab_size: int = 256
   vision_config: VisionConfig | None = None
   remat_config: int | None = None
-  dtype: jnp.dtype = jnp.float32
+  dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
 
 
 class ToyTransformer(nnx.Module):

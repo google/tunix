@@ -82,7 +82,7 @@ class _SamplingState:
   """Internal sampling state."""
 
   # Decoding step.
-  decoding_step: jnp.int32
+  decoding_step: jnp.int32  # pyrefly: ignore[not-a-type]
 
   # Fixed-size buffer for accumulating the output tokens.
   token_buffer: jnp.ndarray  # [B, L]
@@ -109,7 +109,7 @@ class _SamplingState:
   seed: jax.Array
 
   # Number of input tokens with padding.
-  num_input_tokens: jnp.int32 = flax.struct.field(pytree_node=False)
+  num_input_tokens: jnp.int32 = flax.struct.field(pytree_node=False)  # pyrefly: ignore[not-a-type]
 
   # Tempurature for top_p sampling.
   temperature: float = flax.struct.field(pytree_node=False)

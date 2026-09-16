@@ -55,7 +55,7 @@ class _SamplingState:
   """Internal sampling state."""
 
   # Decoding step.
-  decoding_step: jnp.int32
+  decoding_step: jnp.int32  # pyrefly: ignore[not-a-type]
 
   # Fixed-size buffer for accumulating the output tokens.
   token_buffer: jnp.ndarray  # [B, L]

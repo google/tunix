@@ -1732,7 +1732,7 @@ class GradientAccumulatorTest(parameterized.TestCase):
     )
     nnx.update(model, bf16_state)
 
-    tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+    tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(  # pyrefly: ignore[bad-argument-type]
         learning_rate=1e-3
     )
     config = peft_trainer.TrainingConfig(
@@ -2028,7 +2028,7 @@ class OptimizerMemoryTest(parameterized.TestCase):
           mu_dtype=jnp.bfloat16,
       )
     else:
-      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(  # pyrefly: ignore[bad-argument-type]
           learning_rate=0.1
       )
     config = peft_trainer.TrainingConfig(

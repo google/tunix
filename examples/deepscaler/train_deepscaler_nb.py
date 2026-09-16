@@ -399,7 +399,7 @@ if ENABLE_REMAT:
 
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE  # pyrefly: ignore[bad-argument-type]
 )
 
 
@@ -433,7 +433,7 @@ if TRAIN_WITH_LORA:
   qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE  # pyrefly: ignore[bad-argument-type]
   )
 
 # %%

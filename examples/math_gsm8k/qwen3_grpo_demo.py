@@ -382,10 +382,10 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
   config.param_dtype = jnp.float32
 
   reference = qwen3_params_lib.create_model_from_safe_tensors(
-      MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE
+      MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE  # pyrefly: ignore[bad-argument-type]
   )
   actor_base = qwen3_params_lib.create_model_from_safe_tensors(
-      MODEL_DOWNLOAD_DIR, config, mesh, dtype=jnp.float32
+      MODEL_DOWNLOAD_DIR, config, mesh, dtype=jnp.float32  # pyrefly: ignore[bad-argument-type]
   )
 
   reference = put_model_on_device(reference)

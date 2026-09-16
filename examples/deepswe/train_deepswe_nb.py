@@ -814,7 +814,7 @@ if MODEL_SOURCE == "maxtext":
   )
 else:
   qwen_reference = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
+      MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE  # pyrefly: ignore[bad-argument-type]
   )
 
 

@@ -124,7 +124,7 @@ class ModelConfig:
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
-  param_dtype: jnp.dtype = jnp.bfloat16
+  param_dtype: jnp.dtype = jnp.bfloat16  # pyrefly: ignore[bad-assignment]
 
   @classmethod
   def gemma3_270m(
@@ -326,7 +326,7 @@ class Embedder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     self.input_embedding = nnx.Param(
         nnx.initializers.normal(dtype=param_dtype)(
@@ -386,7 +386,7 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     self.einsum_str = einsum_str
     self.shape = shape
@@ -514,7 +514,7 @@ class Attention(nnx.Module):
       query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig,
       remat_config: RematConfig,
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
       raise ValueError(
@@ -930,7 +930,7 @@ class RMSNorm(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: tuple[str, ...] = (),
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     self.scale = nnx.Param(
         nnx.initializers.zeros_init()(rngs.params(), dim).astype(param_dtype),  # pyrefly: ignore[bad-argument-type]

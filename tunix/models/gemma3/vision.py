@@ -109,7 +109,7 @@ class VisionAttention(nnx.Module):
       dropout: float = 0.0,
       *,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.hidden_dim = hidden_dim
@@ -226,7 +226,7 @@ class MlpBlock(nnx.Module):
       rngs: nnx.Rngs,
       mlp_dim: int | None = None,  # Defaults to 4x input dim
       dropout: float = 0.0,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.block_id = block_id
@@ -308,7 +308,7 @@ class Encoder1DBlock(nnx.Module):
       num_heads: int = 12,
       dropout: float = 0.0,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.ln1 = nnx.LayerNorm(
@@ -400,7 +400,7 @@ class Encoder(nnx.Module):
       num_heads: int = 12,
       dropout: float = 0.0,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.blocks = compat.ModuleList([
@@ -482,7 +482,7 @@ class ViTModel(nnx.Module):
       num_heads: int = 16,
       dropout: float = 0.0,
       rngs: nnx.Rngs,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     self.embedding = nnx.Conv(
@@ -620,7 +620,7 @@ class SigLiP(nnx.Module):
       *,
       apply_stop_gradient: bool = True,
       rngs: nnx.Rngs | None = None,
-      dtype_mm: jnp.dtype = jnp.float32,
+      dtype_mm: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: SigLIPShardingConfig | None = None,
   ):
     if rngs is None:

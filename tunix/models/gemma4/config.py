@@ -175,8 +175,8 @@ class ModelConfig:
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
-  param_dtype: jnp.dtype = jnp.float32
-  dtype: jnp.dtype = jnp.float32
+  param_dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
+  dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
   # Backend implementation for splash (flash) attention when

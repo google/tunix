@@ -43,7 +43,7 @@ class ConformerConfig:
   conv_kernel_size: int = 5
   gradient_clipping: float = 10_000_000_000.0
   conf_reduction_factor: int = 1
-  param_dtype: jnp.dtype = jnp.float32
+  param_dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
   compute_dtype: jnp.dtype | None = None
 
 
@@ -221,8 +221,8 @@ class SubSamplingBlock(nnx.Module):
       rngs: nnx.Rngs,
       in_features: int = 128,
       out_features: int = 1024,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ):
 
     self.dtype = dtype
@@ -331,8 +331,8 @@ class ClippedEinsum(nnx.Module):
       shape: tuple[int, ...],
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       w_scale: float | None = None,
       initializer: Any = None,
       sharding: tuple[str | None, ...] | None = None,
@@ -375,7 +375,7 @@ class FFNBlock(nnx.Module):
       ffn_residual_weight: float = 0.5,
       gradient_clipping: float = 10_000_000_000.0,
       dtype: jnp.dtype | None = None,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ):
     self.ffn_residual_weight = ffn_residual_weight
     self.gradient_clipping = gradient_clipping
@@ -433,7 +433,7 @@ class LightweightConvBlock(nnx.Module):
       *,
       rngs: nnx.Rngs,
       dtype: jnp.dtype | None = None,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       gradient_clipping: float = 10_000_000_000.0,
   ):
     self.gradient_clipping = gradient_clipping
@@ -502,7 +502,7 @@ class TransformerXLRelativePositionEmbedding(nnx.Module):
       units_per_head: int,
       atten_left_context: int,
       atten_right_context: int = 0,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       dtype: jnp.dtype | None = None,
   ):
     assert atten_right_context == 0, 'Not yet implemented for right context'
@@ -528,7 +528,7 @@ class TransformerXLRelativePositionEmbedding(nnx.Module):
       channels: int,
       min_timescale: float = 1.0,
       max_timescale: float = 1.0e4,
-      dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ) -> jnp.ndarray:
     """Sinusoidal position embeddings with explicit positions."""
     position = jnp.asarray(position, jnp.float32)
@@ -644,7 +644,7 @@ class LocalDotProductAttention(nnx.Module):
       atten_right_context: int = 0,
       attention_logits_soft_capping: float = 50.0,
       block_size: int = 12,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       dtype: jnp.dtype | None = None,
   ):
 
@@ -692,7 +692,7 @@ class LocalDotProductAttention(nnx.Module):
       block_size: int,
       left_context: int,
       right_context: int,
-      padding_val: float | jnp.bool_ = 0.0,
+      padding_val: float | jnp.bool_ = 0.0,  # pyrefly: ignore[not-a-type]
   ) -> jnp.ndarray:
     """Extracts temporal context for every block.
 
@@ -768,7 +768,7 @@ class LocalDotProductAttention(nnx.Module):
       cols: int,
       num_lower: int,
       num_upper: int,
-      out_dtype: jnp.dtype = jnp.float32,
+      out_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       out_shape: tuple[int, ...] | None = None,
   ) -> jnp.ndarray:
     """Matrix band part of ones."""
@@ -924,7 +924,7 @@ class AttentionBlock(nnx.Module):
       atten_right_context: int = 0,
       gradient_clipping: float = 10_000_000_000.0,
       dtype: jnp.dtype | None = None,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ):
     self.gradient_clipping = gradient_clipping
 
@@ -998,7 +998,7 @@ class ConformerLayer(nnx.Module):
       atten_right_context: int = 0,
       gradient_clipping: float = 10_000_000_000.0,
       dtype: jnp.dtype | None = None,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ):
     self.gradient_clipping = gradient_clipping
 
@@ -1168,14 +1168,14 @@ class AudioTokenizer(nnx.Module):
         chunk_size,
         num_lower=-1,
         num_upper=0,
-        out_dtype=jnp.bool_,
+        out_dtype=jnp.bool_,  # pyrefly: ignore[bad-argument-type]
     ).T
     upper_causal_mask = LocalDotProductAttention._ones_matrix_band_part(  # pylint: disable=protected-access
         chunk_size,
         context_size,
         num_lower=-1,
         num_upper=upper_diagonal,
-        out_dtype=jnp.bool_,
+        out_dtype=jnp.bool_,  # pyrefly: ignore[bad-argument-type]
     )
     causal_valid_mask = lower_causal_mask & upper_causal_mask
     return causal_valid_mask

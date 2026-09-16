@@ -73,6 +73,6 @@ def create_model(model_name: str, model_dir: str, mesh: Mesh):
     )
   if "qwen3" in normalized:
     return qwen3_params_lib.create_model_from_safe_tensors(
-        model_dir, _qwen3_config(model_name), mesh, dtype=jnp.bfloat16
+        model_dir, _qwen3_config(model_name), mesh, dtype=jnp.bfloat16  # pyrefly: ignore[bad-argument-type]
     )
   raise ValueError(f"Unsupported demo model_name: {model_name!r}")

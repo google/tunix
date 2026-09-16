@@ -231,8 +231,8 @@ class Einsum(nnx.Module):
       shape: tuple[int, ...],
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       w_scale: float | None = None,
       initializer: Any = None,
       sharding: tuple[str | None, ...] | None = None,
@@ -263,8 +263,8 @@ class ClippedEinsum(nnx.Module):
       shape: tuple[int, ...],
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       w_scale: float | None = None,
       initializer: Any = None,
       sharding: tuple[str | None, ...] | None = None,
@@ -304,8 +304,8 @@ class RMSNorm(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       with_scale: bool = True,
       sharding: tuple[str | None, ...] | None = None,
   ):
@@ -334,7 +334,7 @@ class Standardize(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       sharding: tuple[str | None, ...] | None = None,
   ):
     self.scale = nnx.Param(jnp.ones((dim,), dtype=param_dtype), sharding=sharding)
@@ -361,7 +361,7 @@ class Attention(nnx.Module):
       rope_scale_factor: float = 1.0,
       use_qk_norm: bool = False,
       use_clipped_linears: bool = False,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.num_heads = num_heads
@@ -505,7 +505,7 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       use_clipped_linears: bool = False,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     linear_cls = ClippedEinsum if use_clipped_linears else Einsum
@@ -547,7 +547,7 @@ class VisionBlock(nnx.Module):
       *,
       rngs: nnx.Rngs,
       use_clipped_linears: bool = False,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.pre_attention_norm = RMSNorm(
@@ -640,7 +640,7 @@ class VisionEntry(nnx.Module):
       pos_emb_shape_yx: tuple[int, int],
       *,
       rngs: nnx.Rngs,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.patch_size = patch_size
@@ -690,7 +690,7 @@ class VisionExit(nnx.Module):
       self,
       d_model: int,
       output_length: int | tuple[int, ...],
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ):
     self.d_model = d_model
     self.output_length = output_length
@@ -749,7 +749,7 @@ class VisionEncoder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       config: VisionEncoderConfig,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.config = config
