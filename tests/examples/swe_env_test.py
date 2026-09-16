@@ -574,3 +574,73 @@ def test_prewarm_dataset_iterator_max_in_flight_batches():
   assert b3[0]["docker_image"] == "img3"
   assert len(it.in_flight_batches) == 2
   mock_fleet.unwarm_image.assert_called_with("img1")
+
+
+def test_normalize_entry():
+  entry = {
+      "repo_name": "pandas",
+      "commit_hash": "1234567890abcdef",
+      "list_col": ["a", "b"],
+      "docker_image": "namanjain12/pandas_final:tag",
+  }
+  normalized = swe_env.normalize_entry(
+      entry, docker_image_prefix="us-central1-docker.pkg.dev/my-proj"
+  )
+  assert normalized["instance_id"] == "pandas__12345678"
+  assert normalized["list_col"] == '["a", "b"]'
+  assert (
+      normalized["docker_image"]
+      == "us-central1-docker.pkg.dev/my-proj/pandas_final:tag"
+  )
+
+
+def test_swe_agent_update_from_model():
+  mock_action_cls = mock.MagicMock()
+  mock_action_inst = mock.MagicMock()
+  mock_action_inst.to_xml_string.return_value = (
+      "<function=execute_bash>\n<parameter=command>ls</parameter>\n</function>"
+  )
+  mock_action_cls.from_string.return_value = mock_action_inst
+  mock_r2e = mock.MagicMock()
+  mock_r2e.agenthub.action.Action = mock_action_cls
+
+  with mock.patch.dict(
+      sys.modules,
+      {
+          "r2egym": mock_r2e,
+          "r2egym.agenthub": mock_r2e.agenthub,
+          "r2egym.agenthub.action": mock_r2e.agenthub.action,
+      },
+  ):
+    from examples.deepswe import swe_agent
+
+    # Non-thinking response: should preserve clean_resp without duplication
+    agent = swe_agent.SWEAgent(scaffold="r2egym")
+    agent.update_from_env("Fix bug", 0.0, False, {})
+    resp_non_thinking = (
+        "I will run bash.\n<function=execute_bash>\n<parameter=command>ls</parameter>\n</function>"
+    )
+    agent.update_from_model(resp_non_thinking)
+    assert agent._messages[-1]["content"] == resp_non_thinking
+
+    # Thinking response with valid action: think_block + parsed action
+    agent = swe_agent.SWEAgent(scaffold="r2egym")
+    agent.update_from_env("Fix bug", 0.0, False, {})
+    resp_thinking = (
+        "thinking\n</think>\n\n<function=execute_bash>\n<parameter=command>ls</parameter>\n</function>"
+    )
+    agent.update_from_model(resp_thinking)
+    assert agent._messages[-1]["content"].startswith("thinking\n</think>\n\n<function=execute_bash>")
+    assert agent._messages[-1]["content"].count("<function=execute_bash>") == 1
+
+    # Thinking response without action: think_block + synthetic tool call
+    mock_empty_action = mock.MagicMock()
+    mock_empty_action.to_xml_string.return_value = ""
+    mock_action_cls.from_string.return_value = mock_empty_action
+    agent = swe_agent.SWEAgent(scaffold="r2egym")
+    agent.update_from_env("Fix bug", 0.0, False, {})
+    resp_no_action = "thinking only\n</think>"
+    agent.update_from_model(resp_no_action)
+    assert "Error: missing function call" in agent._messages[-1]["content"]
+
+

@@ -267,6 +267,22 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
       for eos in ("<|im_end|>", "<|endoftext|>"):
         if cleaned.endswith(eos):
           cleaned = cleaned[:-len(eos)].rstrip()
+    if self.enable_thinking:
+      if "</think>" in cleaned:
+        if not cleaned.lstrip().startswith("<think>"):
+          cleaned = "<think>\n" + cleaned.lstrip()
+      elif "<function=" in cleaned:
+        f_idx = cleaned.find("<function=")
+        thought = cleaned[:f_idx].strip()
+        if thought.startswith("<think>"):
+          thought = thought[len("<think>"):].strip()
+        func_part = cleaned[f_idx:].strip()
+        cleaned = f"<think>\n{thought}\n</think>\n\n{func_part}"
+      elif cleaned:
+        thought = cleaned
+        if thought.startswith("<think>"):
+          thought = thought[len("<think>"):].strip()
+        cleaned = f"<think>\n{thought}\n</think>\n\n"
     return self.tokens.assistant_token + cleaned + self.tokens.eot_token
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:

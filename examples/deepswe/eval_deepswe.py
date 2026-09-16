@@ -15,10 +15,7 @@ import json
 import logging
 import math
 import os
-import re
-import shlex
 import sys
-import threading
 import time
 
 # Path Setup before JAX
@@ -43,43 +40,29 @@ os.environ["VLLM_TPU_RPA_VERSION"] = "2"
 os.environ["DISABLE_MOSAIC_ATTN"] = "1"
 
 if "proxy" in os.getenv("JAX_PLATFORMS", ""):
-  try:
-    import pathwaysutils
+  import pathwaysutils
+  pathwaysutils.initialize()
+  print("Pathways initialized successfully before JAX import.")
 
-    pathwaysutils.initialize()
-    print("Pathways initialized successfully before JAX import.")
-  except Exception as e:
-    print(f"Failed to initialize pathwaysutils: {e}")
-
-from datasets import load_dataset
+import datasets as datasets_lib
 import jax
-import jax.numpy as jnp
 from jax.sharding import Mesh
 from kubernetes import client
 from kubernetes import config as k8s_config
 import numpy as np
 from transformers import AutoTokenizer
+from maxtext.integration.vllm import maxtext_vllm_adapter
+import swe_env
+from guarded_swe_env import GuardedSWEEnv
+from swe_agent import SWEAgent
+from swe_env import _normalize_entry, SWEEnv
 
-try:
-  import swe_env
-  from guarded_swe_env import GuardedSWEEnv
-  from swe_agent import SWEAgent
-  from swe_env import SWEEnv
-except ImportError:
-  from examples.deepswe import swe_env  # pytype: disable=import-error
-  from examples.deepswe.guarded_swe_env import GuardedSWEEnv  # pytype: disable=import-error
-  from examples.deepswe.swe_agent import SWEAgent  # pytype: disable=import-error
-  from examples.deepswe.swe_env import SWEEnv  # pytype: disable=import-error
-
-from huggingface_hub import snapshot_download
 from tunix.generate import tokenizer_adapter as tok_adapter
-from tunix.models.automodel import AutoModel, ModelSource
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
-from tunix.sft import utils as sft_utils
 
 Counter = collections.Counter
 
@@ -114,10 +97,10 @@ parser_cli.add_argument(
     help="Absolute model path (GCS bucket or local directory)",
 )
 parser_cli.add_argument(
-    "--dataset_name",
+    "--dataset_path",
     type=str,
-    default=os.getenv("DATASET_NAME", "R2E-Gym/SWE-Bench-Verified"),
-    help="Dataset name or path",
+    default=os.getenv("DATASET_PATH", None),
+    help="Dataset path",
 )
 parser_cli.add_argument(
     "--dataset_split",
@@ -130,12 +113,6 @@ parser_cli.add_argument(
     type=str,
     default=os.getenv("DATASET_CACHE", "/scratch/dataset_cache"),
     help="Dataset cache directory",
-)
-parser_cli.add_argument(
-    "--dataset_num_proc",
-    type=int,
-    default=int(os.getenv("DATASET_NUM_PROC", "32")),
-    help="Number of processes for dataset loading (0 or 1 for single-process)",
 )
 parser_cli.add_argument(
     "--max_steps",
@@ -200,8 +177,7 @@ parser_cli.add_argument(
     "--rollout_engine",
     type=str,
     default=os.getenv("ROLLOUT_ENGINE", "vllm"),
-    choices=["vllm", "vanilla"],
-    help="Rollout engine",
+    help="Rollout engine (defaults to vllm)",
 )
 parser_cli.add_argument(
     "--vllm_utilization",
@@ -210,11 +186,6 @@ parser_cli.add_argument(
         os.getenv("VLLM_UTILIZATION", os.getenv("VLLM_HBM_UTILIZATION", "0.85"))
     ),
     help="HBM utilization ratio for vLLM",
-)
-parser_cli.add_argument(
-    "--vllm_server_mode",
-    type=str2bool,
-    default=os.getenv("VLLM_SERVER_MODE", "true").lower() == "true",
 )
 parser_cli.add_argument(
     "--vllm_max_num_seqs",
@@ -403,10 +374,9 @@ parser_cli.add_argument(
 
 args, _ = parser_cli.parse_known_args()
 
-DATASET_NAME = args.dataset_name
+DATASET_PATH = args.dataset_path
 DATASET_SPLIT = args.dataset_split
 DATASET_CACHE = args.dataset_cache
-DATASET_NUM_PROC = args.dataset_num_proc
 
 MODEL_VERSION = args.model_version
 MODEL_SOURCE = "maxtext"
@@ -430,7 +400,6 @@ ENABLE_GUARD = args.enable_guard
 ROLLOUT_ENGINE = args.rollout_engine
 
 VLLM_HBM_UTILIZATION = args.vllm_utilization
-VLLM_SERVER_MODE = args.vllm_server_mode
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = args.vllm_max_batched_tokens
 
@@ -491,88 +460,34 @@ logger.info("JAX backend initialized.")
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 # Register MaxText vLLM adapter
-try:
-  from maxtext.integration.vllm import maxtext_vllm_adapter  # pytype: disable=import-error
-
-  maxtext_vllm_adapter.register()
-  logger.info("Successfully registered MaxTextForCausalLM model with vLLM.")
-except ImportError as e:
-  logger.warning("Could not import maxtext_vllm_adapter: %s", e)
+maxtext_vllm_adapter.register()
+logger.info("Successfully registered MaxTextForCausalLM model with vLLM.")
 
 # ========================== Dataset ==========================
 
-logger.info("Loading dataset %s split=%s ...", DATASET_NAME, DATASET_SPLIT)
-if DATASET_NAME.startswith("gs://") or os.path.isdir(DATASET_NAME):
-  try:
-    import datasets as datasets_lib
-    dataset = datasets_lib.load_from_disk(DATASET_NAME)
-    if isinstance(dataset, datasets_lib.DatasetDict):
-      dataset = dataset[DATASET_SPLIT]
-  except Exception as e:
-    logger.warning("load_from_disk failed (%s), falling back to load_dataset...", e)
-    dataset = load_dataset(
-        DATASET_NAME,
-        split=DATASET_SPLIT,
-        cache_dir=DATASET_CACHE,
-    )
-elif DATASET_NUM_PROC > 1:
-  try:
-    dataset = load_dataset(
-        DATASET_NAME,
-        split=DATASET_SPLIT,
-        cache_dir=DATASET_CACHE,
-        num_proc=DATASET_NUM_PROC,
-    )
-  except Exception as e:
-    logger.warning(
-        "load_dataset failed with num_proc=%d (%s), retrying without"
-        " num_proc...",
-        DATASET_NUM_PROC,
-        e,
-    )
-    dataset = load_dataset(
-        DATASET_NAME,
-        split=DATASET_SPLIT,
-        cache_dir=DATASET_CACHE,
-    )
+logger.info(
+    "Loading dataset %s split=%s ...",
+    DATASET_PATH or "R2E-Gym/R2E-Gym-Subset",
+    DATASET_SPLIT,
+)
+if args.dataset_path:
+  dataset = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(dataset, datasets_lib.DatasetDict):
+    dataset = dataset[DATASET_SPLIT]
 else:
-  dataset = load_dataset(
-      DATASET_NAME,
+  dataset = datasets_lib.load_dataset(
+      "R2E-Gym/R2E-Gym-Subset",
       split=DATASET_SPLIT,
       cache_dir=DATASET_CACHE,
   )
+  
 
 
-def _normalize_entry(entry):
-  """Prepares a raw dataset row for SWEEnv.
-
-  `SWEEnv._unpack_entry` rejects list values of length != 1, and R2E-Gym rows
-  carry several list-valued columns, so those are JSON-encoded the same way the
-  training script does.
-  """
-  normalized = {
-      k: json.dumps(v) if isinstance(v, list) else v for k, v in entry.items()
-  }
-  if "instance_id" not in normalized or not normalized["instance_id"]:
-    normalized["instance_id"] = (
-        entry.get("commit_hash")
-        or (f"{entry.get('repo_name', 'repo')}__{entry.get('commit_hash', '')[:8]}"
-            if entry.get("commit_hash") else None)
-    )
-  if DOCKER_IMAGE_PREFIX and normalized.get("docker_image"):
-    # If image is from swebench-verified and prefix does not target swebench, keep original
-    if "swebench-verified" in normalized["docker_image"] and "swebench-verified" not in DOCKER_IMAGE_PREFIX:
-      pass
-    else:
-      # e.g. 'namanjain12/pandas_final:tag' -> '<prefix>/pandas_final:tag'
-      image_name = normalized["docker_image"].split("/")[-1]
-      normalized["docker_image"] = (
-          f"{DOCKER_IMAGE_PREFIX.rstrip('/')}/{image_name}"
-      )
-  return normalized
-
-
-entries = [_normalize_entry(e) for e in dataset if "docker_image" in e]
+entries = [
+    _normalize_entry(e, docker_image_prefix=DOCKER_IMAGE_PREFIX)
+    for e in dataset
+    if "docker_image" in e
+]
 if EVAL_MAX_EXAMPLES:
   entries = entries[:EVAL_MAX_EXAMPLES]
 
@@ -590,56 +505,12 @@ os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
 os.environ.setdefault("NODE_SELECTOR_VAL", NODE_SELECTOR_VAL)
 
 
-def patch_kubernetes_runtime():
-  """Monkeypatch r2egym DockerRuntime to dynamically configure Kubernetes nodeSelector."""
-  try:
-    from r2egym.agenthub.runtime.docker import DockerRuntime  # pytype: disable=import-error
-
-    original_start_kubernetes_pod = DockerRuntime._start_kubernetes_pod
-
-    def patched_start_kubernetes_pod(
-        self, docker_image, command, pod_name, **docker_kwargs
-    ):
-      original_create_namespaced_pod = self.client.create_namespaced_pod
-
-      def patched_create_namespaced_pod(*a, **kw):
-        body = kw.get("body")
-        if body and "spec" in body:
-          key = os.environ.get(
-              "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
-          )
-          val = os.environ.get("NODE_SELECTOR_VAL", NODE_SELECTOR_VAL)
-          body["spec"]["nodeSelector"] = {key: val}
-          logger.info("[Monkeypatch] Overrode nodeSelector to %s=%s", key, val)
-        return original_create_namespaced_pod(*a, **kw)
-
-      self.client.create_namespaced_pod = patched_create_namespaced_pod
-      try:
-        return original_start_kubernetes_pod(
-            self, docker_image, command, pod_name, **docker_kwargs
-        )
-      finally:
-        self.client.create_namespaced_pod = original_create_namespaced_pod
-
-    DockerRuntime._start_kubernetes_pod = patched_start_kubernetes_pod
-    logger.info(
-        "[Monkeypatch] Successfully patched DockerRuntime._start_kubernetes_pod"
-    )
-  except Exception as ex:
-    logger.warning("[Monkeypatch] Note on patching DockerRuntime: %s", ex)
-
-
-patch_kubernetes_runtime()
-
-try:
-  if os.getenv("KUBERNETES_SERVICE_HOST"):
-    k8s_config.load_incluster_config()
-  else:
-    k8s_config.load_kube_config()
-  k8s_client = client.CoreV1Api()
-  logger.info("Kubernetes connection verified.")
-except Exception as e:
-  logger.warning("Kubernetes config loading note: %s", e)
+if os.getenv("KUBERNETES_SERVICE_HOST"):
+  k8s_config.load_incluster_config()
+else:
+  k8s_config.load_kube_config()
+k8s_client = client.CoreV1Api()
+logger.info("Kubernetes connection verified.")
 
 fleet = None
 if USE_AGENT_SANDBOX:
@@ -654,67 +525,6 @@ if USE_AGENT_SANDBOX:
   logger.info('[Main] Starting warmpools for planned tasks on K8s...')
   fleet.start_warmpools(wait=False)
 
-  # Resilient acquire: self-heal if another job deletes warmpools in shared namespace
-  orig_acquire = fleet.acquire
-
-  def resilient_acquire(task):
-    for attempt in range(10):
-      try:
-        return orig_acquire(task)
-      except Exception as exc:
-        exc_str = str(exc)
-        if "SandboxWarmPool" in exc_str or "not found" in exc_str.lower():
-          logger.warning(
-              "[ResilientAcquire] Warmpool missing for %s (attempt %d/10): %s; recreating...",
-              task.image,
-              attempt + 1,
-              exc,
-          )
-          try:
-            entry = fleet.plan_.for_image(task.image) if fleet.plan_ else None
-            cluster = fleet.registry.get(entry.cluster if entry else "default")
-            fleet._ensure_pool(cluster, task.image, 1)
-          except Exception as ce:
-            logger.warning("[ResilientAcquire] Pool recreation error: %s", ce)
-          time.sleep(5)
-        else:
-          raise
-    return orig_acquire(task)
-
-  fleet.acquire = resilient_acquire
-
-  def safe_teardown(*args, **kwargs):
-    logger.info(
-        "[Main] Safely tearing down ONLY our own warmpools and claims (oh-img-*)..."
-    )
-    try:
-      fleet.release_all()
-      for c in fleet.registry:
-        try:
-          pools = c.resources.list_warmpools(label_selector=None)
-          for p in pools:
-            if p.startswith("pool-oh-img-"):
-              try:
-                c.resources.delete_warmpool(p)
-              except Exception:
-                pass
-        except Exception as pe:
-          logger.warning("Error cleaning up warmpools: %s", pe)
-        try:
-          tmpls = c.resources.list_templates(label_selector=None)
-          for t in tmpls:
-            if t.startswith("oh-img-"):
-              try:
-                c.resources.delete_template(t)
-              except Exception:
-                pass
-        except Exception as te:
-          logger.warning("Error cleaning up templates: %s", te)
-    except Exception as e:
-      logger.warning("Error during safe teardown: %s", e)
-
-  fleet.teardown = safe_teardown
-  fleet._teardown = safe_teardown
 
 # ========================== Model & Mesh ==========================
 
@@ -729,14 +539,7 @@ if MODEL_PATH.startswith("gs://"):
   local_files_only = False
   logger.info("Loading tokenizer from HF Hub: %s", tokenizer_path)
 else:
-  if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
-    os.makedirs(MODEL_PATH, exist_ok=True)
-    snapshot_download(
-        repo_id=MODEL_VERSION,
-        local_dir=MODEL_PATH,
-        local_dir_use_symlinks=False,
-    )
-  logger.info("Loading tokenizer from local path: %s", tokenizer_path)
+  logger.error("Model path %s must start with gs://", MODEL_PATH)
 
 tokenizer = AutoTokenizer.from_pretrained(
     tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
@@ -744,163 +547,6 @@ tokenizer = AutoTokenizer.from_pretrained(
 tokenizer_for_agentic = tok_adapter.TokenizerAdapter(tokenizer)
 chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=True)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
-
-# Install resilient XML action/parameter parsing and OpenHands step patches
-try:
-  from r2egym.agenthub.action import Action as _R2EAction
-
-  def _resilient_to_xml_string(self) -> str:
-    if not getattr(self, "function_name", ""):
-      return ""
-    xml_str = f"<function={self.function_name}>\n"
-    for param_key, param_value in (self.parameters or {}).items():
-      xml_str += f"  <parameter={param_key}>{param_value}</parameter>\n"
-    xml_str += "</function>"
-    return xml_str
-
-  def _resilient_to_bashcmd(self) -> str:
-    if not getattr(self, "function_name", ""):
-      return ""
-    elif self.function_name in ("finish", "submit"):
-      return "echo '<<<Finished>>>'"
-    cmd_parts = [shlex.quote(self.function_name)]
-    base_command = (self.parameters or {}).get("command")
-    if base_command is not None:
-      cmd_parts.append(shlex.quote(str(base_command)))
-    for param_key, param_value in (self.parameters or {}).items():
-      if param_key == "command":
-        continue
-      param_value_quoted = shlex.quote(str(param_value))
-      cmd_parts.append(f"--{param_key}={param_value_quoted}")
-    return " ".join(cmd_parts)
-
-  @classmethod
-  def _resilient_action_from_string(cls, action_str: str):
-    if not action_str or not isinstance(action_str, str):
-      return cls("", {})
-
-    fn = ""
-    default_cmd = None
-    fn_match = re.search(r"<function\s*=\s*([^\s>]+)", action_str)
-    if fn_match:
-      fn = fn_match.group(1).strip()
-    elif "<tool_call>" in action_str:
-      try:
-        tc_body = action_str.split("<tool_call>", 1)[1].split("</tool_call>")[0].strip()
-        tc_json = json.loads(tc_body)
-        fn = tc_json.get("name", "")
-        params = tc_json.get("arguments", tc_json.get("parameters", {}))
-        if isinstance(params, str):
-          params = json.loads(params)
-        if isinstance(params, dict):
-          return cls(fn, {str(k): str(v) for k, v in params.items()})
-      except Exception:
-        pass
-
-    fn = re.sub(r"</?function.*$", "", fn, flags=re.IGNORECASE)
-    fn = re.sub(r"</?tool_call.*$", "", fn, flags=re.IGNORECASE)
-    fn = fn.strip('<>\x22\x27 `/\\')
-    fn_lower = fn.lower()
-
-    if "submit" in fn_lower or "finish" in fn_lower:
-      fn = "submit"
-    elif any(k in fn_lower for k in ("str", "replace", "edit", "view", "create", "insert", "undo")):
-      if fn_lower in ("view", "create", "insert", "str_replace", "undo_edit"):
-        default_cmd = fn_lower
-      fn = "str_replace_editor"
-    elif any(k in fn_lower for k in ("bash", "exec", "cmd", "run", "shell")):
-      fn = "execute_bash"
-    else:
-      fn = ""
-
-    if not fn:
-      return cls("", {})
-    if fn == "submit":
-      return cls("submit", {})
-
-    params = {}
-    code_keys = {"old_str", "new_str", "file_text"}
-
-    def _clean_val(k: str, v: str) -> str:
-      if k in code_keys:
-        v = re.sub(r"^\r?\n", "", v)
-        v = re.sub(r"\r?\n[ \t]*$", "", v)
-        return v
-      return v.strip()
-
-    param_starts = list(re.finditer(r"<parameter\s*=\s*([^>]+)>", action_str))
-    for idx, m in enumerate(param_starts):
-      key = m.group(1).strip().strip("\"'")
-      val_start = m.end()
-      next_tag_start = param_starts[idx + 1].start() if idx + 1 < len(param_starts) else len(action_str)
-      segment = action_str[val_start:next_tag_start]
-      if "</parameter>" in segment:
-        val = segment.split("</parameter>", 1)[0]
-      else:
-        val = re.sub(r"</function>.*$", "", segment, flags=re.DOTALL)
-      if key and key not in params:
-        params[key] = _clean_val(key, val)
-
-    if not params:
-      for m in re.finditer(
-          r"<parameter\s+name=[\"']?([^\"'>]+)[\"']?>(.*?)(?=</parameter>|<parameter|</function>|$)",
-          action_str,
-          flags=re.DOTALL,
-      ):
-        key = m.group(1).strip()
-        val = m.group(2)
-        if key and key not in params:
-          params[key] = _clean_val(key, val)
-
-    for tag in ("command", "cmd", "path", "file_path", "file_text", "old_str", "new_str", "insert_line", "view_range"):
-      if tag not in params:
-        m = re.search(rf"<{tag}>(.*?)</{tag}>", action_str, flags=re.DOTALL)
-        if m:
-          params[tag] = _clean_val(tag, m.group(1))
-
-    if fn == "str_replace_editor":
-      if "path" not in params:
-        for alt in ("file_path", "filepath", "file", "target_file"):
-          if alt in params:
-            params["path"] = params.pop(alt)
-            break
-      if "path" in params:
-        params["path"] = re.sub(r"<.*$", "", params["path"]).strip().strip("\"'")
-      if "command" not in params:
-        if default_cmd:
-          params["command"] = default_cmd
-        elif "old_str" in params:
-          params["command"] = "str_replace"
-        elif "file_text" in params:
-          params["command"] = "create"
-        elif "insert_line" in params:
-          params["command"] = "insert"
-        elif "path" in params:
-          params["command"] = "view"
-      if not params.get("command") or not params.get("path"):
-        return cls("", {})
-
-    elif fn == "execute_bash":
-      if "command" not in params and "cmd" in params:
-        params["command"] = params.pop("cmd")
-      if "command" not in params:
-        body = re.sub(r"^.*?<function[^>]*>", "", action_str, flags=re.DOTALL)
-        body = re.sub(r"</function>.*$", "", body, flags=re.DOTALL)
-        body = re.sub(r"</?parameter[^>]*>", "", body).strip()
-        if body:
-          params["command"] = body
-      if not params.get("command"):
-        return cls("", {})
-
-    return cls(fn, params)
-
-  _R2EAction.from_string = _resilient_action_from_string
-  _R2EAction.to_xml_string = _resilient_to_xml_string
-  _R2EAction.to_bashcmd = _resilient_to_bashcmd
-  logger.info("Installed resilient Action methods (from_string, to_xml_string, to_bashcmd).")
-except Exception as e:
-  logger.warning("Could not install resilient Action methods: %s", e)
-
 
 # The r2egym scaffold terminates every action with `</function>`; stopping
 # there matches the training rollouts and avoids generating past the action.
@@ -912,11 +558,6 @@ STOP_TOKEN_IDS = [
 
 # Mesh Setup
 devices = jax.devices()
-try:
-  jax.device_put(jnp.ones((1,), dtype=jnp.int32), devices[0]).block_until_ready()
-  logger.info("TPU slice placement verified via warmup barrier.")
-except Exception as e:
-  logger.warning("TPU warmup barrier note: %s", e)
 total_mesh_devices = MESH_FSDP * MESH_TP
 if total_mesh_devices > len(devices):
   raise ValueError(
@@ -967,162 +608,109 @@ except Exception as e:
 
 logger.info("Creating sampler with engine=%s ...", ROLLOUT_ENGINE)
 
-if ROLLOUT_ENGINE == "vllm":
-  from tunix.generate import mappings
-  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+from tunix.generate import mappings
+from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 
-  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
-  maxtext_cfg = {
-      "model_name": MODEL_VERSION.lower().split("/")[-1],
-      "model_call_mode": "inference",
-      # vLLM inference requires unrolled layers for PagedAttention KV cache indexing (see maxtext vllm.yml).
-      # The base checkpoint remains scanned; weight_converter automatically unrolls scanned layers into vLLM.
-      "scan_layers": False,
-      "enable_dp_attention": False,
-      "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
-      "log_config": False,
-      "weight_dtype": WEIGHT_DTYPE,
-      "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
-      "attention": MAXTEXT_ATTENTION,
-      "remat_policy": "none",
-      "max_target_length": MAX_MODEL_LEN,
-      "max_prefill_predict_length": MAX_PREFILL_LENGTH,
-      "checkpoint_storage_use_ocdbt": CHECKPOINT_STORAGE_USE_OCDBT,
-      "checkpoint_storage_use_zarr3": CHECKPOINT_STORAGE_USE_ZARR3,
-      "checkpoint_storage_concurrent_gb": (
-          CHECKPOINT_STORAGE_CONCURRENT_GB
-      ),
-      "load_parameters_path": MODEL_PATH,
-  }
+maxtext_cfg = {
+    "model_name": MODEL_VERSION.lower().split("/")[-1],
+    "model_call_mode": "inference",
+    # vLLM inference requires unrolled layers for PagedAttention KV cache indexing (see maxtext vllm.yml).
+    # The base checkpoint remains scanned; weight_converter automatically unrolls scanned layers into vLLM.
+    "scan_layers": False,
+    "enable_dp_attention": False,
+    "allow_split_physical_axes": ALLOW_SPLIT_PHYSICAL_AXES,
+    "log_config": False,
+    "weight_dtype": WEIGHT_DTYPE,
+    "prefuse_moe_weights": PREFUSE_MOE_WEIGHTS,
+    "attention": MAXTEXT_ATTENTION,
+    "remat_policy": "none",
+    "max_target_length": MAX_MODEL_LEN,
+    "max_prefill_predict_length": MAX_PREFILL_LENGTH,
+    "checkpoint_storage_use_ocdbt": CHECKPOINT_STORAGE_USE_OCDBT,
+    "checkpoint_storage_use_zarr3": CHECKPOINT_STORAGE_USE_ZARR3,
+    "checkpoint_storage_concurrent_gb": (
+        CHECKPOINT_STORAGE_CONCURRENT_GB
+    ),
+    "load_parameters_path": MODEL_PATH,
+}
 
-  additional_config = {
-      "enable_continue_decode": ENABLE_CONTINUE_DECODE,
-      "maxtext_config": maxtext_cfg,
-  }
+additional_config = {
+    "enable_continue_decode": ENABLE_CONTINUE_DECODE,
+    "maxtext_config": maxtext_cfg,
+}
 
-  # The adapter regenerates the MaxText config and would otherwise reinstate
-  # a remat policy, which is pure overhead for inference.
-  try:
-    from maxtext.integration.vllm.maxtext_vllm_adapter import adapter  # pytype: disable=import-error
+# The adapter regenerates the MaxText config and would otherwise reinstate
+# a remat policy, which is pure overhead for inference.
+try:
+  from maxtext.integration.vllm.maxtext_vllm_adapter import adapter  # pytype: disable=import-error
 
-    _orig_generate_maxtext_config = adapter.generate_maxtext_config
+  _orig_generate_maxtext_config = adapter.generate_maxtext_config
 
-    def _generate_maxtext_config_with_no_remat(vllm_config_param):
-      if "maxtext_config" not in vllm_config_param.additional_config:
-        vllm_config_param.additional_config["maxtext_config"] = {}
-      mc = vllm_config_param.additional_config["maxtext_config"]
-      mc["remat_policy"] = "none"
-      mc["scan_layers"] = False
-      return _orig_generate_maxtext_config(vllm_config_param)
+  def _generate_maxtext_config_with_no_remat(vllm_config_param):
+    if "maxtext_config" not in vllm_config_param.additional_config:
+      vllm_config_param.additional_config["maxtext_config"] = {}
+    mc = vllm_config_param.additional_config["maxtext_config"]
+    mc["remat_policy"] = "none"
+    mc["scan_layers"] = False
+    return _orig_generate_maxtext_config(vllm_config_param)
 
-    adapter.generate_maxtext_config = _generate_maxtext_config_with_no_remat
-    logger.info("Patched generate_maxtext_config to force remat_policy=none.")
-  except ImportError as e:
-    logger.warning("Could not patch generate_maxtext_config: %s", e)
+  adapter.generate_maxtext_config = _generate_maxtext_config_with_no_remat
+  logger.info("Patched generate_maxtext_config to force remat_policy=none.")
+except ImportError as e:
+  logger.warning("Could not patch generate_maxtext_config: %s", e)
 
-  mapping_config = mappings.MappingConfig()
-  engine_kwargs = {
-      "model": tokenizer_path,
-      "max_model_len": MAX_MODEL_LEN,
-      "max_num_seqs": VLLM_MAX_NUM_SEQS,
-      "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      "enable_prefix_caching": False,
-      "async_scheduling": True,
-      "kv_cache_metrics": True,
-      "disable_log_stats": False,
-      "tokenizer": tokenizer_path,
-      "hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
-      "dtype": "bfloat16",
-      "enable_expert_parallel": False,
-  }
+mapping_config = mappings.MappingConfig()
+engine_kwargs = {
+    "model": tokenizer_path,
+    "max_model_len": MAX_MODEL_LEN,
+    "max_num_seqs": VLLM_MAX_NUM_SEQS,
+    "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+    "enable_prefix_caching": False,
+    "async_scheduling": True,
+    "kv_cache_metrics": True,
+    "disable_log_stats": False,
+    "tokenizer": tokenizer_path,
+    "hf_overrides": {"architectures": ["MaxTextForCausalLM"]},
+    "dtype": "bfloat16",
+    "enable_expert_parallel": False,
+}
 
-  # Must be set here rather than at the call site: `VllmSampler.__call__`
-  # forwards unknown kwargs via `setattr` and swallows failures. Stop strings
-  # additionally require `detokenize=True`, which the sampler otherwise
-  # hardcodes to False.
-  sampling_kwargs = {
-      "stop": STOP_STRINGS,
-      "stop_token_ids": STOP_TOKEN_IDS,
-      "detokenize": True,
-  }
+# Must be set here rather than at the call site: `VllmSampler.__call__`
+# forwards unknown kwargs via `setattr` and swallows failures. Stop strings
+# additionally require `detokenize=True`, which the sampler otherwise
+# hardcodes to False.
+sampling_kwargs = {
+    "stop": STOP_STRINGS,
+    "stop_token_ids": STOP_TOKEN_IDS,
+    "detokenize": True,
+}
 
-  vllm_config = VllmConfig(
-      mesh=mesh,
-      hbm_utilization=VLLM_HBM_UTILIZATION,
-      init_with_random_weights=False,
-      tpu_backend_type="jax",
-      server_mode=VLLM_SERVER_MODE,
-      tensor_parallel_size=mesh.shape["tp"],
-      data_parallel_size=mesh.shape["fsdp"],
-      mapping_config=mapping_config,
-      additional_config=additional_config,
-      engine_kwargs=engine_kwargs,
-      sampling_kwargs=sampling_kwargs,
-  )
+vllm_config = VllmConfig(
+    mesh=mesh,
+    hbm_utilization=VLLM_HBM_UTILIZATION,
+    init_with_random_weights=False,
+    tpu_backend_type="jax",
+    server_mode=True,
+    tensor_parallel_size=mesh.shape["tp"],
+    data_parallel_size=mesh.shape["fsdp"],
+    mapping_config=mapping_config,
+    additional_config=additional_config,
+    engine_kwargs=engine_kwargs,
+    sampling_kwargs=sampling_kwargs,
+)
 
-  logger.info(
-      "Initializing VllmSampler directly with checkpoint from %s ...",
-      MODEL_PATH,
-  )
-  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-  logger.info(
-      "VllmSampler successfully initialized directly with model weights."
-  )
-
-elif ROLLOUT_ENGINE == "vanilla":
-  logger.info(
-      "Loading MaxText model %s from %s (scan_layers=%s)...",
-      MODEL_VERSION,
-      MODEL_PATH,
-      SCAN_LAYERS,
-  )
-  model, _ = AutoModel.from_pretrained(
-      model_id=MODEL_VERSION,
-      mesh=mesh,
-      model_source=ModelSource.MAXTEXT,
-      model_path=MODEL_PATH,
-      enable_checkpointing=True,
-      allow_split_physical_axes=ALLOW_SPLIT_PHYSICAL_AXES,
-      scan_layers=SCAN_LAYERS,
-      checkpoint_storage_concurrent_gb=CHECKPOINT_STORAGE_CONCURRENT_GB,
-  )
-
-  sft_utils.show_hbm_usage()
-
-  from tunix.generate import sampler as sampler_lib
-
-  sampler = sampler_lib.Sampler(
-      model,
-      tokenizer,
-      sampler_lib.CacheConfig(
-          cache_size=16384,
-          num_layers=getattr(model, "config", None)
-          and getattr(model.config, "num_layers", 32)
-          or 32,
-          num_kv_heads=getattr(model, "config", None)
-          and getattr(model.config, "num_kv_heads", 8)
-          or 8,
-          head_dim=getattr(model, "config", None)
-          and getattr(model.config, "head_dim", 128)
-          or 128,
-      ),
-  )
-
-else:
-  raise ValueError(
-      f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
-      "Choose from: 'vllm', 'vanilla'"
-  )
+logger.info(
+    "Initializing VllmSampler directly with checkpoint from %s ...",
+    MODEL_PATH,
+)
+sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+logger.info(
+    "VllmSampler successfully initialized directly with model weights."
+)
 
 # ========================== Model Call ==========================
-
-sampler_lock = None
-if ROLLOUT_ENGINE == "vanilla" or (
-    ROLLOUT_ENGINE == "vllm" and not VLLM_SERVER_MODE
-):
-  sampler_lock = threading.Lock()
-
 
 class PromptTooLongError(ValueError):
   """Raised when a prompt exceeds the model context limit before sampling."""
@@ -1147,9 +735,6 @@ SAMPLER_CALL_KWARGS = {
     "top_p": TOP_P,
     "top_k": TOP_K,
 }
-if ROLLOUT_ENGINE != "vllm":
-  SAMPLER_CALL_KWARGS["eos_tokens"] = qwen_eos_tokens
-
 
 def model_call(
     chat_completions,
@@ -1188,21 +773,12 @@ def model_call(
     )
   t0 = time.time()
   try:
-    if sampler_lock is None:
-      out = sampler(
-          prompt,
-          max_generation_steps=max_gen_steps,
-          echo=False,
-          **SAMPLER_CALL_KWARGS,
-      )
-    else:
-      with sampler_lock:
-        out = sampler(
-            prompt,
-            max_generation_steps=max_gen_steps,
-            echo=False,
-            **SAMPLER_CALL_KWARGS,
-        )
+    out = sampler(
+        prompt,
+        max_generation_steps=max_gen_steps,
+        echo=False,
+        **SAMPLER_CALL_KWARGS,
+    )
     gc.collect()
   except Exception as exc:
     if _is_prompt_overflow_error(exc):
@@ -1366,62 +942,11 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
   pass
 
 
-class Qwen35SWEAgent(SWEAgent):
-  """SWEAgent subclass that formats Qwen3.5 tool responses and normalizes assistant thoughts."""
-
-  def _observation_to_messages(
-      self, observation, reward: float, done: bool, info: dict
-  ) -> None:
-    role = "tool" if len(self._trajectory.steps) > 0 else "user"
-    self._messages.append({"role": role, "content": str(observation)})
-
-  def update_from_model(self, response: str, **kwargs):
-    clean_resp = response.strip()
-    while clean_resp.endswith("<|im_end|>") or clean_resp.endswith("<|endoftext|>"):
-      if clean_resp.endswith("<|im_end|>"):
-        clean_resp = clean_resp[:-len("<|im_end|>")].rstrip()
-      elif clean_resp.endswith("<|endoftext|>"):
-        clean_resp = clean_resp[:-len("<|endoftext|>")].rstrip()
-    if "</think>" in clean_resp:
-      if not clean_resp.lstrip().startswith("<think>"):
-        clean_resp = "<think>\n" + clean_resp.lstrip()
-    else:
-      if "<function=" in clean_resp:
-        f_idx = clean_resp.find("<function=")
-        thought = clean_resp[:f_idx].strip()
-        if thought.startswith("<think>"):
-          thought = thought[len("<think>"):].strip()
-        func_part = clean_resp[f_idx:].strip()
-        clean_resp = f"<think>\n{thought}\n</think>\n\n{func_part}"
-      else:
-        thought = clean_resp
-        if thought.startswith("<think>"):
-          thought = thought[len("<think>"):].strip()
-        clean_resp = f"<think>\n{thought}\n</think>\n\n"
-    action_res = super().update_from_model(clean_resp, **kwargs)
-    cur_step = self._trajectory.steps[-1]
-    think_block = clean_resp.split("</think>")[0] + "</think>" if "</think>" in clean_resp else clean_resp
-    if (
-        cur_step.action
-        and cur_step.action.startswith(("<function=execute_bash>", "<function=str_replace_editor>", "<function=submit>", "<function=finish>"))
-    ):
-      self._messages[-1]["content"] = f"{think_block}\n\n{cur_step.action}"
-    else:
-      # Never leave <function=> or bare </think> without tool call in assistant chat history
-      synthetic_tool_call = (
-          "<function=execute_bash>\n"
-          "<parameter=command>echo 'Error: missing function call'</parameter>\n"
-          "</function>"
-      )
-      self._messages[-1]["content"] = f"{think_block}\n\n{synthetic_tool_call}"
-    return action_res
-
-
 def pairs_generator():
   """Yield NUM_ROLLOUTS_PER_INSTANCE trajectory tasks per dataset entry."""
   for pair_index in range(len(entries) * NUM_ROLLOUTS_PER_INSTANCE):
     entry = entries[pair_index // NUM_ROLLOUTS_PER_INSTANCE]
-    agent = Qwen35SWEAgent(scaffold=SCAFFOLD)
+    agent = SWEAgent(scaffold=SCAFFOLD)
     env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
     env = env_cls(
         entry=entry,
@@ -1562,7 +1087,7 @@ def compute_pass_at_k(results):
     instance_groups[r["instance_id"]].append(r)
 
   pass_at_k_metrics = {}
-  for k in (1, 4, 5):
+  for k in (1, 4):
     scores = []
     for inst_results in instance_groups.values():
       n = len(inst_results)
@@ -1599,10 +1124,6 @@ def compute_pass_at_k(results):
     logger.info("Pass@4:           %.4f", pass_at_k_metrics[4])
   else:
     logger.info("Pass@4:           N/A")
-  if pass_at_k_metrics[5] is not None:
-    logger.info("Pass@5:           %.4f", pass_at_k_metrics[5])
-  else:
-    logger.info("Pass@5:           N/A")
   logger.info("Avg reward:       %.4f", avg_reward)
   logger.info("Avg steps:        %.2f", avg_steps)
   logger.info("Status counts:    %s", dict(status_counts))
@@ -1648,32 +1169,19 @@ def save_results(results):
   logger.info("Results saved to %s", output_file)
 
   if OUTPUT_DIR.startswith("gs://"):
-    try:
-      from google.cloud import storage
+    from google.cloud import storage
 
-      gcs_path = OUTPUT_DIR[5:]
-      bucket_name, *prefix_parts = gcs_path.split("/")
-      blob_prefix = "/".join(prefix_parts)
-      blob_name = (
-          os.path.join(blob_prefix, filename) if blob_prefix else filename
-      )
-      client = storage.Client()
-      bucket = client.bucket(bucket_name)
-      blob = bucket.blob(blob_name)
-      blob.upload_from_filename(output_file)
-      logger.info("Uploaded results to gs://%s/%s", bucket_name, blob_name)
-    except Exception as e:
-      logger.warning("Failed to upload to GCS via storage client: %s", e)
-      try:
-        import subprocess
-
-        gcs_target = os.path.join(OUTPUT_DIR, filename)
-        subprocess.run(
-            ["gcloud", "storage", "cp", output_file, gcs_target], check=False
-        )
-        logger.info("Uploaded results via gcloud storage to %s", gcs_target)
-      except Exception as ex:
-        logger.warning("Failed to upload to GCS via gcloud: %s", ex)
+    gcs_path = OUTPUT_DIR[5:]
+    bucket_name, *prefix_parts = gcs_path.split("/")
+    blob_prefix = "/".join(prefix_parts)
+    blob_name = (
+        os.path.join(blob_prefix, filename) if blob_prefix else filename
+    )
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(output_file)
+    logger.info("Uploaded results to gs://%s/%s", bucket_name, blob_name)
 
   return output_file
 

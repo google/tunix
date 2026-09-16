@@ -164,34 +164,39 @@ class SWEAgent(ConversationAgentBase):
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]
   ) -> None:
-
-    self._messages.append({"role": "user", "content": str(observation)})
+    role = "tool" if len(self._trajectory.steps) > 0 else "user"
+    self._messages.append({"role": role, "content": str(observation)})
 
   def update_from_model(self, response: str, **kwargs):
     """Updates the agent's internal state after an environment step.
 
     This function is called during environment interaction to incorporate the
-    latest action's
-    outcome into the agent's learning process.
+    latest action's outcome into the agent's learning process.
 
     Args:
         response (str): The response from the model.
 
     Returns:
-        None
+        Action: The parsed action to execute in the environment.
     """
+    clean_resp = response.strip()
+    while clean_resp.endswith(("<|im_end|>", "<|endoftext|>")):
+      for eos in ("<|im_end|>", "<|endoftext|>"):
+        if clean_resp.endswith(eos):
+          clean_resp = clean_resp[:-len(eos)].rstrip()
+
     self._trajectory.steps.append(self.cur_step)
     if self.use_fn_calling:
-      thought, action = parse_oai_response(response)
+      thought, action = parse_oai_response(clean_resp)
     else:
-      thought, action = parse_xml_response(response)
+      thought, action = parse_xml_response(clean_resp)
     action_str = action.to_xml_string()
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]
     cur_step.thought = thought
     cur_step.action = action_str
-    cur_step.model_response = response
+    cur_step.model_response = clean_resp
 
     # Update Chat Completions
     if self.format_model_response:
@@ -199,6 +204,33 @@ class SWEAgent(ConversationAgentBase):
           {"role": "assistant", "content": f"{thought}\n\n{action_str}"}
       )
     else:
-      self._messages.append({"role": "assistant", "content": response})
+      if "</think>" in clean_resp:
+        think_block = clean_resp.split("</think>")[0] + "</think>"
+        if (
+            cur_step.action
+            and cur_step.action.startswith(
+                (
+                    "<function=execute_bash>",
+                    "<function=str_replace_editor>",
+                    "<function=submit>",
+                    "<function=finish>",
+                )
+            )
+        ):
+          self._messages.append(
+              {"role": "assistant", "content": f"{think_block}\n\n{cur_step.action}"}
+          )
+        else:
+          # Never leave bare </think> without tool call in assistant chat history
+          synthetic_tool_call = (
+              "<function=execute_bash>\n"
+              "<parameter=command>echo 'Error: missing function call'</parameter>\n"
+              "</function>"
+          )
+          self._messages.append(
+              {"role": "assistant", "content": f"{think_block}\n\n{synthetic_tool_call}"}
+          )
+      else:
+        self._messages.append({"role": "assistant", "content": clean_resp})
     self.step += 1
     return Action(action=cur_step.action)

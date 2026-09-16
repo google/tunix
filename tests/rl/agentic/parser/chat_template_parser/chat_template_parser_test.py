@@ -101,6 +101,30 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     )
     self.assertEqual(result, expected)
 
+  def test_parse_with_enable_thinking_assistant_restores_think_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': 'Thinking...\n</think>\n\n<function=execute_bash>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nThinking...\n</think>\n\n<function=execute_bash><|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_already_has_think_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': '<think>\nThinking...\n</think>\n\n<function=execute_bash>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nThinking...\n</think>\n\n<function=execute_bash><|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
 
 class LlamaChatTemplateParserTest(absltest.TestCase):
 
