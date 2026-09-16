@@ -70,14 +70,20 @@ def _get_ws_lib() -> Any:
   """Imports tpu_sync weight_synchronizer lazily to prevent early C++ library symbol collisions."""
   if "_ws_lib" in globals():
     return globals()["_ws_lib"]
-  return _lazy_import_module("tpu_sync.api.jax.weight_synchronizer")
+  mod = _lazy_import_module(
+      "GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.api.jax.weight_synchronizer"
+  )
+  return mod
 
 
 def _get_raiden_ffi() -> Any:
   """Imports tpu_sync weight_synchronizer_ffi lazily to avoid loading XLA runtime early."""
   if "_raiden_ffi" in globals():
     return globals()["_raiden_ffi"]
-  return _lazy_import_module("tpu_sync.frameworks.jax.weight_synchronizer_ffi")
+  mod = _lazy_import_module(
+      "GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.frameworks.jax.weight_synchronizer_ffi"
+  )
+  return mod
 
 
 def __getattr__(name: str) -> Any:

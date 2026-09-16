@@ -28,6 +28,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.rl import algo_core as _  # Registers policy loss functions.
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
 
