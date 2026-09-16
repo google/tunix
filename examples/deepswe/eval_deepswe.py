@@ -191,6 +191,18 @@ parser_cli.add_argument(
     default=int(os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888")),
 )
 parser_cli.add_argument(
+    "--vllm_reshard_chunk_size",
+    type=int,
+    default=int(os.getenv("VLLM_RESHARD_CHUNK_SIZE", "1")),
+    help="Reshard chunk size for transferring weights into VllmSampler (1 for sequential chunked sync)",
+)
+parser_cli.add_argument(
+    "--vllm_init_random_weights",
+    type=str2bool,
+    default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true",
+    help="Whether to initialize VllmSampler with random weights before chunked sync",
+)
+parser_cli.add_argument(
     "--mesh_fsdp",
     type=int,
     default=int(os.getenv("MESH_FSDP", "4")),
@@ -394,6 +406,8 @@ ROLLOUT_ENGINE = args.rollout_engine
 VLLM_HBM_UTILIZATION = args.vllm_utilization
 VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = args.vllm_max_batched_tokens
+VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
+VLLM_INIT_RANDOM_WEIGHTS = args.vllm_init_random_weights or (args.vllm_reshard_chunk_size > 0)
 
 MESH_FSDP = args.mesh_fsdp
 MESH_TP = args.mesh_tp
@@ -625,8 +639,9 @@ maxtext_cfg = {
     "checkpoint_storage_concurrent_gb": (
         CHECKPOINT_STORAGE_CONCURRENT_GB
     ),
-    "load_parameters_path": MODEL_PATH,
 }
+if not VLLM_INIT_RANDOM_WEIGHTS:
+  maxtext_cfg["load_parameters_path"] = MODEL_PATH
 
 additional_config = {
     "enable_continue_decode": ENABLE_CONTINUE_DECODE,
@@ -682,25 +697,82 @@ sampling_kwargs = {
 vllm_config = VllmConfig(
     mesh=mesh,
     hbm_utilization=VLLM_HBM_UTILIZATION,
-    init_with_random_weights=False,
+    init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
     tpu_backend_type="jax",
     server_mode=True,
     tensor_parallel_size=mesh.shape["tp"],
     data_parallel_size=mesh.shape["fsdp"],
     mapping_config=mapping_config,
     additional_config=additional_config,
+    reshard_chunk_size=VLLM_RESHARD_CHUNK_SIZE
+    if VLLM_RESHARD_CHUNK_SIZE > 0
+    else None,
     engine_kwargs=engine_kwargs,
     sampling_kwargs=sampling_kwargs,
 )
 
-logger.info(
-    "Initializing VllmSampler directly with checkpoint from %s ...",
-    MODEL_PATH,
-)
-sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
-logger.info(
-    "VllmSampler successfully initialized directly with model weights."
-)
+if VLLM_INIT_RANDOM_WEIGHTS:
+  from flax import nnx
+  from maxtext.configs import pyconfig
+  from maxtext import model_creation_utils
+
+  base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
+  model_name_slug = MODEL_VERSION.lower().split("/")[-1]
+
+  logger.info("Initializing base model weights from %s (scan_layers=%s)...", MODEL_PATH, SCAN_LAYERS)
+  trainer_config = pyconfig.initialize(
+      [
+          "",
+          base_yml,
+          "num_slices=1",
+          f"model_name={model_name_slug}",
+          f"load_parameters_path={MODEL_PATH}",
+          f"ici_fsdp_parallelism={MESH_FSDP}",
+          f"ici_tensor_parallelism={MESH_TP}",
+          f"scan_layers={SCAN_LAYERS}",
+          f"max_target_length={MAX_MODEL_LEN}",
+          f"max_prefill_predict_length={MAX_PREFILL_LENGTH}",
+          "remat_policy=none",
+          f"dtype={WEIGHT_DTYPE}",
+          f"attention={'flash' if MAXTEXT_ATTENTION == 'flash' else 'dot_product'}",
+          f"prefuse_moe_weights={PREFUSE_MOE_WEIGHTS}",
+          f"checkpoint_storage_use_ocdbt={CHECKPOINT_STORAGE_USE_OCDBT}",
+          f"checkpoint_storage_use_zarr3={CHECKPOINT_STORAGE_USE_ZARR3}",
+          f"checkpoint_storage_concurrent_gb={CHECKPOINT_STORAGE_CONCURRENT_GB}",
+          f"allow_split_physical_axes={ALLOW_SPLIT_PHYSICAL_AXES}",
+          "skip_jax_distributed_system=True",
+          "load_checkpoint_only_once=True",
+          "use_standalone_converter=False",
+          "log_config=False",
+      ],
+      vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
+  )
+
+  model, _ = model_creation_utils.from_pretrained(
+      trainer_config,
+      devices=devices[:total_mesh_devices],
+      wrap_with_tunix_adapter=True,
+      tokenizer_pad_id=tokenizer.pad_token_id,
+  )
+
+  logger.info("Initializing VllmSampler with random weights (chunked sync enabled)... ")
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+
+  model_state = nnx.state(model)
+  logger.info("Transferring model weights to VllmSampler with reshard_chunk_size=%s...", VLLM_RESHARD_CHUNK_SIZE)
+  sampler.update_params(model_state)
+  logger.info("Weight transfer complete. Freeing temporary model weights...")
+  del model, model_state
+  gc.collect()
+else:
+  logger.info(
+      "Initializing VllmSampler directly with checkpoint from %s ...",
+      MODEL_PATH,
+  )
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+  logger.info(
+      "VllmSampler successfully initialized directly with model weights."
+  )
 
 # ========================== Model Call ==========================
 
