@@ -353,6 +353,41 @@ def _column_parallel(site, equation, inputs, weight, prefix, norm=None):
     return mapped(*map_args)
 
 
+def _fixed_order_tp_sum_gather(partial, axis_name, count):
+    """P56.4.5a form: one all_gather, then the rank-ordered sum on every rank."""
+    gathered = base.jax.lax.all_gather(partial, axis_name, axis=0, tiled=False)
+    acc = gathered[0]
+    for part_index in range(1, count):
+        acc = acc + gathered[part_index]
+    return acc
+
+
+def _fixed_order_tp_sum_scatter(partial, axis_name, count):
+    """tasks/deepswe_4b_perf P2b: the same rank-ordered sum with 2/count of the bytes.
+
+    Rows are cut into ``count`` blocks.  all_to_all hands block ``r`` of every
+    rank's partial to rank ``r``, stacked by source rank exactly as all_gather
+    concatenates by axis index, so rank ``r`` adds its block with the identical
+    operands in the identical association order (rank 0 + rank 1 + ...) as the
+    gather form.  A tiled all_gather then places the completed blocks back in
+    row order on every rank: each element is computed once instead of on every
+    rank, and the bytes received per rank drop from (count-1) full partials to
+    2(count-1)/count of one.  Row counts the TP degree does not divide keep the
+    gather form (a static shape decision, so the program identity is unchanged).
+    """
+    rows = int(partial.shape[0])
+    if count <= 1 or rows % count:
+        return _fixed_order_tp_sum_gather(partial, axis_name, count)
+    blocks = partial.reshape((count, rows // count) + tuple(partial.shape[1:]))
+    received = base.jax.lax.all_to_all(
+        blocks, axis_name, split_axis=0, concat_axis=0, tiled=False
+    )
+    acc = received[0]
+    for part_index in range(1, count):
+        acc = acc + received[part_index]
+    return base.jax.lax.all_gather(acc, axis_name, axis=0, tiled=True)
+
+
 def _contract_parallel(site, equation, inputs, weight, prefix):
     from jax.experimental.shard_map import shard_map
     from jax.sharding import PartitionSpec as P
@@ -367,6 +402,16 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
             f"CANON_FIXED_AR_GATHER must be unset/0/1, got {gather_mode!r}"
         )
     gather_mode = gather_mode == "1"
+    scatter_mode = os.environ.get("CANON_FIXED_AR_SCATTER", "")
+    if scatter_mode not in ("", "0", "1"):
+        raise RuntimeError(
+            f"CANON_FIXED_AR_SCATTER must be unset/0/1, got {scatter_mode!r}"
+        )
+    scatter_mode = scatter_mode == "1"
+    if scatter_mode and not gather_mode:
+        raise RuntimeError(
+            "CANON_FIXED_AR_SCATTER=1 requires CANON_FIXED_AR_GATHER=1"
+        )
 
     def local(a_local, w_local):
         a2 = a_local.reshape(a_local.shape[0], -1)
@@ -385,12 +430,14 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
                 f"M={a2.shape[0]} Klocal={a2.shape[1]} Nlocal={w2.shape[1]}",
                 flush=True,
             )
-            gathered = base.jax.lax.all_gather(
-                partial, base._CANON_TP_AXIS, axis=0, tiled=False
-            )
-            acc = gathered[0]
-            for part_index in range(1, count):
-                acc = acc + gathered[part_index]
+            if scatter_mode:
+                acc = _fixed_order_tp_sum_scatter(
+                    partial, base._CANON_TP_AXIS, count
+                )
+            else:
+                acc = _fixed_order_tp_sum_gather(
+                    partial, base._CANON_TP_AXIS, count
+                )
             return _p66_replicated_tp_value(acc)
         partial = pallas_matmul(a2, w2, block_n=BN, block_k=BK)[None]
         print(
@@ -418,7 +465,7 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
 
     print(
         f"[PATHTRACE] CANON_FIXED_AR=1 "
-        f"{'gather-ordered-sum' if gather_mode else 'fixed-order tree'} "
+        f"{('scatter-ordered-sum' if scatter_mode else 'gather-ordered-sum') if gather_mode else 'fixed-order tree'} "
         f"at {prefix} ({equation}, tp={count})",
         flush=True,
     )

@@ -29,6 +29,7 @@ admitted 值即当前默认:来自代码默认、bundle `cluster/v1_full_system_
 | 名 | 家族 | 默认/取值 | 来源/读者 | 备注 |
 |---|---|---|---|---|
 | `CANON_ALIGNMENT_AUDIT_EVERY` | new | 10 | canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:100; canon-zero-tim/cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env (tasks/deepswe_4b_perf 1e) | 10-step alignment audit period of the zero_tim_perf3 KEEP set (canon-zero-tim/cluster/v1_full_system_optimization.py:11); parser tunix/rl/alignment.py:496 |
+| `CANON_FIXED_AR_SCATTER` | new | unset(0) / 1 | canon-zero-tim/src/engine_shims/linear_p22xf.py (reader _contract_parallel); canon-zero-tim/cluster/profiles/qwen3-4b-dp1-tp4-deepswe-zero.env, qwen3-4b-dp8-tp8-deepswe-v1-hp.env (tasks/deepswe_4b_perf P2b) | fixed-order TP sum as all_to_all + rank-ordered block sum + tiled all_gather: same operands and association order as `CANON_FIXED_AR_GATHER=1` (bitwise by construction), 2/TP of the bytes per rank; requires GATHER=1; rows not divisible by TP keep the gather form |
 | `CANON_DP_COMPARE_MODE` | g1 | fingerprint-hybrid | canon-zero-tim/cluster/v1_full_system_optimization.py:36 (_BASE_ADDITIONS) | bundle addition; code default "" at tunix/rl/dp_training.py:711 |
 | `CANON_DP_DISTINCT_SCHEDULE` | g1 | first-group-warmup | canon-zero-tim/cluster/v1_full_system_optimization.py:37 (_BASE_ADDITIONS) | bundle addition; code default "" at tunix/rl/dp_training.py:722 |
 | `CANON_DP_FINITE_FETCH` | g1 | batched-commit | canon-zero-tim/cluster/v1_full_system_optimization.py:38 (_BASE_ADDITIONS) | bundle addition; code default "" at tunix/rl/dp_training.py:878 |
@@ -877,6 +878,7 @@ CANON_EXPECT_VISIBLE_DEVICES
 CANON_FIXED_AR
 CANON_FIXED_AR_EMBED
 CANON_FIXED_AR_GATHER
+CANON_FIXED_AR_SCATTER
 CANON_FL_DIAG_VLLM_MAX_NUM_SEQS
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY
 CANON_FROZENLAKE_C0
