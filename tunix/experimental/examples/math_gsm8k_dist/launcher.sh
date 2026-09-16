@@ -78,7 +78,7 @@ TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
-CHAT_PARSER=${CHAT_PARSER:-auto}
+CHAT_PARSER=${CHAT_PARSER:-raw}
 # Qwen3 chat models close each turn with `<|im_end|>` rather than the
 # tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
 # fall back to the tokenizer's EOS token.
@@ -390,6 +390,7 @@ echo "  ckpt max keep:  $CHECKPOINT_MAX_TO_KEEP"
 echo "  ckpt root dir:  $CHECKPOINT_ROOT_DIRECTORY"
 echo "  sampler:        $SAMPLER"
 echo "  weight sync:    $WEIGHT_SYNC_MODE"
+echo "  chat parser:    $CHAT_PARSER"
 echo "  eos tokens:     ${EOS_TOKENS:-<tokenizer default>}"
 echo "  trainer backend:$TRAINER_BACKEND"
 echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
