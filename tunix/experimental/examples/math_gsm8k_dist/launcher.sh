@@ -724,16 +724,33 @@ echo "Launching CPU orchestrator..."
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--debug)
   fi
-  [[ -n "$EPSILON_HIGH" ]] && ORCHESTRATOR_CMD+=(--epsilon_high="$EPSILON_HIGH")
-  [[ -n "$LOSS_AGG_MODE" ]] && ORCHESTRATOR_CMD+=(--loss_agg_mode="$LOSS_AGG_MODE")
-  [[ -n "$ADVANTAGE_ESTIMATOR" ]] && ORCHESTRATOR_CMD+=(--advantage_estimator="$ADVANTAGE_ESTIMATOR")
+  # Explicit if-blocks, not `[[ -n x ]] && cmd`: this script runs under `set -Ee`
+  # (line 17), where a false test at the head of an AND-list can take the whole
+  # launcher down. An unset recipe option must be a no-op, not an abort.
+  if [[ -n "$EPSILON_HIGH" ]]; then
+    ORCHESTRATOR_CMD+=(--epsilon_high="$EPSILON_HIGH")
+  fi
+  if [[ -n "$LOSS_AGG_MODE" ]]; then
+    ORCHESTRATOR_CMD+=(--loss_agg_mode="$LOSS_AGG_MODE")
+  fi
+  if [[ -n "$ADVANTAGE_ESTIMATOR" ]]; then
+    ORCHESTRATOR_CMD+=(--advantage_estimator="$ADVANTAGE_ESTIMATOR")
+  fi
   if [[ "$OVERLONG_LOSS_MASKING" == "1" || "$OVERLONG_LOSS_MASKING" == "true" ]]; then
     ORCHESTRATOR_CMD+=(--overlong_loss_masking)
   fi
-  [[ -n "$SEQ_LOGPROB_ERROR_THRESHOLD" ]] && ORCHESTRATOR_CMD+=(--seq_logprob_error_threshold="$SEQ_LOGPROB_ERROR_THRESHOLD")
-  [[ -n "$TIS_TYPE" ]] && ORCHESTRATOR_CMD+=(--truncated_importance_sampling_type="$TIS_TYPE")
-  [[ -n "$TIS_RATIO_MIN" ]] && ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio_min="$TIS_RATIO_MIN")
-  [[ -n "$TIS_RATIO" ]] && ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio="$TIS_RATIO")
+  if [[ -n "$SEQ_LOGPROB_ERROR_THRESHOLD" ]]; then
+    ORCHESTRATOR_CMD+=(--seq_logprob_error_threshold="$SEQ_LOGPROB_ERROR_THRESHOLD")
+  fi
+  if [[ -n "$TIS_TYPE" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_type="$TIS_TYPE")
+  fi
+  if [[ -n "$TIS_RATIO_MIN" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio_min="$TIS_RATIO_MIN")
+  fi
+  if [[ -n "$TIS_RATIO" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio="$TIS_RATIO")
+  fi
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)
   else
