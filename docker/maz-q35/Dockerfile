@@ -58,10 +58,12 @@ FROM ${BASE_IMAGE}
 # same paths. Uninstall by the old name first.
 #
 # --no-deps: the wheel pins jax==0.11.0, jaxlib==0.11.0 and libtpu==0.0.47. The first two
-# already match. libtpu here is 0.0.44 and moving it is not a change this overlay should
-# be making silently -- it is the runtime for the rollout's vLLM as well. The .so files in
-# the wheel are the thing being upgraded; if they turn out to need 0.0.47 it will show up
-# as a load failure at weight-sync time, not as a subtle wrong answer.
+# already match. libtpu here is 0.0.44, and the pin is declarative rather than an ABI
+# dependency -- none of the wheel's three extension modules link against libtpu. Their
+# NEEDED entries are libm, libstdc++, libgcc_s, libc and the loader, and `strings | grep
+# libtpu` is empty for all three; they reach the TPU as XLA custom calls through the JAX
+# FFI, whose contract is with jaxlib. Satisfying the pin would mean replacing the runtime
+# under the rollout's vLLM and tpu-inference for no benefit.
 ARG TPU_SYNC_WHEEL=tpu_sync_jax-0.0.1.dev20260914193202-cp312-cp312-manylinux_2_31_x86_64.whl
 RUN --mount=type=bind,source=${TPU_SYNC_WHEEL},target=/tmp/${TPU_SYNC_WHEEL} \
     pip uninstall -y tpu_raiden_jax \
