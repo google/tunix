@@ -56,6 +56,10 @@ export LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
+# `env` takes the reward the rollout's GSM8KEnv already computed; `exact` has the
+# orchestrator recompute the same GSM8K score from the returned trajectory text. Only
+# `exact` constructs gsm8k.make_gsm8k_reward_fn, which is where the DEBUG=1 trajectory
+# dump lives, so `env` plus --debug yields debug logging and no sampled responses.
 export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
@@ -225,6 +229,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --reward_mode=${REWARD_MODE} \
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --stop_workers_on_exit \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \

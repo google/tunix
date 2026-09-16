@@ -204,6 +204,14 @@ export WANDB_API_KEY
 # 1, to log the sampled trajectories. It also turns on httpx wire-level logging, which
 # floods the orchestrator log, so read step times with `grep` rather than by scrolling.
 export DEBUG=1
+# DEBUG=1 on its own does not print trajectories. The sampled-response dump lives inside
+# gsm8k.make_gsm8k_reward_fn, and run_gsm8k_dist_grpo.py:416 only constructs that function
+# when reward_mode is `exact`; the default `env` leaves reward_fns empty and takes the
+# reward the rollout's GSM8KEnv already computed. maz-q35-8 ran DEBUG=1 with the default
+# and logged zero "[Sampled Response]" lines while reporting a real reward_mean of
+# 0.86-0.98. `exact` recomputes the same score orchestrator-side from the trajectory text,
+# so the reward should be unchanged and the text becomes visible.
+export REWARD_MODE=exact
 
 # --- Job names ---------------------------------------------------------------
 # The launcher derives every JobSet name from $USER: maz-q35-N-{orch,train,roll}.
@@ -215,7 +223,8 @@ echo "    trainer    ${TRAINER_TPU_SLICE} fsdp=${TRAINER_MESH_FSDP}"
 echo "    rollout    ${ROLLOUT_REPLICAS} x ${ROLLOUT_TPU_SLICE} dp=${ROLLOUT_MESH_FSDP} tp=${ROLLOUT_MESH_TP} sampler=${SAMPLER}"
 echo "    batch      ${BATCH_SIZE} prompts x ${NUM_GENERATIONS} gens = ${MINI_BATCH_SIZE}/step, resp<=${MAX_RESPONSE_LENGTH}"
 echo "    packing    ${MAX_SEQ_TOKEN_PER_TPU} tok/row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
-echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV:-RAIDEN_BROADCAST_K unset (direct push)}, debug=${DEBUG}"
+echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV:-RAIDEN_BROADCAST_K unset (direct push)}"
+echo "    reward     mode=${REWARD_MODE} debug=${DEBUG} (trajectories need both)"
 echo "    priority   ${PRIORITY_CLASS_NAME}"
 echo "    output     ${MAXTEXT_OUTPUT_DIR}"
 if [ "${ROLLOUT_REPLICAS}" -gt 1 ]; then
