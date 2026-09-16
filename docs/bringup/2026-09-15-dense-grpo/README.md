@@ -3,14 +3,21 @@
 First end-to-end bring-up of the GRPO recipe gates (`seq-mask-TIS`, `grpo-loo`,
 overlong loss masking) on the Trellis distributed orchestrator, on a single v5p-8.
 
-Three results:
+Four results:
 
-1. **It trains.** `grad_norm` is nonzero and the reward signal is live.
+1. **It trains.** `grad_norm` is nonzero and the reward signal is live. The
+   plumbing — rollout log-probs reaching the trainer, both recipe gates
+   computing, metrics emitting — is validated end to end.
 2. **Two silent wiring bugs**, both of which made the importance-sampling gate
    metrics unreadable. Both fixed on this branch.
 3. **The trainer's own log-probs depend on its forward-pass micro-batch shape**
    — 6.2× more divergence at micro-batch 4 than at micro-batch 1, on identical
    data and identical weights.
+4. **Trainer and sampler are not actually in agreement**, even though both are
+   the same JAX model on the same host. 69–100% of sequences land outside the
+   `[0.999, 1.002]` TIS band, and the per-token errors are correlated within a
+   sequence, so longer completions will not average them away as 1/√T. This is
+   the open item; §3 and §4 are the evidence.
 
 Everything below is recomputed from the logs in [`logs/`](logs/) by
 [`verify_report_numbers.py`](verify_report_numbers.py). Run it yourself:
@@ -93,14 +100,24 @@ the scorer gives different scores to different answers, the algorithm can tell
 which were better, and the weights actually move. `grad_norm` is "how far the
 weights moved". It is nonzero on 2 of the 5 steps that report it.
 
-Do not be surprised by the three zeros. `grpo-loo` centres advantages inside a
-prompt group, so when all 8 generations for a prompt earn the same reward the
-advantage is identically zero and there is no gradient — and `reward_mean` is
-exactly 0.5000 on two of those steps, i.e. a degenerate group on a 2-prompt
-batch. I have **not** proven that is the cause of each zero [H]; the correlation
-is imperfect (step 3 has `advantage_mean` 0.0000 yet `grad_norm` 1.154, because
-`advantage_mean` is near zero by construction and it is the *spread* that drives
-the gradient). What is established is that the gradient path is live end to end.
+The three zeros are accounted for. `grad_norm` reported at step N+1 tracks
+`advantage_mean` at step N — nonzero exactly when the advantage was nonzero, on
+**5 of 5** observed pairs [M]:
+
+| `advantage_mean` @ N | 0.0000 | 0.1341 | 0.1341 | 0.0000 | 0.0000 |
+|---|---|---|---|---|---|
+| `reward_mean` @ N | 0.5000 | 0.4688 | 0.2188 | 0.5000 | 0.5000 |
+| `grad_norm` @ N+1 | 0 | 0.5863 | 1.154 | 0 | 0 |
+
+Every zero sits under a step whose `reward_mean` is exactly 0.5000 with
+`advantage_mean` exactly 0.0000 — a degenerate group. `grpo-loo` centres
+advantages inside a prompt group, so when all 8 generations for a prompt earn
+the same reward the advantage is identically zero and there is no gradient to
+take. On a 2-prompt batch that happens often. **The zeros are a property of the
+reward signal on this tiny batch, not of the TIS gate** [D] — the gate's
+rejection rate does not predict them (steps 3 and 4 have `is_oob_ratio` of
+0.875 and 0.6875 respectively yet both give zero gradient, while step 2 at
+0.8125 gives 1.154). Five points is few, but the correlation is exact.
 
 Gate metrics over the same run's 24 loss calls: [M]
 
@@ -179,15 +196,42 @@ Across `tis4`'s 24 min/max pairs the across-sequence spread is **σ = 0.00519**
 [D] (range-of-4 estimator, E[range] = 2.059σ). Zero-mean Gaussian noise at that
 σ predicts **77.36% out of band** [D]. Measured: **81.25%** [M].
 
-So most — not quite all — of an 81% OOB rate is noise against a band that is too
-tight for short sequences. σ_seq shrinks roughly as 1/√T, and these completions
-are **114–196 tokens** [M].
+So the OOB rate is fully accounted for by the observed spread of `seq_geomean`.
+The tempting next step is to call that spread short-sequence noise and assume it
+washes out at production lengths, because σ_seq should shrink as 1/√T. **That
+assumption is wrong here, and it is worth being precise about why.**
 
-**Therefore `is_oob_ratio` is not comparable across sequence lengths.** The
-length-invariant quantity is the signed per-token mean, `token_logdiff_mean`,
-which here is −0.000466 and two-sided: 16/24 calls have a sequence above 1.002
-and 22/24 have one below 0.999. [M] That is symmetric noise around zero, not a
-systematic bias.
+At `train_micro_batch_size=1` there is exactly one sequence per loss call, so
+`seq_geomean` is observed directly rather than estimated from a range. Over the
+16 sequences of [`logs/tok1`](logs/tok1/): [M]
+
+| | |
+|---|---|
+| observed σ_seq | **0.003628** |
+| σ_seq predicted if per-token errors were independent | **0.001140** |
+| ratio | **3.18×** |
+| implied effective independent tokens | **≈ 15**, against 152.5 actual |
+
+(The prediction is σ_token/√T with σ_token = `absmean`/0.7979 = 0.01421 and
+T = 152.5 mean scored tokens.) Predicted OOB at the observed σ is 0.6822 against
+0.6875 measured — the spread explains the rejection rate exactly. [D]
+
+**The per-token errors are strongly correlated within a sequence.** Averaging
+over a 152-token completion buys the noise reduction of about 15 independent
+samples, not 152. So each sequence carries its own near-constant offset, and
+longer completions will not dilute it the way the band's design assumes. Whether
+the effective count grows with T is untested [H] — but the 1/√T argument cannot
+be leaned on without measuring it.
+
+There is also a small systematic component: mean `seq_geomean` over those 16
+sequences is **0.997819**, not 1.0, i.e. the trainer assigns slightly *lower*
+log-probs than the sampler on average (`token_logdiff_mean` = −0.002188). [M]
+
+**`is_oob_ratio` is therefore not comparable across sequence lengths or batch
+shapes**, and a low value should not be read as agreement. The length-invariant
+quantity is the signed per-token mean, `token_logdiff_mean`: −0.000466 over
+`tis4`, two-sided (16/24 calls have a sequence above 1.002, 22/24 have one below
+0.999). [M]
 
 ---
 
@@ -231,13 +275,6 @@ micro-batch 4 with one optimizer step, `is_oob_ratio` is 1.0 on all four calls.
 Anyone tuning the band, or reading the gate as a health signal, is partly
 reading this.
 
-**Mechanism [H], untested.** `selective_log_softmax` already casts to fp32 for
-the logsumexp (`tunix/rl/common.py:220`), so the normalizer is not the exposure.
-The final logits matmul runs in bf16, and XLA picks different tiling and
-accumulation orders for batch 1 versus batch ≥ 2, which would produce this
-signature. The test that settles it is to force that matmul to fp32 and see
-whether the 6× gap collapses. The tunix model path has no such knob today.
-
 ---
 
 ## 5. Caveats
@@ -251,8 +288,10 @@ whether the 6× gap collapses. The tunix model path has no such knob today.
 - §4 deliberately quotes no noise prediction for `mb2`: the range-of-n constant
   differs for n=2 and the n=4 value does not apply.
 - The MaxText-backend instance of bug A (§2) is untested.
-- The three zero `grad_norm` steps in §1 are explained by a hypothesis, not a
-  measurement.
+- The `grad_norm`/`advantage_mean` correspondence in §1 is exact on all 5
+  observed pairs, but 5 pairs is a small sample.
+- Whether the effective independent-token count in §3 grows with sequence length
+  is untested; it was measured at one length (152.5 mean tokens).
 
 ---
 

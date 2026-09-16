@@ -189,7 +189,62 @@ def main():
 
   print()
   print("=" * 68)
-  print("CLAIM 5  there is a live training signal (tis4)")
+  print("CLAIM 5  per-token errors are correlated within a sequence")
+  print("=" * 68)
+  # At micro-batch 1 there is one sequence per loss call, so seq_geomean is
+  # observed directly instead of estimated from a range of 4.
+  p = os.path.join(args.logs, "tok1", "trainer.log")
+  if os.path.exists(p):
+    g = sampler_is(p, "sampler_is/seq_geomean_mean")
+    tok = sampler_is(p, "sampler_is/scored_tokens_per_seq")
+    am = sampler_is(p, "sampler_is/token_logdiff_absmean")
+    oob = sampler_is(p, "tis/is_oob_ratio")
+    sigma_tok = [a / 0.7979 for a in am]
+    predicted = statistics.mean(
+        [s / math.sqrt(t) for s, t in zip(sigma_tok, tok)]
+    )
+    observed = statistics.stdev(g)
+    ratio = observed / predicted
+    print(f"  sequences                         : {len(g)}")
+    print(f"  mean seq_geomean                  : {statistics.mean(g):.6f}")
+    print(f"  mean sigma_token                  : {statistics.mean(sigma_tok):.5f}")
+    print(f"  mean scored tokens per sequence   : {statistics.mean(tok):.1f}")
+    print(f"  sigma_seq if tokens independent   : {predicted:.6f}")
+    print(f"  sigma_seq OBSERVED                : {observed:.6f}")
+    print(f"  ratio                             : {ratio:.2f}x")
+    print(f"  effective independent tokens      : {statistics.mean(tok) / ratio ** 2:.1f}")
+    p_in = normal_cdf(0.002 / observed) - normal_cdf(-0.001 / observed)
+    print(f"  predicted OOB at observed sigma   : {1 - p_in:.4f}")
+    print(f"  measured OOB                      : {statistics.mean(oob):.4f}")
+
+  print()
+  print("=" * 68)
+  print("CLAIM 6  grad_norm tracks advantage_mean, offset one step (tis4)")
+  print("=" * 68)
+  p = os.path.join(args.logs, "tis4", "orchestrator.log")
+  t = os.path.join(args.logs, "tis4", "trainer.log")
+  if os.path.exists(p) and os.path.exists(t):
+    gn = orchestrator(p, r"grad_norm: ([^ ]+)")
+    adv = [float(x) for x in orchestrator(p, r"advantage_mean: ([0-9.-]+)")]
+    rew = [float(x) for x in orchestrator(p, r"reward_mean: ([0-9.]+)")]
+    oob = sampler_is(t, "tis/is_oob_ratio")
+    per_step = [oob[i : i + 4] for i in range(0, len(oob), 4)]
+    agree = 0
+    print("  step  reward   advantage  is_oob   grad_norm@step+1  consistent")
+    for n in range(len(gn) - 1):
+      nz_g = gn[n + 1] not in ("0", "N/A")
+      nz_a = adv[n] != 0.0
+      agree += nz_g == nz_a
+      ob = statistics.mean(per_step[n]) if n < len(per_step) else float("nan")
+      print(
+          f"   {n}    {rew[n]:.4f}   {adv[n]:.4f}     {ob:.4f}   "
+          f"{gn[n + 1]:<16} {nz_g == nz_a}"
+      )
+    print(f"  consistent on {agree}/{len(gn) - 1} pairs")
+
+  print()
+  print("=" * 68)
+  print("CLAIM 7  there is a live training signal (tis4)")
   print("=" * 68)
   p = os.path.join(args.logs, "tis4", "orchestrator.log")
   if os.path.exists(p):
