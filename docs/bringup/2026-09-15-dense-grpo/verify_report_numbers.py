@@ -16,7 +16,7 @@ import os
 import re
 import statistics
 
-RUNS = ["tis4", "mb1", "mb2", "mb4", "tok1", "tok4"]
+RUNS = ["tis4", "mb1", "mb2", "mb4", "tok1", "tok4", "hp0", "hp1", "hp2"]
 
 
 def sampler_is(path, key):
@@ -186,6 +186,21 @@ def main():
     p_in = normal_cdf(0.002 / sigma) - normal_cdf(-0.001 / sigma)
     print(f"  mean range of 4 = {mr:.5f}  ->  sigma = {sigma:.5f}")
     print(f"  predicted OOB = {1 - p_in:.4f}     measured OOB = {d['oob_mean']:.4f}")
+
+  print()
+  print("=" * 68)
+  print("CLAIM 4b  precision A/B/C: does it fix is_oob?")
+  print("=" * 68)
+  labels = {"hp0": "bf16 both sides (production)",
+            "hp1": "fp32 acts + HIGH, trainer only",
+            "hp2": "fp32 acts + HIGH, both sides"}
+  print(f"  {'run':5s} {'configuration':32s} {'is_oob':>8s} {'accept%':>8s} {'absmean':>11s}")
+  for run in ("hp0", "hp1", "hp2"):
+    if run not in summary:
+      continue
+    d = summary[run]
+    print(f"  {run:5s} {labels[run]:32s} {d['oob_mean']:8.4f}"
+          f" {100 * (1 - d['oob_mean']):8.2f} {d['absmean']:11.6f}")
 
   print()
   print("=" * 68)
