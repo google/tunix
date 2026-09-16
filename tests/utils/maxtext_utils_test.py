@@ -387,18 +387,20 @@ class MaxTextUtilsTest(absltest.TestCase):
       maxtext_utils.build_maxtext_config(model_name="gemma2-9b", **kwargs)
     return mock_pyconfig.initialize.call_args[0][0]
 
-  def test_checkpoint_save_interval_zero_with_load_parameters_path(self):
-    # When restoring from load_parameters_path with save_interval_steps=0,
-    # enable_checkpointing must remain True with a huge checkpoint_period
-    # so MaxText restores weights while suppressing periodic saves.
+  def test_checkpoint_save_interval_zero_keeps_restore_but_disables_saving(
+      self,
+  ):
+    # `save_interval_steps=0` means "never save". MaxText restores
+    # `load_parameters_path` through its own `ocp.Checkpointer`, so warm start
+    # still works with `enable_checkpointing=False`.
     argv = self._build_config_argv(
         load_parameters_path="gs://bucket/ckpt",
         checkpointing_options=mock.MagicMock(
             save_interval_steps=0, max_to_keep=10
         ),
     )
-    self.assertIn("enable_checkpointing=True", argv)
-    self.assertIn("checkpoint_period=1000000000", argv)
+    self.assertIn("enable_checkpointing=False", argv)
+    self.assertNotIn("enable_checkpointing=True", argv)
     self.assertIn("load_parameters_path=gs://bucket/ckpt", argv)
 
   def test_checkpoint_save_interval_zero_without_restore_disables_saving(self):

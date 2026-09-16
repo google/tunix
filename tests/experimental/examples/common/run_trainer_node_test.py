@@ -152,50 +152,6 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
     self.mock_mesh.__exit__.assert_called_once()
 
-  def test_current_train_step_reads_int_not_bound_method(self):
-    """PeftTrainer exposes `train_step` as a method and `train_steps` as int.
-
-    Reading `train_step` blindly returns a bound method, which compares equal
-    to itself and would make every close() look like a duplicate save.
-    """
-
-    class _PeftLikeTrainer:
-      train_steps = 7
-
-      def train_step(self, payload=None):
-        return 1
-
-    mesh_trainer = run_trainer_node._MeshBoundTrainer(
-        _PeftLikeTrainer(), self.mock_mesh
-    )
-    self.assertEqual(mesh_trainer._current_train_step(), 7)
-
-  def test_current_train_step_reads_maxtext_property(self):
-    class _MaxTextLikeEngine:
-      train_step = 4
-
-    mesh_trainer = run_trainer_node._MeshBoundTrainer(
-        _MaxTextLikeEngine(), self.mock_mesh
-    )
-    self.assertEqual(mesh_trainer._current_train_step(), 4)
-
-  def test_final_checkpoint_not_duplicate_when_peft_step_advanced(self):
-    class _PeftLikeTrainer:
-      train_steps = 3
-
-      def train_step(self, payload=None):
-        return 1
-
-    trainer = _PeftLikeTrainer()
-    mesh_trainer = run_trainer_node._MeshBoundTrainer(trainer, self.mock_mesh)
-
-    mesh_trainer._last_saved_train_step = 3
-    self.assertTrue(mesh_trainer._final_checkpoint_would_duplicate())
-
-    # Training advanced past the last save, so close() must still write.
-    trainer.train_steps = 4
-    self.assertFalse(mesh_trainer._final_checkpoint_would_duplicate())
-
   def test_prepare_weight_sync_never_drains_checkpoint(self):
     """Checkpoint staging and the Raiden transfer must stay overlapped.
 

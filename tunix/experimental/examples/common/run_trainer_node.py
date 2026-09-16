@@ -27,7 +27,6 @@ from pathlib import Path
 import pickle
 import signal
 import sys
-import time
 from typing import Any
 
 from flax import nnx
@@ -513,16 +512,9 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
 class _MeshBoundTrainer:
   """Binds generic PeftTrainer v2 calls to this worker's JAX mesh."""
 
-  def __init__(
-      self,
-      trainer: Any,
-      mesh: Mesh,
-      save_enabled: bool = True,
-  ):
+  def __init__(self, trainer: peft_trainer_v2.PeftTrainer, mesh: Mesh):
     self._trainer = trainer
     self._mesh = mesh
-    self._save_enabled = save_enabled
-    self._last_saved_train_step = None
 
   def __getattr__(self, name: str) -> Any:
     return getattr(self._trainer, name)
@@ -531,20 +523,8 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.fwd_bwd(*args, **kwargs)
 
-  def _clear_resumed_mid_step(self) -> None:
-    # MaxText sets _resumed_mid_step = True upon restoring a checkpoint and forces
-    # an immediate save during update(). If saving is disabled, bypass it.
-    if getattr(self._trainer, "_resumed_mid_step", False):
-      logging.info(
-          "checkpoint_save_interval_steps=0; clearing _resumed_mid_step so the"
-          " MaxText engine does not immediately save a checkpoint."
-      )
-      setattr(self._trainer, "_resumed_mid_step", False)
-
   def update(self, **kwargs) -> int:
     with self._mesh:
-      if not self._save_enabled:
-        self._clear_resumed_mid_step()
       return self._trainer.update(**kwargs)
 
   def eval_step(self, *args, **kwargs) -> None:
@@ -561,114 +541,20 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.compile(*args, **kwargs)
 
-  def _drain_inflight_checkpoint(self) -> None:
-    """Blocks until any in-flight checkpoint write has finished.
-
-    Orbax saves asynchronously, so save_checkpoint() returns while the write is
-    still in progress. Only used on the close() path, where the write has to
-    land before we tear the checkpoint manager down; the weight-sync path
-    deliberately does not drain, so the save and the Raiden transfer overlap.
-    """
-    manager = getattr(self._trainer, "_checkpoint_manager", None) or getattr(
-        self._trainer, "checkpoint_manager", None
-    )
-    wait = getattr(manager, "wait_until_finished", None)
-    if wait is None:
-      return
-    start = time.monotonic()
-    wait()
-    waited = time.monotonic() - start
-    if waited > 1.0:
-      logging.info(
-          "Waited %.1fs for in-flight checkpoint save to finish.",
-          waited,
-      )
-
   def prepare_weight_sync(self, **kwargs) -> Any:
     with self._mesh:
-      # Deliberately does not wait on the in-flight Orbax write: the checkpoint
-      # save and the Raiden weight transfer are meant to run back-to-back, and
-      # serialising them here would add latency to every step.
       return self._trainer.prepare_weight_sync(**kwargs)
 
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
-    if not self._save_enabled:
-      logging.info(
-          "checkpoint_save_interval_steps=0; skipping save_checkpoint request."
-      )
-      return
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
-      self._last_saved_train_step = self._current_train_step()
 
   def restore_checkpoint(self, **kwargs) -> Any:
     with self._mesh:
       return self._trainer.restore_checkpoint(**kwargs)
 
-  def _suppress_final_checkpoint(self, reason: str) -> None:
-    """Stops the backend writing a final checkpoint from close()."""
-    self._drain_inflight_checkpoint()
-    # PeftTrainer invokes _save_last_checkpoint() inside close().
-    if hasattr(self._trainer, "_save_last_checkpoint"):
-      logging.info(
-          "%s disabling _save_last_checkpoint on %s so close() does not write"
-          " final checkpoint.",
-          reason,
-          type(self._trainer).__name__,
-      )
-      setattr(self._trainer, "_save_last_checkpoint", lambda: None)
-      return
-
-    manager = getattr(self._trainer, "_checkpoint_manager", None)
-    if manager is None:
-      logging.info(
-          "%s exposes no _checkpoint_manager; nothing to suppress at close().",
-          type(self._trainer).__name__,
-      )
-      return
-    logging.info(
-        "%s dropping checkpoint manager so %s.close() does not write final"
-        " checkpoint.",
-        reason,
-        type(self._trainer).__name__,
-    )
-    try:
-      manager.close()
-    except Exception:  # pylint: disable=broad-except
-      logging.exception("Ignoring error while closing checkpoint manager.")
-    setattr(self._trainer, "_checkpoint_manager", None)
-
-  def _current_train_step(self) -> int | None:
-    """Resolves the backend's integer step counter.
-
-    `MaxTextTrainingEngine` exposes `train_step` as an int property, while
-    `PeftTrainer` exposes `train_steps` as the int property and uses
-    `train_step` as a *method*. Reading `train_step` blindly therefore yields a
-    bound method on the PeftTrainer path, and a bound method compares equal to
-    itself, which would report every close() as a duplicate and silently drop
-    the final checkpoint. Require an int so neither backend can be misread.
-    """
-    for attr in ("train_steps", "train_step"):
-      value = getattr(self._trainer, attr, None)
-      if isinstance(value, int):
-        return value
-    return None
-
-  def _final_checkpoint_would_duplicate(self) -> bool:
-    """True when close() would rewrite the step already saved."""
-    if self._last_saved_train_step is None:
-      return False
-    current = self._current_train_step()
-    return current is not None and current == self._last_saved_train_step
-
   def close(self) -> None:
     with self._mesh:
-      if not self._save_enabled:
-        self._suppress_final_checkpoint("checkpoint_save_interval_steps=0;")
-      elif self._final_checkpoint_would_duplicate():
-        self._suppress_final_checkpoint(
-            f"step {self._last_saved_train_step} is already checkpointed;"
-        )
       self._trainer.close()
 
 
@@ -754,11 +640,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
     )
-    return _MeshBoundTrainer(
-        engine,
-        mesh,
-        save_enabled=args.checkpoint_save_interval_steps > 0,
-    )
+    return _MeshBoundTrainer(engine, mesh)
 
   return _factory
 
@@ -832,11 +714,7 @@ def _create_tunix_trainer_factory(args) -> Any:
           training_config,
           sampler_type=args.sampler_type,
       )
-    return _MeshBoundTrainer(
-        trainer,
-        mesh,
-        save_enabled=args.checkpoint_save_interval_steps > 0,
-    )
+    return _MeshBoundTrainer(trainer, mesh)
 
   return _factory
 
