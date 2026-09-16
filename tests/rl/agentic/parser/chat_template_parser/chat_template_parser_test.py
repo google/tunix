@@ -77,7 +77,7 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, add_generation_prompt=True)
     expected = ('\n<|im_start|>user\nHello<|im_end|>\n'
-                '<|im_start|>assistant\n')
+                '<|im_start|>assistant\n<think>\n')
     self.assertEqual(result, expected)
 
   def test_parse_with_tool_message(self):
@@ -98,6 +98,30 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     expected = (
         '\n<|im_start|>assistant\n<think>\n\n</think>\n\nThinking...<|im_end|>\n'
         '<|im_start|>assistant\n<think>\n\n</think>\n\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_restores_think_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': 'Thinking...\n</think>\n\n<function=execute_bash>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nThinking...\n</think>\n\n<function=execute_bash><|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_already_has_think_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': '<think>\nThinking...\n</think>\n\n<function=execute_bash>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nThinking...\n</think>\n\n<function=execute_bash><|im_end|>'
     )
     self.assertEqual(result, expected)
 

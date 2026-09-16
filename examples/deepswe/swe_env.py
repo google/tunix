@@ -88,6 +88,67 @@ def _unpack_entry(entry: dict) -> dict:
   return unpacked_entry
 
 
+def _normalize_entry(
+    entry: dict[str, Any],
+    docker_image_prefix: str | None = None,
+) -> dict[str, Any]:
+  """Prepares a raw benchmark dataset row (e.g., R2E-Gym / SWE-bench) for SWEEnv.
+
+  Raw datasets often contain representations that require adaptation before
+  SWEEnv initialization and distributed execution:
+  1. Multi-element list columns: `SWEEnv._unpack_entry` strictly expects scalar
+     values or singleton lists (`len(v) == 1`) and raises `ValueError` if a list
+     has multiple items. Raw benchmark datasets frequently contain multi-item
+     list columns (e.g. test files, commands, patch hunks, hints). JSON-encoding
+     these lists converts them to string scalars, preserving their structured
+     content while avoiding unpacking errors (consistent with the training pipeline).
+  2. Missing or alternate task identifiers: Certain datasets and disk-saved
+     splits (e.g. `r2e-gym-easy-format`) omit `instance_id` and store task
+     identifiers under `commit_hash` instead. This fallback ensures every row
+     has a valid, non-empty `instance_id`.
+  3. Container registry re-routing: If `docker_image_prefix` is specified,
+     public Docker Hub image names (e.g. `namanjain12/pandas_final:tag`) are
+     rewritten to point to a private or regional mirror registry (e.g. GCP
+     Artifact Registry) to bypass Docker Hub pull rate limits and network
+     restrictions on cluster worker nodes, while preserving SWE-bench verified
+     images when the prefix does not target them.
+
+  Args:
+    entry: Raw dictionary row from the dataset.
+    docker_image_prefix: Optional registry prefix to prepend to docker image names.
+
+  Returns:
+    Normalized dictionary compatible with SWEEnv.
+  """
+  normalized = {
+      k: json.dumps(v) if isinstance(v, list) else v for k, v in entry.items()
+  }
+  if "instance_id" not in normalized or not normalized["instance_id"]:
+    commit = entry.get("commit_hash")
+    if commit:
+      repo = entry.get("repo_name", "repo")
+      normalized["instance_id"] = f"{repo}__{commit[:8]}"
+    else:
+      normalized["instance_id"] = None
+  if docker_image_prefix and normalized.get("docker_image"):
+    # If image is from swebench-verified and prefix does not target swebench, keep original
+    if (
+        "swebench-verified" in normalized["docker_image"]
+        and "swebench-verified" not in docker_image_prefix
+    ):
+      pass
+    else:
+      # e.g. 'namanjain12/pandas_final:tag' -> '<prefix>/pandas_final:tag'
+      image_name = normalized["docker_image"].split("/")[-1]
+      normalized["docker_image"] = (
+          f"{docker_image_prefix.rstrip('/')}/{image_name}"
+      )
+  return normalized
+
+
+normalize_entry = _normalize_entry
+
+
 class SWEEnv(BaseTaskEnv):
   """Software Engineering Environment for code-related tasks."""
 
