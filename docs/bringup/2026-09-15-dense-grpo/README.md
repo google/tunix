@@ -15,7 +15,7 @@ Five results:
    data and identical weights.
 4. **Root cause found: bf16 matmul rounding on the MXU**, whose tiling and
    accumulation order are keyed on matmul shape. Established by elimination —
-   true fp32 arithmetic removes the batch-dependence entirely (~22,000×). §5.
+   true fp32 arithmetic removes the batch-dependence entirely (~20,000×). §5.
 5. **It is fixable, and the sequence dropping is entirely numerical.** With
    fp32 activations + 3-pass matmuls, acceptance goes 18.75% → 42.71%
    (trainer-side only) → 100% (both sides), on the real GRPO loop. §6 explains
@@ -391,12 +391,24 @@ matters:
 | **bf16** | **fp32** | **HIGH** | **24.7 ms** | **87.7 ms** | **0.0000299** | **≤ 6e-6** |
 | bf16 | fp32 | HIGHEST | 30.9 ms | 111.1 ms | 0.0000014 | ≤ 1e-6 |
 
+For completeness, **full fp32 (weights *and* activations) + HIGHEST** gives
+`|Δ|` = 0.0000016 with the `seq_geomean` shift at exactly 1.0 — a ~20,000×
+reduction ([`probe_out/13_full_fp32_highest.txt`](probe_out/13_full_fp32_highest.txt)).
+That is the configuration that establishes the mechanism; it is not a
+recommendation.
+
+Note that **HIGHEST is genuinely more accurate than HIGH here** — 0.0000014 vs
+0.0000299, about 21× — because the activations are truly fp32 and the third
+bf16 component of the operand split is doing real work. HIGH is recommended not
+because HIGHEST is useless but because HIGH already puts the shift four orders
+of magnitude inside the band, at ~25% less cost.
+
 Raw transcripts for every row are in [`probe_out/`](probe_out/), one file per
 configuration. Timings are wall-clock and vary ~1% run to run.
 
 **Mechanism: bf16 matmul rounding on the MXU**, whose tiling and accumulation
 order are keyed on matmul shape — and batch size is part of that shape. True
-fp32 arithmetic removes it entirely (~22,000×).
+fp32 arithmetic removes it entirely (~20,000-22,000× depending on weight dtype).
 
 Two scoping results that matter for cost:
 
