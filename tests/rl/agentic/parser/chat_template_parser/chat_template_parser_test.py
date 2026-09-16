@@ -77,7 +77,7 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, add_generation_prompt=True)
     expected = ('\n<|im_start|>user\nHello<|im_end|>\n'
-                '<|im_start|>assistant\n')
+                '<|im_start|>assistant\n<think>\n')
     self.assertEqual(result, expected)
 
   def test_parse_with_tool_message(self):
