@@ -204,14 +204,22 @@ export WANDB_API_KEY
 # 1, to log the sampled trajectories. It also turns on httpx wire-level logging, which
 # floods the orchestrator log, so read step times with `grep` rather than by scrolling.
 export DEBUG=1
-# DEBUG=1 on its own does not print trajectories. The sampled-response dump lives inside
-# gsm8k.make_gsm8k_reward_fn, and run_gsm8k_dist_grpo.py:416 only constructs that function
-# when reward_mode is `exact`; the default `env` leaves reward_fns empty and takes the
-# reward the rollout's GSM8KEnv already computed. maz-q35-8 ran DEBUG=1 with the default
-# and logged zero "[Sampled Response]" lines while reporting a real reward_mean of
-# 0.86-0.98. `exact` recomputes the same score orchestrator-side from the trajectory text,
-# so the reward should be unchanged and the text becomes visible.
-export REWARD_MODE=exact
+# `env`, not `exact`, and this costs the trajectory dump. The sampled-response logging
+# lives inside gsm8k.make_gsm8k_reward_fn, which run_gsm8k_dist_grpo.py:416 constructs
+# only under `exact`, so DEBUG=1 alone prints no trajectories -- maz-q35-8 ran ten steps
+# that way and logged zero "[Sampled Response]" lines.
+#
+# `exact` is not a usable substitute: maz-q35-9 showed it scores the whole chat
+# transcript, prompt included, rather than the assistant turn. Both modes call the same
+# vtc_completion_outcome, but the VTC prompt instructs the model to use
+# <reasoning>...</reasoning> and <answer>\boxed{}</answer>, so the prompt itself carries
+# every tag is_vtc_format_correct counts. It requires exactly one of each and sees two,
+# so format_ok is always false and a correct answer scores 0.5 instead of 1.0. Measured
+# over steps 0-2: reward_mean 0.9375/0.8742/0.8871 under `env` against
+# 0.4750/0.4582/0.4465 under `exact`, with answer extraction agreeing with gold on 99.2%
+# of 930 trajectories in both. `env` scores action.action, the assistant turn alone,
+# which is correct.
+export REWARD_MODE=env
 
 # --- Job names ---------------------------------------------------------------
 # The launcher derives every JobSet name from $USER: maz-q35-N-{orch,train,roll}.
