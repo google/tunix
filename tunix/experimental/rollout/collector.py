@@ -14,8 +14,9 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-from typing import Any, List
+from typing import Any, Collection, List, Sequence
 import zlib
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
@@ -56,6 +57,37 @@ def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
   return chat_completions
 
 
+def response_budget_facts(
+    response_tokens: Sequence[int] | np.ndarray,
+    max_response_length: int,
+    eos_ids: Collection[int],
+) -> tuple[int, bool]:
+  """Computes `(raw_length, clipped)` for a generated response token sequence.
+
+  A response is considered truncated (`clipped = True`) when its token length
+  reaches or exceeds `max_response_length` without stopping on a configured EOS
+  token (`int(response_tokens[-1]) in eos_ids`).
+
+  TODO(tunix-dev): Move to a shared module and unify with
+  `GRPOLearner._process_results` in `tunix/rl/agentic/agentic_grpo_learner.py`
+  once agentic GRPO plumbs configured stop sets (`RolloutConfig.eos_tokens`).
+
+  Args:
+    response_tokens: Sequence or 1D array of response token IDs (including
+      environment/tool turns).
+    max_response_length: Maximum allowed response tokens for this rollout.
+    eos_ids: Set of valid stop token IDs configured for the sampler.
+
+  Returns:
+    A tuple `(raw_length, clipped)` where `raw_length` is clamped to
+    `max_response_length`.
+  """
+  raw_length = len(response_tokens)
+  stopped_on_eos = raw_length > 0 and int(response_tokens[-1]) in eos_ids
+  clipped = raw_length >= max_response_length and not stopped_on_eos
+  return min(raw_length, max_response_length), clipped
+
+
 class TrajectoryCollectorEngine:
   """Wrapper around TrajectoryCollectEngine providing lifecycle controls and Trajectory conversion."""
 
@@ -68,6 +100,7 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
+      eos_ids: Collection[int] | None = None,
   ):
     if (
         sampler is None
@@ -93,6 +126,11 @@ class TrajectoryCollectorEngine:
     self.max_response_length = request.generation_kwargs.get(
         "max_response_length"
     )
+    # The stop set the sampler was configured with, which is what decides
+    # whether a rollout ended on its own. Defined at the recipe level via
+    # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
+    # than forced from the base tokenizer.
+    self.eos_ids = frozenset(int(token_id) for token_id in (eos_ids or ()))
     metadata = request.metadata or {}
     timeout = metadata.get("episode_timeout")
     self.episode_timeout = float(
@@ -206,6 +244,78 @@ class TrajectoryCollectorEngine:
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
+  def _annotate_response_budget(self, rl_traj: dict[str, Any]) -> None:
+    """Records whether this rollout was truncated by the response budget.
+
+    Written here rather than by the consumer because only the producer knows
+    the budget actually enforced: `max_response_length` is read per request,
+    and `DistributedRLEngine` lets a dataset item override the default.
+
+    Sets two keys, both computed by `response_budget_facts`:
+      * `clipped`: reached the budget without stopping on a configured EOS.
+      * `raw_length`: response tokens including env/tool turns, clamped to the
+        budget (the rLLM/VERL `response_length` convention).
+
+    Both are left unset when no budget was enforced, no EOS id is known, or
+    there is no token stream, so consumers can tell "not truncated" from
+    "unknown". Each of those skips warns once, because an absent metric is
+    otherwise indistinguishable from a zero one on a dashboard. An empty stream
+    is annotated rather than skipped: it is a rollout that produced nothing,
+    and keeps its place in the group denominator.
+
+    TODO(tunix-dev): Prefer `TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED`, which
+    already reaches the consumer via `traj["status"]`, over this last-token
+    heuristic. Deferred because that status is not EOS-aware and is evaluated
+    per turn, so adopting it would shift the reported metric. Note
+    `finish_reason` exists only on the sampler responses here; agentic has
+    never had such a field.
+
+    Args:
+      rl_traj: Token-mode trajectory dict, annotated in place.
+    """
+    skipped = "Not annotating clipped/raw_length for rollout %s: %s."
+    if not self.max_response_length:
+      # A non-positive budget is a misconfiguration rather than "no budget":
+      # every rollout would score as having reached it.
+      if self.max_response_length is None:
+        reason = (
+            "the request carries no max_response_length, so no budget was"
+            " enforced"
+        )
+      else:
+        reason = (
+            f"max_response_length is {self.max_response_length!r}, which is"
+            " not a usable budget"
+        )
+      logging.log_first_n(logging.WARNING, skipped, 1, self.traj_id, reason)
+      return
+    if not self.eos_ids:
+      logging.log_first_n(
+          logging.WARNING,
+          skipped,
+          1,
+          self.traj_id,
+          "no eos_tokens are configured in RolloutConfig, so termination"
+          " cannot be detected",
+      )
+      return
+    tokens = rl_traj.get("conversation_tokens")
+    if tokens is None:
+      logging.log_first_n(
+          logging.WARNING,
+          skipped,
+          1,
+          self.traj_id,
+          "the trajectory carries no conversation_tokens",
+      )
+      return
+
+    raw_length, clipped = response_budget_facts(
+        tokens, self.max_response_length, self.eos_ids
+    )
+    rl_traj["raw_length"] = raw_length
+    rl_traj["clipped"] = clipped
+
   def _convert_to_trajectory(
       self, rl_traj: dict[str, Any]
   ) -> agent_types.TrajectoryItem:
@@ -214,6 +324,8 @@ class TrajectoryCollectorEngine:
       raise TypeError(
           f"Expected rl_traj to be a dict, got {type(rl_traj).__name__}"
       )
+
+    self._annotate_response_budget(rl_traj)
 
     metadata = dict(self.request.metadata or {})
     metadata["prompt_id"] = self.request.prompt_id
