@@ -15,7 +15,8 @@ Five results:
    data and identical weights.
 4. **Root cause found: bf16 matmul rounding on the MXU**, whose tiling and
    accumulation order are keyed on matmul shape. Established by elimination —
-   true fp32 arithmetic removes the batch-dependence entirely (~20,000×). §5.
+   true fp32 arithmetic attenuates the batch-dependence ~20,000× (a 1.6e-6
+   residual survives). §5.
 5. **It is fixable, and the sequence dropping is entirely numerical.** With
    fp32 activations + 3-pass matmuls, acceptance goes 18.75% → 42.71%
    (trainer-side only) → 100% (both sides), on the real GRPO loop. §6 explains
@@ -400,15 +401,19 @@ recommendation.
 Note that **HIGHEST is genuinely more accurate than HIGH here** — 0.0000014 vs
 0.0000299, about 21× — because the activations are truly fp32 and the third
 bf16 component of the operand split is doing real work. HIGH is recommended not
-because HIGHEST is useless but because HIGH already puts the shift four orders
-of magnitude inside the band, at ~25% less cost.
+because HIGHEST is useless but on cost/benefit: HIGH already puts the shift
+~172× inside the nearest band edge (two orders of magnitude) for ~20% less
+forward time than HIGHEST.
 
 Raw transcripts for every row are in [`probe_out/`](probe_out/), one file per
 configuration. Timings are wall-clock and vary ~1% run to run.
 
 **Mechanism: bf16 matmul rounding on the MXU**, whose tiling and accumulation
 order are keyed on matmul shape — and batch size is part of that shape. True
-fp32 arithmetic removes it entirely (~20,000-22,000× depending on weight dtype).
+fp32 arithmetic attenuates it ~20,000× but does **not** remove it: 1.6e-6
+survives at full fp32, on a path whose bs=1 reruns are bit-exact. So the
+shape-dependence is dtype-independent; bf16 is what makes it large enough to
+cross the band.
 
 Two scoping results that matter for cost:
 
@@ -423,8 +428,7 @@ Two scoping results that matter for cost:
   memory is unchanged. Only activations widen. [M]
 
 On cost: for **f32 × bf16** operands the TPU pass counts are **1 / 2 / 3**, not
-1 / 3 / 6, and `HIGHEST` buys zero accuracy over `HIGH` in that mixed case
-(verified against `lax.py:2129-2175` and measured on this v5p). `HIGH` is the
+1 / 3 / 6 (`lax.py:2129-2175`). `HIGH` is the
 right setting.
 
 ---
@@ -440,7 +444,14 @@ variable. [M]
 | [hp1](logs/hp1/) | fp32 acts + HIGH, **trainer only** | 0.5729 | **42.71%** | 0.008290 |
 | [hp2](logs/hp2/) | fp32 acts + HIGH, **both sides** | **0.0000** | **100.00%** | **0.000008** |
 
-All three still train (`grad_norm` peaks 0.5863 / 0.8952 / 1.431). Step time is
+hp0 and hp1 are matched-data (the `HP_TRAINER_*` switch reaches only the
+trainer). **hp2 is not**: it sets `TRAINER_ACT_DTYPE` directly, which
+`models.py` also serves to the rollout node, so the sampler's numerics changed
+and it generated different text — `scored_tokens_per_seq` is 147.75 / 121.75 /
+161.25 / 164.75 against hp0/hp1's 147.75 / 130.5 / 163.25 / 168.5. Read hp2 as a
+numerical-floor control, not the third point on a fix-efficacy curve.
+
+All three still train (`grad_norm` peaks 1.154 / 0.8952 / 1.431). Step time is
 ~10 s in every case — the ~2× trainer forward is hidden because rollout
 generation dominates.
 
