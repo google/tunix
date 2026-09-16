@@ -28,6 +28,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl import algo_core
 from tunix.rl import function_registry
 
@@ -99,6 +100,34 @@ def _routed_experts_for(
       dtype=np.int32,
   )
   return np.concatenate([routed_arr, pad], axis=0)
+
+
+def _extract_overlong(item: datatypes.TrajectoryItem) -> np.ndarray | None:
+  """1.0 when the response token budget ran out, 0.0 when it did not.
+
+  "Overlong" means the rollout was cut off by `max_response_length` without
+  producing an end-of-sequence token, i.e. a truncated prefix rather than a
+  finished answer. `overlong_loss_masking` drops those from the loss AND from
+  its denominator, which is the opposite of what seq-mask-tis does to the
+  sequences it rejects; the report notes that getting the two the same way round
+  is a silent learning-rate change.
+
+  Derived exactly as the non-experimental learner derives it
+  (agentic_grpo_learner.py:676-681): from the collector's own verdict, compared
+  by `.name` because TrajectoryStatus uses `auto()` and `.value` is an opaque
+  int that would never match the serialised string.
+
+  Returns None when the trajectory carries no status at all, so a rollout source
+  that does not report one leaves the field absent rather than asserting every
+  sequence finished cleanly.
+  """
+  status = item.traj.get("status")
+  if status is None:
+    return None
+  overlong = (
+      status == agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name
+  )
+  return np.asarray(1.0 if overlong else 0.0, dtype=np.float32)
 
 
 def _extract_old_logps(
@@ -239,6 +268,7 @@ class GRPOAdapter(AlgorithmAdapter):
     self.truncated_importance_sampling_ratio = truncated_importance_sampling_ratio
     self.sampler_is_report_bands = tuple(sampler_is_report_bands or ())
     self.sampler_is_length_buckets = sampler_is_length_buckets
+    self._validate_sampler_is_options()
     # Deliberately NOT guarded against use_rollout_logps=False. That flag only
     # decides whether the rollout's log-probabilities become the PPO ratio's
     # denominator; `rollout_per_token_logps` is carried either way, so
@@ -253,6 +283,65 @@ class GRPOAdapter(AlgorithmAdapter):
         truncated_importance_sampling_type is not None
         or seq_logprob_error_threshold is not None
     )
+
+  def _validate_sampler_is_options(self) -> None:
+    """Rejects incomplete or reversed sampler-vs-trainer settings.
+
+    Ported from `tunix.rl.algorithm_config.AlgorithmConfig`. Without it a
+    reversed keep-band -- min above max -- is accepted, keeps nothing, and
+    zeroes every gradient for the whole run with no error and no warning; the
+    only symptom is `is_oob_ratio` pinned at 1.0, which is exactly the symptom
+    the real defect produces. Failing at construction keeps the two apart.
+
+    Raises:
+      ValueError: If an option is unsupported, incomplete, or out of order.
+    """
+    lo = self.truncated_importance_sampling_ratio_min
+    hi = self.truncated_importance_sampling_ratio
+    if (lo is None) != (hi is None):
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min and"
+          " truncated_importance_sampling_ratio must be set together (a"
+          f" keep-band needs both ends). Got min={lo}, max={hi}."
+      )
+    if lo is not None and hi is not None and lo > hi:
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min must not exceed"
+          f" truncated_importance_sampling_ratio. Got min={lo}, max={hi}."
+      )
+    if self.truncated_importance_sampling_type is not None:
+      if self.truncated_importance_sampling_type != "seq-mask-tis":
+        raise ValueError(
+            "truncated_importance_sampling_type only supports 'seq-mask-tis'."
+            f" Received: {self.truncated_importance_sampling_type!r}"
+        )
+      if lo is None:
+        raise ValueError(
+            "truncated_importance_sampling_type requires a keep-band. Set"
+            " truncated_importance_sampling_ratio_min and"
+            " truncated_importance_sampling_ratio."
+        )
+    for band in self.sampler_is_report_bands or ():
+      if len(band) != 2 or band[0] > band[1]:
+        raise ValueError(
+            "each entry of sampler_is_report_bands must be an ordered"
+            f" (min, max) pair. Received: {band!r}"
+        )
+    if self.sampler_is_length_buckets is not None:
+      edges = tuple(self.sampler_is_length_buckets)
+      if not edges:
+        raise ValueError(
+            "sampler_is_length_buckets must be non-empty when set; use None"
+            " to disable the length-scaling diagnostic."
+        )
+      if any(e <= 0 for e in edges) or any(
+          b <= a for a, b in zip(edges, edges[1:])
+      ):
+        raise ValueError(
+            "sampler_is_length_buckets must be strictly increasing positive"
+            f" token counts. Received: {edges}"
+        )
+      self.sampler_is_length_buckets = edges
 
   def compute_advantages(
       self,
@@ -311,8 +400,10 @@ class GRPOAdapter(AlgorithmAdapter):
       # so tying both to use_rollout_logps made the recipe inexpressible.
       rollout_lp = _extract_old_logps(item, len(c_arr))
       old_lp = rollout_lp if self.use_rollout_logps else None
+      overlong = _extract_overlong(item)
       payload = datatypes.RLTrainerPayload(
           rollout_per_token_logps=rollout_lp,
+          overlong=overlong,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,

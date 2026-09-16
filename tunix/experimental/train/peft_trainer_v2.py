@@ -125,6 +125,50 @@ class TrainingInput:
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
+def _aux_metric_reducer(name: str) -> Callable[[Any], Any]:
+  """Cross-micro-batch reducer for an aux metric, chosen by name.
+
+  The non-experimental learner registers a reducer per metric name. This stack
+  has no such registry, so infer it: an extreme stays an extreme under pooling,
+  everything else is a mean. Getting this wrong understates a max or overstates
+  a min; it never fabricates a value.
+  """
+  if name.endswith(("_max", "/max")):
+    return np.max
+  if name.endswith(("_min", "/min")):
+    return np.min
+  return np.mean
+
+
+def _aux_to_additional_metrics(aux: Any) -> dict[str, Any] | None:
+  """Turns a loss's aux dict into `_buffer_metrics`'s additional_metrics form.
+
+  Without this every metric `grpo_loss_fn` produces -- `tis/is_oob_ratio`,
+  `sample_mask/kept_frac`, the whole `sampler_is/*` family -- reaches
+  `_post_process_train_step`, whose base implementation is `pass`, and is
+  discarded. Enabling sequence-mask TIS then has no observable effect at all,
+  which is indistinguishable from it not being enabled.
+
+  Only rank-0 values are forwarded: the metric stream is scalar, and a stray
+  per-token array would be silently meaningless rather than useful.
+  """
+  if not isinstance(aux, dict):
+    return None
+  out: dict[str, Any] = {}
+  for name, value in aux.items():
+    # sft_utils.WeightedMetric and friends expose compute(); everything else is
+    # already a scalar array.
+    if hasattr(value, "compute"):
+      try:
+        value = value.compute()
+      except Exception:  # pylint: disable=broad-except
+        continue
+    if getattr(value, "ndim", 0) != 0:
+      continue
+    out[name] = (value, _aux_metric_reducer(name))
+  return out or None
+
+
 class MetricsBuffer:
   """Metrics collected for a specific step.
 
@@ -1042,6 +1086,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
+        additional_metrics=_aux_to_additional_metrics(aux),
     )
     self._post_process_train_step(aux)
 

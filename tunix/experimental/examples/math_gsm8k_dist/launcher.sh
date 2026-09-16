@@ -79,6 +79,16 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 # sampler responses") but nothing plumbed it through, so a run that scores every
 # rollout 0.0 gave no way to see whether the model produced bad text or the
 # reward path never saw any text at all. DEBUG=1 turns it on.
+# MLPerf GRPO recipe options. Empty/0 means "leave at the runner's default",
+# so an unset variable reproduces the previous behaviour exactly.
+EPSILON_HIGH=${EPSILON_HIGH:-}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-}
+OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-0}
+SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-}
+TIS_TYPE=${TIS_TYPE:-}
+TIS_RATIO_MIN=${TIS_RATIO_MIN:-}
+TIS_RATIO=${TIS_RATIO:-}
 DEBUG=${DEBUG:-0}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -714,6 +724,16 @@ echo "Launching CPU orchestrator..."
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--debug)
   fi
+  [[ -n "$EPSILON_HIGH" ]] && ORCHESTRATOR_CMD+=(--epsilon_high="$EPSILON_HIGH")
+  [[ -n "$LOSS_AGG_MODE" ]] && ORCHESTRATOR_CMD+=(--loss_agg_mode="$LOSS_AGG_MODE")
+  [[ -n "$ADVANTAGE_ESTIMATOR" ]] && ORCHESTRATOR_CMD+=(--advantage_estimator="$ADVANTAGE_ESTIMATOR")
+  if [[ "$OVERLONG_LOSS_MASKING" == "1" || "$OVERLONG_LOSS_MASKING" == "true" ]]; then
+    ORCHESTRATOR_CMD+=(--overlong_loss_masking)
+  fi
+  [[ -n "$SEQ_LOGPROB_ERROR_THRESHOLD" ]] && ORCHESTRATOR_CMD+=(--seq_logprob_error_threshold="$SEQ_LOGPROB_ERROR_THRESHOLD")
+  [[ -n "$TIS_TYPE" ]] && ORCHESTRATOR_CMD+=(--truncated_importance_sampling_type="$TIS_TYPE")
+  [[ -n "$TIS_RATIO_MIN" ]] && ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio_min="$TIS_RATIO_MIN")
+  [[ -n "$TIS_RATIO" ]] && ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio="$TIS_RATIO")
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)
   else

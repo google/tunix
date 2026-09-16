@@ -192,6 +192,52 @@ def gsm8k_env_reward(
   return score_gsm8k_completion(str(completion), gold_answer)
 
 
+def _last_assistant_content(messages: Any) -> str | None:
+  """The last assistant message's content, or None if there is not one."""
+  if not isinstance(messages, (list, tuple)):
+    return None
+  for message in reversed(messages):
+    if isinstance(message, dict) and message.get("role") == "assistant":
+      return str(message.get("content") or "")
+  return None
+
+
+def _completion_text(item: Any, metadata: dict[str, Any]) -> str:
+  """The model's own output, never the whole conversation.
+
+  `metadata["text"]` has been observed to hold the full chat message list rather
+  than the completion. Scoring that is wrong twice over, and the two errors do
+  not cancel:
+
+    * `is_gsm8k_format_correct` looks for <reasoning>...</reasoning>, which the
+      PROMPT contains -- it instructs the model to use those tags and ends with
+      an open one. Every rollout then clears the format bar for free.
+    * `extract_boxed_answer` walks the string with a brace-matching stack, and
+      the message dicts are full of braces, so \boxed{13} stops being
+      recognised. A correct answer scores as wrong.
+
+    completion only : reward 0.5  format=False answer=True   extracted '13'
+    whole chat      : reward 0.1  format=True  answer=False  extracted ''
+
+  Rewards collapse toward a constant, group reward variance goes to zero, GRPO
+  advantages go to zero, and the run trains on no signal while looking healthy.
+
+  Prefer the structured conversation off the trajectory, fall back to
+  metadata["text"], and in both cases take the last assistant turn if what we
+  have is a message list rather than a string.
+  """
+  traj = getattr(item, "traj", None)
+  if isinstance(traj, dict):
+    content = _last_assistant_content(traj.get("conversation_text"))
+    if content is not None:
+      return content
+  text = metadata.get("text", "")
+  content = _last_assistant_content(text)
+  if content is not None:
+    return content
+  return str(text)
+
+
 def make_gsm8k_reward_fn(
     debug: bool = False,
 ) -> collections.abc.Callable[[Any], float]:
@@ -199,7 +245,7 @@ def make_gsm8k_reward_fn(
 
   def reward_fn(item: Any) -> float:
     metadata = dict(getattr(item, "metadata", None) or {})
-    text = str(metadata.get("text", ""))
+    text = _completion_text(item, metadata)
     gold_answer = metadata.get("answer", metadata.get("gold_answer"))
     reward, _ = score_gsm8k_completion(text, gold_answer)
     if debug:

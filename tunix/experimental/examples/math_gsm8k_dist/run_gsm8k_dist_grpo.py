@@ -210,6 +210,48 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " on-policy ratio=1."
       ),
   )
+  # ---- MLPerf GRPO recipe options ------------------------------------------
+  # All default to off, so omitting them reproduces the previous behaviour.
+  parser.add_argument(
+      "--epsilon_high", type=float, default=None,
+      help="Upper PPO clip bound (DAPO asymmetric clipping). MLPerf uses 0.28.",
+  )
+  parser.add_argument(
+      "--loss_agg_mode", type=str, default="sequence-mean-token-mean",
+      help="Loss aggregation. MLPerf uses token-mean.",
+  )
+  parser.add_argument(
+      "--advantage_estimator", type=str, default="grpo",
+      help="Advantage estimator. MLPerf uses grpo-loo (leave-one-out).",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking", action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Drop sequences truncated by the response budget from the loss AND"
+          " its denominator. Needs the rollout to report a trajectory status."
+      ),
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold", type=float, default=None,
+      help=(
+          "Drop sequences whose mean exp|log p_trainer - log q_sampler|"
+          " exceeds this. MLPerf uses 2.0. Requires rollout log-probabilities."
+      ),
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_type", type=str, default=None,
+      choices=(None, "seq-mask-tis"),
+      help="Set to seq-mask-tis to enable the MLPerf sequence-mask TIS gate.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min", type=float, default=None,
+      help="Lower edge of the TIS keep band. MLPerf uses 0.999.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio", type=float, default=None,
+      help="Upper edge of the TIS keep band. MLPerf uses 1.002.",
+  )
   parser.add_argument(
       "--debug",
       action="store_true",
@@ -233,6 +275,20 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       beta_kl=args.beta,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
+      epsilon_high=args.epsilon_high,
+      loss_agg_mode=args.loss_agg_mode,
+      advantage_estimator=args.advantage_estimator,
+      overlong_loss_masking=args.overlong_loss_masking,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      truncated_importance_sampling_type=(
+          args.truncated_importance_sampling_type
+      ),
+      truncated_importance_sampling_ratio_min=(
+          args.truncated_importance_sampling_ratio_min
+      ),
+      truncated_importance_sampling_ratio=(
+          args.truncated_importance_sampling_ratio
+      ),
   )
 
 
