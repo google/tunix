@@ -78,7 +78,8 @@ fi
 sampling_temperature=0.7
 carrier_prompts=1
 carrier_generations=2
-carrier_max_concurrency=1
+# The entrypoint contract (abafa27b1) requires max_concurrency == prompts x generations.
+carrier_max_concurrency=2
 carrier_max_num_seqs=2
 if [ "$q4_tp4_carrier_screen" = 1 ]; then
   # One bounded harvest at the exact P46 clean-census sampling recipe.  The
