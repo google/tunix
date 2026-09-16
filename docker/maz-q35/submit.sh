@@ -171,18 +171,25 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 export TRAINER_EXTRA_ENV="CKPT_D2H_CONCURRENT_GB=8"
 
 # Raiden tree broadcast, on the orchestrator only. tpu_sync's RaidenController reads
-# RAIDEN_BROADCAST_K at construction (rpc/raiden_controller.py, default 64) and uses it
-# twice: a transfer group only becomes a tree broadcast when its distinct destinations
-# outnumber K, and K is then the tree's fan-out. The one RaidenController in this run is
-# built in the orchestrator process -- orchestrator.py calls create_default_handler,
-# which builds RaidenHandler -> _RaidenTransport -> RaidenController -- so the trainer
-# and rollout containers never read this variable.
+# RAIDEN_BROADCAST_K at construction (rpc/raiden_controller.py:1416, default 64) and uses
+# it twice: a transfer group only becomes a tree broadcast when its distinct destinations
+# outnumber K, and K is then the fan-out passed to _execute_slice_broadcast. The one
+# RaidenController in this run is built in the orchestrator process -- orchestrator.py
+# calls create_default_handler, which builds RaidenHandler -> _RaidenTransport ->
+# RaidenController -- so the trainer and rollout containers never read this variable.
 #
-# At the default 64 the 8 rollout destinations never exceed K, so every step is 8 direct
-# pushes and the trainer source sends the full parameter set 8 times. At K=1 the same
-# group becomes a tree of fan-out 1: a relay chain in which each destination forwards to
-# the next, so the source sends it once.
-export ORCHESTRATOR_EXTRA_ENV="RAIDEN_BROADCAST_K=1"
+# At the default 64 the 8 destinations never exceed K, so every step is 8 direct pushes
+# and the trainer sends the full parameter set 8 times. Below 8 the group instead goes
+# through _execute_slice_broadcast, a work-stealing loop: each destination that finishes
+# is promoted into `available_sources`, and K caps how many pushes any one node may have
+# in flight.
+#
+# K=4, not 1. At K=1 maz-q35-6 hung on the first hop of round 0 -- no destination logged
+# receiving anything, and the transfer died 650 s later on the 600 s deadline hardcoded
+# in tpu_sync's _send_rpc, which start_transfer does not override. K=4 keeps the same
+# tree-broadcast path but allows four concurrent pushes per node, which separates
+# "fanout_k=1 is too serial" from "the tree-broadcast path does not work here".
+export ORCHESTRATOR_EXTRA_ENV="RAIDEN_BROADCAST_K=4"
 
 export MAXTEXT_OUTPUT_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/maxtext
 
