@@ -8,7 +8,6 @@ with configurable JAX/vLLM sharding meshes.
 
 import argparse
 import asyncio
-import base64
 import collections
 import concurrent.futures
 import gc
@@ -226,18 +225,6 @@ parser_cli.add_argument(
     "--vllm_max_batched_tokens",
     type=int,
     default=int(os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888")),
-)
-parser_cli.add_argument(
-    "--vllm_reshard_chunk_size",
-    type=int,
-    default=int(os.getenv("VLLM_RESHARD_CHUNK_SIZE", "30")),
-    help="Reshard chunk size for vLLM weight sync",
-)
-parser_cli.add_argument(
-    "--vllm_init_random_weights",
-    type=str2bool,
-    default=os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "false").lower() == "true",
-    help="Initialize vLLM with random weights and sync real weights chunked",
 )
 parser_cli.add_argument(
     "--mesh_fsdp",
@@ -991,207 +978,6 @@ try:
 except Exception as e:
   logger.warning("Could not install resilient Action methods: %s", e)
 
-try:
-  def _resilient_parse_xml_response(response_text: str):
-    if not response_text or not isinstance(response_text, str):
-      return "", _R2EAction("", {})
-    if "<function=" in response_text:
-      idx = response_text.find("<function=")
-      thought = response_text[:idx].strip()
-      action_block = response_text[idx:].strip()
-    elif "<tool_call>" in response_text:
-      idx = response_text.find("<tool_call>")
-      thought = response_text[:idx].strip()
-      action_block = response_text[idx:].strip()
-    else:
-      thought = response_text.strip()
-      action_block = ""
-    action_obj = _R2EAction.from_string(action_block)
-    return thought, action_obj
-
-  SWEAgent.update_from_model.__globals__["parse_xml_response"] = (
-      _resilient_parse_xml_response
-  )
-  logger.info("Installed resilient parse_xml_response on SWEAgent.")
-except Exception as e:
-  logger.warning("Could not install resilient parse_xml_response: %s", e)
-
-try:
-  from tunix.rl.agentic.environments.base_environment import EnvStepResult as _EnvStepResult
-
-  def _strip_cat_n_line_numbers(text: str) -> str:
-    lines = text.splitlines()
-    non_empty = [l for l in lines if l.strip()]
-    if not non_empty:
-      return text
-    if all(re.match(r"^[ \t]*\d+[\t ]", l) for l in non_empty):
-      return "\n".join(re.sub(r"^[ \t]*\d+[\t ]?", "", l) for l in lines)
-    return text
-
-  def _try_fallback_str_replace(file_content: str, old_str: str, new_str: str):
-    clean_old = _strip_cat_n_line_numbers(old_str)
-    clean_new = _strip_cat_n_line_numbers(new_str)
-    if clean_old != old_str and file_content.count(clean_old) == 1:
-      return True, file_content.replace(clean_old, clean_new, 1)
-
-    old_lines = clean_old.splitlines()
-    new_lines = clean_new.splitlines()
-    while old_lines and not old_lines[0].strip():
-      old_lines.pop(0)
-    while old_lines and not old_lines[-1].strip():
-      old_lines.pop()
-    if not old_lines:
-      return False, file_content
-
-    file_lines = file_content.splitlines()
-    n_old = len(old_lines)
-    matches = []
-    for i in range(len(file_lines) - n_old + 1):
-      window = file_lines[i : i + n_old]
-      if all(w.strip() == o.strip() for w, o in zip(window, old_lines)):
-        matches.append(i)
-
-    if len(matches) != 1:
-      return False, file_content
-
-    match_idx = matches[0]
-    matched_window = file_lines[match_idx : match_idx + n_old]
-
-    def _get_indent(s: str) -> int:
-      return len(s) - len(s.lstrip(" "))
-
-    file_indent_0 = _get_indent(matched_window[0])
-    old_indent_0 = _get_indent(old_lines[0])
-    new_indent_0 = _get_indent(new_lines[0]) if new_lines and new_lines[0].strip() else 0
-
-    if n_old > 1:
-      deltas = [
-          _get_indent(w) - _get_indent(o)
-          for w, o in zip(matched_window[1:], old_lines[1:])
-          if w.strip() and o.strip()
-      ]
-      common_delta = deltas[0] if deltas else (file_indent_0 - old_indent_0)
-    else:
-      common_delta = file_indent_0 - old_indent_0
-
-    adjusted_new_lines = []
-    for idx, nl in enumerate(new_lines):
-      if not nl.strip():
-        adjusted_new_lines.append("")
-        continue
-      cur_indent = _get_indent(nl)
-      if idx == 0 and old_indent_0 == 0 and file_indent_0 > 0 and new_indent_0 == 0:
-        adjusted_new_lines.append(" " * file_indent_0 + nl.lstrip(" "))
-      elif common_delta > 0 and cur_indent + common_delta >= 0:
-        adjusted_new_lines.append(" " * (cur_indent + common_delta) + nl.lstrip(" "))
-      else:
-        adjusted_new_lines.append(nl)
-
-    updated_lines = file_lines[:match_idx] + adjusted_new_lines + file_lines[match_idx + n_old :]
-    updated_content = "\n".join(updated_lines)
-    if file_content.endswith("\n") and not updated_content.endswith("\n"):
-      updated_content += "\n"
-    return True, updated_content
-
-  _oh_mod = SWEEnv._step_impl.__globals__["openhands_utils"]
-  _orig_step_openhands = _oh_mod.step_openhands
-
-  def _patched_step_openhands(env, action_obj):
-    max_steps = getattr(env, "max_steps", None)
-    fn = getattr(action_obj, "function_name", "")
-    if fn in ("submit", "finish") and getattr(env, "step_count", 0) < 25 and getattr(env, "workspace", None) is not None:
-      try:
-        st_res = env.workspace.execute_command("cd /testbed 2>/dev/null && git status --porcelain", timeout=10.0)
-        if st_res.exit_code == 0 and not st_res.stdout.strip():
-          return _EnvStepResult(
-              observation=(
-                  "[ACTION GUARD] You cannot submit yet because no files in the repository have been modified. "
-                  "Please inspect the code, modify the relevant files to fix the issue, and verify the changes "
-                  "before calling submit."
-              ),
-              reward=0.0,
-              done=False,
-              info={"max_steps": max_steps, "guard_blocked": True, "guard_reason": "empty_git_status_submit"},
-          )
-      except Exception as e:
-        logger.warning("Git status check before submit failed: %s", e)
-    if fn == "execute_bash" and getattr(env, "workspace", None) is not None:
-      params = getattr(action_obj, "parameters", {}) or {}
-      cmd = params.get("command") or params.get("cmd")
-      if not cmd:
-        return _EnvStepResult(
-            observation="ERROR: No command specified for execute_bash.",
-            reward=0,
-            done=False,
-            info={"max_steps": max_steps},
-        )
-      try:
-        step_timeout = getattr(env, "step_timeout", 30.0)
-        wrapped_cmd = f"(cd /testbed 2>/dev/null || cd /workspace) && {cmd}"
-        result = env.workspace.execute_command(wrapped_cmd, timeout=float(step_timeout))
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        if stderr:
-          obs = f"{stdout}\n{stderr}".strip() if stdout else stderr.strip()
-        else:
-          obs = stdout
-        if not obs.strip() and result.exit_code == 0:
-          obs = "(Command executed successfully with no output.)"
-      except Exception as e:
-        obs = f"Command execution failed: {e}"
-      if hasattr(env, "total_steps"):
-        env.total_steps += 1
-      return _EnvStepResult(
-          observation=obs,
-          reward=0,
-          done=False,
-          info={"max_steps": max_steps},
-      )
-
-    res = _orig_step_openhands(env, action_obj)
-
-    # Fallback whitespace-tolerant str_replace when exact match fails
-    if (
-        fn in ("str_replace_editor", "file_editor")
-        and (getattr(action_obj, "parameters", {}) or {}).get("command") == "str_replace"
-        and getattr(env, "workspace", None) is not None
-        and ("ERROR: No occurrences of" in str(res.observation) or "ERROR: Multiple occurrences of" in str(res.observation))
-    ):
-      params = action_obj.parameters
-      path = params.get("path")
-      old_str = params.get("old_str")
-      new_str = params.get("new_str", "")
-      if path and old_str:
-        try:
-          read_res = env.workspace.execute_command(f"cat {shlex.quote(path)}", timeout=15.0)
-          if read_res.exit_code == 0 and read_res.stdout:
-            ok, updated_text = _try_fallback_str_replace(read_res.stdout, old_str, new_str)
-            if ok:
-              b64 = base64.b64encode(updated_text.encode("utf-8")).decode("ascii")
-              write_cmd = (
-                  f"python3 -c 'import base64, sys; "
-                  f"open(sys.argv[1], \"w\").write(base64.b64decode(sys.argv[2]).decode(\"utf-8\"))' "
-                  f"{shlex.quote(path)} {b64}"
-              )
-              if path.endswith(".py"):
-                write_cmd += f" && python3 -m py_compile {shlex.quote(path)}"
-              w_res = env.workspace.execute_command(write_cmd, timeout=15.0)
-              if w_res.exit_code == 0:
-                logger.info("Applied fallback str_replace successfully on %s", path)
-                res = _EnvStepResult(
-                    observation=f"The file {path} has been edited successfully.",
-                    reward=0,
-                    done=False,
-                    info=res.info,
-                )
-        except Exception as e:
-          logger.warning("Fallback str_replace failed on %s: %s", path, e)
-    return res
-
-  _oh_mod.step_openhands = _patched_step_openhands
-  logger.info("Installed patched step_openhands with stderr preservation & fallback str_replace.")
-except Exception as e:
-  logger.warning("Could not install patched step_openhands: %s", e)
 
 # The r2egym scaffold terminates every action with `</function>`; stopping
 # there matches the training rollouts and avoids generating past the action.
@@ -1305,8 +1091,6 @@ if ROLLOUT_ENGINE == "vllm":
       mc = vllm_config_param.additional_config["maxtext_config"]
       mc["remat_policy"] = "none"
       mc["scan_layers"] = False
-      if getattr(vllm_config_param, "load_config", None) and getattr(vllm_config_param.load_config, "load_format", None) == "dummy":
-        mc.pop("load_parameters_path", None)
       return _orig_generate_maxtext_config(vllm_config_param)
 
     adapter.generate_maxtext_config = _generate_maxtext_config_with_no_remat
