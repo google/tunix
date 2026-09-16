@@ -609,6 +609,7 @@ class StandardRLProgram(RLProgram):
     # --- 4. Trainer Metrics ---
     loss_val = None
     perplexity_val = None
+    grad_norm_val = None
     if trainer_metrics is None:
       if isinstance(step_result, dict):
         trainer_metrics = step_result.get("metrics")
@@ -679,6 +680,7 @@ class StandardRLProgram(RLProgram):
           "grad_norm", scalar_metrics.pop("trainer/grad_norm", None)
       )
       gn_val = _extract_scalar(raw_gn)
+      grad_norm_val = gn_val
       if gn_val is not None:
         self.metrics_logger.log(
             self.metrics_prefix,
@@ -715,6 +717,7 @@ class StandardRLProgram(RLProgram):
         "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
+        "grad_norm_val": grad_norm_val,
     }
 
   async def train_stage(self) -> None:
@@ -890,14 +893,16 @@ class StandardRLProgram(RLProgram):
 
       loss_val = metrics_summary["loss_val"]
       perplexity_val = metrics_summary["perplexity_val"]
+      grad_norm_val = metrics_summary["grad_norm_val"]
       if self.mode == Mode.TRAIN:
         logging.info(
             "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - perplexity: %s - step_time: %.2fs",
+            " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
             metrics_summary["advantage_mean"],
+            f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
         )
