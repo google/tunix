@@ -125,12 +125,14 @@ export MAX_SEQ_TOKEN_PER_TPU=4096
 export MAX_STEPS="${STEPS}"
 
 # --- Output ------------------------------------------------------------------
-# Save every 10 steps. What made this affordable is MaxText PR 5234: Orbax staged the
-# whole 35B device-to-host at once, and the bound below caps in-flight staged bytes per
-# handler. tunix PR 2228 supplies the other half -- prepare_weight_sync now drains any
-# in-flight save first, so a checkpoint write and Raiden's own ~70 GB D2H no longer
-# occupy the proxy host at the same time.
-export CHECKPOINT_SAVE_INTERVAL_STEPS=10
+# Checkpointing is off. Saving at step 10 of maz-q35-2 OOM-killed the trainer's user
+# container: the cgroup killed python at 64.9 GiB against the 70G limit, 36 s into the
+# save. Both halves of the intended fix were in effect at the time and neither helped --
+# MaxText PR 5234's CKPT_D2H_CONCURRENT_GB=8 bound, and tunix PR 2228's drain of any
+# in-flight save inside prepare_weight_sync. PR 2228 addresses a *concurrent* checkpoint
+# and Raiden staging; here the save alone exceeded the limit, with no weight sync running.
+# See qwen35_report_v8.md section 6.1. Set to 10 to reproduce the failure.
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 # PR 5234 already defaults `checkpoint_storage_device_host_concurrent_gb` to 8 in
 # base.yml. Setting it explicitly in the trainer's environment makes the value visible
 # in the trainer log ("CKPT_D2H_CONCURRENT_GB=8; overriding ..."), which is the only
