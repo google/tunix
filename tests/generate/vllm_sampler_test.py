@@ -544,6 +544,39 @@ class VllmSamplerConfigTest(absltest.TestCase):
           tokenizer=mock.MagicMock(), config=config
       )
 
+  def test_weight_sync_keeps_kv_cache_when_configured(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        free_kv_cache_during_weight_sync=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.to_hf_key_mappings = None
+    with mock.patch.object(
+        vllm_sampler.utils, "transfer_state_directly"
+    ), mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      sampler.update_params({})
+
+    rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
+    self.assertNotIn("delete_kv_cache", rpcs)
+    self.assertNotIn("reinitialize_kv_cache", rpcs)
+    sampler.llm.reset_prefix_cache.assert_called_once()
+
+  def test_weight_sync_frees_kv_cache_by_default(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.to_hf_key_mappings = None
+    with mock.patch.object(
+        vllm_sampler.utils, "transfer_state_directly"
+    ), mock.patch.object(vllm_sampler.jax, "effects_barrier"):
+      sampler.update_params({})
+
+    rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
+    self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
+
   def test_expert_parallel_size_plumbed_to_sharding(self):
     mesh = self._make_mock_mesh(8)
     config = vllm_sampler.VllmConfig(
