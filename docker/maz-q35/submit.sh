@@ -108,11 +108,18 @@ export ROLLOUT_JOBSET_YAML=jobset.tpu.yaml
 export ROLLOUT_TPU_SLICE=tpuv5p:2x2x1
 export ROLLOUT_MESH_FSDP=2
 export ROLLOUT_MESH_TP=2
-# Eight independent rollout JobSets, maz-q35-N-roll-0 .. -7, one 2x2x1 slice each. This
-# is the Raiden 1 -> 8 fan-out: one trainer source pushes to eight destinations per step.
-# 256 rollouts per step across 8 replicas is 32 per replica, against 32 on a single
-# replica at the old 4x8. Same per-replica generate cost, eight times the throughput.
-export ROLLOUT_REPLICAS=8
+# One rollout JobSet, back from the eight of maz-q35-6 and -7. Raiden cannot currently
+# fan out: with 8 destinations the transfer group exceeds no K below 8, takes
+# _execute_slice_broadcast, and hangs on the first hop of round 0 -- at K=1 (run 6,
+# 684.18 s) and at K=4 (run 7, 694.83 s), both dying on the 600 s deadline hardcoded in
+# tpu_sync's _send_rpc with no destination having received anything. See
+# qwen35_report_v9.md. At 1 destination `len(unique_dst_units) > 1` is false, so the
+# direct branch is taken and the 86.44 s sync of maz-q35-5 is the expected behaviour.
+#
+# The batch stays at 16 x 16 = 256 with 1024-token responses, so this replica does 8x
+# the sequences and 2x the length of maz-q35-3's 4 x 8 at 512. Generation is the part
+# that scales; weight sync (~60 s) and the optimizer step do not.
+export ROLLOUT_REPLICAS=1
 # Separate vLLM server process, not the in-process sampler. Before tunix PR 2229 this
 # path could not weight-sync at all: tpu_inference publishes destination variable names
 # bracketed (['base']['decoder']...) while the Raiden source side uses dotted keys, so
@@ -170,26 +177,19 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 # confirmation from outside the container that the bound is in force.
 export TRAINER_EXTRA_ENV="CKPT_D2H_CONCURRENT_GB=8"
 
-# Raiden tree broadcast, on the orchestrator only. tpu_sync's RaidenController reads
-# RAIDEN_BROADCAST_K at construction (rpc/raiden_controller.py:1416, default 64) and uses
-# it twice: a transfer group only becomes a tree broadcast when its distinct destinations
-# outnumber K, and K is then the fan-out passed to _execute_slice_broadcast. The one
-# RaidenController in this run is built in the orchestrator process -- orchestrator.py
-# calls create_default_handler, which builds RaidenHandler -> _RaidenTransport ->
-# RaidenController -- so the trainer and rollout containers never read this variable.
+# RAIDEN_BROADCAST_K is deliberately unset. tpu_sync's RaidenController reads it at
+# construction (rpc/raiden_controller.py:1416, default 64) and uses it twice: a transfer
+# group only becomes a tree broadcast when its distinct destinations outnumber K, and K
+# is then the fan-out passed to _execute_slice_broadcast. The one RaidenController in
+# this run is built in the orchestrator process -- orchestrator.py calls
+# create_default_handler, which builds RaidenHandler -> _RaidenTransport ->
+# RaidenController -- which is why ORCHESTRATOR_EXTRA_ENV rather than TRAINER_EXTRA_ENV
+# is the hook, should it be needed again.
 #
-# At the default 64 the 8 destinations never exceed K, so every step is 8 direct pushes
-# and the trainer sends the full parameter set 8 times. Below 8 the group instead goes
-# through _execute_slice_broadcast, a work-stealing loop: each destination that finishes
-# is promoted into `available_sources`, and K caps how many pushes any one node may have
-# in flight.
-#
-# K=4, not 1. At K=1 maz-q35-6 hung on the first hop of round 0 -- no destination logged
-# receiving anything, and the transfer died 650 s later on the 600 s deadline hardcoded
-# in tpu_sync's _send_rpc, which start_transfer does not override. K=4 keeps the same
-# tree-broadcast path but allows four concurrent pushes per node, which separates
-# "fanout_k=1 is too serial" from "the tree-broadcast path does not work here".
-export ORCHESTRATOR_EXTRA_ENV="RAIDEN_BROADCAST_K=4"
+# At ROLLOUT_REPLICAS=1 the value cannot matter: the tree-broadcast test also requires
+# `len(unique_dst_units) > 1`, so a single destination always takes the direct branch.
+# Setting it anyway would imply it was doing something.
+# export ORCHESTRATOR_EXTRA_ENV="RAIDEN_BROADCAST_K=4"
 
 export MAXTEXT_OUTPUT_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/maxtext
 
@@ -215,7 +215,7 @@ echo "    trainer    ${TRAINER_TPU_SLICE} fsdp=${TRAINER_MESH_FSDP}"
 echo "    rollout    ${ROLLOUT_REPLICAS} x ${ROLLOUT_TPU_SLICE} dp=${ROLLOUT_MESH_FSDP} tp=${ROLLOUT_MESH_TP} sampler=${SAMPLER}"
 echo "    batch      ${BATCH_SIZE} prompts x ${NUM_GENERATIONS} gens = ${MINI_BATCH_SIZE}/step, resp<=${MAX_RESPONSE_LENGTH}"
 echo "    packing    ${MAX_SEQ_TOKEN_PER_TPU} tok/row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
-echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV} (orchestrator), debug=${DEBUG}"
+echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV:-RAIDEN_BROADCAST_K unset (direct push)}, debug=${DEBUG}"
 echo "    priority   ${PRIORITY_CLASS_NAME}"
 echo "    output     ${MAXTEXT_OUTPUT_DIR}"
 if [ "${ROLLOUT_REPLICAS}" -gt 1 ]; then
