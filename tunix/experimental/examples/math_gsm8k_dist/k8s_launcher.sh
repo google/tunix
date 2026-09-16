@@ -131,6 +131,18 @@ export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 
 export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
 export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+# Memory *requests* are the scheduling floor and must sum to less than the
+# node's allocatable RAM (~208G on v5e, ~256G on v5p), because podAffinity
+# co-locates the head pod (rm + proxy + user) with the pw-node pod (worker).
+# Limits stay generous so each container remains burstable.
+#   4G (rm) + 16G (proxy) + 48G (user) + 100G (worker) = 168G requested.
+export PATHWAYS_PROXY_MEMORY_LIMIT=${PATHWAYS_PROXY_MEMORY_LIMIT:-190G}
+export PATHWAYS_PROXY_MEMORY=${PATHWAYS_PROXY_MEMORY:-16G}
+export PATHWAYS_RM_MEMORY=${PATHWAYS_RM_MEMORY:-4G}
+export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-48G}
+export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
+export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-100G}
+export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
@@ -277,11 +289,17 @@ start_trainer() {
     --cpu_machine=${CPU_MACHINE} \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
+    --pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}" \
+    --pathways_proxy_memory="${PATHWAYS_PROXY_MEMORY}" \
+    --pathways_rm_memory="${PATHWAYS_RM_MEMORY}" \
+    --user_container_memory="${USER_CONTAINER_MEMORY}" \
+    --user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}" \
+    --pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}" \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \

@@ -387,17 +387,34 @@ class MaxTextUtilsTest(absltest.TestCase):
       maxtext_utils.build_maxtext_config(model_name="gemma2-9b", **kwargs)
     return mock_pyconfig.initialize.call_args[0][0]
 
-  def test_checkpoint_save_interval_zero_disables_saving(self):
-    # Saving off, but the warm start from load_parameters_path is untouched.
+  def test_checkpoint_save_interval_zero_with_load_parameters_path(self):
+    # When restoring from load_parameters_path with save_interval_steps=0,
+    # enable_checkpointing must remain True with a huge checkpoint_period
+    # so MaxText restores weights while suppressing periodic saves.
     argv = self._build_config_argv(
         load_parameters_path="gs://bucket/ckpt",
         checkpointing_options=mock.MagicMock(
             save_interval_steps=0, max_to_keep=10
         ),
     )
-    self.assertIn("enable_checkpointing=False", argv)
+    self.assertIn("enable_checkpointing=True", argv)
+    self.assertIn("checkpoint_period=1000000000", argv)
     self.assertIn("load_parameters_path=gs://bucket/ckpt", argv)
+
+  def test_checkpoint_save_interval_zero_without_restore_disables_saving(self):
+    argv = self._build_config_argv(
+        load_parameters_path=None,
+        checkpointing_options=mock.MagicMock(
+            save_interval_steps=0, max_to_keep=10
+        ),
+    )
+    self.assertIn("enable_checkpointing=False", argv)
     self.assertNotIn("enable_checkpointing=True", argv)
+
+  def test_ckpt_d2h_concurrent_gb_override(self):
+    with mock.patch.dict("os.environ", {"CKPT_D2H_CONCURRENT_GB": "32"}):
+      argv = self._build_config_argv()
+    self.assertIn("checkpoint_storage_device_host_concurrent_gb=32", argv)
 
   def test_checkpoint_save_interval_positive_enables_saving(self):
     argv = self._build_config_argv(
