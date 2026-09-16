@@ -999,7 +999,14 @@ if ONEHOST_SMOKE:
         "CANON_XPROF_STEPS": "1",
         "CANON_XPROF_HOST_TRACER": "1",
         "CANON_XPROF_PYTHON_TRACER": "0",
-        "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+        # The learner admits a TPU trace mode only for the update window; the
+        # engine window is the immediate timer (CANON_XPROF_STEP_IMMEDIATE).
+        "CANON_XPROF_TPU_TRACE_MODE": (
+            "TRACE_COMPUTE" if expected_xprof_phase == "update" else ""
+        ),
+        "CANON_XPROF_STEP_IMMEDIATE": (
+            "1" if expected_xprof_phase == "step" else ""
+        ),
         "CANON_XPROF_LABELS": "1",
         "CANON_PERF_TRACE_EXPORT_STEP": "0",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",

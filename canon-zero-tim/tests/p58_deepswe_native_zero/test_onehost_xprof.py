@@ -503,6 +503,15 @@ class OnehostXprofTest(unittest.TestCase):
     common = (SCRIPTS / "run_onehost_deepswe_xprof_common.sh").read_text()
     train_script = TRAIN_SCRIPT.read_text()
     self.assertIn(
+        '"TRACE_COMPUTE" if expected_xprof_phase == "update" else ""',
+        train_script,
+    )
+    self.assertIn(
+        '"CANON_XPROF_STEP_IMMEDIATE": (\n'
+        '            "1" if expected_xprof_phase == "step" else ""',
+        train_script,
+    )
+    self.assertIn(
         "expected_prompt_length = (\n"
         "      2048\n"
         "      if P58_Q4_TP4_TRAJECTORY_REPLAY\n"
@@ -529,8 +538,13 @@ class OnehostXprofTest(unittest.TestCase):
         # tasks/deepswe_4b_perf 1a: the engine window is an explicit opt-in;
         # the update window stays the pinned default.
         "P58_ONEHOST_XPROF_PHASE:-update",
-        "step) export CANON_XPROF_PHASE=step",
+        "export CANON_XPROF_PHASE=step",
         "CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE",
+        # The engine window is the immediate timer window, never a TPU trace mode.
+        "export CANON_XPROF_TPU_TRACE_MODE=\n",
+        "export CANON_XPROF_STEP_IMMEDIATE=1",
+        'CANON_XPROF_STEP_IMMEDIATE_DELAY="${P58_ONEHOST_XPROF_STEP_DELAY:-60}"',
+        'CANON_XPROF_STEP_IMMEDIATE_SECONDS="${P58_ONEHOST_XPROF_STEP_SECONDS:-20}"',
         "CANON_PERF_TRACE_EXPORT_STEP=0",
         "CANON_P38_FIXED_LM_HEAD=0",
         "CANON_P58_Q4_TP4_ZERO_ADMISSION",
@@ -546,7 +560,7 @@ class OnehostXprofTest(unittest.TestCase):
         '--mini_batch_size "$carrier_prompts"',
         '--max_concurrency "$carrier_max_concurrency"',
         "carrier_generations=16",
-        "carrier_max_concurrency=8",
+        "carrier_max_concurrency=16",
         "carrier_max_num_seqs=16",
         "P58_ONEHOST_PROBE_PROFILE",
         "CANON_P58_ONEHOST_SEAM_PROBE",

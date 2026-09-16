@@ -88,7 +88,9 @@ if [ "$q4_tp4_carrier_screen" = 1 ]; then
   # seeds or repeatedly launching G2 screens is forbidden.
   sampling_temperature=1.0
   carrier_generations=16
-  carrier_max_concurrency=8
+  # abafa27b1 pins max_concurrency to prompts x generations; the screen's 8 has failed that
+  # contract since 2026-09-14 (tasks/deepswe_4b_perf P0.2).
+  carrier_max_concurrency=16
   carrier_max_num_seqs=16
 elif [ "$q4_tp4_trajectory_replay" = 1 ]; then
   # The immutable local DP1xTP4 source recipe used temperature=1.0. Re-scoring
@@ -441,15 +443,27 @@ export CANON_XPROF_DIR="$artifact_dir/xprof-update"
 export CANON_XPROF_SKIP_STEPS=0
 export CANON_XPROF_STEPS=1
 # P58 one-host XProf window. `update` (default) frames the trainer window; `step` frames the engine window
-# (device buffer holds the first ~25 s of decode) for rollout-kernel attribution (tasks/deepswe_4b_perf P0.2).
+# for rollout-kernel attribution (tasks/deepswe_4b_perf P0.2).  A whole-step device window overflows the
+# device trace buffer (tasks/zero_tim_perf2 A2), so the engine window is the immediate timer the v2
+# FrozenLake carrier uses: it opens DELAY seconds after the rollout producer starts (past engine warm-up)
+# and closes SECONDS later.  The learner admits a TPU trace mode only for the update window.
 case "${P58_ONEHOST_XPROF_PHASE:-update}" in
-  update) export CANON_XPROF_PHASE=update ;;
-  step) export CANON_XPROF_PHASE=step ;;
+  update)
+    export CANON_XPROF_PHASE=update
+    export CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE
+    export CANON_XPROF_STEP_IMMEDIATE=
+    ;;
+  step)
+    export CANON_XPROF_PHASE=step
+    export CANON_XPROF_TPU_TRACE_MODE=
+    export CANON_XPROF_STEP_IMMEDIATE=1
+    export CANON_XPROF_STEP_IMMEDIATE_DELAY="${P58_ONEHOST_XPROF_STEP_DELAY:-60}"
+    export CANON_XPROF_STEP_IMMEDIATE_SECONDS="${P58_ONEHOST_XPROF_STEP_SECONDS:-20}"
+    ;;
   *) echo "[P58.ONEHOST.XPROF] P58_ONEHOST_XPROF_PHASE must be update or step" >&2; exit 2 ;;
 esac
 export CANON_XPROF_HOST_TRACER=1
 export CANON_XPROF_PYTHON_TRACER=0
-export CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE
 export CANON_XPROF_LABELS=1
 export CANON_PERF_TRACE_DIR="$artifact_dir/perfetto"
 export CANON_PERF_TRACE_EXPORT_STEP=0
