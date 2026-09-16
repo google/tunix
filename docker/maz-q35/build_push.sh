@@ -68,10 +68,39 @@ assert hasattr(vllm_sampler_adapter, "_canonicalize_variable_names")
 assert "data_parallel_size" in inspect.getsource(
     run_rollout_node._create_vllm_sampler)
 
-# tunix-0002: PR 2228, the two parts the base image lacks
+# tunix-0002: PR 2228 at head 3421417e, the parts the base image lacks.
 assert "CKPT_D2H_CONCURRENT_GB" in inspect.getsource(
     maxtext_utils.build_maxtext_config)
 assert hasattr(remote_execution, "_is_unrecoverable_runtime_error")
+
+# The four _MeshBoundTrainer changes. Exercise _current_train_step against both
+# backends' attribute shapes rather than reading its source: PeftTrainer's
+# train_step is a method, and picking it up instead of the int train_steps is the
+# failure this method exists to prevent.
+_mbt = run_trainer_node._MeshBoundTrainer
+
+
+class _PeftLike:
+  train_steps = 7
+
+  def train_step(self, payload=None):
+    return 1
+
+
+class _MaxTextLike:
+  train_step = 4
+
+
+assert _mbt(_PeftLike(), None)._current_train_step() == 7
+assert _mbt(_MaxTextLike(), None)._current_train_step() == 4
+assert _mbt(object(), None)._current_train_step() is None
+
+_drain_src = inspect.getsource(_mbt._drain_inflight_checkpoint)
+assert '"_checkpoint_manager"' in _drain_src and '"checkpoint_manager"' in _drain_src
+assert "_save_last_checkpoint" in inspect.getsource(_mbt._suppress_final_checkpoint)
+# The PR requires the Orbax write and the Raiden transfer to overlap, so the
+# weight-sync path must not drain.
+assert "_drain_inflight_checkpoint" not in inspect.getsource(_mbt.prepare_weight_sync)
 
 # tunix-0003: upstream bf13cd2c. Exercise _extract_reward rather than reading its
 # source: it must return the rollout key and refuse the old one, not default to 0.0.
@@ -91,7 +120,7 @@ assert "max_seq_token_per_tpu" in inspect.signature(
     maxtext_utils.build_maxtext_config).parameters
 assert "--max_seq_token_per_tpu" in inspect.getsource(run_trainer_node)
 
-print("ok: all six overlay patches are live in the image")
+print("ok: all six overlay patches are live in the image, PR 2228 at head 3421417e")
 PY'
 
 if [ "${PUSH}" != "true" ]; then

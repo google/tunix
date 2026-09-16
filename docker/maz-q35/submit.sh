@@ -40,9 +40,10 @@ export PRIORITY_CLASS_NAME=medium
 # Pinned by digest, not tag. A tag can be repointed between the three `kubectl apply`s,
 # and weight sync requires the orchestrator, trainer and rollout to run identical code.
 # This is Yixuan's yixuann-e2e-0912head-v8 plus six patches: MaxText PR 5219 and 5234,
-# tunix PR 2229, the in-image part of tunix PR 2228, upstream tunix bf13cd2c for the
-# trajectory reward key, and the packing budget fix (see docker/maz-q35/Dockerfile).
-export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:3a8cab3879e655ade728ff3841911b1b2b6b2efa648d1e06b7cae42f6757a4dc
+# tunix PR 2229, the in-image part of tunix PR 2228 at head 3421417e, upstream tunix
+# bf13cd2c for the trajectory reward key, and the packing budget fix (see
+# docker/maz-q35/Dockerfile).
+export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:e473f60f74c866e8f9f410c3692b4818c87bfdc6ff0696ecdb47b263cb808452
 export PATHWAYS_SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904
 export PATHWAYS_PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904
 
@@ -61,11 +62,18 @@ export TRAINER_MESH_FSDP=8
 export TRAINER_MESH_TP=1
 export TRAINER_MESH_EXPERT=1
 # The three containers of the trainer's `proc` pod share one n2d-standard-64 (245 GiB
-# allocatable): pathways-rm at 16G, pathways-proxy at the limit below, and the trainer's
-# own container. A container with only `limits` gets requests=limits, so these three
-# numbers have to sum under the node. tunix PR 2228's own default proxy limit of 190G
-# does not (190+16+60 > 245) -- 120G does, and still holds the ~70 GB Raiden stages
-# device-to-host alongside the bounded checkpoint staging below.
+# allocatable): pathways-rm, pathways-proxy and the trainer's own container. PR 2228 at
+# head 3421417e adds explicit `requests` for the first two, which is what makes the
+# limits below independent of scheduling: a container with only `limits` gets
+# requests=limits, so before this the pod reserved 16+120+60 = 196 GiB and the proxy
+# limit could not be raised without the pod becoming unschedulable. It now reserves
+# 4+16+60 = 80 GiB and the limits are ceilings only.
+#
+# 120G on the proxy holds the ~70 GB Raiden stages device-to-host alongside the bounded
+# checkpoint staging below. PR 2228's own default of 190G now fits as well, but 120G is
+# the value the previous three runs used and nothing has shown it to be the constraint.
+export PATHWAYS_RM_MEMORY=4G
+export PATHWAYS_PROXY_MEMORY=16G
 export PATHWAYS_PROXY_MEMORY_LIMIT=120G
 export USER_CONTAINER_MEMORY=60G
 export USER_CONTAINER_MEMORY_LIMIT=70G
@@ -125,14 +133,16 @@ export MAX_SEQ_TOKEN_PER_TPU=4096
 export MAX_STEPS="${STEPS}"
 
 # --- Output ------------------------------------------------------------------
-# Checkpointing is off. Saving at step 10 of maz-q35-2 OOM-killed the trainer's user
-# container: the cgroup killed python at 64.9 GiB against the 70G limit, 36 s into the
-# save. Both halves of the intended fix were in effect at the time and neither helped --
-# MaxText PR 5234's CKPT_D2H_CONCURRENT_GB=8 bound, and tunix PR 2228's drain of any
-# in-flight save inside prepare_weight_sync. PR 2228 addresses a *concurrent* checkpoint
-# and Raiden staging; here the save alone exceeded the limit, with no weight sync running.
-# See qwen35_report_v8.md section 6.1. Set to 10 to reproduce the failure.
-export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
+# Saving at step 10 of maz-q35-2 OOM-killed the trainer's user container: the cgroup
+# killed python at 64.9 GiB against the 70G limit, 36 s into the save, with no weight
+# sync running. MaxText PR 5234's CKPT_D2H_CONCURRENT_GB=8 bound was already in force.
+# maz-q35-3 ran 100 steps clean with saving off. Saving is back on here to exercise
+# tunix PR 2228 at head 3421417e, which is the only thing that changed: that head
+# removes the drain from prepare_weight_sync, so a save and the next step's Raiden
+# transfer are now meant to overlap rather than serialise. Nothing in it lowers the
+# peak of a save on its own, so this may reproduce the same OOM at step 10 -- which is
+# the result worth having. See qwen35_report_v8.md section 6.1. Set to 0 to disable.
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-10}
 # PR 5234 already defaults `checkpoint_storage_device_host_concurrent_gb` to 8 in
 # base.yml. Setting it explicitly in the trainer's environment makes the value visible
 # in the trainer log ("CKPT_D2H_CONCURRENT_GB=8; overriding ..."), which is the only

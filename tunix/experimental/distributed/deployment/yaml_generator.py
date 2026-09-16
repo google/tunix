@@ -89,6 +89,21 @@ def main() -> None:
       help="Memory limit of the Pathways proxy container",
   )
   parser.add_argument(
+      "--pathways_proxy_memory",
+      default="16G",
+      help=(
+          "Memory request for the Pathways proxy container. Kept well below"
+          " --pathways_proxy_memory_limit: requests are the scheduling floor,"
+          " and the head pod is co-located with pw-node via podAffinity, so"
+          " requesting the full limit over-reserves the node."
+      ),
+  )
+  parser.add_argument(
+      "--pathways_rm_memory",
+      default="4G",
+      help="Memory request for the pathways-rm container",
+  )
+  parser.add_argument(
       "--user_container_memory",
       default="60G",
       help="Memory request for the user/worker container",
@@ -205,6 +220,8 @@ def main() -> None:
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,
         PATHWAYS_PROXY_MEMORY_LIMIT=args.pathways_proxy_memory_limit,
+        PATHWAYS_PROXY_MEMORY=args.pathways_proxy_memory,
+        PATHWAYS_RM_MEMORY=args.pathways_rm_memory,
         USER_CONTAINER_MEMORY=args.user_container_memory,
         USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
         PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,

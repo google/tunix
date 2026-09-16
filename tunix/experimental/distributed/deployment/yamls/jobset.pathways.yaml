@@ -66,7 +66,14 @@ ${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
+              # requests set the scheduling floor; limits stay generous so the
+              # container is burstable. Omitting requests makes Kubernetes
+              # default them to limits, which over-reserves this node because
+              # podAffinity co-locates the head pod with pw-node.
               resources:
+                requests:
+                  cpu: "2"
+                  memory: ${PATHWAYS_RM_MEMORY}
                 limits:
                   cpu: "24"
                   memory: 16G
@@ -101,6 +108,9 @@ ${PRIORITY_CLASS_LINE}            dnsPolicy: ClusterFirstWithHostNet
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
               resources:
+                requests:
+                  cpu: "4"
+                  memory: ${PATHWAYS_PROXY_MEMORY}
                 limits:
                   cpu: "16"
                   memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}

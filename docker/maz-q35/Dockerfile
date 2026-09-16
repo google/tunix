@@ -12,8 +12,21 @@
 #   tunix-0003    tunix bf13cd2c    read the trajectory reward key the rollout emits
 #   tunix-0004    (local)           let the packing budget raise max_target_length
 #
-# Most of tunix PR 2228 is already in the base image; tunix-0002 carries only the two
-# parts that are not (the CKPT_D2H_CONCURRENT_GB override and the lost-device-set exit).
+# tunix-0002 carries tunix PR 2228 at head 3421417e. The base image already contains an
+# independently written version of most of it, so the patch holds only the differences:
+# the CKPT_D2H_CONCURRENT_GB override, the lost-device-set exit, and the four
+# _MeshBoundTrainer changes the PR makes on top of what the base image has --
+#   * _drain_inflight_checkpoint also looks up the public `checkpoint_manager`, so the
+#     PeftTrainer backend is drained too, not only MaxText's private attribute;
+#   * prepare_weight_sync no longer drains. The PR now requires the Orbax write and the
+#     Raiden transfer to overlap, and ships a test asserting the drain is absent;
+#   * _suppress_final_checkpoint drains before either branch and neutralises
+#     PeftTrainer's _save_last_checkpoint, which the manager-dropping branch never reached;
+#   * _current_train_step requires an int, because PeftTrainer's `train_step` is a method
+#     and a bound method compares equal to itself, making every close() look like a
+#     duplicate save and silently dropping the final checkpoint.
+# Only the second of those is live on this run: TRAINER_BACKEND=maxtext, and the MaxText
+# engine exposes `_checkpoint_manager` and an int `train_step`.
 # The rest of that PR changes the launcher, the YAML generator and the JobSet template,
 # which run on the submitting host and need no image change.
 #
@@ -66,6 +79,8 @@ RUN set -e \
  && grep -q 'data_parallel_size=dp_size' /app/tunix/experimental/examples/common/run_rollout_node.py \
  && grep -q 'CKPT_D2H_CONCURRENT_GB' /app/tunix/utils/maxtext_utils.py \
  && grep -q '_is_unrecoverable_runtime_error' /app/tunix/experimental/worker/remote_execution.py \
+ && grep -q '_current_train_step' /app/tunix/experimental/examples/common/run_trainer_node.py \
+ && grep -q '_save_last_checkpoint' /app/tunix/experimental/examples/common/run_trainer_node.py \
  && grep -q 'traj\["trajectory_reward"\]' /app/tunix/experimental/orchestrator/rl_program.py \
  && ! grep -q '"reward", 0.0' /app/tunix/experimental/orchestrator/rl_program.py \
  && grep -q '"trajectory_reward": 0.0' /app/tunix/experimental/orchestrator/distributed_rl_engine.py \

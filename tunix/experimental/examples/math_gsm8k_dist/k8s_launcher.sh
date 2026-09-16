@@ -141,6 +141,12 @@ export PATHWAYS_PROXY_MEMORY_LIMIT=${PATHWAYS_PROXY_MEMORY_LIMIT:-100G}
 export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-60G}
 export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
 export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-165G}
+# Requests for pathways-rm and pathways-proxy. Without them Kubernetes defaults
+# each container's request to its limit, so the head pod reserves 16G + the full
+# proxy limit on top of the user container. podAffinity co-locates that pod with
+# pw-node, so the reservation has to leave room for PATHWAYS_WORKER_MEMORY.
+export PATHWAYS_PROXY_MEMORY=${PATHWAYS_PROXY_MEMORY:-16G}
+export PATHWAYS_RM_MEMORY=${PATHWAYS_RM_MEMORY:-4G}
 # Extra `KEY=VAL` pairs prepended to the trainer's startup command, for ad-hoc
 # diagnostics (e.g. JAX_LOG_COMPILES=1) without rebuilding the image.
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
@@ -286,6 +292,8 @@ start_trainer() {
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
     --pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}" \
+    --pathways_proxy_memory="${PATHWAYS_PROXY_MEMORY}" \
+    --pathways_rm_memory="${PATHWAYS_RM_MEMORY}" \
     --user_container_memory="${USER_CONTAINER_MEMORY}" \
     --user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}" \
     --pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}" \
