@@ -817,6 +817,46 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     with self.assertRaisesRegex(TypeError, "Expected rl_traj to be a dict"):
       engine._convert_to_trajectory(mock_traj)
 
+  def test_model_call_respects_min_of_remaining_budget_and_request_max_tokens(self):
+    sampler = _MockVllmSampler()
+    request = datatypes.RolloutRequest(
+        prompt="test",
+        prompt_id="p_budget",
+        generation_kwargs={"max_tokens": 4, "max_response_length": 16},
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=sampler,
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+    captured_model_call = None
+
+    def _capture_engine(*args, **kwargs):
+      del args
+      nonlocal captured_model_call
+      captured_model_call = kwargs["model_call"]
+      mock_inner = mock.MagicMock()
+      mock_inner.collect = mock.AsyncMock(return_value={})
+      return mock_inner
+
+    with mock.patch.object(
+        collector.rl_collect_engine, "TrajectoryCollectEngine", side_effect=_capture_engine
+    ):
+      asyncio.run(engine.run_episode())
+
+    self.assertIsNotNone(captured_model_call)
+    # Remaining budget 12 > request max_tokens 4 -> should use 4
+    asyncio.run(captured_model_call("prompt", max_generation_steps=12))
+    self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 4)
+
+    # Remaining budget 2 < request max_tokens 4 -> should use 2
+    asyncio.run(captured_model_call("prompt", max_generation_steps=2))
+    self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 2)
+
 
 if __name__ == "__main__":
   absltest.main()

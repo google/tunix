@@ -124,16 +124,23 @@ class TrajectoryCollectorEngine:
       request_max_generation_steps = generation_kwargs.pop(
           "max_generation_steps", None
       )
+      req_max_tokens = (
+          request_max_generation_steps
+          if request_max_generation_steps is not None
+          else generation_kwargs.get("max_tokens")
+      )
 
-      if max_generation_steps is not None:
+      if max_generation_steps is not None and req_max_tokens is not None:
+        effective_max_tokens = min(max_generation_steps, req_max_tokens)
+      elif max_generation_steps is not None:
         effective_max_tokens = max_generation_steps
-      elif request_max_generation_steps is not None:
-        effective_max_tokens = request_max_generation_steps
+      elif req_max_tokens is not None:
+        effective_max_tokens = req_max_tokens
       else:
         raise ValueError(
             "TrajectoryCollectorEngine requires either"
             " request.generation_kwargs or the model_call callback to specify"
-            " max_generation_steps."
+            " max_generation_steps or max_tokens."
         )
 
       generation_kwargs["max_tokens"] = effective_max_tokens
