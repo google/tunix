@@ -439,7 +439,13 @@ export CANON_UPDATE_REPORT="$artifact_dir/updates.jsonl"
 export CANON_XPROF_DIR="$artifact_dir/xprof-update"
 export CANON_XPROF_SKIP_STEPS=0
 export CANON_XPROF_STEPS=1
-export CANON_XPROF_PHASE=update
+# P58 one-host XProf window. `update` (default) frames the trainer window; `step` frames the engine window
+# (device buffer holds the first ~25 s of decode) for rollout-kernel attribution (tasks/deepswe_4b_perf P0.2).
+case "${P58_ONEHOST_XPROF_PHASE:-update}" in
+  update) export CANON_XPROF_PHASE=update ;;
+  step) export CANON_XPROF_PHASE=step ;;
+  *) echo "[P58.ONEHOST.XPROF] P58_ONEHOST_XPROF_PHASE must be update or step" >&2; exit 2 ;;
+esac
 export CANON_XPROF_HOST_TRACER=1
 export CANON_XPROF_PYTHON_TRACER=0
 export CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE

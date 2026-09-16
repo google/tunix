@@ -526,6 +526,10 @@ class OnehostXprofTest(unittest.TestCase):
         'status --porcelain)',
         "ls-files --others --exclude-standard",
         "CANON_XPROF_PHASE=update",
+        # tasks/deepswe_4b_perf 1a: the engine window is an explicit opt-in;
+        # the update window stays the pinned default.
+        "P58_ONEHOST_XPROF_PHASE:-update",
+        "step) export CANON_XPROF_PHASE=step",
         "CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE",
         "CANON_PERF_TRACE_EXPORT_STEP=0",
         "CANON_P38_FIXED_LM_HEAD=0",
