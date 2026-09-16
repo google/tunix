@@ -265,6 +265,7 @@ start_trainer() {
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
+      ${ROLLOUT_MESH_EXPERT:+--rollout_mesh_expert=${ROLLOUT_MESH_EXPERT}} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
     "
   fi

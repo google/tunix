@@ -386,6 +386,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--rollout_mesh_expert",
+      type=int,
+      default=0,
+      help=(
+          "Rollout EP degree. The rollout shards KV heads over tp*ep, so this"
+          " is needed alongside --rollout_mesh_tp to align KV head counts."
+      ),
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -619,6 +628,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
   sig = inspect.signature(maxtext_utils.build_maxtext_config)
   for k, v in [
       ("rollout_mesh_tp", args.rollout_mesh_tp),
+      ("rollout_mesh_expert", args.rollout_mesh_expert),
       ("prefuse_moe_weights", args.prefuse_moe_weights),
       ("use_weight_converter", args.use_weight_converter),
   ]:
