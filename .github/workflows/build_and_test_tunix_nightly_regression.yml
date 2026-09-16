@@ -51,6 +51,7 @@ jobs:
     needs: [build_tunix_package, tunix_tpu_nightly_regression]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:

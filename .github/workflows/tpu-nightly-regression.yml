@@ -43,6 +43,9 @@ jobs:
   run_prod:
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
+    # Longest observed healthy execution is ~70min; cap well above that so a
+    # genuine hang releases the v6e-8 slice instead of holding it.
+    timeout-minutes: 180
     container:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -319,6 +322,9 @@ jobs:
   run_latest:
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
+    # Longest observed healthy execution is ~70min; cap well above that so a
+    # genuine hang releases the v6e-8 slice instead of holding it.
+    timeout-minutes: 180
     container:
       image: vllm/vllm-tpu:nightly # zizmor: ignore[unpinned-images]
       options: --privileged

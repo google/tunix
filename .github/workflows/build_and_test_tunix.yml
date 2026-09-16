@@ -23,10 +23,24 @@ on:
     branches:
       - main
     types: [opened, synchronize, reopened, labeled]
+    # Documentation-only changes cannot affect test outcomes, and every run of
+    # this workflow reserves scarce v6e-8 TPU slices. Skip them.
+    # NOTE: if any job in this workflow is a *required* status check, add the
+    # same paths-ignore to a companion no-op workflow that reports the same job
+    # names, otherwise docs-only PRs will block on a check that never runs.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
   schedule:
-    # Run the job every 16 hours
-    - cron:  '0 */16 * * *'
+    # Twice daily, evenly spaced 12h apart, and deliberately offset from the
+    # Tunix Nightly Regression (10:00 UTC) so the two do not contend for the
+    # same TPU slices.
+    # (The previous '0 */16 * * *' did not mean "every 16 hours" -- cron resets
+    # each day, so it fired at 00:00 and 16:00, a 16h/8h split.)
+    - cron:  '0 4,16 * * *'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
@@ -68,6 +82,7 @@ jobs:
     needs: [build_tunix_package,tunix_cpu_unit_tests, tunix_tpu_unit_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
