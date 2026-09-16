@@ -1,0 +1,7 @@
+2026-09-15T22:56:58.678704037Z [P78.ACTOR_LOGPS] segmented_engine_ready data=8 tp=8 local_M=256 global_M=2048 workload=p58-qwen4b-tim-128
+2026-09-15T22:56:58.699466717Z [P78.ACTOR_LOGPS] deferred_weight_map_ready source_leaves=398 target_leaves=398 module_programs=39 mapped_leaf_outputs=0 source=trainer-state
+2026-09-15T22:59:19.080083756Z [P78.ACTOR_LOGPS] dispatch batch=128 groups=16 chunks=17,24,29,26,30,28,51,38,72,47,46,43,47,50,58,72 local_M=256 global_M=2048 outer_jit=0 d2h_lengths=0 length_guard=device-finite
+2026-09-15T23:00:44.031008311Z [P78.ACTOR_LOGPS] program_cache_release module_programs=39 outputs_ready=1 shared_engine=retained global_jax_clear_caches=0 chunk_programs=1
+2026-09-15T23:51:11.475787045Z [P78.ACTOR_LOGPS] deferred_weight_map_ready source_leaves=398 target_leaves=398 module_programs=39 mapped_leaf_outputs=0 source=trainer-state
+2026-09-15T23:51:48.028268162Z [P78.ACTOR_LOGPS] dispatch batch=128 groups=16 chunks=39,28,38,32,38,26,34,30,41,37,63,40,49,60,55,71 local_M=256 global_M=2048 outer_jit=0 d2h_lengths=0 length_guard=device-finite
+2026-09-15T23:53:11.535341898Z [P78.ACTOR_LOGPS] program_cache_release module_programs=39 outputs_ready=1 shared_engine=retained global_jax_clear_caches=0 chunk_programs=1
