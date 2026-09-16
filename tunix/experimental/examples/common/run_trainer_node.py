@@ -547,6 +547,24 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
+  # Opt-in high-precision arithmetic for this node only. bf16 matmul rounding
+  # on the MXU is tiling-dependent, so log-probs shift with the forward pass's
+  # batch shape; raising precision needs fp32 OPERANDS (the flag is a no-op on
+  # bf16 operands) plus a multi-pass matmul.
+  # HP_* are read here, inside the trainer process, and re-exported under the
+  # names models.py looks for. The rollout node shares models.py but has no
+  # such translation, so the sampler is deliberately left at bf16 -- which is
+  # the realistic production case, where the sampler is a different engine we
+  # cannot change.
+  _act = os.environ.get("HP_TRAINER_ACT_DTYPE", "").strip()
+  if _act:
+    os.environ["TRAINER_ACT_DTYPE"] = _act
+    logging.info("trainer activations: %s (sampler unchanged)", _act)
+  _prec = os.environ.get("HP_TRAINER_PRECISION", "").strip()
+  if _prec:
+    jax.config.update("jax_default_matmul_precision", _prec)
+    logging.info("trainer jax_default_matmul_precision=%s", _prec)
+
   if context:
     context.jax.initialize()
   if REPO_ROOT not in sys.path:

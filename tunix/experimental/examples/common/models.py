@@ -20,6 +20,8 @@ destination expose identically named tensors.
 
 from __future__ import annotations
 
+import os
+
 from jax import numpy as jnp
 from jax.sharding import Mesh
 from tunix.models.gemma import model as gemma_model_lib
@@ -50,7 +52,14 @@ def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
   else:
     raise ValueError(f"Unsupported qwen3 model_name: {model_name!r}")
   config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
-  config.dtype = jnp.bfloat16
+  # Weights stay bf16 (see create_model): only the activation dtype is
+  # overridable, because raising matmul precision requires fp32 operands and
+  # widening activations alone is enough -- fp32 weights measured no better.
+  config.dtype = (
+      jnp.float32
+      if os.environ.get("TRAINER_ACT_DTYPE", "").strip() == "float32"
+      else jnp.bfloat16
+  )
   config.param_dtype = jnp.float32
   return config
 
