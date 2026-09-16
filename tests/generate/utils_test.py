@@ -364,6 +364,22 @@ class UtilsTest(parameterized.TestCase):
     # Verify values are repeated correctly
     self.assertTrue(jnp.allclose(result.params[src_key].value, 1.0))
 
+  def test_unroll_layer_axis_matches_slicing(self):
+    """One jitted call returns the same per-layer slices as indexing."""
+    val = jnp.arange(2 * 3 * 4, dtype=jnp.float32).reshape(2, 3, 4)
+    for axis in range(val.ndim):
+      layers = utils._unroll_layer_axis(val, axis)
+      self.assertLen(layers, val.shape[axis])
+      for i, layer in enumerate(layers):
+        np.testing.assert_array_equal(
+            layer, np.asarray(val).take(i, axis=axis)
+        )
+    # numpy inputs take the plain slicing path and stay numpy.
+    np_layers = utils._unroll_layer_axis(np.asarray(val), 1)
+    self.assertLen(np_layers, 3)
+    self.assertIsInstance(np_layers[0], np.ndarray)
+    np.testing.assert_array_equal(np_layers[2], np.asarray(val)[:, 2, :])
+
   def test_transfer_state_with_scanned_layers(self):
     """Comprehensive test for scanned layers covering multiple scenarios."""
     num_layers = 3
