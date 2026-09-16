@@ -1,0 +1,201 @@
+2026-09-16 01:30:01,456 - [Orchestrator] === Starting Distributed GSM8K GRPO Orchestrator ===
+2026-09-16 01:30:01,456 - [Orchestrator] Configuration: model_id=Qwen/Qwen3-1.7B, batch_size=2 (prompt groups), num_generations=8 (16 rollouts/step), max_steps=6, train_micro_batch_size=4, beta=0.0000, epsilon=0.20, reward_mode=exact, max_staleness=0, weight_sync_mode=WeightSyncMode.RAIDEN.
+2026-09-16 01:30:01,494 - [Orchestrator] Control-plane JAX backend: cpu
+2026-09-16 01:30:01,494 - [Orchestrator] Dataset: GSM8K split=train data_dir=/mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/data reward_mode=exact.
+2026-09-16 01:30:02,119 - [Orchestrator] Loaded tokenizer from /mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/models (vocab_size=151669, pad_id=151643, eos_id=151645).
+2026-09-16 01:30:02,125 - [Orchestrator] discovery server started on port 30000
+2026-09-16 01:30:02,126 - [Orchestrator] Waiting for workers to register via discovery service...
+2026-09-16 01:30:03,427 - [Orchestrator] Discovered rollout service (vllm-rollout-0) at localhost:20001.
+2026-09-16 01:30:03,427 - [Orchestrator] Registered remote worker 'vllm-rollout-0' with roles ['rollout'].
+2026-09-16 01:30:03,443 - [Orchestrator] Discovered trainer service (trainer-0) at localhost:20000.
+2026-09-16 01:30:03,443 - [Orchestrator] Registered remote worker 'trainer-0' with roles ['actor'].
+2026-09-16 01:30:04,126 - [Orchestrator] All required workers are ready. Current counts: {<Role.ACTOR: 'actor'>: 1, <Role.ROLLOUT: 'rollout'>: 1, <Role.REFERENCE: 'reference'>: 0}
+2026-09-16 01:30:04,126 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='trainer-0', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'localhost:20000'}), WorkerInfo(worker_id='vllm-rollout-0', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'localhost:20001'})]
+2026-09-16 01:30:04,128 - [Orchestrator] WandbBackend skipped: The 'wandb' library is not installed. Please install it with 'pip install wandb' to use the WandbBackend.
+2026-09-16 01:30:04,128 - [Orchestrator] Bringing up remote workers through ClusterOrchestrator...
+2026-09-16 01:30:04,128 - [Orchestrator] Bringing up 2 registered worker(s)...
+2026-09-16 01:30:04,128 - [Orchestrator] Initializing remote worker trainer-0.
+2026-09-16 01:30:04,131 - [Orchestrator] Initializing remote worker vllm-rollout-0.
+2026-09-16 01:30:04,134 - [Orchestrator] Compiling remote worker trainer-0.
+2026-09-16 01:30:04,135 - [Orchestrator] Compiling remote worker vllm-rollout-0.
+2026-09-16 01:30:04,135 - [Orchestrator] Starting remote worker trainer-0.
+2026-09-16 01:30:04,136 - [Orchestrator] Starting remote worker vllm-rollout-0.
+2026-09-16 01:30:04,145 - [Orchestrator] Built RaidenHandler natively; port 32893
+2026-09-16 01:30:04,145 - [Orchestrator] All workers brought up successfully.
+2026-09-16 01:30:04,145 - [Orchestrator] Cluster workers ready: ['trainer-0', 'vllm-rollout-0']. Starting StandardRLProgram execution...
+2026-09-16 01:30:04,146 - [Orchestrator] Executing program StandardRLProgram...
+2026-09-16 01:30:04,148 - [Orchestrator] No checkpoint to resume from; starting from step 0.
+2026-09-16 01:30:04,148 - [Orchestrator] Starting StandardRLProgram concurrent stages...
+2026-09-16 01:30:04,148 - [Orchestrator] Auto-configuring trainer loss and model input fn on actor worker...
+2026-09-16 01:30:04,171 - [Orchestrator] Synchronizing weights (target policy_version=0)...
+2026-09-16 01:30:11,993 - [Orchestrator] transfer wsync-v0-r0: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:30:11,993 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v0-r0 (uuid=1): [trainer] -> [rollout]
+2026-09-16 01:30:11,993 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:30:12,068 - [Orchestrator] Transfer wsync-v0-r0 (uuid=1): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:30:12,629 - [Orchestrator] Weight sync finished in 8.46 seconds.
+2026-09-16 01:30:12,630 - [Orchestrator] Weight synchronization complete (policy_version=0).
+2026-09-16 01:30:12,630 - [Orchestrator] Loading GSM8K TFDS split=train data_dir=/mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/data shuffle=True seed=42.
+2026-09-16 01:30:12,631 - [Orchestrator] Load dataset info from /mnt/disks/maxdiffusion-data/trellis/tunix/artifacts/qwen3_dist_gsm8k/data/gsm8k/1.0.0
+2026-09-16 01:30:12,637 - [Orchestrator] GSM8K dataset loaded successfully: 7473 examples.
+2026-09-16 01:30:12,644 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=0). Prompt IDs: [prompt_0]
+2026-09-16 01:30:12,645 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_0]
+2026-09-16 01:30:12,645 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:18,440 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=0). Prompt IDs: [prompt_1]
+2026-09-16 01:30:18,440 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_1]
+2026-09-16 01:30:18,440 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:21,877 - [Orchestrator] >>> Step 0 starting | Policy Version: 0
+2026-09-16 01:30:21,878 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_0_g0, traj_prompt_0_g1, traj_prompt_0_g2, traj_prompt_0_g3]
+2026-09-16 01:30:21,878 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:28,378 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_0_g4, traj_prompt_0_g5, traj_prompt_0_g6, traj_prompt_0_g7]
+2026-09-16 01:30:28,379 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:28,622 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_1_g0, traj_prompt_1_g1, traj_prompt_1_g2, traj_prompt_1_g3]
+2026-09-16 01:30:28,622 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:28,803 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_1_g4, traj_prompt_1_g5, traj_prompt_1_g6, traj_prompt_1_g7]
+2026-09-16 01:30:28,803 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=True)...
+2026-09-16 01:30:31,459 - [Orchestrator] Saving checkpoint on actor worker...
+2026-09-16 01:30:31,499 - [Orchestrator] Synchronizing weights (target policy_version=1)...
+2026-09-16 01:30:31,768 - [Orchestrator] transfer wsync-v1-r1: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:30:31,768 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v1-r1 (uuid=2): [trainer] -> [rollout]
+2026-09-16 01:30:31,768 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:30:31,845 - [Orchestrator] Transfer wsync-v1-r1 (uuid=2): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:30:32,387 - [Orchestrator] Weight sync finished in 0.89 seconds.
+2026-09-16 01:30:32,387 - [Orchestrator] Weight synchronization complete (policy_version=1).
+2026-09-16 01:30:32,390 - [Orchestrator] Train step 0 - loss: N/A - reward_mean: 0.5000 - advantage_mean: 0.0000 - grad_norm: N/A - perplexity: N/A - step_time: 19.76s
+2026-09-16 01:30:32,390 - [Orchestrator] <<< Step 0 finished | Advanced to Policy Version: 1
+2026-09-16 01:30:32,390 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=1). Prompt IDs: [prompt_2]
+2026-09-16 01:30:32,391 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_2]
+2026-09-16 01:30:32,391 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:35,611 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=1). Prompt IDs: [prompt_3]
+2026-09-16 01:30:35,611 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_3]
+2026-09-16 01:30:35,611 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:36,732 - [Orchestrator] >>> Step 1 starting | Policy Version: 1
+2026-09-16 01:30:36,733 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_2_g0, traj_prompt_2_g1, traj_prompt_2_g2, traj_prompt_2_g3]
+2026-09-16 01:30:36,733 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:36,918 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_2_g4, traj_prompt_2_g5, traj_prompt_2_g6, traj_prompt_2_g7]
+2026-09-16 01:30:36,918 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:41,052 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_3_g0, traj_prompt_3_g1, traj_prompt_3_g2, traj_prompt_3_g3]
+2026-09-16 01:30:41,052 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:41,237 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_3_g4, traj_prompt_3_g5, traj_prompt_3_g6, traj_prompt_3_g7]
+2026-09-16 01:30:41,237 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=True)...
+2026-09-16 01:30:41,604 - [Orchestrator] Saving checkpoint on actor worker...
+2026-09-16 01:30:41,642 - [Orchestrator] Synchronizing weights (target policy_version=2)...
+2026-09-16 01:30:41,910 - [Orchestrator] transfer wsync-v2-r2: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:30:41,911 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v2-r2 (uuid=3): [trainer] -> [rollout]
+2026-09-16 01:30:41,911 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:30:41,988 - [Orchestrator] Transfer wsync-v2-r2 (uuid=3): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:30:42,534 - [Orchestrator] Weight sync finished in 0.89 seconds.
+2026-09-16 01:30:42,534 - [Orchestrator] Weight synchronization complete (policy_version=2).
+2026-09-16 01:30:42,545 - [Orchestrator] Train step 1 - loss: 0.0000 - reward_mean: 0.4688 - advantage_mean: 0.1341 - grad_norm: 0 - perplexity: 1.0000 - step_time: 10.14s
+2026-09-16 01:30:42,545 - [Orchestrator] <<< Step 1 finished | Advanced to Policy Version: 2
+2026-09-16 01:30:42,545 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=2). Prompt IDs: [prompt_4]
+2026-09-16 01:30:42,546 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_4]
+2026-09-16 01:30:42,546 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:47,435 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=2). Prompt IDs: [prompt_5]
+2026-09-16 01:30:47,435 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_5]
+2026-09-16 01:30:47,435 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:48,260 - [Orchestrator] >>> Step 2 starting | Policy Version: 2
+2026-09-16 01:30:48,261 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_4_g0, traj_prompt_4_g1, traj_prompt_4_g2, traj_prompt_4_g3]
+2026-09-16 01:30:48,261 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:48,445 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_4_g4, traj_prompt_4_g5, traj_prompt_4_g6, traj_prompt_4_g7]
+2026-09-16 01:30:48,446 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:51,332 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_5_g0, traj_prompt_5_g1, traj_prompt_5_g2, traj_prompt_5_g3]
+2026-09-16 01:30:51,332 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:30:51,516 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_5_g4, traj_prompt_5_g5, traj_prompt_5_g6, traj_prompt_5_g7]
+2026-09-16 01:30:51,516 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=True)...
+2026-09-16 01:30:51,843 - [Orchestrator] Saving checkpoint on actor worker...
+2026-09-16 01:30:51,882 - [Orchestrator] Synchronizing weights (target policy_version=3)...
+2026-09-16 01:30:52,150 - [Orchestrator] transfer wsync-v3-r3: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:30:52,150 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v3-r3 (uuid=4): [trainer] -> [rollout]
+2026-09-16 01:30:52,150 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:30:52,226 - [Orchestrator] Transfer wsync-v3-r3 (uuid=4): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:30:52,764 - [Orchestrator] Weight sync finished in 0.88 seconds.
+2026-09-16 01:30:52,764 - [Orchestrator] Weight synchronization complete (policy_version=3).
+2026-09-16 01:30:52,774 - [Orchestrator] Train step 2 - loss: -0.0568 - reward_mean: 0.2188 - advantage_mean: 0.1341 - grad_norm: 0.5863 - perplexity: 0.9448 - step_time: 10.22s
+2026-09-16 01:30:52,774 - [Orchestrator] <<< Step 2 finished | Advanced to Policy Version: 3
+2026-09-16 01:30:52,775 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=3). Prompt IDs: [prompt_6]
+2026-09-16 01:30:52,775 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_6]
+2026-09-16 01:30:52,775 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:30:58,727 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=3). Prompt IDs: [prompt_7]
+2026-09-16 01:30:58,727 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_7]
+2026-09-16 01:30:58,727 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:31:00,006 - [Orchestrator] >>> Step 3 starting | Policy Version: 3
+2026-09-16 01:31:00,007 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_6_g0, traj_prompt_6_g1, traj_prompt_6_g2, traj_prompt_6_g3]
+2026-09-16 01:31:00,007 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:00,191 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_6_g4, traj_prompt_6_g5, traj_prompt_6_g6, traj_prompt_6_g7]
+2026-09-16 01:31:00,191 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:02,584 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_7_g0, traj_prompt_7_g1, traj_prompt_7_g2, traj_prompt_7_g3]
+2026-09-16 01:31:02,584 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:02,767 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_7_g4, traj_prompt_7_g5, traj_prompt_7_g6, traj_prompt_7_g7]
+2026-09-16 01:31:02,768 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=True)...
+2026-09-16 01:31:03,022 - [Orchestrator] Saving checkpoint on actor worker...
+2026-09-16 01:31:03,061 - [Orchestrator] Synchronizing weights (target policy_version=4)...
+2026-09-16 01:31:03,375 - [Orchestrator] transfer wsync-v4-r4: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:31:03,375 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v4-r4 (uuid=5): [trainer] -> [rollout]
+2026-09-16 01:31:03,375 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:31:03,451 - [Orchestrator] Transfer wsync-v4-r4 (uuid=5): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:31:04,020 - [Orchestrator] Weight sync finished in 0.96 seconds.
+2026-09-16 01:31:04,020 - [Orchestrator] Weight synchronization complete (policy_version=4).
+2026-09-16 01:31:04,030 - [Orchestrator] Train step 3 - loss: 0.0406 - reward_mean: 0.5000 - advantage_mean: 0.0000 - grad_norm: 1.154 - perplexity: 1.0415 - step_time: 11.25s
+2026-09-16 01:31:04,030 - [Orchestrator] <<< Step 3 finished | Advanced to Policy Version: 4
+2026-09-16 01:31:04,030 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=4). Prompt IDs: [prompt_8]
+2026-09-16 01:31:04,030 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_8]
+2026-09-16 01:31:04,030 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:31:08,285 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=4). Prompt IDs: [prompt_9]
+2026-09-16 01:31:08,286 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_9]
+2026-09-16 01:31:08,286 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:31:08,897 - [Orchestrator] >>> Step 4 starting | Policy Version: 4
+2026-09-16 01:31:08,898 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_8_g0, traj_prompt_8_g1, traj_prompt_8_g2, traj_prompt_8_g3]
+2026-09-16 01:31:08,898 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:09,083 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_8_g4, traj_prompt_8_g5, traj_prompt_8_g6, traj_prompt_8_g7]
+2026-09-16 01:31:09,083 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:13,403 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_9_g0, traj_prompt_9_g1, traj_prompt_9_g2, traj_prompt_9_g3]
+2026-09-16 01:31:13,403 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:13,589 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_9_g4, traj_prompt_9_g5, traj_prompt_9_g6, traj_prompt_9_g7]
+2026-09-16 01:31:13,589 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=True)...
+2026-09-16 01:31:13,844 - [Orchestrator] Saving checkpoint on actor worker...
+2026-09-16 01:31:14,083 - [Orchestrator] Synchronizing weights (target policy_version=5)...
+2026-09-16 01:31:14,416 - [Orchestrator] transfer wsync-v5-r5: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:31:14,416 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v5-r5 (uuid=6): [trainer] -> [rollout]
+2026-09-16 01:31:14,416 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:31:14,492 - [Orchestrator] Transfer wsync-v5-r5 (uuid=6): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:31:15,057 - [Orchestrator] Weight sync finished in 0.97 seconds.
+2026-09-16 01:31:15,057 - [Orchestrator] Weight synchronization complete (policy_version=5).
+2026-09-16 01:31:15,068 - [Orchestrator] Train step 4 - loss: 0.0000 - reward_mean: 0.5000 - advantage_mean: 0.0000 - grad_norm: 0 - perplexity: 1.0000 - step_time: 11.03s
+2026-09-16 01:31:15,068 - [Orchestrator] <<< Step 4 finished | Advanced to Policy Version: 5
+2026-09-16 01:31:15,068 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=5). Prompt IDs: [prompt_10]
+2026-09-16 01:31:15,068 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_10]
+2026-09-16 01:31:15,068 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:31:19,704 - [Orchestrator] Created rollout requests for 1 prompts (group_size=8, total_requests=8, policy_version=5). Prompt IDs: [prompt_11]
+2026-09-16 01:31:19,704 - [Orchestrator] Created rollout requests for 8 prompts (group_size=1, total_requests=8, policy_version=0). Prompt IDs: [prompt_11]
+2026-09-16 01:31:19,705 - [Orchestrator] Dispatching 8 rollout request(s) across 1 worker(s).
+2026-09-16 01:31:20,927 - [Orchestrator] >>> Step 5 starting | Policy Version: 5
+2026-09-16 01:31:20,928 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_10_g0, traj_prompt_10_g1, traj_prompt_10_g2, traj_prompt_10_g3]
+2026-09-16 01:31:20,928 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:21,112 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_10_g4, traj_prompt_10_g5, traj_prompt_10_g6, traj_prompt_10_g7]
+2026-09-16 01:31:21,113 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:23,553 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_11_g0, traj_prompt_11_g1, traj_prompt_11_g2, traj_prompt_11_g3]
+2026-09-16 01:31:23,553 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=False)...
+2026-09-16 01:31:23,737 - [Orchestrator] Packed 4 trajectories into microbatch: [traj_prompt_11_g4, traj_prompt_11_g5, traj_prompt_11_g6, traj_prompt_11_g7]
+2026-09-16 01:31:23,737 - [Orchestrator] Executing train_step on actor worker (accumulate_gradients=True, apply_optimizer=True)...
+2026-09-16 01:31:23,993 - [Orchestrator] Saving checkpoint on actor worker...
+2026-09-16 01:31:24,031 - [Orchestrator] Synchronizing weights (target policy_version=6)...
+2026-09-16 01:31:24,346 - [Orchestrator] transfer wsync-v6-r6: expected_block_count auto; deferring to the controller's schedule-derived count
+2026-09-16 01:31:24,346 - [Orchestrator] RaidenController acting as SENDER COORDINATOR (is_sender=True) for req_id wsync-v6-r6 (uuid=7): [trainer] -> [rollout]
+2026-09-16 01:31:24,347 - [Orchestrator] Using local registration for destination metadata
+2026-09-16 01:31:24,423 - [Orchestrator] Transfer wsync-v6-r6 (uuid=7): generated schedule for [trainer] -> [rollout] (310 variable(s), 620 expected blocks)
+2026-09-16 01:31:24,979 - [Orchestrator] Weight sync finished in 0.95 seconds.
+2026-09-16 01:31:24,979 - [Orchestrator] Weight synchronization complete (policy_version=6).
+2026-09-16 01:31:24,989 - [Orchestrator] Train step 5 - loss: 0.0000 - reward_mean: 0.3438 - advantage_mean: 0.0239 - grad_norm: 0 - perplexity: 1.0000 - step_time: 9.91s
+2026-09-16 01:31:24,990 - [Orchestrator] <<< Step 5 finished | Advanced to Policy Version: 6
+2026-09-16 01:31:24,991 - [Orchestrator] Program StandardRLProgram finished.
+2026-09-16 01:31:24,993 - [Orchestrator] Shutting down cluster workers...
+2026-09-16 01:31:24,993 - [Orchestrator] Shutting down all workers...
+2026-09-16 01:32:24,994 - [Orchestrator] Failed to stop remote worker trainer-0: TimeoutError()
+2026-09-16 01:34:13,385 - [Orchestrator] Shutdown complete.
+2026-09-16 01:34:13,385 - [Orchestrator] === GRPO Training Finished Successfully ===
+  Final step: 5
+  Final policy version: 6
+  Total rollouts: 16
+  Total microbatches: 4
+  Final step reward: mean=0.3438, std=0.2318
+2026-09-16 01:34:13,406 - [Orchestrator] discovery server stopped
