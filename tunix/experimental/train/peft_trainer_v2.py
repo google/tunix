@@ -124,7 +124,6 @@ class TrainingInput:
   images: jax.Array | np.ndarray | None = None
 
 
-@dataclasses.dataclass(slots=True, kw_only=True)
 def _aux_metric_reducer(name: str) -> Callable[[Any], Any]:
   """Cross-micro-batch reducer for an aux metric, chosen by name.
 
@@ -169,6 +168,7 @@ def _aux_to_additional_metrics(aux: Any) -> dict[str, Any] | None:
   return out or None
 
 
+@dataclasses.dataclass(slots=True, kw_only=True)
 class MetricsBuffer:
   """Metrics collected for a specific step.
 

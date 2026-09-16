@@ -270,5 +270,57 @@ class PayloadCarriesRolloutInputsTest(absltest.TestCase):
     self.assertIsNone(packed.rollout_per_token_logps)
 
 
+class AuxMetricsReachTheMetricStreamTest(absltest.TestCase):
+  """The loss's aux dict must survive to the metric writer.
+
+  `_record_fwd_bwd` used to hand `aux` to `_post_process_train_step`, whose base
+  implementation is `pass`, so every metric `grpo_loss_fn` produces was computed
+  and discarded. Enabling TIS then had no observable effect at all.
+  """
+
+  def test_scalar_aux_metrics_are_converted_for_the_buffer(self):
+    from tunix.experimental.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
+    aux = {
+        "tis/is_oob_ratio": np.float32(0.25),
+        "sample_mask/kept_frac": np.float32(0.8),
+        "sampler_is/seq_geomean_max": np.float32(1.4),
+        "sampler_is/seq_geomean_min": np.float32(0.6),
+    }
+    out = peft_trainer_v2._aux_to_additional_metrics(aux)  # pylint: disable=protected-access
+    self.assertIsNotNone(out)
+    self.assertCountEqual(out.keys(), aux.keys())
+    # Reducer inferred by name: an extreme stays an extreme under pooling.
+    self.assertIs(out["sampler_is/seq_geomean_max"][1], np.max)
+    self.assertIs(out["sampler_is/seq_geomean_min"][1], np.min)
+    self.assertIs(out["tis/is_oob_ratio"][1], np.mean)
+
+  def test_non_scalar_entries_are_skipped_not_crashed_on(self):
+    from tunix.experimental.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
+    out = peft_trainer_v2._aux_to_additional_metrics(  # pylint: disable=protected-access
+        {"per_token": np.zeros((2, 4), np.float32), "scalar": np.float32(1.0)}
+    )
+    self.assertEqual(list(out.keys()), ["scalar"])
+
+  def test_non_dict_aux_is_none(self):
+    from tunix.experimental.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
+    self.assertIsNone(peft_trainer_v2._aux_to_additional_metrics(None))  # pylint: disable=protected-access
+
+  def test_metrics_buffer_is_still_a_dataclass(self):
+    """Regression: helpers were once inserted between the decorator and class.
+
+    That left `@dataclasses.dataclass` applied to a function, which fails only
+    at import time with `'function' object has no attribute '__mro__'` -- and
+    only in the trainer subprocess, where it is easy to misread as a runtime
+    fault rather than a syntax-level mistake.
+    """
+    import dataclasses  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
+    self.assertTrue(dataclasses.is_dataclass(peft_trainer_v2.MetricsBuffer))
+
+
 if __name__ == "__main__":
   absltest.main()
