@@ -238,6 +238,47 @@ class YamlGeneratorTest(parameterized.TestCase):
           rendered = mock_stdout.getvalue()
           self.assertIn("namespace: \n", rendered)
 
+  def test_generate_pathways_yaml_default_memory_limits_and_requests(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        # Verify default memory limits (100G proxy, 70G user container)
+        self.assertIn("memory: 100G", rendered)
+        self.assertIn("memory: 70G", rendered)
+        # Verify default memory requests (4G rm, 16G proxy, 48G user, 100G worker)
+        self.assertIn("memory: 4G", rendered)
+        self.assertIn("memory: 16G", rendered)
+        self.assertIn("memory: 48G", rendered)
+        self.assertIn("memory: 100G", rendered)
+
+  def test_generate_pathways_yaml_custom_memory_limits_and_requests(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--pathways_proxy_memory_limit=190G",
+        "--user_container_memory_limit=160G",
+        "--user_container_memory=120G",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("memory: 190G", rendered)
+        self.assertIn("memory: 160G", rendered)
+        self.assertIn("memory: 120G", rendered)
+
 
 if __name__ == "__main__":
   absltest.main()
+
