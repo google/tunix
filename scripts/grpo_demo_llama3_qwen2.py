@@ -68,12 +68,14 @@ show_hbm_usage = utils.show_hbm_usage
 
 print("This script is still WIP and try at your own discretion")
 
-# Disable precompilation for faster iteration, need to toggle it back for
-# official run
-os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
 # Parse command line options
 parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
+parser.add_argument(
+    "--skip-jax-precompile",
+    action="store_true",
+    default=False,
+    help="Disable JAX precompilation for faster iteration.",
+)
 parser.add_argument(
     "--root-dir",
     type=str,
@@ -316,6 +318,11 @@ parser.add_argument(
 
 # Parse arguments
 args = parser.parse_args()
+
+if args.skip_jax_precompile:
+  os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+else:
+  os.environ.pop("SKIP_JAX_PRECOMPILE", None)
 
 
 def validata_args():
@@ -1285,9 +1292,12 @@ trained_ckpt_path = os.path.join(
 )
 
 filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
+training_state = nnx.state(training_model, filter_type)
 abs_params = jax.tree.map(
-    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
-    nnx.state(training_model, filter_type),
+    lambda x: jax.ShapeDtypeStruct(
+        x.shape, x.dtype, sharding=getattr(x, "sharding", None)
+    ),
+    training_state,
 )
 checkpointer = ocp.StandardCheckpointer()
 trained_lora_params = checkpointer.restore(trained_ckpt_path, target=abs_params)
@@ -1296,10 +1306,15 @@ nnx.update(
     training_model,
     jax.tree.map(
         lambda a, b: b,
-        nnx.state(training_model, filter_type),
+        training_state,
         trained_lora_params,
     ),
 )
+
+# Synchronize restored weights to the rollout worker/sampler for post-training evaluation
+filter_types = (filter_type,)
+src_filtered_params = nnx.state(training_model, filter_types)
+rl_engine.rollout.update_params(src_filtered_params, filter_types)
 
 (eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
     test_dataset,
