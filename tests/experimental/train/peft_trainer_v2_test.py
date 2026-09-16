@@ -176,6 +176,53 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
+  @parameterized.named_parameters(
+      ('single_microstep', 1),
+      ('accumulating', 2),
+  )
+  def test_training_with_skip_jit(self, gradient_accumulation_steps: int):
+    """`skip_jit=True` must train at every accumulation depth.
+
+    `skip_jit` selects how a step runs, not which step runs, so the
+    single-microstep regime still takes the fused path -- just eagerly.
+    """
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds, self.eval_ds, skip_jit=True)
+
+    self.assertGreater(trainer._train_steps, 0)
+    # Every accumulated gradient was consumed by an update().
+    self.assertTrue(trainer.grad_accumulator.is_empty)
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_variables, nnx.state(model, nnx.Param)
+    )
+
+  def test_skip_jit_run_does_not_disable_jit_for_later_runs(self):
+    """A `skip_jit=True` run must not clear the cached executables."""
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds, skip_jit=False)
+    self.assertIsNotNone(trainer._jitted_train_step_fn)
+
+    trainer.train(self.train_ds, skip_jit=True)
+    # The eager run must leave the jitted fused step intact, otherwise the
+    # next jitted run silently finds nothing to call.
+    self.assertIsNotNone(trainer._jitted_train_step_fn)
+
+    trainer.train(self.train_ds, skip_jit=False)
+    self.assertGreater(trainer._train_steps, 0)
+
   def test_per_token_logps_matches_direct_compute(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
@@ -1301,6 +1348,124 @@ class OptimizerMemoryTest(parameterized.TestCase):
     )
 
 
+class _LinearStack(nnx.Module):
+  """Parameter-heavy model so gradient-tree traffic dominates the measurement."""
+
+  def __init__(self, width: int, depth: int, rngs: nnx.Rngs):
+    self.layers = nnx.List([
+        nnx.Linear(width, width, rngs=rngs, use_bias=False)
+        for _ in range(depth)
+    ])
+
+  def __call__(self, x):
+    for layer in self.layers:
+      x = layer(x)
+    return x
+
+
+def _working_set_bytes(compiled) -> int:
+  """Device bytes an executable needs: arguments + outputs + temps - aliases.
+
+  Raises:
+    absltest.SkipTest: If the backend does not report memory analysis.
+  """
+  stats = compiled.memory_analysis()
+  if stats is None:
+    raise absltest.SkipTest('Backend does not report memory analysis.')
+  return (
+      stats.argument_size_in_bytes
+      + stats.output_size_in_bytes
+      + stats.temp_size_in_bytes
+      - stats.alias_size_in_bytes
+  )
+
+
+class FusedStepMemoryTest(absltest.TestCase):
+  """The fused step must stay cheaper than fwd_bwd() + update().
+
+  Saving memory is the fused path's entire reason to exist -- it is otherwise
+  redundant with the split path, and the split path now handles depth 1 just
+  like any other depth. Without this test, deleting train_step() looks like
+  free simplification.
+  """
+
+  def test_fused_step_working_set_is_smaller_than_split_path(self):
+    width, depth = 512, 4
+    model = _LinearStack(width, depth, nnx.Rngs(0))
+    param_bytes = sum(
+        leaf.size * leaf.dtype.itemsize
+        for leaf in jax.tree_util.tree_leaves(
+            nnx.to_pure_dict(nnx.state(model, nnx.Param))
+        )
+    )
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, gradient_accumulation_steps=1
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+    inputs = {
+        'x': jnp.ones((8, width), dtype=jnp.float32),
+        'y': jnp.ones((8, width), dtype=jnp.float32),
+    }
+
+    fused = (
+        nnx.jit(trainer._train_step, donate_argnames=('model', 'optimizer'))
+        .lower(model, trainer.optimizer, inputs)
+        .compile()
+    )
+    empty_accumulator = trainer.grad_accumulator
+    fwd_bwd = (
+        nnx.jit(
+            trainer._fwd_bwd_step,
+            graph_updates=False,
+            donate_argnames=('grad_accumulator',),
+        )
+        .lower(model, empty_accumulator, inputs)
+        .compile()
+    )
+    _, _, filled_accumulator = trainer._fwd_bwd_step(
+        model, empty_accumulator, inputs
+    )
+    update = (
+        nnx.jit(trainer._update_step, donate_argnames=('model', 'optimizer'))
+        .lower(model, trainer.optimizer, filled_accumulator)
+        .compile()
+    )
+
+    fused_bytes = _working_set_bytes(fused)
+    fwd_bwd_bytes = _working_set_bytes(fwd_bwd)
+    update_bytes = _working_set_bytes(update)
+    split_bytes = max(fwd_bwd_bytes, update_bytes)
+
+    self.assertLess(
+        fused_bytes,
+        split_bytes,
+        'The fused step is supposed to be the cheap path; if it is not, it has'
+        ' no reason to exist and should be deleted rather than maintained.',
+    )
+    # Measured saving is ~1.5x the parameter tree; require 1x so the test
+    # tracks the property rather than one backend's buffer assignment.
+    self.assertGreaterEqual(
+        split_bytes - fused_bytes,
+        param_bytes,
+        'Fusing should save at least one full copy of the parameter tree.',
+    )
+
+    # The mechanism: split has to hand the whole gradient tree between two
+    # executables, so it is a program output of fwd_bwd and an argument to
+    # update. Fused keeps it as an internal temporary.
+    self.assertGreaterEqual(
+        fwd_bwd.memory_analysis().output_size_in_bytes, param_bytes
+    )
+    # Donating the accumulator buys nothing on the first micro-step of an
+    # update: it arrives empty (grads is None), so there is no gradient buffer
+    # to alias against the full tree coming out. Donation only pays from the
+    # second micro-step on.
+    self.assertLess(
+        fwd_bwd.memory_analysis().alias_size_in_bytes, param_bytes
+    )
+
+
 class V1ParityTest(parameterized.TestCase):
   """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
 
@@ -1453,11 +1618,47 @@ class GradientAccumulatorTest(parameterized.TestCase):
     model = nnx.Linear(
         in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
     )
-    acc = peft_trainer_v2.GradientAccumulator(model, nnx.Param)
-    param_dtypes = jax.tree_util.tree_leaves(acc._param_dtypes)
+    acc = peft_trainer_v2.GradientAccumulator.create(model, nnx.Param)
+    param_dtypes = jax.tree_util.tree_leaves(acc.param_dtype)
     self.assertNotEmpty(param_dtypes)
     for dt in param_dtypes:
       self.assertEqual(dt, jnp.bfloat16)
+
+  def test_gradient_accumulator_is_a_jittable_value(self):
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(
+        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
+    )
+    acc = peft_trainer_v2.GradientAccumulator.create(model, nnx.Param)
+    self.assertTrue(acc.is_empty)
+    with self.assertRaisesRegex(ValueError, 'empty'):
+      acc.get()
+
+    ones = jax.tree.map(
+        lambda dt: jnp.ones((), jnp.bfloat16), acc.param_dtype
+    )
+
+    @jax.jit
+    def step(acc, g, d):
+      return acc.add(g, d)
+
+    # Two micro-batches of unequal size: 3 tokens then 1 token.
+    acc = step(acc, ones, jnp.asarray(3.0, jnp.float32))
+    acc = step(acc, ones, jnp.asarray(1.0, jnp.float32))
+    self.assertFalse(acc.is_empty)
+    self.assertEqual(float(acc.denom), 4.0)
+    for g in jax.tree_util.tree_leaves(acc.grads):
+      self.assertEqual(g.dtype, jnp.float32)  # accumulator dtype
+      self.assertEqual(float(g), 2.0)
+
+    scaled = jax.jit(lambda a: a.get())(acc)
+    for g in jax.tree_util.tree_leaves(scaled):
+      self.assertEqual(g.dtype, jnp.bfloat16)  # back in the param dtype
+      self.assertEqual(float(g), 0.5)  # (1 + 1) / (3 + 1)
+
+    acc = acc.reset()
+    self.assertTrue(acc.is_empty)
+    self.assertEqual(float(acc.denom), 0.0)
 
 
 if __name__ == '__main__':
