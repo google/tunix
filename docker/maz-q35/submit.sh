@@ -72,11 +72,20 @@ export TRAINER_MESH_EXPERT=1
 # 120G on the proxy holds the ~70 GB Raiden stages device-to-host alongside the bounded
 # checkpoint staging below. PR 2228's own default of 190G now fits as well, but 120G is
 # the value the previous three runs used and nothing has shown it to be the constraint.
+#
+# 120G, not 70G, on the user container. The step-10 checkpoint save of maz-q35-2 was
+# OOM-killed at 64.9 GiB against 70G with no weight sync running, so the save alone does
+# not fit; a 35B bf16 model is ~70 GB, which is the obvious candidate for what it is
+# staging. Requests still sum to 4+16+60 = 80 GiB, well under the node, so this changes
+# nothing about scheduling -- it only stops the cgroup killing the save first. The three
+# limits now sum to 256 GiB, above the node's 245 GiB, which is deliberate and is what
+# limits are for: the proxy's own peak is the ~70 GB it stages for Raiden, so the
+# realistic simultaneous worst case is 16 + 70 + 70 = 156 GiB.
 export PATHWAYS_RM_MEMORY=4G
 export PATHWAYS_PROXY_MEMORY=16G
 export PATHWAYS_PROXY_MEMORY_LIMIT=120G
 export USER_CONTAINER_MEMORY=60G
-export USER_CONTAINER_MEMORY_LIMIT=70G
+export USER_CONTAINER_MEMORY_LIMIT=120G
 export PATHWAYS_WORKER_MEMORY=165G
 
 # --- Rollout: 4 v5p chips, tp=2 x dp=2 ---------------------------------------
