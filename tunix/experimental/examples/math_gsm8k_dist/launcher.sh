@@ -83,12 +83,6 @@ CHAT_PARSER=${CHAT_PARSER:-raw}
 # tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
 # fall back to the tokenizer's EOS token.
 EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
-# Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
-# both the trainer and the rollout, so the two cannot drift. A disagreement is
-# not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
-# against a non-MaxText rollout matches zero of them. Set it explicitly to
-# override, or empty to put the rollout back on tpu-inference's own model.
-MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
@@ -109,10 +103,13 @@ TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
 
-# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+# tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText config names are lowercase. Passed to both the trainer and the
+  # rollout, so the two cannot drift.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
   # MaxText shards the batch dimension of every loss input across the fsdp
   # axis, so the microbatch has to be a multiple of it. The trainer node
   # enforces this too.
@@ -123,6 +120,15 @@ if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
     echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
     exit 1
   fi
+elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
+  # Must stay empty on the tunix backend. A non-empty value puts the rollout on
+  # MaxText's MaxTextForCausalLM while the trainer still emits tunix/vllm_jax
+  # tensor names, and Raiden pairs tensors by exact name, so zero of them match.
+  # Export it explicitly to override.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-}
+else
+  echo "Error: Unsupported TRAINER_BACKEND='$TRAINER_BACKEND' (expected 'tunix' or 'maxtext')." >&2
+  exit 1
 fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
