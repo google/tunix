@@ -44,7 +44,7 @@ below are the same JAX model under the same framework. [M]
 
 Nothing outside this repo was modified: MaxText on the test machine is stock
 upstream (`79e5978de`) with a clean working tree, and there is no vLLM checkout
-involved. The branch touches 12 files, all under `tunix/` and `tests/`.
+involved. The branch touches 12 source files, all under `tunix/` and `tests/`.
 
 ### Reproducing
 
@@ -175,9 +175,9 @@ line.
 `is_oob_ratio` is the fraction of sequences outside `[0.999, 1.002]` — a band
 only −0.001/+0.002 wide.
 
-Across `tis4`'s 24 min/max pairs the across-sequence spread is **σ ≈ 0.0052**
+Across `tis4`'s 24 min/max pairs the across-sequence spread is **σ = 0.00519**
 [D] (range-of-4 estimator, E[range] = 2.059σ). Zero-mean Gaussian noise at that
-σ predicts **77.4% out of band** [D]. Measured: **81.3%** [M].
+σ predicts **77.36% out of band** [D]. Measured: **81.25%** [M].
 
 So most — not quite all — of an 81% OOB rate is noise against a band that is too
 tight for short sequences. σ_seq shrinks roughly as 1/√T, and these completions
@@ -258,8 +258,9 @@ whether the 6× gap collapses. The tunix model path has no such knob today.
 
 ## 6. Branch
 
-`jfacevedo/trellis-mlperf`, 14 commits on `origin/e2e-head` @ `7d995511`.
-12 source files touched, all under `tunix/` and `tests/`. No MaxText, no vLLM.
+`jfacevedo/trellis-mlperf`, 15 commits on `origin/e2e-head` @ `7d995511`.
+**12 source files** touched, all under `tunix/` and `tests/`, plus this
+directory. No MaxText, no vLLM, nothing outside this repo.
 71 tests pass (`tests/experimental/orchestrator/mlperf_recipe_wiring_test.py`
 and `tests/rl/algo_core_test.py`), including a regression test for each of the
 two wiring bugs.
