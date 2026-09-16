@@ -127,6 +127,62 @@ def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
   )
 
 
+def _canonicalize_variable_names(entry: Any) -> Any:
+  """Rewrites destination variable names into the canonical dotted key format.
+
+  The weight-sync controller pairs source and destination variables by exact name.
+  `tpu_inference.rl.raiden_worker_sync` formats destination variable names with
+  brackets and quotes (e.g. ['base']['decoder']...), whereas `raiden_synchronizer`
+  expects canonical dotted keys (e.g. decoder...). This function canonicalizes
+  names using `raiden_synchronizer._param_key`.
+  """
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      raiden_synchronizer,
+  )
+
+  if not isinstance(entry, Mapping):
+    return entry
+  variables = entry.get("variables")
+  if not variables:
+    return entry
+
+  canonical = []
+  renamed = 0
+  seen: dict[str, str] = {}
+  for v in variables:
+    if isinstance(v, Mapping) and v.get("name"):
+      original = v["name"]
+      key = raiden_synchronizer._param_key(original)  # pylint: disable=protected-access
+      if not key:
+        raise ValueError(
+            "Raiden destination variable name canonicalised to an empty key: "
+            f"{original!r}. Refusing to publish a manifest that cannot pair."
+        )
+      if seen.setdefault(key, original) != original:
+        raise ValueError(
+            f"Raiden destination variables {seen[key]!r} and {original!r} both "
+            f"canonicalise to {key!r}. Refusing to publish an ambiguous "
+            "manifest."
+        )
+      if key != original:
+        renamed += 1
+      v = {**v, "name": key}
+    canonical.append(v)
+
+  if renamed:
+    logger.info(
+        "Canonicalised %d/%d destination variable names for manifest pairing"
+        " (e.g. %r -> %r).",
+        renamed,
+        len(canonical),
+        variables[0].get("name"),
+        canonical[0].get("name"),
+    )
+  out = dict(entry)
+  out["variables"] = canonical
+  return out
+
+
 class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   """Sampler adapter wrapping tpu-inference RLVllmSampler with full Raiden weight sync."""
 
@@ -341,7 +397,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       )
     await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
-    return [weight_sync.WorkUnitMetadata.from_dict(m) for m in meta or []]
+    return [
+        weight_sync.WorkUnitMetadata.from_dict(_canonicalize_variable_names(m))
+        for m in meta or []
+    ]
 
   async def pre_weight_sync(
       self, sync_request: Any = None, **kwargs: Any
