@@ -86,9 +86,11 @@ _INTERPRET = textwrap.dedent(
     x = jnp.asarray(((np.arange(m * k) % 5) - 2).reshape(m, k) / 64, jnp.bfloat16)
     y = jnp.asarray(((np.arange(k * n) % 7) - 3).reshape(k, n) / 128, jnp.bfloat16)
     out = padded_matmul(x, y, interpret=True, block_m=128, block_n=128, block_k=128)
-    mp = -(-m // 128) * 128
-    xr = jnp.pad(x, ((0, mp - m), (0, 0)))
-    ref = base_matmul(xr, y, interpret=True, block_m=256 if mp % 256 == 0 else 128, block_n=128, block_k=128)[:m]
+    # Reference = the previous production path: contract tiles, N zero-padded to the 128 multiple
+    # (the P22.XI wrapper's old behaviour for 1216 -> 1280), padding rows/columns sliced off.
+    mp = -(-m // 128) * 128; np_ = -(-n // 128) * 128
+    xr = jnp.pad(x, ((0, mp - m), (0, 0))); yr = jnp.pad(y, ((0, 0), (0, np_ - n)))
+    ref = base_matmul(xr, yr, interpret=True, block_m=256 if mp % 256 == 0 else 128, block_n=128, block_k=128)[:m, :n]
     a = np.asarray(out.astype(jnp.float32)).view(np.uint32); b = np.asarray(ref.astype(jnp.float32)).view(np.uint32)
     assert out.shape == (m, n), out.shape
     assert np.array_equal(a, b), int((a != b).sum())
