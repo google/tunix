@@ -147,9 +147,13 @@ export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-165G}
 # pw-node, so the reservation has to leave room for PATHWAYS_WORKER_MEMORY.
 export PATHWAYS_PROXY_MEMORY=${PATHWAYS_PROXY_MEMORY:-16G}
 export PATHWAYS_RM_MEMORY=${PATHWAYS_RM_MEMORY:-4G}
-# Extra `KEY=VAL` pairs prepended to the trainer's startup command, for ad-hoc
-# diagnostics (e.g. JAX_LOG_COMPILES=1) without rebuilding the image.
+# Extra `KEY=VAL` pairs prepended to each role's startup command, for ad-hoc
+# diagnostics (e.g. JAX_LOG_COMPILES=1) without rebuilding the image. The three are
+# separate because the roles do not share a process: RAIDEN_BROADCAST_K, for instance,
+# is read only where the RaidenController is constructed, which is the orchestrator.
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
 
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
@@ -203,6 +207,7 @@ start_orchestrator() {
       ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      ${ORCHESTRATOR_EXTRA_ENV} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -407,7 +412,7 @@ start_rollout_instance() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \

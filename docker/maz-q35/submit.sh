@@ -93,7 +93,7 @@ export USER_CONTAINER_MEMORY=60G
 export USER_CONTAINER_MEMORY_LIMIT=120G
 export PATHWAYS_WORKER_MEMORY=165G
 
-# --- Rollout: 4 v5p chips, tp=2 x dp=2 ---------------------------------------
+# --- Rollout: 8 replicas x 4 v5p chips = 32 chips, tp=2 x dp=2 each ----------
 # TP rather than FSDP: FSDP on the rollout all-gathers the weights on every decode step,
 # while TP leaves them sharded and splits the matmuls instead.
 #
@@ -108,7 +108,11 @@ export ROLLOUT_JOBSET_YAML=jobset.tpu.yaml
 export ROLLOUT_TPU_SLICE=tpuv5p:2x2x1
 export ROLLOUT_MESH_FSDP=2
 export ROLLOUT_MESH_TP=2
-export ROLLOUT_REPLICAS=1
+# Eight independent rollout JobSets, maz-q35-N-roll-0 .. -7, one 2x2x1 slice each. This
+# is the Raiden 1 -> 8 fan-out: one trainer source pushes to eight destinations per step.
+# 256 rollouts per step across 8 replicas is 32 per replica, against 32 on a single
+# replica at the old 4x8. Same per-replica generate cost, eight times the throughput.
+export ROLLOUT_REPLICAS=8
 # Separate vLLM server process, not the in-process sampler. Before tunix PR 2229 this
 # path could not weight-sync at all: tpu_inference publishes destination variable names
 # bracketed (['base']['decoder']...) while the Raiden source side uses dotted keys, so
@@ -133,15 +137,15 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-true}
 
 # --- Batching and packing ----------------------------------------------------
 export MAX_PROMPT_LENGTH=512
-export MAX_RESPONSE_LENGTH=512
-export BATCH_SIZE=4
-export NUM_GENERATIONS=8
-export MINI_BATCH_SIZE=32           # = BATCH_SIZE * NUM_GENERATIONS: one optimizer step per rollout batch
-export TRAIN_MICRO_BATCH_SIZE=8     # 32 / 8 = 4 micro-batches per step
-# Sequence packing. A row holds 4096 tokens against a 512+512 worst-case sequence, so
-# up to 4 sequences share a row and the 32 sequences fill 8 rows -- one per FSDP shard.
-# max_segments_per_packed_row is left unset so that max_packed_len alone bounds the row;
-# a lower cap would produce more than 8 rows, which the mesh cannot place.
+export MAX_RESPONSE_LENGTH=1024
+export BATCH_SIZE=16
+export NUM_GENERATIONS=16
+export MINI_BATCH_SIZE=256          # = BATCH_SIZE * NUM_GENERATIONS: one optimizer step per rollout batch
+export TRAIN_MICRO_BATCH_SIZE=8     # = TRAINER_MESH_FSDP: one packed row per FSDP shard per micro-batch
+# Sequence packing. A row holds 4096 tokens against a 512+1024 worst-case sequence, so
+# 2 sequences share a row in the worst case and the 256 sequences need at least 128 rows,
+# or 16 micro-batches of 8. Short completions pack denser and cut that count.
+# max_segments_per_packed_row is left unset so that max_packed_len alone bounds the row.
 export MAX_SEQ_TOKEN_PER_TPU=4096
 
 export MAX_STEPS="${STEPS}"
@@ -165,6 +169,21 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 # in the trainer log ("CKPT_D2H_CONCURRENT_GB=8; overriding ..."), which is the only
 # confirmation from outside the container that the bound is in force.
 export TRAINER_EXTRA_ENV="CKPT_D2H_CONCURRENT_GB=8"
+
+# Raiden tree broadcast, on the orchestrator only. tpu_sync's RaidenController reads
+# RAIDEN_BROADCAST_K at construction (rpc/raiden_controller.py, default 64) and uses it
+# twice: a transfer group only becomes a tree broadcast when its distinct destinations
+# outnumber K, and K is then the tree's fan-out. The one RaidenController in this run is
+# built in the orchestrator process -- orchestrator.py calls create_default_handler,
+# which builds RaidenHandler -> _RaidenTransport -> RaidenController -- so the trainer
+# and rollout containers never read this variable.
+#
+# At the default 64 the 8 rollout destinations never exceed K, so every step is 8 direct
+# pushes and the trainer source sends the full parameter set 8 times. At K=1 the same
+# group becomes a tree of fan-out 1: a relay chain in which each destination forwards to
+# the next, so the source sends it once.
+export ORCHESTRATOR_EXTRA_ENV="RAIDEN_BROADCAST_K=1"
+
 export MAXTEXT_OUTPUT_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/maxtext
 
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
@@ -175,9 +194,9 @@ export WANDB_ENTITY=${WANDB_ENTITY:-google-trellis}
 : "${WANDB_API_KEY:?export WANDB_API_KEY before running; it is not stored in this file}"
 export WANDB_API_KEY
 
-# 0, not 1. DEBUG=1 turns on httpx wire-level logging, which floods the orchestrator log
-# and makes the step-time and weight-sync lines hard to find over a 100-step run.
-export DEBUG=0
+# 1, to log the sampled trajectories. It also turns on httpx wire-level logging, which
+# floods the orchestrator log, so read step times with `grep` rather than by scrolling.
+export DEBUG=1
 
 # --- Job names ---------------------------------------------------------------
 # The launcher derives every JobSet name from $USER: maz-q35-N-{orch,train,roll}.
@@ -186,11 +205,17 @@ export USER=maz-q35-${RUN_N}
 echo "=== maz-q35-${RUN_N}: ${ACTION}, ${STEPS} steps"
 echo "    image      ${TUNIX_IMAGE}"
 echo "    trainer    ${TRAINER_TPU_SLICE} fsdp=${TRAINER_MESH_FSDP}"
-echo "    rollout    ${ROLLOUT_TPU_SLICE} dp=${ROLLOUT_MESH_FSDP} tp=${ROLLOUT_MESH_TP} sampler=${SAMPLER}"
+echo "    rollout    ${ROLLOUT_REPLICAS} x ${ROLLOUT_TPU_SLICE} dp=${ROLLOUT_MESH_FSDP} tp=${ROLLOUT_MESH_TP} sampler=${SAMPLER}"
+echo "    batch      ${BATCH_SIZE} prompts x ${NUM_GENERATIONS} gens = ${MINI_BATCH_SIZE}/step, resp<=${MAX_RESPONSE_LENGTH}"
 echo "    packing    ${MAX_SEQ_TOKEN_PER_TPU} tok/row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
+echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV} (orchestrator), debug=${DEBUG}"
 echo "    priority   ${PRIORITY_CLASS_NAME}"
 echo "    output     ${MAXTEXT_OUTPUT_DIR}"
-echo "    jobsets    ${USER}-orch ${USER}-train ${USER}-roll"
+if [ "${ROLLOUT_REPLICAS}" -gt 1 ]; then
+  echo "    jobsets    ${USER}-orch ${USER}-train ${USER}-roll-0 .. -$((ROLLOUT_REPLICAS - 1))"
+else
+  echo "    jobsets    ${USER}-orch ${USER}-train ${USER}-roll"
+fi
 echo
 
 # Deliberately not `gcloud container clusters get-credentials`. That command rewrites the
