@@ -13,11 +13,11 @@ Four results:
 3. **The trainer's own log-probs depend on its forward-pass micro-batch shape**
    — 6.2× more divergence at micro-batch 4 than at micro-batch 1, on identical
    data and identical weights.
-4. **Trainer and sampler are not actually in agreement**, even though both are
-   the same JAX model on the same host. 69–100% of sequences land outside the
-   `[0.999, 1.002]` TIS band, and the per-token errors are correlated within a
-   sequence, so longer completions will not average them away as 1/√T. This is
-   the open item; §3 and §4 are the evidence.
+4. **Our rejection rate is in family with the reference at micro-batch 1, and
+   out of family above it.** Calibrated against NVIDIA's published seq-mask-TIS
+   acceptance curves (§3), micro-batch 1 sits inside their range and
+   micro-batch 4 sits below their worst. The batch-shape effect in (3) is the
+   open item, not the rejection rate as such.
 
 Everything below is recomputed from the logs in [`logs/`](logs/) by
 [`verify_report_numbers.py`](verify_report_numbers.py). Run it yourself:
@@ -233,6 +233,46 @@ quantity is the signed per-token mean, `token_logdiff_mean`: −0.000466 over
 `tis4`, two-sided (16/24 calls have a sequence above 1.002, 22/24 have one below
 0.999). [M]
 
+### Calibration: what the reference actually accepts
+
+A high rejection rate is normal for this gate. NVIDIA published per-step
+acceptance curves for seq-mask-TIS at the same `[0.999, 1.002]` bounds
+(mlcommons/training#905, "Standard-TIS controls: accepted samples", accepted
+among `global_valid_seqs`):
+
+| reference run | accepted | rejected |
+|---|---:|---:|
+| GBS256 · job 429453 | 55.8% | 44.2% |
+| GBS512 · job 429454 | 28.1% | 71.9% |
+| GBS1024 · job 429455 | 13.5% | 86.5% |
+
+Two things follow. First, acceptance **degrades sharply with global batch size**
+and declines over training steps within each run, fastest at the largest GBS.
+Second, our numbers should be read against that range, not against 100%:
+
+| | accepted | verdict |
+|---|---:|---|
+| reference span | 13.5 – 55.8% | — |
+| Trellis micro-batch 1 | **31.25%** | inside the reference range |
+| Trellis micro-batch 4 | **0%** | below the reference's worst |
+
+So the gate rejecting most of the batch is not by itself a defect, and §3's
+spread analysis explains our rate at micro-batch 1. What is not normal is
+micro-batch ≥ 2 — see §4.
+
+The reference's GBS trend and our micro-batch trend point the same way but are
+**not the same mechanism** [D]: theirs is consistent with policy drift (a bigger
+batch takes a more effective step, so the policy moves further from the sampler
+that generated the rollouts), whereas ours is measured at step 0 with the
+weights never updated, so drift cannot explain it. Whether the reference's
+trend also carries a numerics component is untested [H].
+
+[`reference_baseline.py`](reference_baseline.py) recomputes band statistics from
+a NeMo-RL trace's `train_data_step*.jsonl` dumps. It is a tool, not the source
+of the table above — its denominator does not necessarily match the
+`global_valid_seqs` used in the published curves, and the trace available here
+is a different job from the ones plotted.
+
 ---
 
 ## 4. Trainer log-probs depend on the forward-pass batch shape
@@ -275,6 +315,13 @@ micro-batch 4 with one optimizer step, `is_oob_ratio` is 1.0 on all four calls.
 Anyone tuning the band, or reading the gate as a health signal, is partly
 reading this.
 
+**This is the open item.** Against the reference span in §3, micro-batch 1
+(31.25% accepted, `absmean` 0.011337) is in family; micro-batch 4 (0% accepted,
+`absmean` 0.070474) is not. Because out-of-band sequences are zeroed but stay in
+the loss denominator (`truncated_importance_weights` leaves the denominator
+alone by design, `algo_core.py`), a rejection rate driven by numerics is a
+direct loss of gradient signal for no modelling reason.
+
 ---
 
 ## 5. Caveats
@@ -292,6 +339,10 @@ reading this.
   observed pairs, but 5 pairs is a small sample.
 - Whether the effective independent-token count in §3 grows with sequence length
   is untested; it was measured at one length (152.5 mean tokens).
+- The reference acceptance figures in §3 are NVIDIA's published curves for a
+  different model, task and rollout engine at far longer sequences. They
+  calibrate what rejection rate is normal for this gate; they are not a
+  like-for-like comparison with a 1.7B dense model on GSM8K.
 
 ---
 
