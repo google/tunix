@@ -1,0 +1,18 @@
+### 08_accuracy_vs_fp32truth : probe_batch_shape.py --test accuracy
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:221: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with prec_ctx, mesh:
+devices=2  pad_id=151643  eos_id=151645
+precision=None  chunk_size=0
+mesh=Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+scored tokens/seq: [186, 187, 191, 152]
+=== TEST accuracy: bf16 at each batch size vs fp32 truth ===
+  production bf16 path vs fp32/highest ground truth:
+  |bf16 bs=1 - fp32 truth|           pooled|d|=0.02470287
+                                       signed/seq=[-0.004174 -0.000247  0.004322 -0.00846 ]
+                                       seq_geomean shift=[0.995835 0.999753 1.004332 0.991575]
+  |bf16 bs=2 - fp32 truth|           pooled|d|=0.02278870
+                                       signed/seq=[-3.394260e-06  3.085468e-03 -2.443403e-03  1.954524e-03]
+                                       seq_geomean shift=[0.999997 1.00309  0.99756  1.001956]
+  |bf16 bs=4 - fp32 truth|           pooled|d|=0.02197365
+                                       signed/seq=[ 0.003109  0.003122 -0.002889  0.002228]
+                                       seq_geomean shift=[1.003114 1.003127 0.997116 1.002231]

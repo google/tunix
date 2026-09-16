@@ -1,0 +1,33 @@
+### 01_baseline_bf16 : probe_batch_shape.py --test logps,jit
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:221: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with prec_ctx, mesh:
+devices=2  pad_id=151643  eos_id=151645
+precision=None  chunk_size=0
+mesh=Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+scored tokens/seq: [186, 187, 191, 152]
+=== TEST logps: same sequences, different forward batch size ===
+  |logp(bs=2) - logp(bs=1)|          pooled|d|=0.02967503
+                                       signed/seq=[ 0.004171  0.003332 -0.006766  0.010415]
+                                       seq_geomean shift=[1.004179 1.003338 0.993257 1.010469]
+  |logp(bs=4) - logp(bs=1)|          pooled|d|=0.03134460
+                                       signed/seq=[ 0.007283  0.003369 -0.007211  0.010688]
+                                       seq_geomean shift=[1.00731  1.003374 0.992815 1.010746]
+  rerun at bs=1 max|diff| = 0.000e+00  (deterministic)
+=== TEST jit: redo the isolations inside jax.jit ===
+  -- hidden states, INSIDE jit --
+    hidden |bs=2 - bs=1|  mean=0.0081784287  max=1.50000000
+    hidden |bs=4 - bs=1|  mean=0.0065808066  max=1.50000000
+  -- transformer + projection in ONE jit --
+  jit logps |bs=2 - bs=1|            pooled|d|=0.02725158
+                                       signed/seq=[ 0.003996  0.002336 -0.006105  0.009096]
+                                       seq_geomean shift=[1.004004 1.002339 0.993914 1.009138]
+  jit logps |bs=4 - bs=1|            pooled|d|=0.02876327
+                                       signed/seq=[ 0.007109  0.002373 -0.00655   0.00937 ]
+                                       seq_geomean shift=[1.007135 1.002376 0.993471 1.009414]
+  -- that same jit vs the real compute_per_token_logps --
+  jit-mine vs real, bs=1             pooled|d|=0.00925876
+                                       signed/seq=[ 0.000174  0.000996 -0.000661  0.001318]
+                                       seq_geomean shift=[1.000174 1.000996 0.999339 1.001319]
+  jit-mine vs real, bs=4             pooled|d|=0.00000000
+                                       signed/seq=[0. 0. 0. 0.]
+                                       seq_geomean shift=[1. 1. 1. 1.]

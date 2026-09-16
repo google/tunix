@@ -1,0 +1,41 @@
+### 03_scope_nohead : probe_batch_shape.py --test logps,jit --hp_scope nohead
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:221: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with prec_ctx, mesh:
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:201: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+  variable[...]
+For other Variable types use:
+  variable.get_value()
+  wb = jnp.astype(self.input_embedding.value, jnp.bfloat16)
+devices=2  pad_id=151643  eos_id=151645
+precision=None  chunk_size=0
+mesh=Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+  output head: forced bf16 + DEFAULT
+  everything else: fp32 weights+acts + HIGHEST
+  weights=float32  activations=float32
+scored tokens/seq: [186, 187, 191, 152]
+=== TEST logps: same sequences, different forward batch size ===
+  |logp(bs=2) - logp(bs=1)|          pooled|d|=0.00986417
+                                       signed/seq=[ 0.001819  0.001053  0.000175 -0.000151]
+                                       seq_geomean shift=[1.00182  1.001053 1.000175 0.999849]
+  |logp(bs=4) - logp(bs=1)|          pooled|d|=0.00986047
+                                       signed/seq=[ 0.001802  0.001064  0.000176 -0.000156]
+                                       seq_geomean shift=[1.001804 1.001065 1.000176 0.999844]
+  rerun at bs=1 max|diff| = 0.000e+00  (deterministic)
+=== TEST jit: redo the isolations inside jax.jit ===
+  -- hidden states, INSIDE jit --
+    hidden |bs=2 - bs=1|  mean=0.0000002582  max=0.00006294
+    hidden |bs=4 - bs=1|  mean=0.0000002389  max=0.00004387
+  -- transformer + projection in ONE jit --
+  jit logps |bs=2 - bs=1|            pooled|d|=0.00002951
+                                       signed/seq=[-1.356679e-05 -7.802790e-06  1.022079e-05 -9.712420e-06]
+                                       seq_geomean shift=[0.999986 0.999992 1.00001  0.99999 ]
+  jit logps |bs=4 - bs=1|            pooled|d|=0.00002862
+                                       signed/seq=[-3.021507e-05  3.952394e-06  1.193341e-05 -1.483215e-05]
+                                       seq_geomean shift=[0.99997  1.000004 1.000012 0.999985]
+  -- that same jit vs the real compute_per_token_logps --
+  jit-mine vs real, bs=1             pooled|d|=0.00986631
+                                       signed/seq=[ 0.001832  0.001061  0.000164 -0.000141]
+                                       seq_geomean shift=[1.001834 1.001061 1.000164 0.999859]
+  jit-mine vs real, bs=4             pooled|d|=0.00000000
+                                       signed/seq=[0. 0. 0. 0.]
+                                       seq_geomean shift=[1. 1. 1. 1.]

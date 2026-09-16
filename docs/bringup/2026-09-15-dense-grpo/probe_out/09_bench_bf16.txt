@@ -1,0 +1,10 @@
+### 09_bench_bf16 : probe_batch_shape.py --test bench
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:221: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with prec_ctx, mesh:
+devices=2  pad_id=151643  eos_id=151645
+precision=None  chunk_size=0
+mesh=Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+scored tokens/seq: [186, 187, 191, 152]
+=== TEST bench: wall-clock cost of this configuration ===
+  forward bs=1: 13.7 ms  (13.7 ms/seq)
+  forward bs=4: 44.6 ms  (11.2 ms/seq)

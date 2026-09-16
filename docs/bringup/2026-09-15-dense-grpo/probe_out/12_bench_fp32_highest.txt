@@ -1,0 +1,11 @@
+### 12_bench_fp32_highest : probe_batch_shape.py --test bench --model_dtype float32 --weights bf16 --precision highest
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:221: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with prec_ctx, mesh:
+devices=2  pad_id=151643  eos_id=151645
+precision=highest  chunk_size=0
+mesh=Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+  weights=bfloat16  activations=float32
+scored tokens/seq: [186, 187, 191, 152]
+=== TEST bench: wall-clock cost of this configuration ===
+  forward bs=1: 30.9 ms  (30.9 ms/seq)
+  forward bs=4: 111.1 ms  (27.8 ms/seq)

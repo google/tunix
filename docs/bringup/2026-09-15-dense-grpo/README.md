@@ -15,19 +15,28 @@ Five results:
    data and identical weights.
 4. **Root cause found: bf16 matmul rounding on the MXU**, whose tiling and
    accumulation order are keyed on matmul shape. Established by elimination —
-   true fp32 arithmetic removes the batch-dependence entirely (~20,000×). §5.
+   true fp32 arithmetic removes the batch-dependence entirely (~22,000×). §5.
 5. **It is fixable, and the sequence dropping is entirely numerical.** With
    fp32 activations + 3-pass matmuls, acceptance goes 18.75% → 42.71%
    (trainer-side only) → 100% (both sides), on the real GRPO loop. §6 explains
    why the 100% is an ideal-case result that will not transfer intact to a vLLM
    sampler.
 
-Everything below is recomputed from the logs in [`logs/`](logs/) by
-[`verify_report_numbers.py`](verify_report_numbers.py). Run it yourself:
+Every number here is traceable to committed evidence, in one of two ways.
+
+**GRPO-loop numbers** (§1, §3, §4, §6) come from the run logs in
+[`logs/`](logs/) and are recomputed by
+[`verify_report_numbers.py`](verify_report_numbers.py) — stdlib only, no TPU:
 
 ```bash
 python3 docs/bringup/2026-09-15-dense-grpo/verify_report_numbers.py
 ```
+
+**Probe numbers** (§5: the precision/cost table and the scope ablation) come
+from standalone `probe_batch_shape.py` runs, whose raw transcripts are committed
+in [`probe_out/`](probe_out/) — one file per configuration, each headed by the
+exact command that produced it. They are **not** derivable from `logs/`, because
+the probe does not go through the orchestrator.
 
 Claims are tagged **[M]** measured, **[D]** derived from measurements,
 **[H]** hypothesis not yet tested.
@@ -377,20 +386,26 @@ matters:
 
 | weights | acts | precision | fwd bs=1 | fwd bs=4 | \|Δ\| bs=4 vs bs=1 | `seq_geomean` shift |
 |---|---|---|---|---|---|---|
-| bf16 | bf16 | DEFAULT *(production)* | 13.8 ms | 44.6 ms | 0.03134 | up to **0.0107** |
-| bf16 | fp32 | DEFAULT | 17.3 ms | 58.6 ms | 0.01132 | up to 0.0021 |
+| bf16 | bf16 | DEFAULT *(production)* | 13.7 ms | 44.6 ms | 0.03134 | up to **0.0107** |
+| bf16 | fp32 | DEFAULT | 17.2 ms | 58.6 ms | 0.01132 | up to 0.0021 |
 | **bf16** | **fp32** | **HIGH** | **24.7 ms** | **87.7 ms** | **0.0000299** | **≤ 6e-6** |
-| bf16 | fp32 | HIGHEST | 31.2 ms | 111.4 ms | 0.0000016 | exactly 1.0 |
+| bf16 | fp32 | HIGHEST | 30.9 ms | 111.1 ms | 0.0000014 | ≤ 1e-6 |
+
+Raw transcripts for every row are in [`probe_out/`](probe_out/), one file per
+configuration. Timings are wall-clock and vary ~1% run to run.
 
 **Mechanism: bf16 matmul rounding on the MXU**, whose tiling and accumulation
 order are keyed on matmul shape — and batch size is part of that shape. True
-fp32 arithmetic removes it entirely (~20,000×).
+fp32 arithmetic removes it entirely (~22,000×).
 
 Two scoping results that matter for cost:
 
 - **An fp32 output head alone does not work.** It buys 8% (0.03134 → 0.02870)
-  and leaves the hidden-state divergence untouched at 1.50 max. The variance is
-  born in the transformer body; the head only adds to it. [M]
+  and leaves the hidden-state divergence untouched at 1.50 max. The complement
+  confirms where the variance lives: upgrading *everything except* the head
+  drops it to 0.00986 and collapses the hidden-state divergence from 1.50 to
+  0.0000439. The variance is born in the transformer body; the head only adds
+  to it. [M, `probe_out/02_scope_head.txt`, `probe_out/03_scope_nohead.txt`]
 - **fp32 *weights* are not needed** — bf16 weights with fp32 activations measured
   marginally *better* than fp32 weights (0.0000299 vs 0.0000344), so weight
   memory is unchanged. Only activations widen. [M]

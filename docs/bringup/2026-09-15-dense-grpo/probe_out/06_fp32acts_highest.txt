@@ -1,0 +1,16 @@
+### 06_fp32acts_highest : probe_batch_shape.py --test logps --model_dtype float32 --weights bf16 --precision highest
+/mnt/disks/maxdiffusion-data/trellis/probe_batch_shape.py:221: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with prec_ctx, mesh:
+devices=2  pad_id=151643  eos_id=151645
+precision=highest  chunk_size=0
+mesh=Mesh('fsdp': 1, 'tp': 2, axis_types=(Auto, Auto))
+  weights=bfloat16  activations=float32
+scored tokens/seq: [186, 187, 191, 152]
+=== TEST logps: same sequences, different forward batch size ===
+  |logp(bs=2) - logp(bs=1)|          pooled|d|=0.00000143
+                                       signed/seq=[-2.973823e-07 -7.139808e-08  1.997224e-08 -1.756768e-07]
+                                       seq_geomean shift=[1. 1. 1. 1.]
+  |logp(bs=4) - logp(bs=1)|          pooled|d|=0.00000142
+                                       signed/seq=[-5.742555e-07 -1.937948e-07 -7.489589e-08 -8.156425e-08]
+                                       seq_geomean shift=[0.999999 1.       1.       1.      ]
+  rerun at bs=1 max|diff| = 0.000e+00  (deterministic)
