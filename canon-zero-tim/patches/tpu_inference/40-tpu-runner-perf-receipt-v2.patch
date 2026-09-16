@@ -1,0 +1,243 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -164,6 +164,49 @@
+ _ENGINE_STEP_LOG_SUMMARY_EVERY = int(
+     os.environ.get("CANON_ENGINE_STEP_LOG_SUMMARY_EVERY", "500") or "500")
+ _ENGINE_STEP_LOG_ALL_PROCS = os.environ.get("CANON_ENGINE_STEP_LOG_ALL_PROCS", "0") == "1"
++#   CANON_ENGINE_STEP_LOG_SYNC_EVERY     perf receipt v2 (tasks/deepswe_4b_perf): every K-th
++#                                        step blocks on the dispatched model output and records
++#                                        dev_model_ms, so device time separates from host and
++#                                        controller time; 0 = never.  Diagnostic only.
++_ENGINE_STEP_LOG_SYNC_EVERY = int(
++    os.environ.get("CANON_ENGINE_STEP_LOG_SYNC_EVERY", "0") or "0")
++
++
++def _engine_step_launch(runner, name, t_start):
++    """Adds one named launch's host wall (dispatch only) to the open receipt."""
++    rec = getattr(runner, "_perf3_step_rec", None)
++    if rec is None or t_start is None:
++        return
++    try:
++        rec.setdefault("launch", []).append(
++            (name, (time.perf_counter() - t_start) * 1e3))
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_sync_sample(runner, rec, value):
++    """Every SYNC_EVERY-th step blocks on the dispatched model output (dev_model_ms).
++
++    It changes when the host waits on that one step, never what the device computes.
++    """
++    if rec is None or _ENGINE_STEP_LOG_SYNC_EVERY <= 0:
++        return
++    try:
++        if (_ENGINE_STEP_STATE["n"] + 1) % _ENGINE_STEP_LOG_SYNC_EVERY:
++            return
++        t_sync = time.perf_counter()
++        jax.block_until_ready(value)
++        rec["dev_model_ms"] = (time.perf_counter() - t_sync) * 1e3
++        rec["synced"] = 1
++    except Exception:  # pylint: disable=broad-except
++        pass
++
++
++def _engine_step_launch_text(launch):
++    totals = {}
++    for name, ms in launch or ():
++        totals[name] = totals.get(name, 0.0) + ms
++    return "/".join("%s:%.2f" % (k, v) for k, v in totals.items()) if totals else "-"
+ _ENGINE_STEP_STATE = {"n": 0, "prev_end": None, "t0": None, "announced": False,
+                       "proc": None, "win": None}
+ 
+@@ -185,6 +228,7 @@
+     return {"steps": 0, "by_path": {}, "exec_ms": [], "gap_ms": [], "sync_ms": [],
+             "sample_ms": [], "sched_tok": 0, "pad_tok": 0, "reqs": 0, "gen_tok": 0,
+             "mixed": 0, "prefill_steps": 0, "cd_steps": 0, "cd_launches": 0,
++            "fill": [], "kv_tok": 0, "dev_model_ms": [], "launch": {},
+             "t_start": time.perf_counter()}
+ 
+ 
+@@ -214,9 +258,17 @@
+             "per_rank_reqs": [], "per_rank_tok": [], "per_rank_prefill": [],
+             "exec_ms": 0.0, "sample_ms": 0.0, "sync_ms": 0.0,
+             "cd_steps": 0, "cd_max": 0, "cd_eos": 0, "gen_tok": 0,
++            "kv_tok": 0, "dev_model_ms": 0.0, "synced": 0, "launch": [],
+         }
+         nst = scheduler_output.num_scheduled_tokens
+         rec["prefill_reqs"] = sum(1 for v in nst.values() if int(v) > 1)
++        try:
++            batch = runner.input_batch
++            rec["kv_tok"] = int(sum(
++                int(batch.num_computed_tokens_cpu[index]) + int(nst.get(req_id, 0))
++                for index, req_id in enumerate(batch.req_ids[:int(batch.num_reqs)])))
++        except Exception:  # pylint: disable=broad-except
++            pass
+         return rec
+     except Exception:  # pylint: disable=broad-except
+         return None
+@@ -339,6 +391,13 @@
+         win["gen_tok"] += rec["gen_tok"]
+         win["mixed"] += mixed
+         win["prefill_steps"] += int(rec["prefill_reqs"] > 0)
++        fill = rec["sched_tok"] / rec["pad_tok"] if rec["pad_tok"] else 0.0
++        win["fill"].append(fill)
++        win["kv_tok"] += int(rec.get("kv_tok", 0))
++        if rec.get("synced"):
++            win["dev_model_ms"].append(rec.get("dev_model_ms", 0.0))
++        for name, ms in rec.get("launch", ()):
++            win["launch"].setdefault(name, []).append(ms)
+         if path == "cd":
+             win["cd_launches"] += 1
+             win["cd_steps"] += rec["cd_steps"]
+@@ -348,13 +407,16 @@
+             print("[ENGINE_STEP] n=%d t=%.3f path=%s reqs=%d prefill_reqs=%d sched_tok=%d "
+                   "pad_tok=%d pad_reqs=%d pad_per_rank=%d per_rank_reqs=%s per_rank_tok=%s "
+                   "per_rank_prefill=%s mixed=%d gap_ms=%.2f exec_ms=%.2f sample_ms=%.2f "
+-                  "sync_ms=%.2f cd_steps=%d cd_max=%d cd_eos=%d gen_tok=%d"
++                  "sync_ms=%.2f cd_steps=%d cd_max=%d cd_eos=%d gen_tok=%d "
++                  "fill=%.3f kv_tok=%d synced=%d dev_model_ms=%.2f launch_ms=%s"
+                   % (n, now - st["t0"], path, rec["reqs"], rec["prefill_reqs"],
+                      rec["sched_tok"], rec["pad_tok"], rec["pad_reqs"], rec["pad_per_rank"],
+                      fmt(rec["per_rank_reqs"]), fmt(rec["per_rank_tok"]),
+                      fmt(rec["per_rank_prefill"]), mixed, rec["gap_ms"], rec["exec_ms"],
+                      rec["sample_ms"], rec["sync_ms"], rec["cd_steps"], rec["cd_max"],
+-                     rec["cd_eos"], rec["gen_tok"]), flush=True)
++                     rec["cd_eos"], rec["gen_tok"], fill, int(rec.get("kv_tok", 0)),
++                     int(rec.get("synced", 0)), rec.get("dev_model_ms", 0.0),
++                     _engine_step_launch_text(rec.get("launch"))), flush=True)
+         if _ENGINE_STEP_LOG_SUMMARY_EVERY > 0 and win["steps"] >= _ENGINE_STEP_LOG_SUMMARY_EVERY:
+             _engine_step_print_summary(win, n, now)
+             st["win"] = None
+@@ -372,7 +434,8 @@
+           "exec_ms_p50=%.1f exec_ms_p90=%.1f exec_ms_max=%.1f exec_ms_sum=%.0f "
+           "gap_ms_p50=%.1f gap_ms_p90=%.1f gap_ms_max=%.1f gap_ms_sum=%.0f "
+           "sample_ms_sum=%.0f sync_ms_sum=%.0f gen_tok=%d tok_per_s=%.1f "
+-          "cd_launches=%d cd_steps_per_launch=%.2f"
++          "cd_launches=%d cd_steps_per_launch=%.2f fill_p50=%.3f kv_tok_mean=%.0f "
++          "synced=%d dev_model_ms_p50=%.1f launch_p50=%s"
+           % (n, window_s, win["steps"], by_path, win["mixed"], win["prefill_steps"],
+              win["reqs"] / steps, win["sched_tok"], win["pad_tok"], fill,
+              _engine_step_pct(win["exec_ms"], 0.5), _engine_step_pct(win["exec_ms"], 0.9),
+@@ -381,7 +444,11 @@
+              max(win["gap_ms"] or [0.0]), sum(win["gap_ms"]),
+              sum(win["sample_ms"]), sum(win["sync_ms"]), win["gen_tok"],
+              win["gen_tok"] / window_s, win["cd_launches"],
+-             win["cd_steps"] / win["cd_launches"] if win["cd_launches"] else 0.0),
++             win["cd_steps"] / win["cd_launches"] if win["cd_launches"] else 0.0,
++             _engine_step_pct(win["fill"], 0.5), win["kv_tok"] / steps,
++             len(win["dev_model_ms"]), _engine_step_pct(win["dev_model_ms"], 0.5),
++             "/".join("%s:%.2f" % (k, _engine_step_pct(v, 0.5))
++                      for k, v in win["launch"].items()) or "-"),
+           flush=True)
+ 
+ 
+@@ -4881,6 +4948,11 @@
+                                          intermediate_tensors)
+         if _perf3_rec is not None:
+             _perf3_rec["exec_ms"] = (time.perf_counter() - _perf3_rec["t_begin"]) * 1e3
++            if _perf3_rec["path"] == "std":
++                _perf3_state = getattr(self, "execute_model_state", None)
++                _engine_step_sync_sample(self, _perf3_rec, (
++                    getattr(_perf3_state, "logits", None),
++                    getattr(_perf3_state, "hidden_states", None)))
+             if _perf3_rec["path"] in ("cd", "empty"):
+                 # continue-decode already synced on device_get; nothing left to time.
+                 self._perf3_step_rec = None
+@@ -5267,6 +5339,7 @@
+                         "num_prompt_logprobs": dict(self.input_batch.num_prompt_logprobs),
+                         "weight_fingerprint": _p18_weight_fingerprint(self.state_leaves),
+                     })
++                _perf3_t_run_model = time.perf_counter()
+                 (self.kv_caches, hidden_states, aux_hidden_states,
+                  expert_indices) = self.model_fn(
+                      self.state_leaves,
+@@ -5281,6 +5354,7 @@
+                      self.is_first_rank,
+                      self.is_last_rank,
+                  )
++                _engine_step_launch(self, "run_model", _perf3_t_run_model)
+             if not self.is_last_rank:
+                 assert isinstance(hidden_states, JaxIntermediateTensors)
+                 hidden_states.kv_connector_output = kv_connector_output
+@@ -5346,11 +5420,13 @@
+ 
+         if self.input_batch.num_prompt_logprobs:
+             # Compute logits for ALL token positions once.
++            _perf3_t_compute_logits = time.perf_counter()
+             full_logits = self.compute_logits_fn(
+                 self.state_leaves,
+                 full_hidden_states,
+                 lora_metadata,
+             )
++            _engine_step_launch(self, "compute_logits", _perf3_t_compute_logits)
+             if _P18_CAPTURE_DIR:
+                 # Segment-wise evidence: hidden_states lets P18.1 verify run_model and
+                 # run_compute_logits INDEPENDENTLY, so a replay mismatch localises itself.
+@@ -5402,18 +5478,24 @@
+                       f"logits_max={float(_np.abs(_l0.astype('f4')-_l1.astype('f4')).max()):.6e} "
+                       f"verdict={'BITWISE_SAME' if (_hd==0 and _ld==0) else 'DIFFERS'}",
+                       flush=True)
++            _perf3_t_select = time.perf_counter()
+             logits = self._select_from_array_fn(full_logits, logits_indices,
+                                                 self.mesh)
++            _engine_step_launch(self, "select", _perf3_t_select)
+         else:
+             full_logits = None
++            _perf3_t_select = time.perf_counter()
+             hidden_states = self._select_from_array_fn(hidden_states,
+                                                        logits_indices,
+                                                        self.mesh)
++            _engine_step_launch(self, "select", _perf3_t_select)
++            _perf3_t_compute_logits = time.perf_counter()
+             logits = self.compute_logits_fn(
+                 self.state_leaves,
+                 hidden_states,
+                 lora_metadata,
+             )
++            _engine_step_launch(self, "compute_logits", _perf3_t_compute_logits)
+ 
+         self.execute_model_state = ExecuteModelState(
+             scheduler_output=scheduler_output,
+@@ -5814,8 +5896,10 @@
+         if fused_split_sample:
+             step_rng = None
+         elif tpu_sampling_metadata.do_sampling:
++            _perf3_t_split = time.perf_counter()
+             self.rng_params_for_sampling, step_rng = jax.random.split(
+                 self.rng_params_for_sampling)
++            _engine_step_launch(self, "split", _perf3_t_split)
+         else:
+             step_rng = self.rng_params_for_sampling
+ 
+@@ -5837,12 +5921,14 @@
+             else:
+                 logits = logits.astype(jnp.float32)
+                 with self.maybe_forbid_compile:
++                    _perf3_t_sample = time.perf_counter()
+                     next_tokens, processed_logits = sample(
+                         step_rng,
+                         self.mesh,
+                         logits,
+                         tpu_sampling_metadata,
+                     )
++                    _engine_step_launch(self, "sample", _perf3_t_sample)
+         else:
+             if tpu_sampling_metadata.do_sampling:
+                 bonus_rng, rejection_rng = jax.random.split(step_rng)
+@@ -5905,6 +5991,7 @@
+                     if spec_decode_metadata is not None:
+                         raise ValueError(
+                             "CANON_LOGPROB_M does not yet support speculative decoding")
++                    _perf3_t_logprob = time.perf_counter()
+                     logprobs, original_logprob_rows, canon_logprob_chunks = (
+                         _canon_compute_decode_logprobs(
+                             logprobs_logits,
+@@ -5912,6 +5999,7 @@
+                             self.model_config.max_logprobs,
+                             canon_logprob_m,
+                         ))
++                    _engine_step_launch(self, "logprob", _perf3_t_logprob)
+                     if full_logits is None:
+                         _p38_tail_after_decode(
+                             self,

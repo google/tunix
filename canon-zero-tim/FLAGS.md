@@ -40,6 +40,7 @@ admitted 值即当前默认:来自代码默认、bundle `cluster/v1_full_system_
 | `CANON_ENGINE_STEP_LOG_EVERY` | new | 20 | canon-zero-tim/patches/tpu_inference/39-tpu-runner-perf3-engine-step-log.patch:24 | one line every N steps after the full window |
 | `CANON_ENGINE_STEP_LOG_FULL` | new | 5000 | canon-zero-tim/patches/tpu_inference/39-tpu-runner-perf3-engine-step-log.patch:23 | first N steps printed step-by-step |
 | `CANON_ENGINE_STEP_LOG_SUMMARY_EVERY` | new | 500 | canon-zero-tim/patches/tpu_inference/39-tpu-runner-perf3-engine-step-log.patch:26 | [ENGINE_STEP_SUMMARY] period |
+| `CANON_ENGINE_STEP_LOG_SYNC_EVERY` | new | 0 | canon-zero-tim/patches/tpu_inference/40-tpu-runner-perf-receipt-v2.patch (code default); cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env=200, qwen3-4b-dp1-tp4-deepswe-zero.env=50 (tasks/deepswe_4b_perf perf receipt v2) | every K-th engine step blocks on the dispatched model output and records dev_model_ms; the same patch adds fill / kv_tok / launch_ms per program to [ENGINE_STEP] and their p50 to [ENGINE_STEP_SUMMARY]; diagnostic clocks only, never touches programs |
 | `CANON_EXPECT_JAX_VERSION` | g7 | 0.10.2 | canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-admission.env:10 | fail-closed re-check in canon-zero-tim/cluster/steps/00_env.sh |
 | `CANON_EXPECT_PATHWAYS_RELEASE` | g7 | 20260730-jax_0.10.2 | canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-admission.env:11 | fail-closed release pin, same admission profile |
 | `CANON_FIXED_AR` | g2 | 1 | canon-zero-tim/cluster/profiles/_canonical_engine.env:12 | sourced by canon-zero-tim/cluster/steps/00_env.sh:223; unset only on the stock-fast arm |
@@ -866,6 +867,7 @@ CANON_ENGINE_STEP_LOG
 CANON_ENGINE_STEP_LOG_FULL
 CANON_ENGINE_STEP_LOG_EVERY
 CANON_ENGINE_STEP_LOG_SUMMARY_EVERY
+CANON_ENGINE_STEP_LOG_SYNC_EVERY
 CANON_ENGINE_STEP_LOG_ALL_PROCS
 CANON_ENGINE_DRIVER_LOG
 CANON_EXPECTED_SLICE_DEVICES
