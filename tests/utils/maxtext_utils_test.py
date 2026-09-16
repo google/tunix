@@ -253,6 +253,13 @@ class MaxTextUtilsTest(absltest.TestCase):
       ):
         maxtext_utils.build_maxtext_config("gemma2-9b", rollout_mesh_tp=-4)
 
+      with self.assertRaisesRegex(
+          ValueError, "max_seq_token_per_tpu must be non-negative"
+      ):
+        maxtext_utils.build_maxtext_config(
+            "gemma2-9b", max_seq_token_per_tpu=-1
+        )
+
   def test_build_maxtext_config_auto_padding_failure_raises_runtime_error(self):
     mock_pyconfig = mock.MagicMock()
     mock_cfg = mock.MagicMock()
@@ -386,6 +393,47 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch("os.path.exists", return_value=True):
       maxtext_utils.build_maxtext_config(model_name="gemma2-9b", **kwargs)
     return mock_pyconfig.initialize.call_args[0][0]
+
+  def test_max_seq_token_per_tpu_raises_max_target_length(self):
+    # A packed row holds several trajectories, so it is wider than any single
+    # one. max_prompt+max_response describes one trajectory, and everything
+    # MaxText derives from max_target_length would be computed for that width.
+    argv = self._build_config_argv(
+        max_prompt_length=512,
+        max_response_length=1024,
+        max_seq_token_per_tpu=4096,
+    )
+    self.assertIn("max_target_length=4096", argv)
+
+  def test_max_seq_token_per_tpu_below_floor_is_ignored(self):
+    argv = self._build_config_argv(
+        max_prompt_length=512,
+        max_response_length=1024,
+        max_seq_token_per_tpu=1024,
+    )
+    self.assertIn("max_target_length=1536", argv)
+
+  def test_max_seq_token_per_tpu_unset_keeps_default(self):
+    argv = self._build_config_argv(
+        max_prompt_length=512, max_response_length=1024
+    )
+    self.assertIn("max_target_length=1536", argv)
+
+  def test_max_seq_token_per_tpu_none_keeps_default(self):
+    argv = self._build_config_argv(
+        max_prompt_length=512,
+        max_response_length=1024,
+        max_seq_token_per_tpu=None,
+    )
+    self.assertIn("max_target_length=1536", argv)
+
+  def test_max_seq_token_per_tpu_negative_raises(self):
+    with self.assertRaisesRegex(
+        ValueError, "max_seq_token_per_tpu must be non-negative"
+    ):
+      self._build_config_argv(
+          max_seq_token_per_tpu=-1,
+      )
 
   def test_checkpoint_save_interval_zero_keeps_restore_but_disables_saving(
       self,

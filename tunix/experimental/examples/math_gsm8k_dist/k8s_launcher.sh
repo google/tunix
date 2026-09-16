@@ -266,6 +266,7 @@ start_trainer() {
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
+      ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     "
   fi
 
