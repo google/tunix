@@ -53,7 +53,6 @@ import numpy as np
 from transformers import AutoTokenizer
 from maxtext.integration.vllm import maxtext_vllm_adapter
 import swe_env
-from guarded_swe_env import GuardedSWEEnv
 from swe_agent import SWEAgent
 from swe_env import _normalize_entry, SWEEnv
 
@@ -166,12 +165,6 @@ parser_cli.add_argument(
     type=int,
     default=None,
     help="Max context token limit before terminating",
-)
-parser_cli.add_argument(
-    "--enable_guard",
-    type=str2bool,
-    default=os.getenv("ENABLE_GUARD", "false").lower() == "true",
-    help="Enable action guard",
 )
 parser_cli.add_argument(
     "--rollout_engine",
@@ -396,7 +389,6 @@ MAX_CONTEXT_LIMIT = (
     else max(1, MAX_MODEL_LEN - 256)
 )
 
-ENABLE_GUARD = args.enable_guard
 ROLLOUT_ENGINE = args.rollout_engine
 
 VLLM_HBM_UTILIZATION = args.vllm_utilization
@@ -938,17 +930,12 @@ class LoggedSWEEnv(_EvalLoggingEnvMixin, SWEEnv):
   pass
 
 
-class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
-  pass
-
-
 def pairs_generator():
   """Yield NUM_ROLLOUTS_PER_INSTANCE trajectory tasks per dataset entry."""
   for pair_index in range(len(entries) * NUM_ROLLOUTS_PER_INSTANCE):
     entry = entries[pair_index // NUM_ROLLOUTS_PER_INSTANCE]
     agent = SWEAgent(scaffold=SCAFFOLD)
-    env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
-    env = env_cls(
+    env = LoggedSWEEnv(
         entry=entry,
         max_steps=MAX_STEPS,
         pair_index=pair_index,
@@ -1006,11 +993,6 @@ async def run_evaluation():
       traj = item.traj
       entry_index = item.group_index // NUM_ROLLOUTS_PER_INSTANCE
       entry = entries[entry_index]
-      guard_reasons = sorted({
-          (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
-          for step in traj.steps
-          if (getattr(step, "info", {}) or {}).get("guard_blocked")
-      })
       step_actions = [
           getattr(step, "action", "").split("\n", 1)[0][:80]
           for step in traj.steps
@@ -1022,12 +1004,6 @@ async def run_evaluation():
           "reward": float(traj.reward),
           "num_steps": len(traj.steps),
           "status": getattr(traj.status, "name", str(traj.status)),
-          "guard_blocked_steps": sum(
-              1
-              for step in traj.steps
-              if (getattr(step, "info", {}) or {}).get("guard_blocked")
-          ),
-          "guard_reasons": guard_reasons,
           "step_actions": step_actions,
       }
       results.append(result)
@@ -1097,15 +1073,6 @@ def compute_pass_at_k(results):
         scores.append(score)
     pass_at_k_metrics[k] = sum(scores) / len(scores) if scores else None
 
-  guard_blocked_trajectories = sum(
-      1 for r in results if r["guard_blocked_steps"] > 0
-  )
-  total_guard_blocks = sum(r["guard_blocked_steps"] for r in results)
-  guard_reason_counts = Counter()
-  for r in results:
-    for reason in r["guard_reasons"]:
-      guard_reason_counts[reason] += 1
-
   avg_reward = total_reward / total
   avg_steps = total_steps / total
 
@@ -1127,15 +1094,6 @@ def compute_pass_at_k(results):
   logger.info("Avg reward:       %.4f", avg_reward)
   logger.info("Avg steps:        %.2f", avg_steps)
   logger.info("Status counts:    %s", dict(status_counts))
-  logger.info(
-      "Guarded trajs:    %d/%d (%.2f%%)",
-      guard_blocked_trajectories,
-      total,
-      100.0 * guard_blocked_trajectories / total,
-  )
-  logger.info("Guard blocks:     %d", total_guard_blocks)
-  if guard_reason_counts:
-    logger.info("Guard reasons:    %s", dict(guard_reason_counts))
   logger.info("=" * 50)
 
 
@@ -1160,8 +1118,6 @@ def save_results(results):
           "reward": r["reward"],
           "num_steps": r["num_steps"],
           "status": r["status"],
-          "guard_blocked_steps": r["guard_blocked_steps"],
-          "guard_reasons": r["guard_reasons"],
           "step_actions": r.get("step_actions", []),
       }
       f.write(json.dumps(record) + "\n")
