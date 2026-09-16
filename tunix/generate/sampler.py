@@ -335,18 +335,25 @@ class Sampler(base_sampler.BaseSampler):
       check_tree_structure(self._transformer_state, state)
       self._transformer_state = state
     else:
-      # LoRA state replacement.
-      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+      # LoRA / PEFT state replacement.
+      from tunix.sft.peft.beft import BEFTParam  # pylint: disable=g-import-not-at-top
+      valid_peft_types = (nnx.LoRAParam, BEFTParam)
+      matched_types = [
+          t for t in param_types
+          if isinstance(t, type) and issubclass(t, valid_peft_types)
+      ]
+      if not (len(param_types) == 1 and matched_types):
         raise ValueError(
-            'Only LoRAParam is supported. Received invalid `param_types`: '
+            'Only LoRAParam or BEFTParam is supported. Received invalid `param_types`: '
             f'{param_types}'
         )
-      original_lora_params = statelib.filter_state(
-          self._transformer_state, nnx.LoRAParam
+      target_type = matched_types[0]
+      original_peft_params = statelib.filter_state(
+          self._transformer_state, target_type
       )
-      check_tree_structure(original_lora_params, state)
+      check_tree_structure(original_peft_params, state)
       base_state = statelib.filter_state(
-          self._transformer_state, filterlib.Not(nnx.LoRAParam)
+          self._transformer_state, filterlib.Not(target_type)
       )
       self._transformer_state = statelib.merge_state(base_state, state)
 
