@@ -125,6 +125,66 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     )
     self.assertEqual(result, expected)
 
+  def test_parse_with_enable_thinking_assistant_strips_trailing_eos(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': 'Thinking...\n</think>\n\n<function=execute_bash><|im_end|><|endoftext|>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nThinking...\n</think>\n\n<function=execute_bash><|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_function_without_think_closing_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': 'Let me inspect files.\n<function=execute_bash>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nLet me inspect files.\n</think>\n\n<function=execute_bash><|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_function_with_think_opening_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': '<think>\nLet me inspect files.\n<function=execute_bash>'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nLet me inspect files.\n</think>\n\n<function=execute_bash><|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_plain_text(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': 'Hello, world!'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nHello, world!\n</think>\n\n<|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_enable_thinking_assistant_plain_text_with_think_opening_tag(self):
+    p = parser.QwenChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=True
+    )
+    messages = [{'role': 'assistant', 'content': '<think>\nHello, world!'}]
+    result = p.parse(messages)
+    expected = (
+        '\n<|im_start|>assistant\n'
+        '<think>\nHello, world!\n</think>\n\n<|im_end|>'
+    )
+    self.assertEqual(result, expected)
+
 
 class LlamaChatTemplateParserTest(absltest.TestCase):
 

@@ -734,6 +734,49 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertIsInstance(trajectory.env_time['step_latency'], list)
     self.assertIn('close_latency', trajectory.env_time)
 
+  def test_prompt_tokens_aligned_with_left_padded_prompt_tokens(self):
+    self.mock_env.max_steps = 1
+    self.mock_env.step.return_value = ('obs1', 1.0, True, {})
+    expected_prompt_tokens = np.array([42, 43, 44])
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['resp'],
+            logits=[jnp.zeros((2,))],
+            tokens=[np.array([1, 2])],
+            left_padded_prompt_tokens=np.array([expected_prompt_tokens]),
+            logprobs=[np.ones((2,))],
+        )
+    ]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    np.testing.assert_array_equal(traj.prompt_tokens, expected_prompt_tokens)
+
+  def test_prompt_tokens_aligned_with_padded_prompt_tokens_fallback(self):
+    self.mock_env.max_steps = 1
+    self.mock_env.step.return_value = ('obs1', 1.0, True, {})
+    expected_prompt_tokens = np.array([55, 56, 57])
+    mock_output = mock.Mock()
+    mock_output.text = ['resp']
+    mock_output.logits = [jnp.zeros((2,))]
+    mock_output.tokens = [np.array([1, 2])]
+    mock_output.left_padded_prompt_tokens = None
+    mock_output.padded_prompt_tokens = np.array([expected_prompt_tokens])
+    mock_output.logprobs = [np.ones((2,))]
+    mock_output.routed_experts = None
+
+    self.mock_model_call.side_effect = [mock_output]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    np.testing.assert_array_equal(traj.prompt_tokens, expected_prompt_tokens)
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -997,6 +997,19 @@ class SamplerTest(parameterized.TestCase):
     with self.assertRaises(NotImplementedError):
       dummy.update_params({})
 
+  def test_sampler_output_left_padded_prompt_tokens(self):
+    padded_tokens = np.array([[0, 0, 1, 2], [0, 3, 4, 5]])
+    output = base_sampler.SamplerOutput(
+        text=['a', 'b'],
+        logits=None,
+        tokens=[np.array([1, 2]), np.array([3, 4, 5])],
+        padded_prompt_tokens=padded_tokens,
+        logprobs=None,
+    )
+    np.testing.assert_array_equal(
+        output.left_padded_prompt_tokens, padded_tokens
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

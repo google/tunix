@@ -173,6 +173,7 @@ class AutoModelTest(parameterized.TestCase):
             skip_jax_distributed_system=False,
             checkpoint_storage_use_ocdbt=False,
             checkpoint_storage_use_zarr3=False,
+            checkpoint_storage_concurrent_gb=100,
         )
 
       m_pyconfig.initialize.assert_called_once()
@@ -189,6 +190,7 @@ class AutoModelTest(parameterized.TestCase):
       self.assertIn("skip_jax_distributed_system=false", called_argv)
       self.assertIn("checkpoint_storage_use_ocdbt=false", called_argv)
       self.assertIn("checkpoint_storage_use_zarr3=false", called_argv)
+      self.assertIn("checkpoint_storage_concurrent_gb=100", called_argv)
 
       self.assertNotIn("use_flash_attention=true", called_argv)
 

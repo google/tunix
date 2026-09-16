@@ -18,37 +18,13 @@ import os
 import sys
 import time
 
-# Path Setup before JAX
-workdir = os.getcwd()
-pathways_root = os.path.join(workdir, "pathways-utils")
-r2egym_root = os.path.join(workdir, "r2egym")
+from examples.deepswe import deepswe_utils
 
-for root in [
-    workdir,
-    pathways_root,
-    r2egym_root,
-    "/usr/github/rllm",
-    "/usr/github/pathways-utils",
-    "/app",
-]:
-  if os.path.exists(root) and root not in sys.path:
-    sys.path.insert(0, root)
-
-
-# vLLM TPU backend environment configuration for MaxText
-os.environ["VLLM_TPU_RPA_VERSION"] = "2"
-os.environ["DISABLE_MOSAIC_ATTN"] = "1"
-
-if "proxy" in os.getenv("JAX_PLATFORMS", ""):
-  import pathwaysutils
-  pathwaysutils.initialize()
-  print("Pathways initialized successfully before JAX import.")
+deepswe_utils.setup_runtime_environment()
 
 import datasets as datasets_lib
 import jax
 from jax.sharding import Mesh
-from kubernetes import client
-from kubernetes import config as k8s_config
 import numpy as np
 from transformers import AutoTokenizer
 from maxtext.integration.vllm import maxtext_vllm_adapter
@@ -64,18 +40,7 @@ from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
 Counter = collections.Counter
-
-
-def str2bool(v):
-  """Parses common string representations into boolean values."""
-  if isinstance(v, bool):
-    return v
-  if v.lower() in ("yes", "true", "t", "y", "1"):
-    return True
-  elif v.lower() in ("no", "false", "f", "n", "0"):
-    return False
-  else:
-    raise argparse.ArgumentTypeError("Boolean value expected.")
+str2bool = deepswe_utils.str2bool
 
 
 # ========================== Argument Parsing ==========================
@@ -475,8 +440,6 @@ else:
       "R2E-Gym/R2E-Gym-Subset",
       split=DATASET_SPLIT,
   )
-  
-
 
 entries = [
     _normalize_entry(e, docker_image_prefix=DOCKER_IMAGE_PREFIX)
@@ -495,17 +458,10 @@ logger.info(
 
 # ========================== Kubernetes ==========================
 
-os.environ.setdefault("KUBECONFIG", "~/.kube/config")
-os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
-os.environ.setdefault("NODE_SELECTOR_VAL", NODE_SELECTOR_VAL)
-
-
-if os.getenv("KUBERNETES_SERVICE_HOST"):
-  k8s_config.load_incluster_config()
-else:
-  k8s_config.load_kube_config()
-k8s_client = client.CoreV1Api()
-logger.info("Kubernetes connection verified.")
+deepswe_utils.setup_kubernetes_config(
+    node_selector_val=NODE_SELECTOR_VAL,
+    logger=logger,
+)
 
 fleet = None
 if USE_AGENT_SANDBOX:
@@ -572,31 +528,7 @@ logger.info(
     total_mesh_devices,
 )
 
-# pathwaysutils registers CloudPathwaysArrayHandler, which reads checkpoint
-# shards on the Pathways workers but does not support OCDBT yet (b/365549911).
-# Fall back to the standard ArrayHandler only when the checkpoint really is
-# OCDBT, since that path materializes whole arrays in the head container's RAM.
-try:
-  from etils import epath
-  from orbax.checkpoint._src.serialization import jax_array_handlers
-  from orbax.checkpoint._src.serialization import type_handler_registry
-
-  if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
-    type_handler_registry.register_type_handler(
-        jax.Array, jax_array_handlers.ArrayHandler(), override=True
-    )
-    logger.info(
-        "Checkpoint is OCDBT; registered the standard ArrayHandler: %s",
-        MODEL_PATH,
-    )
-  else:
-    logger.info(
-        "Checkpoint is not OCDBT; keeping the registered handler so reads"
-        " stay on the Pathways workers: %s",
-        MODEL_PATH,
-    )
-except Exception as e:
-  logger.warning("Could not inspect checkpoint storage format: %s", e)
+deepswe_utils.configure_orbax_ocdbt_handler(MODEL_PATH, logger=logger)
 
 # ========================== Sampler ==========================
 
@@ -643,7 +575,7 @@ engine_kwargs = {
     "max_model_len": MAX_MODEL_LEN,
     "max_num_seqs": VLLM_MAX_NUM_SEQS,
     "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-    "enable_prefix_caching": False,
+    "enable_prefix_caching": ENABLE_PREFIX_CACHING,
     "async_scheduling": True,
     "kv_cache_metrics": True,
     "disable_log_stats": False,
@@ -680,6 +612,13 @@ vllm_config = VllmConfig(
     sampling_kwargs=sampling_kwargs,
 )
 
+# NOTE(b/365549911): Why we use a two-step weight transfer instead of direct loading:
+# - Issue: vLLM's direct checkpoint loader transfers all weights at once (e.g. ~70 GB
+#   for Qwen3.5 35B). Without native OCDBT direct-read support in Pathways, the
+#   gRPC proxy buffers all layers simultaneously and OOMs (>70 GB).
+# - Solution: We load the model in MaxText first, then stream weights into vLLM
+#   one tensor at a time (reshard_chunk_size=1) via `sampler.update_params()`. This
+#   drops proxy memory usage to < 2 GiB and prevents OOM.
 if USE_OCDBT_WITH_PATHWAYS:
   from flax import nnx
   from maxtext.configs import pyconfig
@@ -771,17 +710,17 @@ SAMPLER_CALL_KWARGS = {
 
 def model_call(
     chat_completions,
-    env_unused=None,
+    env=None,
     max_generation_steps=None,
     **kwargs,
 ):
   """Model inference via tunix sampler."""
-  max_gen_steps = min(max_generation_steps or MAX_RESPONSE_LENGTH, 4096)
+  max_gen_steps = max_generation_steps or MAX_RESPONSE_LENGTH
   pair_index = None
   instance_id = "unknown"
-  if env_unused is not None:
-    pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
-    instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
+  if env is not None:
+    pair_index = getattr(env, "extra_kwargs", {}).get("pair_index")
+    instance_id = getattr(env, "entry", {}).get("instance_id", "unknown")
 
   prompt = chat_parser.parse(
       chat_completions,
@@ -812,7 +751,6 @@ def model_call(
         echo=False,
         **SAMPLER_CALL_KWARGS,
     )
-    gc.collect()
   except Exception as exc:
     if _is_prompt_overflow_error(exc):
       raise PromptTooLongError(str(exc)) from exc
@@ -845,10 +783,6 @@ class EvalTrajectoryCollectEngine(
           self.env.entry.get("instance_id", "unknown"),
           exc,
       )
-      try:
-        await self._close()
-      except Exception:
-        pass
       return self.agent.trajectory
 
   async def _one_step(self) -> bool:
@@ -875,9 +809,9 @@ class EvalTrajectoryCollectEngine(
           self.env.entry.get("instance_id", "unknown"),
           exc,
       )
-      if self.agent.trajectory.steps:
-        self.agent.trajectory.steps[-1].done = True
-      return True
+    if self.agent.trajectory.steps:
+      self.agent.trajectory.steps[-1].done = True
+    return True
 
   async def _append_final_reward(self):
     pair_index = self.env.extra_kwargs.get("pair_index")
@@ -1021,13 +955,11 @@ async def run_evaluation():
   producer = asyncio.create_task(
       orchestrator.run_producers_from_stream(
           pairs_stream=pairs_generator(),
-          group_size=1,
+          num_generations=1,
           group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
           collect_mode="Trajectory",
       )
   )
-
-  await asyncio.sleep(0)
 
   async for batch in orchestrator.yield_batches(batch_size=1):
     for item in batch:

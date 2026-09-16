@@ -22,12 +22,13 @@ import faulthandler
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
-
-os.environ["VLLM_TPU_RPA_VERSION"] = "2"
-os.environ["DISABLE_MOSAIC_ATTN"] = "1"
 import signal
 import sys
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+
+from examples.deepswe import deepswe_utils
+
+deepswe_utils.setup_runtime_environment()
 
 from absl import logging as absl_logging
 import datasets as datasets_lib
@@ -46,9 +47,22 @@ from pydantic import ValidationError
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
+from tunix.models.qwen3 import model as model_lib
+from tunix.models.qwen3 import params as params_lib
+from tunix.perf.experimental.export import PerfMetricsExport
+from tunix import PerfMetricsConfig
+from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
+from tunix.rl.agentic.rewards.reward_types import RewardOutput
+from tunix.rl.rollout import base_rollout
+from tunix.sft import metrics_logger
+from tunix.sft import utils as sft_utils
 from tunix.utils import compat
 import vllm  # pytype: disable=import-error
+from examples.deepswe import swe_agent
+from examples.deepswe import swe_env
 
 # Register MaxText vLLM adapter
 maxtext_vllm_adapter.register()
@@ -57,17 +71,7 @@ logging.info("Successfully registered MaxTextForCausalLM model with vLLM.")
 faulthandler.register(signal.SIGINT, all_threads=True)
 
 Dataset = datasets_lib.Dataset
-
-
-def str2bool(v):
-  if isinstance(v, bool):
-    return v
-  if v.lower() in ("yes", "true", "t", "y", "1"):
-    return True
-  elif v.lower() in ("no", "false", "f", "n", "0"):
-    return False
-  else:
-    raise argparse.ArgumentTypeError("Boolean value expected.")
+str2bool = deepswe_utils.str2bool
 
 
 # ==========================================
@@ -395,78 +399,18 @@ absl_logging.set_stderrthreshold(args.logging_level.lower())
 
 # %%
 # ==========================================
-# 1. Path Setup
+# 1. Environment & Kubernetes Configuration
 # ==========================================
-
-# Use the current working directory as ROOT folder
 workdir = os.getcwd()
-tunix_root = os.path.join(workdir, "tunix")
-pathways_root = os.path.join(workdir, "pathways-utils")
-r2egym_root = os.path.join(workdir, "r2egym")
-
-for root in [workdir, pathways_root, r2egym_root]:
-  if root not in sys.path:
-    sys.path.insert(0, root)
-
-# Verification
-try:
-  import tunix
-  import pathwaysutils
-  import r2egym  # pytype: disable=import-error
-
-  print("✅ tunix pathways-utils, r2egym are successfully mapped.")
-except ImportError as e:
-  print(f"❌ Still missing a module: {e}")
-
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
-  pathwaysutils.initialize()
-
-
-# %%
-# ==========================================
-# 2. Imports from Custom Modules
-# ==========================================
-from tunix.models.qwen3 import params as params_lib
-from tunix.models.qwen3 import model as model_lib
-from tunix.sft import utils as sft_utils
-from tunix.sft import metrics_logger
-from tunix.rl import rl_cluster as rl_engine_lib
-from tunix.rl.rollout import base_rollout
-from tunix.rl.agentic import agentic_grpo_learner
-from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
-from tunix import PerfMetricsConfig
-from tunix.perf.experimental.export import PerfMetricsExport
-from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from examples.deepswe import swe_agent
-from examples.deepswe import swe_env
-
-# %%
-# ==========================================
-# 3. Environment Configuration
-# ==========================================
 DATASET_CACHE = os.getenv(
     "DATASET_CACHE", os.path.join(workdir, "dataset_cache")
 )
 os.makedirs(DATASET_CACHE, exist_ok=True)
 
-os.environ["KUBECONFIG"] = "~/.kube/config"
-os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
-os.environ["NODE_SELECTOR_VAL"] = (
-    NODE_SELECTOR_VAL  # NB: change based on your node pool name
-)
-print(
-    "Using Kubernetes node selector:"
-    f" {os.environ['NODE_SELECTOR_KEY']}={os.environ['NODE_SELECTOR_VAL']}"
-)
-
-
 # Kubernetes Setup
-try:
-  k8s_config.load_kube_config()
-  k8s_client = client.CoreV1Api()
-  # k8s_client.list_namespace(timeout_seconds=5)
-except Exception as e:
-  print(f"Warning: Kubernetes config loading failed: {e}")
+k8s_client = deepswe_utils.setup_kubernetes_config(
+    node_selector_val=NODE_SELECTOR_VAL,
+)
 
 
 # %%
@@ -902,41 +846,7 @@ trainer_devices = devices[
 # ==========================================
 # 7. Model Initialization via MaxText
 # ==========================================
-from etils import epath
-from orbax.checkpoint._src.serialization import jax_array_handlers
-from orbax.checkpoint._src.serialization import type_handler_registry
-
-# pathwaysutils registers CloudPathwaysArrayHandler on init, which reads
-# checkpoint shards on the Pathways workers. It does not support OCDBT yet
-# (b/365549911), so an OCDBT checkpoint has to fall back to the standard
-# ArrayHandler -- but that one reads on the client and materializes whole arrays
-# in the head container's host RAM.
-#
-# So only pay that cost when the checkpoint really is OCDBT. The client-side
-# restore scales with the largest single array rather than with model size,
-# which is why it goes unnoticed at 35B ([256, 10, 2048, 512] = 5.4 GiB, ~18 GB
-# peak) and is fatal at 397B: the scan axis makes every MoE tensor
-# [512, 15, 4096, 1024] = 64 GiB with ~12 in flight, so the head needs ~690 GB
-# and is OOMKilled. Keeping the reads on the workers peaks at 22 GB instead.
-# Note that checkpoint_storage_concurrent_gb does not bound this path.
-#
-# Outside Pathways this is a no-op either way: ArrayHandler is already the
-# default handler for jax.Array.
-if (epath.Path(MODEL_PATH) / "manifest.ocdbt").exists():
-  print(
-      "Base checkpoint is OCDBT, using the standard ArrayHandler:"
-      f" {MODEL_PATH}",
-      flush=True,
-  )
-  type_handler_registry.register_type_handler(
-      jax.Array, jax_array_handlers.ArrayHandler(), override=True
-  )
-else:
-  print(
-      "Base checkpoint is not OCDBT, keeping the registered handler so reads"
-      f" stay on the Pathways workers: {MODEL_PATH}",
-      flush=True,
-  )
+deepswe_utils.configure_orbax_ocdbt_handler(MODEL_PATH)
 
 (
     qwen_reference,
