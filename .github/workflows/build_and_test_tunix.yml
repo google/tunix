@@ -25,8 +25,8 @@ on:
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
   schedule:
-    # Run the job every 4 hours
-    - cron:  '0 */4 * * *'
+    # Run the job every 16 hours
+    - cron:  '0 */16 * * *'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
