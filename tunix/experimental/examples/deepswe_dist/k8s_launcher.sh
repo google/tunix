@@ -16,6 +16,11 @@
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" &>/dev/null; then
+  PYTHON="python"
+fi
+
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
@@ -61,8 +66,10 @@ export SHUFFLE=${SHUFFLE:-true}
 export SEED=${SEED:-42}
 export ENV_BACKEND=${ENV_BACKEND:-kubernetes}
 export SCAFFOLD=${SCAFFOLD:-r2egym}
+export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
+export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-}}
 export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-0}
-export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
+export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}
 export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
@@ -123,7 +130,7 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
 fi
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
 }
 
 start_orchestrator() {
@@ -140,9 +147,11 @@ start_orchestrator() {
     sandbox_arg="--use_agent_sandbox"
   fi
 
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  "$PYTHON" tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -196,7 +205,7 @@ start_orchestrator() {
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
 }
 
 start_trainer() {
@@ -209,6 +218,8 @@ start_trainer() {
       --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
+      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
+      ${USE_WEIGHT_CONVERTER:+--use_weight_converter=${USE_WEIGHT_CONVERTER}} \
     "
   fi
   local lora_args=""
@@ -219,11 +230,16 @@ start_trainer() {
   if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
     opt_chain_flags="--optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\""
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  "$PYTHON" tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
+    ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
+    ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
+    ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}"} \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
@@ -251,7 +267,7 @@ start_trainer() {
         --learning_rate=${LEARNING_RATE} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --sampler_type=${SAMPLER} \
+        --sampler=${SAMPLER} \
         ${lora_args} \
         ${maxtext_args} \
         ${DEBUG:+--debug} \
@@ -260,7 +276,7 @@ start_trainer() {
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
 }
 
 start_rollout() {
@@ -274,7 +290,9 @@ start_rollout() {
   local vllm_args=""
   if [[ "$SAMPLER" == "vllm" ]]; then
     vllm_args="\
-    --sampler_mesh_tp=${ROLLOUT_MESH_TP} \
+    --tensor_parallel_size=${ROLLOUT_MESH_TP} \
+    ${PREFUSE_MOE_WEIGHTS:+--prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS}} \
+    ${ENABLE_PREFIX_CACHING:+--enable_prefix_caching=${ENABLE_PREFIX_CACHING}} \
     "
   fi
   local lora_args=""
@@ -285,9 +303,11 @@ start_rollout() {
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"}"
   fi
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  "$PYTHON" tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
     --jobset_name="${ROLLOUT_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${ROLLOUT_TPU_SLICE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
