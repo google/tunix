@@ -1,0 +1,27 @@
+{
+  "created_at": "2026-09-01T23:20:06Z",
+  "entity": "yuxzhang-google",
+  "group": null,
+  "job_type": null,
+  "name": "2026-09-01_23-20-05",
+  "notes": null,
+  "project": "tunix",
+  "run_id": "ocl0zt4v",
+  "server_files": [
+    {
+      "name": "artifact/3490572190/wandb_manifest.json",
+      "size_bytes": 0
+    },
+    {
+      "name": "requirements.txt",
+      "size_bytes": 7211
+    },
+    {
+      "name": "wandb-metadata.json",
+      "size_bytes": 3079
+    }
+  ],
+  "state": "crashed",
+  "tags": [],
+  "url": "https://wandb.ai/yuxzhang-google/tunix/runs/ocl0zt4v"
+}

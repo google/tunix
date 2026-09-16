@@ -167,16 +167,34 @@ The cost is model generation. bd07's `[P58.BATCH_METRICS_JSON]` agrees: per-grou
 | `derived/perf_stages.csv` | stage timings, timestamped |
 | `derived/vllm_throughput.csv` | prompt/gen throughput, concurrency, KV usage, prefix-cache hit rate |
 | `derived/step_timeline.csv` | per-training-step boundaries with per-stage sums |
-| `derived/history_74x7dx50_fast_635s.csv` | wandb per-step history of the fast run |
-| `derived/history_ocl0zt4v_slow_3000s.csv` | wandb per-step history of the slow run |
+| `derived/history_74x7dx50_fast_635s.csv` | wandb per-step history of the fast run (curated column subset) |
+| `derived/history_ocl0zt4v_slow_3000s.csv` | wandb per-step history of the slow run (curated column subset) |
+| `baseline_runs/LAUNCH_CONFIG_DIFF.md` | **full argv diff of the two historical runs** — the flags are identical, which is what narrows the gap to a source-code range |
+| `baseline_runs/74x7dx50_.../` | complete wandb mirror of the fast "native" run: all 139 history columns (`history.csv`, `history.jsonl`), `summary.json`, `config.yaml`, `wandb-metadata.json`, `requirements.txt`, and the full 54.2 MiB `output.log` |
+| `baseline_runs/ocl0zt4v_.../` | same mirror for the slow run, all 149 history columns. **No `output.log`** — wandb has no console log server-side for this run |
 | `SHA256SUMS` | checksums for everything above |
 
 > [!NOTE]
-> The head-pod console log is **not** included in full. Only the receipt lanes
-> above are extracted. Rationale matches
-> `debug_logs/full_train_perf_20260908/README.md`: raw console logs are large,
-> reproducible from the pod or wandb while the run lives, and would permanently
-> weigh down every clone.
+> Console logs are treated asymmetrically here, deliberately.
+>
+> **bd07's head-pod console log is not included.** Only the receipt lanes above
+> are extracted from it. Rationale matches
+> `debug_logs/full_train_perf_20260908/README.md`: bd07 is still running, its log
+> is still growing, and it can be re-pulled from the pod at any time.
+>
+> **`74x7dx50`'s `output.log` is included in full** (54.2 MiB, 751 242 lines).
+> That run is `failed` and finished on 2026-08-23; its pod is long gone, so wandb
+> is the only remaining copy and there is nothing to re-pull it from later. It
+> compresses to ~4.2 MiB, which is what git actually stores, and it is the sole
+> source of the vLLM throughput series that establishes the 34.6 ms engine step.
+> It is below GitHub's 100 MiB hard limit but above the 50 MiB soft-warning
+> threshold, so pushing it produces a warning. The repository already carries a
+> 72.6 MiB console log under `wandb_exports/`, so this is within existing
+> practice.
+>
+> `ocl0zt4v` has **no** console log server-side — wandb only holds
+> `wandb_manifest.json`, `requirements.txt` and `wandb-metadata.json` for it. Its
+> console output is unrecoverable.
 
 ### Provenance caveats
 
@@ -189,8 +207,20 @@ The cost is model generation. bd07's `[P58.BATCH_METRICS_JSON]` agrees: per-grou
 * wandb `config` is empty for every DeepSWE run — the trainer never populates it,
   and it also ignores `CANON_WANDB_PROJECT` / `RUN_NAME` / `GROUP`. Run id and
   `created_at` are the only stable identifiers.
-* The 4.1x engine-step gap is **established**; its *cause* is **not**. Candidate
-  causes still open: `tpu_inference` / `vllm-tpu` kernel differences between the
-  2026-08-23 image and the current one; whether the 2048/128 fixed padding
-  (`MIN_TOKEN_BUCKET`, `pad_per_rank=256`) was already in force on 2026-08-23;
-  slice placement. None of these has been verified.
+* The 4.1x engine-step gap is **established**; its *cause* is **not**, but the
+  search space is now much smaller. `baseline_runs/LAUNCH_CONFIG_DIFF.md` shows
+  the fast and slow runs were launched with **effectively identical flags** —
+  same `rollout_mesh_dp/tp=8/8`, same `rollout_split_fraction=0.5`, same
+  `max_num_batched_tokens=256`, same `rollout_vllm_max_num_seqs=16`, same model
+  and dataset revision. The only substantive differences are the source commit
+  (`24b1bbcf` vs `c25f6f2d`, 343 commits apart) and the host node.
+* The head-pod CPU-starvation hypothesis was raised by that host-node difference
+  and then **rejected by direct measurement** on bd07: cgroup average 0.60 cores
+  of a 24-core ceiling, `nr_throttled` 9 of 82 425 periods (0.011%), and a
+  busiest single thread of **0.136 cores**. Details and caveats in
+  `baseline_runs/LAUNCH_CONFIG_DIFF.md` section 3.
+* Still unexamined: whether the fixed 2048/128 padding was already in force on
+  2026-08-23; `tpu_inference` / `vllm-tpu` differences between the two images
+  (both `requirements.txt` files are included under `baseline_runs/` and have
+  not been diffed); the `pathways-proxy` dispatch path.
+

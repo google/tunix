@@ -1,0 +1,39 @@
+{
+  "created_at": "2026-08-23T19:26:18Z",
+  "entity": "yuxzhang-google",
+  "group": null,
+  "job_type": null,
+  "name": "2026-08-23_19-26-17",
+  "notes": null,
+  "project": "tunix",
+  "run_id": "74x7dx50",
+  "server_files": [
+    {
+      "name": "artifact/3399039588/wandb_manifest.json",
+      "size_bytes": 0
+    },
+    {
+      "name": "config.yaml",
+      "size_bytes": 5307
+    },
+    {
+      "name": "output.log",
+      "size_bytes": 56803466
+    },
+    {
+      "name": "requirements.txt",
+      "size_bytes": 7224
+    },
+    {
+      "name": "wandb-metadata.json",
+      "size_bytes": 3194
+    },
+    {
+      "name": "wandb-summary.json",
+      "size_bytes": 6834
+    }
+  ],
+  "state": "failed",
+  "tags": [],
+  "url": "https://wandb.ai/yuxzhang-google/tunix/runs/74x7dx50"
+}
