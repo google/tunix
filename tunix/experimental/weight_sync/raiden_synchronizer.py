@@ -71,7 +71,7 @@ def _get_ws_lib() -> Any:
   if "_ws_lib" in globals():
     return globals()["_ws_lib"]
   mod = _lazy_import_module(
-      "GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.api.jax.weight_synchronizer"
+      "tpu_sync.api.jax.weight_synchronizer"
   )
   return mod
 
@@ -81,7 +81,7 @@ def _get_raiden_ffi() -> Any:
   if "_raiden_ffi" in globals():
     return globals()["_raiden_ffi"]
   mod = _lazy_import_module(
-      "GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.frameworks.jax.weight_synchronizer_ffi"
+      "tpu_sync.frameworks.jax.weight_synchronizer_ffi"
   )
   return mod
 
@@ -696,7 +696,12 @@ class RaidenSynchronizer:
 
   def _require_sync(self, op: str) -> Any:
     if self._sync is None and not self._is_proxy:
-      raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
+      if not self.bound:
+        raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
+      raise RuntimeError(
+          f"{self.job_name}: tpu_sync native weight_synchronizer library "
+          "(_ws_lib) could not be loaded."
+      )
     return self._sync
 
   def d2h(self) -> None:
