@@ -984,8 +984,17 @@ if ONEHOST_SMOKE:
     )
   if P58_ONEHOST_XPROF_ARM:
     expected_fixed_head = "1" if P58_Q4_TP4_ZERO_ADMISSION else "0"
+    # tasks/deepswe_4b_perf P0.2: the carrier may opt into the engine window
+    # (P58_ONEHOST_XPROF_PHASE=step) for rollout-kernel attribution; the
+    # trainer window stays the pinned default.
+    expected_xprof_phase = os.environ.get("P58_ONEHOST_XPROF_PHASE", "update")
+    if expected_xprof_phase not in ("update", "step"):
+      raise ValueError(
+          "P58_ONEHOST_XPROF_PHASE must be update or step, got "
+          f"{expected_xprof_phase!r}"
+      )
     common_xprof = {
-        "CANON_XPROF_PHASE": "update",
+        "CANON_XPROF_PHASE": expected_xprof_phase,
         "CANON_XPROF_SKIP_STEPS": "0",
         "CANON_XPROF_STEPS": "1",
         "CANON_XPROF_HOST_TRACER": "1",
