@@ -1082,12 +1082,28 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
+    extra = _aux_to_additional_metrics(aux)
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
-        additional_metrics=_aux_to_additional_metrics(aux),
+        additional_metrics=extra,
     )
+    # The buffered metrics only surface if a metrics sink is configured, and on
+    # the Trellis path there often is not one -- which is indistinguishable from
+    # the metrics not existing. Log the gate-relevant ones directly so a
+    # bring-up run can be read from the trainer log alone.
+    if extra:
+      wanted = {
+          k: v[0]
+          for k, v in extra.items()
+          if k.startswith(("tis/", "sample_mask/", "sampler_is/"))
+      }
+      if wanted:
+        logging.info(
+            "[sampler-is] %s",
+            " ".join(f"{k}={float(v):.6g}" for k, v in sorted(wanted.items())),
+        )
     self._post_process_train_step(aux)
 
   def _record_update(self, grad_norm: ArrayLike) -> int:
