@@ -44,6 +44,16 @@ TP8 = (128, 128, 128)
         ((128, 4096, 512), TP8, (128, 512, 128)),
         ((128, 4096, 128), TP8, (128, 128, 128)),
         ((512, 4096, 128), TP8, (256, 128, 128)),
+        # Qwen3-4B (tasks/deepswe_4b_perf 1a): 2560-multiples take 1280; the
+        # unpadded MLP width 2432 stays at the contract tile here (the P22.XI
+        # wrapper widens it through the contract padding), q keeps 1024/512.
+        ((256, 1024, 2560), TP8, (256, 1280, 128)),
+        ((256, 2432, 2560), TP8, (256, 1280, 128)),
+        ((256, 2560, 2432), TP8, (256, 128, 128)),
+        ((256, 2560, 1024), TP8, (256, 1024, 128)),
+        ((256, 512, 2560), TP8, (256, 1280, 128)),
+        ((256, 2560, 512), TP8, (256, 512, 128)),
+        ((256, 2560, 256), TP8, (256, 128, 128)),
     ],
 )
 def test_policy_widens_m_and_n_only(shape, tiles, expected):
@@ -68,3 +78,12 @@ def test_every_contract_fixed_tiles_trigger_the_policy():
             for name in ("BM", "BN", "BK")
         )
         assert tiles in mm.CONTRACT_TILES, f"{path.parent.name} passes {tiles}"
+
+
+def test_wide_candidates_never_fire_on_8b_or_1p7b_widths():
+    # 1280/640 divide only 2560-multiples; every 8B/1.7B TP-local width keeps
+    # its pre-1a choice, so those carriers' tile receipts are unchanged.
+    for n in (4096, 6144, 2048, 3072, 1536, 1024, 768, 512, 256, 128):
+        for tiles in (TP2, TP8):
+            assert mm.tile_policy(256, 4096, n, tiles)[1] not in (1280, 640)
+    assert mm.BLOCK_N_CANDIDATES == (1024, 1280, 640, 512)

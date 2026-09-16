@@ -38,6 +38,9 @@ _TILE_RECEIPTS: set[tuple[int, int, int]] = set()
 # A caller passing one of these gets the shape policy; any other explicit
 # tiles are honored as written.
 CONTRACT_TILES = frozenset({(BM, BN, BK), (128, 128, 128)})
+# Output-column tile candidates in preference order (bitwise-neutral: bn never
+# enters an element's contraction order).  See tile_policy.
+BLOCK_N_CANDIDATES = (1024, 1280, 640, 512)
 
 
 def tile_policy(
@@ -45,15 +48,20 @@ def tile_policy(
 ) -> tuple[int, int, int]:
     """Return (block_m, block_n, block_k) for a [m,k]@[k,n] bf16 matmul.
 
-    block_m 256 when m divides by 256 else the caller's; block_n the largest
-    of 1024/512 dividing n else the caller's; block_k always the caller's, so
-    the per-element accumulation order never changes (the tp8 contract
-    accumulates in 128-wide k blocks).
+    block_m 256 when m divides by 256 else the caller's; block_n the first of
+    BLOCK_N_CANDIDATES dividing n else the caller's; block_k always the
+    caller's, so the per-element accumulation order never changes (the tp8
+    contract accumulates in 128-wide k blocks).  1280 and 640 exist for the
+    Qwen3-4B TP-local widths (2560-multiples: o_proj/down_proj N=2560, and
+    the contract-padded MLP width 2432->2560, 1216->1280); they divide none of
+    the 8B/1.7B widths, so those shapes keep the 1024/512 choice
+    (tasks/deepswe_4b_perf phase1 1a; scratch k3b_4b_bench2: o_proj 22.9->15.4
+    us, down_proj 42.5->24.9 us at M=256, bitwise == 128/512).
     """
     block_m, block_n, block_k = tiles
     if m % 256 == 0:
         block_m = 256
-    for candidate in (1024, 512):
+    for candidate in BLOCK_N_CANDIDATES:
         if n % candidate == 0:
             block_n = candidate
             break
