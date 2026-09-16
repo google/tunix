@@ -128,8 +128,9 @@ image layer. The wheel is not in the branch — `.gitignore` excludes `*.whl` �
 
 `--no-deps` is deliberate: the wheel pins `jax==0.11.0`, `jaxlib==0.11.0` and
 `libtpu==0.0.47`. The first two already match. The image has `libtpu 0.0.44`,
-and libtpu is also the rollout's vLLM runtime, so moving it is not a change this
-overlay should make implicitly. §4 reports that 0.0.44 works in practice.
+and libtpu is also the rollout's vLLM and tpu-inference runtime, so moving it is
+not a change this overlay should make implicitly. §4.1 shows the pin is not a
+real constraint.
 
 `build_push.sh` asserts the swap in the finished image:
 
@@ -360,6 +361,39 @@ there is no steady-state number from it. But it settles the risk flagged in
 §1.2: **the wheel's `.so` files load and transfer correctly against the image's
 `libtpu 0.0.44` despite the wheel pinning `libtpu==0.0.47`.** No load failure,
 no wrong answer at the verification checksum.
+
+### 4.1 The `libtpu==0.0.47` pin is declarative, not an ABI dependency
+
+The wheel's three extension modules do not link against libtpu at all:
+
+```
+$ objdump -p tpu_sync/frameworks/jax/_weight_synchronizer_ffi.so | grep NEEDED
+  NEEDED               libm.so.6
+  NEEDED               libstdc++.so.6
+  NEEDED               libgcc_s.so.1
+  NEEDED               libc.so.6
+  NEEDED               ld-linux-x86-64.so.2
+$ strings tpu_sync/frameworks/jax/_weight_synchronizer_ffi.so | grep -c libtpu
+0
+```
+
+Same for `_tpu_raiden_jax.so` and `_kv_cache_manager_ffi.so`. They reach the TPU
+as XLA custom calls registered through the JAX FFI, so their binary contract is
+with jaxlib's FFI headers — and `jaxlib==0.11.0` is satisfied exactly. The
+`libtpu==0.0.47` line in `Requires-Dist` records the stack the wheel was built
+and tested against, not a symbol the extensions resolve.
+
+**So there is nothing to fix, and `--no-deps` is the correct handling rather
+than a workaround.** Upgrading libtpu to 0.0.47 to satisfy the pin would replace
+the runtime underneath vLLM and tpu-inference on all eight rollout pods, which
+is a far larger change than the one being avoided. If it is ever wanted, it
+should be a run of its own, not folded in alongside an unresolved weight-sync
+failure.
+
+TODO(raiden): ask the wheel's owners to relax `libtpu==0.0.47` to a lower bound,
+or drop it, if the extensions genuinely do not depend on it.
+
+### 4.2 Timing
 
 86.44 s at 1 destination is the number to compare any fan-out-8 result against,
 and it is also a direct like-for-like against the old wheel: on the 2026-09-08
