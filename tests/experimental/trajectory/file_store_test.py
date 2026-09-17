@@ -5,11 +5,20 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+import pydantic
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
+
+
+class _CustomMetadata(trajectory_lib.TrajectoryMetadata):
+  custom_tag: str = ""
+
+
+class _CustomTrajectory(_CustomMetadata):
+  steps: list[trajectory_lib.Step] = pydantic.Field(default_factory=list)
 
 
 class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
@@ -199,7 +208,8 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     with mock.patch.object(
         self.file_s._writer, "_process_task", side_effect=blocking_process_task
     ):
-      # add_step should enqueue task and return immediately while worker loop is blocked.
+      # add_step should enqueue task and return immediately while worker loop
+      # is blocked.
       self.file_s.add_step(
           trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
       )
@@ -470,6 +480,76 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     nonexistent_root = self.tmp_dir / "does_not_exist"
     store_instance = file_store.FileTrajectoryStore(root_dir=nonexistent_root)
     self.assertEmpty(store_instance.get_trajectories_metadata())
+
+  def test_tunix_trajectory_with_step_zero(self) -> None:
+    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
+    tunix_store: file_store.FileTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata, trajectory_lib.TunixTrajectory
+    ] = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        run_id="tunix_run",
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata,
+    )
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="tunix_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        status="RUNNING",
+    )
+    step0 = trajectory_lib.TunixEnvStep(
+        step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+    )
+    step1 = trajectory_lib.TunixAgentStep(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="response"
+    )
+    tunix_store.add_step(step0, meta)
+    tunix_store.add_step(step1, meta)
+    tunix_store.flush()
+
+    metas = tunix_store.get_trajectories_metadata(["tunix_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(metas[0].status, "RUNNING")
+
+    trajs = tunix_store.get_trajectories(["tunix_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
+    self.assertEqual(trajs[0].steps[0].step_id, 0)
+    self.assertEqual(trajs[0].steps[1].step_id, 1)
+    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
+    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
+
+  def test_custom_metadata_and_trajectory_subclass(self) -> None:
+    """Verifies FileTrajectoryStore supports custom metadata and trajectory types."""
+    custom_store: file_store.FileTrajectoryStore[
+        _CustomMetadata, _CustomTrajectory
+    ] = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        run_id="custom_run",
+        metadata_cls=_CustomMetadata,
+        trajectory_cls=_CustomTrajectory,
+    )
+    meta = _CustomMetadata(
+        trajectory_id="custom_1",
+        agent=trajectory_lib.Agent(name="custom_agent", version="1.0"),
+        custom_tag="experiment_42",
+    )
+    step = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="custom step"
+    )
+    custom_store.add_step(step, meta)
+    custom_store.flush()
+
+    metas = custom_store.get_trajectories_metadata(["custom_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], _CustomMetadata)
+    self.assertEqual(metas[0].custom_tag, "experiment_42")
+
+    trajs = custom_store.get_trajectories(["custom_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], _CustomTrajectory)
+    self.assertEqual(trajs[0].custom_tag, "experiment_42")
+    self.assertLen(trajs[0].steps, 1)
+    self.assertEqual(trajs[0].steps[0].message, "custom step")
 
 
 if __name__ == "__main__":

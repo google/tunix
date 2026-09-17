@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import enum
-from typing import Annotated, Any, Final, Literal, get_args
+from typing import Annotated, Any, Final, Literal, Sequence, get_args
 
 import numpy as np
 import pydantic
@@ -391,6 +391,18 @@ class TrajectoryMetadata(pydantic.BaseModel):
       description="Custom root-level metadata.",
   )
 
+  def create_trajectory(
+      self,
+      steps: Sequence[Any] | None = None,
+      subagent_trajectories: Sequence[Any] | None = None,
+  ) -> Any:
+    """Creates a full Trajectory from this metadata and given steps."""
+    data = self.model_dump()
+    data["steps"] = list(steps) if steps is not None else []
+    if subagent_trajectories is not None:
+      data["subagent_trajectories"] = list(subagent_trajectories)
+    return Trajectory(**data)
+
 
 class Trajectory(TrajectoryMetadata):
   """Root trajectory object containing the interaction history."""
@@ -617,6 +629,18 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Timing information for reward operations.",
   )
+
+  def create_trajectory(
+      self,
+      steps: Sequence[Any] | None = None,
+      subagent_trajectories: Sequence[Any] | None = None,
+  ) -> Any:
+    """Creates a full TunixTrajectory from this metadata and given steps."""
+    data = self.model_dump()
+    data["steps"] = list(steps) if steps is not None else []
+    if subagent_trajectories is not None:
+      data["subagent_trajectories"] = list(subagent_trajectories)
+    return TunixTrajectory(**data)
 
 
 class TunixTrajectory(TunixTrajectoryMetadata):

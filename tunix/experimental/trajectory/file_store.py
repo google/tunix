@@ -1,14 +1,18 @@
 """File-based implementation for Trajectory Store."""
 
 import functools
+import json
 import re
 import types
-from typing import Any, ClassVar, Final, Mapping
+from typing import Any, ClassVar, Final, Mapping, TypeVar, cast
 
 from etils import epath
 from tunix.experimental.trajectory import async_writer
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+T = TypeVar("T", bound=trajectory_lib.TrajectoryMetadata)
+TrajT = TypeVar("TrajT", bound=trajectory_lib.TrajectoryMetadata)
 
 _METADATA_FILENAME: Final[str] = "metadata.json"
 _TRAJECTORY_DIR_PREFIX: Final[str] = "traj_"
@@ -50,9 +54,7 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
-class FileTrajectoryStore(
-    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
-):
+class FileTrajectoryStore(store.TrajectoryStore[T, TrajT]):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Architectural Separation of Responsibilities:
@@ -79,7 +81,12 @@ class FileTrajectoryStore(
   BACKEND: ClassVar[str] = "file"
 
   def __init__(
-      self, root_dir: epath.PathLike, run_id: str | None = None
+      self,
+      root_dir: epath.PathLike,
+      run_id: str | None = None,
+      *,
+      metadata_cls: type[T] = trajectory_lib.TrajectoryMetadata,
+      trajectory_cls: type[TrajT] | None = None,
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -90,6 +97,10 @@ class FileTrajectoryStore(
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      metadata_cls: Type of TrajectoryMetadata to deserialize. Defaults to
+        TrajectoryMetadata.
+      trajectory_cls: Optional explicit Trajectory type to instantiate. If None,
+        calls `meta.create_trajectory(steps=steps)`.
 
     Raises:
       ValueError: If root_dir is empty, or run_id is given but cannot be used
@@ -109,10 +120,14 @@ class FileTrajectoryStore(
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
+    self._metadata_cls = metadata_cls
+    self._trajectory_cls = trajectory_cls
     self._writer = async_writer.AsyncFileWriter()
 
   @classmethod
-  def _from_config(cls, config: Mapping[str, Any]) -> "FileTrajectoryStore":
+  def _from_config(
+      cls, config: Mapping[str, Any]
+  ) -> "FileTrajectoryStore[Any, Any]":
     """Builds a file-backed store from `config`.
 
     Args:
@@ -186,7 +201,7 @@ class FileTrajectoryStore(
 
   def get_trajectories_metadata(
       self, trajectory_ids: list[str] | None = None
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
+  ) -> list[T]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
@@ -201,7 +216,7 @@ class FileTrajectoryStore(
       store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
         not exist.
     """
-    metas: list[trajectory_lib.TrajectoryMetadata] = []
+    metas: list[T] = []
     if trajectory_ids is None:
       if not self.root_dir.exists():
         return metas
@@ -217,16 +232,12 @@ class FileTrajectoryStore(
       meta_path = self.get_trajectory_metadata_path(traj_id)
       if not meta_path.exists():
         raise store.TrajectoryMetadataNotFoundError(traj_id)
-      meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-          meta_path.read_text()
-      )
+      meta = self._metadata_cls.model_validate_json(meta_path.read_text())
       metas.append(meta)
 
     return metas
 
-  def get_trajectories(
-      self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory]:
+  def get_trajectories(self, trajectory_ids: list[str]) -> list[TrajT]:
     """Retrieves full trajectories for a list of trajectory IDs.
 
     Args:
@@ -239,7 +250,7 @@ class FileTrajectoryStore(
       store.TrajectoryNotFoundError: If any requested trajectory ID does not
       exist.
     """
-    trajs: list[trajectory_lib.Trajectory] = []
+    trajs: list[TrajT] = []
 
     for traj_id in trajectory_ids:
       traj_dir = self.get_trajectory_dir(traj_id)
@@ -247,27 +258,27 @@ class FileTrajectoryStore(
       if not meta_path.exists():
         raise store.TrajectoryNotFoundError(traj_id)
 
-      meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-          meta_path.read_text()
-      )
-      steps: list[trajectory_lib.Step] = []
+      meta = self._metadata_cls.model_validate_json(meta_path.read_text())
+      steps: list[Any] = []
 
       for file_entry in traj_dir.iterdir():
         if not _STEP_FILENAME_REGEX.match(file_entry.name):
           continue
-        step = trajectory_lib.Step.model_validate_json(file_entry.read_text())
-        steps.append(step)
+        steps.append(json.loads(file_entry.read_text()))
 
-      traj_data = meta.model_dump()
-      traj_data["steps"] = steps
-      trajs.append(trajectory_lib.Trajectory(**traj_data))
+      if self._trajectory_cls is not None:
+        traj_data = meta.model_dump()
+        traj_data["steps"] = steps
+        trajs.append(self._trajectory_cls(**traj_data))
+      else:
+        trajs.append(cast(TrajT, meta.create_trajectory(steps=steps)))
 
     return trajs
 
   def add_step(
       self,
       step: trajectory_lib.Step,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: T,
   ) -> None:
     """Asynchronously logs a turn step and its trajectory metadata.
 
@@ -288,7 +299,7 @@ class FileTrajectoryStore(
 
   def update_metadata(
       self,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: T,
       step: trajectory_lib.Step | None = None,
   ) -> None:
     """Updates (or creates) trajectory metadata asynchronously, optionally writing a step.
@@ -340,7 +351,7 @@ class FileTrajectoryStore(
     """
     self._writer.close()
 
-  def __enter__(self) -> "FileTrajectoryStore":
+  def __enter__(self) -> "FileTrajectoryStore[T, TrajT]":
     """Returns this store, for use as a context manager."""
     return self
 
