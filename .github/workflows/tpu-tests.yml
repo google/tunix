@@ -311,3 +311,81 @@ jobs:
           python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "not vllm"
 
 
+  # ---------------------------------------------------------------------------
+  # Job: run_dist_smoke
+  # Purpose: Distributed RL (math_gsm8k_dist) smoke test with Raiden weight sync.
+  # Hardware: Live TPU v6e-8 accelerator with vLLM TPU container.
+  # Secrets: Requires HF_TOKEN for model downloads (skipped on external fork PRs).
+  # Scope: 2-step end-to-end distributed RL: PeftTrainer + inprocess_vllm + Raiden.
+  # ---------------------------------------------------------------------------
+  run_dist_smoke:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [linux-x86-ct6e-180-8tpu]
+    environment: testing
+    container:
+      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v6e-8
+        JAX_PLATFORMS: tpu,cpu
+    steps:
+      # Cache Hugging Face hub
+      - name: Cache HF hub
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Tunix and dependencies
+        run: |
+          echo "Current directory:"
+          pwd
+          python3 -m pip install --upgrade pip setuptools wheel
+
+          # Install Tunix with test dependencies
+          python3 -m pip install -e .[test]
+          # tpu-inference/Numba needs NumPy 2.3 or less.
+          python3 -m pip install numpy==2.3.5 --force-reinstall
+          # GSM8K dataset loading via tfds
+          python3 -m pip install tensorflow tensorflow_datasets array_record
+
+      - name: Install Raiden weight sync library
+        run: bash scripts/install_raiden.sh
+
+      - name: Verify TPU runtime preflight
+        run: |
+          # Dump the vfio-ID -> PCI-address map the chip split relies on.
+          python3 scripts/get_sorted_tpu_ids.py --human
+          python3 - <<'PY'
+          import jax
+          print(f"JAX version: {jax.__version__}")
+          devices = jax.devices()
+          print(f"Discovered {len(devices)} device(s): {devices}")
+          assert len(devices) == 8, f"Expected 8 TPU devices on v6e-8 host, got {len(devices)}"
+          assert all(d.platform == "tpu" for d in devices), f"Non-TPU device found: {devices}"
+          print("TPU runtime preflight check passed successfully.")
+          PY
+
+      - name: Run GSM8K Distributed RL Smoke Test (Raiden Sync)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
+
+      - name: Print logs on failure
+        if: ${{ failure() }}
+        run: |
+          echo "==================== TRAINER LOG ===================="
+          cat tunix/experimental/examples/math_gsm8k_dist/trainer.log || true
+          echo "==================== ROLLOUT LOG ===================="
+          cat tunix/experimental/examples/math_gsm8k_dist/rollout.log || true
+          echo "==================== ORCHESTRATOR LOG ===================="
+          cat tunix/experimental/examples/math_gsm8k_dist/orchestrator.log || true

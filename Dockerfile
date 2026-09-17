@@ -87,16 +87,15 @@ fi
 ARG INSTALL_RAIDEN=false
 ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
 
-# Install Raiden specific dependencies conditionally
+# Install Raiden specific dependencies conditionally. Off by default, so a
+# plain build never needs access to the wheel. The installer prefers a locally
+# built wheel from ${RAIDEN_WHEEL_DIR} (see scripts/build_raiden_wheel.sh) and
+# otherwise fetches the wheel pinned in scripts/install_raiden.sh.
+COPY scripts/install_raiden.sh /app/scripts/
 COPY raiden_wheels/ ${RAIDEN_WHEEL_DIR}/
 RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
-    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
-      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
-    else \
-      pip install keyrings.google-artifactregistry-auth && \
-      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
-    fi; \
-fi
+      RAIDEN_WHEEL_DIR="$RAIDEN_WHEEL_DIR" bash /app/scripts/install_raiden.sh; \
+    fi
 
 # Force install numpy version to avoid version conflicts.
 RUN uv pip install numpy==2.3.5

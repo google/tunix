@@ -521,7 +521,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
@@ -573,7 +573,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
@@ -702,7 +702,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
     export PYTHONUNBUFFERED=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
