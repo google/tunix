@@ -35,15 +35,15 @@ on:
       trainer_pathways:
         description: >
           Run the MaxText trainer as a Pathways proxy client instead of mcJAX.
-          On by default, because production runs the trainer on Pathways and
-          that is the only mode that exercises the single-controller API the
-          orchestrator is built on; it is also what puts Raiden on its FFI
-          transport rather than TCP. Set false to fall back to mcJAX on both
-          sides, which is the faster way to tell a Pathways problem apart from
-          a MaxText/Tunix one.
+          Off by default despite production running the trainer on Pathways,
+          because the Pathways path currently aborts the trainer inside
+          Raiden's first weight-sync round -- see the comment on the Pathways
+          daemon step below. Everything before that point works, so the mode
+          stays switchable rather than removed: set this true from
+          workflow_dispatch to retest it once Raiden is fixed.
         required: false
         type: boolean
-        default: true
+        default: false
     secrets:
       HF_TOKEN:
         description: 'HuggingFace token for model downloads'
@@ -476,10 +476,11 @@ jobs:
           python3 -m pip install -e .[test]
           # GSM8K is loaded through TFDS, which needs tensorflow.
           python3 -m pip install tensorflow tensorflow_datasets array_record
-          # Registers the "proxy" JAX backend the Pathways trainer resolves.
-          # Usually already present as a tpu-inference dependency; named here
-          # because the trainer cannot start without it and the failure is
-          # reported as an unknown backend rather than a missing package.
+          # Registers the "proxy" JAX backend a Pathways trainer resolves.
+          # Unused when trainer_pathways is false, and usually already present
+          # as a tpu-inference dependency; installed unconditionally because it
+          # is small and because its absence is reported as an unknown backend
+          # rather than as a missing package.
           python3 -m pip install pathwaysutils
 
       # Tests Tunix at the checked-out ref against MaxText at `maxtext_ref`
@@ -522,8 +523,22 @@ jobs:
       # trainer [3,2,4,1] / rollout [7,5,6,0]. The instance type is likewise
       # autodetected from the host's generation.
       #
-      # Skipped entirely when trainer_pathways is false, in which case nothing
-      # binds the chips and both sides run mcJAX.
+      # Skipped entirely when trainer_pathways is false -- the default -- in
+      # which case nothing binds the chips and both sides run mcJAX.
+      #
+      # KNOWN BLOCKER, which is why that is the default. Under Pathways the
+      # trainer reaches Raiden's first weight-sync round and then aborts:
+      #   trainer bind prepared 310 arrays (proxy_runtime=True)
+      #   F message.cc:348] File is already registered:
+      #                     xla/pjrt/proto/execute_options.proto
+      #     @ google::protobuf::MessageFactory::InternalRegisterGeneratedFile()
+      # This is the collision tunix/experimental/weight_sync/raiden_preload.py
+      # exists to avoid: Raiden's native modules and the TPU backend each link
+      # their own XLA and so their own copy of that proto, and whichever is
+      # dlopened second aborts. run_rollout_node.py preloads Raiden and is
+      # therefore fine; run_trainer_node.py does not, and only the Pathways
+      # branch puts the trainer on Raiden's FFI transport (RAIDEN_USE_FFI=1),
+      # so mcJAX never loads the second copy and never trips it.
       - name: Start Pathways daemons
         if: ${{ inputs.trainer_pathways }}
         run: bash scripts/start_pathways_daemons.sh

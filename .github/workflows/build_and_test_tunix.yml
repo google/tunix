@@ -34,15 +34,16 @@ on:
         type: string
         default: 'main'
       # A choice rather than a boolean so the value is a non-empty string even
-      # when it is deliberately "false". `inputs` is null on pull_request and
-      # schedule, and a boolean false is indistinguishable from that null in a
-      # `||` fallback -- which would silently force Pathways back on.
+      # when it is deliberately "true". `inputs` is null on pull_request and
+      # schedule, and a boolean is indistinguishable from that null in a `||`
+      # fallback -- which would silently flip the mode for the runs nobody is
+      # watching.
       trainer_pathways:
-        description: 'Run the MaxText RL smoke test trainer on Pathways instead of mcJAX'
+        description: 'Run the MaxText RL smoke test trainer on Pathways instead of mcJAX (known-broken; see tpu-tests.yml)'
         required: false
         type: choice
-        options: ['true', 'false']
-        default: 'true'
+        options: ['false', 'true']
+        default: 'false'
   schedule:
     # Run the job every 16 hours
     - cron:  '0 */16 * * *'
@@ -81,7 +82,7 @@ jobs:
       # `inputs` is empty for pull_request and schedule, so fall back to the same
       # defaults tpu-tests.yml declares.
       maxtext_ref: ${{ inputs.maxtext_ref || 'main' }}
-      trainer_pathways: ${{ (inputs.trainer_pathways || 'true') == 'true' }}
+      trainer_pathways: ${{ (inputs.trainer_pathways || 'false') == 'true' }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}

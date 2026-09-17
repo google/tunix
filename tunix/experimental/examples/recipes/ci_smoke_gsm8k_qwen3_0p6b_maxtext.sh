@@ -29,14 +29,24 @@
 # pairing is covered against the real MaxText parameter names -- the thing that
 # breaks when either repository renames a weight.
 #
-# The trainer runs on Pathways by default (TRAINER_PATHWAYS=1), matching
-# production: Raiden's FFI transport on the trainer side, TCP on the rollout
-# side. TRAINER_PATHWAYS=0 falls back to mcJAX on both sides and needs no
-# daemons, which is useful when bisecting a failure.
+# Both sides run mcJAX by default (TRAINER_PATHWAYS=0), which needs no daemons.
+# TRAINER_PATHWAYS=1 runs the trainer as a Pathways proxy client instead --
+# production's configuration, and the one that puts Raiden on its FFI transport
+# on the trainer side while the rollout stays on TCP. See WHAT THIS DOES NOT
+# COVER for why that is not the default yet.
 #
 # WHAT THIS DOES NOT COVER
 # ------------------------
-# Production is multi-host and multi-slice, and the 35B model is MoE, so
+# Pathways, as of this writing. TRAINER_PATHWAYS=1 gets the trainer all the way
+# to Raiden's first weight-sync round and then aborts it in native code:
+#   F message.cc:348] File is already registered:
+#                     xla/pjrt/proto/execute_options.proto
+# which is the XLA-duplication collision ../../weight_sync/raiden_preload.py
+# documents. The rollout preloads Raiden and so avoids it; the trainer node does
+# not, and only the Pathways branch below puts the trainer on the FFI transport
+# that loads Raiden's native modules at all.
+#
+# Production is also multi-host and multi-slice, and the 35B model is MoE, so
 # MoE prefusion and the padded expert MLP dim are out of scope here: qwen3-0.6b
 # is dense, and its 8 KV heads exceed the rollout's TP=4, so no KV-head
 # replication is needed either. All of those knobs stay at their defaults.
@@ -130,16 +140,17 @@ export TPU_HOST_BOUNDS="${TPU_HOST_BOUNDS:-1,1,1}"
 # Allow multiple concurrent libtpu loads across trainer and rollout processes on the same host
 export ALLOW_MULTIPLE_LIBTPU_LOAD="${ALLOW_MULTIPLE_LIBTPU_LOAD:-1}"
 
-# Run the trainer as a Pathways proxy client instead of mcJAX. On by default,
-# because production runs the trainer on Pathways: with this on the trainer
-# takes Raiden's FFI transport while the rollout stays on TCP, which is the
-# production pairing and the only configuration that exercises the
-# single-controller API the orchestrator depends on.
+# Run the trainer as a Pathways proxy client instead of mcJAX. Off by default
+# only because it is currently broken downstream of here -- see WHAT THIS DOES
+# NOT COVER at the top of this file. When it works this is the production
+# pairing: the trainer takes Raiden's FFI transport while the rollout stays on
+# TCP, and it is the only configuration that exercises the single-controller
+# API the orchestrator depends on.
 #
 # Requires the Pathways daemons to be listening already -- run
-# scripts/start_pathways_daemons.sh first. Set TRAINER_PATHWAYS=0 to fall back
-# to mcJAX on both sides (TCP/TCP), which needs no daemons.
-export TRAINER_PATHWAYS="${TRAINER_PATHWAYS:-1}"
+# scripts/start_pathways_daemons.sh first. The default, TRAINER_PATHWAYS=0,
+# runs mcJAX on both sides (TCP/TCP) and needs no daemons.
+export TRAINER_PATHWAYS="${TRAINER_PATHWAYS:-0}"
 if [[ "${TRAINER_PATHWAYS}" == "1" ]]; then
   # The Pathways persistence array handler cannot read OCDBT or zarr3; this also
   # makes tunix/utils/maxtext_utils.py emit the matching storage settings. The
