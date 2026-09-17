@@ -61,6 +61,16 @@ class VllmConfig:
   # Capture the MoE expert ids the rollout actually routed through, so training
   # can replay them. Sets vLLM's `enable_return_routed_experts` engine arg.
   return_routed_experts: bool = False
+  # Token ids that terminate a generation. Defaults to the tokenizer's single
+  # `eos_id()`, which for a chat model is only the chat-turn terminator. A model
+  # whose generation config declares several — Qwen3 declares both `<|im_end|>`
+  # and `<|endoftext|>` — needs all of them here, otherwise a completion-mode
+  # rollout never stops and runs to `max_tokens` instead.
+  eos_tokens: Optional[List[int]] = None
+  # Stop strings that terminate a generation (e.g. `["</answer>"]` or
+  # `["</function>"]`). When set, `SamplingParams.detokenize` is enabled so
+  # vLLM evaluates stop strings against the output text buffer.
+  stop: Optional[List[str]] = None
 
   # vLLM Env vars
   init_with_random_weights: bool = True
@@ -663,6 +673,35 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
+  def _stop_token_ids(self) -> List[int]:
+    """Returns the token ids that terminate a generation.
+
+    A tokenizer exposes a single `eos_id()`, but a model may declare several
+    terminators and use a different one depending on how it was prompted. Qwen3,
+    for instance, lists both `<|im_end|>` and `<|endoftext|>` in its generation
+    config: a chat-formatted turn ends with the former, a raw completion with
+    the latter, and the tokenizer only reports the former. Stopping solely on
+    `eos_id()` therefore leaves completion-mode rollouts running until they hit
+    `max_tokens`.
+
+    Returns:
+      `VllmConfig.eos_tokens` when configured, otherwise the tokenizer's single
+      end-of-sequence id.
+    """
+    return list(self.config.eos_tokens or [self.tokenizer.eos_id()])
+
+  def _stop_strings(self) -> List[str]:
+    """Returns the stop strings that terminate a generation.
+
+    Some tasks terminate on multi-token delimiter strings (e.g. `</answer>`
+    for math tasks or `</function>` for tool use) rather than a single special
+    token.
+
+    Returns:
+      `VllmConfig.stop` when configured, otherwise an empty list.
+    """
+    return list(self.config.stop or [])
+
   def __call__(
       self,
       input_strings: str | List[str],
@@ -712,7 +751,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           sampling_params = SamplingParams()
       else:
         sampling_params = self.llm.get_default_sampling_params()  # pyrefly: ignore[missing-attribute]
-      sampling_params.detokenize = False
+      stop_strings = self._stop_strings()
+      sampling_params.detokenize = bool(stop_strings)
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
@@ -722,7 +762,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       else:
         sampling_params.logprobs = 0
         sampling_params.prompt_logprobs = None
-      sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
+      sampling_params.stop_token_ids = self._stop_token_ids()
+      if stop_strings:
+        sampling_params.stop = stop_strings
       sampling_params.skip_special_tokens = True
       # Keep the stop token in the returned ``token_ids`` so multi-turn
       # consumers can reconstruct the exact sequence the model was sampled
@@ -770,6 +812,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
                 len(sampling_kwargs),
             )
             setattr(sampling_params, key, value)
+          if getattr(sampling_params, "stop", None):
+            sampling_params.detokenize = True
         except (AttributeError, TypeError) as e:
           logging.info(
               "Failed to update sampling_params with kwargs:"
