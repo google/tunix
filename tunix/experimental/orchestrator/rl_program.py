@@ -20,7 +20,7 @@ pipelines.
 
 import abc
 import asyncio
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import dataclasses
 import os
 import time
@@ -43,6 +43,70 @@ MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
 _extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
+
+
+def _generation_metrics(
+    groups: Sequence[Sequence[Any]],
+) -> dict[str, float]:
+  """Computes the step's `generation/completions/*` metrics, grouped by prompt.
+
+  Matches `agentic_grpo_learner.GRPOLearner._process_results`: the two means are
+  per group, not per rollout, so a short group still weighs the same as a full
+  one. Max and min are unaffected by grouping.
+
+  `clipped` / `raw_length` come from the collector, which derives them with
+  `collector.response_budget_facts` and records them on
+  `TrajectoryItem.metadata`, because only the producer knows the budget a
+  rollout was held to -- `DistributedRLEngine` lets a dataset item override
+  `max_response_length`. Raw length counts env and tool tokens, per the
+  rLLM/VERL `response_length` convention.
+
+  Args:
+    groups: Trajectory items for the step, grouped by prompt.
+
+  Returns:
+    Fully-qualified metric name to step value; empty when no rollout carried
+    the annotations.
+  """
+  clip_ratios: list[float] = []
+  group_mean_lengths: list[float] = []
+  all_lengths: list[int] = []
+  for group in groups:
+    clipped = 0
+    lengths: list[int] = []
+    for item in group:
+      # Token mode yields a dict; Trajectory mode yields a dataclass, which
+      # never carries these. Both keys are required: a rollout annotated with
+      # only one of them is a producer bug, and dropping it keeps that bug from
+      # taking down the training step over a metric.
+      traj = item.traj
+      if not isinstance(traj, dict):
+        continue
+      meta = getattr(item, "metadata", None)
+      if not isinstance(meta, dict):
+        continue
+      if meta.get("clipped") is None or meta.get("raw_length") is None:
+        continue
+      # A zero-length response is a rollout that ran and produced nothing; it
+      # stays in the denominator, matching the agentic learner.
+      lengths.append(int(meta["raw_length"]))
+      clipped += int(meta["clipped"])
+    if not lengths:
+      continue
+    clip_ratios.append(clipped / len(lengths))
+    group_mean_lengths.append(float(np.mean(lengths)))
+    all_lengths.extend(lengths)
+
+  if not all_lengths:
+    return {}
+  return {
+      "generation/completions/clip_ratio": float(np.mean(clip_ratios)),
+      "generation/completions/mean_raw_length": float(
+          np.mean(group_mean_lengths)
+      ),
+      "generation/completions/max_raw_length": float(np.max(all_lengths)),
+      "generation/completions/min_raw_length": float(np.min(all_lengths)),
+  }
 
 
 def _extract_reward(item: Any) -> float:
@@ -447,6 +511,7 @@ class StandardRLProgram(RLProgram):
       all_step_items: Sequence[datatypes.TrajectoryItem],
       step_rewards: Sequence[float],
       step_advantages: Sequence[float] | None = None,
+      generation_metrics: Mapping[str, float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
       num_rollouts: int,
@@ -599,6 +664,18 @@ class StandardRLProgram(RLProgram):
       for tag, val in staleness_stats.items():
         self.metrics_logger.log(
             self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
+        )
+
+    # Generation metrics, already named to match the agentic GRPO learner so
+    # the same dashboards work for both.
+    if generation_metrics:
+      for tag, val in generation_metrics.items():
+        self.metrics_logger.log(
+            self.metrics_prefix,
+            tag,
+            val,
+            self.mode,
+            log_step,
         )
 
     # --- 2. Reward Metrics ---
@@ -1039,6 +1116,8 @@ class StandardRLProgram(RLProgram):
             new_version if new_version is not None else self.policy_version + 1
         )
 
+      # Before `commit()`, which will eventually take ownership of the groups.
+      generation_metrics = _generation_metrics(uncommitted_groups)
       self.scored_q.commit(current_step, groups=uncommitted_groups)
 
       assert (
@@ -1053,6 +1132,7 @@ class StandardRLProgram(RLProgram):
           all_step_items=all_step_items,
           step_rewards=step_rewards,
           step_advantages=step_advantages,
+          generation_metrics=generation_metrics,
           step_result=step_result,
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
