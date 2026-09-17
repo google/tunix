@@ -105,6 +105,39 @@ def gsm8k_env_reward(
   return score_gsm8k_completion(str(completion), gold_answer)
 
 
+def _last_assistant_content(messages: Any) -> str | None:
+  """The last assistant message's content, or None if there is not one."""
+  if not isinstance(messages, (list, tuple)):
+    return None
+  for message in reversed(messages):
+    if isinstance(message, dict) and message.get("role") == "assistant":
+      return str(message.get("content") or "")
+  return None
+
+
+def _completion_text(item: Any, metadata: dict[str, Any]) -> str:
+  """Returns the model's completion for `item`.
+
+  Prefers the last assistant turn of the trajectory's conversation, falling
+  back to `metadata["text"]`. Returns an empty string when neither yields a
+  completion, since `metadata["text"]` may hold the full message list rather
+  than the model's own output.
+  """
+  traj = getattr(item, "traj", None)
+  if isinstance(traj, dict):
+    content = _last_assistant_content(traj.get("conversation_text"))
+    if content is not None:
+      return content
+  text = metadata.get("text", "")
+  content = _last_assistant_content(text)
+  if content is not None:
+    return content
+  if isinstance(text, (list, tuple)):
+    # A message list with no assistant turn: there is no completion to score.
+    return ""
+  return str(text)
+
+
 def make_gsm8k_reward_fn(
     debug: bool = False,
 ) -> collections.abc.Callable[[Any], float]:
@@ -112,7 +145,7 @@ def make_gsm8k_reward_fn(
 
   def reward_fn(item: Any) -> float:
     metadata = dict(getattr(item, "metadata", None) or {})
-    text = str(metadata.get("text", ""))
+    text = _completion_text(item, metadata)
     gold_answer = metadata.get("answer", metadata.get("gold_answer"))
     reward, _ = score_gsm8k_completion(text, gold_answer)
     if debug:
