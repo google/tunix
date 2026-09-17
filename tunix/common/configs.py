@@ -228,9 +228,6 @@ class RolloutConfig:
   # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
   rollout_sglang_jax_enable_deterministic_sampling: bool = False
 
-  # Whether to use sort or mask implementation in sampler, sort has better evaluation result.
-  rollout_sglang_jax_use_sort_for_toppk_minp: bool = True
-
   # Whether to use lora
   rollout_sglang_jax_enable_static_lora: bool = False
 
