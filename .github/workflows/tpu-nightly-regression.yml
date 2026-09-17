@@ -41,13 +41,13 @@ env:
 
 jobs:
   run_prod:
-    runs-on: [linux-x86-ct6e-180-8tpu]
+    runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
+        CLOUD_TPU_ACCELERATOR: v5e-8
         JAX_PLATFORMS: tpu,cpu
     steps:
 
@@ -317,13 +317,13 @@ jobs:
 
 
   run_latest:
-    runs-on: [linux-x86-ct6e-180-8tpu]
+    runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
       image: vllm/vllm-tpu:nightly # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
+        CLOUD_TPU_ACCELERATOR: v5e-8
         JAX_PLATFORMS: tpu,cpu
     steps:
 
