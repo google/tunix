@@ -511,6 +511,16 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     TRAINER_CMD+=(--use_lora)
   fi
 
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--profiler_steps=$PROFILER_STEPS)
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--skip_first_n_profiler_steps=$SKIP_FIRST_N_PROFILER_STEPS)
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    TRAINER_CMD+=(--profiler_period=$PROFILER_PERIOD)
+  fi
+
   if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
     # Chips 0-3 belong to the local Pathways worker container; the trainer
     # is a proxy client and must not grab them.

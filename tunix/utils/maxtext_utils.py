@@ -16,9 +16,21 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from typing import Any
+
+
+@dataclasses.dataclass(frozen=True)
+class ProfilerOptions:
+  """Options for configuring the profiler."""
+  # Number of steps to skip before profiling.
+  skip_first_n_steps: int
+  # Number of steps to profile.
+  profiler_steps: int
+  # If positive, profile every N steps.
+  profiler_period: int = -1
 
 
 def maxtext_modules():
@@ -106,6 +118,7 @@ def build_maxtext_config(
     base_output_directory: str = "",
     gradient_accumulation_steps: int = 1,
     checkpointing_options: Any = None,
+    profiling_options: ProfilerOptions | None = None,
     *,
     base_num_kv_heads: int = 0,
     kv_tp_size: int = 0,
@@ -323,6 +336,14 @@ def build_maxtext_config(
         max_target_length,
         max_target_length,
     )
+
+  if profiling_options is not None:
+    argv.extend([
+        f"profiler_steps={profiling_options.profiler_steps}",
+        f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
+        f"profile_periodically_period={profiling_options.profiler_period}",
+    ])
+
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",

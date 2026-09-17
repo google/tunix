@@ -419,6 +419,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action="store_true",
       help="Enable debug logging for the trainer worker.",
   )
+  parser.add_argument(
+      "--profiler_steps",
+      type=int,
+      default=0,
+      help="Number of steps to profile.",
+  )
+  parser.add_argument(
+      "--skip_first_n_profiler_steps",
+      type=int,
+      default=1,
+      help="Number of steps to skip before starting profiling.",
+  )
+  parser.add_argument(
+      "--profiler_period",
+      type=int,
+      default=-1,
+      help="Profile every N steps. If negative, profile only once.",
+  )
   return parser.parse_args(argv)
 
 
@@ -578,6 +596,15 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
         " --maxtext_warmup_steps_fraction.",
         args.optimizer_schedule_type,
     )
+
+  profiling_options = None
+  if args.profiler_steps > 0:
+    profiling_options = maxtext_utils.ProfilerOptions(
+        skip_first_n_steps=args.skip_first_n_profiler_steps,
+        profiler_steps=args.profiler_steps,
+        profiler_period=args.profiler_period,
+    )
+
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
       worker_id=args.worker_id,
@@ -595,6 +622,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       base_output_directory=args.maxtext_output_directory,
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
+      profiling_options=profiling_options,
       rollout_mesh_tp=args.rollout_mesh_tp,
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,

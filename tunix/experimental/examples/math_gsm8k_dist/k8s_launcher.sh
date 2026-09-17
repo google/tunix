@@ -240,12 +240,23 @@ stop_trainer() {
 start_trainer() {
   local extra_flags=""
   local debug_flag=""
+  local profiler_flags=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
   fi
 
   if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
+  fi
+
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    profiler_flags+=" --profiler_steps=${PROFILER_STEPS}"
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    profiler_flags+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    profiler_flags+=" --profiler_period=${PROFILER_PERIOD}"
   fi
 
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
@@ -339,6 +350,7 @@ start_trainer() {
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${extra_flags} \
         ${debug_flag} \
+        ${profiler_flags} \
     " \
     | apply_manifest
 }
