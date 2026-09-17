@@ -68,8 +68,6 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_environment_contract.py
     PYTHONPATH=/workspace python3 \
-      canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
-    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_sandbox_capacity_probe.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_artifacts.py

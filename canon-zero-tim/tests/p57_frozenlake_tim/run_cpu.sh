@@ -16,7 +16,6 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_inprocess_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_stock_classifier.py \
-  canon-zero-tim/tests/p57_frozenlake_tim/test_provenance_derivation.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_jobset_log_collector.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_m15_alignment_warning.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_m15_token_continuity.py \

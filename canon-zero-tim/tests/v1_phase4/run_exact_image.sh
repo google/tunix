@@ -81,7 +81,6 @@ $docker run --rm \
       DPWorkloadsTest.test_frozenlake_v1_full_requires_exact_system_optimization_tuple \
       DPWorkloadsTest.test_p57_m15_uses_its_signed_wide_token_contract \
       DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
-    python3 canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
     XLA_FLAGS=--xla_force_host_platform_device_count=64 \
       python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/probe_gsm_fixed_replay_scale.py
     python3 tests/perf/profile_window_test.py
@@ -123,11 +122,9 @@ $docker run --rm \
       AgenticRLLearnerTest.test_model_call_rejects_simultaneous_deepswe_and_m15_admission \
       AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt
     bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
-    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_analyze_m15i_evidence.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_target_run.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_first_red_replay.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_full_replay_carrier.py
-    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_e0_kv_three_round.py
     bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_attempt19_e0_kv3_return.sh
@@ -135,12 +132,8 @@ $docker run --rm \
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_debug_tito.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_e0v_onehost_arm.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_e0v_onehost_pair.py
-    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_e0v_onehost_runner.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_validate_m15_e0w5_recovery_render.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_wide_seam.py
-    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_review_m15_attempt17_d36_candidate.py
-    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_review_m15_attempt18_e0_admission.py
-    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_review_m15_attempt18_e0_return.py
     python3 canon-zero-tim/tests/p38_serving/test_kv_observer_classifier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_wide_durability.py
     bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh

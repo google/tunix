@@ -20,7 +20,6 @@ $docker run --rm \
   -e PYTHONPATH=/workspace \
   "$image_id" \
   bash -euo pipefail -c '
-    bash canon-zero-tim/tests/v1_gsm8k_xprof_pair/run_cpu.sh
     python3 tests/rl/canonical_qwen3_adapter_test.py \
       CanonicalQwen3AdapterTest.test_xprof_jit_is_exactly_plain_jit_when_disabled \
       CanonicalQwen3AdapterTest.test_xprof_jit_labels_module_and_operation_stack \

@@ -1,9 +1,0 @@
-# 📊 WandB Multi-Run Ablation Benchmark Summary
-
-| Run ID | Experiment Name | State | Steps | Peak Solve | Final Solve | Avg Step Time | Total Runtime | Log Lines |
-|---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `tybj4xr0` | **canon-p57-fl-zero-r10a-06a0fdb9** | running | 216 | **99.22%** | 86.33% | 609.7s | 38.06h | 620502 |
-| `jff877lt` | **canon-p57-fl-stan-r01-567c96d5** | finished | 301 | **85.94%** | 49.22% | 136.9s | 12.65h | 269830 |
-| `3osny0pb` | **canon-p57-fl-zero-m15-r10-06a0fdb9** | running | 53 | **55.47%** | 46.88% | 2550.5s | 38.70h | 436786 |
-| `4m9p2ylk` | **canon-p57-fl-stan-m15-r01-567c96d5** | crashed | 182 | **51.95%** | 1.56% | 446.4s | 23.35h | 389464 |
-

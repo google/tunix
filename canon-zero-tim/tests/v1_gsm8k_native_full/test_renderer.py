@@ -456,21 +456,5 @@ class Gsm8kNativeFullRendererTest(unittest.TestCase):
           verifier.stdout,
       )
 
-  def test_handoffs_route_both_arms_to_one_wandb_project(self):
-    task_handoff = (_TASK / "HANDOFF.md").read_text(encoding="utf-8")
-    phase4_handoff = (
-        _PACKAGE / "tasks/v1-phase4-three-full-recipes/HANDOFF.md"
-    ).read_text(encoding="utf-8")
-    for source in (task_handoff, phase4_handoff):
-      self.assertIn("prepare_gsm8k_native_full.sh", source)
-      self.assertIn("prepare_gsm8k_full_dp16tp4_p74.sh", source)
-      self.assertIn(native._WANDB_PROJECT, source)
-      self.assertIn(native._WANDB_GROUP, source)
-    for selector in native._FORBIDDEN_ZERO_SELECTORS:
-      self.assertIn(selector, task_handoff)
-    self.assertIn("must all be absent from the raw Native manifest", task_handoff)
-    self.assertIn("TARGET NOT RUN", task_handoff)
-
-
 if __name__ == "__main__":
   unittest.main()

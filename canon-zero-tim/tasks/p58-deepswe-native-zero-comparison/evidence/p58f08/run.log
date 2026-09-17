@@ -1,6 +1,0 @@
-# P58 DeepSWE Native Full (p58f08) Infrastructure Evidence (Commit 5c5aca27)
-
-- `canon-p58-ds4b-native-full-p58f08` was tested on `deepswe-cpu-pool` after adding `deepswe-flavor` to ClusterQueue `cluster-queue`.
-- Head Pod started on `deepswe-cpu-pool`, but worker nodes failed to maintain persistent scheduler pipe to the remote CPU node across subnets.
-- Verified root cause of earlier port collision on `cpu-np`: `cpu-np` currently has 6 nodes hosting 6 concurrent head pods; without PodAntiAffinity, Kubernetes packed the 7th head pod onto an occupied node where port 29001 collided.
-- Recommended fix: Configure `podAntiAffinity` on `pathways-head` so Kubernetes triggers GKE autoscaling to provision a dedicated 7th node in `cpu-np`.

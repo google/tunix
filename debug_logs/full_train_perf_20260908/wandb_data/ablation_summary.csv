@@ -1,4 +1,0 @@
-run_id,name,rows,step_min,step_max,peak_solve,final_solve,avg_step_time_sec,runtime_hours
-3osny0pb,canon-p57-fl-zero-m15-r10-06a0fdb9,234,0,233,99.22%,83.59%,2718.2,178.77
-e45soyn7,canon-p57-fl-zero-m15-r11-3f95bdc7,184,0,183,94.92%,84.77%,1221.0,63.74
-tybj4xr0,canon-p57-fl-zero-r10a-06a0fdb9,301,0,300,99.22%,91.41%,674.2,57.90
