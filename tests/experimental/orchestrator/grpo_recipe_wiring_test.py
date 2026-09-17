@@ -44,6 +44,7 @@ def _recipe_config(**overrides) -> algorithm_config.GRPOConfig:
   kwargs = dict(
       num_generations=4,
       temperature=1.0,
+      use_rollout_logps=False,
       overlong_loss_masking=True,
       seq_logprob_error_threshold=2.0,
       truncated_importance_sampling_type="seq-mask-tis",
@@ -147,6 +148,13 @@ class GRPOConfigValidationTest(absltest.TestCase):
   def test_length_buckets_are_normalized_to_a_tuple(self):
     cfg = _recipe_config(sampler_is_length_buckets=[512, 2048])
     self.assertEqual(cfg.sampler_is_length_buckets, (512, 2048))
+
+  def test_tis_requires_a_recomputed_ratio_denominator(self):
+    # With use_rollout_logps=True the sampler's log-probs are already the
+    # surrogate ratio's denominator, so seq-mask-tis would apply the same
+    # correction a second time and square it.
+    with self.assertRaisesRegex(ValueError, "use_rollout_logps=False"):
+      _recipe_config(use_rollout_logps=True)
 
   def test_token_level_and_sequence_level_tis_cannot_both_be_set(self):
     # Both write the per-token importance weights, so the second would
@@ -263,9 +271,15 @@ class PayloadFieldsTest(absltest.TestCase):
     )
 
   def test_both_logprob_fields_are_set_when_the_denominator_uses_them(self):
+    # Reachable only without seq-mask-tis: the two together would apply the
+    # sampler correction twice, and the config refuses that combination.
     logps = [-0.1, -0.2, -0.3]
     payload = self._payload(
-        _trajectory(3, old_logprobs=logps), use_rollout_logps=True
+        _trajectory(3, old_logprobs=logps),
+        use_rollout_logps=True,
+        truncated_importance_sampling_type=None,
+        truncated_importance_sampling_ratio_min=None,
+        truncated_importance_sampling_ratio=None,
     )
     np.testing.assert_allclose(payload.old_per_token_logps, np.float32(logps))
     np.testing.assert_allclose(
@@ -354,6 +368,7 @@ class ExampleCommandLineTest(absltest.TestCase):
 
   def test_flags_reach_the_config(self):
     cfg = self._config([
+        "--no-use_rollout_logps",
         "--overlong_loss_masking",
         "--seq_logprob_error_threshold=2.0",
         "--truncated_importance_sampling_type=seq-mask-tis",
@@ -368,6 +383,7 @@ class ExampleCommandLineTest(absltest.TestCase):
     self.assertEqual(cfg.truncated_importance_sampling_ratio_min, 0.999)
     self.assertEqual(cfg.truncated_importance_sampling_ratio, 1.002)
     self.assertEqual(cfg.advantage_estimator, "grpo-loo")
+    self.assertFalse(cfg.use_rollout_logps)
     self.assertEqual(cfg.sampler_is_length_buckets, (512, 2048))
 
   def test_launcher_passes_every_option_it_exposes(self):

@@ -211,7 +211,7 @@ def sequence_geomean_ratio(
 
 
 def sequence_mult_prob_error(
-    log_is: jax.Array, mask: jax.Array
+    log_is_raw: jax.Array, mask: jax.Array
 ) -> jax.Array:
   """Per-sequence multiplicative probability error, `mean_t exp(|log_is_t|)`.
 
@@ -226,8 +226,15 @@ def sequence_mult_prob_error(
   has a geometric-mean ratio of exactly 1 and looks perfectly on-policy, while
   its multiplicative error is `exp(d)`.
 
+  Takes the ratio **before** any `nan_to_num`. A scored token the sampler gave
+  zero probability makes the error non-finite, which fails any threshold and
+  drops the sequence. Sanitising first would turn that token into a log ratio of
+  0, i.e. `exp(0) = 1`, and record the worst possible disagreement as perfect
+  agreement.
+
   Args:
-    log_is: Per-token trainer-minus-sampler log ratio, `[B, T]`.
+    log_is_raw: Per-token trainer-minus-sampler log ratio, `[B, T]`, before
+      sanitising.
     mask: Tokens to include, `[B, T]`.
 
   Returns:
@@ -235,9 +242,11 @@ def sequence_mult_prob_error(
     minimum statistic down nor trip a threshold spuriously.
   """
   denom = mask.sum(axis=-1)
-  # Masking inside the exp keeps padded positions at exp(0) = 1 before they are
-  # zeroed, so whatever occupies those slots cannot overflow.
-  num = (jnp.exp(jnp.abs(log_is) * mask) * mask).sum(axis=-1)
+  # `where` rather than multiplying by the mask: an unmasked position may hold
+  # an infinity, and `inf * 0` is NaN, which would spread a single padded slot
+  # across the whole sequence's error.
+  abs_log_is = jnp.where(mask > 0, jnp.abs(log_is_raw), 0.0)
+  num = (jnp.exp(abs_log_is) * mask).sum(axis=-1)
   return jnp.where(denom > 0, num / jnp.clip(denom, 1.0, None), 0.0)
 
 
@@ -263,7 +272,7 @@ def sequence_loss_mask(
     completion_mask: jax.Array,
     overlong: jax.Array | None = None,
     mask_overlong: bool = False,
-    log_is: jax.Array | None = None,
+    log_is_raw: jax.Array | None = None,
     mult_prob_error_threshold: float | None = None,
 ) -> SequenceMask:
   """Per-sequence loss multiplier, and the token mask it induces.
@@ -290,8 +299,10 @@ def sequence_loss_mask(
     overlong: 1.0 for sequences the rollout engine truncated, `[B]`, or None
       when the engine reports no truncation verdict.
     mask_overlong: Whether to drop truncated sequences from the update.
-    log_is: Per-token trainer-minus-sampler log ratio `[B, T]`, or None when
-      the rollout engine returned no log-probabilities.
+    log_is_raw: Per-token trainer-minus-sampler log ratio `[B, T]` before
+      sanitising, or None when the rollout engine returned no
+      log-probabilities. The gate needs the unsanitised ratio; see
+      `sequence_mult_prob_error`.
     mult_prob_error_threshold: Drop sequences whose multiplicative probability
       error exceeds this. None disables the gate.
 
@@ -305,13 +316,13 @@ def sequence_loss_mask(
     sample_mask = sample_mask * (1.0 - jnp.astype(overlong, jnp.float32))
 
   mult_prob_error = None
-  if mult_prob_error_threshold is not None and log_is is not None:
+  if mult_prob_error_threshold is not None and log_is_raw is not None:
     # Measured over the already-truncation-restricted mask. A sequence dropped
     # above contributes no tokens here, scores 0.0 and passes the threshold,
     # and stays dropped either way -- so ordering does not change the outcome,
     # but it keeps the reported error free of tokens nobody is training on.
     mult_prob_error = sequence_mult_prob_error(
-        log_is, completion_mask * sample_mask[:, None]
+        log_is_raw, completion_mask * sample_mask[:, None]
     )
     sample_mask = sample_mask * jnp.astype(
         mult_prob_error <= mult_prob_error_threshold, jnp.float32
@@ -1095,7 +1106,7 @@ def grpo_loss_fn(
       completion_mask,
       overlong=getattr(train_example, "overlong", None),
       mask_overlong=mask_overlong,
-      log_is=log_is,
+      log_is_raw=log_is_raw,
       mult_prob_error_threshold=mult_prob_error_threshold,
   )
 
@@ -1239,17 +1250,17 @@ def grpo_loss_fn(
   #
   # Sequence-level masking can leave a micro-batch with no such tokens at all,
   # most easily when `train_micro_batch_size == num_generations` and one
-  # micro-batch is one prompt group. Every extremum below reports 0.0 there
-  # rather than the +/-inf neutral element of its reduction.
-  any_loss_row = jnp.any(loss_mask > 0)
+  # micro-batch is one prompt group. Each extremum keeps the +/-inf neutral
+  # element of its own reduction for that case, because these are pooled across
+  # a step's micro-batches with the matching max/min: an empty micro-batch then
+  # contributes nothing, where any finite sentinel would win the reduction and
+  # replace the step's real value.
   # 1.0 for rows that hold a sequence at all, as opposed to the assembler's
   # trailing padding rows, which carry no scored tokens.
   row_is_sequence = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
   is_ratio_mean = masked_mean(is_ratio, loss_mask)
   is_ratio_max = jnp.max(jnp.where(loss_mask > 0, is_ratio, 0.0))
-  is_ratio_min = jnp.where(
-      any_loss_row, jnp.min(jnp.where(loss_mask > 0, is_ratio, jnp.inf)), 0.0
-  )
+  is_ratio_min = jnp.min(jnp.where(loss_mask > 0, is_ratio, jnp.inf))
   log_ratio_abs_mean = masked_mean(
       jnp.abs(seq_importance_ratio), loss_mask
   )
@@ -1257,12 +1268,8 @@ def grpo_loss_fn(
   pg_loss_2_mean = masked_mean(pg_loss_2, loss_mask)
   adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
   adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), loss_mask)
-  adv_max = jnp.where(
-      any_loss_row, jnp.max(jnp.where(loss_mask > 0, adv_broadcast, -jnp.inf)), 0.0
-  )
-  adv_min = jnp.where(
-      any_loss_row, jnp.min(jnp.where(loss_mask > 0, adv_broadcast, jnp.inf)), 0.0
-  )
+  adv_max = jnp.max(jnp.where(loss_mask > 0, adv_broadcast, -jnp.inf))
+  adv_min = jnp.min(jnp.where(loss_mask > 0, adv_broadcast, jnp.inf))
   nonzero_adv_frac = masked_mean(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), loss_mask
   )

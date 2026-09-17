@@ -497,7 +497,7 @@ class SequenceMultProbErrorTest(absltest.TestCase):
     # Row errors: exp(0)=1.0, exp(0.5)=1.649, exp(1.5)=4.482.
     result = algo_core.sequence_loss_mask(
         jnp.ones((3, 4), dtype=jnp.float32),
-        log_is=jnp.array([[0.0] * 4, [0.5] * 4, [1.5] * 4]),
+        log_is_raw=jnp.array([[0.0] * 4, [0.5] * 4, [1.5] * 4]),
         mult_prob_error_threshold=2.0,
     )
     np.testing.assert_allclose(
@@ -512,8 +512,8 @@ class SequenceMultProbErrorTest(absltest.TestCase):
     completion_mask = jnp.ones((2, 3), dtype=jnp.float32)
     log_is = jnp.full((2, 3), 5.0)
     for kwargs in (
-        {'log_is': log_is, 'mult_prob_error_threshold': None},
-        {'log_is': None, 'mult_prob_error_threshold': 2.0},
+        {'log_is_raw': log_is, 'mult_prob_error_threshold': None},
+        {'log_is_raw': None, 'mult_prob_error_threshold': 2.0},
     ):
       result = algo_core.sequence_loss_mask(completion_mask, **kwargs)
       np.testing.assert_array_equal(result.sample_mask, [1.0, 1.0])
@@ -527,7 +527,7 @@ class SequenceMultProbErrorTest(absltest.TestCase):
         jnp.ones((2, 4), dtype=jnp.float32),
         overlong=jnp.array([1.0, 0.0]),
         mask_overlong=True,
-        log_is=jnp.full((2, 4), 5.0),  # exp(5) >> threshold for both rows
+        log_is_raw=jnp.full((2, 4), 5.0),  # exp(5) >> threshold for both rows
         mult_prob_error_threshold=2.0,
     )
     self.assertEqual(float(result.mult_prob_error[0]), 0.0)
@@ -967,15 +967,45 @@ class GrpoLossSequenceMaskingTest(absltest.TestCase):
     )
     self.assertIsNotNone(self._loss(example, config))
 
-  def test_metrics_are_finite_when_every_sequence_is_dropped(self):
-    example = self._example(overlong=jnp.ones((2,)))
-    aux = self._loss(
-        example, self._config(overlong_loss_masking=True)
+  def test_an_empty_micro_batch_yields_the_reduction_identity(self):
+    """An emptied micro-batch must not win the cross-micro-batch min/max.
+
+    These are pooled over a step's micro-batches with the matching np.min /
+    np.max, so the value emitted when nothing survives has to be the identity
+    of that reduction. Any finite sentinel would replace the step's real value.
+    """
+    empty = self._loss(
+        self._example(overlong=jnp.ones((2,))),
+        self._config(overlong_loss_masking=True),
     ).aux_metrics
-    for name in ('is_ratio/min', 'is_ratio/max', 'advantage/max',
-                 'advantage/min'):
+    full = self._loss(self._example(), self._config()).aux_metrics
+
+    for name, reducer in (('is_ratio/min', np.min),
+                          ('advantage/min', np.min),
+                          ('advantage/max', np.max)):
       with self.subTest(metric=name):
-        self.assertTrue(np.isfinite(float(aux[name])), msg=name)
+        real = float(full[name])
+        pooled = float(reducer([real, float(empty[name])]))
+        self.assertAlmostEqual(
+            pooled, real, places=5,
+            msg=f'{name}: an empty micro-batch changed the pooled value')
+
+  def test_a_non_finite_ratio_fails_the_error_gate(self):
+    """A token the sampler gave zero probability is the worst disagreement.
+
+    Sanitising the log ratio before the gate would turn it into exp(0) = 1 and
+    read as perfect agreement, so the gate sees the raw ratio.
+    """
+    rollout = jnp.array([[-1.0, -1.0, -1.0], [-1.0, -jnp.inf, -1.0]],
+                        jnp.float32)
+    aux = self._loss(
+        self._example(rollout_per_token_logps=rollout),
+        self._config(seq_logprob_error_threshold=1e6),
+    ).aux_metrics
+    # The threshold is far above anything a finite ratio can reach, so the
+    # only sequence that can fail it is the one holding the infinity.
+    self.assertAlmostEqual(
+        float(aux['sample_mask/kept_frac'].compute()), 0.5, places=5)
 
   def test_kept_frac_ignores_padding_rows(self):
     # Row 1 carries no scored tokens, as the assembler's trailing rows do not.

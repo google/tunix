@@ -274,6 +274,21 @@ class GRPOConfig(AlgorithmConfig):
             " truncated_importance_sampling_type="
             f"{self.truncated_importance_sampling_type}"
         )
+      if self.use_rollout_logps:
+        # The correction would be applied twice. `use_rollout_logps=True` makes
+        # the sampler's log-probabilities the denominator of the surrogate
+        # ratio, so that ratio already carries the whole sampler-vs-trainer
+        # correction; seq-mask-tis then multiplies the same quantity in again
+        # and the per-token loss picks up its square. There is no correct
+        # reading of the combination, so it is refused rather than reconciled.
+        raise ValueError(
+            "truncated_importance_sampling_type requires"
+            " use_rollout_logps=False. With use_rollout_logps=True the"
+            " sampler's log-probabilities are already the surrogate ratio's"
+            " denominator, so applying the sampler correction again squares"
+            " it. Set use_rollout_logps=False, which recomputes the"
+            " denominator on the trainer and pins the ratio to 1."
+        )
     if self.sampler_is_length_buckets is not None:
       edges = tuple(self.sampler_is_length_buckets)
       if not edges:
