@@ -961,6 +961,8 @@ async def run_evaluation():
       )
   )
 
+  await asyncio.sleep(0)
+
   async for batch in orchestrator.yield_batches(batch_size=1):
     for item in batch:
       traj = item.traj
