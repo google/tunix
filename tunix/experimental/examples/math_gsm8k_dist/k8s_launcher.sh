@@ -37,10 +37,13 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-# Qwen3 chat models close each turn with `<|im_end|>` rather than the
-# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
-# fall back to the tokenizer's EOS token.
-export EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Qwen3's generation_config.json declares two terminators, `<|im_end|>` (ends a
+# chat turn) and `<|endoftext|>` (ends a raw completion), but a tokenizer only
+# reports one. Both are listed here because the rollout has to stop on whichever
+# the prompt format elicits: CHAT_PARSER=auto produces the former, CHAT_PARSER=raw
+# the latter. Set empty to fall back to the tokenizer's single EOS token.
+export EOS_TOKENS=${EOS_TOKENS-'<|im_end|>,<|endoftext|>'}
+export STOP_TOKENS=${STOP_TOKENS-'</answer>'}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
@@ -440,6 +443,7 @@ start_rollout_instance() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         ${EOS_TOKENS:+--eos_tokens=\"${EOS_TOKENS}\"} \
+        ${STOP_TOKENS:+--stop_tokens=\"${STOP_TOKENS}\"} \
         --sampler=${SAMPLER} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \

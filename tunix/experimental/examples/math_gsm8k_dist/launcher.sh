@@ -79,10 +79,15 @@ SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-raw}
-# Qwen3 chat models close each turn with `<|im_end|>` rather than the
-# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
-# fall back to the tokenizer's EOS token.
-EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Qwen3's generation_config.json declares two terminators, `<|im_end|>` (ends a
+# chat turn) and `<|endoftext|>` (ends a raw completion), but a tokenizer only
+# reports one. Both are listed here because the rollout has to stop on whichever
+# the prompt format elicits: CHAT_PARSER=auto produces the former, CHAT_PARSER=raw
+# the latter. Set empty to fall back to the tokenizer's single EOS token.
+EOS_TOKENS=${EOS_TOKENS-'<|im_end|>,<|endoftext|>'}
+# Stop string sequences that terminate generation when produced by the model
+# (e.g. `</answer>` for math problems).
+STOP_TOKENS=${STOP_TOKENS-'</answer>'}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
@@ -398,6 +403,7 @@ echo "  sampler:        $SAMPLER"
 echo "  weight sync:    $WEIGHT_SYNC_MODE"
 echo "  chat parser:    $CHAT_PARSER"
 echo "  eos tokens:     ${EOS_TOKENS:-<tokenizer default>}"
+echo "  stop tokens:    ${STOP_TOKENS:-<none>}"
 echo "  trainer backend:$TRAINER_BACKEND"
 echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
 echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
@@ -575,6 +581,9 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   fi
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=( --eos_tokens="$EOS_TOKENS" )
+  fi
+  if [[ -n "$STOP_TOKENS" ]]; then
+    ROLLOUT_CMD+=( --stop_tokens="$STOP_TOKENS" )
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)

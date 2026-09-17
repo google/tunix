@@ -128,6 +128,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " Unset leaves the sampler on the tokenizer's own EOS token."
       ),
   )
+  parser.add_argument(
+      "--stop_tokens",
+      "--stop_strings",
+      dest="stop_tokens",
+      type=str,
+      default=os.getenv("STOP_TOKENS", ""),
+      help=(
+          "Comma-separated stop string sequences (e.g. '</answer>' or"
+          " '</function>'). The rollout stops when any of these strings is"
+          " generated."
+      ),
+  )
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=64)
   parser.add_argument("--lora_alpha", type=float, default=64.0)
@@ -313,6 +325,16 @@ def _eos_token_ids(
   return token_ids
 
 
+def _stop_tokens(args: argparse.Namespace) -> list[str] | None:
+  """Resolves --stop_tokens into a list of stop strings, or None when unset."""
+  raw_entries = (getattr(args, "stop_tokens", None) or "").split(",")
+  entries = [entry.strip() for entry in raw_entries if entry.strip()]
+  if not entries:
+    return None
+  logging.info("Resolved --stop_tokens strings: %s", entries)
+  return entries
+
+
 def _rollout_config_kwargs(
     args: argparse.Namespace, tokenizer: Any = None
 ) -> dict[str, Any]:
@@ -324,6 +346,7 @@ def _rollout_config_kwargs(
       "top_p": 1.0,
       "return_logprobs": True,
       "eos_tokens": _eos_token_ids(args, tokenizer),
+      "stop_tokens": _stop_tokens(args),
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
@@ -528,6 +551,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       mapping_config=mapping_config,
       additional_config=maxtext_additional_config,
       engine_kwargs=engine_kwargs,
+      eos_tokens=_eos_token_ids(args, tokenizer),
+      stop=_stop_tokens(args),
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,

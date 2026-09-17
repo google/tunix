@@ -550,6 +550,46 @@ class VllmSamplerConfigTest(absltest.TestCase):
           tokenizer=mock.MagicMock(), config=config
       )
 
+  def test_stop_token_ids_falls_back_to_tokenizer_eos(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    sampler.tokenizer.eos_id.return_value = 151645
+
+    self.assertEqual(sampler._stop_token_ids(), [151645])
+
+  def test_stop_token_ids_uses_configured_eos_tokens(self):
+    # Qwen3 declares both `<|im_end|>` and `<|endoftext|>`; a raw completion
+    # ends on the latter, which the tokenizer never reports.
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+        eos_tokens=[151645, 151643],
+    )
+    sampler = self._make_sampler(config)
+    sampler.tokenizer.eos_id.return_value = 151645
+
+    self.assertEqual(sampler._stop_token_ids(), [151645, 151643])
+
+  def test_stop_strings_defaults_to_empty(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+    )
+    sampler = self._make_sampler(config)
+    self.assertEqual(sampler._stop_strings(), [])
+
+  def test_stop_strings_uses_configured_stop(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False,
+        additional_config={"maxtext_config": {}},
+        stop=["</answer>", "<|im_end|>"],
+    )
+    sampler = self._make_sampler(config)
+    self.assertEqual(sampler._stop_strings(), ["</answer>", "<|im_end|>"])
+
   def test_weight_sync_keeps_kv_cache_when_configured(self):
     config = vllm_sampler.VllmConfig(
         init_with_random_weights=False,
