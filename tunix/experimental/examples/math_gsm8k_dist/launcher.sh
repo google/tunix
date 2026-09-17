@@ -517,6 +517,11 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export JAX_PLATFORMS=proxy,cpu
     export JAX_BACKEND_TARGET=${JAX_BACKEND_TARGET:-grpc://127.0.0.1:29000}
     export TRAINER_PATHWAYS_LOCAL_INIT=1
+    # Under Pathways the trainer's arrays live in the worker rather than in this
+    # process, so Raiden moves them with its FFI transport instead of over TCP.
+    # Exported here and not from a recipe: the rollout is mcJAX and has to stay
+    # on TCP, and a recipe-level export would reach both children.
+    export RAIDEN_USE_FFI=${RAIDEN_USE_FFI:-1}
     unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
   else
     export JAX_PLATFORMS=tpu,cpu
@@ -572,6 +577,10 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
 
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
+  # The rollout is always mcJAX here, so its Raiden endpoint is always TCP, even
+  # when the trainer runs on Pathways and binds FFI. Pinned rather than left
+  # unset so an ambient RAIDEN_USE_FFI cannot make both ends pick FFI.
+  export RAIDEN_USE_FFI=0
   export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
