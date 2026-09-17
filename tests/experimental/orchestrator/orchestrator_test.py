@@ -15,15 +15,19 @@
 """Unit tests for ClusterOrchestrator."""
 
 import pickle
+import tempfile
 import threading
 import time
 from unittest import mock
 
 from absl.testing import absltest
+from etils import epath
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.trajectory import file_store
+from tunix.experimental.trajectory import trajectory_testing
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -423,6 +427,79 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
     )
+
+
+def _trajectory_store_orchestrator(
+    **kwargs,
+) -> orchestrator.ClusterOrchestrator:
+  mock_registry = mock.MagicMock()
+  mock_registry.worker_ids.return_value = []
+  mock_registry.infos.return_value = []
+  mock_registry.group.return_value.members.return_value = []
+  return orchestrator.ClusterOrchestrator(
+      registry=mock_registry,
+      lifecycle_driver=mock.MagicMock(),
+      monitor=mock.MagicMock(),
+      **kwargs,
+  )
+
+
+class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
+
+  def test_no_config_means_no_store(self):
+    orch = _trajectory_store_orchestrator()
+    self.assertIsNone(orch.trajectory_store)
+    orch.shutdown()
+
+  def test_disabled_config_means_no_store(self):
+    orch = _trajectory_store_orchestrator(
+        trajectory_store_config={"enabled": False, "backend": "file"}
+    )
+    self.assertIsNone(orch.trajectory_store)
+    orch.shutdown()
+
+  def test_enabled_file_backend_builds_store_once(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    orch = _trajectory_store_orchestrator(
+        trajectory_store_config={
+            "enabled": True,
+            "backend": "file",
+            "root_dir": str(tmp_dir),
+            "run_id": "cluster_run",
+        }
+    )
+    self.assertIsInstance(orch.trajectory_store, file_store.FileTrajectoryStore)
+    orch.shutdown()
+
+  def test_shutdown_closes_the_store(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    orch = _trajectory_store_orchestrator(
+        trajectory_store_config={
+            "enabled": True,
+            "backend": "file",
+            "root_dir": str(tmp_dir),
+            "run_id": "cluster_run",
+        }
+    )
+    store = orch.trajectory_store
+    orch.shutdown()
+    with self.assertRaises(RuntimeError):
+      store.add_step(trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1)
+
+  def test_shutdown_closes_the_store_even_when_a_prior_step_raises(self):
+    orch = _trajectory_store_orchestrator()
+    orch.trajectory_store = mock.MagicMock()
+    orch.monitor.close = mock.MagicMock(
+        side_effect=RuntimeError("monitor close failed")
+    )
+    with self.assertRaises(RuntimeError):
+      orch.shutdown()
+    orch.lifecycle_driver.shutdown.assert_called_once()
+    orch.trajectory_store.close.assert_called_once()
+
+  def test_shutdown_without_a_store_does_not_raise(self):
+    orch = _trajectory_store_orchestrator()
+    orch.shutdown()
 
 
 if __name__ == "__main__":

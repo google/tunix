@@ -28,6 +28,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
@@ -3622,6 +3623,53 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     self.assertEmpty(
         [k for k in logged if k.startswith("generation/completions/")]
     )
+
+
+class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    self.mock_algo.num_generations = 2
+    self.mock_algo.mini_batch_size = 1
+    self.mock_algo.max_packed_len = 16
+    self.mock_algo.max_response_length = 1024
+    self.assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+    )
+
+  def _create_program(self, **kwargs) -> rl_program.StandardRLProgram:
+    return rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+        assembler=self.assembler,
+        **kwargs,
+    )
+
+  def test_no_trajectory_store_by_default(self):
+    program = self._create_program()
+    self.assertIsNone(program.trajectory_store)
+    program.close()
+
+  def test_holds_the_instance_it_was_given(self):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    program = self._create_program(trajectory_store=store)
+    self.assertIs(program.trajectory_store, store)
+    program.close()
+
+  def test_close_does_not_close_an_injected_store(self):
+    store = mock.MagicMock(spec=in_memory_store.InMemoryTrajectoryStore)
+    program = self._create_program(trajectory_store=store)
+    program.close()
+    store.close.assert_not_called()
+
+  def test_close_without_a_store_does_not_raise(self):
+    program = self._create_program()
+    program.close()
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import trajectory_logger
@@ -211,6 +212,7 @@ class StandardRLProgram(RLProgram):
       sync_weights: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
+      trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       on_step_begin: Callable[[int], None] | None = None,
@@ -299,6 +301,14 @@ class StandardRLProgram(RLProgram):
       )
     else:
       logging.info("Trajectory logging disabled; no trajectory_log_dir set.")
+    # Received, not built: the orchestrator running this program owns the
+    # Trajectory Store's construction and lifecycle (ClusterOrchestrator, one
+    # per process), since a store's lifetime should span the whole
+    # orchestrator process rather than just one program run. This program
+    # only uses it; close() below does not close it.
+    # TODO(sizhi): Wire active trajectory store reads/writes in pipeline stages
+    # in follow-up CLs.
+    self._trajectory_store = trajectory_store
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
@@ -316,8 +326,17 @@ class StandardRLProgram(RLProgram):
         num_generations=self.num_generations
     )
 
+  @property
+  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+    return self._trajectory_store
+
   def close(self) -> None:
-    """Flushes and closes the metrics logger and associated resources."""
+    """Flushes and closes the metrics logger and associated resources.
+
+    Does not close `self._trajectory_store`: this program does not own it
+    (see `__init__`), and closing a store the orchestrator may still be
+    using — e.g. across a second `run_program()` call — would be wrong.
+    """
     if self.trajectory_logger is not None:
       self.trajectory_logger.stop()
     if self.metrics_logger is not None:

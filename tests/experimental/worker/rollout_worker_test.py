@@ -12,18 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for RolloutWorker and lineage telemetry generation."""
+"""Unit tests for RolloutWorker, lineage telemetry, and Trajectory Store."""
 
 import asyncio
+import tempfile
 import threading
 from unittest import mock
 
 from absl.testing import absltest
+from etils import epath
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.common import test_utils as mocks
+from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.experimental.trajectory import trajectory_testing
 from tunix.experimental.worker import rollout_worker
 
 
@@ -160,6 +164,104 @@ class RolloutWorkerTest(absltest.TestCase):
     )
     with self.assertRaises(TypeError):
       self.worker._to_rollout_response(traj)
+
+
+def _worker(config=None):
+  return rollout_worker.RolloutWorker(
+      worker_id="w0",
+      config=config,
+      sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+      tokenizer="mock",
+      chat_parser="mock",
+  )
+
+
+class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
+
+  def test_no_config_means_no_store(self):
+    worker = _worker()
+    self.assertIsNone(worker.trajectory_store)
+
+  def test_config_without_trajectory_store_config_means_no_store(self):
+    worker = _worker(config=rollout_worker.RolloutConfig())
+    self.assertIsNone(worker.trajectory_store)
+
+  def test_disabled_trajectory_store_config_means_no_store(self):
+    config = rollout_worker.RolloutConfig(
+        trajectory_store_config={"enabled": False, "backend": "file"}
+    )
+    worker = _worker(config=config)
+    self.assertIsNone(worker.trajectory_store)
+
+  def test_enabled_file_backend_builds_store_once(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    config = rollout_worker.RolloutConfig(
+        trajectory_store_config={
+            "enabled": True,
+            "backend": "file",
+            "root_dir": str(tmp_dir),
+            "run_id": "worker_run",
+        }
+    )
+    worker = _worker(config=config)
+    self.assertIsInstance(
+        worker.trajectory_store, file_store.FileTrajectoryStore
+    )
+    worker.stop()
+
+  def test_two_workers_get_two_independent_store_instances(self):
+    # Each process constructs its own store; two RolloutWorker instances in
+    # this test process stand in for two separate worker pods, each of which
+    # would build its own store exactly once, in its own __init__.
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    config = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "shared",
+    }
+    worker_a = _worker(
+        config=rollout_worker.RolloutConfig(trajectory_store_config=config)
+    )
+    worker_b = _worker(
+        config=rollout_worker.RolloutConfig(trajectory_store_config=config)
+    )
+    self.assertIsNot(
+        worker_a.trajectory_store, worker_b.trajectory_store
+    )
+    worker_a.stop()
+    worker_b.stop()
+
+  def test_stop_closes_the_store(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    config = rollout_worker.RolloutConfig(
+        trajectory_store_config={
+            "enabled": True,
+            "backend": "file",
+            "root_dir": str(tmp_dir),
+            "run_id": "worker_run",
+        }
+    )
+    worker = _worker(config=config)
+    store = worker.trajectory_store
+    assert store is not None
+    worker.stop()
+    with self.assertRaises(RuntimeError):
+      store.add_step(trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1)
+
+  def test_stop_closes_the_store_even_when_cancel_all_raises(self):
+    worker = _worker()
+    worker._trajectory_store = mock.MagicMock()  # pylint: disable=protected-access
+    worker.manager.cancel_all = mock.MagicMock(
+        side_effect=RuntimeError("cancel_all failed")
+    )
+    with self.assertRaises(RuntimeError):
+      worker.stop()
+    worker._trajectory_store.close.assert_called_once()  # pylint: disable=protected-access
+
+  def test_stop_without_a_store_does_not_raise(self):
+    worker = _worker()
+    worker.stop()
 
 
 if __name__ == "__main__":

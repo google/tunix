@@ -16,11 +16,14 @@
 
 import dataclasses
 import threading
-from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
+
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
@@ -40,6 +43,12 @@ class RolloutConfig(base_rollout.RolloutConfig):
     agent_name: Registered name of agent class in AGENT_REGISTRY.
     env_config: Configuration dictionary passed to environment constructor.
     agent_config: Configuration dictionary passed to agent constructor.
+    trajectory_store_config: Trajectory Store configuration for this worker
+      process, or None to run without a store. See
+      `store.TrajectoryStore.from_config`. Must match what the orchestrator
+      was given: for the file backend it is the shared root_dir and run_id
+      that will make these writes visible to the orchestrator's reads once
+      rollout step logging is wired.
   """
 
   sampler_type: str = "vanilla"
@@ -48,6 +57,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  trajectory_store_config: Mapping[str, Any] | None = None
 
 
 TrajectoryOrError = Union[
@@ -96,6 +106,27 @@ class RolloutWorker(abstract_worker.Worker):
         tokenizer=tokenizer,
         chat_parser=chat_parser,
     )
+    # Built at most once per process: this __init__ runs exactly once per
+    # RolloutWorker instance, so there is no separate guard against
+    # constructing the store twice. See store.TrajectoryStore.from_config.
+    # TODO(sizhi): Pass self._trajectory_store into RolloutManager / collector
+    # to log rollout steps in follow-up CLs.
+    self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
+        config.trajectory_store_config if config is not None else None
+    )
+    if self._trajectory_store is not None:
+      # Several workers can share one log stream, and absl log lines carry no
+      # process identity, so the worker_id is what attributes a reported
+      # config to a process.
+      logging.info(
+          "[trajectory-store] worker %s built %s",
+          worker_id,
+          self._trajectory_store.to_config(),
+      )
+
+  @property
+  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+    return self._trajectory_store
 
   @property
   def sampler(self) -> sampler_lib.Sampler:
@@ -162,7 +193,13 @@ class RolloutWorker(abstract_worker.Worker):
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
-    self.manager.cancel_all()
+    try:
+      self.manager.cancel_all()
+    finally:
+      # Runs even when cancel_all raises, so a failed stop releases the
+      # store's background writer thread instead of leaking it.
+      if self._trajectory_store is not None:
+        self._trajectory_store.close()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
