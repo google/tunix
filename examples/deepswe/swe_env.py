@@ -23,8 +23,14 @@ import time
 from typing import Any, Optional, cast
 
 import numpy as np
-from examples.deepswe import openhands_utils
-from examples.deepswe import sandbox_utils
+try:
+  from examples.deepswe import openhands_utils
+  from examples.deepswe import sandbox_utils
+  from examples.deepswe import template as template_mod
+except ImportError:
+  from examples.deepswe import openhands_utils  # pytype: disable=import-error
+  from examples.deepswe import sandbox_utils  # pytype: disable=import-error
+  from examples.deepswe import template as template_mod  # pytype: disable=import-error
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
@@ -96,12 +102,12 @@ class SWEEnv(BaseTaskEnv):
       entry: dict,
       group_id: int | None = None,
       pair_index: int | None = None,
-      step_timeout: int = 30 * 60,
-      reward_timeout: int = 30 * 60,
+      step_timeout: int = 60,
+      reward_timeout: int = 60,
       backend: str = "kubernetes",
       delete_image: bool = False,
       verbose: bool = False,
-      scaffold: str = "r2egym",
+      scaffold: str = "openhands",
       max_steps: int = 1,
       use_agent_sandbox: bool = False,
       fleet: Any | None = None,
@@ -199,7 +205,7 @@ class SWEEnv(BaseTaskEnv):
           time.sleep(5 * (attempt + 1))
         else:
           raise
-    if self.scaffold == "openhands":
+    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
       from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
 
       ws_kwargs = {}
@@ -222,8 +228,19 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout=self.reward_timeout,
         verbose=self.verbose,
     )
-    if self.scaffold == "openhands":
+    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
       openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
+    elif self.env is not None:
+      openhands_utils.hide_r2e_tests_for_rollout(self.env)
+
+    if self.env is not None and hasattr(self.env, "compute_reward"):
+      orig_compute_reward = self.env.compute_reward
+
+      def _compute_reward_with_restore(*args, **kwargs):
+        openhands_utils.restore_r2e_tests_for_reward(self.workspace or self.env)
+        return orig_compute_reward(*args, **kwargs)
+
+      self.env.compute_reward = _compute_reward_with_restore
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv
@@ -283,7 +300,7 @@ class SWEEnv(BaseTaskEnv):
           info={"max_steps": self.max_steps},
       )
 
-    if self.scaffold == "openhands" and self.workspace is not None:
+    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
       return openhands_utils.step_openhands(self, action_obj)
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
@@ -299,6 +316,13 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    if self.workspace is not None and hasattr(self.workspace, "close"):
+      try:
+        self.workspace.close()
+      except Exception as e:
+        logging.warning("[SWEEnv] Workspace close note: %s", e)
+      self.workspace = None
+
     if self.env is not None:
       self.env.close()
 

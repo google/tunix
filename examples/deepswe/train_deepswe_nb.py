@@ -142,9 +142,9 @@ parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
-parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
-parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
-parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
+parser.add_argument("--episode_timeout_secs", type=int, default=1800)
+parser.add_argument("--step_timeout_secs", type=int, default=60)
+parser.add_argument("--reward_timeout_secs", type=int, default=60)
 parser.add_argument("--max_concurrency", type=int, default=200)
 parser.add_argument(
     "--use_agent_sandbox",
@@ -261,6 +261,13 @@ parser.add_argument(
     default="INFO",
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="Logging level for the script and relevant libraries.",
+)
+parser.add_argument(
+    "--scaffold",
+    type=str,
+    default=os.getenv("SCAFFOLD", "openhands"),
+    choices=["r2egym", "sweagent", "openhands"],
+    help="Agent scaffold/sandbox toolset to use ('r2egym', 'sweagent', or 'openhands').",
 )
 
 args, _ = parser.parse_known_args()
@@ -394,9 +401,11 @@ from tunix.utils import mllog_utils  # pytype: disable=missing-module-attribute,
 try:
   from examples.deepswe import swe_agent
   from examples.deepswe import swe_env
+  from examples.deepswe import template
 except ImportError:
   from examples.deepswe import swe_agent  # pytype: disable=import-error
   from examples.deepswe import swe_env  # pytype: disable=import-error
+  from examples.deepswe import template  # pytype: disable=import-error
 
 if args.rcp_logging:
   mllog_utils.init_start(args)
@@ -684,12 +693,14 @@ if USE_AGENT_SANDBOX:
       max_concurrency=MAX_CONCURRENCY,
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
+      scaffold=args.scaffold,
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,
       fleet=fleet,
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
+      scaffold=args.scaffold,
   )
 
 
@@ -1069,7 +1080,7 @@ config_kwargs = {
     "max_response_length": MAX_RESPONSE_LENGTH,
     "beta": BETA,
     "epsilon": EPSILON,
-    "system_prompt": swe_agent.SWE_SYSTEM_PROMPT,
+    "system_prompt": swe_agent.get_system_prompt(scaffold=args.scaffold),
     "max_concurrency": MAX_CONCURRENCY,
     "epsilon_high": EPSILON_HIGH,
     "off_policy_steps": OFF_POLICY_STEPS,
@@ -1083,11 +1094,17 @@ config_kwargs = {
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
+agent_class = (
+    swe_agent.CodeActAgent
+    if args.scaffold in template.OPENHANDS_SCAFFOLDS
+    else swe_agent.SWEAgent
+)
+
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine,
     reward_fns=None,
-    agent_class=swe_agent.SWEAgent,
-    agent_kwargs={},
+    agent_class=agent_class,
+    agent_kwargs={"scaffold": args.scaffold},
     env_class=swe_env.SWEEnv,
     env_kwargs={
         "max_steps": MAX_TURNS,
@@ -1095,6 +1112,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "reward_timeout": REWARD_TIMEOUT_SECS,
         "use_agent_sandbox": USE_AGENT_SANDBOX,
         "fleet": fleet,
+        "scaffold": args.scaffold,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
