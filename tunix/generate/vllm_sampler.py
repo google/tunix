@@ -650,9 +650,26 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
+  @staticmethod
+  def _check_prompt_echo(prompt_ids, outputs) -> None:
+    """Checks each result belongs to, and echoes, the submitted token row.
+
+    Raises:
+      ValueError: result count, request ids or echoed prompts disagree with
+        what was submitted.
+    """
+    if len(outputs) != len(prompt_ids):
+      raise ValueError("vLLM result count differs from submitted token rows")
+    request_ids = [output.request_id for output in outputs]
+    if len(set(request_ids)) != len(request_ids):
+      raise ValueError("vLLM returned duplicate request ids")
+    for expected, output in zip(prompt_ids, outputs):
+      if not np.array_equal(utils.as_token_ids(output.prompt_token_ids), expected):
+        raise ValueError("vLLM prompt echo differs from the submitted token row")
+
   def __call__(
       self,
-      input_strings: str | List[str],
+      input_strings: str | List[str] | None,
       max_generation_steps: int,
       max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,
@@ -666,11 +683,25 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      *,
+      prompt_token_ids: list[list[int] | np.ndarray] | None = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
     if isinstance(input_strings, str):
       input_strings = [input_strings]
+
+    exact_input = prompt_token_ids is not None
+    if exact_input == (input_strings is not None):
+      raise ValueError("Provide exactly one of input_strings or prompt_token_ids")
+    if exact_input:
+      prompt_ids = [utils.as_token_ids(row) for row in prompt_token_ids]
+      if any(
+          len(row) + max_generation_steps > self.args["max_model_len"]
+          for row in prompt_ids
+      ):
+        raise ValueError("prompt plus max_generation_steps exceeds max_model_len")
+      input_strings = [""] * len(prompt_ids)  # detokenize logs only
 
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
@@ -751,7 +782,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               f" {sampling_kwargs}. Error: {e}",
           )
 
-    prompt_ids = [self.tokenize(x) for x in input_strings]
+    if exact_input and (
+        isinstance(sampling_params, BeamSearchParams)
+        or getattr(sampling_params, "n", 1) != 1
+        or getattr(sampling_params, "truncate_prompt_tokens", None) is not None
+    ):
+      # One sampled row per submitted row, no truncation: the echo check and
+      # the recorded history assume the engine consumed exactly these ids.
+      raise ValueError("prompt_token_ids requires exactly one output per row")
+    if not exact_input:
+      prompt_ids = [self.tokenize(x) for x in input_strings]
     prompt_objects = cast(
         List[TokensPrompt],
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
@@ -760,6 +800,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:
       outputs = self._generate_offline(prompt_objects, sampling_params)
+    if exact_input:
+      self._check_prompt_echo(prompt_ids, outputs)
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
     )
@@ -792,5 +834,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
+        ),
+        prompt_lengths=np.array(
+            [len(row) for row in prompt_ids], dtype=np.int32
         ),
     )

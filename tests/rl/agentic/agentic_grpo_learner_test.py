@@ -2489,5 +2489,150 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertIn("off_policy_steps", mock_warn.call_args[0][0])
 
 
+class ExactTokenContinuityBatchTest(absltest.TestCase):
+  """Real batch construction on a recorded exact trajectory; no model training."""
+
+  @staticmethod
+  def _raw_trajectory():
+    return {
+        "prompt_tokens": np.array([0, 0, 5, 100, 101], np.int32),
+        "prompt_length": 3,
+        "conversation_tokens": np.array(
+            [10, 11, 90, 20, 21, 12, 90, 22, 13, 14, 90], np.int32
+        ),
+        "conversation_masks": np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.int32),
+        "old_logprobs": np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.float32) * -0.5,
+        "conversation_text": [{"role": "assistant", "content": "action"}],
+        "policy_version": 7,
+        "trajectory_reward": 1.0,
+        "original_input": {"prompts": ["fixture"]},
+    }
+
+  def _make_batch(self, *, exact=True, packed=False, raw=None):
+    import copy  # pylint: disable=g-import-not-at-top
+    from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(agentic_grpo_learner.GRPOLearner)
+    obj.algo_config = agentic_grpo_learner.GRPOConfig(
+        exact_token_continuity=exact,
+        max_response_length=20,
+        beta=0.0,
+        use_rollout_logps=True,
+    )
+    obj._trajectory_logger = None
+    obj.metric_fns = []
+    obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
+    obj.rl_engine = types.SimpleNamespace(
+        rollout=types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 255),
+        r2m={rl_engine_lib.Role.ACTOR: None},
+        perf_v2=tracer.NoopTracer(),
+        buffer_metrics_async=mock.Mock(),
+        cluster_config=types.SimpleNamespace(
+            rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
+            training_config=types.SimpleNamespace(
+                max_seq_token_per_tpu=32 if packed else None,
+                compute_logps_micro_batch_size=1,
+            ),
+        ),
+    )
+    record = self._raw_trajectory() if raw is None else raw
+    items = [agent_types.TrajectoryItem(traj=copy.deepcopy(record)) for _ in range(2)]
+    return obj._process_results(items)[0]
+
+  def test_exact_batch_keeps_recorded_ids_masks_and_logprobs(self):
+    raw = self._raw_trajectory()
+    batch = self._make_batch()
+    count = len(raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.prompt_ids[0], [0, 0, 5, 100, 101])
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    np.testing.assert_array_equal(batch.completion_ids[0, :count], raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.completion_mask[0, :count], raw["conversation_masks"])
+    np.testing.assert_array_equal(batch.old_per_token_logps[0, :count], raw["old_logprobs"])
+    np.testing.assert_array_equal(batch.completion_mask[0, count:], 0)
+
+  def test_exact_batch_never_silently_truncates(self):
+    raw = self._raw_trajectory()
+    raw.update(
+        conversation_tokens=np.arange(1, 22),
+        conversation_masks=np.ones(21, np.int32),
+        old_logprobs=np.zeros(21),
+    )
+    with self.assertRaisesRegex(ValueError, "exceeds training padding budget"):
+      self._make_batch(raw=raw)
+
+  def test_validity_mask_is_separate_from_loss_mask_and_survives_packing(self):
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    raw = self._raw_trajectory()
+    raw["conversation_tokens"] = raw["conversation_tokens"].copy()
+    raw["conversation_tokens"][-2] = 0  # a real token equal to the pad id stays valid
+    batch = self._make_batch(raw=raw)
+    count = len(raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.completion_ids[0, :count], raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.completion_mask[0, :count], raw["conversation_masks"])
+    np.testing.assert_array_equal(
+        batch.completion_attention_mask[0], [1] * count + [0] * (20 - count)
+    )
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    unpadded = rl_utils.unpad_train_example(batch)[0]
+    np.testing.assert_array_equal(unpadded["completion_ids"], raw["conversation_tokens"])
+    np.testing.assert_array_equal(unpadded["old_per_token_logps"], raw["old_logprobs"])
+
+    packed = list(
+        rl_utils.pack_sequences(
+            iter([[self._make_batch(packed=True, raw=raw)]]),
+            max_token_budget=64,
+            sequences_per_update=2,
+        )
+    )[0][0]
+    expected = [5, 100, 101] + list(raw["conversation_tokens"])
+    for segment in (1, 2):
+      positions = np.asarray(packed.segment_ids[0]) == segment
+      np.testing.assert_array_equal(packed.completion_ids[0][positions], expected)
+      np.testing.assert_array_equal(
+          packed.completion_mask[0][positions], [0, 0, 0] + list(raw["conversation_masks"])
+      )
+
+  def test_native_default_keeps_pad_id_validity(self):
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    batch = self._make_batch(exact=False)
+    self.assertIsNone(batch.completion_attention_mask)
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    self.assertLen(rl_utils.unpad_train_example(batch)[0]["completion_ids"], 5)
+
+  def test_actor_ref_and_loss_consume_token_mask(self):
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+    from tunix.rl import rl_cluster as rl_cluster_lib  # pylint: disable=g-import-not-at-top
+
+    class PositionModel(nnx.Module):
+      """Logits that only depend on the attention positions the model sees."""
+
+      def __init__(self):
+        self.scale = nnx.Param(jnp.ones((1,), jnp.float32))
+
+      def __call__(self, tokens, positions, cache=None, attention_mask=None, segment_ids=None):
+        del cache, attention_mask, segment_ids
+        base = jnp.zeros(tokens.shape + (256,), jnp.float32)
+        return base.at[..., 1].set(positions.astype(jnp.float32) * self.scale[0]), None
+
+    raw = self._raw_trajectory()
+    raw["conversation_tokens"] = raw["conversation_tokens"].copy()
+    raw["conversation_tokens"][-2] = 0
+    batch = self._make_batch(raw=raw)
+    graph, state = nnx.split(PositionModel())
+    mask = jnp.concatenate([batch.prompt_mask, batch.completion_attention_mask], axis=1)
+    with_mask = common.compute_per_token_logps(
+        graph, state, batch.prompt_ids, batch.completion_ids, 0, 255, token_mask=mask
+    )
+    without_mask = common.compute_per_token_logps(
+        graph, state, batch.prompt_ids, batch.completion_ids, 0, 255
+    )
+    # The pad-valued real token shifts positions of everything after it
+    # without the explicit mask; with it, positions are contiguous.
+    self.assertFalse(np.array_equal(np.asarray(with_mask), np.asarray(without_mask)))
+
+
 if __name__ == "__main__":
   absltest.main()

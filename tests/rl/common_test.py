@@ -1194,5 +1194,39 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
     )
 
 
+class ProcessIdsTokenMaskTest(absltest.TestCase):
+
+  def test_explicit_token_mask_marks_validity_independent_of_pad_id(self):
+    prompt = jnp.array([[0, 5]])
+    completion = jnp.array([[6, 0, 7, 0]])  # a real token equal to pad id (0)
+    explicit = jnp.array([[1, 1, 1, 1, 1, 0]])
+    _, positions, attention, segments = common.process_ids(
+        prompt, completion, 0, 255, token_mask=explicit
+    )
+    np.testing.assert_array_equal(positions, [[0, 1, 2, 3, 4, 4]])
+    np.testing.assert_array_equal(segments, explicit)
+    expected = np.tril(np.ones((6, 6), dtype=bool))
+    expected[:, 5] = False
+    np.testing.assert_array_equal(attention[0], expected)
+    # Without token_mask the legacy pad-id rule is unchanged.
+    _, old_positions, _, old_segments = common.process_ids(
+        prompt, completion, 0, 255
+    )
+    np.testing.assert_array_equal(old_positions, [[0, 0, 1, 1, 2, 2]])
+    np.testing.assert_array_equal(old_segments, [[0, 1, 1, 0, 1, 0]])
+    with self.assertRaises(ValueError):  # shape must cover prompt+completion
+      common.process_ids(
+          jnp.array([[1, 2]]), jnp.array([[3, 4]]), 0, 255,
+          token_mask=np.ones((1, 3), bool),
+      )
+    with self.assertRaises(ValueError):  # exclusive with packed segments
+      common.process_ids(
+          jnp.array([[1, 2]]), jnp.array([[3, 4]]), 0, 255,
+          token_mask=np.ones((1, 4), bool),
+          segment_ids=np.ones((1, 4), np.int32),
+          segment_positions=np.arange(4)[None],
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

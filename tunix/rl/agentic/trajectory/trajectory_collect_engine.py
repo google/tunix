@@ -20,6 +20,7 @@ an LLM-based agent and an environment. It supports single and concurrent
 multi-pair trajectory collection.
 """
 import asyncio
+import copy
 import inspect
 import json
 import time
@@ -27,6 +28,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from absl import logging
 import numpy as np
+from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -68,6 +70,7 @@ class TrajectoryCollectEngine:
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
+      exact_token_continuity: bool = False,
   ):
     """Initialize the trajectory collection engine.
 
@@ -94,12 +97,18 @@ class TrajectoryCollectEngine:
         overlong_filter: Whether to filter overlong trajectories.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements. Defaults to a no-op tracer.
+        exact_token_continuity: Preserve recorded token history on later turns.
+          Requires a token-aware model_call, tokenizer, and parser.
     """
     self.agent = agent
     self.env = env
     self.model_call = model_call
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
+    if exact_token_continuity and (tokenizer is None or chat_parser is None):
+      raise ValueError("exact_token_continuity requires a tokenizer and parser")
+    self.exact_token_continuity = exact_token_continuity
+    self._exact_chat_history = None
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
     )
@@ -314,7 +323,7 @@ class TrajectoryCollectEngine:
           else conversation_masks
       )
 
-      return {
+      result = {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
           "conversation_tokens": conversation_tokens,
@@ -330,6 +339,10 @@ class TrajectoryCollectEngine:
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
+      if self.agent.trajectory.prompt_length is not None:
+        # Set only by exact token continuity; lets training unpad by length.
+        result["prompt_length"] = self.agent.trajectory.prompt_length
+      return result
     elif mode == "Conversation":
       # return raw conversation history
       return self.agent.chat_completions
@@ -423,7 +436,11 @@ class TrajectoryCollectEngine:
         info=self._rollout_state_info(info),
     )
 
-    if self.tokenizer is not None and self.chat_parser is not None:
+    if (
+        self.tokenizer is not None
+        and self.chat_parser is not None
+        and not self.exact_token_continuity
+    ):
       # Get the current messages (usually System + User)
       init_messages = self.agent.chat_completions
       prompt_tokens, _ = utils.tokenize_and_generate_masks(
@@ -434,6 +451,23 @@ class TrajectoryCollectEngine:
           contains_generation_msg=True,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
+    if self.exact_token_continuity:
+      self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
+
+  def _record_exact_turn(self, cur_step, *, terminal: bool) -> None:
+    """Closes the recorded turn and checks the agent only appended messages.
+
+    Raises:
+      ValueError: the agent rewrote earlier chat history, which would silently
+        desynchronize text from the recorded ids.
+    """
+    messages = self.agent.chat_completions
+    previous = self._exact_chat_history
+    if messages[: len(previous)] != previous:
+      raise ValueError("agent rewrote previously recorded chat history")
+    if terminal and cur_step is not None:
+      cur_step.done = True
+    self._exact_chat_history = copy.deepcopy(messages)
 
   @property
   def _debug_prefix(self) -> str:
@@ -504,6 +538,14 @@ class TrajectoryCollectEngine:
     )
     logging.debug("%s model_call starting", self._debug_prefix)
 
+    chat_input = self.agent.chat_completions
+    call_kwargs = dict(self.model_call_kwargs)
+    if self.exact_token_continuity and self.agent.trajectory.steps:
+      chat_input = None  # later turn: recorded ids, not re-encoded text
+      call_kwargs["prompt_token_ids"] = utils.continuation_prompt_tokens(
+          self.agent.trajectory
+      )
+
     model_call_fn = self.model_call
     is_async = inspect.iscoroutinefunction(model_call_fn) or (
         hasattr(model_call_fn, "__call__")
@@ -514,10 +556,10 @@ class TrajectoryCollectEngine:
     if is_async:
       try:
         rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
-            self.agent.chat_completions,
+            chat_input,
             self.env,
             max_generation_steps=max_generation_steps,
-            **self.model_call_kwargs,
+            **call_kwargs,
         )
       except Exception as e:
         logging.exception("Caught exception inside async model_call: %s", e)
@@ -526,10 +568,10 @@ class TrajectoryCollectEngine:
       def _safe_model_call():
         try:
           return model_call_fn(
-              self.agent.chat_completions,
+              chat_input,
               self.env,
               max_generation_steps=max_generation_steps,
-              **self.model_call_kwargs,
+              **call_kwargs,
           )
         except Exception as e:
           logging.exception("Caught exception inside model_call: %s", e)
@@ -550,6 +592,18 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
           rollout_output.left_padded_prompt_tokens[0]
       )
+      if self.exact_token_continuity:
+        # The owned first-turn prompt; later turns replay exactly these ids.
+        self.agent.trajectory.prompt_length = int(
+            rollout_output.prompt_lengths[0]
+        )
+    elif self.exact_token_continuity:
+      echoed = generate_utils.unpad_prompt(
+          rollout_output.left_padded_prompt_tokens[0],
+          rollout_output.prompt_lengths[0],
+      )
+      if not np.array_equal(echoed, call_kwargs["prompt_token_ids"]):
+        raise ValueError("later-turn prompt differs from recorded history")
 
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
@@ -643,6 +697,10 @@ class TrajectoryCollectEngine:
                 rollout_output.tokens[0]
             )
         )
+        if self.exact_token_continuity:
+          cur_step.assistant_tokens = utils.assistant_with_suffix(
+              rollout_output.tokens[0], cur_step.assistant_tokens, n_append
+          )
         cur_step.assistant_masks = np.concatenate(
             [
                 np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
@@ -669,6 +727,9 @@ class TrajectoryCollectEngine:
         cur_step.env_tokens = np.array(e_tokens)
         cur_step.env_masks = np.array(e_masks)
         self._response_token_count += len(e_tokens)
+
+    if self.exact_token_continuity:
+      self._record_exact_turn(cur_step, terminal=done or step_timed_out)
 
     if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT

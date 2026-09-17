@@ -37,6 +37,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import common
@@ -504,10 +505,23 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
       completion_texts.append(assistant_text)
-      prompt_tokens_list.append(item.traj.get("prompt_tokens"))
-      completion_tokens_list.append(item.traj.get("conversation_tokens"))
-      completion_masks_list.append(item.traj.get("conversation_masks"))
-      old_logprobs_list.append(item.traj.get("old_logprobs"))
+      if self.algo_config.exact_token_continuity:
+        # Recorded ids are the training stream; keep them as arrays.
+        prompt_tokens_list.append(
+            generate_utils.unpad_prompt(
+                item.traj["prompt_tokens"], item.traj["prompt_length"]
+            )
+        )
+        completion_tokens_list.append(
+            generate_utils.as_token_ids(item.traj["conversation_tokens"])
+        )
+        completion_masks_list.append(np.asarray(item.traj["conversation_masks"]))
+        old_logprobs_list.append(np.asarray(item.traj["old_logprobs"]))
+      else:
+        prompt_tokens_list.append(item.traj.get("prompt_tokens"))
+        completion_tokens_list.append(item.traj.get("conversation_tokens"))
+        completion_masks_list.append(item.traj.get("conversation_masks"))
+        old_logprobs_list.append(item.traj.get("old_logprobs"))
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
@@ -528,6 +542,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_completion_ids = []
     padded_completion_masks = []
     padded_old_logprobs = []
+    padded_prompt_masks = []
+    padded_completion_attention_masks = []
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
@@ -537,6 +553,23 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_masks_list,
         old_logprobs_list,
     ):
+      if self.algo_config.exact_token_continuity:
+        if (
+            len(prompt_tokens) > rollout_config.max_prompt_length
+            or len(completion_tokens) > max_response_length
+        ):
+          raise ValueError(
+              "Exact trajectory exceeds training padding budget:"
+              f" prompt={len(prompt_tokens)}/{rollout_config.max_prompt_length},"
+              f" completion={len(completion_tokens)}/{max_response_length}"
+          )
+        padded_prompt_masks.append(
+            np.arange(rollout_config.max_prompt_length)
+            >= rollout_config.max_prompt_length - len(prompt_tokens)
+        )
+        padded_completion_attention_masks.append(
+            np.arange(max_response_length) < len(completion_tokens)
+        )
       raw_completion_lengths.append(
           min(len(completion_tokens), max_response_length)
       )
@@ -580,6 +613,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    completion_attention_mask = None
+    token_kwargs = {}
+    if self.algo_config.exact_token_continuity:
+      # Validity by length: environment/template tokens are context, and a
+      # real token equal to the pad id stays valid.
+      prompt_mask = jnp.asarray(padded_prompt_masks)
+      completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
+      token_kwargs["token_mask"] = jnp.concatenate(
+          [prompt_mask, completion_attention_mask], axis=1
+      )
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
@@ -631,6 +674,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               pad_id=pad_value,
               eos_id=eos_value,
               micro_batch_size=compute_logps_micro_batch_size,
+              **token_kwargs,
           )
     elif self.algo_config.use_rollout_logps and padded_old_logprobs:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
@@ -650,6 +694,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=compute_logps_micro_batch_size,
+            **token_kwargs,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -672,6 +717,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=compute_logps_micro_batch_size,
+          **token_kwargs,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -708,6 +754,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=compute_logps_micro_batch_size,
+            **token_kwargs,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -865,6 +912,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
+        completion_attention_mask=completion_attention_mask,
     )
     return [combined_batch]
 
