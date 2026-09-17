@@ -25,11 +25,33 @@ def _set_sqlite_pragma(
   cursor.close()
 
 
-def create_sqlite_memory_engine() -> sa.Engine:
-  """Creates an in-memory SQLite engine with foreign key enforcement enabled."""
-  engine = sa.create_engine("sqlite:///:memory:")
+def create_sqlite_memory_engine(shared_pool: bool = False) -> sa.Engine:
+  """Creates an in-memory SQLite engine with foreign key enforcement enabled.
+
+  Args:
+    shared_pool: If True, uses StaticPool and check_same_thread=False so that
+      the in-memory database is shared across multiple concurrent threads (e.g.
+      for asynchronous background worker threads).
+
+  Returns:
+    A configured SQLAlchemy Engine.
+  """
+  kwargs: dict[str, Any] = {}
+  if shared_pool:
+    kwargs["poolclass"] = sa.pool.StaticPool
+    kwargs["connect_args"] = {"check_same_thread": False}
+  engine = sa.create_engine("sqlite:///:memory:", **kwargs)
   sa.event.listen(engine, "connect", _set_sqlite_pragma)
   return engine
+
+
+def fetch_all(
+    engine: sa.Engine, statement: sa.sql.Executable
+) -> list[dict[str, Any]]:
+  """Executes a statement and returns all rows as dictionary mappings."""
+  with engine.connect() as conn:
+    result = conn.execute(statement)
+    return [dict(row) for row in result.mappings().all()]
 
 
 class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
