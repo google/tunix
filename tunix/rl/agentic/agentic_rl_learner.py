@@ -758,6 +758,59 @@ def _p58_all_filtered_no_commit_contract(
   return True
 
 
+def _p58_microbatch_all_compact_filtered(
+    pair_sidecar: Any,
+    *,
+    host_action_tokens: int,
+    values: Mapping[str, str],
+) -> tuple[Any, bool]:
+  """Re-derives `all_compact_filtered` for one microbatch row slice.
+
+  `ObservedTrainExample.all_compact_filtered` is a `pytree_node=False` scalar,
+  so the `jax.tree.map` row gather that builds a microbatch sidecar copies the
+  *batch* answer verbatim.  That is correct whenever the microbatch mirrors the
+  batch, and wrong in exactly one situation:
+
+  `CANON_P32_LENGTH_SORT` orders the update's rows by sequence length before
+  cutting them into microbatches, and a compact-filtered row (for example
+  `MAX_CONTEXT_LIMIT_REACHED`) is by construction among the longest rows in the
+  batch.  As soon as one step filters more rows than a microbatch holds, the
+  leading microbatch consists entirely of filtered rows and carries zero policy
+  action tokens, while the batch as a whole still has plenty.  The inherited
+  `False` then makes `alignment.check_batch` report `N_action=0` for a row set
+  that is legitimately signal-free.
+
+  Re-deriving the flag from the microbatch's own action mask does not weaken a
+  single check:
+
+  * it is inert unless the enclosing batch does have action tokens, so a truly
+    empty batch keeps flowing through the existing batch-level transaction;
+  * it is inert outside the signed P58 training lane;
+  * `alignment.check_batch` still fails closed with
+    `compact_filtered_gradient_nonzero` if a zero-action microbatch ever
+    produced a nonzero gradient.
+
+  Returns the (possibly rewritten) sidecar and whether it was rewritten.
+  """
+  if pair_sidecar.all_compact_filtered:
+    return pair_sidecar, False
+  if host_action_tokens <= 0:
+    return pair_sidecar, False
+  signed = (
+      values.get("CANON_P34_DEEPSWE") == "1"
+      and values.get("CANON_P58_DEEPSWE_TIM") == "1"
+      and values.get("CANON_P58_TIM_ADMITTED") == "1"
+      and values.get("CANON_P58_TIM_ARM") in ("native", "zero")
+      and values.get("CANON_ALIGNMENT_TRAIN") == "1"
+  )
+  if not signed:
+    return pair_sidecar, False
+  action_tokens = int(np.asarray(pair_sidecar.action_mask, dtype=np.bool_).sum())
+  if action_tokens != 0:
+    return pair_sidecar, False
+  return pair_sidecar.replace(all_compact_filtered=True), True
+
+
 def _p58_full_batch_runtime_contract(values: Mapping[str, str]) -> bool:
   """Selects the exact P58 training geometry that requires 128-row batches."""
   return deepswe_debug.p58_complete_batch_runtime_contract(values)
@@ -2046,6 +2099,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     host_sidecar, host_logps = _host_microbatch_views(
         sidecar, result["per_token_logps"], num_trajectories
     )
+    # Length sorting can concentrate every compact-filtered row of the update
+    # into one microbatch; the batch answer below decides whether such a
+    # microbatch is a local no-signal slice or a genuinely empty batch.
+    host_action_tokens = int(
+        np.asarray(host_sidecar.action_mask, dtype=np.bool_).sum()
+    )
     for index in range(expected_microbatches):
       rows = (
           tuple(result["reports"][index]["trajectory_rows"])
@@ -2066,6 +2125,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           ),
           host_sidecar,
       )
+      pair_sidecar, microbatch_all_filtered = (
+          _p58_microbatch_all_compact_filtered(
+              pair_sidecar,
+              host_action_tokens=host_action_tokens,
+              values=os.environ,
+          )
+      )
+      if microbatch_all_filtered:
+        print(
+            "[P58.MICROBATCH_ALL_FILTERED] "
+            f"index={index} rows={rows} n_action=0 "
+            f"batch_n_action={host_action_tokens} commit=batch",
+            flush=True,
+        )
+
       active = (
           result["reports"][index]["gradient_nonzero"] > 0
           if canonical_workload
