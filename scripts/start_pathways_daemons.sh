@@ -53,8 +53,30 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 # Chips the Pathways worker owns. Must not overlap ROLLOUT_TPU_CHIPS.
-PATHWAYS_WORKER_TPU_CHIPS=${PATHWAYS_WORKER_TPU_CHIPS:-${TRAINER_TPU_CHIPS:-0,1,2,3}}
+#
+# Detected in PCI order rather than taken as the literal IDs 0,1,2,3. On a
+# multi-tray host the /dev/vfio minor IDs are enumerated out of order across
+# PCIe switches, so the four lowest IDs can straddle two trays and cannot form a
+# 2x2 mesh. The worker rejects that late and opaquely, during TPU init:
+#   TPU_RET_CHECK failure ... GetChip(i)->location().index_on_host() == i
+# after which the proxy never comes up and the trainer fails with the
+# unrelated-looking "Backend 'proxy' is not in the list of known backends".
+#
+# Same script and same split the recipe uses for TRAINER_TPU_CHIPS; the daemons
+# just start before the recipe runs, so it is computed twice rather than passed.
+detect_worker_chips() {
+  local sorted_ids="${SCRIPT_DIR}/get_sorted_tpu_ids.py"
+  if [[ -f "${sorted_ids}" && -d /dev/vfio ]]; then
+    python3 "${sorted_ids}" --count 4 2>/dev/null || true
+  fi
+}
+
+PATHWAYS_WORKER_TPU_CHIPS=${PATHWAYS_WORKER_TPU_CHIPS:-${TRAINER_TPU_CHIPS:-$(detect_worker_chips)}}
+# Hosts with no /dev/vfio (detection returns nothing) keep the old literal.
+PATHWAYS_WORKER_TPU_CHIPS=${PATHWAYS_WORKER_TPU_CHIPS:-0,1,2,3}
 
 # Topology the resource manager expects the worker to report, as
 # "<generation>:<XxY>". It must agree with the bounds below and with the chip

@@ -511,13 +511,16 @@ jobs:
         run: bash scripts/build_maxtext_checkpoint.sh
 
       # The worker is confined to the trainer's 4 chips so the rollout keeps the
-      # other 4; the instance type is autodetected from the host's generation.
+      # other 4. Which 4 those are is left to the script, which picks them in PCI
+      # order exactly as the recipe does -- naming them here as 0,1,2,3 is what
+      # made the worker fail TPU init on this runner, whose vfio IDs enumerate as
+      # trainer [3,2,4,1] / rollout [7,5,6,0]. The instance type is likewise
+      # autodetected from the host's generation.
+      #
       # Skipped entirely when trainer_pathways is false, in which case nothing
       # binds the chips and both sides run mcJAX.
       - name: Start Pathways daemons
         if: ${{ inputs.trainer_pathways }}
-        env:
-          PATHWAYS_WORKER_TPU_CHIPS: '0,1,2,3'
         run: bash scripts/start_pathways_daemons.sh
 
       - name: Run GSM8K Distributed RL Smoke Test (MaxText + vLLM + Raiden)
