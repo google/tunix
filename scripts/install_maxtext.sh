@@ -55,7 +55,20 @@ MAXTEXT_REQUIREMENTS=${MAXTEXT_REQUIREMENTS:-"${ROOT_DIR}/requirements/maxtext_r
 
 # Packages whose versions the TPU runtime, vLLM and tpu-inference agree on.
 # MaxText must fit around them, not the other way round.
-PROTECTED_PACKAGES=(jax jaxlib libtpu libtpu-nightly numpy torch vllm tpu-inference)
+#
+# protobuf is here for a subtler reason than the rest. MaxText's closure asks
+# only for `protobuf<8.0.0,>=4.25.8`, which the image's 7.36.1 already satisfies,
+# yet pip still re-resolves it down to 6.x. The image's compiled extensions
+# (tpu_info's tpu_metric_service.pb.cc, TensorFlow, gRPC) register their
+# generated descriptors against the 7.x C++ runtime at static-init time, so
+# swapping the runtime underneath them aborts the process on the first duplicate
+# file:
+#   descriptor_database.cc: File already exists in database:
+#                           google/protobuf/timestamp.proto
+#   descriptor.cc: Check failed: GeneratedDatabase()->Add(...)
+# which lands as a bare SIGSEGV/SIGABRT partway through an import, with no
+# Python traceback. Nothing actually needs the downgrade; restoring it is free.
+PROTECTED_PACKAGES=(jax jaxlib libtpu libtpu-nightly numpy protobuf torch vllm tpu-inference)
 
 if [[ ! -f "${MAXTEXT_REQUIREMENTS}" ]]; then
   echo "Error: requirements file not found: ${MAXTEXT_REQUIREMENTS}" >&2
@@ -122,32 +135,48 @@ if [[ "${RESTORED}" == "0" ]]; then
   echo "No protected package versions changed."
 fi
 
+echo "Installed versions after the restore:"
+record_versions jax jaxlib libtpu numpy protobuf torch vllm tpu-inference maxtext \
+  maxtext-vllm-adapter | sed 's/^/  /'
+
 # Both halves of the stack import from this interpreter, so assert both here
 # rather than discovering it inside a backgrounded trainer or rollout process,
 # where the traceback lands in a log file nobody reads until the job times out.
+#
+# One subprocess per half, mirroring how the test actually runs: the trainer
+# imports MaxText, the rollout imports the vLLM plugin, and neither imports the
+# other. Checking both in a single interpreter would be a harsher test than
+# production ever performs, and would fail the install on a conflict nothing hits.
+#
+# -u because stdout to a pipe is block-buffered and a native crash discards the
+# buffer: without it a segfault mid-import prints nothing at all, not even the
+# lines already "printed", so there is no way to tell which import died.
+# -X faulthandler turns that crash into a Python stack trace.
 # JAX_PLATFORMS=cpu keeps this from claiming the TPU chips the test needs.
-JAX_PLATFORMS=cpu python3 - <<'PY'
-import importlib.metadata as md
+verify_imports() {
+  local label="$1"
+  echo "Verifying the ${label} half of the stack imports..."
+  if ! JAX_PLATFORMS=cpu python3 -X faulthandler -u; then
+    echo "Error: the ${label} half of the stack does not import cleanly." >&2
+    exit 1
+  fi
+}
 
-import jax
-
-print(f"jax {jax.__version__}")
-for name in ("jaxlib", "libtpu", "numpy", "vllm", "tpu-inference", "maxtext"):
-  try:
-    print(f"{name} {md.version(name)}")
-  except md.PackageNotFoundError:
-    print(f"{name} MISSING")
-
-# Trainer side: the engine Tunix's maxtext backend instantiates.
+verify_imports "trainer" <<'PY'
+# The engine Tunix's maxtext backend instantiates.
 from maxtext.configs import pyconfig  # noqa: F401
+print("  maxtext.configs.pyconfig ok")
 from maxtext.training_engine import maxtext_engine  # noqa: F401
+print("  maxtext.training_engine.maxtext_engine ok")
+PY
 
-# Rollout side: the vLLM general plugin that registers MaxTextForCausalLM. vLLM
-# loads it by entry point, which swallows import errors into a warning, so a
-# broken install would otherwise show up as the rollout quietly running the
-# stock Qwen3 model and Raiden matching zero tensors by name.
-import maxtext_vllm_adapter  # noqa: F401
+verify_imports "rollout" <<'PY'
+# The vLLM general plugin that registers MaxTextForCausalLM. vLLM loads it by
+# entry point, which swallows import errors into a warning, so a broken install
+# would otherwise show up as the rollout quietly running the stock Qwen3 model
+# and Raiden matching zero tensors by name.
+import maxtext_vllm_adapter
 
-assert hasattr(maxtext_vllm_adapter, "register")
-print("MaxText trainer engine and vLLM adapter import cleanly.")
+assert hasattr(maxtext_vllm_adapter, "register"), "adapter has no register()"
+print("  maxtext_vllm_adapter ok")
 PY

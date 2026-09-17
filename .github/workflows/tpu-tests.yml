@@ -501,9 +501,10 @@ jobs:
           print("TPU runtime preflight check passed successfully.")
           PY
 
-      # CPU only; the TPU chips stay free. The MaxText backend restores a scanned
-      # Orbax checkpoint and cannot start from HF safetensors the way the Tunix
-      # backend can.
+      # CPU only; the TPU chips stay free. Tunix's maxtext backend requires a
+      # scanned Orbax checkpoint -- not because MaxText lacks HF support, but
+      # because Tunix never reaches it. See the recipe script for the three
+      # places that enforce it.
       - name: Build MaxText checkpoint (Qwen3-0.6B HF -> Orbax)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -541,6 +542,10 @@ jobs:
       # connection with no stated cause.
       - name: Print Pathways daemon logs on failure
         if: ${{ failure() && inputs.trainer_pathways }}
+        # `shell: bash` because the jobs in this file default to `sh -e {0}`,
+        # under which `shopt` is not a builtin: the step exits 127 and turns the
+        # diagnostic for a failure into a second, louder failure of its own.
+        shell: bash
         run: |
           shopt -s nullglob
           for f in /tmp/pathways-logs/pathways_*.log /tmp/*sanitized*.log.FATAL.* /tmp/*sanitized*.log.ERROR.*; do
