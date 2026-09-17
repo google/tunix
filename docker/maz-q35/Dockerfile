@@ -1,6 +1,6 @@
 # Thin overlay on Yixuan's runner image for the Qwen3.5-35B-A3B GRPO run.
 #
-# Six changes, applied as patches rather than file copies. A file copy would overwrite
+# Seven changes, applied as patches rather than file copies. A file copy would overwrite
 # whatever else the base image has done to these files; a patch fails the build instead.
 # Nothing else in the image is modified: same tunix, maxtext, tpu-inference, vLLM, Raiden
 # wheel and JAX pins as the base. The patch files themselves do not survive the layer.
@@ -11,6 +11,8 @@
 #   tunix-0002    tunix PR 2228     checkpoint/Raiden host-memory fixes
 #   tunix-0003    tunix bf13cd2c    read the trajectory reward key the rollout emits
 #   tunix-0004    (local)           let the packing budget raise max_target_length
+#   tunix-0005    tunix babc1c70    per-rollout trajectory CSV via TRAJECTORY_LOG_DIR
+#                 + tunix 0cfdab45
 #
 # Plus one wheel replacement: the Raiden weight-sync engine is moved from the base
 # image's 2026-09-08 build to the 2026-09-14 one, to match the Pathways images. The wheel
@@ -39,12 +41,35 @@
 # tunix-0003 is upstream commit bf13cd2c, minus its one hunk against the trajectory
 # logging block that landed after this base image was cut. Without it the orchestrator
 # reads `traj["reward"]`, the rollout writes `traj["trajectory_reward"]`, and every GRPO
-# advantage in the run is computed from a reward of 0.0.
+# advantage in the run is computed from a reward of 0.0. That excluded hunk is carried
+# by tunix-0005 instead, which is what introduces the block it applies to.
 #
 # tunix-0004 has no upstream equivalent. `max_target_length` was pinned to
 # max_prompt_length + max_response_length, which is the smallest budget batch_assembly
 # accepts, so a packed row held exactly one maximal trajectory and MAX_SEQ_TOKEN_PER_TPU
 # did nothing.
+#
+# tunix-0005 backports two upstream commits, both dated 2026-09-13, one day after this
+# base image was cut: babc1c70 builds an AsyncTrajectoryLogger inside StandardRLProgram
+# and adds _log_consumed_trajectories, and 0cfdab45 adds the --trajectory_log_dir flag
+# that feeds it. Without them TRAJECTORY_LOG_DIR reaches a process that has no such flag.
+# Only the two in-image files are carried here; 0cfdab45 also edits k8s_launcher.sh and
+# launcher.sh, which run on the submitting host.
+#
+# Three of the seven hunks needed rebasing: the base image's StandardRLProgram signature
+# and __init__ carry `checkpoint_save_interval_steps`, which upstream main does not have,
+# so the surrounding context does not match. The inserted code is upstream's verbatim.
+#
+# It also carries the one hunk of bf13cd2c that tunix-0003 had to leave out. As written by
+# babc1c70 the row reads `traj.get("reward")`, the key bf13cd2c had already renamed
+# everywhere else, so the CSV's reward column would be empty on every row.
+#
+# One row is written per consumed rollout, carrying reward, completion and gold_answer,
+# read from `traj["trajectory_reward"]` rather than recomputed -- so it reports the reward
+# the run actually trained on under either REWARD_MODE, and does not need DEBUG=1.
+# TODO(tunix): trajectory_logger.log_item has no append path for gs:// -- each flush
+# re-reads the whole CSV, concatenates and re-uploads, so cost grows with the square of
+# the run length. Rows also embed the full trajectory and token arrays.
 ARG BASE_IMAGE=gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0912head-v8
 FROM ${BASE_IMAGE}
 
@@ -76,6 +101,7 @@ COPY maxtext-0001-clear-payload-metadata.patch \
      tunix-0002-checkpoint-raiden-oom.patch \
      tunix-0003-trajectory-reward-key.patch \
      tunix-0004-packing-max-target-length.patch \
+     tunix-0005-trajectory-logging.patch \
      /tmp/patches/
 
 # `--forward` off and no fuzz. An already-applied or inexactly-matching patch means the
@@ -92,6 +118,7 @@ RUN cd /app/maxtext \
  && patch -p1 --no-backup-if-mismatch --fuzz=0 < /tmp/patches/tunix-0002-checkpoint-raiden-oom.patch \
  && patch -p1 --no-backup-if-mismatch --fuzz=0 < /tmp/patches/tunix-0003-trajectory-reward-key.patch \
  && patch -p1 --no-backup-if-mismatch --fuzz=0 < /tmp/patches/tunix-0004-packing-max-target-length.patch \
+ && patch -p1 --no-backup-if-mismatch --fuzz=0 < /tmp/patches/tunix-0005-trajectory-logging.patch \
  && rm -rf /tmp/patches
 
 # Assert each patch landed where it is read from, so a silently reordered or reverted
@@ -116,6 +143,11 @@ RUN set -e \
  && grep -q 'max_seq_token_per_tpu' /app/tunix/utils/maxtext_utils.py \
  && grep -q 'max_target_length={max_target_length}' /app/tunix/utils/maxtext_utils.py \
  && grep -q 'max_seq_token_per_tpu' /app/tunix/experimental/examples/common/run_trainer_node.py \
+ && grep -q '_log_consumed_trajectories' /app/tunix/experimental/orchestrator/rl_program.py \
+ && grep -q 'AsyncTrajectoryLogger' /app/tunix/experimental/orchestrator/rl_program.py \
+ && grep -q 'trajectory_log_dir=args.trajectory_log_dir' \
+      /app/tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py \
+ && grep -q 'TRAJECTORY_LOG_DIR' /app/tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py \
  && python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in sys.argv[1:]]" \
       /app/maxtext/src/maxtext/training_engine/maxtext_engine.py \
       /app/maxtext/src/maxtext/configs/types.py \

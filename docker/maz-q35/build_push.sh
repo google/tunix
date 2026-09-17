@@ -49,8 +49,12 @@ DOCKER_BUILDKIT=1 ${DOCKER_CMD} build \
 # otherwise only surface as a crash-looping pod. Each assertion reads the symbol through
 # the import system rather than off disk, so a stale copy earlier on sys.path fails here.
 echo "=== Verifying the built image"
-${DOCKER_CMD} run --rm --entrypoint bash "${TARGET_IMAGE}" -c '
-python3 - <<PY
+#
+# The script is fed to the container's stdin under a quoted heredoc. An earlier version
+# wrapped it in `bash -c '...'`, where a Python quote closes the shell argument: the
+# heredoc terminator was swallowed and the assertions never ran, while the build still
+# reported success. With <<'PY' the host shell performs no quote or dollar processing.
+${DOCKER_CMD} run --rm -i --entrypoint python3 "${TARGET_IMAGE}" - <<'PY'
 import inspect
 
 from maxtext.training_engine import checkpointing, maxtext_engine
@@ -129,6 +133,23 @@ assert "max_seq_token_per_tpu" in inspect.signature(
     maxtext_utils.build_maxtext_config).parameters
 assert "--max_seq_token_per_tpu" in inspect.getsource(run_trainer_node)
 
+# tunix-0005: upstream babc1c70 + 0cfdab45. The flag has to reach the constructor and
+# the constructor has to accept it, so check both ends rather than either alone.
+from tunix.experimental.examples.math_gsm8k_dist import run_gsm8k_dist_grpo
+
+assert "trajectory_log_dir" in inspect.signature(
+    rl_program.StandardRLProgram.__init__).parameters
+assert hasattr(rl_program, "trajectory_logger")
+_row_src = inspect.getsource(rl_program.StandardRLProgram._log_consumed_trajectories)
+for _field in ("reward", "completion", "gold_answer", "prompt_id", "global_step"):
+  assert '"%s"' % _field in _row_src, _field
+# The row must report the reward the run trained on, not recompute one, so that it is
+# correct under REWARD_MODE=env where no orchestrator-side reward_fn exists.
+assert "trajectory_reward" in _row_src
+assert "TRAJECTORY_LOG_DIR" in inspect.getsource(run_gsm8k_dist_grpo._parse_args)
+assert "trajectory_log_dir=args.trajectory_log_dir" in inspect.getsource(
+    run_gsm8k_dist_grpo.main)
+
 # The Raiden wheel replacement. Check the version through the metadata and the FFI
 # extension through an actual import: a wheel whose .so cannot load against this image
 # libtpu would otherwise only surface at the first weight sync.
@@ -144,9 +165,9 @@ else:
   raise AssertionError("the superseded tpu_raiden_jax distribution is still installed")
 from tpu_sync.frameworks.jax import weight_synchronizer_ffi  # noqa: F401
 
-print("ok: all six overlay patches are live in the image, PR 2228 at head 3421417e,")
+print("ok: all seven overlay patches are live in the image, PR 2228 at head 3421417e,")
 print("    tpu_sync_jax 0.0.1.dev20260914193202")
-PY'
+PY
 
 if [ "${PUSH}" != "true" ]; then
   echo "=== PUSH=${PUSH}, stopping after build: ${TARGET_IMAGE}"

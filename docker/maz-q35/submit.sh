@@ -39,12 +39,13 @@ export PRIORITY_CLASS_NAME=medium
 # --- Images ------------------------------------------------------------------
 # Pinned by digest, not tag. A tag can be repointed between the three `kubectl apply`s,
 # and weight sync requires the orchestrator, trainer and rollout to run identical code.
-# This is Yixuan's yixuann-e2e-0912head-v8 plus six patches: MaxText PR 5219 and 5234,
+# This is Yixuan's yixuann-e2e-0912head-v8 plus seven patches: MaxText PR 5219 and 5234,
 # tunix PR 2229, the in-image part of tunix PR 2228 at head 3421417e, upstream tunix
-# bf13cd2c for the trajectory reward key, and the packing budget fix. Plus the
-# tpu_sync_jax 2026-09-14 Raiden wheel in place of the base image's 2026-09-08 one
+# bf13cd2c for the trajectory reward key, the packing budget fix, and upstream tunix
+# babc1c70 + 0cfdab45 for per-rollout trajectory logging. Plus the tpu_sync_jax
+# 2026-09-14 Raiden wheel in place of the base image's 2026-09-08 one
 # (see docker/maz-q35/Dockerfile).
-export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:37d4070d501a54c8a167ba2287bbe9626726e65224a6019750430b5d2ff9aaf5
+export TUNIX_IMAGE=gcr.io/cloud-tpu-multipod-dev/mazumdera-runner@sha256:428ef3033683eb50b4816672e0415c9e1c57ae5254ef1df1c3fc94d84ba160b7
 # The two Pathways halves are deliberately on different tags: the server carries a fix
 # on top of raiden_20260914 and the proxy does not have one. Both are the 2026-09-14
 # Raiden generation, which is what the tpu_sync_jax wheel in the image above matches;
@@ -201,25 +202,38 @@ export WANDB_ENTITY=${WANDB_ENTITY:-google-trellis}
 : "${WANDB_API_KEY:?export WANDB_API_KEY before running; it is not stored in this file}"
 export WANDB_API_KEY
 
-# 1, to log the sampled trajectories. It also turns on httpx wire-level logging, which
-# floods the orchestrator log, so read step times with `grep` rather than by scrolling.
+# 1 turns on httpx wire-level logging, which floods the orchestrator log, so read step
+# times with `grep` rather than by scrolling. It is not what produces the trajectories --
+# TRAJECTORY_LOG_DIR below is.
 export DEBUG=1
-# `env`, not `exact`, and this costs the trajectory dump. The sampled-response logging
-# lives inside gsm8k.make_gsm8k_reward_fn, which run_gsm8k_dist_grpo.py:416 constructs
-# only under `exact`, so DEBUG=1 alone prints no trajectories -- maz-q35-8 ran ten steps
-# that way and logged zero "[Sampled Response]" lines.
-#
-# `exact` is not a usable substitute: maz-q35-9 showed it scores the whole chat
-# transcript, prompt included, rather than the assistant turn. Both modes call the same
-# vtc_completion_outcome, but the VTC prompt instructs the model to use
+# `env`, not `exact`. Both modes call the same vtc_completion_outcome, but they hand it
+# different text: `env` scores action.action, the assistant turn alone, and `exact` scores
+# metadata["text"], the whole chat transcript. The VTC prompt instructs the model to use
 # <reasoning>...</reasoning> and <answer>\boxed{}</answer>, so the prompt itself carries
-# every tag is_vtc_format_correct counts. It requires exactly one of each and sees two,
-# so format_ok is always false and a correct answer scores 0.5 instead of 1.0. Measured
-# over steps 0-2: reward_mean 0.9375/0.8742/0.8871 under `env` against
+# every tag is_vtc_format_correct counts. It requires exactly one of each and sees two, so
+# under `exact` format_ok is always false and a correct answer scores 0.5 instead of 1.0.
+# Measured over steps 0-2: reward_mean 0.9375/0.8742/0.8871 under `env` against
 # 0.4750/0.4582/0.4465 under `exact`, with answer extraction agreeing with gold on 99.2%
-# of 930 trajectories in both. `env` scores action.action, the assistant turn alone,
-# which is correct.
+# of 930 trajectories in both. `env` is the correct one.
 export REWARD_MODE=env
+
+# One CSV row per consumed rollout: global_step, prompt_id, group_index, status, reward,
+# question, prompt, completion, gold_answer. Written by StandardRLProgram, which reads
+# traj["trajectory_reward"] rather than recomputing, so the reward column is the number
+# the run actually trained on under either REWARD_MODE and DEBUG is not involved.
+#
+# This supersedes the gsm8k.make_gsm8k_reward_fn debug dump, which only exists under
+# REWARD_MODE=exact -- maz-q35-8 ran ten steps with DEBUG=1 under `env` and logged zero
+# "[Sampled Response]" lines, and maz-q35-9 got the dump under `exact` at the cost of the
+# 0.5-capped reward above.
+#
+# TODO(tunix): trajectory_logger.log_item has no append path for gs:// (utils/
+# trajectory_logger.py:122) -- each flush re-reads the whole CSV, concatenates and
+# re-uploads, and each row embeds the full trajectory and token arrays, so the cost grows
+# with the square of the run length. Watch the step time; a local dir plus a copy out is
+# the fallback.
+export LOG_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/logs
+export TRAJECTORY_LOG_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/trajectories
 
 # --- Job names ---------------------------------------------------------------
 # The launcher derives every JobSet name from $USER: maz-q35-N-{orch,train,roll}.
@@ -232,7 +246,8 @@ echo "    rollout    ${ROLLOUT_REPLICAS} x ${ROLLOUT_TPU_SLICE} dp=${ROLLOUT_MES
 echo "    batch      ${BATCH_SIZE} prompts x ${NUM_GENERATIONS} gens = ${MINI_BATCH_SIZE}/step, resp<=${MAX_RESPONSE_LENGTH}"
 echo "    packing    ${MAX_SEQ_TOKEN_PER_TPU} tok/row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
 echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV:-RAIDEN_BROADCAST_K unset (direct push)}"
-echo "    reward     mode=${REWARD_MODE} debug=${DEBUG} (trajectories need both)"
+echo "    reward     mode=${REWARD_MODE} debug=${DEBUG}"
+echo "    traj csv   ${TRAJECTORY_LOG_DIR}"
 echo "    priority   ${PRIORITY_CLASS_NAME}"
 echo "    output     ${MAXTEXT_OUTPUT_DIR}"
 if [ "${ROLLOUT_REPLICAS}" -gt 1 ]; then
