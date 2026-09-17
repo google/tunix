@@ -83,6 +83,16 @@ CHAT_PARSER=${CHAT_PARSER:-raw}
 # tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
 # fall back to the tokenizer's EOS token.
 EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Generation sampling parameters, passed to the runner and the reference scorer.
+TEMPERATURE=${TEMPERATURE:-1.0}
+TOP_P=${TOP_P:-1.0}
+TOP_K=${TOP_K:--1}
+# Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
+# both the trainer and the rollout, so the two cannot drift. A disagreement is
+# not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
+# against a non-MaxText rollout matches zero of them. Set it explicitly to
+# override, or empty to put the rollout back on tpu-inference's own model.
+MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
@@ -374,6 +384,7 @@ echo "  python:         $PYTHON_BIN"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
 echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
+echo "  sampling:       temperature=$TEMPERATURE top_p=$TOP_P top_k=$TOP_K"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
 echo "  learning rate:  $LEARNING_RATE"
@@ -695,6 +706,9 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
       --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
       --max_prompt_length="$MAX_PROMPT_LENGTH"
       --max_response_length="$MAX_RESPONSE_LENGTH"
+      # Must match the sampling temperature: this node scores the reference
+      # policy for the KL term.
+      --temperature="$TEMPERATURE"
     )
 
     export JAX_PLATFORMS=tpu,cpu
@@ -735,6 +749,9 @@ echo "Launching CPU orchestrator..."
     --batch_size="$BATCH_SIZE"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
+    --temperature="$TEMPERATURE"
+    --top_p="$TOP_P"
+    --top_k="$TOP_K"
     --max_steps="$MAX_STEPS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
