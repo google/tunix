@@ -83,7 +83,7 @@ def _routed_experts_for(
     routed = item.metadata.get("routed_experts")
   if routed is None:
     return None
-  routed_arr = np.asarray(routed, dtype=np.int32)
+  routed_arr = np.asarray(routed, dtype=np.int16)
   if routed_arr.ndim != 3:
     raise ValueError(
         "routed_experts must be [length, num_layers, top_k]; got shape"
@@ -94,7 +94,7 @@ def _routed_experts_for(
   pad = np.full(
       (seq_len - routed_arr.shape[0],) + routed_arr.shape[1:],
       datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int32,
+      dtype=np.int16,
   )
   return np.concatenate([routed_arr, pad], axis=0)
 

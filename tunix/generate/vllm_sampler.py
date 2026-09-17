@@ -16,6 +16,7 @@
 
 import atexit
 import concurrent.futures
+import copy
 import dataclasses
 import gc
 from itertools import count
@@ -567,15 +568,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _generate_offline(
       self,
       prompts: List[TokensPrompt],
-      sampling_params: Union[SamplingParams, BeamSearchParams],
+      sampling_params: Union[
+          SamplingParams, BeamSearchParams, List[SamplingParams]
+      ],
   ) -> List[RequestOutput]:
     """Offline generation; overlaps post-processing with decode when enabled.
 
     Beam search keeps the plain `LLM.generate` path: `BeamSearchParams` are
     expanded by vLLM itself and never reach the engine as one request.
     """
-    if not self.config.overlap_postprocessing or not isinstance(
-        sampling_params, SamplingParams
+    if not self.config.overlap_postprocessing or isinstance(
+        sampling_params, BeamSearchParams
     ):
       return self.llm.generate(  # pyrefly: ignore[missing-attribute]
           prompts=prompts,
@@ -592,9 +595,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._postprocessed = None
     engine = self.llm.llm_engine  # pyrefly: ignore[missing-attribute]
     counter = self.llm.request_counter  # pyrefly: ignore[missing-attribute]
-    sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
-    for prompt in prompts:
-      engine.add_request(str(next(counter)), prompt, sampling_params)
+    for idx, prompt in enumerate(prompts):
+      params = (
+          sampling_params[idx]
+          if isinstance(sampling_params, list)
+          else sampling_params
+      )
+      params.output_kind = RequestOutputKind.FINAL_ONLY
+      engine.add_request(str(next(counter)), prompt, params)
     outputs: List[RequestOutput] = []
     futures: Dict[str, concurrent.futures.Future[Any]] = {}
     progress = tqdm.tqdm(
@@ -618,7 +626,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _generate_server_mode(
       self,
       prompts: List[TokensPrompt],
-      sampling_params: Union[SamplingParams, BeamSearchParams],
+      sampling_params: Union[
+          SamplingParams, BeamSearchParams, List[SamplingParams]
+      ],
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -627,9 +637,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     requests = []
     for idx, prompt in enumerate(prompts):
       request_id = str(next(self._request_counter))
-      params = sampling_params
-      if idx > 0 and hasattr(sampling_params, "clone"):
-        params = sampling_params.clone()
+      if isinstance(sampling_params, list):
+        params = sampling_params[idx]
+      else:
+        params = sampling_params
+        if idx > 0 and hasattr(sampling_params, "clone"):
+          params = sampling_params.clone()
       requests.append({
           "request_id": request_id,
           "prompt": prompt,
@@ -680,6 +693,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{max_generation_steps} and `max_model_len`="
           f"{self.args['max_model_len']}."
       )
+    raw_prompt_start = None
     if beam_size is not None:
       sampling_params = BeamSearchParams(
           beam_width=beam_size,
@@ -728,6 +742,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
       sampling_kwargs = self.config.sampling_kwargs.copy()
       sampling_kwargs.update(kwargs)
+      raw_prompt_start = sampling_kwargs.pop(
+          "routed_experts_prompt_start", None
+      )
+      if raw_prompt_start is not None and not isinstance(
+          raw_prompt_start, (list, tuple)
+      ):
+        setattr(
+            sampling_params, "routed_experts_prompt_start", raw_prompt_start
+        )
+        raw_prompt_start = None
+
       if sampling_kwargs:
         try:
           logging.log_first_n(
@@ -756,10 +781,35 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         List[TokensPrompt],
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
     )
+    target_sampling_params: Union[
+        SamplingParams, BeamSearchParams, List[SamplingParams]
+    ] = sampling_params
+    if raw_prompt_start is not None and isinstance(
+        raw_prompt_start, (list, tuple)
+    ):
+      assert len(raw_prompt_start) == len(prompt_objects), (
+          f"Length of routed_experts_prompt_start ({len(raw_prompt_start)}) "
+          f"does not match number of prompts ({len(prompt_objects)})."
+      )
+      prompt_params_list: List[SamplingParams] = []
+      for offset in raw_prompt_start:
+        p = cast(
+            SamplingParams,
+            sampling_params.clone()
+            if hasattr(sampling_params, "clone")
+            else copy.deepcopy(sampling_params),
+        )
+        setattr(p, "routed_experts_prompt_start", offset)
+        prompt_params_list.append(p)
+      target_sampling_params = prompt_params_list
+
     if self._driver is not None:
-      outputs = self._generate_server_mode(prompt_objects, sampling_params)
+      outputs = self._generate_server_mode(
+          prompt_objects, target_sampling_params
+      )
     else:
-      outputs = self._generate_offline(prompt_objects, sampling_params)
+      outputs = self._generate_offline(prompt_objects, target_sampling_params)
+
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
     )

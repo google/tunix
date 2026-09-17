@@ -365,6 +365,47 @@ class RoutedExpertsTest(absltest.TestCase):
         f"expected a warning about the engine setting, got {logs.output}",
     )
 
+  def test_forwards_routed_experts_prompt_start(self):
+    """Cumulative prompt offset must be forwarded to the vLLM sampler as a list."""
+    adapter = self._adapter(None)
+    req = base_sampler_lib.SamplingRequest(
+        request_id="req-0",
+        prompt=np.array([1, 2, 3, 4], dtype=np.int32),
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            return_routed_experts=True,
+            routed_experts_prompt_start=12,
+        ),
+    )
+    asyncio.run(adapter.sample([req]))
+    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    self.assertEqual(call_kwargs.get("routed_experts_prompt_start"), [12])
+
+  def test_forwards_heterogeneous_batch_routed_experts_prompt_start(self):
+    """Per-prompt offsets in heterogeneous batch must be preserved without collapse."""
+    adapter = self._adapter([None, None])
+    req0 = base_sampler_lib.SamplingRequest(
+        request_id="req-0",
+        prompt=np.array([1, 2, 3, 4], dtype=np.int32),
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            return_routed_experts=True,
+            routed_experts_prompt_start=8,
+        ),
+    )
+    req1 = base_sampler_lib.SamplingRequest(
+        request_id="req-1",
+        prompt=np.array([1, 2, 3, 4, 5, 6], dtype=np.int32),
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            return_routed_experts=True,
+            routed_experts_prompt_start=14,
+        ),
+    )
+    asyncio.run(adapter.sample([req0, req1]))
+    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    self.assertEqual(call_kwargs.get("routed_experts_prompt_start"), [8, 14])
+
 
 if __name__ == "__main__":
   absltest.main()

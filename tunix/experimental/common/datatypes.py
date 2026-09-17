@@ -228,6 +228,7 @@ class GenerationArgs:
   top_k: int | None = None
   seed: int | None = None
   return_logprobs: bool | None = None
+  return_routed_experts: bool | None = None
 
   def as_kwargs(self) -> dict[str, Any]:
     return {

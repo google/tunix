@@ -174,7 +174,7 @@ def _routed_experts_aligned(
   Returns:
     `[max_prompt_length + max_response_length, num_layers, top_k]`.
   """
-  routed = np.asarray(routed, dtype=np.int32)
+  routed = np.asarray(routed, dtype=np.int16)
   # Prompts are left-padded, so an over-long one keeps its tail; completions are
   # right-padded, so an over-long one keeps its head.
   kept_prompt_start = max(prompt_len - max_prompt_length, 0)
@@ -185,7 +185,7 @@ def _routed_experts_aligned(
   out = np.full(
       (max_prompt_length + max_response_length,) + routed.shape[1:],
       datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int32,
+      dtype=np.int16,
   )
   prompt_end = max_prompt_length
   out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
@@ -879,7 +879,7 @@ class PaddedBatchAssembler:
                 # `routed_experts` is declared ArrayLike, which admits jax
                 # arrays and scalars; concretise it here as the sibling fields
                 # above do.
-                np.asarray(routed, dtype=np.int32),
+                np.asarray(routed, dtype=np.int16),
                 p_full.size,
                 c.size,
                 self.max_prompt_length,

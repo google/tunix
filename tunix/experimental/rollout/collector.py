@@ -162,8 +162,10 @@ class TrajectoryCollectorEngine:
     async def model_call(
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
-      del env, kwargs
+      del env
       generation_kwargs = dict(self.request.generation_kwargs)
+      # NB: extra kwargs can be passed in from trajectory_collect_engine.
+      generation_kwargs.update(kwargs)
       request_max_generation_steps = generation_kwargs.pop(
           "max_generation_steps", None
       )
@@ -211,6 +213,12 @@ class TrajectoryCollectorEngine:
           top_k=generation_kwargs.get("top_k", None),
           seed=seed,
           return_logprobs=generation_kwargs.get("return_logprobs", False),
+          return_routed_experts=generation_kwargs.get(
+              "return_routed_experts", False
+          ),
+          routed_experts_prompt_start=generation_kwargs.get(
+              "routed_experts_prompt_start", 0
+          ),
       )
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
@@ -221,6 +229,7 @@ class TrajectoryCollectorEngine:
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
+      routed_experts = getattr(res, "routed_experts", None)
       prompt_tokens = np.asarray(
           getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
           dtype=np.int32,
@@ -236,6 +245,7 @@ class TrajectoryCollectorEngine:
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
           logprobs=[logprobs] if logprobs is not None else None,
+          routed_experts=[routed_experts] if routed_experts is not None else None,
       )
 
     if not self.agent or not self.env:
@@ -364,6 +374,7 @@ class TrajectoryCollectorEngine:
         rl_traj.get("policy_version", 0),
     )
     metadata["policy_version"] = int(policy_version or 0)
+
     self._annotate_response_budget(rl_traj, metadata)
 
     return agent_types.TrajectoryItem(

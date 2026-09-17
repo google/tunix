@@ -326,12 +326,14 @@ class GenerationArgsTest(absltest.TestCase):
         temperature=0.7,
         top_p=0.95,
         return_logprobs=True,
+        return_routed_experts=True,
     )
     expected = {
         "max_generation_steps": 128,
         "temperature": 0.7,
         "top_p": 0.95,
         "return_logprobs": True,
+        "return_routed_experts": True,
     }
     self.assertEqual(args.as_kwargs(), expected)
 

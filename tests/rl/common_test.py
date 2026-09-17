@@ -1047,6 +1047,7 @@ class AlignRoutedExpertsTest(parameterized.TestCase):
         completion_width=completion_width,
     )
 
+    self.assertEqual(out.dtype, np.int16)
     self.assertEqual(
         out.shape,
         (1, prompt_width + completion_width, _ROUTING_LAYERS, _ROUTING_TOP_K),
@@ -1112,6 +1113,40 @@ class AlignRoutedExpertsTest(parameterized.TestCase):
           prompt_width=1,
           completion_width=2,
       )
+
+  def test_upcasts_int16_routed_experts_to_int32_on_trainer_end(self):
+    """Trainer receives int16 routing over IPC and upcasts to int32 on device."""
+    captured = {}
+
+    class DummyModel(nnx.Module):
+
+      def __call__(
+          self,
+          x,
+          positions=None,
+          attention_mask=None,
+          cache=None,
+          forced_routed_experts=None,
+          **kwargs,
+      ):
+        del positions, attention_mask, cache, kwargs
+        captured["forced_routed_experts"] = forced_routed_experts
+        return jnp.zeros((x.shape[0], x.shape[1], 16), dtype=jnp.float32), None
+
+    model = DummyModel()
+    graphdef, state = nnx.split(model)
+    routed_int16 = jnp.ones((1, 4, 2, 2), dtype=jnp.int16)
+    common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=jnp.ones((1, 2), dtype=jnp.int32),
+        completion_tokens=jnp.ones((1, 2), dtype=jnp.int32),
+        pad_id=0,
+        eos_id=1,
+        routed_experts=routed_int16,
+    )
+    self.assertIn("forced_routed_experts", captured)
+    self.assertEqual(captured["forced_routed_experts"].dtype, jnp.int32)
 
 
 class SamplerTrainerAgreementTest(parameterized.TestCase):

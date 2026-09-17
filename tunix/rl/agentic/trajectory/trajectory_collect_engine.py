@@ -123,6 +123,8 @@ class TrajectoryCollectEngine:
 
     self.overlong_filter = overlong_filter
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
+    self._cumulative_prompt_tokens: int = 0
+    self._current_step_initial_routed_experts: Optional[np.ndarray] = None
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
@@ -180,6 +182,37 @@ class TrajectoryCollectEngine:
     self._logged_clip_reasons.add(reason)
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
 
+  def _finalize_terminal_step_routing(self) -> None:
+    """Pad the terminal step's unrouted last token with UNSET_ROUTED_EXPERT.
+
+    In autoregressive sampling, vLLM routes P + G - 1 tokens; the G-th token
+    is sampled at the end of decode and only passes through an MoE layer if a
+    subsequent turn prefills it. On episode termination, the final step's last
+    token was never forwarded through a subsequent prefill. In causal loss,
+    targets are rolled by -1 and targets_segmentation is 0 at the final token,
+    so padding with UNSET_ROUTED_EXPERT has zero effect on training loss.
+    """
+    if not self.agent.trajectory.steps:
+      return
+    final_step = self.agent.trajectory.steps[-1]
+    if (
+        final_step.assistant_routed_experts is not None
+        and final_step.assistant_tokens is not None
+        and len(final_step.assistant_routed_experts)
+        < len(final_step.assistant_tokens)
+    ):
+      missing = len(final_step.assistant_tokens) - len(
+          final_step.assistant_routed_experts
+      )
+      pad = np.full(
+          (missing,) + final_step.assistant_routed_experts.shape[1:],
+          agent_types.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+      final_step.assistant_routed_experts = np.concatenate(
+          [final_step.assistant_routed_experts, pad], axis=0
+      )
+
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
 
@@ -188,7 +221,7 @@ class TrajectoryCollectEngine:
     calculation, and resource cleanup.
 
     Args:
-        mode (str): Output format. Options: 
+        mode (str): Output format. Options:
           - "Trajectory": return full Trajectory object.
           - "Token": return flattened tokenized dict for training.
           - "Steps": return stepwise tokenized data only.
@@ -216,6 +249,8 @@ class TrajectoryCollectEngine:
         if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
+
+    self._finalize_terminal_step_routing()
 
     masked_out = (
         self.overlong_filter
@@ -249,6 +284,10 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
+              "assistant_routed_experts": getattr(
+                  step, "assistant_routed_experts", None
+              ),
+              "env_routed_experts": getattr(step, "env_routed_experts", None),
               "reward": step.reward,
               "mc_return": step.mc_return,
               "env_time": self.env_time,
@@ -259,16 +298,25 @@ class TrajectoryCollectEngine:
     elif mode == "Token":
       # flatten all steps into single batch dict
       conversation_tokens, conversation_masks, logprobs = [], [], []
+      routed_experts = []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
+      has_routed_experts = (
+          getattr(self.agent.trajectory, "prompt_routed_experts", None)
+          is not None
+          or any(
+              getattr(step, "assistant_routed_experts", None) is not None
+              or getattr(step, "env_routed_experts", None) is not None
+              for step in self.agent.trajectory.steps
+          )
+      )
 
-      for step in self.agent.trajectory.steps:
-        # Keep tokens/masks/logprobs appended in lockstep. A step with
-        # env_tokens but no vllm logprobs (initial observation, empty
-        # completion) would otherwise leave the logprobs array short by
-        # `len(env_tokens)` and offset every subsequent step.
+      for idx, step in enumerate(self.agent.trajectory.steps):
+        # Keep tokens/masks/logprobs/routed_experts appended in lockstep.
         assistant_tokens = getattr(step, "assistant_tokens", None)
         env_tokens = getattr(step, "env_tokens", None)
         step_logprobs = getattr(step, "logprobs", None)
+        step_routed = getattr(step, "assistant_routed_experts", None)
+        step_env_routed = getattr(step, "env_routed_experts", None)
         if assistant_tokens is not None:
           conversation_tokens.append(assistant_tokens)
           conversation_masks.append(step.assistant_masks)
@@ -280,10 +328,37 @@ class TrajectoryCollectEngine:
             logprobs.append(step_logprobs)
           else:
             logprobs.append(np.zeros(len(assistant_tokens)))
+          if has_routed_experts:
+            if step_routed is None:
+              raise ValueError(
+                  f"Step {idx} has assistant_tokens (len"
+                  f" {len(assistant_tokens)}) but missing"
+                  " assistant_routed_experts while routed_experts is active."
+              )
+            if len(step_routed) != len(assistant_tokens):
+              raise ValueError(
+                  f"Step {idx} assistant_routed_experts length"
+                  f" {len(step_routed)} does not match assistant_tokens length"
+                  f" {len(assistant_tokens)}."
+              )
+            routed_experts.append(np.asarray(step_routed, dtype=np.int16))
         if env_tokens is not None:
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
           logprobs.append(np.zeros(len(env_tokens)))
+          if has_routed_experts:
+            if step_env_routed is None:
+              raise ValueError(
+                  f"Step {idx} has env_tokens (len {len(env_tokens)}) but"
+                  " missing env_routed_experts while routed_experts is active."
+              )
+            if len(step_env_routed) != len(env_tokens):
+              raise ValueError(
+                  f"Step {idx} env_routed_experts length"
+                  f" {len(step_env_routed)} does not match env_tokens length"
+                  f" {len(env_tokens)}."
+              )
+            routed_experts.append(np.asarray(step_env_routed, dtype=np.int16))
 
       conversation_tokens = [
           np.asarray(tokens)
@@ -314,6 +389,44 @@ class TrajectoryCollectEngine:
           else conversation_masks
       )
 
+      final_routed_experts = None
+      if has_routed_experts:
+        prompt_routed = getattr(
+            self.agent.trajectory, "prompt_routed_experts", None
+        )
+        sample_arr = next(
+            iter(routed_experts),
+            prompt_routed,
+        )
+        sample_shape = (
+            sample_arr.shape[1:] if sample_arr is not None else (0, 0)
+        )
+        conv_routed = (
+            np.concatenate(routed_experts, axis=0)
+            if routed_experts
+            else np.zeros((0,) + sample_shape, dtype=np.int16)
+        )
+        prompt_len = len(prompt_tokens) if prompt_tokens is not None else 0
+        if prompt_len > 0:
+          if prompt_routed is None:
+            raise ValueError(
+                f"Trajectory has prompt_tokens (len {prompt_len}) but missing"
+                " prompt_routed_experts while routed_experts is active."
+            )
+          if getattr(prompt_routed, "shape", (0,))[0] != prompt_len:
+            raise ValueError(
+                f"prompt_routed_experts shape {getattr(prompt_routed, 'shape', None)}"
+                f" does not match prompt_tokens length {prompt_len}."
+            )
+          prompt_routed_arr = np.asarray(prompt_routed, dtype=np.int16)
+        else:
+          prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=np.int16)
+
+        final_routed_experts = np.concatenate(
+            [prompt_routed_arr, conv_routed], axis=0
+        )
+
+
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
@@ -326,6 +439,7 @@ class TrajectoryCollectEngine:
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
+          "routed_experts": final_routed_experts,
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
@@ -416,6 +530,8 @@ class TrajectoryCollectEngine:
     self.agent.reset()
     self._start_ts = time.perf_counter()
     self._response_token_count = 0
+    self._cumulative_prompt_tokens = 0
+    self._current_step_initial_routed_experts = None
     self.agent.update_from_env(
         observation=obs,
         reward=0.0,
@@ -511,13 +627,17 @@ class TrajectoryCollectEngine:
             getattr(model_call_fn, "__call__")
         )
     )
+    call_kwargs = dict(self.model_call_kwargs)
+    if self._cumulative_prompt_tokens > 0:
+      call_kwargs["routed_experts_prompt_start"] = self._cumulative_prompt_tokens
+
     if is_async:
       try:
         rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
             self.agent.chat_completions,
             self.env,
             max_generation_steps=max_generation_steps,
-            **self.model_call_kwargs,
+            **call_kwargs,
         )
       except Exception as e:
         logging.exception("Caught exception inside async model_call: %s", e)
@@ -529,7 +649,7 @@ class TrajectoryCollectEngine:
               self.agent.chat_completions,
               self.env,
               max_generation_steps=max_generation_steps,
-              **self.model_call_kwargs,
+              **call_kwargs,
           )
         except Exception as e:
           logging.exception("Caught exception inside model_call: %s", e)
@@ -550,6 +670,71 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
           rollout_output.left_padded_prompt_tokens[0]
       )
+
+    self._current_step_initial_routed_experts = None
+    if (
+        not self.agent.trajectory.steps
+        and rollout_output.routed_experts
+        and rollout_output.routed_experts[0] is not None
+    ):
+      init_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
+      prompt_len = (
+          len(self.agent.trajectory.prompt_tokens)
+          if getattr(self.agent.trajectory, "prompt_tokens", None) is not None
+          else 0
+      )
+      self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
+          init_routed[:prompt_len]
+      )
+      self._cumulative_prompt_tokens = init_routed.shape[0]
+      self._current_step_initial_routed_experts = init_routed[prompt_len:]
+    elif (
+        self.agent.trajectory.steps
+        and rollout_output.routed_experts
+        and rollout_output.routed_experts[0] is not None
+    ):
+      delta_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
+      prev_step = self.agent.trajectory.steps[-1]
+      needed_asst = 0
+      if (
+          prev_step.assistant_tokens is not None
+          and prev_step.assistant_routed_experts is not None
+      ):
+        needed_asst = max(
+            0,
+            len(prev_step.assistant_tokens)
+            - len(prev_step.assistant_routed_experts),
+        )
+        if needed_asst > 0:
+          if len(delta_routed) < needed_asst:
+            raise ValueError(
+                f"Insufficient delta_routed length {len(delta_routed)} to stitch "
+                f"{needed_asst} trailing assistant tokens at step "
+                f"{len(self.agent.trajectory.steps) - 1}."
+            )
+          prev_step.assistant_routed_experts = np.concatenate(
+              [prev_step.assistant_routed_experts, delta_routed[:needed_asst]],
+              axis=0,
+          )
+      num_env = (
+          len(prev_step.env_tokens)
+          if prev_step.env_tokens is not None
+          else 0
+      )
+      if num_env > 0:
+        prev_step.env_routed_experts = delta_routed[
+            needed_asst : needed_asst + num_env
+        ]
+        if len(prev_step.env_routed_experts) != num_env:
+          raise ValueError(
+              f"Mismatch between captured env_routed_experts length "
+              f"{len(prev_step.env_routed_experts)} and env_tokens length "
+              f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
+          )
+      self._current_step_initial_routed_experts = delta_routed[
+          needed_asst + num_env :
+      ]
+      self._cumulative_prompt_tokens += delta_routed.shape[0]
 
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
@@ -629,6 +814,14 @@ class TrajectoryCollectEngine:
 
     if cur_step is not None and rollout_output.logprobs is not None:
       cur_step.logprobs = rollout_output.logprobs[0]
+
+    if (
+        cur_step is not None
+        and self._current_step_initial_routed_experts is not None
+    ):
+      cur_step.assistant_routed_experts = (
+          self._current_step_initial_routed_experts
+      )
 
     step_timed_out = time.perf_counter() - self._start_ts > self.timeout
     if cur_step is not None and self.tokenizer and self.chat_parser:

@@ -340,7 +340,7 @@ def align_routed_experts(
 
   rows = []
   for routed, completion_len in zip(routed_experts, completion_lengths):
-    routed = np.asarray(routed, dtype=np.int32)
+    routed = np.asarray(routed, dtype=np.int16)
     if routed.ndim != 3:
       raise ValueError(
           "routed_experts must be [length, num_layers, top_k]; got shape"
@@ -356,7 +356,7 @@ def align_routed_experts(
     row = np.full(
         (prompt_width + completion_width,) + routed.shape[1:],
         UNSET_ROUTED_EXPERT,
-        dtype=np.int32,
+        dtype=np.int16,
     )
     row[prompt_width - prompt_part.shape[0] : prompt_width] = prompt_part
     row[prompt_width : prompt_width + completion_part.shape[0]] = (
@@ -498,7 +498,9 @@ def compute_per_token_logps(
   if routed_experts is not None and model_call_contains(
       model, "forced_routed_experts"
   ):
-    model_kwargs["forced_routed_experts"] = routed_experts
+    model_kwargs["forced_routed_experts"] = jnp.asarray(
+        routed_experts, dtype=jnp.int32
+    )
 
   outputs, _ = model(input_tokens, **model_kwargs)
 

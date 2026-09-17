@@ -76,10 +76,11 @@ class _MockTokenizer:
 
 class _MockSampler(sampler_lib.Sampler):
 
-  def __init__(self, token_lengths=None):
+  def __init__(self, token_lengths=None, routed_experts=None):
     self.sampled_params = []
     self.token_lengths = token_lengths or [30, 20]
     self._call_count = 0
+    self.routed_experts = routed_experts
 
   async def sample(self, req, **kwargs):
     if hasattr(req, "sampling_params"):
@@ -96,6 +97,7 @@ class _MockSampler(sampler_lib.Sampler):
         text=f"action_{self._call_count}",
         token_ids=tokens,
         prompt_token_ids=np.array([1, 2], dtype=np.int32),
+        routed_experts=self.routed_experts,
     )
 
 
@@ -617,6 +619,52 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_model_call_propagates_return_routed_experts_in_generation_kwargs(
+      self,
+  ):
+    async def _run():
+      mock_routed = np.ones((10, 4, 8), dtype=np.int32)
+      sampler = _MockSampler(routed_experts=mock_routed)
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_routed",
+          prompt="test prompt",
+          group_index=0,
+          generation_kwargs={
+              "max_generation_steps": 128,
+              "return_routed_experts": True,
+          },
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_1",
+          request=req,
+          sampler=sampler,
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = {}
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        output = await model_call("prompt text", env=mock.MagicMock())
+
+      self.assertLen(sampler.sampled_params, 1)
+      self.assertTrue(sampler.sampled_params[0].return_routed_experts)
+      self.assertIsNotNone(output.routed_experts)
+      np.testing.assert_array_equal(output.routed_experts[0], mock_routed)
+
+    asyncio.run(_run())
+
 
 class _RecordingSampler:
 
@@ -881,6 +929,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     )
     with self.assertRaisesRegex(TypeError, "Expected rl_traj to be a dict"):
       engine._convert_to_trajectory(mock_traj)
+
 
   def test_model_call_respects_min_of_remaining_budget_and_request_max_tokens(self):
     sampler = _MockVllmSampler()
@@ -1186,6 +1235,40 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       collector.response_budget_facts([], 0, {99})
     with self.assertRaises(ValueError):
       collector.response_budget_facts([1, 2], -1, {99})
+
+
+  def test_convert_to_trajectory_preserves_routed_experts(self):
+    request = datatypes.RolloutRequest(
+        request_id="req_routed",
+        prompt="hello",
+        prompt_id="prompt_routed",
+        group_index=0,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+    mock_routed = np.ones((10, 4, 8), dtype=np.int32)
+    rl_traj = {
+        "conversation_text": "step",
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+        "routed_experts": mock_routed,
+        "trajectory_reward": 1.0,
+        "status": "COMPLETED",
+        "policy_version": 1,
+    }
+    item = engine._convert_to_trajectory(rl_traj)
+    self.assertNotIn("routed_experts", item.metadata)
+    np.testing.assert_array_equal(item.traj["routed_experts"], mock_routed)
+    np.testing.assert_array_equal(item.routed_experts, mock_routed)
 
 
 if __name__ == "__main__":
