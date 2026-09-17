@@ -23,7 +23,7 @@ import ipaddress
 import os
 import re
 import socket
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from absl import logging
 import jax
@@ -332,7 +332,31 @@ def _devices_per_host(devices: List[Any]) -> int:
   return counts.pop()
 
 
-def _tensor_metadata(name: str, arr: Any, layer_idx: int):
+def _compute_global_shard_index(
+    slice_tuple: Any,
+    global_shape: Sequence[int],
+    sharding_shape: Sequence[int],
+) -> int:
+  if not slice_tuple:
+    return 0
+  global_idx = 0
+  stride = 1
+  for sl, g_dim, m_dim in zip(
+      reversed(slice_tuple), reversed(global_shape), reversed(sharding_shape)
+  ):
+    if m_dim > 1:
+      tile_size = g_dim // m_dim
+      start = (
+          sl.start
+          if isinstance(sl, slice) and sl.start is not None
+          else (sl if isinstance(sl, int) else 0)
+      )
+      coord = start // tile_size if tile_size > 0 else 0
+      global_idx += coord * stride
+      stride *= m_dim
+  return global_idx
+
+def _tensor_metadata(name: str, arr: Any, layer_idx: int, target_devices: Optional[Sequence[Any]] = None):
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
@@ -350,6 +374,21 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
       mesh_shape = (1,) * arr.ndim
   else:
     mesh_shape = (1,) * arr.ndim
+
+  global_shard_indices: tuple[int, ...] = ()
+  if target_devices and sharding is not None and hasattr(sharding, "devices_indices_map"):
+    try:
+      device_to_slice = sharding.devices_indices_map(arr.shape)
+      global_shard_indices = tuple(
+          _compute_global_shard_index(
+              device_to_slice.get(d), arr.shape, mesh_shape
+          )
+          for d in target_devices
+      )
+    except Exception as e:
+      logging.warning("Could not compute global_shard_indices for %s: %s", name, e)
+      global_shard_indices = ()
+
   return weight_sync.TensorMetadata(
       name=name,
       shape=tuple(arr.shape),
@@ -358,6 +397,7 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
       item_size=arr.dtype.itemsize,
       layer_idx=layer_idx,
       sharding_spec=tuple(_axis_name(a) for a in spec),
+      global_shard_indices=global_shard_indices,
   )
 
 
@@ -502,12 +542,50 @@ class RaidenSynchronizer:
         sorted({getattr(d, "task_id", None) for d in src_devices}, key=str),
     )
 
+    host_subgrid = None
+    host_subgrid_env = os.environ.get("RAIDEN_HOST_SUBGRID")
+    if host_subgrid_env:
+      try:
+        host_subgrid = [int(x.strip()) for x in host_subgrid_env.split(",")]
+      except ValueError:
+        pass
+    if host_subgrid is None:
+      try:
+        if (
+            hasattr(mesh, "local_mesh")
+            and mesh.local_mesh is not None
+            and hasattr(mesh.local_mesh, "devices")
+        ):
+          host_subgrid = list(mesh.local_mesh.devices.shape)
+      except (AttributeError, ValueError, TypeError):
+        host_subgrid = None
+    if host_subgrid is None:
+      if len(task_mesh_shape) > 1 and task_mesh_shape[1] == devices_per_host:
+        host_subgrid = [1, devices_per_host]
+      elif hasattr(_raiden_ffi, "compute_host_subgrid"):
+        host_subgrid, _ = _raiden_ffi.compute_host_subgrid(
+            list(task_mesh_shape), devices_per_host
+        )
+      else:
+        try:
+          from tpu_sync.rpc import raiden_controller as _rc  # pylint: disable=g-import-not-at-top
+          host_subgrid, _ = _rc.compute_host_subgrid(
+              list(task_mesh_shape), devices_per_host
+          )
+        except Exception:
+          host_subgrid = None
+
+    self._host_subgrid = (
+        tuple(host_subgrid) if host_subgrid is not None else None
+    )
+
     if is_d2h:
       logging.info(
           "Initializing Pathways weight synchronizer and executing D2H via FFI"
-          " (%d layers, %d devices/host)",
+          " (%d layers, %d devices/host, host_subgrid=%s)",
           len(self.arrays),
           devices_per_host,
+          host_subgrid,
       )
       ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
           device_arrays=self.arrays,
@@ -518,6 +596,7 @@ class RaidenSynchronizer:
           num_layers=len(self.arrays),
           listener_port=0,
           num_shards=devices_per_host,
+          host_subgrid=host_subgrid,
       )
     else:
       logging.info(
@@ -853,6 +932,16 @@ class RaidenSynchronizer:
     return head
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
+    target_devices = None
+    if self._is_proxy:
+      for arr in self.arrays:
+        m = getattr(getattr(arr, "sharding", None), "mesh", None)
+        if m is not None:
+          target_devices = list(m.devices.flatten())
+          break
+    elif self.arrays:
+      target_devices = [s.device for s in self.arrays[0].addressable_shards]
+
     mesh = None
     for arr in self.arrays:
       mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
@@ -870,7 +959,7 @@ class RaidenSynchronizer:
     # the nnx `.value` leaf). `_param_key` already normalises both away, so
     # canonicalising here is what makes the manifests line up.
     variables = tuple(
-        _tensor_metadata(_param_key(name), arr, idx)
+        _tensor_metadata(_param_key(name), arr, idx, target_devices)
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
     if self._is_proxy:
@@ -894,6 +983,31 @@ class RaidenSynchronizer:
         job_name=self.job_name,
         job_replica_id=str(self.worker_index) if self.worker_index else "",
     )
+    host_subgrid = self._host_subgrid
+    if host_subgrid is None:
+      host_subgrid_env = os.environ.get("RAIDEN_HOST_SUBGRID")
+      if host_subgrid_env:
+        try:
+          host_subgrid = tuple(
+              int(x.strip()) for x in host_subgrid_env.split(",")
+          )
+        except ValueError:
+          pass
+    if host_subgrid is None:
+      for arr in self.arrays:
+        m = getattr(getattr(arr, "sharding", None), "mesh", None)
+        if m is not None:
+          try:
+            if (
+                hasattr(m, "local_mesh")
+                and m.local_mesh is not None
+                and hasattr(m.local_mesh, "devices")
+            ):
+              host_subgrid = tuple(m.local_mesh.devices.shape)
+              break
+          except (AttributeError, ValueError, TypeError):
+            pass
+
     return weight_sync.WorkUnitMetadata(
         unit=unit,
         shards=shards,

@@ -101,6 +101,7 @@ class TensorMetadata:
   item_size: int
   layer_idx: int = 0
   sharding_spec: tuple[str, ...] = ()
+  global_shard_indices: tuple[int, ...] = ()
 
   def __post_init__(self) -> None:
     rank = len(self.shape)
@@ -239,6 +240,7 @@ class WorkUnitMetadata:
                 item_size=int(v["item_size"]),
                 layer_idx=int(v.get("layer_idx", 0)),
                 sharding_spec=tuple(v.get("sharding_spec", ())),
+                global_shard_indices=tuple(v.get("global_shard_indices", ())),
             )
         )
       elif hasattr(v, "name"):
@@ -251,6 +253,7 @@ class WorkUnitMetadata:
                 item_size=int(v.item_size),
                 layer_idx=int(getattr(v, "layer_idx", 0)),
                 sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+                global_shard_indices=tuple(getattr(v, "global_shard_indices", ())),
             )
         )
 

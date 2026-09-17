@@ -197,7 +197,7 @@ class _RaidenTransport:
 
   @staticmethod
   def _to_variable_proto(tensor: weight_sync.TensorMetadata) -> Any:
-    return raiden_service_pb2.VariableMetadataProto(
+    proto = raiden_service_pb2.VariableMetadataProto(
         name=tensor.name,
         shape=list(tensor.shape),
         mesh_shape=list(tensor.mesh_shape),
@@ -206,6 +206,15 @@ class _RaidenTransport:
         layer_idx=tensor.layer_idx,
         sharding_spec=list(tensor.sharding_spec),
     )
+    if tensor.global_shard_indices:
+      if hasattr(proto, "DESCRIPTOR") and "global_shard_indices" in proto.DESCRIPTOR.fields_by_name:
+        proto.global_shard_indices.extend(tensor.global_shard_indices)
+      else:
+        logging.warning(
+            "Installed tpu_sync wheel does not support global_shard_indices in"
+            " VariableMetadataProto. Falling back to legacy mesh geometry."
+        )
+    return proto
 
   def register_work_unit(self, metadata: weight_sync.WorkUnitMetadata) -> None:
     if not metadata.shards:
