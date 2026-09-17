@@ -126,7 +126,7 @@ def _create_rollout_response(
       completion_tokens=np.array([3, 4], dtype=np.int32),
       action_mask=np.array([1, 1], dtype=np.float32),
       policy_version=policy_version,
-      metadata={},
+      metadata={"prompt_id": prompt_id, "group_index": group_index},
   )
   return datatypes.RolloutResponse(
       request_id=request_id,
@@ -258,7 +258,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=dataset,
         max_steps=max_steps,
         algo=self.mock_algo,
-        reward_fns=reward_fns if reward_fns is not None else [lambda x: 1.0],
+        reward_fns=reward_fns if reward_fns is not None else [lambda *_: 1.0],
         assembler=assembler if assembler is not None else self.assembler,
         **kwargs,
     )
@@ -296,7 +296,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=self.assembler,
     )
     self.assertEqual(program.step, 0)
@@ -311,7 +311,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
     )
     self.assertIsInstance(
         program.assembler, batch_assembly.SequencePackedBatchAssembler
@@ -676,7 +676,7 @@ class RLProgramTest(absltest.TestCase):
       program = rl_program.StandardRLProgram(
           dataset=["prompt_0", "prompt_1"],
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=self.assembler,
           max_staleness=0,
       )
@@ -755,7 +755,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -803,7 +803,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -870,7 +870,7 @@ class RLProgramTest(absltest.TestCase):
           max_steps=1,
           algo=self.mock_algo,
           batch_size=4,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=assembler,
           sync_weights=True,
       )
@@ -942,7 +942,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1010,7 +1010,7 @@ class RLProgramTest(absltest.TestCase):
           max_steps=1,
           algo=self.mock_algo,
           batch_size=4,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1112,7 +1112,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1173,7 +1173,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1234,7 +1234,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1304,7 +1304,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1394,7 +1394,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -1447,7 +1447,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1514,7 +1514,7 @@ class RLProgramTest(absltest.TestCase):
   def test_run_synchronous_entry_point(self):
     _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
     program = self._create_program(
-        reward_fns=[lambda x: 2.0], dataset=["sync_prompt"]
+        reward_fns=[lambda *_: 2.0], dataset=["sync_prompt"]
     )
 
     program.run(self.mock_engine)
@@ -1610,10 +1610,12 @@ class RLProgramTest(absltest.TestCase):
       # 2. Track items observed in reward_fn
       observed_in_reward = []
 
-      def tracking_reward_fn(it: datatypes.TrajectoryItem) -> float:
+      def tracking_reward_fn(
+          unused_completion: str, metadata: dict[str, Any]
+      ) -> float:
         observed_in_reward.append({
-            "prompt_id": it.prompt_id,
-            "group_index": it.group_index,
+            "prompt_id": metadata["prompt_id"],
+            "group_index": metadata["group_index"],
         })
         return 1.0
 
@@ -1879,7 +1881,7 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
 
-      def failing_reward_fn(_):
+      def failing_reward_fn(*_):
         raise ValueError("Reward model computation failed")
 
       program = self._create_program(reward_fns=[failing_reward_fn])
@@ -3032,7 +3034,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_seq_token_per_tpu=1024,
@@ -3054,7 +3056,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
@@ -3072,7 +3074,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
@@ -3089,7 +3091,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
     )
     self.assertEqual(program.max_response_length, 768)
     self.assertEqual(program.batch_config.max_response_length, 768)
@@ -3099,7 +3101,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
     )
     self.assertIsInstance(
@@ -3342,6 +3344,10 @@ class RLProgramTest(absltest.TestCase):
     traj = {
         "status": datatypes.TrajectoryStatus.SUCCEEDED,
         "trajectory_reward": 1.0,
+        "conversation_text": [
+            {"role": "user", "content": "Q: What is 2+2?\nA:"},
+            {"role": "assistant", "content": "4"},
+        ],
     }
     item = datatypes.TrajectoryItem(
         traj_id="traj_1",
@@ -3353,7 +3359,6 @@ class RLProgramTest(absltest.TestCase):
         metadata={
             "question": "What is 2+2?",
             "prompt": "Q: What is 2+2?\nA:",
-            "text": "4",
             "gold_answer": "4",
         },
         traj=traj,
@@ -3376,6 +3381,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(row["reward"], 1.0)
     self.assertEqual(row["question"], "What is 2+2?")
     self.assertEqual(row["prompt"], "Q: What is 2+2?\nA:")
+    # Only the assistant turn, never the prompt that precedes it.
     self.assertEqual(row["completion"], "4")
     self.assertEqual(row["gold_answer"], "4")
     self.assertEqual(row["prompt_tokens"], [1, 2])
@@ -3429,6 +3435,87 @@ class RLProgramTest(absltest.TestCase):
     self.assertIsNone(rows[2]["reward"])
 
     program.close()
+
+  def test_log_consumed_trajectories_multi_turn_includes_env_messages(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        trajectory_log_dir="/tmp/trajectories",
+    )
+    mock_traj_logger = mock.MagicMock()
+    program.trajectory_logger = mock_traj_logger
+
+    traj = {
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "trajectory_reward": 1.0,
+        "conversation_text": [
+            {"role": "system", "content": "You are a coding agent."},
+            {"role": "user", "content": "Fix bug in foo.py"},
+            {"role": "assistant", "content": "ls -l"},
+            {"role": "user", "content": "foo.py bar.py"},
+            {"role": "assistant", "content": "done"},
+        ],
+    }
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_multi",
+        group_index=0,
+        traj=traj,
+    )
+
+    program._log_consumed_trajectories(
+        [item], log_step=1, consumed_policy_version=1
+    )
+
+    mock_traj_logger.log_item_async.assert_called_once()
+    row = mock_traj_logger.log_item_async.call_args[0][0]
+    expected_completion = (
+        "[assistant]: ls -l\n[environment]: foo.py bar.py\n[assistant]: done"
+    )
+    self.assertEqual(row["completion"], expected_completion)
+    program.close()
+
+  def test_invoke_reward_fn_passes_concatenated_assistant_text_and_metadata(
+      self,
+  ):
+    item = datatypes.TrajectoryItem(
+        prompt_id="p_math",
+        group_index=3,
+        traj={
+            "conversation_text": [
+                {"role": "system", "content": "you are a math tutor"},
+                {
+                    "role": "user",
+                    "content": (
+                        "Put your reasoning inside"
+                        " <reasoning>...</reasoning> tags and your answer"
+                        " inside <answer>\\boxed{}</answer> tags."
+                    ),
+                },
+                {"role": "assistant", "content": "<reasoning>2+2=4.</reasoning>"},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "<answer>\\boxed{4}</answer>"},
+            ]
+        },
+        metadata={"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
+    )
+    captured = {}
+
+    def reward_fn(completion: str, metadata: dict[str, Any]) -> float:
+      captured["completion"] = completion
+      captured["metadata"] = dict(metadata)
+      return 1.0
+
+    score = rl_program._invoke_reward_fn(reward_fn, item)
+    self.assertEqual(score, 1.0)
+    self.assertEqual(
+        captured["completion"],
+        "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>",
+    )
+    self.assertEqual(
+        captured["metadata"],
+        {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
+    )
 
 
 def _traj_item(tokens, clipped=None, raw_length=None):
@@ -3587,7 +3674,7 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
     )
     program.metrics_logger = mock.MagicMock()
     program._collect_and_log_step_metrics(
@@ -3645,7 +3732,7 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     return rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=self.assembler,
         **kwargs,
     )

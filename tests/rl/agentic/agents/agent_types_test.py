@@ -174,5 +174,32 @@ class TrajectoryItemTest(absltest.TestCase):
     np.testing.assert_array_equal(restored.prompt_tokens, [1, 2])
 
 
+class AssistantTextTest(absltest.TestCase):
+
+  def test_assistant_text_concatenates_assistant_turns_only(self):
+    conversation = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    self.assertEqual(agent_types.assistant_text(conversation), "a1a2")
+
+  def test_assistant_text_passes_through_plain_string(self):
+    self.assertEqual(
+        agent_types.assistant_text("already rendered"), "already rendered"
+    )
+
+  def test_assistant_text_handles_empty_and_malformed_entries(self):
+    self.assertEqual(agent_types.assistant_text([]), "")
+    self.assertEqual(
+        agent_types.assistant_text(
+            [None, {"role": "assistant"}, {"role": "assistant", "content": "x"}]
+        ),
+        "x",
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

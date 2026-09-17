@@ -145,6 +145,64 @@ def _extract_reward(item: Any) -> float:
   return float(traj["trajectory_reward"])
 
 
+def _invoke_reward_fn(
+    fn: Callable[[str, Mapping[str, Any]], float],
+    item: datatypes.TrajectoryItem,
+) -> float:
+  """Scores `item`'s assistant completion string with `fn(completion, metadata)`."""
+  if not isinstance(item.traj, dict):
+    raise TypeError(
+        "Expected a Token-mode trajectory mapping, got"
+        f" {type(item.traj).__name__}."
+    )
+  completion = datatypes.assistant_text(item.traj.get("conversation_text", ""))
+  return float(fn(completion, item.metadata))
+
+
+def _format_rollout_completion(conversation: Any) -> str:
+  """Renders post-prompt interaction (assistant + env) for trajectory logging.
+
+  In single-turn tasks (e.g. GSM8K), this yields the assistant's completion.
+  In multi-turn agentic environments (e.g. ToolAgent, DeepSWE), this preserves
+  both the assistant's turns and subsequent environment/tool feedback while
+  excluding the initial prompt.
+
+  Args:
+    conversation: Either a list of chat messages or an already-rendered string.
+
+  Returns:
+    The rendered completion string for trajectory logging.
+  """
+  if not isinstance(conversation, list):
+    return str(conversation)
+
+  # Find the end of the initial prompt (first user turn).
+  prompt_end_idx = 0
+  for idx, msg in enumerate(conversation):
+    if isinstance(msg, dict) and msg.get("role") == "user":
+      prompt_end_idx = idx + 1
+      break
+
+  post_prompt = conversation[prompt_end_idx:]
+  if not post_prompt:
+    return datatypes.assistant_text(conversation)
+
+  # For a single assistant turn (e.g. single-turn math), return raw content directly.
+  if len(post_prompt) == 1 and isinstance(post_prompt[0], dict):
+    return str(post_prompt[0].get("content", ""))
+
+  # For multi-turn interactions, include role labels so env observations and assistant actions are distinguishable.
+  lines = []
+  for msg in post_prompt:
+    if not isinstance(msg, dict):
+      continue
+    role = msg.get("role", "unknown")
+    content = str(msg.get("content", ""))
+    label = "environment" if role == "user" else role
+    lines.append(f"[{label}]: {content}")
+  return "\n".join(lines)
+
+
 @dataclasses.dataclass(kw_only=True)
 class RLStepResult:
   """Summary of a completed RL training step."""
@@ -460,7 +518,7 @@ class StandardRLProgram(RLProgram):
         rewards = []
         for item in group:
           if self.reward_fns:
-            r = sum(fn(item) for fn in self.reward_fns)
+            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
@@ -978,7 +1036,9 @@ class StandardRLProgram(RLProgram):
           "reward": float(reward) if reward is not None else None,
           "question": metadata.get("question", env_config.get("question", "")),
           "prompt": metadata.get("prompt", env_config.get("prompt", "")),
-          "completion": metadata.get("text", ""),
+          "completion": _format_rollout_completion(
+              traj.get("conversation_text", "")
+          ),
           "gold_answer": metadata.get(
               "gold_answer",
               metadata.get("answer", env_config.get("gold_answer", "")),

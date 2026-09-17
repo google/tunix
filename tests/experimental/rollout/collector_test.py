@@ -763,7 +763,11 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     )
 
     rl_traj = {
-        "conversation_text": "first step second step",
+        "conversation_text": [
+            {"role": "system", "content": "you are a helpful assistant"},
+            {"role": "user", "content": "the prompt must not be scored"},
+            {"role": "assistant", "content": "first step second step"},
+        ],
         "prompt_tokens": np.array([1, 2, 3], dtype=np.int32),
         "conversation_tokens": np.array([10, 11, 12], dtype=np.int32),
         "conversation_masks": np.array([1.0, 1.0, 1.0], dtype=np.float32),
@@ -779,13 +783,44 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     self.assertEqual(item.group_index, 2)
     self.assertEqual(item.policy_version, 5)
     self.assertEqual(item.metadata.get("custom_key"), "custom_val")
-    self.assertEqual(item.metadata.get("trajectory_reward"), 2.5)
-    self.assertEqual(item.metadata.get("text"), "first step second step")
     np.testing.assert_array_equal(item.prompt_tokens, [1, 2, 3])
     np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 12])
     np.testing.assert_array_equal(item.conversation_masks, [1.0, 1.0, 1.0])
     np.testing.assert_allclose(item.old_logprobs, [-0.1, -0.2, -0.3])
     self.assertEqual(item.traj, rl_traj)
+    # Episode data must live on `traj` only. Mirroring it into metadata let the
+    # copy drift from the original and silently corrupted reward scoring.
+    self.assertNotIn("text", item.metadata)
+    self.assertNotIn("trajectory_reward", item.metadata)
+    self.assertEqual(item.traj["trajectory_reward"], 2.5)
+    self.assertEqual(
+        datatypes.assistant_text(item.traj["conversation_text"]),
+        "first step second step",
+    )
+
+  def test_assistant_text_concatenates_assistant_turns_only(self):
+    conversation = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    self.assertEqual(datatypes.assistant_text(conversation), "a1a2")
+
+  def test_assistant_text_passes_through_plain_string(self):
+    self.assertEqual(
+        datatypes.assistant_text("already rendered"), "already rendered"
+    )
+
+  def test_assistant_text_handles_empty_and_malformed_entries(self):
+    self.assertEqual(datatypes.assistant_text([]), "")
+    self.assertEqual(
+        datatypes.assistant_text(
+            [None, {"role": "assistant"}, {"role": "assistant", "content": "x"}]
+        ),
+        "x",
+    )
 
   def test_convert_to_trajectory_with_env_tokens_and_masks(self):
     request = datatypes.RolloutRequest(

@@ -107,27 +107,25 @@ def gsm8k_env_reward(
 
 def make_gsm8k_reward_fn(
     debug: bool = False,
-) -> collections.abc.Callable[[Any], float]:
+) -> collections.abc.Callable[[str, collections.abc.Mapping[str, Any]], float]:
   """Creates an orchestrator-side reward function scoring completions against gold answers."""
 
-  def reward_fn(item: Any) -> float:
-    metadata = dict(getattr(item, "metadata", None) or {})
-    text = str(metadata.get("text", ""))
+  def reward_fn(
+      completion: str,
+      metadata: collections.abc.Mapping[str, Any],
+  ) -> float:
     gold_answer = metadata.get("answer", metadata.get("gold_answer"))
-    reward, _ = score_gsm8k_completion(text, gold_answer)
+    reward, _ = score_gsm8k_completion(completion, gold_answer)
     if debug:
-      prompt_id = metadata.get(
-          "prompt_id",
-          getattr(item, "prompt_id", "unknown"),
-      )
+      prompt_id = metadata.get("prompt_id", "unknown")
       logging.debug(
           "[Orchestrator] Sampler response for %s:\n"
           "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
           "Gold Answer: %s, Extracted Answer: %s",
           prompt_id,
-          text,
+          completion,
           gold_answer,
-          extract_boxed_answer(text),
+          extract_boxed_answer(completion),
       )
     return reward
 

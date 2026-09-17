@@ -45,6 +45,10 @@ Role = common_datatypes.Role
 UNSET_ROUTED_EXPERT = -1
 
 
+# Re-export assistant_text from canonical agent_types module.
+assistant_text = agent_types.assistant_text
+
+
 ##### Common DTOs (Data Transfer Objects) #####
 
 

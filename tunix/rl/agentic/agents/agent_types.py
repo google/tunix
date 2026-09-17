@@ -263,3 +263,32 @@ class TrajectoryItem:
         metadata=metadata,
     )
 
+
+def assistant_text(conversation_text: Any) -> str:
+  """Renders the assistant's share of a rollout conversation as plain text.
+
+  `TrajectoryCollectEngine` emits `conversation_text` in "Token" mode as the
+  agent's message list (`[{"role": ..., "content": ...}, ...]`), not a string.
+  Stringifying that list yields a repr that still embeds the system and user
+  turns, so anything scoring it is really scoring the prompt alongside the
+  answer.
+
+  Every assistant turn is included, so multi-turn episodes are scored in full.
+
+  Args:
+    conversation_text: Either a list of chat messages or an already-rendered
+      string.
+
+  Returns:
+    The concatenated content of the assistant turns. Non-list inputs are
+    stringified unchanged, so callers already holding rendered text keep
+    working.
+  """
+  if not isinstance(conversation_text, list):
+    return str(conversation_text)
+  return "".join(
+      str(message.get("content", ""))
+      for message in conversation_text
+      if isinstance(message, dict) and message.get("role") == "assistant"
+  )
+

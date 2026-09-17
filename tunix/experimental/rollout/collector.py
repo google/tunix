@@ -348,13 +348,15 @@ class TrajectoryCollectorEngine:
           f"Expected rl_traj to be a dict, got {type(rl_traj).__name__}"
       )
 
+    # Metadata carries only request-scoped context. Everything about the
+    # episode itself stays on `traj`, which is the single source of truth and
+    # matches how `agentic_grpo_learner` consumes rollouts. Mirroring episode
+    # fields here previously let the copy drift from the original: the mirrored
+    # reward was read instead of the real one, and the mirrored text held the
+    # whole conversation rather than the model's answer.
     metadata = dict(self.request.metadata or {})
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
-    metadata.setdefault("text", rl_traj.get("conversation_text", ""))
-    metadata["trajectory_reward"] = float(
-        rl_traj.get("trajectory_reward", 0.0) or 0.0
-    )
     metadata["status"] = rl_traj.get("status", "")
     policy_version = getattr(
         self.request,
