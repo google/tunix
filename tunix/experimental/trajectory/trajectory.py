@@ -14,7 +14,6 @@ from typing import Annotated, Any, Final, Literal, get_args
 import numpy as np
 import pydantic
 
-
 # ==============================================================================
 # --- Pure ATIF Base Classes ---
 # ==============================================================================
@@ -52,6 +51,31 @@ def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
     return v
 
   return _convert(value)
+
+
+def _pack_subclass_values_into_extra(
+    model: pydantic.BaseModel, base_field_names: set[str] | frozenset[str]
+) -> dict[str, Any] | None:
+  """Packs subclass field values into `extra['_atif_ext']` and returns ATIF values by key."""
+  subclass_field_names = set(type(model).model_fields) - base_field_names
+  if not subclass_field_names:
+    return None
+
+  base_values_by_key = model.model_dump(include=set(base_field_names))
+  subclass_values_by_key = model.model_dump(
+      include=subclass_field_names, exclude_none=True
+  )
+
+  # Nest subclass fields under extra["_atif_ext"] to avoid colliding.
+  extra_by_key = base_values_by_key.get("extra") or {}
+  if subclass_values_by_key:
+    atif_ext_by_key = extra_by_key.get("_atif_ext") or {}
+    extra_by_key = extra_by_key | {
+        "_atif_ext": atif_ext_by_key | subclass_values_by_key
+    }
+
+  base_values_by_key["extra"] = extra_by_key or None
+  return base_values_by_key
 
 
 IntArray = Annotated[
@@ -330,6 +354,17 @@ class Step(pydantic.BaseModel):
         )
     return self
 
+  def to_atif_step(self) -> Step:
+    """Converts this step to a base ATIF Step, storing subclass fields in extra."""
+    packed_values_by_key = _pack_subclass_values_into_extra(
+        self, frozenset(Step.model_fields)
+    )
+    return (
+        Step(**packed_values_by_key)
+        if packed_values_by_key is not None
+        else self
+    )
+
 
 class Agent(pydantic.BaseModel):
   """Basic agent metadata."""
@@ -390,6 +425,17 @@ class TrajectoryMetadata(pydantic.BaseModel):
       default=None,
       description="Custom root-level metadata.",
   )
+
+  def to_atif_metadata(self) -> TrajectoryMetadata:
+    """Converts this metadata to base ATIF TrajectoryMetadata, storing subclass fields in extra."""
+    packed_values_by_key = _pack_subclass_values_into_extra(
+        self, frozenset(TrajectoryMetadata.model_fields)
+    )
+    return (
+        TrajectoryMetadata(**packed_values_by_key)
+        if packed_values_by_key is not None
+        else self
+    )
 
 
 class Trajectory(TrajectoryMetadata):
@@ -479,6 +525,10 @@ class Trajectory(TrajectoryMetadata):
     """Returns trajectory metadata (excluding steps and sub-trajectories)."""
     data = self.model_dump(exclude={"steps", "subagent_trajectories"})
     return TrajectoryMetadata(**data)
+
+  def to_atif_metadata(self) -> TrajectoryMetadata:
+    """Converts this trajectory's metadata to base ATIF TrajectoryMetadata."""
+    return self.get_metadata().to_atif_metadata()
 
   def to_json_dict(self) -> dict[str, Any]:
     """Serializes the model to a dictionary suitable for JSON, excluding Nones."""
@@ -737,6 +787,10 @@ class TunixTrajectory(TunixTrajectoryMetadata):
     """Returns trajectory metadata (excluding steps and sub-trajectories)."""
     data = self.model_dump(exclude={"steps", "subagent_trajectories"})
     return TunixTrajectoryMetadata(**data)
+
+  def to_atif_metadata(self) -> TrajectoryMetadata:
+    """Converts this trajectory's metadata to base ATIF TrajectoryMetadata."""
+    return self.get_metadata().to_atif_metadata()
 
   def to_json_dict(self) -> dict[str, Any]:
     """Serializes the model to a dictionary suitable for JSON, excluding Nones."""
