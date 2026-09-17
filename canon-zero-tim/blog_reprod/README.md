@@ -219,8 +219,22 @@ same 275-package set; the nine data hashes match; figure and spreadsheet rebuild
 byte-identically; the step-6 CSV recipe reproduces all three `data/*.csv` byte for byte; and
 `canon-zero-tim/blog_reprod/export_wandb.py` passes its unit tests and exported a real W&B run.
 
-Not verified: **nothing was launched** — no cluster ran these manifests, no `--devices` ABI check
-ran, and the three archived runs could not be re-exported live, because the credentials on this host
-cannot see project `zero-tim-p57-frozenlake-tim`. Comparing a live export against
-`canon-zero-tim/blog_reprod/runs/` is therefore **not verified** (the exporter was exercised against
-a different, reachable run). One-host validation of the pruned tip is still pending.
+Verified 2026-09-17 on one v5p-8 host (real image, real TPUs, this branch's tip), Zero-TIM only:
+`canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/run_perf_v2_onehost.sh` with the
+exact-token-continuity arm (`tito-on`, DP1×TP4, production dataset via `P57_PERF_V2_DATA_DIR`)
+installed the overlay (`all 37 files match (qwen8b)`), ran three optimizer commits with finite
+gradients (commit gradient norms 15.51 / 6.68 / 6.51) and held all 12 strict-alignment rows — 36
+boundaries — at zero differing bytes, with a green semantic census; and
+`canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/run_frozenlake_dp2tp2_onehost.sh p45 r3 … measure`
+(DP2×TP2, the same trainer knobs as the 64-chip profile) reported `strict_exact: true` over 26
+boundaries with finite gradient norms. Those carriers cap rollouts at two turns, so every trajectory
+was single-turn and exact token continuity itself was **not exercised** there (`token_verdict:
+UNEXERCISED`); the 64-chip recipe's five-turn rollouts are where it is exercised.
+
+Not verified: **no cluster job was launched** — no 64-chip run of these manifests, no `--devices` ABI
+check; the Standard and TIS arms have no one-host coverage (the host driver's stock-engine arms crash
+in the backward pass under its `CANON_P66_P59_CHECK_VMA=1` profile — a pre-existing defect on record
+since 2026-09-10, unrelated to the 64-chip path); and the three archived runs could not be
+re-exported live, because the credentials on this host cannot see project
+`zero-tim-p57-frozenlake-tim`, so comparing a live export against `canon-zero-tim/blog_reprod/runs/`
+is **not verified** (the exporter was exercised against a different, reachable run).
