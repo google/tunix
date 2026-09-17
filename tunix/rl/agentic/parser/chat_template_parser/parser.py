@@ -257,33 +257,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     return token
 
   def _init_generation_prompt(self) -> str:
-    if self.enable_thinking:
-      return "<|im_start|>assistant\n<think>\n"
     return self.tokens.assistant_token
-
-  def _parse_assistant(self, content: str) -> str:
-    cleaned = content.strip()
-    while cleaned.endswith(("<|im_end|>", "<|endoftext|>")):
-      for eos in ("<|im_end|>", "<|endoftext|>"):
-        if cleaned.endswith(eos):
-          cleaned = cleaned[:-len(eos)].rstrip()
-    if self.enable_thinking:
-      if "</think>" in cleaned:
-        if not cleaned.lstrip().startswith("<think>"):
-          cleaned = "<think>\n" + cleaned.lstrip()
-      elif "<function=" in cleaned:
-        f_idx = cleaned.find("<function=")
-        thought = cleaned[:f_idx].strip()
-        if thought.startswith("<think>"):
-          thought = thought[len("<think>"):].strip()
-        func_part = cleaned[f_idx:].strip()
-        cleaned = f"<think>\n{thought}\n</think>\n\n{func_part}"
-      elif cleaned:
-        thought = cleaned
-        if thought.startswith("<think>"):
-          thought = thought[len("<think>"):].strip()
-        cleaned = f"<think>\n{thought}\n</think>\n\n"
-    return self.tokens.assistant_token + cleaned + self.tokens.eot_token
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
     """Add default system message if first message is not system."""

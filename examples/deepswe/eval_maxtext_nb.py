@@ -496,7 +496,7 @@ tokenizer = AutoTokenizer.from_pretrained(
     tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
 )
 tokenizer_for_agentic = tok_adapter.TokenizerAdapter(tokenizer)
-chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=True)
+chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # The r2egym scaffold terminates every action with `</function>`; stopping
 # there matches the training rollouts and avoids generating past the action.

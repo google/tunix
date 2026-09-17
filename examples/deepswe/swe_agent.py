@@ -204,33 +204,6 @@ class SWEAgent(ConversationAgentBase):
           {"role": "assistant", "content": f"{thought}\n\n{action_str}"}
       )
     else:
-      if "</think>" in clean_resp:
-        think_block = clean_resp.split("</think>")[0] + "</think>"
-        if (
-            cur_step.action
-            and cur_step.action.startswith(
-                (
-                    "<function=execute_bash>",
-                    "<function=str_replace_editor>",
-                    "<function=submit>",
-                    "<function=finish>",
-                )
-            )
-        ):
-          self._messages.append(
-              {"role": "assistant", "content": f"{think_block}\n\n{cur_step.action}"}
-          )
-        else:
-          # Never leave bare </think> without tool call in assistant chat history
-          synthetic_tool_call = (
-              "<function=execute_bash>\n"
-              "<parameter=command>echo 'Error: missing function call'</parameter>\n"
-              "</function>"
-          )
-          self._messages.append(
-              {"role": "assistant", "content": f"{think_block}\n\n{synthetic_tool_call}"}
-          )
-      else:
-        self._messages.append({"role": "assistant", "content": clean_resp})
+      self._messages.append({"role": "assistant", "content": clean_resp})
     self.step += 1
     return Action(action=cur_step.action)
