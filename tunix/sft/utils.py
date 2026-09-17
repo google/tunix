@@ -15,11 +15,12 @@
 """Simple utils used by SFT."""
 
 import collections
+from collections.abc import Iterable, Mapping
 import contextlib
 import functools
 import gc
 import time
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from absl import logging
 from flax import nnx
@@ -230,3 +231,34 @@ class LossOutput:
 
   primary_loss: WeightedMetric
   aux_metrics: Mapping[str, WeightedMetric | jax.Array]
+
+
+_WRAPPER_ATTRS = (
+    "inner_opt_state",
+    "inner_state",
+    "inner_states",
+    "fast_state",
+)
+
+
+def try_get_learning_rate(opt_state: Any) -> float | jax.Array | None:
+  """Extracts the last injected learning rate from an optax state tree."""
+  def _walk(state: Any) -> Iterable[Any]:
+    if (
+        isinstance(hp := getattr(state, "hyperparams", None), Mapping)
+        and "learning_rate" in hp
+    ):
+      yield getattr(hp["learning_rate"], "value", hp["learning_rate"])
+    if isinstance(state, tuple) and not hasattr(state, "_fields"):
+      children = state
+    elif isinstance(state, Mapping):
+      children = state.values()
+    else:
+      children = (
+          getattr(state, a) for a in _WRAPPER_ATTRS if hasattr(state, a)
+      )
+    for child in children:
+      yield from _walk(child)
+
+  lrs = list(_walk(opt_state))
+  return lrs[-1] if lrs else None
