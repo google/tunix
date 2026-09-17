@@ -412,6 +412,14 @@ def grpo_loss_fn(
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
+  completion_attention_mask = getattr(
+      train_example, "completion_attention_mask", None
+  )
+  token_mask = None
+  if isinstance(completion_attention_mask, (jax.Array, np.ndarray)):
+    token_mask = jnp.concatenate(
+        [train_example.prompt_mask, completion_attention_mask], axis=1
+    )
   per_token_logps, token_entropy = common.compute_per_token_logps(
       graphdef,
       state,
@@ -426,6 +434,7 @@ def grpo_loss_fn(
       temperature=algo_config.temperature,
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       routed_experts=getattr(train_example, "routed_experts", None),
+      token_mask=token_mask,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.

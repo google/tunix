@@ -132,6 +132,10 @@ class Trajectory:
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  prompt_tokens: list[int] | np.ndarray = dataclasses.field(
+      default_factory=list
+  )
+  prompt_length: int | None = None
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -142,7 +146,7 @@ class Trajectory:
     Returns:
       dict: Serializable dictionary representation of the trajectory.
     """
-    return {
+    result = {
         "task": self.task,
         "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),
@@ -150,6 +154,10 @@ class Trajectory:
         "env_time": self.env_time,
         "reward_time": self.reward_time,
     }
+    if self.prompt_length is not None:
+      result["prompt_tokens"] = np.array(self.prompt_tokens, copy=True)
+      result["prompt_length"] = self.prompt_length
+    return result
 
 
 def format_traj_id(prompt_id: Hashable = "", group_index: int = 0) -> str:
@@ -269,8 +277,6 @@ class TrajectoryItem:
         traj=data.get("traj"),
         metadata=metadata,
     )
-
-
 def assistant_text(conversation_text: Any) -> str:
   """Renders the assistant's share of a rollout conversation as plain text.
 
@@ -298,4 +304,3 @@ def assistant_text(conversation_text: Any) -> str:
       for message in conversation_text
       if isinstance(message, dict) and message.get("role") == "assistant"
   )
-

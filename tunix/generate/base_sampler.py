@@ -52,6 +52,9 @@ class SamplerOutput:
   # rollout's expert choices during training instead of re-routing.
   routed_experts: Optional[list[np.ndarray | None]] = None
 
+  # Valid prompt length per row, before left padding (not a pad-ID count).
+  prompt_lengths: np.ndarray | None = None
+
 
 class BaseSampler(ABC):
   """Base class for samplers."""
