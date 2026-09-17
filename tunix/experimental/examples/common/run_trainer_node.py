@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
-import contextlib
 import logging
 import math
 import os
@@ -523,55 +522,6 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   )
 
 
-class _MeshBoundTrainer:
-  """Binds generic PeftTrainer v2 calls to this worker's JAX mesh."""
-
-  def __init__(self, trainer: peft_trainer_v2.PeftTrainer, mesh: Mesh):
-    self._trainer = trainer
-    self._mesh = mesh
-
-  def __getattr__(self, name: str) -> Any:
-    return getattr(self._trainer, name)
-
-  def fwd_bwd(self, *args, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.fwd_bwd(*args, **kwargs)
-
-  def update(self, **kwargs) -> int:
-    with self._mesh:
-      return self._trainer.update(**kwargs)
-
-  def eval_step(self, *args, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.eval_step(*args, **kwargs)
-
-  @contextlib.contextmanager
-  def eval_context(self):
-    with self._mesh:
-      with self._trainer.eval_context():
-        yield
-
-  def compile(self, *args, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.compile(*args, **kwargs)
-
-  def prepare_weight_sync(self, **kwargs) -> Any:
-    with self._mesh:
-      return self._trainer.prepare_weight_sync(**kwargs)
-
-  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.save_checkpoint(metadata, **kwargs)
-
-  def restore_checkpoint(self, **kwargs) -> Any:
-    with self._mesh:
-      return self._trainer.restore_checkpoint(**kwargs)
-
-  def close(self) -> None:
-    with self._mesh:
-      self._trainer.close()
-
-
 def _checkpointing_options(args) -> Any:
   """Builds the Orbax options; `save_interval_steps=0` means "never save".
 
@@ -611,8 +561,8 @@ def _checkpoint_root_directory(args) -> str | None:
   return None
 
 
-def _create_maxtext_trainer_factory(args) -> Any:
-  """Creates the trainer factory function for MaxText's MaxTextTrainingEngine."""
+def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
+  """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
@@ -655,15 +605,14 @@ def _create_maxtext_trainer_factory(args) -> Any:
   logging.info("Trainer mesh: %s", mesh)
 
   def _factory():
-    engine = maxtext_utils.create_maxtext_engine(
+    return maxtext_utils.create_maxtext_engine(
         maxtext_config,
         mesh=mesh,
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
     )
-    return _MeshBoundTrainer(engine, mesh)
 
-  return _factory
+  return _factory, mesh
 
 
 def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
@@ -685,8 +634,8 @@ def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
   return update_trajectories // args.train_micro_batch_size
 
 
-def _create_tunix_trainer_factory(args) -> Any:
-  """Creates the trainer factory function for Tunix's PeftTrainer."""
+def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
+  """Creates the trainer factory function and mesh for Tunix's PeftTrainer."""
   logging.info("Trainer backend: Tunix's PeftTrainer.")
   grad_accumulation_steps = _gradient_accumulation_steps(args)
   update_trajectories = args.mini_batch_size * args.num_generations
@@ -734,20 +683,18 @@ def _create_tunix_trainer_factory(args) -> Any:
   )
 
   def _factory():
-    with mesh:
-      trainer = peft_trainer_v2.PeftTrainer(
-          actor_model,
-          _build_optimizer(args),
-          training_config,
-          sampler_type=args.sampler_type,
-      )
-    return _MeshBoundTrainer(trainer, mesh)
+    return peft_trainer_v2.PeftTrainer(
+        actor_model,
+        _build_optimizer(args),
+        training_config,
+        sampler_type=args.sampler_type,
+    )
 
-  return _factory
+  return _factory, mesh
 
 
-def _create_trainer_factory(args) -> Any:
-  """Creates the trainer factory function based on args.trainer_backend."""
+def _create_trainer_factory(args) -> tuple[Any, Mesh]:
+  """Creates the trainer factory function and mesh based on args.trainer_backend."""
   if args.trainer_backend == "maxtext":
     return _create_maxtext_trainer_factory(args)
   return _create_tunix_trainer_factory(args)
@@ -788,10 +735,11 @@ def main(argv: list[str], context: Any = None) -> None:
     )
 
   logging.info("Creating generic TrainerWorker and gRPC server...")
-  trainer_factory = _create_trainer_factory(args)
+  trainer_factory, mesh = _create_trainer_factory(args)
   worker_service = trainer_worker.TrainerWorker(
       trainer_factory=trainer_factory,
       worker_id=args.worker_id,
+      execution_context=mesh,
   )
 
   async def grpc_server_main() -> None:

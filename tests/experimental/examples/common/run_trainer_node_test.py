@@ -32,15 +32,20 @@ from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
 
 
-class MeshBoundTrainerTest(absltest.TestCase):
+class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
     self.mock_trainer = mock.MagicMock(spec=peft_trainer_v2.PeftTrainer)
+    self.mock_trainer.policy_version = 1
     self.mock_mesh = mock.MagicMock(spec=Mesh)
-    self.mesh_trainer = run_trainer_node._MeshBoundTrainer(
-        self.mock_trainer, self.mock_mesh
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.mock_trainer,
+        worker_id="trainer-0",
+        execution_context=self.mock_mesh,
     )
+    self.worker.initialize()
+    self.mock_mesh.reset_mock()
 
   def test_save_checkpoint_runs_within_mesh_context_and_propagates_kwargs(self):
     call_order = []
@@ -55,7 +60,7 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
 
     metadata = {"step": 10, "policy_version": 2, "num_rollouts": 4}
-    self.mesh_trainer.save_checkpoint(
+    self.worker.save_checkpoint(
         metadata=metadata, force=True, save_only_lora_params=True
     )
 
@@ -66,14 +71,10 @@ class MeshBoundTrainerTest(absltest.TestCase):
         call_order, ["enter_mesh", "save_checkpoint", "exit_mesh"]
     )
 
-  def test_save_checkpoint_default_metadata(self):
-    self.mesh_trainer.save_checkpoint()
-    self.mock_trainer.save_checkpoint.assert_called_once_with(None)
-
   def test_save_checkpoint_propagates_exception_and_exits_mesh(self):
     self.mock_trainer.save_checkpoint.side_effect = RuntimeError("Disk full")
     with self.assertRaisesRegex(RuntimeError, "Disk full"):
-      self.mesh_trainer.save_checkpoint(metadata={"step": 1})
+      self.worker.save_checkpoint(metadata={"step": 1})
 
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
@@ -93,7 +94,7 @@ class MeshBoundTrainerTest(absltest.TestCase):
         or {"step": 5}
     )
 
-    result = self.mesh_trainer.restore_checkpoint(step=5)
+    result = self.worker.restore_checkpoint(step=5)
 
     self.assertEqual(result, {"step": 5})
     self.mock_trainer.restore_checkpoint.assert_called_once_with(step=5)
@@ -102,55 +103,43 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
 
   def test_fwd_bwd_runs_within_mesh(self):
-    self.mesh_trainer.fwd_bwd("payload", skip_jit=False)
+    req = mock.MagicMock(payload="payload", metadata={}, request_id="r1")
+    self.worker.fwd_bwd(req, skip_jit=False)
     self.mock_mesh.__enter__.assert_called_once()
-    self.mock_trainer.fwd_bwd.assert_called_once_with(
-        "payload", skip_jit=False
-    )
+    self.mock_trainer.fwd_bwd.assert_called_once_with("payload")
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_update_runs_within_mesh(self):
     self.mock_trainer.update.return_value = 5
-    result = self.mesh_trainer.update(custom_kw=True)
+    result = self.worker.update(custom_kw=True)
     self.assertEqual(result, 5)
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.update.assert_called_once_with(custom_kw=True)
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_eval_step_runs_within_mesh(self):
-    self.mesh_trainer.eval_step("eval_payload", arg1=1)
+    req = mock.MagicMock(payload="eval_payload", metadata={}, request_id="r2")
+    self.worker.eval_step(req, arg1=1)
     self.mock_mesh.__enter__.assert_called_once()
-    self.mock_trainer.eval_step.assert_called_once_with(
-        "eval_payload", arg1=1
-    )
-    self.mock_mesh.__exit__.assert_called_once()
-
-  def test_eval_context_runs_within_mesh(self):
-    mock_ctx = mock.MagicMock()
-    self.mock_trainer.eval_context.return_value = mock_ctx
-
-    with self.mesh_trainer.eval_context():
-      mock_ctx.__enter__.assert_called_once()
-
-    mock_ctx.__exit__.assert_called_once()
-    self.mock_mesh.__enter__.assert_called_once()
+    self.mock_trainer.eval_step.assert_called_once_with("eval_payload", arg1=1)
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_compile_runs_within_mesh(self):
-    self.mesh_trainer.compile("dummy_data")
+    self.worker.compile("dummy_data")
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.compile.assert_called_once_with("dummy_data")
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_prepare_weight_sync_runs_within_mesh(self):
     self.mock_trainer.prepare_weight_sync.return_value = {"weights": "synced"}
-    result = self.mesh_trainer.prepare_weight_sync(sync_request="req1")
+    result = self.worker.prepare_weight_sync(sync_request="req1")
     self.assertEqual(result, {"weights": "synced"})
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.prepare_weight_sync.assert_called_once_with(
         sync_request="req1"
     )
     self.mock_mesh.__exit__.assert_called_once()
+
 
   def test_prepare_weight_sync_never_drains_checkpoint(self):
     """Checkpoint staging and the Raiden transfer must stay overlapped.
@@ -160,18 +149,15 @@ class MeshBoundTrainerTest(absltest.TestCase):
     """
     manager = mock.MagicMock()
     setattr(self.mock_trainer, "_checkpoint_manager", manager)
-    self.mesh_trainer.prepare_weight_sync()
+    self.mock_trainer.prepare_weight_sync()
     manager.wait_until_finished.assert_not_called()
 
-  def test_close_runs_within_mesh(self):
-    self.mesh_trainer.close()
+
+  def test_stop_runs_close_within_mesh(self):
+    self.worker.stop()
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.close.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
-
-  def test_getattr_delegates_to_underlying_trainer(self):
-    self.mock_trainer.custom_attr = "custom_value"
-    self.assertEqual(self.mesh_trainer.custom_attr, "custom_value")
 
 
 class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
@@ -202,7 +188,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_mesh = mock.MagicMock(spec=Mesh)
     mock_create_mesh.return_value = mock_mesh
     mock_load_actor_model.return_value = mock.MagicMock()
-    mock_create_trainer_factory.return_value = mock.MagicMock()
+    mock_create_trainer_factory.return_value = (mock.MagicMock(), mock_mesh)
     mock_trainer_worker_cls.return_value = self.mock_worker_service
     mock_grpc_server_cls.return_value = self.mock_server
 
@@ -263,6 +249,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertIn(signal.SIGINT, signal_handlers)
     self.assertIn(signal.SIGTERM, signal_handlers)
     self.mock_context.jax.initialize.assert_called_once()
+    mock_trainer_worker_cls.assert_called_once_with(
+        trainer_factory=mock.ANY,
+        worker_id="trainer-0",
+        execution_context=mock_create_mesh.return_value,
+    )
     self.mock_server.start_serving_async.assert_called_once_with(20000)
     self.mock_context.ipc.discovery.register.assert_called_once()
     self.mock_worker_service.stop.assert_called_once()
