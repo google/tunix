@@ -35,12 +35,15 @@ on:
       trainer_pathways:
         description: >
           Run the MaxText trainer as a Pathways proxy client instead of mcJAX.
-          Off by default despite production running the trainer on Pathways,
-          because the Pathways path currently aborts the trainer inside
-          Raiden's first weight-sync round -- see the comment on the Pathways
-          daemon step below. Everything before that point works, so the mode
-          stays switchable rather than removed: set this true from
-          workflow_dispatch to retest it once Raiden is fixed.
+          Production runs the trainer on Pathways, and that is the only mode
+          exercising the single-controller API the orchestrator is built on, so
+          this is the configuration worth getting to. It is off by default all
+          the same: Pathways adds four host-level requirements this test cannot
+          check in advance (daemons up, TPU generation detected, chips bound in
+          PCI order, the proxy backend registered), and a failure in any of
+          them looks like a test failure. mcJAX covers MaxText, vLLM and Raiden
+          without them. Set true from workflow_dispatch to run the production
+          pairing; the daemons start automatically.
         required: false
         type: boolean
         default: false
@@ -525,20 +528,6 @@ jobs:
       #
       # Skipped entirely when trainer_pathways is false -- the default -- in
       # which case nothing binds the chips and both sides run mcJAX.
-      #
-      # KNOWN BLOCKER, which is why that is the default. Under Pathways the
-      # trainer reaches Raiden's first weight-sync round and then aborts:
-      #   trainer bind prepared 310 arrays (proxy_runtime=True)
-      #   F message.cc:348] File is already registered:
-      #                     xla/pjrt/proto/execute_options.proto
-      #     @ google::protobuf::MessageFactory::InternalRegisterGeneratedFile()
-      # This is the collision tunix/experimental/weight_sync/raiden_preload.py
-      # exists to avoid: Raiden's native modules and the TPU backend each link
-      # their own XLA and so their own copy of that proto, and whichever is
-      # dlopened second aborts. run_rollout_node.py preloads Raiden and is
-      # therefore fine; run_trainer_node.py does not, and only the Pathways
-      # branch puts the trainer on Raiden's FFI transport (RAIDEN_USE_FFI=1),
-      # so mcJAX never loads the second copy and never trips it.
       - name: Start Pathways daemons
         if: ${{ inputs.trainer_pathways }}
         run: bash scripts/start_pathways_daemons.sh

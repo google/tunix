@@ -39,7 +39,7 @@ on:
       # fallback -- which would silently flip the mode for the runs nobody is
       # watching.
       trainer_pathways:
-        description: 'Run the MaxText RL smoke test trainer on Pathways instead of mcJAX (known-broken; see tpu-tests.yml)'
+        description: 'Run the MaxText RL smoke test trainer on Pathways instead of mcJAX (needs the host-level setup described in tpu-tests.yml)'
         required: false
         type: choice
         options: ['false', 'true']
