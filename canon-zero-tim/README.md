@@ -115,7 +115,7 @@ trajectories per update; GSPO-token loss with RLOO advantages; one optimizer ite
 batch; seed 42; learning rate 1e-6; clipping 0.003 / 0.005; temperature 0.7, top-p 1, top-k 0;
 loss aggregation `sequence-mean-token-mean`; grid sides 2–9; ≤5 turns; prompt limit 4096;
 generation limit 2048; 300 updates requested, first 200 training observations plotted. The
-`recipe` tab of `canon-zero-tim/blog_reprod/figure4.xlsx` compares all 24 recorded config keys
+`README` tab of `canon-zero-tim/blog_reprod/figure4.xlsx` compares all 24 recorded config keys
 across the arms and marks exactly three as differing: `old_logps_source`, `sampler_is`,
 `eval_every_n_steps`.
 
@@ -313,15 +313,26 @@ checked-in SVG and PNG are byte-identical to the blog package's (PNG SHA-256
 `4465b15ab936c2d812568fa806909b810cc2e5a3ada1082e1598d306fbc2cccc`). The PNG comes from
 `gdk-pixbuf-thumbnailer`; without that binary the command fails after writing the SVG.
 
-The third writes `figure4.xlsx` (67,133 bytes as generated) with six sheets: `README`;
-`curves_wide` (201×10: display step plus, per arm, `solve_ratio`, its trailing ten-step mean and
-`logp_diff_mean`); `curves_long` (1801×4); `recipe` (24 config keys × three arms plus a `differs`
-column); `provenance` (run ids, W&B project, executed SHAs, the three CSV hashes, line ranges); and
-`endpoints`. Raw curve cells hold the CSV's own number strings, so the workbook shows the digits
-that were plotted. Regenerating it changes its bytes but not its contents — openpyxl stamps the
-wall clock into `docProps/core.xml` and the zip member timestamps, so compare the worksheet XML,
-not the file hash. `python3 -m unittest` passes on
-`canon-zero-tim/blog_reprod/make_spreadsheet_test.py` (5 tests) and on the two builder tests (19).
+The third writes `figure4.xlsx` (522,396 bytes as generated) with four sheets: `README`, then one
+tab per arm — `Standard` (201×146), `TIS` (201×152), `Zero-TIM` (201×59). Each arm tab is that
+arm's own W&B export, unabridged: every column of its `history.csv`, on the 200 rows the manifest
+says Figure 4 plotted, holding the export's own number strings, so the workbook shows the digits
+that were plotted and an empty cell is empty upstream too. Only the order is ours — identity
+(`display_step`, `_step`, `_runtime`, `_timestamp`), then the five Figure 4 columns
+(`rewards/train/solve_ratio`, its derived ten-step trailing mean, `logp_diff_mean`,
+`logp_diff_max`, and for Zero-TIM `alignment_max_differing_bytes`), then the arm's
+training-dynamics namespace (`actor/train/*`, or `canonical/train/*` for Zero-TIM, which logs no
+`actor/train/*` at all), then `sampler_is/*` where the arm has it, then every remaining namespace
+in alphabetical order; the pane freezes after the Figure 4 block. Those `actor/train/*` values are
+logged one step after the `rewards/*` of the same update, so 199 of the 200 rows carry them, and
+the export's `_step` 300 row — outside the plotted window — carries only actor metrics. The
+`README` tab holds the plotting recipe, a legend for every column group, per-arm provenance, the
+24 config keys × three arms with a `differs` column, semantic notes, and two native line charts:
+the figure's two panels, drawn by the spreadsheet itself from the arm tabs. Regenerating it changes
+its bytes but not its contents — openpyxl stamps the wall clock into `docProps/core.xml` and the
+zip member timestamps, so compare the worksheet XML, not the file hash. `python3 -m unittest`
+passes on `canon-zero-tim/blog_reprod/make_spreadsheet_test.py` (9 tests) and on the two builder
+tests (19).
 
 ### 1.5 Evidence boundary, and what "reproduced" means
 

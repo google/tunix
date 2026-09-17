@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Build figure4.xlsx: the Figure 4 curves, recipe and provenance in one workbook.
+"""Build figure4.xlsx: one raw W&B tab per arm, plus a README tab with charts.
 
-Every value comes from data/manifest.json and data/*.csv; nothing is typed by
-hand. The raw curve columns hold the CSV's original number strings, so a reader
-sees exactly the digits that were plotted. The ten-step trailing average reuses
-moving_average() from the figure builder, so solve_trail10 at display step 200
-is the endpoint label the figure prints.
+Each arm tab is that arm's own W&B export, unabridged: every column of
+runs/<run_id>/history.csv, on the 200 rows data/manifest.json says Figure 4
+plotted, written as the export's own strings so a reader sees the digits that
+were drawn. Only the column order is ours - identity, then the five Figure 4
+columns, then the arm's training-dynamics namespace, then everything else
+grouped by prefix - and only two columns are derived: display_step and the
+ten-step trailing mean, which reuses moving_average() from the figure builder so
+its last row is the endpoint label the figure prints.
 
 Run from this directory (needs openpyxl and PyYAML):
     python make_spreadsheet.py            # writes ./figure4.xlsx
@@ -15,9 +18,14 @@ Run from this directory (needs openpyxl and PyYAML):
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference, Series
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 
 import build_end_to_end_results_measured as figure
 # Same trailing-mean function the figure's foreground curve and endpoint labels
@@ -28,19 +36,259 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 WANDB_PROJECT = "zero-tim-p57-frozenlake-tim"
 ARMS = (("standard", "Standard"),
-        ("importance_sampling", "Token-level TIS"),
+        ("importance_sampling", "TIS"),
         ("zero_tim", "Zero-TIM"))
-METRICS = (("solve_ratio", figure.REWARD),
-           ("solve_trail10", None),
-           ("logp_diff_mean", figure.MEAN))
-SHEETS = ("README", "curves_wide", "curves_long", "recipe", "provenance", "endpoints")
-EVIDENCE = "analysis-grade telemetry, not signed full-run certification"
-BRANCH_TIP = "see README.md"
+SHEETS = ("README",) + tuple(label for _, label in ARMS)
+
+# Column order on an arm tab. IDENTITY and FIGURE_COLUMNS are the frozen block
+# the freeze pane keeps on screen; everything after it follows the arm's own
+# order inside each namespace.
+DISPLAY = "display_step"
+TRAIL = "derived:solve_ratio_trail10"
+IDENTITY = ("_step", "_runtime", "_timestamp")
+FIGURE_COLUMNS = (figure.REWARD, TRAIL, figure.MEAN, figure.MAXIMUM, figure.BYTES)
+DYNAMICS_PREFIXES = ("actor/train/", "canonical/train/")
+ARM_SPECIFIC_PREFIX = "sampler_is/"
+FIRST_DATA_ROW = 2
+LAST_DATA_ROW = FIRST_DATA_ROW + figure.STEPS - 1
+
+GROUP_LEGEND = (
+    (DISPLAY + ", " + ", ".join(IDENTITY),
+     "identity: display step 1-200, W&B's own step counter, seconds since the run "
+     "started, and the Unix timestamp of the log call."),
+    (figure.REWARD,
+     "Figure 4, right panel, faint line: fraction of the update's 256 trajectories "
+     "that reached the goal."),
+    (TRAIL,
+     "Figure 4, right panel, bold line: ten-step trailing mean of the column to its "
+     "left. Derived here, not exported by W&B."),
+    (figure.MEAN,
+     "Figure 4, left panel: mean absolute sampler-trainer logprob difference over the "
+     "sampled action tokens of that update."),
+    (figure.MAXIMUM,
+     "Figure 4 companion: the worst single-token logprob difference in the same "
+     "update. Not drawn, but it bounds the mean."),
+    (figure.BYTES,
+     "Figure 4 companion, Zero-TIM only: bytes differing between the sampler's and "
+     "the trainer's logprob tensors. Zero on every plotted step."),
+    ("actor/train/*",
+     "training dynamics for Standard and TIS: loss, gradient norm, clipping, KL and "
+     "the zero_tim censuses. Logged one step after the rewards of the same update."),
+    ("canonical/train/*",
+     "training dynamics for Zero-TIM, which logs this namespace instead of "
+     "actor/train/*: commit gradient norm, parameter delta, alignment census."),
+    ("sampler_is/*",
+     "token-level sampler importance weights and clipping fraction. Only the TIS arm "
+     "logs them; the other two tabs have no such columns."),
+    ("frozenlake_eval/*",
+     "held-out FrozenLake evaluation. Standard and TIS evaluate every 50 steps, so "
+     "these cells are empty on most training rows; Zero-TIM never evaluates."),
+    ("generation/*", "prompt and completion lengths and the generation clip ratio."),
+    ("perf/*", "wall-clock seconds per phase of the update."),
+    ("rewards/*",
+     "solve counts, solve fractions and advantage statistics, on train and - where "
+     "the arm evaluates - eval."),
+    ("sampler_trainer/*",
+     "sampler-versus-trainer agreement: logprob and probability differences and their "
+     "Pearson correlation."),
+    ("trajectory/*", "environment and reward-function latencies per update."),
+    ("trajectory_rewards/*", "per-trajectory reward statistics for the update."),
+)
+
+SEMANTIC_NOTES = (
+    ("_step",
+     "W&B step 0-199 on these rows is display step 1-200; the export itself runs to "
+     "_step 300 (Standard, TIS) or 215 (Zero-TIM), outside the plotted window."),
+    ("actor/train/* offset",
+     "these are logged one step after the rewards/* of the same update, so 199 of the "
+     "200 rows carry them - the first row is empty - and the export's _step=300 row "
+     "carries only actor metrics."),
+    ("Zero-TIM namespace",
+     "the Zero-TIM arm has no actor/train/* at all; canonical/train/* is its "
+     "training-dynamics namespace, and it is populated on all 200 rows."),
+    ("trailing mean",
+     "derived:solve_ratio_trail10 averages the available prefix for the first nine "
+     "steps, then a full ten-step window - exactly what the figure draws."),
+    ("empty cells",
+     "an empty cell is empty in the W&B export too: an evaluation row the arm did not "
+     "write, or a metric that arm never logged. Nothing was filled in."),
+    ("number strings",
+     "W&B cells hold the export's own text, so a spreadsheet may flag them as numbers "
+     "stored as text, and a chart drawn straight from such a column may read as empty "
+     "until the column is converted. Reformatting them here would change the digits on "
+     "display, so they are left as exported."),
+    ("numeric precision",
+     "the two derived columns are numbers, written at openpyxl's 16-significant-digit "
+     "precision; the figure builder's own trailing mean can carry one more digit."),
+    ("regeneration",
+     "re-running make_spreadsheet.py changes the file's bytes - openpyxl stamps the "
+     "wall clock into docProps and the zip member timestamps - but not the contents "
+     "of any sheet."),
+)
 
 
 def cell(value):
     """Render a manifest scalar for a spreadsheet cell without inventing values."""
     return "null" if value is None else value
+
+
+def read_history(entry: dict) -> tuple[list, list]:
+    """Return the arm's full W&B header and the 200 rows the manifest plotted."""
+    path = ROOT / "runs" / entry["run_id"] / "history.csv"
+    blob = path.read_bytes()
+    figure.require(figure.digest(blob) == entry["source_history_sha256"],
+                   f"{path.name}: history hash does not match the manifest")
+    lines = list(csv.reader(io.StringIO(blob.decode("utf-8"))))
+    header = lines[0]
+    records = []
+    for number in entry["source_csv_lines"]:
+        row = lines[number - 1]
+        figure.require(len(row) == len(header), f"{path.name}: ragged line {number}")
+        records.append(dict(zip(header, row)))
+    figure.require(len(records) == figure.STEPS, f"{path.name}: wrong plotted row count")
+    return header, records
+
+
+def order_columns(header: list) -> tuple[list, list]:
+    """Split an arm's columns into the frozen leading block and the rest."""
+    leading = [DISPLAY, *IDENTITY]
+    leading += [name for name in FIGURE_COLUMNS if name == TRAIL or name in header]
+    used = set(leading)
+    prefix = next(candidate for candidate in DYNAMICS_PREFIXES
+                  if any(name.startswith(candidate) for name in header))
+    dynamics = [name for name in header if name.startswith(prefix) and name not in used]
+    used.update(dynamics)
+    specific = [name for name in header
+                if name.startswith(ARM_SPECIFIC_PREFIX) and name not in used]
+    used.update(specific)
+    groups = {}
+    for name in header:
+        if name not in used:
+            groups.setdefault(name.split("/")[0], []).append(name)
+    rest = [name for group in sorted(groups) for name in groups[group]]
+    trailing = dynamics + specific + rest
+    figure.require(set(leading + trailing) == set(header) | {DISPLAY, TRAIL},
+                   "column order dropped or invented a column")
+    figure.require(len(leading) + len(trailing) == len(header) + 2,
+                   "column order duplicated a column")
+    return leading, trailing
+
+
+def write_arm(book, label: str, header: list, records: list, plotted: list, trail) -> list:
+    """Write one arm's raw W&B rows; only display_step and the trail are derived."""
+    leading, trailing = order_columns(header)
+    columns = leading + trailing
+    sheet = book.create_sheet(label)
+    sheet.append(columns)
+    for heading in sheet[1]:
+        heading.font = Font(bold=True)
+    for index, record in enumerate(records):
+        step = index + 1
+        figure.require(int(float(record["_step"])) + 1 == step, f"{label}: steps out of step")
+        figure.require(trail[index].update == step, f"{label}: trailing mean out of step")
+        # The raw rows must be the very rows the figure plotted.
+        for name in figure.FIELDS:
+            if name in header:
+                figure.require(record[name] == plotted[index].get(name, ""),
+                               f"{label}: {name} differs from the plotted CSV at step {step}")
+        row = []
+        for name in columns:
+            if name == DISPLAY:
+                row.append(step)
+            elif name == TRAIL:
+                row.append(trail[index].value)
+            else:
+                row.append(record[name] or None)
+        sheet.append(row)
+    figure.require(sheet.max_row == LAST_DATA_ROW, f"{label}: wrong row count")
+    sheet.freeze_panes = sheet.cell(row=FIRST_DATA_ROW, column=len(leading) + 1)
+    for position, name in enumerate(columns[:9], 1):
+        sheet.column_dimensions[get_column_letter(position)].width = min(34, max(12, len(name) + 2))
+    return columns
+
+
+def readme_blocks(manifest: dict, trail: dict) -> list:
+    """The README tab as titled blocks: (title, optional header row, rows)."""
+    labels = " / ".join(f"{label} {trail[arm][-1].value * 100:.1f}%" for arm, label in ARMS)
+    how = [
+        ("x axis", f"{DISPLAY} (column A of the {', '.join(SHEETS[1:])} tabs), 1 to 200."),
+        ("left panel, y", f"{figure.MEAN}, one line per arm, unsmoothed."),
+        ("right panel, faint y", f"{figure.REWARD}, the raw training solve rate."),
+        ("right panel, bold y", f"{TRAIL}, its ten-step trailing mean."),
+        ("endpoint labels", f"{labels} - the bold line's value on row {LAST_DATA_ROW}."),
+        ("charts on this sheet",
+         "the two line charts on the right are those two panels, drawn by the "
+         "spreadsheet straight from the arm tabs."),
+        ("published figure",
+         "build_end_to_end_results_measured.py --data-dir data draws figures/figure4.svg "
+         "from the same rows."),
+    ]
+    provenance_header = ["arm", "run_id", "wandb_project", "executed_source_sha",
+                         "source_history_sha256", "source_config_sha256",
+                         "source_csv_line_first", "source_csv_line_last",
+                         "archive_commit", "evidence_grade"]
+    provenance = []
+    for arm, label in ARMS:
+        entry = manifest["runs"][arm]
+        lines = entry["source_csv_lines"]
+        provenance.append([label, entry["run_id"], WANDB_PROJECT,
+                           entry["run_id"].rsplit("-", 1)[-1],
+                           entry["source_history_sha256"], entry["source_config_sha256"],
+                           lines[0], lines[-1], manifest["source_commit"],
+                           manifest["evidence_grade"]])
+    recipe_header = ["config_key"] + [label for _, label in ARMS] + ["differs"]
+    configs = [manifest["runs"][arm]["config"] for arm, _ in ARMS]
+    for other in configs[1:]:
+        figure.require(set(other) == set(configs[0]), "arms disagree on config keys")
+    recipe = []
+    for key in configs[0]:
+        values = [config[key] for config in configs]
+        recipe.append([key] + [cell(value) for value in values]
+                      + [not all(value == values[0] for value in values)])
+    return [
+        ("Figure 4 - how to plot it from these tabs", None, how),
+        ("Column groups, in the order each arm tab uses", None, list(GROUP_LEGEND)),
+        ("Provenance", provenance_header, provenance),
+        ("Recipe - the 24 recorded config keys", recipe_header, recipe),
+        ("Semantic notes", None, list(SEMANTIC_NOTES)),
+    ]
+
+
+def write_readme(sheet, blocks) -> None:
+    for index, (title, header, rows) in enumerate(blocks):
+        if index:
+            sheet.append([])
+        sheet.append([title])
+        sheet.cell(row=sheet.max_row, column=1).font = Font(bold=True)
+        if header is not None:
+            sheet.append(header)
+            for heading in sheet[sheet.max_row]:
+                heading.font = Font(bold=True)
+        for row in rows:
+            sheet.append(list(row))
+    sheet.column_dimensions["A"].width = 44
+    sheet.column_dimensions["B"].width = 66
+
+
+def add_chart(book, sheet, title, column, y_title, anchor, limits=None) -> None:
+    """One native line chart: the same column from each arm tab, rows 2-201."""
+    chart = LineChart()
+    chart.title = title
+    chart.style = 2
+    chart.height, chart.width = 9, 18
+    chart.x_axis.title = DISPLAY
+    chart.y_axis.title = y_title
+    if limits is not None:
+        chart.y_axis.scaling.min, chart.y_axis.scaling.max = limits
+    for _, label in ARMS:
+        tab = book[label]
+        position = [heading.value for heading in tab[1]].index(column) + 1
+        values = Reference(tab, min_col=position,
+                           min_row=FIRST_DATA_ROW, max_row=LAST_DATA_ROW)
+        chart.append(Series(values, title=label))
+    chart.set_categories(Reference(book[SHEETS[1]], min_col=1,
+                                   min_row=FIRST_DATA_ROW, max_row=LAST_DATA_ROW))
+    sheet.add_chart(chart, anchor)
 
 
 def build(output: Path) -> Path:
@@ -52,97 +300,16 @@ def build(output: Path) -> Path:
     book = Workbook()
     readme = book.active
     readme.title = "README"
-    readme.append(["sheet", "contents"])
-    for name, description in (
-        ("README", "This sheet: what each tab holds, where the numbers come from."),
-        ("curves_wide", "Display step 1-200, then per arm: solve_ratio, solve_trail10, "
-                        "logp_diff_mean. One row per training observation."),
-        ("curves_long", "The same numbers tidy: arm, step, metric, value."),
-        ("recipe", "One row per run-config key, one column per arm, plus differs=TRUE "
-                   "where the three arms disagree."),
-        ("provenance", "Run ids, W&B project, executed source SHA, and the sha256 of "
-                       "every source file behind the curves."),
-        ("endpoints", "Per arm and metric: last_ten_mean, minimum, maximum, exactly as "
-                      "recorded in data/manifest.json."),
-    ):
-        readme.append([name, description])
-    readme.append([])
-    for key, value in (
-        ("evidence grade", EVIDENCE),
-        ("manifest evidence_grade", manifest["evidence_grade"]),
-        ("signed_full_run_certification", manifest["signed_full_run_certification"]),
-        ("archive commit", manifest["source_commit"]),
-        ("branch tip", BRANCH_TIP),
-        ("W&B project", WANDB_PROJECT),
-        ("plotted window", f"source steps {manifest['window']['source_step_first']}-"
-                           f"{manifest['window']['source_step_last']} shown as display steps "
-                           f"{manifest['window']['display_step_first']}-"
-                           f"{manifest['window']['display_step_last']}, "
-                           f"{manifest['window']['count_per_arm']} per arm"),
-        ("trailing window", manifest["transformations"]["trailing_window"]),
-        ("generated by", "make_spreadsheet.py from data/manifest.json and data/*.csv"),
-        ("raw columns", "solve_ratio and logp_diff_mean are stored as text: they are the "
-                        "CSV's own digits, not re-formatted numbers. solve_trail10 is numeric."),
-        ("numeric precision", "Numeric cells (solve_trail10, endpoints) are written at the "
-                              "spreadsheet's float precision, which can drop the last digit or "
-                              "two; data/manifest.json holds the full value."),
-    ):
-        readme.append([key, value])
-
-    wide = book.create_sheet("curves_wide")
-    wide.append(["display_step"] + [f"{label} {metric}" for _, label in ARMS
-                                    for metric, _ in METRICS])
-    long = book.create_sheet("curves_long")
-    long.append(["arm", "step", "metric", "value"])
-    for index in range(figure.STEPS):
-        step = trail[ARMS[0][0]][index].update
-        row = [step]
-        for arm, label in ARMS:
-            source = selected[arm][index]
-            assert int(float(source["_step"])) + 1 == step, "arm steps out of step"
-            row += [source[figure.REWARD], trail[arm][index].value, source[figure.MEAN]]
-            for metric, key in METRICS:
-                value = trail[arm][index].value if key is None else source[key]
-                long.append([label, step, metric, value])
-        wide.append(row)
-
-    recipe = book.create_sheet("recipe")
-    recipe.append(["config_key"] + [label for _, label in ARMS] + ["differs"])
-    configs = [manifest["runs"][arm]["config"] for arm, _ in ARMS]
-    for other in configs[1:]:
-        assert set(other) == set(configs[0]), "arms disagree on config keys"
-    for key in configs[0]:
-        values = [config[key] for config in configs]
-        recipe.append([key] + [cell(value) for value in values]
-                      + [not all(value == values[0] for value in values)])
-
-    provenance = book.create_sheet("provenance")
-    provenance.append(["arm", "run_id", "wandb_project", "executed_source_sha",
-                       "source_history", "source_history_sha256",
-                       "source_config", "source_config_sha256",
-                       "plotted_csv", "plotted_csv_sha256",
-                       "source_csv_line_first", "source_csv_line_last"])
     for arm, label in ARMS:
-        entry = manifest["runs"][arm]
-        lines = entry["source_csv_lines"]
-        provenance.append([label, entry["run_id"], WANDB_PROJECT,
-                           entry["run_id"].rsplit("-", 1)[-1],
-                           entry["source_history"], entry["source_history_sha256"],
-                           entry["source_config"], entry["source_config_sha256"],
-                           entry["plotted_csv"], entry["plotted_csv_sha256"],
-                           lines[0], lines[-1]])
+        header, records = read_history(manifest["runs"][arm])
+        write_arm(book, label, header, records, selected[arm], trail[arm])
+    write_readme(readme, readme_blocks(manifest, trail))
+    add_chart(book, readme, "Sampler-trainer mean |Δlogp|", figure.MEAN,
+              "mean |Δ logprob|", "M2")
+    add_chart(book, readme, "Training solve rate, trailing-10 mean", TRAIL,
+              "solve rate", "M22", limits=(0, 1))
 
-    endpoints = book.create_sheet("endpoints")
-    endpoints.append(["arm", "metric", "last_ten_mean", "minimum", "maximum"])
-    for arm, label in ARMS:
-        for metric, stats in manifest["runs"][arm]["metrics"].items():
-            endpoints.append([label, metric, stats["last_ten_mean"],
-                              stats["minimum"], stats["maximum"]])
-
-    assert book.sheetnames == list(SHEETS), book.sheetnames
-    for sheet in book:
-        sheet.column_dimensions["A"].width = 34
-        sheet.column_dimensions["B"].width = 34
+    figure.require(book.sheetnames == list(SHEETS), f"unexpected sheets {book.sheetnames}")
     book.save(output)
     return output
 

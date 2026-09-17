@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Read figure4.xlsx back and prove it still says exactly what data/ says.
+"""Read figure4.xlsx back and prove it still says exactly what the exports say.
 
 Regenerates the workbook into a temporary file, reopens it with openpyxl and
-checks: sheet names and order; every raw curve cell is the CSV's own string;
-recipe.differs is TRUE for exactly the three keys that separate the arms; the
-trailing averages end on the manifest's last_ten_mean.
+checks: sheet names and order; every W&B cell on every arm tab against the
+arm's own runs/<run_id>/history.csv at the line data/manifest.json names (200
+rows x all 144/150/57 columns, iterated, not sampled); the frozen leading
+block's column order; the derived trailing mean against the figure builder's
+moving_average; the README tab's recipe, provenance and its two charts. One
+negative control proves the cell comparison can fail.
 
 Run from this directory (needs openpyxl and PyYAML):
     python -m unittest make_spreadsheet_test -v
@@ -22,111 +25,166 @@ from openpyxl import load_workbook
 
 import build_end_to_end_results_measured as figure
 import make_spreadsheet
+from build_end_to_end_results_provisional import Point, moving_average
 
 DIFFERING_KEYS = {"old_logps_source", "sampler_is", "eval_every_n_steps"}
-RAW_METRICS = {"solve_ratio": figure.REWARD, "logp_diff_mean": figure.MEAN}
+# The endpoint labels the published figure prints, as trailing means.
+ENDPOINTS = {"Standard": 0.6265625, "TIS": 0.66875, "Zero-TIM": 0.882421875}
+LEADING = ["display_step", "_step", "_runtime", "_timestamp",
+           "rewards/train/solve_ratio", "derived:solve_ratio_trail10",
+           "sampler_trainer/train/logp_diff_mean", "sampler_trainer/train/logp_diff_max"]
+BYTES_COLUMN = "canonical/train/alignment_max_differing_bytes"
+RECIPE_WIDTH = 5
 
 
-def assert_close(case, actual, expected, label):
-    """A cell keeps the manifest value to spreadsheet float precision, not bit-exactly."""
-    case.assertIsInstance(actual, (int, float), label)
-    case.assertAlmostEqual(actual, expected, delta=abs(expected) * 1e-15, msg=label)
+def as_written(value: float) -> float:
+    """openpyxl stores a float as "%.16g", so a cell keeps 16 significant digits."""
+    return float("%.16g" % value)
 
 
-def csv_rows(arm: str) -> list[dict]:
-    with (make_spreadsheet.DATA / f"{arm}.csv").open(newline="", encoding="utf-8") as handle:
-        rows = [row for row in csv.DictReader(handle)
-                if row["_step"] != "" and 0 <= int(row["_step"]) < figure.STEPS]
-    assert len(rows) == figure.STEPS, f"{arm}: {len(rows)} rows"
-    return rows
+def history_rows(entry: dict) -> tuple[list, list]:
+    """Read the arm's W&B export independently of make_spreadsheet, by line number."""
+    path = make_spreadsheet.ROOT / "runs" / entry["run_id"] / "history.csv"
+    with path.open(newline="", encoding="utf-8") as handle:
+        lines = list(csv.reader(handle))
+    header = lines[0]
+    wanted = set(entry["source_csv_lines"])
+    rows = [dict(zip(header, line)) for number, line in enumerate(lines, 1) if number in wanted]
+    assert len(rows) == figure.STEPS, f"{path.name}: {len(rows)} plotted rows"
+    return header, rows
+
+
+def mismatches(sheet, header: list, rows: list) -> list:
+    """Every W&B cell that is not the export's own string (empty stays empty)."""
+    columns = {name: index for index, name in enumerate([c.value for c in sheet[1]], 1)}
+    problems = []
+    for index, record in enumerate(rows):
+        for name in header:
+            expected = record[name]
+            actual = sheet.cell(row=index + 2, column=columns[name]).value
+            if (actual is not None) if expected == "" else (actual != expected):
+                problems.append(f"row {index + 2} {name}: {actual!r} != {expected!r}")
+    return problems
 
 
 class SpreadsheetTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
-        path = make_spreadsheet.build(Path(cls.directory.name) / "figure4.xlsx")
-        cls.book = load_workbook(path)
+        cls.path = make_spreadsheet.build(Path(cls.directory.name) / "figure4.xlsx")
+        cls.book = load_workbook(cls.path)
         cls.manifest = json.loads(
             (make_spreadsheet.DATA / "manifest.json").read_text(encoding="utf-8"))
-        cls.rows = {arm: csv_rows(arm) for arm, _ in make_spreadsheet.ARMS}
+        cls.exports = {arm: history_rows(cls.manifest["runs"][arm])
+                       for arm, _ in make_spreadsheet.ARMS}
 
     @classmethod
     def tearDownClass(cls):
         cls.directory.cleanup()
 
+    def readme_block(self, first_cell: str) -> list:
+        """The rows under the README block whose header row starts with first_cell."""
+        sheet = self.book["README"]
+        rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+        start = next(index for index, row in enumerate(rows) if row[0] == first_cell)
+        block = []
+        for row in rows[start + 1:]:
+            if row[0] is None:
+                break
+            block.append(row)
+        return block
+
     def test_sheet_names_and_order(self):
         self.assertEqual(self.book.sheetnames, list(make_spreadsheet.SHEETS))
 
-    def test_curves_wide_raw_cells_are_the_csv_strings(self):
-        sheet = self.book["curves_wide"]
-        header = [cell.value for cell in sheet[1]]
-        self.assertEqual(sheet.max_row, figure.STEPS + 1)
+    def test_arm_tabs_are_the_wandb_export_strings(self):
         for arm, label in make_spreadsheet.ARMS:
-            for metric, key in RAW_METRICS.items():
-                column = header.index(f"{label} {metric}") + 1
-                for index, row in enumerate(self.rows[arm]):
-                    value = sheet.cell(row=index + 2, column=column).value
-                    self.assertIsInstance(value, str)
-                    self.assertEqual(value, row[key])
-            column = header.index(f"{label} solve_trail10") + 1
-            last = sheet.cell(row=figure.STEPS + 1, column=column).value
-            assert_close(self, last,
-                         self.manifest["runs"][arm]["metrics"][figure.REWARD]["last_ten_mean"],
-                         f"{label} solve_trail10 endpoint")
-        for index in range(figure.STEPS):
-            self.assertEqual(sheet.cell(row=index + 2, column=1).value, index + 1)
+            header, rows = self.exports[arm]
+            sheet = self.book[label]
+            with self.subTest(arm=label):
+                self.assertEqual(sheet.max_row, figure.STEPS + 1)
+                self.assertEqual(sheet.max_column, len(header) + 2)
+                self.assertEqual({c.value for c in sheet[1]},
+                                 set(header) | {"display_step", "derived:solve_ratio_trail10"})
+                self.assertEqual(mismatches(sheet, header, rows), [])
+                for index in range(figure.STEPS):
+                    self.assertEqual(sheet.cell(row=index + 2, column=1).value, index + 1)
 
-    def test_curves_long_raw_cells_are_the_csv_strings(self):
-        sheet = self.book["curves_long"]
-        self.assertEqual([cell.value for cell in sheet[1]], ["arm", "step", "metric", "value"])
-        self.assertEqual(sheet.max_row, 3 * 3 * figure.STEPS + 1)
-        seen = 0
-        for arm_name, step, metric, value in sheet.iter_rows(min_row=2, values_only=True):
-            arm = next(key for key, label in make_spreadsheet.ARMS if label == arm_name)
-            if metric in RAW_METRICS:
-                self.assertIsInstance(value, str)
-                self.assertEqual(value, self.rows[arm][step - 1][RAW_METRICS[metric]])
-                seen += 1
-        self.assertEqual(seen, 2 * 3 * figure.STEPS)
+    def test_leading_columns_are_identity_then_figure4(self):
+        for arm, label in make_spreadsheet.ARMS:
+            header, _ = self.exports[arm]
+            expected = LEADING + ([BYTES_COLUMN] if BYTES_COLUMN in header else [])
+            actual = [cell.value for cell in self.book[label][1]][:len(expected)]
+            with self.subTest(arm=label):
+                self.assertEqual(actual, expected)
+                self.assertEqual(self.book[label].freeze_panes,
+                                 f"{chr(ord('A') + len(expected))}2")
 
-    def test_recipe_marks_exactly_the_three_differing_keys(self):
-        sheet = self.book["recipe"]
-        self.assertEqual([cell.value for cell in sheet[1]],
-                         ["config_key"] + [label for _, label in make_spreadsheet.ARMS]
-                         + ["differs"])
-        config = self.manifest["runs"]["standard"]["config"]
-        differing, keys = set(), []
-        for key, *values, differs in sheet.iter_rows(min_row=2, values_only=True):
-            keys.append(key)
+    def test_trailing_mean_is_the_figure_builders(self):
+        for arm, label in make_spreadsheet.ARMS:
+            _, rows = self.exports[arm]
+            points = tuple(Point(index + 1, float(row[figure.REWARD]))
+                           for index, row in enumerate(rows))
+            expected = moving_average(points)
+            column = LEADING.index("derived:solve_ratio_trail10") + 1
+            with self.subTest(arm=label):
+                for index, point in enumerate(expected):
+                    # Same function on the same floats: the only gap allowed is
+                    # openpyxl's 16-significant-digit float rendering.
+                    self.assertEqual(self.book[label].cell(row=index + 2, column=column).value,
+                                     as_written(point.value), f"{label} step {index + 1}")
+
+    def test_trailing_mean_ends_on_the_published_labels(self):
+        column = LEADING.index("derived:solve_ratio_trail10") + 1
+        for label, endpoint in ENDPOINTS.items():
+            value = self.book[label].cell(row=figure.STEPS + 1, column=column).value
+            self.assertEqual(value, endpoint, label)
+            self.assertEqual(f"{value * 100:.1f}%",
+                             {"Standard": "62.7%", "TIS": "66.9%",
+                              "Zero-TIM": "88.2%"}[label])
+
+    def test_readme_recipe_matches_the_manifest(self):
+        rows = self.readme_block("config_key")
+        configs = [self.manifest["runs"][arm]["config"] for arm, _ in make_spreadsheet.ARMS]
+        self.assertEqual([row[0] for row in rows], list(configs[0]))
+        self.assertEqual(len(rows), 24)
+        differing = set()
+        for key, *values, differs in (row[:RECIPE_WIDTH] for row in rows):
             self.assertIn(differs, (True, False))
+            expected = [make_spreadsheet.cell(config[key]) for config in configs]
+            self.assertEqual(list(map(str, values)), list(map(str, expected)), key)
             if differs:
                 differing.add(key)
-            else:
-                self.assertEqual(len(set(map(str, values))), 1, key)
-        self.assertEqual(keys, list(config))
         self.assertEqual(differing, DIFFERING_KEYS)
 
-    def test_provenance_and_endpoints_come_from_the_manifest(self):
-        provenance = {row[0]: row for row in
-                      self.book["provenance"].iter_rows(min_row=2, values_only=True)}
-        endpoints = {(row[0], row[1]): row[2:] for row in
-                     self.book["endpoints"].iter_rows(min_row=2, values_only=True)}
+    def test_readme_provenance_matches_the_manifest(self):
+        rows = {row[0]: row for row in self.readme_block("arm")}
         for arm, label in make_spreadsheet.ARMS:
             entry = self.manifest["runs"][arm]
-            row = provenance[label]
-            self.assertEqual(row[1], entry["run_id"])
-            self.assertEqual(row[2], make_spreadsheet.WANDB_PROJECT)
-            self.assertTrue(entry["run_id"].endswith(row[3]))
-            self.assertEqual(row[5], entry["source_history_sha256"])
-            self.assertEqual(row[7], entry["source_config_sha256"])
-            self.assertEqual(row[9], entry["plotted_csv_sha256"])
-            self.assertEqual((row[10], row[11]),
-                             (entry["source_csv_lines"][0], entry["source_csv_lines"][-1]))
-            for metric, stats in entry["metrics"].items():
-                cells = endpoints[(label, metric)]
-                for cell, name in zip(cells, ("last_ten_mean", "minimum", "maximum")):
-                    assert_close(self, cell, stats[name], f"{label} {metric} {name}")
+            row = rows[label]
+            with self.subTest(arm=label):
+                self.assertEqual(row[1], entry["run_id"])
+                self.assertEqual(row[2], make_spreadsheet.WANDB_PROJECT)
+                self.assertTrue(entry["run_id"].endswith(row[3]))
+                self.assertEqual(row[4], entry["source_history_sha256"])
+                self.assertEqual(row[5], entry["source_config_sha256"])
+                self.assertEqual((row[6], row[7]), (entry["source_csv_lines"][0],
+                                                    entry["source_csv_lines"][-1]))
+                self.assertEqual(row[8], self.manifest["source_commit"])
+                self.assertEqual(row[9], self.manifest["evidence_grade"])
+
+    def test_readme_holds_the_two_figure4_charts(self):
+        charts = self.book["README"]._charts
+        self.assertEqual(len(charts), 2)
+        for chart in charts:
+            self.assertEqual(len(chart.series), 3)
+
+    def test_a_changed_cell_is_caught(self):
+        book = load_workbook(self.path)
+        header, rows = self.exports["standard"]
+        sheet = book["Standard"]
+        sheet.cell(row=2, column=5).value = "0.5"
+        self.assertEqual(len(mismatches(sheet, header, rows)), 1)
 
 
 if __name__ == "__main__":
