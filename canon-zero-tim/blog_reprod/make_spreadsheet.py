@@ -6,9 +6,10 @@ runs/<run_id>/history.csv, on the 200 rows data/manifest.json says Figure 4
 plotted, written as the export's own strings so a reader sees the digits that
 were drawn. Only the column order is ours - identity, then the five Figure 4
 columns, then the arm's training-dynamics namespace, then everything else
-grouped by prefix - and only two columns are derived: display_step and the
-ten-step trailing mean, which reuses moving_average() from the figure builder so
-its last row is the endpoint label the figure prints.
+grouped by prefix - and only four columns are derived: display_step, numeric
+twins of the two plotted string columns so the embedded charts have something to
+plot, and the ten-step trailing mean, which reuses moving_average() from the
+figure builder so its last row is the endpoint label the figure prints.
 
 Run from this directory (needs openpyxl and PyYAML):
     python make_spreadsheet.py            # writes ./figure4.xlsx
@@ -45,8 +46,15 @@ SHEETS = ("README",) + tuple(label for _, label in ARMS)
 # order inside each namespace.
 DISPLAY = "display_step"
 TRAIL = "derived:solve_ratio_trail10"
+# Numeric twins of the two plotted string columns. The strings stay
+# authoritative; a chart cannot plot text, so it reads these instead.
+SOLVE_NUM = "derived:solve_ratio_num"
+MEAN_NUM = "derived:logp_diff_mean_num"
+NUMERIC_TWINS = {SOLVE_NUM: figure.REWARD, MEAN_NUM: figure.MEAN}
+DERIVED = (DISPLAY, SOLVE_NUM, TRAIL, MEAN_NUM)
 IDENTITY = ("_step", "_runtime", "_timestamp")
-FIGURE_COLUMNS = (figure.REWARD, TRAIL, figure.MEAN, figure.MAXIMUM, figure.BYTES)
+FIGURE_COLUMNS = (figure.REWARD, SOLVE_NUM, TRAIL,
+                  figure.MEAN, MEAN_NUM, figure.MAXIMUM, figure.BYTES)
 DYNAMICS_PREFIXES = ("actor/train/", "canonical/train/")
 ARM_SPECIFIC_PREFIX = "sampler_is/"
 FIRST_DATA_ROW = 2
@@ -59,12 +67,18 @@ GROUP_LEGEND = (
     (figure.REWARD,
      "Figure 4, right panel, faint line: fraction of the update's 256 trajectories "
      "that reached the goal."),
+    (SOLVE_NUM,
+     "the same solve rate as a number rather than text, derived here so a chart can "
+     "read it."),
     (TRAIL,
-     "Figure 4, right panel, bold line: ten-step trailing mean of the column to its "
-     "left. Derived here, not exported by W&B."),
+     "Figure 4, right panel, bold line: ten-step trailing mean of the solve rate. "
+     "Derived here, not exported by W&B."),
     (figure.MEAN,
      "Figure 4, left panel: mean absolute sampler-trainer logprob difference over the "
      "sampled action tokens of that update."),
+    (MEAN_NUM,
+     "the same mean difference as a number rather than text, derived here so the left "
+     "chart on the README tab can read it."),
     (figure.MAXIMUM,
      "Figure 4 companion: the worst single-token logprob difference in the same "
      "update. Not drawn, but it bounds the mean."),
@@ -113,13 +127,15 @@ SEMANTIC_NOTES = (
      "an empty cell is empty in the W&B export too: an evaluation row the arm did not "
      "write, or a metric that arm never logged. Nothing was filled in."),
     ("number strings",
-     "W&B cells hold the export's own text, so a spreadsheet may flag them as numbers "
-     "stored as text, and a chart drawn straight from such a column may read as empty "
-     "until the column is converted. Reformatting them here would change the digits on "
-     "display, so they are left as exported."),
+     "W&B cells hold the export's own text, so a spreadsheet flags them as numbers "
+     "stored as text and will not plot them. Reformatting them here would change the "
+     "digits on display, so they stay as exported and the two *_num columns carry the "
+     "same values as numbers for charting."),
     ("numeric precision",
-     "the two derived columns are numbers, written at openpyxl's 16-significant-digit "
-     "precision; the figure builder's own trailing mean can carry one more digit."),
+     "the four derived columns are numbers, written at openpyxl's 16-significant-digit "
+     "precision, so a *_num cell can differ from its string in the 17th digit: TIS "
+     "display step 7 logs 0.016703682020306587 and stores 0.01670368202030659. Read "
+     "the string columns for the exported digits, the numeric ones to plot."),
     ("regeneration",
      "re-running make_spreadsheet.py changes the file's bytes - openpyxl stamps the "
      "wall clock into docProps and the zip member timestamps - but not the contents "
@@ -152,7 +168,7 @@ def read_history(entry: dict) -> tuple[list, list]:
 def order_columns(header: list) -> tuple[list, list]:
     """Split an arm's columns into the frozen leading block and the rest."""
     leading = [DISPLAY, *IDENTITY]
-    leading += [name for name in FIGURE_COLUMNS if name == TRAIL or name in header]
+    leading += [name for name in FIGURE_COLUMNS if name in DERIVED or name in header]
     used = set(leading)
     prefix = next(candidate for candidate in DYNAMICS_PREFIXES
                   if any(name.startswith(candidate) for name in header))
@@ -167,9 +183,9 @@ def order_columns(header: list) -> tuple[list, list]:
             groups.setdefault(name.split("/")[0], []).append(name)
     rest = [name for group in sorted(groups) for name in groups[group]]
     trailing = dynamics + specific + rest
-    figure.require(set(leading + trailing) == set(header) | {DISPLAY, TRAIL},
+    figure.require(set(leading + trailing) == set(header) | set(DERIVED),
                    "column order dropped or invented a column")
-    figure.require(len(leading) + len(trailing) == len(header) + 2,
+    figure.require(len(leading) + len(trailing) == len(header) + len(DERIVED),
                    "column order duplicated a column")
     return leading, trailing
 
@@ -197,6 +213,8 @@ def write_arm(book, label: str, header: list, records: list, plotted: list, trai
                 row.append(step)
             elif name == TRAIL:
                 row.append(trail[index].value)
+            elif name in NUMERIC_TWINS:
+                row.append(float(record[NUMERIC_TWINS[name]]))
             else:
                 row.append(record[name] or None)
         sheet.append(row)
@@ -215,6 +233,12 @@ def readme_blocks(manifest: dict, trail: dict) -> list:
         ("left panel, y", f"{figure.MEAN}, one line per arm, unsmoothed."),
         ("right panel, faint y", f"{figure.REWARD}, the raw training solve rate."),
         ("right panel, bold y", f"{TRAIL}, its ten-step trailing mean."),
+        ("which columns to plot",
+         f"plot {MEAN_NUM}, {SOLVE_NUM} and {TRAIL}: a spreadsheet cannot plot the W&B "
+         "string columns. The strings hold the exported digits and stay authoritative; "
+         "a *_num cell is that string at 16 significant digits, so the two can differ "
+         "in the 17th - TIS display step 7 logs 0.016703682020306587 and stores "
+         "0.01670368202030659."),
         ("endpoint labels", f"{labels} - the bold line's value on row {LAST_DATA_ROW}."),
         ("charts on this sheet",
          "the two line charts on the right are those two panels, drawn by the "
@@ -304,7 +328,7 @@ def build(output: Path) -> Path:
         header, records = read_history(manifest["runs"][arm])
         write_arm(book, label, header, records, selected[arm], trail[arm])
     write_readme(readme, readme_blocks(manifest, trail))
-    add_chart(book, readme, "Sampler-trainer mean |Δlogp|", figure.MEAN,
+    add_chart(book, readme, "Sampler-trainer mean |Δlogp|", MEAN_NUM,
               "mean |Δ logprob|", "M2")
     add_chart(book, readme, "Training solve rate, trailing-10 mean", TRAIL,
               "solve rate", "M22", limits=(0, 1))

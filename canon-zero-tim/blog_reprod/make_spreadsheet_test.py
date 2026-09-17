@@ -5,9 +5,10 @@ Regenerates the workbook into a temporary file, reopens it with openpyxl and
 checks: sheet names and order; every W&B cell on every arm tab against the
 arm's own runs/<run_id>/history.csv at the line data/manifest.json names (200
 rows x all 144/150/57 columns, iterated, not sampled); the frozen leading
-block's column order; the derived trailing mean against the figure builder's
-moving_average; the README tab's recipe, provenance and its two charts. One
-negative control proves the cell comparison can fail.
+block's column order; the numeric twins against the strings they mirror; the
+derived trailing mean against the figure builder's moving_average; the README
+tab's recipe, provenance and the two charts, including which column each chart
+series points at. One negative control proves the cell comparison can fail.
 
 Run from this directory (needs openpyxl and PyYAML):
     python -m unittest make_spreadsheet_test -v
@@ -22,6 +23,7 @@ import unittest
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 import build_end_to_end_results_measured as figure
 import make_spreadsheet
@@ -30,9 +32,17 @@ from build_end_to_end_results_provisional import Point, moving_average
 DIFFERING_KEYS = {"old_logps_source", "sampler_is", "eval_every_n_steps"}
 # The endpoint labels the published figure prints, as trailing means.
 ENDPOINTS = {"Standard": 0.6265625, "TIS": 0.66875, "Zero-TIM": 0.882421875}
+SOLVE_NUM = "derived:solve_ratio_num"
+MEAN_NUM = "derived:logp_diff_mean_num"
+TRAIL = "derived:solve_ratio_trail10"
 LEADING = ["display_step", "_step", "_runtime", "_timestamp",
-           "rewards/train/solve_ratio", "derived:solve_ratio_trail10",
-           "sampler_trainer/train/logp_diff_mean", "sampler_trainer/train/logp_diff_max"]
+           "rewards/train/solve_ratio", SOLVE_NUM, TRAIL,
+           "sampler_trainer/train/logp_diff_mean", MEAN_NUM,
+           "sampler_trainer/train/logp_diff_max"]
+DERIVED = {"display_step", SOLVE_NUM, TRAIL, MEAN_NUM}
+# Which string column each numeric twin mirrors, and which column each chart plots.
+TWINS = {SOLVE_NUM: figure.REWARD, MEAN_NUM: figure.MEAN}
+CHART_COLUMNS = (MEAN_NUM, TRAIL)
 BYTES_COLUMN = "canonical/train/alignment_max_differing_bytes"
 RECIPE_WIDTH = 5
 
@@ -103,9 +113,8 @@ class SpreadsheetTest(unittest.TestCase):
             sheet = self.book[label]
             with self.subTest(arm=label):
                 self.assertEqual(sheet.max_row, figure.STEPS + 1)
-                self.assertEqual(sheet.max_column, len(header) + 2)
-                self.assertEqual({c.value for c in sheet[1]},
-                                 set(header) | {"display_step", "derived:solve_ratio_trail10"})
+                self.assertEqual(sheet.max_column, len(header) + len(DERIVED))
+                self.assertEqual({c.value for c in sheet[1]}, set(header) | DERIVED)
                 self.assertEqual(mismatches(sheet, header, rows), [])
                 for index in range(figure.STEPS):
                     self.assertEqual(sheet.cell(row=index + 2, column=1).value, index + 1)
@@ -120,13 +129,26 @@ class SpreadsheetTest(unittest.TestCase):
                 self.assertEqual(self.book[label].freeze_panes,
                                  f"{chr(ord('A') + len(expected))}2")
 
+    def test_numeric_twins_mirror_the_string_columns(self):
+        for arm, label in make_spreadsheet.ARMS:
+            _, rows = self.exports[arm]
+            for twin, source in TWINS.items():
+                column = LEADING.index(twin) + 1
+                with self.subTest(arm=label, column=twin):
+                    for index, record in enumerate(rows):
+                        # The twin is the string's own value, as openpyxl stores it.
+                        self.assertEqual(
+                            self.book[label].cell(row=index + 2, column=column).value,
+                            as_written(float(record[source])),
+                            f"{label} {twin} step {index + 1}")
+
     def test_trailing_mean_is_the_figure_builders(self):
         for arm, label in make_spreadsheet.ARMS:
             _, rows = self.exports[arm]
             points = tuple(Point(index + 1, float(row[figure.REWARD]))
                            for index, row in enumerate(rows))
             expected = moving_average(points)
-            column = LEADING.index("derived:solve_ratio_trail10") + 1
+            column = LEADING.index(TRAIL) + 1
             with self.subTest(arm=label):
                 for index, point in enumerate(expected):
                     # Same function on the same floats: the only gap allowed is
@@ -135,7 +157,7 @@ class SpreadsheetTest(unittest.TestCase):
                                      as_written(point.value), f"{label} step {index + 1}")
 
     def test_trailing_mean_ends_on_the_published_labels(self):
-        column = LEADING.index("derived:solve_ratio_trail10") + 1
+        column = LEADING.index(TRAIL) + 1
         for label, endpoint in ENDPOINTS.items():
             value = self.book[label].cell(row=figure.STEPS + 1, column=column).value
             self.assertEqual(value, endpoint, label)
@@ -176,8 +198,18 @@ class SpreadsheetTest(unittest.TestCase):
     def test_readme_holds_the_two_figure4_charts(self):
         charts = self.book["README"]._charts
         self.assertEqual(len(charts), 2)
-        for chart in charts:
+        for chart, column in zip(charts, CHART_COLUMNS):
             self.assertEqual(len(chart.series), 3)
+            # A chart cannot plot text, so both must point at a numeric column.
+            letter = get_column_letter(LEADING.index(column) + 1)
+            expected = f"!${letter}$2:${letter}${figure.STEPS + 1}"
+            for series, (_, label) in zip(chart.series, make_spreadsheet.ARMS):
+                reference = series.val.numRef.f
+                with self.subTest(chart=column, arm=label):
+                    self.assertTrue(reference.endswith(expected), reference)
+                    self.assertIn(label, reference)
+                    self.assertEqual(self.book[label].cell(row=1, column=LEADING.index(column) + 1).value,
+                                     column)
 
     def test_a_changed_cell_is_caught(self):
         book = load_workbook(self.path)

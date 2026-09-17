@@ -313,14 +313,16 @@ checked-in SVG and PNG are byte-identical to the blog package's (PNG SHA-256
 `4465b15ab936c2d812568fa806909b810cc2e5a3ada1082e1598d306fbc2cccc`). The PNG comes from
 `gdk-pixbuf-thumbnailer`; without that binary the command fails after writing the SVG.
 
-The third writes `figure4.xlsx` (522,396 bytes as generated) with four sheets: `README`, then one
-tab per arm — `Standard` (201×146), `TIS` (201×152), `Zero-TIM` (201×59). Each arm tab is that
+The third writes `figure4.xlsx` (531,684 bytes as generated) with four sheets: `README`, then one
+tab per arm — `Standard` (201×148), `TIS` (201×154), `Zero-TIM` (201×61). Each arm tab is that
 arm's own W&B export, unabridged: every column of its `history.csv`, on the 200 rows the manifest
 says Figure 4 plotted, holding the export's own number strings, so the workbook shows the digits
-that were plotted and an empty cell is empty upstream too. Only the order is ours — identity
-(`display_step`, `_step`, `_runtime`, `_timestamp`), then the five Figure 4 columns
-(`rewards/train/solve_ratio`, its derived ten-step trailing mean, `logp_diff_mean`,
-`logp_diff_max`, and for Zero-TIM `alignment_max_differing_bytes`), then the arm's
+that were plotted and an empty cell is empty upstream too. Only the order and four derived columns
+are ours — identity (`display_step`, `_step`, `_runtime`, `_timestamp`), then the Figure 4 block
+(`rewards/train/solve_ratio` and its numeric twin `derived:solve_ratio_num`, the derived ten-step
+trailing mean `derived:solve_ratio_trail10`, `logp_diff_mean` and its numeric twin
+`derived:logp_diff_mean_num`, `logp_diff_max`, and for Zero-TIM
+`alignment_max_differing_bytes`), then the arm's
 training-dynamics namespace (`actor/train/*`, or `canonical/train/*` for Zero-TIM, which logs no
 `actor/train/*` at all), then `sampler_is/*` where the arm has it, then every remaining namespace
 in alphabetical order; the pane freezes after the Figure 4 block. Those `actor/train/*` values are
@@ -328,10 +330,13 @@ logged one step after the `rewards/*` of the same update, so 199 of the 200 rows
 the export's `_step` 300 row — outside the plotted window — carries only actor metrics. The
 `README` tab holds the plotting recipe, a legend for every column group, per-arm provenance, the
 24 config keys × three arms with a `differs` column, semantic notes, and two native line charts:
-the figure's two panels, drawn by the spreadsheet itself from the arm tabs. Regenerating it changes
+the figure's two panels, drawn by the spreadsheet itself from the arm tabs. A chart cannot plot
+text, so it reads the numeric twins — each is its string at openpyxl's 16 significant digits, which
+can differ from the exported string in the 17th (TIS display step 7 logs `0.016703682020306587`
+and stores `0.01670368202030659`), so the string columns stay the authoritative digits. Regenerating it changes
 its bytes but not its contents — openpyxl stamps the wall clock into `docProps/core.xml` and the
 zip member timestamps, so compare the worksheet XML, not the file hash. `python3 -m unittest`
-passes on `canon-zero-tim/blog_reprod/make_spreadsheet_test.py` (9 tests) and on the two builder
+passes on `canon-zero-tim/blog_reprod/make_spreadsheet_test.py` (10 tests) and on the two builder
 tests (19).
 
 ### 1.5 Evidence boundary, and what "reproduced" means
