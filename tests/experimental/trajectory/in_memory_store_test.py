@@ -1,8 +1,17 @@
 from absl.testing import absltest
+import pydantic
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+
+class _CustomMetadata(trajectory_lib.TrajectoryMetadata):
+  custom_tag: str = ""
+
+
+class _CustomTrajectory(_CustomMetadata):
+  steps: list[trajectory_lib.Step] = pydantic.Field(default_factory=list)
 
 
 class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
@@ -37,7 +46,8 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     return mem_store, mem_store
 
-  def test_update_metadata(self):
+  def test_update_metadata(self) -> None:
+    """Verifies that updating metadata in-memory updates the stored metadata."""
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="t1",
@@ -53,7 +63,8 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     read_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
 
-  def test_tunix_trajectory_with_step_zero(self):
+  def test_tunix_trajectory_with_step_zero(self) -> None:
+    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="tunix_1",
@@ -73,8 +84,40 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
     self.assertEqual(trajs[0].steps[0].step_id, 0)
     self.assertEqual(trajs[0].steps[1].step_id, 1)
+    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
+    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
 
-  def test_metadata_mutation_isolation(self):
+  def test_custom_metadata_and_trajectory_subclass(self) -> None:
+    """Verifies InMemoryTrajectoryStore supports custom metadata and trajectory types."""
+    custom_store: in_memory_store.InMemoryTrajectoryStore[
+        _CustomMetadata, _CustomTrajectory
+    ] = in_memory_store.InMemoryTrajectoryStore(
+        trajectory_cls=_CustomTrajectory
+    )
+    meta = _CustomMetadata(
+        trajectory_id="custom_1",
+        agent=trajectory_lib.Agent(name="custom_agent", version="1.0"),
+        custom_tag="experiment_42",
+    )
+    step = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="custom step"
+    )
+    custom_store.add_step(step, meta)
+
+    metas = custom_store.get_trajectories_metadata(["custom_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], _CustomMetadata)
+    self.assertEqual(metas[0].custom_tag, "experiment_42")
+
+    trajs = custom_store.get_trajectories(["custom_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], _CustomTrajectory)
+    self.assertEqual(trajs[0].custom_tag, "experiment_42")
+    self.assertLen(trajs[0].steps, 1)
+    self.assertEqual(trajs[0].steps[0].message, "custom step")
+
+  def test_metadata_mutation_isolation(self) -> None:
+    """Verifies that mutating returned metadata does not alter internal store state."""
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="iso_1",

@@ -21,6 +21,7 @@ from etils import epath
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store as store_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
 
@@ -190,6 +191,67 @@ class ToConfigTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "run_id"):
       store.to_config()
     store.close()
+
+
+class GenericTypeParametersTest(absltest.TestCase):
+  """Tests that TrajectoryStore and backends preserve generic type parameters without Generic."""
+
+  def test_classes_inherit_parameters_without_explicit_generic(self) -> None:
+    """Verifies that Python typing automatically discovers (T, TrajT)."""
+    self.assertLen(store_lib.TrajectoryStore.__parameters__, 2)
+    self.assertLen(in_memory_store.InMemoryTrajectoryStore.__parameters__, 2)
+    self.assertLen(file_store.FileTrajectoryStore.__parameters__, 2)
+
+    self.assertEqual(
+        store_lib.TrajectoryStore.__parameters__,
+        (store_lib.T, store_lib.TrajT),
+    )
+
+  def test_classes_are_runtime_subscriptable(self) -> None:
+    """Verifies that classes are subscriptable with concrete models at runtime."""
+    subscripted_store = store_lib.TrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata, trajectory_lib.TunixTrajectory
+    ]
+    subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata, trajectory_lib.TunixTrajectory
+    ]
+    subscripted_file = file_store.FileTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata, trajectory_lib.TunixTrajectory
+    ]
+    self.assertIsNotNone(subscripted_store)
+    self.assertIsNotNone(subscripted_mem)
+    self.assertIsNotNone(subscripted_file)
+
+  def test_instances_satisfy_protocols_and_abc(self) -> None:
+    """Verifies protocol and ABC conformance on instantiated instances."""
+    mem = in_memory_store.InMemoryTrajectoryStore()
+    self.assertIsInstance(mem, store_lib.TrajectoryStore)
+    self.assertIsInstance(mem, store_lib.TrajectoryReader)
+    self.assertIsInstance(mem, store_lib.TrajectoryWriter)
+
+    tmp_dir = self.create_tempdir().full_path
+    f_store = file_store.FileTrajectoryStore(root_dir=tmp_dir)
+    self.assertIsInstance(f_store, store_lib.TrajectoryStore)
+    self.assertIsInstance(f_store, store_lib.TrajectoryReader)
+    self.assertIsInstance(f_store, store_lib.TrajectoryWriter)
+    f_store.close()
+
+  def test_subclassing_closes_type_parameters(self) -> None:
+    """Verifies that concrete subclassing binds and closes type parameters."""
+
+    class ConcreteFileStore(
+        file_store.FileTrajectoryStore[
+            trajectory_lib.TunixTrajectoryMetadata,
+            trajectory_lib.TunixTrajectory,
+        ]
+    ):
+      pass
+
+    self.assertEmpty(ConcreteFileStore.__parameters__)
+    tmp_dir = self.create_tempdir().full_path
+    c_store = ConcreteFileStore(root_dir=tmp_dir)
+    self.assertIsInstance(c_store, store_lib.TrajectoryStore)
+    c_store.close()
 
 
 if __name__ == "__main__":
