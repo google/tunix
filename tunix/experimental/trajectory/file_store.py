@@ -2,9 +2,10 @@
 
 import dataclasses
 import functools
+import json
 import re
 import types
-from typing import Any, ClassVar, Final, Mapping
+from typing import Any, ClassVar, Final, Mapping, TypeVar
 
 from absl import logging
 from etils import epath
@@ -12,6 +13,8 @@ import pydantic
 from tunix.experimental.trajectory import async_writer
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 
 _METADATA_FILENAME: Final[str] = "metadata.json"
 _TRAJECTORY_DIR_PREFIX: Final[str] = "traj_"
@@ -65,6 +68,15 @@ class _FileWriteTask(async_writer.WriteTask):
   traj_dir: epath.Path
   meta_path: epath.Path
   step_path: epath.Path | None = None
+
+  @property
+  def resolved_step_path(self) -> epath.Path | None:
+    """Returns the effective step path using the post-projection ATIF step_id."""
+    if self.step is None:
+      return None
+    return self.traj_dir / _STEP_FILENAME_TEMPLATE.format(
+        step_id=self.step.step_id
+    )
 
 
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
@@ -150,8 +162,9 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
 
     # Write step file if provided.
-    if task.step_path is not None and task.step is not None:
-      task.step_path.write_text(_dump_json(task.step))
+    step_path = task.resolved_step_path
+    if step_path is not None and task.step is not None:
+      step_path.write_text(_dump_json(task.step))
 
   def _log_task_error(self, task: _FileWriteTask) -> None:
     """Logs detailed task error with trajectory and filesystem path context.
@@ -163,7 +176,9 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         f"step {task.step.step_id}" if task.step is not None else "metadata"
     )
     target_path = (
-        task.step_path if task.step_path is not None else task.meta_path
+        task.resolved_step_path
+        if task.step is not None
+        else task.meta_path
     )
     logging.exception(
         "%s failed to write trajectory %s (trajectory_id=%s) to %s.",
@@ -174,9 +189,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     )
 
 
-class FileTrajectoryStore(
-    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
-):
+class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Architectural Separation of Responsibilities:
@@ -203,9 +216,16 @@ class FileTrajectoryStore(
   BACKEND: ClassVar[str] = "file"
 
   def __init__(
-      self, root_dir: epath.PathLike, run_id: str | None = None
+      self,
+      root_dir: epath.PathLike,
+      run_id: str | None = None,
   ) -> None:
     """Initializes FileTrajectoryStore.
+
+    The metadata type this store reads back comes from the generic subscript,
+    as in `FileTrajectoryStore[TunixTrajectoryMetadata](...)`. See
+    `store.TrajectoryStore._metadata_cls` for how that resolves, and for the
+    construction shapes it cannot see.
 
     Args:
       root_dir: Base directory path for storage (supports local paths and GCS
@@ -236,14 +256,12 @@ class FileTrajectoryStore(
     self._writer = _AsyncFileWriter()
 
   @classmethod
-  def _from_config(cls, config: Mapping[str, Any]) -> "FileTrajectoryStore":
+  def _from_config(
+      cls, config: Mapping[str, Any]
+  ) -> "FileTrajectoryStore[Any]":
     """Builds a file-backed store from `config`.
 
-    Args:
-      config: Requires "root_dir" and "run_id".
-
-    Returns:
-      A new FileTrajectoryStore.
+    Requires "root_dir" and "run_id".
 
     Raises:
       ValueError: If "root_dir" or "run_id" is missing or empty.
@@ -279,12 +297,15 @@ class FileTrajectoryStore(
           "FileTrajectoryStore without a run_id cannot export a valid"
           " distributed config."
       )
-    return {
+    config: dict[str, Any] = {
         "enabled": True,
         "backend": self.BACKEND,
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
     }
+    if (meta_type := self._metadata_type) is not None:
+      config["metadata_type"] = meta_type
+    return config
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:
@@ -310,7 +331,7 @@ class FileTrajectoryStore(
 
   def get_trajectories_metadata(
       self, trajectory_ids: list[str] | None = None
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
+  ) -> list[MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
@@ -325,7 +346,7 @@ class FileTrajectoryStore(
       store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
         not exist.
     """
-    metas: list[trajectory_lib.TrajectoryMetadata] = []
+    metas: list[MetadataT] = []
     if trajectory_ids is None:
       if not self.root_dir.exists():
         return metas
@@ -337,20 +358,22 @@ class FileTrajectoryStore(
           continue
         trajectory_ids.append(match.group("trajectory_id"))
 
+    metadata_cls = self._metadata_cls
     for traj_id in trajectory_ids:
       meta_path = self.get_trajectory_metadata_path(traj_id)
       if not meta_path.exists():
         raise store.TrajectoryMetadataNotFoundError(traj_id)
-      meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+      base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
           meta_path.read_text()
       )
+      meta = metadata_cls.from_atif_metadata(base_meta)
       metas.append(meta)
 
     return metas
 
   def get_trajectories(
       self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory]:
+  ) -> list[trajectory_lib.Trajectory[Any]]:
     """Retrieves full trajectories for a list of trajectory IDs.
 
     Args:
@@ -363,35 +386,38 @@ class FileTrajectoryStore(
       store.TrajectoryNotFoundError: If any requested trajectory ID does not
       exist.
     """
-    trajs: list[trajectory_lib.Trajectory] = []
+    trajs: list[trajectory_lib.Trajectory[Any]] = []
 
+    metadata_cls = self._metadata_cls
     for traj_id in trajectory_ids:
       traj_dir = self.get_trajectory_dir(traj_id)
       meta_path = self.get_trajectory_metadata_path(traj_id)
       if not meta_path.exists():
         raise store.TrajectoryNotFoundError(traj_id)
 
-      meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+      base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
           meta_path.read_text()
       )
-      steps: list[trajectory_lib.Step] = []
+      meta = metadata_cls.from_atif_metadata(base_meta)
+      steps: list[Any] = []
 
       for file_entry in traj_dir.iterdir():
         if not _STEP_FILENAME_REGEX.match(file_entry.name):
           continue
-        step = trajectory_lib.Step.model_validate_json(file_entry.read_text())
-        steps.append(step)
+        steps.append(json.loads(file_entry.read_text()))
 
-      traj_data = meta.model_dump()
-      traj_data["steps"] = steps
-      trajs.append(trajectory_lib.Trajectory(**traj_data))
+      # `create_trajectory` is the metadata's own factory, so the trajectory
+      # type follows from the metadata type rather than being supplied
+      # separately: TrajectoryMetadata builds a Trajectory,
+      # TunixTrajectoryMetadata a TunixTrajectory.
+      trajs.append(meta.create_trajectory(steps=steps))
 
     return trajs
 
   def add_step(
       self,
       step: trajectory_lib.Step,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Asynchronously logs a turn step and its trajectory metadata.
 
@@ -412,7 +438,7 @@ class FileTrajectoryStore(
 
   def update_metadata(
       self,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
       step: trajectory_lib.Step | None = None,
   ) -> None:
     """Updates or creates trajectory metadata asynchronously.
@@ -469,7 +495,7 @@ class FileTrajectoryStore(
     """
     self._writer.close()
 
-  def __enter__(self) -> "FileTrajectoryStore":
+  def __enter__(self) -> "FileTrajectoryStore[MetadataT]":
     """Returns this store, for use as a context manager."""
     return self
 

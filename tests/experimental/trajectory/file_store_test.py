@@ -2,17 +2,49 @@
 
 import tempfile
 import threading
+from typing import Any, Sequence
 from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+import pydantic
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
+# `trajectory.py` uses `from __future__ import annotations`, so the field
+# annotations of `Trajectory` are strings naming these symbols. Parametrizing
+# it below (`Trajectory[Step]`) builds the concrete model in *this* module, so
+# the names have to resolve here for `model_rebuild` to succeed.
+from tunix.experimental.trajectory.trajectory import Step  # pylint: disable=g-importing-member,unused-import
+from tunix.experimental.trajectory.trajectory import StepT  # pylint: disable=g-importing-member,unused-import
+from tunix.experimental.trajectory.trajectory import Trajectory  # pylint: disable=g-importing-member,unused-import
+
+
+class _CustomMetadata(trajectory_lib.TrajectoryMetadata):
+  custom_tag: str = ""
+
+  def create_trajectory(
+      self,
+      steps: Sequence[Any] | None = None,
+      subagent_trajectories: Sequence[Any] | None = None,
+  ) -> "_CustomTrajectory":
+    """Creates a _CustomTrajectory, mirroring TunixTrajectoryMetadata."""
+    return self._create_paired_trajectory(
+        _CustomTrajectory, steps, subagent_trajectories
+    )
+
+
+class _CustomTrajectory(
+    _CustomMetadata, trajectory_lib.Trajectory[trajectory_lib.Step]
+):
+  subagent_trajectories: list["_CustomTrajectory"] | None = None
+
+
+_CustomTrajectory.model_rebuild()
 
 
 class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
@@ -243,7 +275,8 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     with mock.patch.object(
         self.file_s._writer, "_process_task", side_effect=blocking_process_task
     ):
-      # add_step should enqueue task and return immediately while worker loop is blocked.
+      # add_step should enqueue task and return immediately while worker loop
+      # is blocked.
       self.file_s.add_step(
           trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
       )
@@ -628,6 +661,151 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     nonexistent_root = self.tmp_dir / "does_not_exist"
     store_instance = file_store.FileTrajectoryStore(root_dir=nonexistent_root)
     self.assertEmpty(store_instance.get_trajectories_metadata())
+
+  def test_tunix_trajectory_with_step_zero(self) -> None:
+    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
+    tunix_store = file_store.FileTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ](root_dir=self.tmp_dir, run_id="tunix_run")
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="tunix_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        status="RUNNING",
+    )
+    step0 = trajectory_lib.TunixEnvStep(
+        step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+    )
+    step1 = trajectory_lib.TunixAgentStep(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="response"
+    )
+    tunix_store.add_step(step0, meta)
+    tunix_store.add_step(step1, meta)
+    tunix_store.flush()
+
+    metas = tunix_store.get_trajectories_metadata(["tunix_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(metas[0].status, "RUNNING")
+
+    trajs = tunix_store.get_trajectories(["tunix_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
+    self.assertEqual(trajs[0].steps[0].step_id, 0)
+    self.assertEqual(trajs[0].steps[1].step_id, 1)
+    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
+    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
+
+  def test_custom_metadata_and_trajectory_subclass(self) -> None:
+    """Verifies FileTrajectoryStore supports custom metadata and trajectory types."""
+    custom_store = file_store.FileTrajectoryStore[_CustomMetadata](
+        root_dir=self.tmp_dir, run_id="custom_run"
+    )
+    meta = _CustomMetadata(
+        trajectory_id="custom_1",
+        agent=trajectory_lib.Agent(name="custom_agent", version="1.0"),
+        custom_tag="experiment_42",
+    )
+    step = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="custom step"
+    )
+    custom_store.add_step(step, meta)
+    custom_store.flush()
+
+    metas = custom_store.get_trajectories_metadata(["custom_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], _CustomMetadata)
+    self.assertEqual(metas[0].custom_tag, "experiment_42")
+
+    trajs = custom_store.get_trajectories(["custom_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], _CustomTrajectory)
+    self.assertEqual(trajs[0].custom_tag, "experiment_42")
+    self.assertLen(trajs[0].steps, 1)
+    self.assertEqual(trajs[0].steps[0].message, "custom step")
+
+  def test_unsubscripted_store_defaults_to_base_metadata(self) -> None:
+    """Verifies an unparameterized store reads plain TrajectoryMetadata."""
+    self.assertIs(
+        file_store.FileTrajectoryStore(root_dir=self.tmp_dir)._metadata_cls,
+        trajectory_lib.TrajectoryMetadata,
+    )
+
+  def test_subscripted_base_class_resolves_metadata_type(self) -> None:
+    """Verifies a subclass binding MetadataT needs no subscript at its call site."""
+
+    class _TunixFileStore(
+        file_store.FileTrajectoryStore[trajectory_lib.TunixTrajectoryMetadata]
+    ):
+      # Distinct from FileTrajectoryStore's "file" so that defining this
+      # subclass does not displace it in the backend registry.
+      BACKEND = "file_subclass_test"
+
+    self.addCleanup(
+        store.TrajectoryStore._REGISTRY.pop, "file_subclass_test", None  # pylint: disable=protected-access
+    )
+
+    tunix_store = _TunixFileStore(root_dir=self.tmp_dir, run_id="subclass_run")
+    self.assertIs(
+        tunix_store._metadata_cls, trajectory_lib.TunixTrajectoryMetadata  # pylint: disable=protected-access
+    )
+
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="sub_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        status="RUNNING",
+    )
+    tunix_store.add_step(
+        trajectory_lib.TunixEnvStep(
+            step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+        ),
+        meta,
+    )
+    tunix_store.flush()
+
+    (traj,) = tunix_store.get_trajectories(["sub_1"])
+    self.assertIsInstance(traj, trajectory_lib.TunixTrajectory)
+    self.assertEqual(traj.status, "RUNNING")
+
+  def test_annotated_but_unsubscripted_store_fails_loudly_on_read(self) -> None:
+    """Verifies an unresolved metadata type raises rather than returning mistyped data.
+
+    An annotation is not a subscript, so `__orig_class__` is never set and the
+    store falls back to base `TrajectoryMetadata`. `TrajectoryMetadata` forbids
+    extra fields, so the Tunix-only keys on disk surface as a validation error
+    on read instead of silently vanishing.
+    """
+    writer = file_store.FileTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ](root_dir=self.tmp_dir, run_id="annotated_run")
+    writer.add_step(
+        trajectory_lib.TunixEnvStep(
+            step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+        ),
+        trajectory_lib.TunixTrajectoryMetadata(
+            trajectory_id="ann_1",
+            agent=trajectory_lib.Agent(name="a1", version="1.0"),
+            status="RUNNING",
+        ),
+    )
+    writer.flush()
+
+    # Annotated, not subscripted: resolves to TrajectoryMetadata.
+    reader: file_store.FileTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ] = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="annotated_run"
+    )
+    self.assertIs(reader._metadata_cls, trajectory_lib.TrajectoryMetadata)  # pylint: disable=protected-access
+    with self.assertRaises(pydantic.ValidationError):
+      reader.get_trajectories_metadata(["ann_1"])
+
+  def test_non_metadata_subscript_raises(self) -> None:
+    """Verifies a subscript that does not name a TrajectoryMetadata is rejected."""
+    bad_store = file_store.FileTrajectoryStore[
+        trajectory_lib.Step  # pyrefly: ignore[bad-argument-type]
+    ](root_dir=self.tmp_dir)
+    with self.assertRaisesRegex(TypeError, "not a TrajectoryMetadata"):
+      _ = bad_store._metadata_cls  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":
