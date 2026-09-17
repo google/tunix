@@ -504,6 +504,9 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
     TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
   fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi

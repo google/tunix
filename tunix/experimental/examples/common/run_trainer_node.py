@@ -386,6 +386,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=0,
+      help=(
+          "Token budget per packed row, as configured on the orchestrator's"
+          " SequencePackedBatchAssembler. MaxText backend only: it becomes"
+          " max_target_length, so the trainer's config declares the width of"
+          " the rows it is actually fed rather than the width of one"
+          " trajectory. The Tunix PeftTrainer backend ignores it -- the"
+          " orchestrator owns packing there. 0 keeps max_target_length at"
+          " max_prompt_length + max_response_length."
+      ),
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -614,17 +628,6 @@ def _create_maxtext_trainer_factory(args) -> Any:
         " --maxtext_warmup_steps_fraction.",
         args.optimizer_schedule_type,
     )
-  extra_cfg_kwargs = {}
-  import inspect  # pylint: disable=g-import-not-at-top
-  sig = inspect.signature(maxtext_utils.build_maxtext_config)
-  for k, v in [
-      ("rollout_mesh_tp", args.rollout_mesh_tp),
-      ("prefuse_moe_weights", args.prefuse_moe_weights),
-      ("use_weight_converter", args.use_weight_converter),
-  ]:
-    if k in sig.parameters:
-      extra_cfg_kwargs[k] = v
-
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
       worker_id=args.worker_id,
@@ -642,7 +645,10 @@ def _create_maxtext_trainer_factory(args) -> Any:
       base_output_directory=args.maxtext_output_directory,
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
-      **extra_cfg_kwargs,
+      rollout_mesh_tp=args.rollout_mesh_tp,
+      prefuse_moe_weights=args.prefuse_moe_weights,
+      use_weight_converter=args.use_weight_converter,
+      max_seq_token_per_tpu=args.max_seq_token_per_tpu,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -705,6 +711,12 @@ def _create_tunix_trainer_factory(args) -> Any:
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
       checkpoint_root_directory=_checkpoint_root_directory(args),
+      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
+      # packs: the SequencePackedBatchAssembler does, and the weighting that
+      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
+      # `denom=aux.primary_loss.denominator`). The only thing the field would
+      # change on this path is `_is_single_microstep()`, and the orchestrator
+      # drives `fwd_bwd` + `update` rather than the fused step it gates.
       # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
       # Orchestrator needs to realign its step/policy_version from the returned
       # metadata.

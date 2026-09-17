@@ -113,6 +113,7 @@ def build_maxtext_config(
     rollout_mesh_tp: int = 0,
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
+    max_seq_token_per_tpu: int | None = 0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -148,6 +149,11 @@ def build_maxtext_config(
   if rollout_mesh_tp < 0:
     raise ValueError(
         f"rollout_mesh_tp must be non-negative, got {rollout_mesh_tp}"
+    )
+  if max_seq_token_per_tpu is not None and max_seq_token_per_tpu < 0:
+    raise ValueError(
+        "max_seq_token_per_tpu must be non-negative, got"
+        f" {max_seq_token_per_tpu}"
     )
 
   if train_micro_batch_size % mesh_fsdp:
@@ -282,13 +288,48 @@ def build_maxtext_config(
     argv.append("enable_checkpointing=True")
   else:
     argv.append("enable_checkpointing=False")
+  # max_target_length is the row width this config declares. A packed row holds
+  # several trajectories end to end, so it is wider than any single one, and
+  # max_prompt+max_response describes one trajectory. MaxText takes its actual
+  # shapes from the batch it is handed, so a wider row still runs -- but
+  # everything MaxText derives from max_target_length is then computed for a row
+  # narrower than the ones the trainer is fed: per-device TFLOPs, and the
+  # divisibility checks MaxTextConfig runs against it (num_vocab_tiling,
+  # context parallelism, num_moe_token_chunks). Declare the real width instead.
+  max_target_length = max_prompt_length + max_response_length
+  if (
+      max_seq_token_per_tpu is not None
+      and max_seq_token_per_tpu > max_target_length
+  ):
+    logging.info(
+        "Raising max_target_length %d -> %d: with sequence packing the rows"
+        " the trainer is fed are max_seq_token_per_tpu wide.",
+        max_target_length,
+        max_seq_token_per_tpu,
+    )
+    max_target_length = max_seq_token_per_tpu
+  elif (
+      max_seq_token_per_tpu is not None
+      and 0 < max_seq_token_per_tpu < max_target_length
+  ):
+    logging.warning(
+        "max_seq_token_per_tpu=%d is smaller than max_prompt_length + "
+        "max_response_length (%d + %d = %d), which is not a legal packing "
+        "budget -- validate_packing_budget rejects it on the learner. Keeping "
+        "max_target_length=%d.",
+        max_seq_token_per_tpu,
+        max_prompt_length,
+        max_response_length,
+        max_target_length,
+        max_target_length,
+    )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
-      f"max_target_length={max_prompt_length + max_response_length}",
+      f"max_target_length={max_target_length}",
       "attention=dot_product",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
