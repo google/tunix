@@ -409,15 +409,17 @@ class VllmSamplerTest(absltest.TestCase):
         mock.patch.object(vl_sampler.llm, "collective_rpc"):
       vl_sampler.load_checkpoint(state)
 
-    # Mock the generate method to capture sampling_params
-    original_generate = vl_sampler.llm.generate
+    # Mock add_request on the engine to capture sampling_params
+    original_add_request = vl_sampler.llm.llm_engine.add_request
     captured_sampling_params = []
 
-    def mock_generate(prompts, sampling_params, **kwargs):
+    def mock_add_request(request_id, prompt, sampling_params, *args, **kwargs):
       captured_sampling_params.append(sampling_params)
-      return original_generate(prompts, sampling_params, **kwargs)
+      return original_add_request(
+          request_id, prompt, sampling_params, *args, **kwargs
+      )
 
-    vl_sampler.llm.generate = mock_generate
+    vl_sampler.llm.llm_engine.add_request = mock_add_request
 
     # Call with additional method kwargs
     method_sampling_kwargs = {"min_tokens": 10}
@@ -494,15 +496,17 @@ class VllmSamplerTest(absltest.TestCase):
         mock.patch.object(vl_sampler.llm, "collective_rpc"):
       vl_sampler.load_checkpoint(state)
 
-    # Mock the generate method to capture sampling_params
-    original_generate = vl_sampler.llm.generate
+    # Mock add_request on the engine to capture sampling_params
+    original_add_request = vl_sampler.llm.llm_engine.add_request
     captured_sampling_params = []
 
-    def mock_generate(prompts, sampling_params, **kwargs):
+    def mock_add_request(request_id, prompt, sampling_params, *args, **kwargs):
       captured_sampling_params.append(sampling_params)
-      return original_generate(prompts, sampling_params, **kwargs)
+      return original_add_request(
+          request_id, prompt, sampling_params, *args, **kwargs
+      )
 
-    vl_sampler.llm.generate = mock_generate
+    vl_sampler.llm.llm_engine.add_request = mock_add_request
 
     # Call with method kwargs that override config kwargs
     method_sampling_kwargs = {"frequency_penalty": 0.8}  # Override from 0.5 to 0.8
