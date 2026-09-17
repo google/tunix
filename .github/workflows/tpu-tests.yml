@@ -441,7 +441,18 @@ jobs:
     # step compilation, none of which run_dev does.
     timeout-minutes: 90
     container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      # Four days newer than run_dev's pin, and deliberately the smallest bump
+      # that works: same vLLM commit (51da0ca), tpu-inference only 4b80060 ->
+      # 20a6700, the first nightly whose TPUWorker.raiden_h2d takes the `uuid`
+      # argument that tunix/experimental/rollout/vllm_sampler_v2.py passes it.
+      # Without it the rollout dies mid weight-sync round 0 with
+      #   TypeError: TPUWorker.raiden_h2d() got an unexpected keyword argument
+      #              'uuid'
+      # Only this job is affected: run_dev's recipe samples with
+      # SAMPLER=inprocess_vllm, which never crosses the vLLM worker RPC boundary
+      # where the signature has to match. Leaving run_dev's pin alone keeps a
+      # passing job out of the blast radius; it can follow whenever it likes.
+      image: vllm/vllm-tpu:nightly-20260915-20a6700-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8
