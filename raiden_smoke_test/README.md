@@ -162,8 +162,3 @@ is the intended direction.
      resource.labels.pod_name:"'"$USER"'"
      textPayload:"__grand_total__"'
   ```
-- **`loss: -0.0000` is expected**, not a failure. With one inner epoch the GRPO
-  surrogate is `-mean(advantage)` at ratio 1, and advantages are group-mean-centred
-  by construction. Judge learning by checksum mutation (G3) and optimizer-state
-  size (G7), not the loss scalar.
-- `advantage_std` is never logged upstream; use `reward std` as the proxy.
