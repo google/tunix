@@ -25,7 +25,7 @@ canon_env=/mnt/disks/tunix-data/claude_work/canon_env.sh
 model_cache=/mnt/disks/tunix-data/hf/hub/models--Qwen--Qwen3-8B
 model_sha="$(head -n 1 "$model_cache/refs/main")"
 model="$model_cache/snapshots/$model_sha"
-data=/mnt/disks/tunix-data/frozenlake/data
+data="${P57_PERF_V2_DATA_DIR:-/mnt/disks/tunix-data/frozenlake/data}"
 deps=/mnt/disks/tunix-data/frozenlake/deps
 image=tunix_frozenlake_image:vllm-tpu0.25.0
 image_id="$(sudo docker image inspect "$image" --format '{{.Id}}')"
@@ -117,7 +117,7 @@ if [ "$neutrality_arm" != standard ]; then
 fi
 
 {
-  echo "[P57.PERF_V2.ONEHOST] source=$source_sha diff_sha256=$diff_sha neutrality_arm=$neutrality_arm"
+  echo "[P57.PERF_V2.ONEHOST] source=$source_sha diff_sha256=$diff_sha neutrality_arm=$neutrality_arm data=$data"
   echo "[P57.PERF_V2.ONEHOST] image_id=$image_id"
   echo "[P57.PERF_V2.ONEHOST] topology=DP1xTP4 model=Qwen3-8B trajectories=8 microbatches=4 updates=3 concurrency=2"
   echo "[P57.PERF_V2.ONEHOST] perf_target_step=2 strict_alignment=1 placement=device-resident timeout_seconds=$timeout_seconds"
