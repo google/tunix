@@ -204,8 +204,7 @@ def _restore_opt_state_float_dtypes(
       is_leaf=lambda value: isinstance(value, nnx.Variable),
   )
 
-@flax.struct.dataclass
-class GradientAccumulator:
+class GradientAccumulator(flax.struct.PyTreeNode):
   """Running gradient sum for one optimizer step, as an immutable pytree value.
 
   Deliberately not an nnx.Module: the running sum flows through the jitted
@@ -596,8 +595,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       model: nnx.Module,
       optimizer: nnx.Optimizer,
       acc: GradientAccumulator,
-  ) -> ArrayLike:
-    """Updates the model weights.
+  ) -> Tuple[ArrayLike, GradientAccumulator]:
+    """Updates the model weights and empties the accumulator.
 
     Args:
       model: The model to train.
@@ -605,7 +604,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       acc: The accumulated gradients for this optimizer step.
 
     Returns:
-      The gradient norm.
+      The gradient norm and the emptied accumulator, so that consuming the
+      gradients and dropping them is one atomic transition: no caller can
+      apply an update and leave the sum behind.
     """
     grads = acc.get()
     # Compute the norm in float32. For production-size models the sum-of-squares
@@ -620,7 +621,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     opt_state_dtypes = _opt_state_dtypes(optimizer)
     optimizer.update(model, grads_state)
     _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
-    return norm
+    return norm, acc.reset()
 
   def _train_step(
       self,
@@ -643,7 +644,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     loss, aux, acc = self._fwd_bwd_step(
         model, inputs, self.grad_accumulator.reset()
     )
-    return loss, aux, self._update_step(model, optimizer, acc)
+    norm, _ = self._update_step(model, optimizer, acc)
+    return loss, aux, norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -666,7 +668,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def create_update_step_fn(
       self,
-  ) -> Callable[..., ArrayLike]:
+  ) -> Callable[..., Tuple[ArrayLike, GradientAccumulator]]:
     """Creates the update step function."""
     return self._update_step
 
@@ -1012,8 +1014,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if acc.is_empty:
       raise ValueError("update() was called with nothing accumulated: it must follow at"
                        "least one fwd_bwd() in this optimizer step")
-    grad_norm = update_step(acc)
-    self.grad_accumulator = acc.reset()
+    grad_norm, self.grad_accumulator = update_step(acc)
     return self._record_update(grad_norm)
 
   def train_step(
