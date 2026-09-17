@@ -63,13 +63,27 @@ PATHWAYS_WORKER_TPU_CHIPS=${PATHWAYS_WORKER_TPU_CHIPS:-${TRAINER_TPU_CHIPS:-0,1,
 # instances", which reads like a topology error but is a generation mismatch.
 #
 # Autodetected rather than defaulted to the CI runner's value, so the same
-# script works on a developer's TPU VM. The generation comes from GCE metadata
-# instead of jax.devices() because initializing JAX here would claim the chips
-# the worker is about to take. Override PATHWAYS_INSTANCE_TYPE to skip all this.
+# script works on a developer's TPU VM. Neither source is jax.devices(), because
+# initializing JAX here would claim the chips the worker is about to take.
+# Override PATHWAYS_INSTANCE_TYPE to skip all this.
+#
+# CLOUD_TPU_ACCELERATOR is tried before the metadata server: on a TPU VM the
+# metadata carries instance/attributes/accelerator-type, but the CI runners are
+# GKE pods, where that attribute does not exist and the lookup comes back empty.
+# There the container declares its hardware in this variable instead.
+detect_accelerator_type() {
+  if [[ -n "${CLOUD_TPU_ACCELERATOR:-}" ]]; then
+    echo "${CLOUD_TPU_ACCELERATOR}"
+    return
+  fi
+  curl -s -m 5 -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/accelerator-type" \
+    2>/dev/null || true
+}
+
 detect_pathways_generation() {
   local accel
-  accel=$(curl -s -m 5 -H "Metadata-Flavor: Google" \
-    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/accelerator-type" 2>/dev/null) || true
+  accel=$(detect_accelerator_type)
   case "${accel}" in
     tpu7*)      echo "tpu7x" ;;      # Note: tpu7x, not tpuv7.
     v6e*)       echo "tpuv6e" ;;
@@ -84,7 +98,9 @@ detect_pathways_generation() {
 if [[ -z "${PATHWAYS_INSTANCE_TYPE:-}" ]]; then
   PW_GENERATION=$(detect_pathways_generation)
   if [[ -z "${PW_GENERATION}" ]]; then
-    echo "Error: could not detect the TPU generation from GCE metadata." >&2
+    echo "Error: could not detect the TPU generation." >&2
+    echo "Tried CLOUD_TPU_ACCELERATOR (='${CLOUD_TPU_ACCELERATOR:-unset}') and the" >&2
+    echo "GCE metadata accelerator-type, which yielded '$(detect_accelerator_type)'." >&2
     echo "Set PATHWAYS_INSTANCE_TYPE explicitly, e.g. PATHWAYS_INSTANCE_TYPE=tpuv6e:2x2." >&2
     exit 1
   fi
