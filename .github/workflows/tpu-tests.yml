@@ -36,17 +36,41 @@ env:
   HF_HOME: ~/.cache/huggingface
   HF_HUB_ENABLE_HF_TRANSFER: "1"
 
+# Jobs here are grouped by container image, not by test area. Each job holds an
+# entire 8-chip v6e host for its whole duration, and the self-hosted TPU runner
+# pool is shared, so the number of jobs -- not their runtime -- is what
+# determines how much of that pool a single PR occupies.
+#
+# Adding a test: put it in the job whose image it needs. Only add a new job if it
+# needs a third image, and say why in the review.
+#
+# Within a job, steps that mutate the Python environment (force-reinstalls, extra
+# framework installs) MUST come last, so they cannot perturb the tests above them.
 jobs:
   # ---------------------------------------------------------------------------
   # Job: run_core
-  # Purpose: Multi-device TPU unit test suite on candidate JAX stable stack.
-  # Hardware: Live TPU v6e-8 accelerator.
-  # Secrets: None required.
-  # Scope: Sharded model, generation, SFT, distillation, and RL unit tests.
+  # Purpose: Multi-device TPU unit tests, then SGLang-JAX integration.
+  # Hardware: Live TPU v6e-8 accelerator (1 slice).
+  # Image:    JAX stable stack candidate.
+  # Secrets:  HF_TOKEN, used only by the SGLang stage.
+  # Scope:    Sharded model, generation, SFT, distillation and RL unit tests,
+  #           followed by SGLang sampler, LoRA and RL cluster integration tests.
+  #
+  # ORDERING CONSTRAINTS (within run_core):
+  #   1. Core unit test suites (generation, SFT, distillation, RL cluster, uncovered)
+  #      MUST run BEFORE SGLang-JAX so they execute against the unmodified candidate
+  #      JAX stable stack image. (Relative order among these 5 suites is flexible.)
+  #   2. SGLang-JAX (`Run install sglang-jax && test`) MUST run LAST in this job.
+  #      It executes `pip install 'jax[tpu]<0.11.0' --force-reinstall` and
+  #      `pip install qwix --force-reinstall`, mutating the Python environment.
   # ---------------------------------------------------------------------------
   run_core:
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
+    # Note: GitHub Actions `timeout-minutes` only counts active execution time after
+    # a runner picks up the job (queue wait time is excluded). Measured execution
+    # is ~14.2m, so 60m provides >4x headroom while catching hung processes.
+    timeout-minutes: 60
     container:
       image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -54,98 +78,6 @@ jobs:
         CLOUD_TPU_ACCELERATOR: v6e-8
         JAX_PLATFORMS: tpu
     steps:
-
-    # Cache Hugging Face hub
-    - name: Cache HF hub
-      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-      with:
-        path: ~/.cache/huggingface
-        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-        restore-keys: |
-          hf-${{ runner.os }}-
-
-    - name: Checkout code
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        fetch-depth: 0
-        persist-credentials: false
-
-    - name: Install tunix dependencies
-      run: |
-        pip install --upgrade pip
-        pip install -e ".[test]"
-
-    - name: Verify TPU availability
-      run: |
-        python -c "
-        import jax
-        print(f'JAX version: {jax.__version__}')
-        print(f'JAX devices: {jax.devices()}')
-
-        # Check if we have TPU devices specifically
-        devices = jax.devices()
-        has_tpu = len(devices) > 0 and all(device.platform == 'tpu' for device in devices)
-        print(f'TPU available: {has_tpu}')
-
-        if not has_tpu:
-            print('ERROR: No TPU devices found! Expected TPU devices but got:', [device.platform for device in devices])
-            exit(1)
-        else:
-            print(f'SUCCESS: Found {len(devices)} TPU device(s)')
-        "
-
-    - name: Run tunix generation tests (PASSED only)
-      run: |
-        # tokenizer_adapter_test requires access to gated repo
-        python -m pytest tests/generate/ -v --tb=short \
-          --ignore=tests/generate/vllm_sampler_test.py \
-          --ignore=tests/generate/vllm_sampler_qwen_test.py \
-          --ignore=tests/generate/vllm_driver_test.py \
-          --ignore=tests/generate/tokenizer_adapter_test.py \
-          --ignore=tests/generate/sglang_jax_sampler_test.py \
-          --ignore=tests/generate/sglang_jax_lora_test.py
-
-    - name: Run tunix SFT tests
-      run: |
-        python -m pytest tests/sft/ -v --tb=short
-
-    - name: Run tunix distillation tests
-      run: |
-        python -m pytest tests/distillation/ -v --tb=short
-
-    - name: Run tunix RL cluster tests
-      run: |
-        python -m pytest tests/rl/rl_cluster_test.py -v --tb=short
-
-    - name: Run tunix tests not covered by the above categories
-      run: |
-        # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-        python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/mesh_utils_test.py --ignore=tests/utils/topology_test.py --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ --ignore=tests/experimental/ || code=$?
-        if [ "${code:-0}" = "5" ]; then
-          echo "No tests collected (expected)."
-          exit 0
-        else
-          exit "${code:-0}"
-        fi
-
-  # ---------------------------------------------------------------------------
-  # Job: run_dev
-  # Purpose: Multi-device TPU training and PEFT integration tests.
-  # Hardware: Live TPU v6e-8 accelerator.
-  # Secrets: Requires HF_TOKEN and KAGGLE_* secrets (skipped on external fork PRs).
-  # Scope: End-to-end GRPO RL demo training and SFT PEFT 2x2 mesh integration tests.
-  # ---------------------------------------------------------------------------
-  run_dev:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
-    container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
-      options: --privileged
-      env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
-        JAX_PLATFORMS: tpu,cpu
-    steps:
       # Cache Hugging Face hub
       - name: Cache HF hub
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -155,128 +87,15 @@ jobs:
           restore-keys: |
             hf-${{ runner.os }}-
 
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Tunix , tpu-inference and dependencies
-        run: |
-          echo "Current directory:"
-          pwd
-          python3 -m pip install --upgrade pip setuptools wheel
-
-          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-          python3 -m pip install -e .[test]
-          # tpu-inference/Numba needs NumPy 2.3 or less.
-          python3 -m pip install numpy==2.3.5 --force-reinstall
-      - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          # Run GRPO demo script with minimal configuration
-          python3 scripts/grpo_demo_llama3_qwen2.py \
-            --root-dir=/tmp/grpo_test \
-            --num-batches=2 \
-            --num-test-batches=1 \
-            --global-batch-size=2 \
-            --train-mini-batch-size=2 \
-            --train-micro-batch-size=2 \
-            --rollout-engine=vanilla
-      - name: Run tunix SFT integration tests (PEFT with 2x2 mesh on TPU)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          # Update dependencies
-          python3 -m pip install --upgrade kagglehub kagglesdk
-
-          # Loading tfds requires tensorflow.
-          python3 -m pip install tensorflow
-
-          export JAX_PLATFORMS=tpu,cpu
-          ./tests/sft/sft_tpu_smoke_test.sh
-
-  # ---------------------------------------------------------------------------
-  # Job: run_vllm
-  # Purpose: Live inference sampler tests with vLLM engine on TPU hardware.
-  # Hardware: Live TPU v6e-8 accelerator with vLLM TPU container.
-  # Secrets: Requires HF_TOKEN for downloading gated models (Llama-3.2, Qwen3).
-  # Scope: vLLM Sampler generation, LoRA mapping, and checkpoint loading on TPU.
-  # ---------------------------------------------------------------------------
-  run_vllm:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
-    container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
-      options: --privileged
-      env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
-        JAX_PLATFORMS: tpu,cpu
-    steps:
-      # Cache Hugging Face hub
-      - name: Cache HF hub
+      # Cache pip wheels. Without this the job re-downloads its whole dependency
+      # tree while holding a v6e-8 host.
+      - name: Cache pip
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          path: ~/.cache/pip
+          key: pip-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
           restore-keys: |
-            hf-${{ runner.os }}-
-
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Tunix , tpu-inference and dependencies
-        run: |
-          echo "Current directory:"
-          pwd
-          python3 -m pip install --upgrade pip setuptools wheel
-
-          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-          python3 -m pip install -e .[test]
-          # tpu-inference/Numba needs NumPy 2.3 or less.
-          python3 -m pip install numpy==2.3.5 --force-reinstall
-      - name: Run vllm tests
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          unset JAX_PLATFORMS
-          python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
-          python3 -m pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
-          while read -r test; do
-            python3 -m pytest -s "$test" -v --tb=short
-          done < test_collections.txt
-
-  # ---------------------------------------------------------------------------
-  # Job: run_sglang
-  # Purpose: SGLang-JAX integration and sampler tests on TPU hardware.
-  # Hardware: Live TPU v6e-8 accelerator with isolated candidate TPU container.
-  # Secrets: Requires HF_TOKEN for model downloads.
-  # Scope: SGLang sampler, LoRA, and RL cluster integration tests.
-  # ---------------------------------------------------------------------------
-  run_sglang:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
-    container:
-      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest # zizmor: ignore[unpinned-images]
-      options: --privileged
-      env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
-        JAX_PLATFORMS: tpu,cpu
-    steps:
-      # Cache Hugging Face hub
-      - name: Cache HF hub
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-          restore-keys: |
-            hf-${{ runner.os }}-
+            pip-core-${{ runner.os }}-
 
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -289,7 +108,69 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[test]"
 
+      - name: Verify TPU availability
+        run: |
+          python -c "
+          import jax
+          print(f'JAX version: {jax.__version__}')
+          print(f'JAX devices: {jax.devices()}')
+
+          # Check if we have TPU devices specifically
+          devices = jax.devices()
+          has_tpu = len(devices) > 0 and all(device.platform == 'tpu' for device in devices)
+          print(f'TPU available: {has_tpu}')
+
+          if not has_tpu:
+              print('ERROR: No TPU devices found! Expected TPU devices but got:', [device.platform for device in devices])
+              exit(1)
+          else:
+              print(f'SUCCESS: Found {len(devices)} TPU device(s)')
+          "
+
+      - name: Run tunix generation tests (PASSED only)
+        run: |
+          # tokenizer_adapter_test requires access to gated repo
+          python -m pytest tests/generate/ -v --tb=short \
+            --ignore=tests/generate/vllm_sampler_test.py \
+            --ignore=tests/generate/vllm_sampler_qwen_test.py \
+            --ignore=tests/generate/vllm_driver_test.py \
+            --ignore=tests/generate/tokenizer_adapter_test.py \
+            --ignore=tests/generate/sglang_jax_sampler_test.py \
+            --ignore=tests/generate/sglang_jax_lora_test.py
+
+      - name: Run tunix SFT tests
+        run: |
+          python -m pytest tests/sft/ -v --tb=short
+
+      - name: Run tunix distillation tests
+        run: |
+          python -m pytest tests/distillation/ -v --tb=short
+
+      - name: Run tunix RL cluster tests
+        run: |
+          python -m pytest tests/rl/rl_cluster_test.py -v --tb=short
+
+      - name: Run tunix tests not covered by the above categories
+        run: |
+          # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
+          python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/mesh_utils_test.py --ignore=tests/utils/topology_test.py --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ --ignore=tests/experimental/ || code=$?
+          if [ "${code:-0}" = "5" ]; then
+            echo "No tests collected (expected)."
+            exit 0
+          else
+            exit "${code:-0}"
+          fi
+
+      # --- SGLang-JAX stage (formerly the standalone `run_sglang` job) ---------
+      # [ORDERING CONSTRAINT]: MUST stay LAST in `run_core`. It force-reinstalls
+      # `jax[tpu]<0.11.0` and `qwix`, which would overwrite the candidate JAX
+      # stack and perturb every core unit test above it.
+      #
+      # Gated at the step level rather than the job level so that the unit tests
+      # above still run on external fork PRs, where secrets are unavailable.
+      # This preserves the previous behaviour, where run_core had no `if:`.
       - name: Run install sglang-jax && test
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -305,23 +186,42 @@ jobs:
           # TODO(b/470113586): Remove this test once the bug is fixed.
           python3 -m pip list | egrep 'jax|flax|libtpu'
 
-          cd tunix 
+          cd tunix
           python3 tests/generate/sglang_jax_sampler_test.py
           python3 tests/generate/sglang_jax_lora_test.py
           python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "not vllm"
 
-
   # ---------------------------------------------------------------------------
-  # Job: run_dist_smoke
-  # Purpose: Distributed RL (math_gsm8k_dist) smoke test with Raiden weight sync.
-  # Hardware: Live TPU v6e-8 accelerator with vLLM TPU container.
-  # Secrets: Requires HF_TOKEN for model downloads (skipped on external fork PRs).
-  # Scope: 2-step end-to-end distributed RL: PeftTrainer + inprocess_vllm + Raiden.
+  # Job: run_dev
+  # Purpose: TPU training/PEFT integration, live vLLM sampler tests, and the
+  #          distributed RL smoke test.
+  # Hardware: Live TPU v6e-8 accelerator (1 slice).
+  # Image:    vLLM TPU nightly.
+  # Secrets:  Requires HF_TOKEN and KAGGLE_* secrets (skipped on external fork PRs).
+  # Scope:    End-to-end GRPO RL demo training, vLLM Sampler generation / LoRA
+  #           mapping / checkpoint loading, SFT PEFT 2x2 mesh integration, then
+  #           the Qwen3-0.6B GSM8K distributed RL smoke test with Raiden sync.
+  #
+  # ORDERING CONSTRAINTS (within run_dev):
+  #   1. `GRPO Integration Test` & `Run vllm tests` MUST run BEFORE `Run tunix SFT integration tests`.
+  #      They require the container's pinned `numpy==2.3.5` (for Numba / tpu-inference).
+  #   2. `Run tunix SFT integration tests` MUST run AFTER `Run vllm tests` and BEFORE
+  #      the Distributed RL smoke stage. It executes `pip install tensorflow` (needed
+  #      for TFDS dataset loading), which upgrades NumPy past 2.3.5 and would break
+  #      vLLM/Numba if run earlier.
+  #   3. Distributed RL Smoke Test (`run_dist_smoke` steps) MUST run LAST in this job.
+  #      It installs the native Raiden weight-sync wheel (`tpu_sync`) and spawns
+  #      multi-process trainer/rollout servers across all 8 TPU chips; running it last
+  #      prevents background process or chip-lock leakage into earlier tests.
   # ---------------------------------------------------------------------------
-  run_dist_smoke:
+  run_dev:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
+    # Note: GitHub Actions `timeout-minutes` only counts active execution time after
+    # a runner picks up the job (queue wait time is excluded). Measured execution
+    # is ~20.9m, so 60m provides ~3x headroom while catching hung processes.
+    timeout-minutes: 60
     container:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -338,23 +238,97 @@ jobs:
           restore-keys: |
             hf-${{ runner.os }}-
 
+      # Cache pip wheels. Without this the job re-downloads its whole dependency
+      # tree while holding a v6e-8 host.
+      - name: Cache pip
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: pip-dev-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            pip-dev-${{ runner.os }}-
+
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Setup Tunix and dependencies
+      # Shared by every stage below; previously paid once per job.
+      - name: Setup Tunix , tpu-inference and dependencies
         run: |
           echo "Current directory:"
           pwd
           python3 -m pip install --upgrade pip setuptools wheel
 
-          # Install Tunix with test dependencies
+          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
           python3 -m pip install -e .[test]
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
-          # GSM8K dataset loading via tfds
+
+      - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Run GRPO demo script with minimal configuration
+          python3 scripts/grpo_demo_llama3_qwen2.py \
+            --root-dir=/tmp/grpo_test \
+            --num-batches=2 \
+            --num-test-batches=1 \
+            --global-batch-size=2 \
+            --train-mini-batch-size=2 \
+            --train-micro-batch-size=2 \
+            --rollout-engine=vanilla
+
+      # --- vLLM stage (formerly the standalone `run_vllm` job) ----------------
+      # [ORDERING CONSTRAINT]: Must run BEFORE `Run tunix SFT integration tests`.
+      # SFT installs tensorflow, which pulls NumPy past the ==2.3.5 pin that
+      # tpu-inference/Numba requires. Keeping vLLM above SFT preserves the freshly
+      # pinned environment it had as a standalone job.
+      - name: Run vllm tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          unset JAX_PLATFORMS
+          python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
+          python3 -m pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
+          while read -r test; do
+            python3 -m pytest -s "$test" -v --tb=short
+          done < test_collections.txt
+
+      # [ORDERING CONSTRAINT]: Must run AFTER `Run vllm tests` (installing tensorflow
+      # upgrades NumPy past ==2.3.5) and BEFORE the Distributed RL smoke stage
+      # (which reuses this tensorflow install for TFDS dataset loading).
+      - name: Run tunix SFT integration tests (PEFT with 2x2 mesh on TPU)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Update dependencies
+          python3 -m pip install --upgrade kagglehub kagglesdk
+
+          # Loading tfds requires tensorflow.
+          python3 -m pip install tensorflow
+
+          export JAX_PLATFORMS=tpu,cpu
+          ./tests/sft/sft_tpu_smoke_test.sh
+
+      # --- Distributed RL smoke stage (formerly the standalone `run_dist_smoke`
+      # job) --------------------------------------------------------------------
+      # [ORDERING CONSTRAINT]: MUST stay LAST in `run_dev`. `install_raiden.sh`
+      # installs a pinned native weight-sync wheel (`tpu_sync`), and the recipe
+      # below spawns multi-process trainer / rollout servers across all 8 TPU chips.
+      # Running it last ensures no background processes or chip locks affect
+      # earlier single-process tests.
+      #
+      # To lift it back out into its own job, move these five steps verbatim
+      # into a new job using the same image; nothing else depends on them.
+      # Keeps the name it had as a standalone job. The pip upgrade, editable
+      # install and NumPy pin it used to carry are now done once, by the shared
+      # setup step at the top of this job.
+      - name: Setup Tunix and dependencies
+        run: |
+          # GSM8K dataset loading via tfds. `tensorflow` itself is already
+          # installed by the SFT stage above; this adds the rest.
           python3 -m pip install tensorflow tensorflow_datasets array_record
 
       - name: Install Raiden weight sync library
@@ -380,6 +354,8 @@ jobs:
         run: |
           ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
 
+      # Fires for any failure in this job, not just the smoke test above; the
+      # `|| true` guards make that harmless when the logs do not exist.
       - name: Print logs on failure
         if: ${{ failure() }}
         run: |
@@ -389,3 +365,4 @@ jobs:
           cat tunix/experimental/examples/math_gsm8k_dist/rollout.log || true
           echo "==================== ORCHESTRATOR LOG ===================="
           cat tunix/experimental/examples/math_gsm8k_dist/orchestrator.log || true
+
