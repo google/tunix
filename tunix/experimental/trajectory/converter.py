@@ -236,6 +236,11 @@ def to_tunix_step(
   if agent_step is None and env_step is None:
     return agent_types.Step()
 
+  if agent_step is not None:
+    agent_step = from_atif_step(agent_step)
+  if env_step is not None:
+    env_step = from_atif_step(env_step)
+
   thought = ""
   model_response = ""
   action = None
@@ -369,6 +374,7 @@ def to_tunix_trajectory(
       traj_obj = trajectory_lib.Trajectory.from_json_dict(traj)
   else:
     traj_obj = traj
+  meta_obj = from_atif_metadata(traj_obj.get_metadata())
 
   dto_steps: list[agent_types.Step] = []
   converted_step_idx = 0
@@ -402,18 +408,18 @@ def to_tunix_trajectory(
       dto_steps.append(dto_step)
       converted_step_idx += 1
 
-  total_reward = getattr(traj_obj, "total_reward", None)
-  reward = float(total_reward) if total_reward is not None else 0.0
+  reward = (
+      float(meta_obj.total_reward) if meta_obj.total_reward is not None else 0.0
+  )
 
   status_enum = agent_types.TrajectoryStatus.RUNNING
-  traj_obj_status = getattr(traj_obj, "status", None)
-  if traj_obj_status is not None and hasattr(
-      agent_types.TrajectoryStatus, str(traj_obj_status)
+  if meta_obj.status is not None and hasattr(
+      agent_types.TrajectoryStatus, str(meta_obj.status)
   ):
-    status_enum = getattr(agent_types.TrajectoryStatus, str(traj_obj_status))
+    status_enum = getattr(agent_types.TrajectoryStatus, str(meta_obj.status))
 
-  env_time = getattr(traj_obj, "env_time", None) or {}
-  reward_time = getattr(traj_obj, "reward_time", None) or {}
+  env_time = meta_obj.env_time or {}
+  reward_time = meta_obj.reward_time or {}
 
   return agent_types.Trajectory(
       task=task_val,
@@ -567,3 +573,71 @@ def update_trajectory_metadata(
     metadata.extra.update(extra)
 
   return metadata
+
+
+def _unpack_subclass_values_from_extra(
+    model: trajectory_lib.Step | trajectory_lib.TrajectoryMetadata,
+) -> dict[str, Any]:
+  """Extracts `model.extra['_atif_ext']` into top-level model values."""
+  extra_by_key = dict(model.extra or {})
+  atif_ext_by_key = extra_by_key.pop("_atif_ext", None)
+
+  values_by_key = model.model_dump(exclude={"extra"})
+  values_by_key["extra"] = extra_by_key or None
+  if atif_ext_by_key:
+    values_by_key.update(atif_ext_by_key)
+  return values_by_key
+
+
+def _get_step_class(
+    source: trajectory_lib.Source | str,
+) -> type[trajectory_lib.TunixAgentStep | trajectory_lib.TunixEnvStep]:
+  """Returns the Tunix step subclass corresponding to the step source."""
+  match source:
+    case trajectory_lib.Source.AGENT:
+      return trajectory_lib.TunixAgentStep
+    case trajectory_lib.Source.USER | trajectory_lib.Source.SYSTEM:
+      return trajectory_lib.TunixEnvStep
+    case _:
+      raise ValueError(f"Unsupported step source: {source!r}")
+
+
+def from_atif_step(
+    step: trajectory_lib.Step,
+) -> trajectory_lib.TunixAgentStep | trajectory_lib.TunixEnvStep:
+  """Rehydrates a base ATIF Step into TunixAgentStep or TunixEnvStep.
+
+  Args:
+    step: The ATIF Step instance to rehydrate.
+
+  Returns:
+    The rehydrated TunixAgentStep or TunixEnvStep instance.
+  """
+  if isinstance(
+      step, (trajectory_lib.TunixAgentStep, trajectory_lib.TunixEnvStep)
+  ):
+    return step
+
+  target_cls = _get_step_class(step.source)
+  values_by_key = _unpack_subclass_values_from_extra(step)
+  return target_cls.model_validate(values_by_key)
+
+
+def from_atif_metadata(
+    meta: trajectory_lib.TrajectoryMetadata,
+) -> trajectory_lib.TunixTrajectoryMetadata:
+  """Rehydrates base ATIF TrajectoryMetadata into TunixTrajectoryMetadata.
+
+  Args:
+    meta: The ATIF TrajectoryMetadata instance to rehydrate.
+
+  Returns:
+    The rehydrated TunixTrajectoryMetadata instance.
+  """
+  if isinstance(meta, (trajectory_lib.TunixTrajectory)):
+    meta = meta.get_metadata()
+  if isinstance(meta, trajectory_lib.TunixTrajectoryMetadata):
+    return meta
+
+  values_by_key = _unpack_subclass_values_from_extra(meta)
+  return trajectory_lib.TunixTrajectoryMetadata.model_validate(values_by_key)

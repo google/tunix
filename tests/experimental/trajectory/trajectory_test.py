@@ -932,6 +932,122 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(converted_traj.env_time, {"init": 0.1, "step": 0.6})
     self.assertEqual(converted_traj.reward_time, {"eval": 0.25})
 
+  def test_to_atif_step_on_tunix_agent_step_packs_subclass_fields_into_extra(
+      self,
+  ):
+    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+        update={"extra": {"user_key": "val", "_atif_ext": {"existing_key": 99}}}
+    )
+
+    atif_agent_step = agent_step.to_atif_step()
+
+    self.assertIs(type(atif_agent_step), trajectory.Step)
+    self.assertEqual(
+        atif_agent_step.extra,
+        {
+            "user_key": "val",
+            "_atif_ext": {
+                "existing_key": 99,
+                "mc_return": 2.5,
+                "assistant_tokens": [10, 20],
+                "assistant_masks": [1, 1],
+                "logprobs": [-0.5, -0.2],
+                "policy_version": 3,
+            },
+        },
+    )
+
+  def test_to_atif_step_on_tunix_env_step_packs_subclass_fields_into_extra(
+      self,
+  ):
+    atif_env_step = trajectory_testing.TUNIX_ENV_STEP_0.to_atif_step()
+
+    self.assertIs(type(atif_env_step), trajectory.Step)
+    self.assertEqual(
+        atif_env_step.extra,
+        {
+            "env_extra_key": "env_extra_val",
+            "_atif_ext": {
+                "reward": 1.0,
+                "done": False,
+                "env_tokens": [1, 2],
+                "env_masks": [1, 1],
+            },
+        },
+    )
+
+  def test_to_atif_metadata_on_tunix_metadata_packs_subclass_fields_into_extra(
+      self,
+  ):
+    atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+
+    self.assertIs(type(atif_meta), trajectory.TrajectoryMetadata)
+    self.assertEqual(atif_meta.trajectory_id, "t_atif")
+    self.assertEqual(atif_meta.session_id, "sess_01")
+    self.assertEqual(atif_meta.notes, "Metadata projection test")
+    self.assertEqual(
+        atif_meta.extra,
+        {
+            "user_meta": "val",
+            "_atif_ext": {
+                "prompt_id": "p_1",
+                "group_index": 2,
+                "target_policy_versions": [2, 3],
+                "status": "COMPLETED",
+                "total_reward": 3.5,
+                "hyperparams": {"temperature": 0.7},
+                "env_time": {"step_0": 0.05},
+                "reward_time": {"step_1": 0.02},
+            },
+        },
+    )
+
+  def test_to_atif_step_on_base_step_returns_self(self):
+    self.assertIs(
+        trajectory_testing.STEP_1_1.to_atif_step(),
+        trajectory_testing.STEP_1_1,
+    )
+
+  def test_to_atif_metadata_on_base_metadata_returns_self(self):
+    self.assertIs(
+        trajectory_testing.METADATA_1.to_atif_metadata(),
+        trajectory_testing.METADATA_1,
+    )
+
+  def test_to_atif_metadata_on_tunix_trajectory_strips_steps_and_packs_extra(
+      self,
+  ):
+    atif_meta = trajectory_testing.TUNIX_TRAJECTORY_1.to_atif_metadata()
+
+    self.assertIs(type(atif_meta), trajectory.TrajectoryMetadata)
+    self.assertEqual(atif_meta.trajectory_id, "t_atif")
+    self.assertEqual(
+        atif_meta.extra,
+        {
+            "user_meta": "val",
+            "_atif_ext": {
+                "prompt_id": "p_1",
+                "group_index": 2,
+                "target_policy_versions": [2, 3],
+                "status": "COMPLETED",
+                "total_reward": 3.5,
+                "hyperparams": {"temperature": 0.7},
+                "env_time": {"step_0": 0.05},
+                "reward_time": {"step_1": 0.02},
+            },
+        },
+    )
+    self.assertNotIn("steps", atif_meta.extra)
+    self.assertNotIn("steps", atif_meta.extra["_atif_ext"])
+    self.assertNotIn("subagent_trajectories", atif_meta.extra)
+    self.assertNotIn("subagent_trajectories", atif_meta.extra["_atif_ext"])
+
+  def test_to_atif_metadata_on_base_trajectory_strips_steps(self):
+    base_atif_meta = trajectory_testing.TRAJECTORY_1.to_atif_metadata()
+
+    self.assertIs(type(base_atif_meta), trajectory.TrajectoryMetadata)
+    self.assertEqual(base_atif_meta, trajectory_testing.METADATA_1)
+
 
 if __name__ == "__main__":
   absltest.main()

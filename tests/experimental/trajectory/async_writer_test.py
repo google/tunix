@@ -1,922 +1,543 @@
-"""Tests for AsyncFileWriter."""
+"""Unit tests verifying lifecycle and queue mechanics of AsyncWriter."""
 
-import atexit
 import concurrent.futures
-import importlib
-import tempfile
+import dataclasses
 import threading
-import time
+from typing import Final
 from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
-from etils import epath
 from tunix.experimental.trajectory import async_writer
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
+# Bounds for barriers that must never be hit on a healthy run; generous enough
+# to stay reliable on a loaded test machine.
+_WORKER_START_TIMEOUT_S: Final[float] = 10.0
+_WORKER_BLOCK_TIMEOUT_S: Final[float] = 30.0
+# Deliberately short so close() gives up on the stalled worker.
+_CLOSE_TIMEOUT_S: Final[float] = 0.05
+_NUM_RACING_THREADS: Final[int] = 10
 
-class AsyncFileWriterTest(parameterized.TestCase):
-  """Unit tests for AsyncFileWriter."""
 
-  def setUp(self) -> None:
-    super().setUp()
-    self.tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
-    self.writer = async_writer.AsyncFileWriter()
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _TestWriteTask(async_writer.WriteTask):
+  """Minimal concrete write task for testing AsyncWriter."""
 
-  def _get_traj_paths(
-      self, traj_id: str, step_id: int
-  ) -> tuple[epath.Path, epath.Path, epath.Path]:
-    """Helper returning (traj_dir, meta_path, step_path)."""
-    traj_dir = self.tmp_dir / f"traj_{traj_id}"
-    meta_path = traj_dir / "metadata.json"
-    step_path = traj_dir / f"step_{step_id:06d}.json"
-    return traj_dir, meta_path, step_path
+
+class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
+  """In-memory AsyncWriter recording the tasks its worker thread processes."""
+
+  def __init__(
+      self,
+      thread_name: str | None = None,
+      fail_on_step_id: int | None = None,
+  ):
+    super().__init__(thread_name=thread_name)
+    self.processed_tasks: list[_TestWriteTask] = []
+    self.processing_thread_ids: list[int] = []
+    self.fail_on_step_id = fail_on_step_id
+
+  def enqueue(
+      self,
+      trajectory_id: str = trajectory_testing.TRAJECTORY_ID_1,
+      step_id: int | None = None,
+      run_id: str | None = None,
+  ) -> _TestWriteTask:
+    """Builds a task and submits it through the engine's `_enqueue` entry."""
+    task = _TestWriteTask(
+        metadata=trajectory_testing.make_metadata(trajectory_id=trajectory_id),
+        step=(
+            trajectory_testing.make_step(step_id=step_id)
+            if step_id is not None
+            else None
+        ),
+        run_id=run_id,
+    )
+    self._enqueue(task)
+    return task
+
+  def _process_task(self, task: _TestWriteTask) -> None:
+    if (
+        self.fail_on_step_id is not None
+        and task.step is not None
+        and task.step.step_id == self.fail_on_step_id
+    ):
+      raise ValueError(f"Intentional test failure on step {task.step.step_id}")
+    self.processing_thread_ids.append(threading.get_ident())
+    self.processed_tasks.append(task)
+
+
+class AsyncWriterTest(parameterized.TestCase):
+  """Unit tests for AsyncWriter lifecycle and queue mechanics."""
+
+  def _create_writer(
+      self,
+      thread_name: str | None = None,
+      fail_on_step_id: int | None = None,
+  ) -> _TestAsyncWriter:
+    """Creates a test writer with guaranteed cleanup on test completion."""
+    writer = _TestAsyncWriter(
+        thread_name=thread_name, fail_on_step_id=fail_on_step_id
+    )
+    self.addCleanup(writer.close)
+    return writer
 
   # ============================================================================
-  # Core Writing Functionality
+  # 1. Worker Thread Initialization & Lazy Startup
   # ============================================================================
 
-  def test_write_step_non_blocking_and_flush_persists(self) -> None:
-    """Verifies write_step enqueues asynchronously and flush blocks until files are on disk."""
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
+  def test_enqueue_on_unstarted_writer_spawns_worker_thread_lazily(
+      self,
+  ) -> None:
+    writer = self._create_writer(thread_name="LazyWorkerThread")
+    self.assertIsNone(writer._worker_thread)
 
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_1,
-        step=trajectory_testing.STEP_1_1,
-    )
-    self.writer.flush()
+    writer.enqueue(step_id=1)
 
-    self.assertTrue(traj_dir.exists())
-    self.assertTrue(meta_path.exists())
-    self.assertTrue(step_path.exists())
+    self.assertIsNotNone(writer._worker_thread)
+    self.assertTrue(writer._worker_thread.is_alive())
+    self.assertTrue(writer._worker_thread.daemon)
 
-    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-        meta_path.read_text()
-    )
-    self.assertEqual(saved_meta, trajectory_testing.METADATA_1)
+  def test_writer_without_thread_name_uses_default_class_worker_name(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    writer.enqueue(step_id=1)
 
-    saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
-    self.assertEqual(saved_step, trajectory_testing.STEP_1_1)
+    self.assertIsNotNone(writer._worker_thread)
+    self.assertEqual(writer._worker_thread.name, "_TestAsyncWriterWorker")
 
-  def test_write_step_metadata_only(self) -> None:
-    """Verifies write_step enqueues and writes metadata.json without a step payload."""
-    traj_dir, meta_path, _ = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, 1
-    )
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        metadata=trajectory_testing.METADATA_1,
-    )
-    self.writer.flush()
+  def test_writer_with_thread_name_uses_custom_worker_name(self) -> None:
+    writer = self._create_writer(thread_name="CustomWorkerThread")
+    writer.enqueue(step_id=1)
 
-    self.assertTrue(traj_dir.exists())
-    self.assertTrue(meta_path.exists())
-    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-        meta_path.read_text()
-    )
-    self.assertEqual(saved_meta, trajectory_testing.METADATA_1)
+    self.assertIsNotNone(writer._worker_thread)
+    self.assertEqual(writer._worker_thread.name, "CustomWorkerThread")
 
-  def test_sequential_fifo_order_across_steps(self) -> None:
-    """Verifies that multiple steps are written sequentially in order."""
-    traj_id = trajectory_testing.TRAJECTORY_ID_2
-    meta = trajectory_testing.METADATA_2
-    steps = [
-        trajectory_testing.STEP_2_1,
-        trajectory_testing.STEP_2_2,
-        trajectory_testing.STEP_2_3,
-        trajectory_testing.STEP_2_4,
-        trajectory_testing.STEP_2_5,
+  def test_enqueue_from_simultaneous_threads_spawns_exactly_one_worker_thread(
+      self,
+  ) -> None:
+    worker_name = "SimultaneousWorkerThread"
+    writer = self._create_writer(thread_name=worker_name)
+    self.assertIsNone(writer._worker_thread)
+    barrier = threading.Barrier(_NUM_RACING_THREADS)
+
+    def racing_enqueue(idx: int) -> None:
+      # All threads are released at once, so they race on the lazy spawn.
+      barrier.wait()
+      writer.enqueue(step_id=idx + 1, run_id=f"run_{idx}")
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_NUM_RACING_THREADS
+    ) as executor:
+      futures = [
+          executor.submit(racing_enqueue, i) for i in range(_NUM_RACING_THREADS)
+      ]
+      for f in futures:
+        f.result()
+
+    active_workers = [t for t in threading.enumerate() if t.name == worker_name]
+    self.assertLen(active_workers, 1)
+    worker_thread = writer._worker_thread
+    self.assertIsNotNone(worker_thread)
+    self.assertIs(active_workers[0], worker_thread)
+    self.assertTrue(worker_thread.is_alive())
+
+  def test_enqueue_after_worker_started_reuses_existing_worker_thread(
+      self,
+  ) -> None:
+    worker_name = "ReusedWorkerThread"
+    writer = self._create_writer(thread_name=worker_name)
+    writer.enqueue(step_id=1)
+    initial_worker = writer._worker_thread
+    self.assertIsNotNone(initial_worker)
+
+    def later_enqueue(idx: int) -> None:
+      writer.enqueue(step_id=idx + 2)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_NUM_RACING_THREADS
+    ) as executor:
+      futures = [
+          executor.submit(later_enqueue, i) for i in range(_NUM_RACING_THREADS)
+      ]
+      for f in futures:
+        f.result()
+
+    active_workers = [t for t in threading.enumerate() if t.name == worker_name]
+    self.assertLen(active_workers, 1)
+    self.assertIs(writer._worker_thread, initial_worker)
+
+  # ============================================================================
+  # 2. Task Enqueue & FIFO Queue Processing
+  # ============================================================================
+
+  def test_flush_after_enqueues_processes_all_tasks_in_fifo_order(self) -> None:
+    writer = self._create_writer()
+    step_ids = [1, 2, 3, 4, 5]
+    for step_id in step_ids:
+      writer.enqueue(step_id=step_id)
+    writer.flush()
+
+    processed_step_ids = [
+        t.step.step_id for t in writer.processed_tasks if t.step is not None
     ]
+    self.assertEqual(processed_step_ids, step_ids)
 
-    for step in steps:
-      traj_dir, meta_path, step_path = self._get_traj_paths(
-          traj_id, step.step_id
-      )
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_path,
-          metadata=meta,
-          step=step,
-      )
+  def test_enqueue_preserves_all_task_fields_through_the_queue(self) -> None:
+    writer = self._create_writer()
+    enqueued_task = writer.enqueue(
+        trajectory_id=trajectory_testing.TRAJECTORY_ID_1,
+        step_id=1,
+        run_id="run_100",
+    )
+    writer.flush()
 
-    self.writer.flush()
+    self.assertLen(writer.processed_tasks, 1)
+    processed_task = writer.processed_tasks[0]
+    self.assertEqual(processed_task, enqueued_task)
+    self.assertEqual(processed_task.run_id, "run_100")
+    self.assertEqual(
+        processed_task.trajectory_id, trajectory_testing.TRAJECTORY_ID_1
+    )
 
-    for step in steps:
-      _, _, step_path = self._get_traj_paths(traj_id, step.step_id)
-      self.assertTrue(step_path.exists())
-      saved_step = trajectory_lib.Step.model_validate_json(
-          step_path.read_text()
-      )
-      self.assertEqual(saved_step, step)
+  def test_trajectory_id_is_derived_from_task_metadata(self) -> None:
+    task = _TestWriteTask(
+        metadata=trajectory_testing.make_metadata(trajectory_id="traj_derived")
+    )
+
+    self.assertEqual(task.trajectory_id, "traj_derived")
+
+  def test_write_task_projects_and_deep_copies_payload(self) -> None:
+    meta = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
+    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
+    task = _TestWriteTask(metadata=meta, step=step)
+
+    meta.agent.tool_definitions[0]["name"] = "mutated"
+    step.tool_calls[0].arguments["query"] = "mutated"
+
+    self.assertIs(type(task.metadata), trajectory_lib.TrajectoryMetadata)
+    self.assertEqual(
+        task.metadata, trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    )
+    self.assertIs(type(task.step), trajectory_lib.Step)
+    self.assertEqual(
+        task.step, trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
+    )
 
   # ============================================================================
-  # Snapshot-on-Enqueue Ownership
+  # 3. Barrier Synchronization (flush)
   # ============================================================================
 
-  def test_mutating_step_after_write_step_does_not_affect_file(self) -> None:
-    """Verifies an enqueued step is snapshotted, not shared with the caller."""
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
-    step = trajectory_testing.STEP_1_1.model_copy(deep=True)
+  def test_flush_on_empty_writer_succeeds(self) -> None:
+    writer = self._create_writer()
+    writer.flush()
 
-    block_event = threading.Event()
-    worker_thread = None
-    original_process_task = self.writer._process_task
+    self.assertIsNone(writer._worker_thread)
+    self.assertTrue(writer._queue.empty())
+    self.assertEmpty(writer.processed_tasks)
+    self.assertFalse(writer.is_closed)
 
-    def blocking_process_task(task):
-      block_event.wait()
-      original_process_task(task)
+  def test_flush_when_called_multiple_times_is_idempotent(self) -> None:
+    writer = self._create_writer()
+    writer.enqueue(step_id=1)
+    writer.flush()
+    writer.flush()
 
-    try:
-      with mock.patch.object(
-          self.writer, "_process_task", side_effect=blocking_process_task
-      ):
-        self.writer.write_step(
-            traj_dir=traj_dir,
-            meta_path=meta_path,
-            step_path=step_path,
-            metadata=meta,
-            step=step,
-        )
-        worker_thread = self.writer._worker_thread
+    self.assertLen(writer.processed_tasks, 1)
 
-        # Mutate while the task is still queued: the worker has not serialized
-        # anything yet, so an unsnapshotted task would pick these up.
-        step.message = "mutated after enqueueing"
-        meta.notes = "mutated after enqueueing"
+  def test_flush_when_closed_skips_queue_join(self) -> None:
+    writer = self._create_writer()
+    writer.close()
 
-        block_event.set()
-        self.writer.flush()
-    finally:
-      block_event.set()
-      if worker_thread is not None:
-        worker_thread.join(timeout=5.0)
+    # Flushing a closed writer must return immediately without joining queue.
+    with mock.patch.object(writer._queue, "join") as mock_join:
+      writer.flush()
+      mock_join.assert_not_called()
+    self.assertTrue(writer.is_closed)
 
-    saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
-    self.assertEqual(saved_step, trajectory_testing.STEP_1_1)
-    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-        meta_path.read_text()
-    )
-    self.assertEqual(saved_meta, trajectory_testing.METADATA_1)
+  # ============================================================================
+  # 4. Fault Tolerance & Error Suppression
+  # ============================================================================
 
-  def test_mutating_step_after_write_step_does_not_affect_later_step(
+  def test_process_task_on_failure_continues_processing_remaining_queue(
       self,
   ) -> None:
-    """Verifies a caller can reuse one mutable step object across writes."""
-    step = trajectory_testing.STEP_2_1.model_copy(deep=True)
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_2, step.step_id
-    )
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_2,
-        step=step,
+    writer = self._create_writer(fail_on_step_id=2)
+
+    with mock.patch.object(logging, "exception") as mock_log_exception:
+      writer.enqueue(step_id=1)
+      writer.enqueue(step_id=2)
+      writer.enqueue(step_id=3)
+      writer.flush()
+
+    # Steps 1 and 3 should be processed despite failure on step 2.
+    processed_step_ids = [
+        t.step.step_id for t in writer.processed_tasks if t.step is not None
+    ]
+    self.assertEqual(processed_step_ids, [1, 3])
+    mock_log_exception.assert_called_once_with(
+        "%s failed to process task for trajectory_id=%s, step_id=%s.",
+        "_TestAsyncWriterWorker",
+        trajectory_testing.TRAJECTORY_ID_1,
+        2,
     )
 
-    # Reuse the same object for the next step, as a rollout loop might.
-    step.step_id = trajectory_testing.STEP_2_2.step_id
-    step.source = trajectory_testing.STEP_2_2.source
-    step.message = trajectory_testing.STEP_2_2.message
-    _, _, next_step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_2, step.step_id
-    )
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=next_step_path,
-        metadata=trajectory_testing.METADATA_2,
-        step=step,
-    )
-    self.writer.flush()
-
-    for expected_step in (
-        trajectory_testing.STEP_2_1,
-        trajectory_testing.STEP_2_2,
-    ):
-      _, _, step_path = self._get_traj_paths(
-          trajectory_testing.TRAJECTORY_ID_2, expected_step.step_id
-      )
-      saved_step = trajectory_lib.Step.model_validate_json(
-          step_path.read_text()
-      )
-      self.assertEqual(saved_step, expected_step)
-
-  # ============================================================================
-  # Lazy Worker Thread Initialization
-  # ============================================================================
-
-  def test_lazy_worker_thread_initialization(self) -> None:
-    """Verifies worker thread is not started in __init__ and starts on first write_step."""
-    fresh_writer = async_writer.AsyncFileWriter()
-    self.assertIsNone(fresh_writer._worker_thread)
-
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    fresh_writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
+  def test_log_task_error_with_step_logs_trajectory_and_step_id(self) -> None:
+    writer = self._create_writer()
+    task = _TestWriteTask(
         metadata=trajectory_testing.METADATA_1,
         step=trajectory_testing.STEP_1_1,
     )
-    self.assertIsNotNone(fresh_writer._worker_thread)
-    self.assertTrue(fresh_writer._worker_thread.is_alive())
-    fresh_writer.flush()
-    fresh_writer.close()
 
-  def test_lazy_worker_thread_initialization_concurrent(self) -> None:
-    """Verifies concurrent writes to a fresh writer safely start exactly one worker thread."""
-    fresh_writer = async_writer.AsyncFileWriter()
-    self.assertIsNone(fresh_writer._worker_thread)
+    with mock.patch.object(logging, "exception") as mock_log_exc:
+      writer._log_task_error(task)
 
-    num_threads = 8
-    num_steps_per_thread = 4
-
-    def write_worker(thread_idx: int) -> None:
-      traj_id = f"lazy_init_traj_{thread_idx}"
-      meta = trajectory_testing.METADATA_1.model_copy(
-          update={"trajectory_id": traj_id}
+      mock_log_exc.assert_called_once_with(
+          "%s failed to process task for trajectory_id=%s, step_id=%s.",
+          "_TestAsyncWriterWorker",
+          trajectory_testing.TRAJECTORY_ID_1,
+          trajectory_testing.STEP_1_1.step_id,
       )
-      for step_id in range(1, num_steps_per_thread + 1):
-        step = trajectory_testing.STEP_1_1.model_copy(
-            update={"step_id": step_id}
-        )
-        traj_dir, meta_path, step_path = self._get_traj_paths(traj_id, step_id)
-        fresh_writer.write_step(
-            traj_dir=traj_dir,
-            meta_path=meta_path,
-            step_path=step_path,
-            metadata=meta,
-            step=step,
+
+  def test_log_task_error_without_step_logs_none_step_id(self) -> None:
+    writer = self._create_writer()
+    task = _TestWriteTask(metadata=trajectory_testing.METADATA_1, step=None)
+
+    with mock.patch.object(logging, "exception") as mock_log_exc:
+      writer._log_task_error(task)
+
+      mock_log_exc.assert_called_once_with(
+          "%s failed to process task for trajectory_id=%s, step_id=%s.",
+          "_TestAsyncWriterWorker",
+          trajectory_testing.TRAJECTORY_ID_1,
+          None,
+      )
+
+  def test_worker_loop_when_log_task_error_raises_continues_processing(
+      self,
+  ) -> None:
+    writer = self._create_writer(fail_on_step_id=1)
+
+    with mock.patch.object(
+        writer,
+        "_log_task_error",
+        side_effect=RuntimeError("Logging handler crashed!"),
+    ):
+      with mock.patch.object(logging, "exception") as mock_log_exc:
+        writer.enqueue(step_id=1)
+        writer.enqueue(step_id=2)
+        writer.flush()
+
+    # Step 2 must be processed even when _log_task_error raised on step 1.
+    processed_step_ids = [
+        t.step.step_id for t in writer.processed_tasks if t.step is not None
+    ]
+    self.assertEqual(processed_step_ids, [2])
+    mock_log_exc.assert_called_once_with(
+        "%s failed to log a task error.", "_TestAsyncWriterWorker"
+    )
+
+  # ============================================================================
+  # 5. Multi-Threaded Concurrency
+  # ============================================================================
+
+  def test_enqueue_from_multiple_threads_processes_all_tasks(self) -> None:
+    writer = self._create_writer()
+    num_threads = 5
+    tasks_per_thread = 20
+
+    def concurrent_enqueue(thread_idx: int) -> None:
+      for i in range(tasks_per_thread):
+        writer.enqueue(
+            trajectory_id=f"{trajectory_testing.TRAJECTORY_ID_1}_{thread_idx}",
+            step_id=i + 1,
+            run_id=f"run_{thread_idx}",
         )
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=num_threads
     ) as executor:
-      futures = [executor.submit(write_worker, i) for i in range(num_threads)]
+      futures = [
+          executor.submit(concurrent_enqueue, t) for t in range(num_threads)
+      ]
       for f in futures:
         f.result()
+    writer.flush()
 
-    fresh_writer.flush()
-    self.assertIsNotNone(fresh_writer._worker_thread)
-    self.assertTrue(fresh_writer._worker_thread.is_alive())
-
-    for thread_idx in range(num_threads):
-      traj_id = f"lazy_init_traj_{thread_idx}"
-      for step_id in range(1, num_steps_per_thread + 1):
-        _, _, step_path = self._get_traj_paths(traj_id, step_id)
-        self.assertTrue(step_path.exists())
-
-    fresh_writer.close()
-    self.assertFalse(fresh_writer._worker_thread.is_alive())
+    self.assertLen(writer.processed_tasks, num_threads * tasks_per_thread)
+    self.assertIsNotNone(writer._worker_thread)
+    self.assertEqual(
+        set(writer.processing_thread_ids), {writer._worker_thread.ident}
+    )
 
   # ============================================================================
-  # Optimizations & Caching
-  # ============================================================================
-
-  def test_mkdir_called_only_once_per_trajectory(self) -> None:
-    """Verifies mkdir is called only once per unique trajectory ID."""
-    traj_1_dir, meta_1_path, step_1_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    traj_2_dir, meta_2_path, step_2_1_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_2, trajectory_testing.STEP_2_1.step_id
-    )
-    _, _, step_2_2_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_2, trajectory_testing.STEP_2_2.step_id
-    )
-
-    path_cls = type(self.tmp_dir)
-    with mock.patch.object(
-        path_cls, "mkdir", autospec=True, side_effect=path_cls.mkdir
-    ) as mock_mkdir:
-      # Step 1 in traj 1 -> mkdir called
-      self.writer.write_step(
-          traj_dir=traj_1_dir,
-          meta_path=meta_1_path,
-          step_path=step_1_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_1_1,
-      )
-      self.writer.flush()
-      traj_1_calls = [
-          c
-          for c in mock_mkdir.call_args_list
-          if c.args and c.args[0] == traj_1_dir
-      ]
-      self.assertLen(traj_1_calls, 1)
-
-      # Step 1 in traj 2 -> mkdir called for new trajectory
-      self.writer.write_step(
-          traj_dir=traj_2_dir,
-          meta_path=meta_2_path,
-          step_path=step_2_1_path,
-          metadata=trajectory_testing.METADATA_2,
-          step=trajectory_testing.STEP_2_1,
-      )
-      self.writer.flush()
-      traj_2_calls = [
-          c
-          for c in mock_mkdir.call_args_list
-          if c.args and c.args[0] == traj_2_dir
-      ]
-      self.assertLen(traj_2_calls, 1)
-
-      # Step 2 in traj 2 -> mkdir skipped
-      self.writer.write_step(
-          traj_dir=traj_2_dir,
-          meta_path=meta_2_path,
-          step_path=step_2_2_path,
-          metadata=trajectory_testing.METADATA_2,
-          step=trajectory_testing.STEP_2_2,
-      )
-      self.writer.flush()
-      traj_2_calls = [
-          c
-          for c in mock_mkdir.call_args_list
-          if c.args and c.args[0] == traj_2_dir
-      ]
-      self.assertLen(traj_2_calls, 1)
-
-  def test_metadata_written_on_first_step_and_skipped_when_unchanged(
-      self,
-  ) -> None:
-    """Verifies metadata.json is written on step 1 and skipped when unchanged."""
-    traj_dir, meta_path, step_1_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    _, _, step_2_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_2_1.step_id
-    )
-
-    path_cls = type(self.tmp_dir)
-    with mock.patch.object(
-        path_cls, "write_text", autospec=True, side_effect=path_cls.write_text
-    ) as mock_write:
-      # Step 1 -> metadata written
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_1_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_1_1,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 1)
-
-      # Step 2 -> unchanged metadata skipped
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_2_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_2_1,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 1)
-
-  def test_metadata_updated_when_metadata_changes(self) -> None:
-    """Verifies metadata.json is rewritten when metadata content changes."""
-    traj_id = trajectory_testing.TRAJECTORY_ID_1
-    meta_initial = trajectory_testing.METADATA_1
-    meta_completed = trajectory_testing.METADATA_1.model_copy(
-        update={"extra": {"status": "COMPLETED"}}
-    )
-    meta_failed = trajectory_testing.METADATA_1.model_copy(
-        update={"extra": {"status": "FAILED"}}
-    )
-
-    traj_dir, meta_path, step_1_path = self._get_traj_paths(traj_id, 1)
-    _, _, step_2_path = self._get_traj_paths(traj_id, 2)
-    _, _, step_3_path = self._get_traj_paths(traj_id, 3)
-    _, _, step_4_path = self._get_traj_paths(traj_id, 4)
-    _, _, step_5_path = self._get_traj_paths(traj_id, 5)
-
-    path_cls = type(self.tmp_dir)
-    with mock.patch.object(
-        path_cls, "write_text", autospec=True, side_effect=path_cls.write_text
-    ) as mock_write:
-      # Step 1: Initial -> written
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_1_path,
-          metadata=meta_initial,
-          step=trajectory_testing.STEP_1_1,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 1)
-
-      # Step 2: Unchanged -> skipped
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_2_path,
-          metadata=meta_initial,
-          step=trajectory_testing.STEP_2_1,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 1)
-
-      # Step 3: Updated to COMPLETED -> written
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_3_path,
-          metadata=meta_completed,
-          step=trajectory_testing.STEP_2_2,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 2)
-
-      # Step 4: Unchanged with COMPLETED -> skipped
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_4_path,
-          metadata=meta_completed,
-          step=trajectory_testing.STEP_2_3,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 2)
-
-      # Step 5: Updated to FAILED -> written
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_5_path,
-          metadata=meta_failed,
-          step=trajectory_testing.STEP_2_4,
-      )
-      self.writer.flush()
-      meta_writes = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
-      ]
-      self.assertLen(meta_writes, 3)
-
-    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-        meta_path.read_text()
-    )
-    self.assertEqual(saved_meta, meta_failed)
-
-  # ============================================================================
-  # Barrier Synchronization
-  # ============================================================================
-
-  def test_flush_idempotent_and_empty(self) -> None:
-    """Verifies flush on empty writer is safe and multiple flushes are idempotent."""
-    self.writer.flush()
-    self.writer.flush()
-
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_1,
-        step=trajectory_testing.STEP_1_1,
-    )
-    self.writer.flush()
-    self.writer.flush()
-    self.assertTrue(step_path.exists())
-
-  # ============================================================================
-  # Error Handling & Best-Effort Resilience
-  # ============================================================================
-
-  def test_error_handling_suppresses_exceptions_and_logs(self) -> None:
-    """Verifies that background write errors are logged and suppressed without raising on flush."""
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-
-    path_cls = type(self.tmp_dir)
-    with mock.patch.object(
-        path_cls,
-        "write_text",
-        autospec=True,
-        side_effect=IOError("Simulated disk write failure"),
-    ), mock.patch.object(logging, "exception", autospec=True) as mock_log_exc:
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_1_1,
-      )
-      self.writer.flush()
-      mock_log_exc.assert_called_once()
-
-  def test_error_handling_mkdir_failure_suppressed_and_logged(self) -> None:
-    """Verifies that directory creation errors are logged and suppressed without failing flush."""
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-
-    path_cls = type(self.tmp_dir)
-    with mock.patch.object(
-        path_cls,
-        "mkdir",
-        autospec=True,
-        side_effect=PermissionError("Permission denied to create dir"),
-    ), mock.patch.object(logging, "exception", autospec=True) as mock_log_exc:
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_1_1,
-      )
-      self.writer.flush()
-      mock_log_exc.assert_called_once()
-
-  def test_subsequent_writes_continue_after_error(self) -> None:
-    """Verifies that worker continues processing subsequent writes after an error."""
-    traj_dir_1, meta_1_path, step_1_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    traj_dir_2, meta_2_path, step_2_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_2, trajectory_testing.STEP_2_1.step_id
-    )
-
-    path_cls = type(self.tmp_dir)
-    original_write_text = path_cls.write_text
-
-    def failing_write_text(self_path: epath.Path, text: str) -> int:
-      if self_path == step_1_path:
-        raise IOError("Simulated step 1 write failure")
-      return original_write_text(self_path, text)
-
-    with mock.patch.object(
-        path_cls, "write_text", autospec=True, side_effect=failing_write_text
-    ):
-      # Step 1 fails in background
-      self.writer.write_step(
-          traj_dir=traj_dir_1,
-          meta_path=meta_1_path,
-          step_path=step_1_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_1_1,
-      )
-      # Step 2 succeeds
-      self.writer.write_step(
-          traj_dir=traj_dir_2,
-          meta_path=meta_2_path,
-          step_path=step_2_path,
-          metadata=trajectory_testing.METADATA_2,
-          step=trajectory_testing.STEP_2_1,
-      )
-      self.writer.flush()
-
-    # Step 2 was written successfully despite step 1 failing
-    self.assertTrue(step_2_path.exists())
-    saved_step_2 = trajectory_lib.Step.model_validate_json(
-        step_2_path.read_text()
-    )
-    self.assertEqual(saved_step_2, trajectory_testing.STEP_2_1)
-
-  # ============================================================================
-  # Concurrency
-  # ============================================================================
-
-  def test_concurrent_writes(self) -> None:
-    """Verifies concurrent writes from multiple threads across trajectories."""
-    num_threads = 4
-    num_steps_per_thread = 5
-
-    def worker_thread(thread_idx: int) -> None:
-      traj_id = f"concurrent_traj_{thread_idx}"
-      meta = trajectory_testing.METADATA_1.model_copy(
-          update={"trajectory_id": traj_id}
-      )
-      for step_id in range(1, num_steps_per_thread + 1):
-        step = trajectory_testing.STEP_1_1.model_copy(
-            update={"step_id": step_id}
-        )
-        traj_dir, meta_path, step_path = self._get_traj_paths(traj_id, step_id)
-        self.writer.write_step(
-            traj_dir=traj_dir,
-            meta_path=meta_path,
-            step_path=step_path,
-            metadata=meta,
-            step=step,
-        )
-
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=num_threads
-    ) as executor:
-      futures = [executor.submit(worker_thread, i) for i in range(num_threads)]
-      for f in futures:
-        f.result()
-
-    self.writer.flush()
-
-    for thread_idx in range(num_threads):
-      traj_id = f"concurrent_traj_{thread_idx}"
-      traj_dir, meta_path, _ = self._get_traj_paths(traj_id, 1)
-      self.assertTrue(meta_path.exists())
-      for step_id in range(1, num_steps_per_thread + 1):
-        _, _, step_path = self._get_traj_paths(traj_id, step_id)
-        self.assertTrue(step_path.exists())
-
-  # ============================================================================
-  # Shutdown & Destructor Teardown
+  # 6. Shutdown & Destructor Teardown
   # ============================================================================
 
   def test_close_shuts_down_worker_and_prevents_further_writes(self) -> None:
-    """Verifies close drains pending items, terminates worker, and rejects future writes."""
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_1,
-        step=trajectory_testing.STEP_1_1,
-    )
-    self.writer.close()
+    writer = self._create_writer()
+    writer.enqueue(step_id=1)
+    writer.close()
 
-    # Step should have been written before close finished
-    self.assertTrue(step_path.exists())
+    self.assertLen(writer.processed_tasks, 1)
+    self.assertTrue(writer.is_closed)
+    self.assertIsNotNone(writer._worker_thread)
+    self.assertFalse(writer._worker_thread.is_alive())
 
-    # Further writes must be rejected
-    with self.assertRaisesRegex(
-        RuntimeError, "Cannot write to a closed AsyncFileWriter."
-    ):
-      self.writer.write_step(
-          traj_dir=traj_dir,
-          meta_path=meta_path,
-          step_path=step_path,
-          metadata=trajectory_testing.METADATA_1,
-          step=trajectory_testing.STEP_1_1,
-      )
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      writer.enqueue(step_id=2)
 
-    # Calling close again is safe and idempotent
-    self.writer.close()
+    # Calling close again is safe and idempotent.
+    writer.close()
+    self.assertTrue(writer.is_closed)
 
-  def test_close_concurrent_with_writes(self) -> None:
-    """Verifies write_step calls during close are either persisted or cleanly rejected."""
-    num_writers = 8
+  def test_close_concurrent_with_enqueues_processes_every_accepted_task(
+      self,
+  ) -> None:
+    num_enqueue_threads = 8
     num_steps = 10
-    accepted_steps: list[tuple[epath.Path, trajectory_lib.Step]] = []
+    accepted_steps: list[tuple[str, int]] = []
     lock = threading.Lock()
+    first_task_accepted = threading.Event()
+    writer = self._create_writer()
 
-    def write_worker(thread_idx: int) -> None:
+    def enqueue_worker(thread_idx: int) -> None:
       traj_id = f"concurrent_close_traj_{thread_idx}"
-      meta = trajectory_testing.METADATA_1.model_copy(
-          update={"trajectory_id": traj_id}
-      )
       for step_id in range(1, num_steps + 1):
-        step = trajectory_testing.STEP_1_1.model_copy(
-            update={"step_id": step_id}
-        )
-        traj_dir, meta_path, step_path = self._get_traj_paths(traj_id, step_id)
         try:
-          self.writer.write_step(
-              traj_dir=traj_dir,
-              meta_path=meta_path,
-              step_path=step_path,
-              metadata=meta,
-              step=step,
-          )
-          with lock:
-            accepted_steps.append((step_path, step))
+          writer.enqueue(trajectory_id=traj_id, step_id=step_id)
         except RuntimeError as e:
-          if "Cannot write to a closed AsyncFileWriter." in str(e):
+          if "Cannot write to a closed" in str(e):
             break
           raise
+        with lock:
+          accepted_steps.append((traj_id, step_id))
+        first_task_accepted.set()
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=num_writers + 1
+        max_workers=num_enqueue_threads + 1
     ) as executor:
-      write_futures = [
-          executor.submit(write_worker, i) for i in range(num_writers)
+      enqueue_futures = [
+          executor.submit(enqueue_worker, i) for i in range(num_enqueue_threads)
       ]
-      time.sleep(0.005)
-      close_future = executor.submit(self.writer.close)
+      # Close once writes are genuinely in flight, without relying on sleeps.
+      self.assertTrue(first_task_accepted.wait(_WORKER_START_TIMEOUT_S))
+      close_future = executor.submit(writer.close)
 
-      for f in write_futures:
+      for f in enqueue_futures:
         f.result()
       close_future.result()
 
-    # Verify that every step that was accepted before closure was written to disk.
-    for step_path, expected_step in accepted_steps:
-      self.assertTrue(step_path.exists(), f"Missing file: {step_path}")
-      saved_step = trajectory_lib.Step.model_validate_json(
-          step_path.read_text()
-      )
-      self.assertEqual(saved_step, expected_step)
+    processed_keys = [
+        (t.trajectory_id, t.step.step_id)
+        for t in writer.processed_tasks
+        if t.step is not None
+    ]
+    self.assertCountEqual(processed_keys, accepted_steps)
 
   def test_multiple_concurrent_close_calls_safe(self) -> None:
-    """Verifies that multiple threads calling close() concurrently terminate cleanly."""
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    self.writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_1,
-        step=trajectory_testing.STEP_1_1,
-    )
+    writer = self._create_writer()
+    writer.enqueue(step_id=1)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-      futures = [executor.submit(self.writer.close) for _ in range(5)]
+      futures = [executor.submit(writer.close) for _ in range(5)]
       for f in futures:
         f.result()
 
-    self.assertTrue(step_path.exists())
+    self.assertLen(writer.processed_tasks, 1)
+    self.assertTrue(writer.is_closed)
 
-  def test_close_timeout_logs_warning(self) -> None:
-    """Verifies that close() logs a warning with discarded trajectory IDs if worker thread does not terminate within timeout."""
-    block_event = threading.Event()
-    worker_thread = None
+  def test_close_when_worker_exceeds_timeout_logs_discarded_trajectories(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    worker_started = threading.Event()
+    unblock_worker = threading.Event()
+    self.addCleanup(unblock_worker.set)
 
-    def blocking_process_task(task):
-      del task
-      block_event.wait()
+    def blocking_process_task(task: _TestWriteTask) -> None:
+      del task  # Stalls the worker instead of recording the task.
+      worker_started.set()
+      unblock_worker.wait(timeout=_WORKER_BLOCK_TIMEOUT_S)
 
-    traj_dir_1, meta_path_1, step_path_1 = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
+    with mock.patch.object(
+        writer, "_process_task", side_effect=blocking_process_task
+    ):
+      writer.enqueue(trajectory_id="traj_in_flight")
+      # Barrier: the first task is dequeued and stalled before the remaining
+      # tasks are queued, so the discarded set is deterministic.
+      self.assertTrue(worker_started.wait(timeout=_WORKER_START_TIMEOUT_S))
+      writer.enqueue(trajectory_id=trajectory_testing.TRAJECTORY_ID_2)
+      writer.enqueue(trajectory_id="traj_discarded_3")
+
+      with mock.patch.object(logging, "warning") as mock_log_warning:
+        writer.close(timeout=_CLOSE_TIMEOUT_S)
+
+    mock_log_warning.assert_called_once_with(
+        "%s did not finish within the %s second timeout. Discarded"
+        " remaining tasks for trajectory IDs: %s",
+        "_TestAsyncWriterWorker",
+        _CLOSE_TIMEOUT_S,
+        sorted([trajectory_testing.TRAJECTORY_ID_2, "traj_discarded_3"]),
     )
-    traj_dir_2, meta_path_2, step_path_2 = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_2, trajectory_testing.STEP_2_1.step_id
-    )
+    self.assertTrue(writer.is_closed)
 
-    try:
-      with mock.patch.object(
-          self.writer, "_process_task", side_effect=blocking_process_task
-      ):
-        # Enqueue step 1: worker thread starts and blocks on task 1.
-        self.writer.write_step(
-            traj_dir=traj_dir_1,
-            meta_path=meta_path_1,
-            step_path=step_path_1,
-            metadata=trajectory_testing.METADATA_1,
-            step=trajectory_testing.STEP_1_1,
-        )
-        time.sleep(0.05)
-
-        # Enqueue step 2: stays in queue while worker is blocked on task 1.
-        self.writer.write_step(
-            traj_dir=traj_dir_2,
-            meta_path=meta_path_2,
-            step_path=step_path_2,
-            metadata=trajectory_testing.METADATA_2,
-            step=trajectory_testing.STEP_2_1,
-        )
-
-        worker_thread = self.writer._worker_thread
-        self.assertIsNotNone(worker_thread)
-
-        with mock.patch.object(
-            worker_thread, "is_alive", return_value=True
-        ), mock.patch.object(logging, "warning", autospec=True) as mock_warning:
-          self.writer.close(timeout=0.01)
-          mock_warning.assert_called_once()
-          call_args = mock_warning.call_args[0]
-          self.assertIn("did not finish within timeout", call_args[0])
-          self.assertIn(
-              "Discarded remaining tasks for trajectory IDs", call_args[0]
-          )
-          self.assertEqual(call_args[2], [trajectory_testing.TRAJECTORY_ID_2])
-    finally:
-      block_event.set()
-      if worker_thread is not None:
-        worker_thread.join(timeout=5.0)
-
-  def test_destructor_on_unstarted_writer(self) -> None:
-    """Verifies that __del__ on an unstarted AsyncFileWriter executes cleanly without errors."""
-    unstarted_writer = async_writer.AsyncFileWriter()
+  def test_del_on_unstarted_writer_marks_writer_closed(self) -> None:
+    unstarted_writer = _TestAsyncWriter()
     self.assertIsNone(unstarted_writer._worker_thread)
-    # Should not raise any exception.
-    unstarted_writer.__del__()
-    self.assertTrue(unstarted_writer._closed)
 
-  def test_destructor_closes_worker_gracefully(self) -> None:
-    """Verifies that __del__ closes the worker thread."""
-    fresh_writer = async_writer.AsyncFileWriter()
-    traj_dir, meta_path, step_path = self._get_traj_paths(
-        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
-    )
-    fresh_writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=meta_path,
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_1,
-        step=trajectory_testing.STEP_1_1,
-    )
+    unstarted_writer.__del__()
+
+    self.assertTrue(unstarted_writer.is_closed)
+
+  def test_del_on_started_writer_drains_queue_and_stops_worker(self) -> None:
+    fresh_writer = _TestAsyncWriter()
+    fresh_writer.enqueue(step_id=1)
     worker_thread = fresh_writer._worker_thread
     self.assertIsNotNone(worker_thread)
     self.assertTrue(worker_thread.is_alive())
 
     fresh_writer.__del__()
+
     self.assertFalse(worker_thread.is_alive())
-    self.assertTrue(step_path.exists())
+    self.assertLen(fresh_writer.processed_tasks, 1)
 
 
-class AsyncFileWriterShutdownHookTest(parameterized.TestCase):
+class AsyncWriterShutdownHookTest(parameterized.TestCase):
   """Tests the atexit hook that drains writers still live at process exit."""
 
-  def setUp(self) -> None:
-    super().setUp()
-    self.tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
-
-  def _write_one_step(self, writer: async_writer.AsyncFileWriter) -> epath.Path:
-    """Enqueues a single step without flushing, returning its file path."""
-    traj_dir = self.tmp_dir / f"traj_{trajectory_testing.TRAJECTORY_ID_1}"
-    step_path = (
-        traj_dir / f"step_{trajectory_testing.STEP_1_1.step_id:06d}.json"
-    )
-    writer.write_step(
-        traj_dir=traj_dir,
-        meta_path=traj_dir / "metadata.json",
-        step_path=step_path,
-        metadata=trajectory_testing.METADATA_1,
-        step=trajectory_testing.STEP_1_1,
-    )
-    return step_path
-
-  def test_hook_is_registered_with_atexit(self) -> None:
-    """Verifies the module registers its shutdown hook on import."""
-    with mock.patch.object(atexit, "register") as mock_register:
-      importlib.reload(async_writer)
-      mock_register.assert_called_with(async_writer._close_live_writers)
-    self.addCleanup(atexit.register, async_writer._close_live_writers)
-
   def test_live_writer_is_registered_and_unregistered_on_close(self) -> None:
-    """Verifies writers track their liveness for the shutdown hook."""
-    writer = async_writer.AsyncFileWriter()
+    writer = _TestAsyncWriter()
     self.assertIn(writer, async_writer._LIVE_WRITERS)
 
     writer.close()
+
     self.assertNotIn(writer, async_writer._LIVE_WRITERS)
 
   def test_pending_writes_persisted_by_shutdown_hook(self) -> None:
-    """Verifies queued steps reach disk when the hook runs, without a flush()."""
-    writer = async_writer.AsyncFileWriter()
-    step_path = self._write_one_step(writer)
+    writer = _TestAsyncWriter()
+    self.addCleanup(async_writer._LIVE_WRITERS.discard, writer)
+    self.addCleanup(writer.close)
+    writer.enqueue(step_id=1)
 
     async_writer._close_live_writers()
 
-    self.assertTrue(step_path.exists())
-    self.assertTrue(writer._closed)
+    self.assertTrue(writer.is_closed)
+    self.assertLen(writer.processed_tasks, 1)
 
   def test_shutdown_hook_suppresses_close_errors(self) -> None:
-    """Verifies one failing writer neither propagates nor blocks the others."""
-    failing_writer = async_writer.AsyncFileWriter()
-    healthy_writer = async_writer.AsyncFileWriter()
+    failing_writer = _TestAsyncWriter()
+    healthy_writer = _TestAsyncWriter()
     self.addCleanup(async_writer._LIVE_WRITERS.discard, failing_writer)
-    step_path = self._write_one_step(healthy_writer)
+    self.addCleanup(async_writer._LIVE_WRITERS.discard, healthy_writer)
+    self.addCleanup(failing_writer.close)
+    self.addCleanup(healthy_writer.close)
+    failing_writer.enqueue(trajectory_id=trajectory_testing.TRAJECTORY_ID_1)
+    healthy_writer.enqueue(trajectory_id=trajectory_testing.TRAJECTORY_ID_2)
 
     with mock.patch.object(
         failing_writer, "close", side_effect=RuntimeError("close failed")
@@ -925,8 +546,8 @@ class AsyncFileWriterShutdownHookTest(parameterized.TestCase):
         async_writer._close_live_writers()
 
     mock_log_exception.assert_called_once()
-    self.assertTrue(step_path.exists())
-    self.assertTrue(healthy_writer._closed)
+    self.assertTrue(healthy_writer.is_closed)
+    self.assertLen(healthy_writer.processed_tasks, 1)
 
 
 if __name__ == "__main__":

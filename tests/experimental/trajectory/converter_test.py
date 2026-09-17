@@ -1100,6 +1100,29 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
           restored_tunix_traj.steps[i], original_trajectory.steps[i]
       )
 
+  def test_to_tunix_trajectory_on_base_atif_trajectory_rehydrates_fields(self):
+    tunix_traj = trajectory_testing.TUNIX_TRAJECTORY_1.model_copy(
+        update={
+            "status": "SUCCEEDED",
+            "steps": [trajectory_testing.TUNIX_AGENT_STEP_1],
+            "subagent_trajectories": [],
+        }
+    )
+    atif_traj = trajectory_lib.Trajectory(
+        **tunix_traj.to_atif_metadata().model_dump(),
+        steps=[step.to_atif_step() for step in tunix_traj.steps],
+    )
+
+    rl_traj = converter.to_tunix_trajectory(atif_traj)
+    self.assertEqual(rl_traj.reward, tunix_traj.total_reward)
+    self.assertEqual(rl_traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+    self.assertEqual(rl_traj.env_time, tunix_traj.env_time)
+    self.assertEqual(rl_traj.reward_time, tunix_traj.reward_time)
+    self.assertEqual(
+        rl_traj.steps[0].mc_return,
+        trajectory_testing.TUNIX_AGENT_STEP_1.mc_return,
+    )
+
 
 class CreateTrajectoryMetadataTest(parameterized.TestCase):
 
@@ -1238,6 +1261,69 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.target_policy_versions, [3, 4, 5])
 
 
+class FromAtifTest(trajectory_testing.TrajectoryTestCase):
+
+  def test_from_atif_step_on_agent_step_rehydrates_tunix_agent_step(self):
+    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1
+    atif_agent_step = agent_step.to_atif_step()
+    rehydrated_agent = converter.from_atif_step(atif_agent_step)
+
+    self.assertStepEqual(rehydrated_agent, agent_step)
+    self.assertEqual(rehydrated_agent.extra, {"user_key": "val"})
+
+  def test_from_atif_step_on_env_step_rehydrates_tunix_env_step(self):
+    env_step = trajectory_testing.TUNIX_ENV_STEP_0.model_copy(
+        update={"extra": None}
+    )
+    atif_env_step = env_step.to_atif_step()
+    rehydrated_env = converter.from_atif_step(atif_env_step)
+
+    self.assertStepEqual(rehydrated_env, env_step)
+    self.assertIsNone(rehydrated_env.extra)
+
+  def test_from_atif_metadata_rehydrates_tunix_metadata(self):
+    meta = trajectory_testing.TUNIX_METADATA_1
+    atif_meta = meta.to_atif_metadata()
+    rehydrated_meta = converter.from_atif_metadata(atif_meta)
+
+    self.assertIs(type(rehydrated_meta), trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(rehydrated_meta, meta)
+    self.assertEqual(rehydrated_meta.extra, {"user_meta": "val"})
+
+  def test_from_atif_step_without_atif_ext_rehydrates_with_defaults(self):
+    rehydrated = converter.from_atif_step(trajectory_testing.STEP_1_1)
+
+    self.assertIsInstance(rehydrated, trajectory_lib.TunixAgentStep)
+    self.assertEqual(rehydrated.step_id, trajectory_testing.STEP_1_1.step_id)
+    self.assertIsNone(rehydrated.mc_return)
+    self.assertIsNone(rehydrated.extra)
+
+  def test_from_atif_metadata_without_atif_ext_rehydrates_with_defaults(self):
+    rehydrated = converter.from_atif_metadata(trajectory_testing.METADATA_1)
+
+    self.assertIsInstance(rehydrated, trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(
+        rehydrated.trajectory_id,
+        trajectory_testing.METADATA_1.trajectory_id,
+    )
+    self.assertIsNone(rehydrated.prompt_id)
+    self.assertIsNone(rehydrated.extra)
+
+  def test_from_atif_step_on_tunix_step_returns_self(self):
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+    self.assertIs(converter.from_atif_step(step), step)
+
+  def test_from_atif_metadata_on_tunix_metadata_returns_self(self):
+    meta = trajectory_testing.TUNIX_METADATA_1
+    self.assertIs(converter.from_atif_metadata(meta), meta)
+
+  def test_from_atif_step_with_unsupported_source_raises_value_error(self):
+    invalid_step = trajectory_testing.STEP_1_1.model_copy(
+        update={"source": "unknown_source"}
+    )
+    with self.assertRaisesRegex(ValueError, "Unsupported step source"):
+      converter.from_atif_step(invalid_step)
+
+
 if __name__ == "__main__":
   absltest.main()
-
