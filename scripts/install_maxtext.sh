@@ -190,6 +190,15 @@ from maxtext.configs import pyconfig  # noqa: F401
 print("  maxtext.configs.pyconfig ok")
 from maxtext.training_engine import maxtext_engine  # noqa: F401
 print("  maxtext.training_engine.maxtext_engine ok")
+
+# Registers the "proxy" backend under Pathways. Checked here because its
+# absence surfaces only once the trainer resolves a backend, as "Backend
+# 'proxy' is not in the list of known backends" -- which names neither this
+# package nor the fact that it is missing.
+import pathwaysutils
+
+assert hasattr(pathwaysutils, "initialize"), "pathwaysutils has no initialize()"
+print("  pathwaysutils ok")
 PY
 
 verify_imports "rollout" <<'PY'

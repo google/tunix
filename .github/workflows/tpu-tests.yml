@@ -476,6 +476,11 @@ jobs:
           python3 -m pip install -e .[test]
           # GSM8K is loaded through TFDS, which needs tensorflow.
           python3 -m pip install tensorflow tensorflow_datasets array_record
+          # Registers the "proxy" JAX backend the Pathways trainer resolves.
+          # Usually already present as a tpu-inference dependency; named here
+          # because the trainer cannot start without it and the failure is
+          # reported as an unknown backend rather than a missing package.
+          python3 -m pip install pathwaysutils
 
       # Tests Tunix at the checked-out ref against MaxText at `maxtext_ref`
       # (HEAD by default). See the input's description for why.
