@@ -234,6 +234,13 @@ export REWARD_MODE=env
 # the fallback.
 export LOG_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/logs
 export TRAJECTORY_LOG_DIR=gs://mazumdera-bucket-cloud-tpu-multipod-dev/q35-runs/maz-q35-${RUN_N}/trajectories
+# TODO(tunix): log_item mkdir()s log_path and then asserts is_dir() (utils/
+# trajectory_logger.py:105), above the gs:// branch written to handle exactly this case.
+# GCS has no directories, so on a bucket prefix mkdir is a no-op and is_dir is False until
+# some object exists under it -- the logger can never write its own first file. maz-q35-10
+# raised that assertion on all 100 steps and produced no CSV. One placeholder object is
+# enough to satisfy it; measured in the image, log_item then appends correctly.
+export TRAJECTORY_LOG_KEEP="${TRAJECTORY_LOG_DIR}/.keep"
 
 # --- Job names ---------------------------------------------------------------
 # The launcher derives every JobSet name from $USER: maz-q35-N-{orch,train,roll}.
@@ -285,5 +292,17 @@ if [[ "${DRY_RUN:-false}" != "true" ]] \
 fi
 echo "    context    ${CONTEXT} as $(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')"
 echo
+
+# Materialise the trajectory prefix before the orchestrator starts, so that log_item's
+# is_dir assertion holds on its first flush. See the TODO above TRAJECTORY_LOG_KEEP.
+if [[ "${ACTION}" == "start" ]] && [[ "${DRY_RUN:-false}" != "true" ]]; then
+  if ! printf '' | gcloud storage cp - "${TRAJECTORY_LOG_KEEP}" --quiet; then
+    echo "ERROR: could not create ${TRAJECTORY_LOG_KEEP}; the orchestrator would log no" >&2
+    echo "       trajectories and fail the same assertion maz-q35-10 hit." >&2
+    exit 1
+  fi
+  echo "    traj prefix created: ${TRAJECTORY_LOG_KEEP}"
+  echo
+fi
 
 bash "${LAUNCHER}" "${ACTION}"
