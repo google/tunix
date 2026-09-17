@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 import dataclasses
 from absl import logging
 from tunix.rl import function_registry
@@ -74,7 +75,7 @@ class AlgorithmConfig:
         "ppo",
         "dapo",
     ]
-    valid_advantage_estimators = ["grpo", "gae", "drgrpo", "rloo"]
+    valid_advantage_estimators = ["grpo", "gae", "drgrpo", "rloo", "grpo-loo"]
     valid_policy_loss_fns = ["grpo", "ppo"]
     if self.algo_variant not in valid_algo_variants:
       raise ValueError(
@@ -157,6 +158,26 @@ class GRPOConfig(AlgorithmConfig):
       recomputed logps as old-policy logps and multiply the policy loss by
       detached per-token sampler/trainer correction weights.
     sampler_is_threshold: Maximum per-token TIS correction weight.
+    overlong_loss_masking: Whether to drop sequences the rollout truncated at
+      the response-length budget. They leave the loss and its denominator
+      both, so the surviving sequences keep their gradient magnitude and only
+      the effective batch shrinks. Requires the rollout to report a
+      per-trajectory truncation status.
+    seq_logprob_error_threshold: Drop a sequence when the sampler and the
+      trainer disagree about its tokens by more than this, measured as
+      `mean_t exp|log p_trainer - log q_sampler|`. `None` disables the gate.
+      Requires rollout log-probabilities.
+    truncated_importance_sampling_type: Sequence-level variant of the sampler
+      importance-sampling correction. `"seq-mask-tis"` weights every token by
+      its raw sampler/trainer ratio and zeroes the weights of sequences whose
+      geometric-mean ratio leaves the keep-band. `None` disables it. Requires
+      rollout log-probabilities.
+    truncated_importance_sampling_ratio_min: Lower edge of that keep-band.
+    truncated_importance_sampling_ratio: Upper edge of that keep-band.
+    sampler_is_length_buckets: Completion-length bucket edges, in tokens,
+      strictly increasing. Reports the sampler/trainer offset per length
+      bucket, which separates offsets that shrink as sequences get longer from
+      offsets that do not. `None` disables the diagnostic.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
@@ -178,6 +199,12 @@ class GRPOConfig(AlgorithmConfig):
   epsilon_c: float | None = None
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
+  overlong_loss_masking: bool = False
+  seq_logprob_error_threshold: float | None = None
+  truncated_importance_sampling_type: str | None = None
+  truncated_importance_sampling_ratio_min: float | None = None
+  truncated_importance_sampling_ratio: float | None = None
+  sampler_is_length_buckets: Sequence[int] | None = None
 
   def __post_init__(self):
     if self.epsilon_high is None:
@@ -201,3 +228,64 @@ class GRPOConfig(AlgorithmConfig):
           "sampler_is should be either None or 'token'. Received: "
           f"{self.sampler_is}"
       )
+    self._validate_sampler_is_sequence_options()
+
+  def _validate_sampler_is_sequence_options(self):
+    """Checks the sequence-level sampler-vs-trainer options for consistency.
+
+    A half-specified or reversed keep-band is not a crash, it is a run that
+    rejects every sequence and reports zero gradients, so these are rejected
+    at construction rather than at the first training step.
+
+    Raises:
+      ValueError: If an option is unsupported, incomplete, or out of order.
+    """
+    lo = self.truncated_importance_sampling_ratio_min
+    hi = self.truncated_importance_sampling_ratio
+    if (lo is None) != (hi is None):
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min and"
+          " truncated_importance_sampling_ratio must be set together, since a"
+          f" keep-band needs both ends. Received: min={lo}, max={hi}"
+      )
+    if lo is not None and hi is not None and lo > hi:
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min must not exceed"
+          f" truncated_importance_sampling_ratio. Received: min={lo}, max={hi}"
+      )
+    if self.truncated_importance_sampling_type is not None:
+      if self.truncated_importance_sampling_type != "seq-mask-tis":
+        raise ValueError(
+            "truncated_importance_sampling_type should be either None or"
+            " 'seq-mask-tis'. Received:"
+            f" {self.truncated_importance_sampling_type}"
+        )
+      if lo is None:
+        raise ValueError(
+            "truncated_importance_sampling_type requires a keep-band. Set"
+            " truncated_importance_sampling_ratio_min and"
+            " truncated_importance_sampling_ratio."
+        )
+      if self.sampler_is is not None:
+        raise ValueError(
+            "sampler_is and truncated_importance_sampling_type both set the"
+            " per-token importance weights, so only one may be used at a"
+            f" time. Received: sampler_is={self.sampler_is},"
+            " truncated_importance_sampling_type="
+            f"{self.truncated_importance_sampling_type}"
+        )
+    if self.sampler_is_length_buckets is not None:
+      edges = tuple(self.sampler_is_length_buckets)
+      if not edges:
+        raise ValueError(
+            "sampler_is_length_buckets must be non-empty when set; use None"
+            " to disable the diagnostic."
+        )
+      if any(e <= 0 for e in edges) or any(
+          b <= a for a, b in zip(edges, edges[1:])
+      ):
+        raise ValueError(
+            "sampler_is_length_buckets must be strictly increasing positive"
+            f" token counts. Received: {edges}"
+        )
+      self.sampler_is_length_buckets = edges

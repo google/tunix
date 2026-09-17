@@ -776,6 +776,7 @@ class PaddedBatchAssembler:
         "returns",
         "old_values",
         "sampler_is_weights",
+        "rollout_per_token_logps",
     )
     present_fields = []
     partially_present_fields = []
@@ -802,6 +803,11 @@ class PaddedBatchAssembler:
     # would silently mix replayed and freshly routed rows.
     replay_routing = all(it.routed_experts is not None for it in chunk)
     routed_experts_rows: list[np.ndarray] = []
+    # `overlong` is one scalar per sequence rather than one value per token, so
+    # it is stacked into `[B]` here instead of going through `optional_fields`,
+    # whose members are all completion-aligned and right-padded to `[B, C]`.
+    carry_overlong = all(it.overlong is not None for it in chunk)
+    overlong_rows: list[np.ndarray] = []
     truncated_prompts = truncated_completions = 0
 
     for item in chunk:
@@ -870,6 +876,11 @@ class PaddedBatchAssembler:
             )
         )
 
+      if carry_overlong:
+        overlong_rows.append(
+            np.asarray(item.overlong, dtype=np.float32).reshape(())
+        )
+
       # `replay_routing` already guarantees this is set; binding it locally
       # also narrows the optional field for the type checker.
       routed = item.routed_experts
@@ -911,6 +922,10 @@ class PaddedBatchAssembler:
       advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
       for rows in optional_rows.values():
         rows.append(np.zeros(self.max_response_length, dtype=np.float32))
+      # A trailing row holds no sequence, so it is not a truncated one. Its
+      # completion mask is all zeros and it contributes nothing either way.
+      if carry_overlong:
+        overlong_rows.append(np.float32(0.0))
       if routed_experts_rows:
         routed_experts_rows.append(
             np.full_like(routed_experts_rows[0], datatypes.UNSET_ROUTED_EXPERT)
@@ -952,6 +967,8 @@ class PaddedBatchAssembler:
         returns=stacked_optional.get("returns"),
         old_values=stacked_optional.get("old_values"),
         sampler_is_weights=stacked_optional.get("sampler_is_weights"),
+        rollout_per_token_logps=stacked_optional.get("rollout_per_token_logps"),
+        overlong=np.stack(overlong_rows) if overlong_rows else None,
         routed_experts=(
             np.stack(routed_experts_rows) if routed_experts_rows else None
         ),

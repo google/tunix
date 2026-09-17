@@ -62,6 +62,8 @@ class DAPOlearnerTest(parameterized.TestCase):
     example.segment_ids = None
     example.segment_positions = None
     example.sampler_is_weights = None
+    example.rollout_per_token_logps = None
+    example.overlong = None
     example.routed_experts = None
     return example
 

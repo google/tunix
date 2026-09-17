@@ -131,6 +131,56 @@ class TrainingInput:
   images: jax.Array | np.ndarray | None = None
 
 
+def _aux_metric_reducer(name: str) -> Callable[[Any], Any]:
+  """Picks how one aux metric pools over the micro-batches of a step.
+
+  An extreme is still an extreme once pooled, so a metric named `*_max` or
+  `*/max` takes the maximum and likewise for a minimum; everything else is
+  averaged.
+
+  Args:
+    name: The metric's name, as the loss function keyed it in `aux_metrics`.
+
+  Returns:
+    A reducer over the list of per-micro-batch values.
+  """
+  if name.endswith(("_max", "/max")):
+    return np.max
+  if name.endswith(("_min", "/min")):
+    return np.min
+  return np.mean
+
+
+def _aux_to_additional_metrics(aux: Any) -> dict[str, Any] | None:
+  """Converts a loss function's aux metrics to `_buffer_metrics` form.
+
+  Aux metrics otherwise only reach `_post_process_train_step`, whose base
+  implementation discards them, so a loss function's own diagnostics never
+  leave the train step. Forwarding them puts them on the same logging path as
+  the loss.
+
+  Args:
+    aux: The `aux_metrics` of a `LossOutput`, or anything else, in which case
+      there is nothing to forward.
+
+  Returns:
+    Metric name to `(value, reducer)`, or None when nothing is reportable.
+    `WeightedMetric` entries are reduced to their scalar value here, since the
+    metrics logger takes scalars; non-scalar entries are skipped, a per-token
+    array having no meaningful reduction to one number.
+  """
+  if not isinstance(aux, dict):
+    return None
+  out: dict[str, Any] = {}
+  for name, value in aux.items():
+    if isinstance(value, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+      value = value.compute()
+    if getattr(value, "ndim", 0) != 0:
+      continue
+    out[name] = (value, _aux_metric_reducer(name))
+  return out or None
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class MetricsBuffer:
   """Metrics collected for a specific step.
@@ -1043,6 +1093,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
+        additional_metrics=_aux_to_additional_metrics(aux),
     )
     self._post_process_train_step(aux)
 
