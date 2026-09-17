@@ -63,7 +63,9 @@ dirty tree or a HEAD other than the SHA you pass. Seconds.
 ## Step 4 — render the three arms
 
 One script per arm: tip SHA, a fresh output directory outside the checkout, and a run id that lands
-in the JobSet name and the W&B run name.
+in the JobSet name and the W&B run name — 1–12 lowercase letters, digits or hyphens, starting and
+ending with a letter or digit (no underscores; the wrapper derives `<run-id>-m15` and
+`<run-id>-campaign` from it and rejects anything else before rendering).
 
 ```bash
 SHA="$(git rev-parse HEAD)"                              # the tip from step 1

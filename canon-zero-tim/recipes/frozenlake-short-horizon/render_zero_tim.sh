@@ -10,6 +10,12 @@ fi
 SHA="$1"
 OUT="$2"
 RUN_ID="$3"
+# The renderers accept run ids of 1-16 lowercase letters, digits and hyphens (start/end alphanumeric);
+# this wrapper derives "$RUN_ID-m15", so the id itself must be at most 12 characters.
+if ! [[ "$RUN_ID" =~ ^[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?$ ]]; then
+  echo "invalid run-id '$RUN_ID': use 1-12 lowercase letters, digits or hyphens, starting and ending with a letter or digit" >&2
+  exit 2
+fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 bash "$REPO/canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh" \
   "$SHA" "$OUT" "$RUN_ID-campaign" "$RUN_ID" "$RUN_ID-m15" \
