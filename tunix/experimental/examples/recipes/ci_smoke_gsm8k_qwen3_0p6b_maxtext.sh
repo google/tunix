@@ -44,6 +44,9 @@
 # registered -- so as a default it would report host misconfiguration as test
 # failure. mcJAX exercises MaxText, vLLM and Raiden without any of it.
 #
+# Sampler-vs-trainer logps agreement, because MaxTextTrainingEngine has no
+# per_token_logps yet; see USE_ROLLOUT_LOGPS below.
+#
 # Production is also multi-host and multi-slice, and the 35B model is MoE, so
 # MoE prefusion and the padded expert MLP dim are out of scope here: qwen3-0.6b
 # is dense, and its 8 KV heads exceed the rollout's TP=4, so no KV-head
@@ -95,10 +98,22 @@ if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
   export MAXTEXT_CKPT="${MAXTEXT_CKPT_DIR}/0/items"
 fi
 
-# MaxTextTrainingEngine does not implement per-token logps, so the learner has
-# to take them from the rollout. USE_ROLLOUT_LOGPS=false would send it down
-# `get_actor_per_token_logps`, which the engine cannot serve.
-export USE_ROLLOUT_LOGPS="${USE_ROLLOUT_LOGPS:-true}"
+# Off, against the production default, because MaxTextTrainingEngine does not
+# implement per_token_logps -- an abstract method of Tunix's AbstractTrainer,
+# so this is a gap in the engine and not a quirk of this test. With the flag on,
+# rl_program's _apply_sampler_trainer_agreement rescores each batch under the
+# trainer's live weights to measure sampler-vs-trainer drift, and the run dies
+# there:
+#   AttributeError: 'MaxTextTrainingEngine' object has no attribute
+#                   'per_token_logps'
+# Turn it back on once MaxText implements the method; nothing else here needs
+# to change.
+#
+# What that costs: no sampler-vs-trainer agreement metrics and no TIS weights.
+# The GRPO ratio also goes to 1, which makes epsilon clipping inert -- fine at
+# MINI_BATCH_SIZE == BATCH_SIZE, where there is a single inner iteration and the
+# ratio would be 1 anyway, but it is a reason to keep those two equal here.
+export USE_ROLLOUT_LOGPS="${USE_ROLLOUT_LOGPS:-false}"
 
 # Chip allocation on a single 8-chip host (e.g. TPU v6e-8)
 # Auto-detect TPU chips sorted by PCI topology order if running on a host with /dev/vfio.
