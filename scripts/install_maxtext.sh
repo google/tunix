@@ -135,9 +135,31 @@ if [[ "${RESTORED}" == "0" ]]; then
   echo "No protected package versions changed."
 fi
 
+# The image ships a GPU-targeted triton that nothing here can use: vLLM already
+# disables it on TPU (it finds 0 active drivers) and substitutes a placeholder
+# module. MaxText's import chain reaches it anyway and unguarded --
+# transformers -> torchvision -> torch._dynamo -> torch.utils._triton
+# .has_triton_package(), which is a bare `import triton`. Loading
+# triton._C.libtriton into a process that has already loaded TensorFlow, as the
+# trainer has by that point, segfaults the interpreter: two independently
+# statically-linked copies of LLVM, one set of global symbols.
+#
+# Probe rather than remove unconditionally, so an image that ships a working
+# triton keeps it. Both torch and vLLM treat an absent triton as a supported
+# configuration -- torch's has_triton_package() catches the ImportError, vLLM
+# gates on find_spec -- so dropping a copy that cannot be imported costs nothing.
+if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("triton") else 1)'; then
+  if JAX_PLATFORMS=cpu python3 -c 'import tensorflow, triton' >/dev/null 2>&1; then
+    echo "triton imports cleanly alongside TensorFlow; leaving it installed."
+  else
+    echo "triton cannot be imported alongside TensorFlow; removing it (unused on TPU)."
+    python3 -m pip uninstall -y triton
+  fi
+fi
+
 echo "Installed versions after the restore:"
-record_versions jax jaxlib libtpu numpy protobuf torch vllm tpu-inference maxtext \
-  maxtext-vllm-adapter | sed 's/^/  /'
+record_versions jax jaxlib libtpu numpy protobuf torch triton vllm tpu-inference \
+  maxtext maxtext-vllm-adapter | sed 's/^/  /'
 
 # Both halves of the stack import from this interpreter, so assert both here
 # rather than discovering it inside a backgrounded trainer or rollout process,
