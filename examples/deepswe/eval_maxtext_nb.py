@@ -8,14 +8,8 @@ with configurable JAX/vLLM sharding meshes.
 
 import argparse
 import asyncio
-import collections
-import concurrent.futures
 import gc
-import json
-import logging
-import math
 import os
-import sys
 import time
 
 from examples.deepswe import deepswe_utils
@@ -23,6 +17,7 @@ from examples.deepswe import deepswe_utils
 deepswe_utils.setup_runtime_environment()
 
 import datasets as datasets_lib
+from examples.deepswe import eval_utils
 import jax
 from jax.sharding import Mesh
 import numpy as np
@@ -30,16 +25,12 @@ from transformers import AutoTokenizer
 from maxtext.integration.vllm import maxtext_vllm_adapter
 import swe_env
 from swe_agent import SWEAgent
-from swe_env import _normalize_entry, SWEEnv
 
 from tunix.generate import tokenizer_adapter as tok_adapter
-from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
-Counter = collections.Counter
 str2bool = deepswe_utils.str2bool
 
 
@@ -396,23 +387,9 @@ OUTPUT_DIR = args.output_dir
 USE_AGENT_SANDBOX = args.use_agent_sandbox
 MAX_WARMPOOL_REPLICAS = args.max_warmpool_replicas
 
-ANSI_RED = "\033[31m"
-ANSI_RESET = "\033[0m"
-
 # ========================== Logging ==========================
 
-log_level = getattr(logging, args.logging_level.upper(), logging.INFO)
-for handler in logging.root.handlers[:]:
-  logging.root.removeHandler(handler)
-
-logging.basicConfig(
-    stream=sys.stdout,
-    level=log_level,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
-logger = logging.getLogger("deepswe_eval")
+logger = deepswe_utils.setup_logging(level=args.logging_level)
 
 # ========================== JAX / Pathways ==========================
 
@@ -442,7 +419,7 @@ else:
   )
 
 entries = [
-    _normalize_entry(e, docker_image_prefix=DOCKER_IMAGE_PREFIX)
+    swe_env._normalize_entry(e, docker_image_prefix=DOCKER_IMAGE_PREFIX)
     for e in dataset
     if "docker_image" in e
 ]
@@ -684,21 +661,6 @@ else:
 
 # ========================== Model Call ==========================
 
-class PromptTooLongError(ValueError):
-  """Raised when a prompt exceeds the model context limit before sampling."""
-
-
-def _is_prompt_overflow_error(exc: Exception) -> bool:
-  message = str(exc)
-  return (
-      "maximum input length" in message
-      or "context length is only" in message
-      or "Prompt too long before sampler call" in message
-      or "input_tokens" in message
-      and "max_model_len" in message
-  )
-
-
 # `eos_tokens` is not a parameter of `VllmSampler.__call__`; it would land in
 # **kwargs and be silently dropped by the `setattr(SamplingParams, ...)` path.
 # For vLLM, stop tokens are configured via `VllmConfig.sampling_kwargs` instead.
@@ -708,61 +670,15 @@ SAMPLER_CALL_KWARGS = {
     "top_k": TOP_K,
 }
 
-def model_call(
-    chat_completions,
-    env=None,
-    max_generation_steps=None,
-    **kwargs,
-):
-  """Model inference via tunix sampler."""
-  max_gen_steps = max_generation_steps or MAX_RESPONSE_LENGTH
-  pair_index = None
-  instance_id = "unknown"
-  if env is not None:
-    pair_index = getattr(env, "extra_kwargs", {}).get("pair_index")
-    instance_id = getattr(env, "entry", {}).get("instance_id", "unknown")
-
-  prompt = chat_parser.parse(
-      chat_completions,
-      add_generation_prompt=True,
-      is_first_msg=True,
-  )
-  prompt_token_count = len(tokenizer.encode(prompt))
-  logger.info(
-      "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
-      " max_context_limit=%d",
-      pair_index,
-      instance_id,
-      len(prompt),
-      prompt_token_count,
-      MAX_CONTEXT_LIMIT,
-  )
-  if prompt_token_count >= MAX_CONTEXT_LIMIT:
-    raise PromptTooLongError(
-        "Prompt too long before sampler call:"
-        f" prompt_tokens={prompt_token_count},"
-        f" max_context_limit={MAX_CONTEXT_LIMIT}"
-    )
-  t0 = time.time()
-  try:
-    out = sampler(
-        prompt,
-        max_generation_steps=max_gen_steps,
-        echo=False,
-        **SAMPLER_CALL_KWARGS,
-    )
-  except Exception as exc:
-    if _is_prompt_overflow_error(exc):
-      raise PromptTooLongError(str(exc)) from exc
-    raise
-  logger.info(
-      "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
-      pair_index,
-      instance_id,
-      len(out.text[0]) if out.text else 0,
-      time.time() - t0,
-  )
-  return out
+model_call = eval_utils.create_model_call(
+    sampler=sampler,
+    tokenizer=tokenizer,
+    chat_parser=chat_parser,
+    max_response_length=MAX_RESPONSE_LENGTH,
+    max_context_limit=MAX_CONTEXT_LIMIT,
+    sampler_kwargs=SAMPLER_CALL_KWARGS,
+    logger=logger,
+)
 
 
 # ========================== Evaluation ==========================
@@ -778,7 +694,8 @@ class EvalTrajectoryCollectEngine(
       return await super().collect(mode=mode)
     except Exception as exc:
       logger.exception(
-          "[pair=%s instance=%s] unexpected fatal error in collect(), returning partial trajectory: %s",
+          "[pair=%s instance=%s] unexpected fatal error in collect(), returning"
+          " partial trajectory: %s",
           self.env.extra_kwargs.get("pair_index"),
           self.env.entry.get("instance_id", "unknown"),
           exc,
@@ -788,7 +705,7 @@ class EvalTrajectoryCollectEngine(
   async def _one_step(self) -> bool:
     try:
       return await super()._one_step()
-    except PromptTooLongError as exc:
+    except eval_utils.PromptTooLongError as exc:
       logger.warning(
           "[pair=%s instance=%s] terminating trajectory due to prompt"
           " overflow: %s",
@@ -804,7 +721,8 @@ class EvalTrajectoryCollectEngine(
       return True
     except Exception as exc:
       logger.exception(
-          "[pair=%s instance=%s] unexpected exception in _one_step, terminating trajectory gracefully: %s",
+          "[pair=%s instance=%s] unexpected exception in _one_step, terminating"
+          " trajectory gracefully: %s",
           self.env.extra_kwargs.get("pair_index"),
           self.env.entry.get("instance_id", "unknown"),
           exc,
@@ -836,81 +754,12 @@ class EvalTrajectoryCollectEngine(
     )
 
 
-class _EvalLoggingEnvMixin:
-  """Adds phase-level reset/step logs for eval debugging."""
-
-  def reset(self):
-    pair_index = self.extra_kwargs.get("pair_index")
-    instance_id = self.entry.get("instance_id", "unknown")
-    logger.info("[pair=%s instance=%s] reset start", pair_index, instance_id)
-    t0 = time.time()
-    obs, info = super().reset()
-    logger.info(
-        "[pair=%s instance=%s] reset end (%.1fs)",
-        pair_index,
-        instance_id,
-        time.time() - t0,
-    )
-    return obs, info
-
-  def step(self, action):
-    pair_index = self.extra_kwargs.get("pair_index")
-    instance_id = self.entry.get("instance_id", "unknown")
-    step_idx = self.step_count + 1
-    action_name = action
-    if isinstance(action, str):
-      action_name = action.split("\n", 1)[0][:120]
-    logger.info(
-        "[pair=%s instance=%s] env.step start step=%s action=%s",
-        pair_index,
-        instance_id,
-        step_idx,
-        action_name,
-    )
-    t0 = time.time()
-    obs, reward, done, info = super().step(action)
-    has_valid_fn = bool(
-        action
-        and isinstance(action, str)
-        and "<function=" in action
-        and not action.startswith("<function=>")
-    )
-    if not has_valid_fn and not done:
-      obs = (
-          "[ACTION GUARD] Your previous response did not include a valid function call. "
-          "You must output exactly one tool call in the required XML format. For example:\n"
-          "<function=execute_bash>\n"
-          "<parameter=command>git status</parameter>\n"
-          "</function>\n"
-          "Do NOT call submit until you have modified code and verified the fix."
-      )
-    elif not obs and not done:
-      obs = "(Command executed successfully with no output.)"
-    if isinstance(obs, str) and len(obs) > 12000:
-      obs = obs[:6000] + "\n...<response clipped>...\n" + obs[-6000:]
-    logger.info(
-        "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
-        " (%.1fs)",
-        pair_index,
-        instance_id,
-        step_idx,
-        reward,
-        done,
-        time.time() - t0,
-    )
-    return obs, reward, done, info
-
-
-class LoggedSWEEnv(_EvalLoggingEnvMixin, SWEEnv):
-  pass
-
-
 def pairs_generator():
   """Yield NUM_ROLLOUTS_PER_INSTANCE trajectory tasks per dataset entry."""
   for pair_index in range(len(entries) * NUM_ROLLOUTS_PER_INSTANCE):
     entry = entries[pair_index // NUM_ROLLOUTS_PER_INSTANCE]
     agent = SWEAgent(scaffold=SCAFFOLD)
-    env = LoggedSWEEnv(
+    env = eval_utils.LoggedSWEEnv(
         entry=entry,
         max_steps=MAX_STEPS,
         pair_index=pair_index,
@@ -920,201 +769,10 @@ def pairs_generator():
         reward_timeout=REWARD_TIMEOUT_SECS,
         use_agent_sandbox=USE_AGENT_SANDBOX,
         fleet=fleet,
+        enforce_xml_function_check=True,
+        clip_obs_len=12000,
     )
     yield agent, env
-
-
-async def run_evaluation():
-  """Run evaluation with orchestrator-managed task-level parallelism."""
-  if not OUTPUT_DIR.startswith("gs://"):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-  loop = asyncio.get_running_loop()
-  executor = concurrent.futures.ThreadPoolExecutor(
-      max_workers=max(MAX_CONCURRENT, 32),
-      thread_name_prefix="model_call_worker",
-  )
-  loop.set_default_executor(executor)
-
-  orchestrator = RolloutOrchestrator(
-      engine_cls=EvalTrajectoryCollectEngine,
-      engine_kwargs=dict(
-          model_call=model_call,
-          timeout=TIMEOUT,
-          max_response_length=MAX_RESPONSE_LENGTH,
-          tokenizer=tokenizer_for_agentic,
-          chat_parser=chat_parser,
-      ),
-      max_concurrency=MAX_CONCURRENT,
-      rollout_sync_lock=agentic_utils.RolloutSyncLock(),
-  )
-
-  results = []
-  start_time = time.time()
-
-  producer = asyncio.create_task(
-      orchestrator.run_producers_from_stream(
-          pairs_stream=pairs_generator(),
-          num_generations=1,
-          group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
-          collect_mode="Trajectory",
-      )
-  )
-
-  await asyncio.sleep(0)
-
-  async for batch in orchestrator.yield_batches(batch_size=1):
-    for item in batch:
-      traj = item.traj
-      entry_index = item.group_index // NUM_ROLLOUTS_PER_INSTANCE
-      entry = entries[entry_index]
-      step_actions = [
-          getattr(step, "action", "").split("\n", 1)[0][:80]
-          for step in traj.steps
-      ]
-      result = {
-          "pair_index": item.group_index,
-          "entry_index": entry_index,
-          "instance_id": entry.get("instance_id", entry_index),
-          "reward": float(traj.reward),
-          "num_steps": len(traj.steps),
-          "status": getattr(traj.status, "name", str(traj.status)),
-          "step_actions": step_actions,
-      }
-      results.append(result)
-      elapsed = time.time() - start_time
-      logger.info(
-          "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs"
-          " elapsed)",
-          len(results),
-          len(entries) * NUM_ROLLOUTS_PER_INSTANCE,
-          result["instance_id"],
-          result["reward"],
-          result["num_steps"],
-          result["status"],
-          elapsed,
-      )
-      logger.info(
-          "%s[%s] FINAL TRAJECTORY REWARD=%.1f%s",
-          ANSI_RED,
-          result["instance_id"],
-          result["reward"],
-          ANSI_RESET,
-      )
-
-  try:
-    await producer
-    return results
-  finally:
-    executor.shutdown(wait=False)
-
-
-# ========================== Results ==========================
-
-
-def _estimate_pass_at_k(n: int, c: int, k: int):
-  """Unbiased estimator for pass@k given n samples and c correct."""
-  if n < k:
-    return None
-  if n - c < k:
-    return 1.0
-  return 1.0 - math.comb(n - c, k) / math.comb(n, k)
-
-
-def compute_pass_at_k(results):
-  """Computes and logs evaluation metrics such as Pass@k (k=1, 4, 5) and average reward."""
-  total = len(results)
-  if total == 0:
-    logger.warning("No results to evaluate.")
-    return
-
-  correct = sum(1 for r in results if r["reward"] > 0)
-  total_reward = sum(float(r["reward"]) for r in results)
-  total_steps = sum(r["num_steps"] for r in results)
-  status_counts = Counter(r["status"] for r in results)
-
-  instance_groups = collections.defaultdict(list)
-  for r in results:
-    instance_groups[r["instance_id"]].append(r)
-
-  pass_at_k_metrics = {}
-  for k in (1, 4):
-    scores = []
-    for inst_results in instance_groups.values():
-      n = len(inst_results)
-      c = sum(1 for r in inst_results if r["reward"] > 0)
-      score = _estimate_pass_at_k(n, c, k)
-      if score is not None:
-        scores.append(score)
-    pass_at_k_metrics[k] = sum(scores) / len(scores) if scores else None
-
-  avg_reward = total_reward / total
-  avg_steps = total_steps / total
-
-  logger.info("=" * 50)
-  logger.info("Evaluation Results")
-  logger.info("=" * 50)
-  logger.info("Total instances:  %d", total)
-  logger.info("Resolved:         %d", correct)
-  logger.info(
-      "Pass@1:           %.4f",
-      pass_at_k_metrics[1]
-      if pass_at_k_metrics[1] is not None
-      else correct / total,
-  )
-  if pass_at_k_metrics[4] is not None:
-    logger.info("Pass@4:           %.4f", pass_at_k_metrics[4])
-  else:
-    logger.info("Pass@4:           N/A")
-  logger.info("Avg reward:       %.4f", avg_reward)
-  logger.info("Avg steps:        %.2f", avg_steps)
-  logger.info("Status counts:    %s", dict(status_counts))
-  logger.info("=" * 50)
-
-
-def save_results(results):
-  """Saves the evaluation results to a JSONL file and uploads to GCS if needed."""
-  timestamp = time.strftime("%Y%m%d_%H%M%S")
-  filename = f"eval_{MODEL_VERSION.replace('/', '_')}_{timestamp}.jsonl"
-
-  local_dir = (
-      "/tmp/eval_results" if OUTPUT_DIR.startswith("gs://") else OUTPUT_DIR
-  )
-  os.makedirs(local_dir, exist_ok=True)
-  output_file = os.path.join(local_dir, filename)
-
-  with open(output_file, "w") as f:
-    for r in results:
-      entry = entries[r["entry_index"]]
-      record = {
-          "pair_index": r.get("pair_index", -1),
-          "instance_id": entry.get("instance_id", r["instance_id"]),
-          "docker_image": entry.get("docker_image", ""),
-          "reward": r["reward"],
-          "num_steps": r["num_steps"],
-          "status": r["status"],
-          "step_actions": r.get("step_actions", []),
-      }
-      f.write(json.dumps(record) + "\n")
-
-  logger.info("Results saved to %s", output_file)
-
-  if OUTPUT_DIR.startswith("gs://"):
-    from google.cloud import storage
-
-    gcs_path = OUTPUT_DIR[5:]
-    bucket_name, *prefix_parts = gcs_path.split("/")
-    blob_prefix = "/".join(prefix_parts)
-    blob_name = (
-        os.path.join(blob_prefix, filename) if blob_prefix else filename
-    )
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-    blob.upload_from_filename(output_file)
-    logger.info("Uploaded results to gs://%s/%s", bucket_name, blob_name)
-
-  return output_file
 
 
 # ========================== Main ==========================
@@ -1133,13 +791,33 @@ if __name__ == "__main__":
   )
 
   try:
-    eval_results = asyncio.run(run_evaluation())
-    compute_pass_at_k(eval_results)
-    save_results(eval_results)
+    eval_results = asyncio.run(
+        eval_utils.run_evaluation(
+            entries=entries,
+            pairs_stream=pairs_generator(),
+            model_call=model_call,
+            tokenizer_for_agentic=tokenizer_for_agentic,
+            chat_parser=chat_parser,
+            timeout=TIMEOUT,
+            max_concurrent=MAX_CONCURRENT,
+            output_dir=OUTPUT_DIR,
+            engine_cls=EvalTrajectoryCollectEngine,
+            logger=logger,
+            num_rollouts_per_instance=NUM_ROLLOUTS_PER_INSTANCE,
+            max_response_length=MAX_RESPONSE_LENGTH,
+        )
+    )
+    eval_utils.compute_pass_at_k(eval_results, logger=logger)
+    eval_utils.save_results(
+        eval_results,
+        entries=entries,
+        output_dir=OUTPUT_DIR,
+        filename_prefix=f"eval_{MODEL_VERSION.replace('/', '_')}",
+        logger=logger,
+    )
   finally:
     if USE_AGENT_SANDBOX and fleet is not None:
       logger.info(
           "[Main] Explicitly tearing down SandboxFleet on clean exit..."
       )
       fleet.teardown()
-

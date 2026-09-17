@@ -15,6 +15,7 @@
 """Utility functions for DeepSWE."""
 
 import argparse
+import logging
 import os
 import sys
 from typing import Any, Optional
@@ -30,6 +31,26 @@ def str2bool(v: str | bool) -> bool:
     return False
   else:
     raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def setup_logging(
+    level: str | int = "INFO", logger_name: str = "deepswe_eval"
+) -> logging.Logger:
+  """Configures root logger format and returns a named logger."""
+  if isinstance(level, str):
+    log_level = getattr(logging, level.upper(), logging.INFO)
+  else:
+    log_level = level
+  for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+  logging.basicConfig(
+      stream=sys.stdout,
+      level=log_level,
+      format="%(asctime)s - %(levelname)s - %(message)s",
+      datefmt="%Y-%m-%d %H:%M:%S",
+  )
+  return logging.getLogger(logger_name)
 
 
 def setup_runtime_environment(workdir: Optional[str] = None) -> None:

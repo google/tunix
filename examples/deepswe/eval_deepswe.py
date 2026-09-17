@@ -55,16 +55,13 @@ Usage:
 """
 
 import asyncio
-import collections
-import json
-import logging
 import os
 import sys
 import threading
-import time
 
 from datasets import load_dataset
-from guarded_swe_env import GuardedSWEEnv
+from examples.deepswe import deepswe_utils
+from examples.deepswe import eval_utils
 from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
@@ -73,19 +70,14 @@ from kubernetes import client
 from kubernetes import config as k8s_config
 import numpy as np
 from swe_agent import SWEAgent
-from swe_env import SWEEnv
 from transformers import AutoTokenizer
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
 from tunix.models.qwen3 import params as params_lib
-from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.sft import utils as sft_utils
-
-Counter = collections.Counter
 
 # ========================== Configuration ==========================
 
@@ -136,21 +128,10 @@ SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 OUTPUT_DIR = os.getenv(
     "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
 )
-ANSI_RED = "\033[31m"
-ANSI_RESET = "\033[0m"
 
 # ========================== Logging ==========================
 
-for handler in logging.root.handlers[:]:
-  logging.root.removeHandler(handler)
-
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("deepswe_eval")
+logger = deepswe_utils.setup_logging(level="INFO")
 
 
 # ========================== JAX / Pathways ==========================
@@ -338,79 +319,16 @@ if ROLLOUT_ENGINE == "vanilla" or (
 ):
   sampler_lock = threading.Lock()
 
-
-class PromptTooLongError(ValueError):
-  """Raised when a prompt exceeds the model context limit before sampling."""
-
-
-def _is_prompt_overflow_error(exc: Exception) -> bool:
-  message = str(exc)
-  return (
-      "maximum input length" in message
-      or "context length is only" in message
-      or "Prompt too long before sampler call" in message
-      or "input_tokens" in message
-      and "max_model_len" in message
-  )
-
-
-def model_call(chat_completions, env_unused):
-  """Model inference via tunix sampler."""
-  pair_index = None
-  instance_id = "unknown"
-  if env_unused is not None:
-    pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
-    instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
-
-  prompt = chat_parser.parse(
-      chat_completions,
-      add_generation_prompt=True,
-      is_first_msg=True,
-  )
-  prompt_token_count = len(tokenizer.encode(prompt))
-  logger.info(
-      "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
-      " max_model_len=%d",
-      pair_index,
-      instance_id,
-      len(prompt),
-      prompt_token_count,
-      MAX_MODEL_LEN,
-  )
-  if prompt_token_count >= MAX_MODEL_LEN:
-    raise PromptTooLongError(
-        "Prompt too long before sampler call:"
-        f" prompt_tokens={prompt_token_count}, max_model_len={MAX_MODEL_LEN}"
-    )
-  t0 = time.time()
-  try:
-    if sampler_lock is None:
-      out = sampler(
-          prompt,
-          max_generation_steps=MAX_RESPONSE_LENGTH,
-          echo=False,
-          eos_tokens=qwen_eos_tokens,
-      )
-    else:
-      with sampler_lock:
-        out = sampler(
-            prompt,
-            max_generation_steps=MAX_RESPONSE_LENGTH,
-            echo=False,
-            eos_tokens=qwen_eos_tokens,
-        )
-  except Exception as exc:
-    if _is_prompt_overflow_error(exc):
-      raise PromptTooLongError(str(exc)) from exc
-    raise
-  logger.info(
-      "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
-      pair_index,
-      instance_id,
-      len(out.text[0]) if out.text else 0,
-      time.time() - t0,
-  )
-  return out
+model_call = eval_utils.create_model_call(
+    sampler=sampler,
+    tokenizer=tokenizer,
+    chat_parser=chat_parser,
+    max_response_length=MAX_RESPONSE_LENGTH,
+    max_context_limit=MAX_MODEL_LEN,
+    sampler_kwargs={"eos_tokens": qwen_eos_tokens},
+    sampler_lock=sampler_lock,
+    logger=logger,
+)
 
 
 # ========================== Evaluation ==========================
@@ -424,7 +342,7 @@ class EvalTrajectoryCollectEngine(
   async def _one_step(self) -> bool:
     try:
       return await super()._one_step()
-    except PromptTooLongError as exc:
+    except eval_utils.PromptTooLongError as exc:
       logger.warning(
           "[pair=%s instance=%s] terminating trajectory due to prompt"
           " overflow: %s",
@@ -452,74 +370,15 @@ class EvalTrajectoryCollectEngine(
     return super().compute_trajectory_reward()
 
 
-class _EvalLoggingEnvMixin:
-  """Adds phase-level reset/step logs for eval debugging."""
-
-  def reset(self):
-    """Resets the environment and logs the timing.
-
-    This method calls the superclass's reset and logs the start and end of the
-    reset operation, including the time taken.
-
-    Returns:
-      The observation and info returned by the superclass's reset method.
-    """
-    pair_index = self.extra_kwargs.get("pair_index")
-    instance_id = self.entry.get("instance_id", "unknown")
-    logger.info("[pair=%s instance=%s] reset start", pair_index, instance_id)
-    t0 = time.time()
-    obs, info = super().reset()
-    logger.info(
-        "[pair=%s instance=%s] reset end (%.1fs)",
-        pair_index,
-        instance_id,
-        time.time() - t0,
-    )
-    return obs, info
-
-  def step(self, action):
-    """Steps the environment and logs the action and timing."""
-    pair_index = self.extra_kwargs.get("pair_index")
-    instance_id = self.entry.get("instance_id", "unknown")
-    step_idx = self.step_count + 1
-    action_name = action
-    if isinstance(action, str):
-      action_name = action.split("\n", 1)[0][:120]
-    logger.info(
-        "[pair=%s instance=%s] env.step start step=%s action=%s",
-        pair_index,
-        instance_id,
-        step_idx,
-        action_name,
-    )
-    t0 = time.time()
-    obs, reward, done, info = super().step(action)
-    logger.info(
-        "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s"
-        " (%.1fs)",
-        pair_index,
-        instance_id,
-        step_idx,
-        reward,
-        done,
-        time.time() - t0,
-    )
-    return obs, reward, done, info
-
-
-class LoggedSWEEnv(_EvalLoggingEnvMixin, SWEEnv):
-  pass
-
-
-class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
-  pass
-
-
 def pairs_generator():
   """Yield one full (agent, env) trajectory task per dataset entry."""
   for pair_index, entry in enumerate(entries):
     agent = SWEAgent()
-    env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
+    env_cls = (
+        eval_utils.LoggedGuardedSWEEnv
+        if ENABLE_GUARD
+        else eval_utils.LoggedSWEEnv
+    )
     env = env_cls(
         entry=entry,
         max_steps=MAX_STEPS,
@@ -527,178 +386,6 @@ def pairs_generator():
         group_id=pair_index,
     )
     yield agent, env
-
-
-async def run_evaluation():
-  """Run evaluation with orchestrator-managed task-level parallelism."""
-  os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-  orchestrator = RolloutOrchestrator(
-      engine_cls=EvalTrajectoryCollectEngine,
-      engine_kwargs=dict(
-          model_call=model_call,
-          timeout=TIMEOUT,
-          max_context_limit=MAX_CONTEXT_LIMIT,
-          tokenizer=tokenizer_for_agentic,
-          chat_parser=chat_parser,
-      ),
-      max_concurrency=MAX_CONCURRENT,
-      rollout_sync_lock=agentic_utils.RolloutSyncLock(),
-  )
-
-  results = []
-  start_time = time.time()
-
-  producer = asyncio.create_task(
-      orchestrator.run_producers_from_stream(
-          pairs_stream=pairs_generator(),
-          num_generations=1,
-          group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
-          collect_mode="Trajectory",
-      )
-  )
-
-  await asyncio.sleep(0)
-
-  async for batch in orchestrator.yield_batches(batch_size=1):
-    for item in batch:
-      traj = item.traj
-      entry = entries[item.group_index]
-      guard_reasons = sorted({
-          (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
-          for step in traj.steps
-          if (getattr(step, "info", {}) or {}).get("guard_blocked")
-      })
-      result = {
-          "pair_index": item.group_index,
-          "instance_id": entry.get("instance_id", item.group_index),
-          "reward": float(traj.reward),
-          "num_steps": len(traj.steps),
-          "status": getattr(traj.status, "name", str(traj.status)),
-          "guard_blocked_steps": sum(
-              1
-              for step in traj.steps
-              if (getattr(step, "info", {}) or {}).get("guard_blocked")
-          ),
-          "guard_reasons": guard_reasons,
-      }
-      results.append(result)
-      elapsed = time.time() - start_time
-      logger.info(
-          "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs"
-          " elapsed)",
-          len(results),
-          len(entries),
-          result["instance_id"],
-          result["reward"],
-          result["num_steps"],
-          result["status"],
-          elapsed,
-      )
-      logger.info(
-          "%s[%s] FINAL TRAJECTORY REWARD=%.1f%s",
-          ANSI_RED,
-          result["instance_id"],
-          result["reward"],
-          ANSI_RESET,
-      )
-
-  await producer
-  return results
-
-
-# ========================== Results ==========================
-
-
-def compute_pass_at_k(results):
-  """Computes and logs evaluation metrics such as Pass@1 and average reward.
-
-  Args:
-    results: A list of dictionaries, where each dictionary contains the
-      evaluation results for a single instance, including 'reward', 'num_steps',
-      'status', 'guard_blocked_steps', and 'guard_reasons'.
-  """
-  total = len(results)
-  if total == 0:
-    logger.warning("No results to evaluate.")
-    return
-
-  correct = sum(1 for r in results if r["reward"] > 0)
-  total_reward = sum(float(r["reward"]) for r in results)
-  total_steps = sum(r["num_steps"] for r in results)
-  status_counts = Counter(r["status"] for r in results)
-
-  guard_blocked_trajectories = sum(
-      1 for r in results if r["guard_blocked_steps"] > 0
-  )
-  total_guard_blocks = sum(r["guard_blocked_steps"] for r in results)
-  guard_reason_counts = Counter()
-  for r in results:
-    for reason in r["guard_reasons"]:
-      guard_reason_counts[reason] += 1
-
-  avg_reward = total_reward / total
-  avg_steps = total_steps / total
-
-  logger.info("=" * 50)
-  logger.info("Evaluation Results")
-  logger.info("=" * 50)
-  logger.info("Total instances:  %d", total)
-  logger.info("Resolved:         %d", correct)
-  logger.info("Pass@1:           %.4f", correct / total)
-  logger.info("Avg reward:       %.4f", avg_reward)
-  logger.info("Avg steps:        %.2f", avg_steps)
-  logger.info("Status counts:    %s", dict(status_counts))
-  logger.info(
-      "Guarded trajs:    %d/%d (%.2f%%)",
-      guard_blocked_trajectories,
-      total,
-      100.0 * guard_blocked_trajectories / total,
-  )
-  logger.info("Guard blocks:     %d", total_guard_blocks)
-  if guard_reason_counts:
-    logger.info("Guard reasons:    %s", dict(guard_reason_counts))
-  logger.info("=" * 50)
-
-
-def save_results(results):
-  """Saves the evaluation results to a JSONL file.
-
-  The results are saved in a timestamped file within the OUTPUT_DIR. Each line
-  in the file is a JSON object representing the evaluation outcome for a single
-  instance.
-
-  Args:
-    results: A list of dictionaries, where each dictionary contains the
-      evaluation results for a single instance, including 'pair_index',
-      'reward', 'num_steps', 'status', 'guard_blocked_steps', and
-      'guard_reasons'.
-
-  Returns:
-    The path to the saved JSONL file.
-  """
-  os.makedirs(OUTPUT_DIR, exist_ok=True)
-  timestamp = time.strftime("%Y%m%d_%H%M%S")
-  output_file = os.path.join(
-      OUTPUT_DIR, f"eval_deepscaler_style_{timestamp}.jsonl"
-  )
-
-  with open(output_file, "w") as f:
-    for r in results:
-      entry = entries[r["pair_index"]]
-      record = {
-          "instance_id": entry.get("instance_id", r["instance_id"]),
-          "docker_image": entry.get("docker_image", ""),
-          "reward": r["reward"],
-          "num_steps": r["num_steps"],
-          "status": r["status"],
-          "guard_blocked_steps": r["guard_blocked_steps"],
-          "guard_reasons": r["guard_reasons"],
-      }
-      f.write(json.dumps(record) + "\n")
-
-  logger.info("Results saved to %s", output_file)
-  return output_file
 
 
 # ========================== Main ==========================
@@ -713,6 +400,31 @@ if __name__ == "__main__":
       ROLLOUT_ENGINE,
   )
 
-  eval_results = asyncio.run(run_evaluation())
-  compute_pass_at_k(eval_results)
-  save_results(eval_results)
+  eval_results = asyncio.run(
+      eval_utils.run_evaluation(
+          entries=entries,
+          pairs_stream=pairs_generator(),
+          model_call=model_call,
+          tokenizer_for_agentic=tokenizer_for_agentic,
+          chat_parser=chat_parser,
+          timeout=TIMEOUT,
+          max_concurrent=MAX_CONCURRENT,
+          output_dir=OUTPUT_DIR,
+          engine_cls=EvalTrajectoryCollectEngine,
+          logger=logger,
+          use_custom_executor=False,
+      )
+  )
+  eval_utils.compute_pass_at_k(
+      eval_results, ks=(1,), log_guard_stats=True, logger=logger
+  )
+  eval_utils.save_results(
+      eval_results,
+      entries=entries,
+      output_dir=OUTPUT_DIR,
+      filename_prefix="eval_deepscaler_style",
+      include_pair_index=False,
+      include_step_actions=False,
+      include_guard_stats=True,
+      logger=logger,
+  )
