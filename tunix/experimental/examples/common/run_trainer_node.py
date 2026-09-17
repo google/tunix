@@ -415,6 +415,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Use weight converter for MaxText weight synchronization.",
   )
   parser.add_argument(
+      "--weight_sync_mode",
+      type=str,
+      default=os.getenv("WEIGHT_SYNC_MODE", "gcs"),
+      help="Weight sync mode (gcs, raiden, etc.).",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
@@ -520,6 +526,8 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   return model_utils.apply_lora_to_model(
       model, mesh=mesh, lora_config=lora_config
   )
+
+
 
 
 def _checkpointing_options(args) -> Any:
@@ -714,6 +722,8 @@ def main(argv: list[str], context: Any = None) -> None:
       force=True,
   )
   args = _parse_args(argv)
+  if getattr(args, "weight_sync_mode", None):
+    os.environ["WEIGHT_SYNC_MODE"] = str(args.weight_sync_mode)
   logging.info("Parsed args: %s", args)
 
   if context:

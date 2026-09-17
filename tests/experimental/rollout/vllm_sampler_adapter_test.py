@@ -22,6 +22,7 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout import vllm_sampler_adapter
+from tunix.experimental.weight_sync import weight_sync
 
 
 class VllmSamplerAdapterTest(absltest.TestCase):
@@ -301,6 +302,38 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     )
     self.assertEqual(adapter.raiden_job_name, "replica_worker-42")
 
+  def test_gcs_weight_sync_round(self):
+    mock_sampler = mock.AsyncMock()
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="worker-gcs",
+        sampler_instance=mock_sampler,
+        weight_sync_mode=weight_sync.WeightSyncMode.GCS,
+    )
+    self.assertTrue(adapter.enable_gcs)
+    self.assertFalse(adapter.enable_raiden)
+
+    # 1. Metadata
+    meta = asyncio.run(adapter.get_weight_sync_metadata())
+    self.assertEqual(len(meta), 1)
+    self.assertEqual(meta[0].unit.job_name, "replica_worker-gcs")
+
+    # 2. Pre-sync
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1,
+        extra_config={"req_id": "r1", "checkpoint_path": "/tmp/test_ckpt"},
+    )
+    self.assertTrue(asyncio.run(adapter.pre_weight_sync(req)))
+    mock_sampler.pre_weight_sync.assert_awaited_once_with(free_kv_cache=True)
+
+    # 3. Weight sync
+    self.assertTrue(asyncio.run(adapter.weight_sync(req)))
+    mock_sampler.load_gcs_weights.assert_awaited_once_with("/tmp/test_ckpt")
+
+    # 4. Post-sync
+    new_version = asyncio.run(adapter.post_weight_sync(req))
+    self.assertEqual(new_version, 1)
+    mock_sampler.post_weight_sync.assert_awaited_once_with(req)
+
   def test_canonicalize_variable_names_bracketed_to_dotted(self):
     entry = {
         "unit": {"job_name": "destination"},
@@ -346,6 +379,45 @@ class VllmSamplerAdapterTest(absltest.TestCase):
         vllm_sampler_adapter._canonicalize_variable_names(empty_entry),
         empty_entry,
     )
+
+
+class RoundUuidTest(absltest.TestCase):
+  """Covers the extra_config -> Raiden transfer generation extraction."""
+
+  def test_extracts_positive_uuid(self):
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": 7}
+    )
+    self.assertEqual(vllm_sampler_adapter._round_uuid(req), 7)
+
+  def test_absent_extra_config_raises(self):
+    with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
+      vllm_sampler_adapter._round_uuid(None)
+
+  def test_absent_uuid_key_raises(self):
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1"}
+    )
+    with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
+      vllm_sampler_adapter._round_uuid(req)
+
+  def test_non_positive_uuid_raises(self):
+    # Raiden generations start at 1, and 0 is WorkerRoundTracker's "no round"
+    # sentinel. Forwarding either would silently degrade to an untargeted
+    # wait, which is the cross-round race this plumbing exists to prevent.
+    for sentinel in (0, -1):
+      req = base_sampler_lib.WeightSyncRequest(
+          policy_version=1, extra_config={"req_id": "r1", "uuid": sentinel}
+      )
+      with self.assertRaisesRegex(ValueError, "non-positive transfer uuid"):
+        vllm_sampler_adapter._round_uuid(req)
+
+  def test_malformed_uuid_raises(self):
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": "not-an-int"}
+    )
+    with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
+      vllm_sampler_adapter._round_uuid(req)
 
 
 class RoundUuidTest(absltest.TestCase):

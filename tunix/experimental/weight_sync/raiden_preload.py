@@ -23,6 +23,8 @@ lazily -- so this only has to run before the first call that touches a device.
 
 import importlib
 import logging
+import os
+import sys
 
 # The .so files, not the Python wrappers beside them, so a wrapper going lazy
 # cannot silently turn the preload into a no-op.
@@ -44,6 +46,15 @@ def import_raiden() -> tuple[str, ...]:
   Returns:
     The modules that were imported, in load order. Empty without Raiden.
   """
+  mode = os.getenv("WEIGHT_SYNC_MODE", "").strip().lower()
+  if not mode:
+    for arg in sys.argv:
+      if arg.startswith("--weight_sync_mode="):
+        mode = arg.split("=", 1)[1].strip().lower()
+        break
+  if mode and mode != "raiden":
+    return ()
+
   loaded = []
   for name in RAIDEN_MODULES:
     try:

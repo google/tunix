@@ -169,6 +169,13 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
+  elif mode_name in (weight_sync.WeightSyncMode.GCS.value, "filesystem"):
+    from tunix.experimental.weight_sync import gcs_weight_sync
+
+    logging.info(
+        "Built GcsSyncHandler; weight sync using GCS checkpoint."
+    )
+    return gcs_weight_sync.GcsSyncHandler()
   elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
     logging.info(
         "Built fallback NullHandler; weight sync running protocol-only."
@@ -724,13 +731,23 @@ class WeightSyncCoordinator:
     The round's identity (req_id, uuid, round_index) rides in `extra_config`:
     workers key their `WorkerRoundTracker` on it.
     """
+    merged_config = dict(
+        req_id=req_id, uuid=uuid, round_index=round_index, **extra_config
+    )
+    if "weight_sync_mode" not in merged_config:
+      if getattr(self._handler, "__class__", None) and self._handler.__class__.__name__ in ("GcsSyncHandler", "FilesystemSyncHandler"):
+        merged_config["weight_sync_mode"] = "gcs"
+        merged_config["transport"] = "gcs"
+    if "checkpoint_path" not in merged_config and source_metadata:
+      for m in source_metadata:
+        if getattr(m, "control_plane_rpc_address", None):
+          merged_config["checkpoint_path"] = m.control_plane_rpc_address
+          break
     return datatypes.WeightSyncRequest(
         controller_id=self._controller_id,
         policy_version=policy_version,
         source_metadata=source_metadata,
-        extra_config=dict(
-            req_id=req_id, uuid=uuid, round_index=round_index, **extra_config
-        ),
+        extra_config=merged_config,
     )
 
   # ------------------------------------------------------------- phase plumbing
@@ -1043,36 +1060,38 @@ class WeightSyncCoordinator:
       # the controller pairs variables by exact name and silently skips
       # mismatches, so a bad wire name or shape must stop the round HERE --
       # afterwards it degrades into a lost tensor under a green round.
-      preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
-      if preflight_problems:
-        failures.extend(preflight_problems)
-        src_names = []
-        for m in src_metadata:
-          src_names.extend(v.name for v in m.variables)
-        src_names.sort()
+      # File-based weight sync skips this check because weights are exchanged via checkpoint.
+      if getattr(self._handler, "needs_manifest_preflight", True):
+        preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
+        if preflight_problems:
+          failures.extend(preflight_problems)
+          src_names = []
+          for m in src_metadata:
+            src_names.extend(v.name for v in m.variables)
+          src_names.sort()
 
-        dst_names = []
-        for m in dst_metadata:
-          dst_names.extend(v.name for v in m.variables)
-        dst_names.sort()
-        logging.error(
-            "manifest preflight failed: %d source var(s), %d destination"
-            " var(s), %d problem(s)\n"
-            "  source sample:\n    %s\n"
-            "  destination sample:\n    %s\n"
-            "  problems (first 20):\n    %s",
-            len(src_names),
-            len(dst_names),
-            len(preflight_problems),
-            "\n    ".join(src_names[:8]),
-            "\n    ".join(dst_names[:8]),
-            "\n    ".join(preflight_problems[:20]),
-        )
-        raise fail(
-            "manifest preflight failed before any destination was quiesced;"
-            f" no rollback needed ({len(preflight_problems)} problems, first:"
-            f" {preflight_problems[0]})"
-        )
+          dst_names = []
+          for m in dst_metadata:
+            dst_names.extend(v.name for v in m.variables)
+          dst_names.sort()
+          logging.error(
+              "manifest preflight failed: %d source var(s), %d destination"
+              " var(s), %d problem(s)\n"
+              "  source sample:\n    %s\n"
+              "  destination sample:\n    %s\n"
+              "  problems (first 20):\n    %s",
+              len(src_names),
+              len(dst_names),
+              len(preflight_problems),
+              "\n    ".join(src_names[:8]),
+              "\n    ".join(dst_names[:8]),
+              "\n    ".join(preflight_problems[:20]),
+          )
+          raise fail(
+              "manifest preflight failed before any destination was quiesced;"
+              f" no rollback needed ({len(preflight_problems)} problems, first:"
+              f" {preflight_problems[0]})"
+          )
 
       loop = asyncio.get_running_loop()
       # Registrations are independent replacement writes into the handler's

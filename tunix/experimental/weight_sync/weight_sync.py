@@ -37,6 +37,7 @@ class WeightSyncMode(str, enum.Enum):
   NONE = "none"
   FALLBACK = "fallback"
   RAIDEN = "raiden"
+  GCS = "gcs"
 
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
