@@ -130,9 +130,7 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
-    self.max_response_length = request.generation_kwargs.get(
-        "max_response_length"
-    )
+    self.max_response_length = request.max_response_length
     # The stop set the sampler was configured with, which is what decides
     # whether a rollout ended on its own. Defined at the recipe level via
     # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
@@ -183,9 +181,10 @@ class TrajectoryCollectorEngine:
         effective_max_tokens = req_max_tokens
       else:
         raise ValueError(
-            "TrajectoryCollectorEngine requires either"
-            " request.generation_kwargs or the model_call callback to specify"
-            " max_generation_steps or max_tokens."
+            "TrajectoryCollectorEngine requires"
+            " request.max_response_length, request.generation_kwargs"
+            " ('max_generation_steps' or 'max_tokens'), or the model_call"
+            " callback to specify max_generation_steps."
         )
 
       generation_kwargs["max_tokens"] = effective_max_tokens

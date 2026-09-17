@@ -191,7 +191,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     req1 = datatypes.RolloutRequest(
         prompt_id="p1",
-        generation_kwargs={"max_response_length": 512},
+        max_response_length=512,
     )
     engine1 = collector.TrajectoryCollectorEngine(
         traj_id="t1",
@@ -223,7 +223,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
   def test_episode_options_are_forwarded_to_inner_engine(self):
     request = datatypes.RolloutRequest(
         prompt_id="p1",
-        generation_kwargs={"max_response_length": 512},
+        max_response_length=512,
         metadata={"episode_timeout": 10800, "overlong_filter": True},
     )
     agent = mock.MagicMock()
@@ -365,7 +365,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       req = datatypes.RolloutRequest(
           prompt_id="p1",
           prompt="What is 2+2?",
-          generation_kwargs={"max_response_length": 50},
+          max_response_length=50,
       )
       engine = collector.TrajectoryCollectorEngine(
           traj_id="t1",
@@ -709,6 +709,36 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
 
     self.assertEqual(engine.sampler.seen_max_tokens, [17])
 
+  def test_run_episode_caps_at_request_max_generation_steps_when_episode_budget_larger(
+      self,
+  ):
+    engine = self._make_collector({"max_generation_steps": 123})
+    _FakeInnerEngine.next_max_generation_steps = 500
+
+    with unittest.mock.patch.object(
+        collector.rl_collect_engine,
+        "TrajectoryCollectEngine",
+        _FakeInnerEngine,
+    ):
+      asyncio.run(engine.run_episode())
+
+    self.assertEqual(engine.sampler.seen_max_tokens, [123])
+
+  def test_run_episode_caps_at_episode_budget_when_request_max_generation_steps_larger(
+      self,
+  ):
+    engine = self._make_collector({"max_generation_steps": 123})
+    _FakeInnerEngine.next_max_generation_steps = 50
+
+    with unittest.mock.patch.object(
+        collector.rl_collect_engine,
+        "TrajectoryCollectEngine",
+        _FakeInnerEngine,
+    ):
+      asyncio.run(engine.run_episode())
+
+    self.assertEqual(engine.sampler.seen_max_tokens, [50])
+
 
 class ConvertTrajectoryItemTest(absltest.TestCase):
 
@@ -865,12 +895,10 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     eos_token_id = 7
 
   def _engine(self, max_response_length, tokenizer=None, eos_ids=(7,)):
-    generation_kwargs = {}
-    if max_response_length is not None:
-      generation_kwargs["max_response_length"] = max_response_length
     request = datatypes.RolloutRequest(
         prompt_id="p1",
-        generation_kwargs=generation_kwargs,
+        max_response_length=max_response_length,
+        generation_kwargs={},
     )
     return collector.TrajectoryCollectorEngine(
         traj_id="t1",

@@ -153,6 +153,7 @@ def build_prompt_item(
       "prompt": problem,
       "prompt_id": prompt_id,
       "max_turns": max_turns,
+      "max_response_length": max_response_length,
       "generation_kwargs": {
           "max_generation_steps": max_response_length,
           "temperature": temperature,

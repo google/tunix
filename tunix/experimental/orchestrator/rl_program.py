@@ -223,18 +223,14 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
-    algo_max_response_length = self.algo.max_response_length
-    if generation_args is None:
-      self.generation_args = datatypes.GenerationArgs(
-          max_response_length=algo_max_response_length,
+    algo_config = getattr(self.algo, "algo_config", None)
+    algo_max_response_length = getattr(self.algo, "max_response_length", None)
+    if algo_max_response_length is None and algo_config is not None:
+      algo_max_response_length = getattr(
+          algo_config, "max_response_length", None
       )
-    elif generation_args.max_response_length is None:
-      self.generation_args = dataclasses.replace(
-          generation_args,
-          max_response_length=algo_max_response_length,
-      )
-    else:
-      self.generation_args = generation_args
+    self.max_response_length = algo_max_response_length
+    self.generation_args = generation_args or datatypes.GenerationArgs()
 
     gen_temp = self.generation_args.temperature
     if gen_temp is not None:
@@ -271,7 +267,7 @@ class StandardRLProgram(RLProgram):
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
           self.batch_config,
-          max_response_length=self.generation_args.max_response_length,
+          max_response_length=self.max_response_length,
       )
     if assembler is not None:
       self.assembler = assembler
@@ -382,11 +378,17 @@ class StandardRLProgram(RLProgram):
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
           prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
+          if self.max_response_length is not None:
+            prompt_item.setdefault(
+                "max_response_length", self.max_response_length
+            )
         elif not hasattr(prompt_item, "prompt_id"):
           prompt_item = {
               "prompt": prompt_item,
               "prompt_id": f"prompt_{prompt_idx}",
           }
+          if self.max_response_length is not None:
+            prompt_item["max_response_length"] = self.max_response_length
 
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {

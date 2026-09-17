@@ -213,6 +213,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if isinstance(p, Mapping):
         max_turns = p.get("max_turns", max_turns)
 
+      max_response_length = getattr(p, "max_response_length", None)
+      if isinstance(p, Mapping):
+        max_response_length = p.get("max_response_length", max_response_length)
+
       for group_index in range(num_generations):
         request_metadata = dict(base_metadata)
         request_metadata.update(item_metadata)
@@ -237,6 +241,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 target_policy_version=version,
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
+                max_response_length=max_response_length,
                 metadata=request_metadata,
             )
         )

@@ -203,9 +203,22 @@ class WorkerInfo:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class GenerationArgs:
-  """Typed generation arguments used by the orchestrator generate API."""
+  """Typed per-turn generation arguments used by the orchestrator generate API.
+
+  This holds per-turn sampling and generation configuration (as opposed to
+  episode-level configuration like `max_turns` or `max_response_length` on
+  `RolloutRequest`).
+
+  Attributes:
+    max_generation_steps: Maximum number of tokens to generate in a single turn.
+    temperature: Sampling temperature for generation.
+    top_p: Nucleus sampling probability threshold.
+    top_k: Top-k sampling cutoff.
+    seed: Random seed for reproducible generation.
+    return_logprobs: Whether to return token log probabilities.
+  """
+
   max_generation_steps: int | None = None
-  max_response_length: int | None = None
   temperature: float | None = None
   top_p: float | None = None
   top_k: int | None = None
@@ -230,9 +243,11 @@ class RolloutRequest(Request):
     prompt_id: Unique identifier for this prompt within a task or dataset.
     group_index: Optional index within a group for group-based algorithms (e.g.,
       GRPO). Defaults to 0 for ungrouped.
-    generation_kwargs: Additional keyword arguments for generation (e.g.
-      sampling parameters like max_tokens and temperature).
+    generation_kwargs: Additional per-turn keyword arguments for generation
+      (e.g. sampling parameters like max_generation_steps and temperature).
     max_turns: Maximum number of conversation turns for environment interaction.
+    max_response_length: Optional cumulative response token budget across all
+      turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
   """
@@ -242,6 +257,7 @@ class RolloutRequest(Request):
   group_index: int = 0
   generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
   max_turns: int = 10
+  max_response_length: int | None = None
   target_policy_version: int = 0
 
   @property

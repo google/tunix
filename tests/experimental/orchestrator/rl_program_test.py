@@ -404,11 +404,14 @@ class RLProgramTest(absltest.TestCase):
           policy_version=0,
       )
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
-          [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
+          [{
+              "prompt": "prompt_data_0",
+              "prompt_id": "prompt_0",
+              "max_response_length": 1024,
+          }],
           num_generations=2,
           policy_version=0,
           generation_args=datatypes.GenerationArgs(
-              max_response_length=1024,
               return_logprobs=True,
           ),
       )
@@ -686,15 +689,25 @@ class RLProgramTest(absltest.TestCase):
           break
         await asyncio.sleep(0.01)
 
+      expected_p0 = {
+          "prompt": "prompt_0",
+          "prompt_id": "prompt_0",
+          "max_response_length": 1024,
+      }
+      expected_p1 = {
+          "prompt": "prompt_1",
+          "prompt_id": "prompt_1",
+          "max_response_length": 1024,
+      }
       self.assertEqual(
           dispatched,
-          [({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0)],
+          [(expected_p0, 0)],
       )
 
       await asyncio.sleep(0.1)
       self.assertEqual(
           dispatched,
-          [({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0)],
+          [(expected_p0, 0)],
       )
 
       program.policy_version = 1
@@ -703,8 +716,8 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(
           dispatched,
           [
-              ({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0),
-              ({"prompt": "prompt_1", "prompt_id": "prompt_1"}, 1),
+              (expected_p0, 0),
+              (expected_p1, 1),
           ],
       )
 
@@ -1550,11 +1563,10 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
-          [dict_item],
+          [{**dict_item, "max_response_length": 1024}],
           num_generations=2,
           policy_version=0,
           generation_args=datatypes.GenerationArgs(
-              max_response_length=1024,
               return_logprobs=True,
           ),
       )
@@ -2845,19 +2857,19 @@ class RLProgramTest(absltest.TestCase):
       )
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
-      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
       expected_gen_args = datatypes.GenerationArgs(
           max_generation_steps=128,
-          max_response_length=512,
           temperature=0.7,
           top_p=0.9,
           return_logprobs=True,
       )
       self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+      self.assertEqual(args[0][0].get("max_response_length"), 512)
 
     asyncio.run(_run())
 
-  def test_program_auto_injects_max_response_length_when_gen_args_none(self):
+  def test_program_passes_algo_max_response_length_when_gen_args_none(self):
     async def _run():
       self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
@@ -2872,12 +2884,12 @@ class RLProgramTest(absltest.TestCase):
       )
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
-      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
       expected_gen_args = datatypes.GenerationArgs(
-          max_response_length=512,
           return_logprobs=True,
       )
       self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+      self.assertEqual(args[0][0].get("max_response_length"), 512)
 
     asyncio.run(_run())
 
@@ -3036,13 +3048,13 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.assembler.max_segments_per_packed_row, 4)
 
   def test_program_creates_padded_assembler(self):
+    self.mock_algo.max_response_length = 2048
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
         reward_fns=[lambda x: 1.0],
         assembler=None,
-        generation_args=datatypes.GenerationArgs(max_response_length=2048),
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
             pad_id=5,
@@ -3061,7 +3073,6 @@ class RLProgramTest(absltest.TestCase):
         algo=self.mock_algo,
         reward_fns=[lambda x: 1.0],
         assembler=None,
-        generation_args=datatypes.GenerationArgs(max_response_length=2048),
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
             max_response_length=512,
@@ -3069,6 +3080,18 @@ class RLProgramTest(absltest.TestCase):
         ),
     )
     self.assertEqual(program_override.assembler.max_response_length, 512)
+
+  def test_program_falls_back_to_algo_config_max_response_length(self):
+    self.mock_algo.max_response_length = None
+    self.mock_algo.algo_config.max_response_length = 768
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        reward_fns=[lambda x: 1.0],
+    )
+    self.assertEqual(program.max_response_length, 768)
+    self.assertEqual(program.batch_config.max_response_length, 768)
 
   def test_program_creates_default_assembler(self):
     program = rl_program.StandardRLProgram(
