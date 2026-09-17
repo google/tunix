@@ -15,16 +15,21 @@
 """Unit tests for TrainerWorker.
 
 Verifies TrainerWorker RPC request unpacking (TrainRequest), delegation to
-AbstractTrainer (fwd_bwd, eval_step, update), and response metadata stamping.
+AbstractTrainer (fwd_bwd, eval_step, update), response metadata stamping, and
+per-token log-prob scorer run through AbstractTrainer.fwd_only.
 """
 
 from typing import Any
 
 from absl.testing import absltest
+from flax import nnx
+import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import trainer_worker
+from tunix.rl import common as rl_common
+from tunix.tests import test_common as tc
 
 
 class FakeTrainer(abstract_trainer.AbstractTrainer):
@@ -32,7 +37,8 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def __init__(self):
     self.fwd_bwd_calls = []
     self.eval_step_calls = []
-    self.per_token_logps_calls = []
+    self.fwd_only_calls = []
+    self.model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     self.policy_version = 3
     self.step_count = 10
     self.target_state = None
@@ -56,29 +62,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def eval_step(self, payload, **kwargs):
     self.eval_step_calls.append((payload, kwargs))
 
-  def per_token_logps(
-      self,
-      *,
-      prompt_tokens,
-      completion_tokens,
-      pad_id,
-      eos_id,
-      temperature=None,
-      segment_ids=None,
-      segment_positions=None,
-      micro_batch_size=None,
-  ):
-    self.per_token_logps_calls.append({
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "pad_id": pad_id,
-        "eos_id": eos_id,
-        "temperature": temperature,
-        "segment_ids": segment_ids,
-        "segment_positions": segment_positions,
-        "micro_batch_size": micro_batch_size,
-    })
-    return np.zeros(np.asarray(completion_tokens).shape, dtype=np.float32)
+  def fwd_only(self, fn, *args, **kwargs):
+    self.fwd_only_calls.append((args, kwargs))
+    return fn(self.model, *args, **kwargs)
 
   def save_checkpoint(self, metadata, **kwargs):
     pass
@@ -176,16 +162,48 @@ class TrainerWorkerTest(absltest.TestCase):
     with self.assertRaises(AttributeError):
       self.worker.set_target_state(target_state={"params": 1})
 
-  def test_per_token_logps_unpacks_request_and_delegates(self):
-    request = datatypes.LogprobsRequest(
-        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
-        completion_tokens=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
-        temperature=0.7,
-        pad_id=0,
-        eos_id=1,
-        segment_ids=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
-        segment_positions=np.array([[0, 1, 2], [0, 1, 0]], dtype=np.int32),
+  def _expected_logps(self, request, chunk_size=0):
+    graphdef, state = nnx.split(self.fake_trainer.model)
+    return np.asarray(
+        rl_common.compute_per_token_logps(
+            graphdef,
+            state,
+            prompt_tokens=jnp.asarray(request.prompt_tokens),
+            completion_tokens=jnp.asarray(request.completion_tokens),
+            pad_id=request.pad_id,
+            eos_id=request.eos_id,
+            stop_gradient=True,
+            temperature=request.temperature,
+            chunk_size=chunk_size,
+            segment_ids=(
+                None
+                if request.segment_ids is None
+                else jnp.asarray(request.segment_ids)
+            ),
+            segment_positions=(
+                None
+                if request.segment_positions is None
+                else jnp.asarray(request.segment_positions)
+            ),
+        )
     )
+
+  def _unpacked_request(self, temperature=1.0):
+    batch, prompt_len, completion_len = 3, 3, 4
+    return datatypes.LogprobsRequest(
+        prompt_tokens=np.arange(
+            1, 1 + batch * prompt_len, dtype=np.int32
+        ).reshape(batch, prompt_len),
+        completion_tokens=np.arange(
+            1, 1 + batch * completion_len, dtype=np.int32
+        ).reshape(batch, completion_len),
+        temperature=temperature,
+        pad_id=0,
+        eos_id=0,
+    )
+
+  def test_per_token_logps_matches_reference_scorer(self):
+    request = self._unpacked_request()
 
     result = self.worker.per_token_logps(items=request)
 
@@ -194,19 +212,98 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(result.model_version, self.fake_trainer.policy_version)
     self.assertIsInstance(result.per_token_logps, np.ndarray)
     self.assertEqual(result.per_token_logps.dtype, np.float32)
+    self.assertEqual(result.per_token_logps.shape, (3, 4))
+    # Whole request in one forward by default.
+    self.assertLen(self.fake_trainer.fwd_only_calls, 1)
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_micro_batches_in_order(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_1",
+        logps_micro_batch_size=2,
+    )
+    worker.initialize()
+    request = self._unpacked_request()
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+    (first_args, _), (second_args, _) = self.fake_trainer.fwd_only_calls
+    np.testing.assert_array_equal(first_args[1], request.completion_tokens[:2])
+    np.testing.assert_array_equal(second_args[1], request.completion_tokens[2:])
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_temperature_and_chunked_vocab(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_2",
+        logps_chunk_size=3,
+    )
+    worker.initialize()
+    request = self._unpacked_request(temperature=0.7)
+
+    result = worker.per_token_logps(items=request)
+
+    _, kwargs = self.fake_trainer.fwd_only_calls[0]
+    self.assertEqual(kwargs["temperature"], 0.7)
+    self.assertEqual(kwargs["chunk_size"], 3)
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request, chunk_size=3),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_packed_request(self):
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=0,
+        segment_ids=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+        segment_positions=np.array([[0, 1, 2], [0, 1, 0]], dtype=np.int32),
+    )
+
+    result = self.worker.per_token_logps(items=request)
+
     self.assertEqual(result.per_token_logps.shape, (2, 3))
-    self.assertLen(self.fake_trainer.per_token_logps_calls, 1)
-    call = self.fake_trainer.per_token_logps_calls[0]
-    self.assertEqual(call["pad_id"], 0)
-    self.assertEqual(call["eos_id"], 1)
-    self.assertEqual(call["temperature"], 0.7)
-    np.testing.assert_array_equal(
-        call["completion_tokens"], request.completion_tokens
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
     )
-    np.testing.assert_array_equal(call["segment_ids"], request.segment_ids)
-    np.testing.assert_array_equal(
-        call["segment_positions"], request.segment_positions
+
+  def test_per_token_logps_empty_batch_raises(self):
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((0, 3), dtype=np.int32),
+        completion_tokens=np.zeros((0, 4), dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=0,
     )
+    with self.assertRaises(ValueError):
+      self.worker.per_token_logps(items=request)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
 
   def test_per_token_logps_requires_pad_and_eos(self):
     request = datatypes.LogprobsRequest(
@@ -216,7 +313,7 @@ class TrainerWorkerTest(absltest.TestCase):
     )
     with self.assertRaises(ValueError):
       self.worker.per_token_logps(items=request)
-    self.assertEmpty(self.fake_trainer.per_token_logps_calls)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
 
 
 if __name__ == "__main__":
