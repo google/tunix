@@ -1135,6 +1135,32 @@ class RlEngineTokenInputTest(parameterized.TestCase):
       np.testing.assert_array_equal(result.tokens[0], [i])
       np.testing.assert_array_equal(result.logprobs[0], [-i])
 
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
+  def test_vllm_rollout_forwards_eos_tokens(self):
+    from tunix.generate import mappings  # pylint: disable=g-import-not-at-top
+    from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
+    from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top
+
+    mock_mapping = mock.Mock(spec=mappings.MappingConfig)
+    rollout_cfg = base_rollout.RolloutConfig(
+        eos_tokens=[151645, 151643],
+        rollout_mapping_config=mock_mapping,
+    )
+    with mock.patch.object(vllm_sampler, 'VllmSampler') as mock_sampler:
+      mock_instance = mock.Mock()
+      mock_sampler.return_value = mock_instance
+      with mock.patch('flax.nnx.state', return_value=mock.Mock()):
+        vllm_rollout.VllmRollout(
+            model=mock.Mock(),
+            tokenizer=mock.Mock(),
+            cache_config_or_size=1024,
+            mesh=mock.Mock(),
+            rollout_config=rollout_cfg,
+        )
+        self.assertEqual(mock_sampler.call_count, 1)
+        vllm_config = mock_sampler.call_args.kwargs['config']
+        self.assertEqual(vllm_config.eos_tokens, [151645, 151643])
+
 
 if __name__ == '__main__':
   absltest.main()
