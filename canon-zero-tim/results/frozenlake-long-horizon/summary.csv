@@ -1,4 +1,5 @@
 arm,run_id,steps,last_solve_ratio,trailing10_last,logp_diff_mean_max
-standard,2i5f31c2_canon-p57-fl-mism-m15-n15g-ccbcf572,149,0.00390625,0.03515625,0.03136182576417923
+standard,4m9p2ylk_canon-p57-fl-stan-m15-r01-567c96d5,182,0.015625,0.007421875,0.02779441513121128
 tis,oxkvtl0d_canon-p57-fl-is-m15-i15h-65606a98,149,0.05859375,0.112109375,0.03247183188796043
 zero_tim,3osny0pb_canon-p57-fl-zero-m15-r10-06a0fdb9,234,0.8359375,0.903125,0
+mismatch,2i5f31c2_canon-p57-fl-mism-m15-n15g-ccbcf572,149,0.00390625,0.03515625,0.03136182576417923
