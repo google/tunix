@@ -24,6 +24,14 @@ on:
       - main
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      # Exposed here so a MaxText ref can be tried without editing a workflow
+      # file. Plumbed straight through to tpu-tests.yml, where it is documented.
+      maxtext_ref:
+        description: 'MaxText git ref for the MaxText RL smoke test ("pinned" = the commit in requirements/maxtext_requirements.txt)'
+        required: false
+        type: string
+        default: 'main'
   schedule:
     # Run the job every 16 hours
     - cron:  '0 */16 * * *'
@@ -58,6 +66,10 @@ jobs:
     needs: build_tunix_package
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ready-to-submit') }}
     uses: ./.github/workflows/tpu-tests.yml
+    with:
+      # `inputs` is empty for pull_request and schedule, so fall back to the same
+      # defaults tpu-tests.yml declares.
+      maxtext_ref: ${{ inputs.maxtext_ref || 'main' }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}

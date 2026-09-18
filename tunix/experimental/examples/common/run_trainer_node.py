@@ -38,9 +38,22 @@ from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
 from tunix.utils import maxtext_utils
+
+# Import Raiden before anything touches a device, exactly as run_rollout_node
+# does and for the same reason -- see raiden_preload's module docstring. Without
+# this the trainer runs fine right up to the first weight sync and then dies
+# inside Raiden's source-prepare, with no Python frame to point at:
+#   trainer bind prepared 310 arrays
+#   F message.cc:348] File is already registered:
+#                     xla/pjrt/proto/execute_options.proto
+# The trainer is a weight-sync source in every RL run, so it needs the preload
+# on mcJAX and on Pathways alike: proxy_runtime and RAIDEN_USE_FFI make no
+# difference, both modes abort here without it.
+raiden_preload.import_raiden()
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
