@@ -38,7 +38,7 @@ class CheckResultsTest(unittest.TestCase):
   def test_the_checked_in_tree_passes(self):
     done = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True)
     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-    self.assertIn("RESULTS_CHECK PASS runs=3", done.stdout)
+    self.assertIn("RESULTS_CHECK PASS runs=6", done.stdout)
 
   def test_the_staged_tree_passes(self):
     done = self.stage()
