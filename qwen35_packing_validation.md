@@ -57,8 +57,8 @@ querying the wrong one returns nothing.
 
 ## 2. Is packing on? Four independent checks
 
-Each check is stronger than the last. The first says the code path was chosen;
-the last says the trainer actually consumed packed rows.
+Each check is stronger than the last. The first establishes that the code path
+was selected; the last establishes that the trainer consumed packed rows.
 
 ### 2.1 The assembler was selected
 
@@ -83,8 +83,7 @@ each microbatch is 8 packed rows of up to 4096 tokens — one row per FSDP shard
 Seeing `pack_size: 8` rather than `pack_size: 1` is itself confirmation that the
 trainer mesh was read correctly.
 
-If this line is absent from your run, packing is off. That is the single most
-useful thing to grep for.
+If this line is absent from your run, packing is off. Grep for it first.
 
 ### 2.2 Rows really contained multiple sequences
 
@@ -122,11 +121,10 @@ The trajectory totals above are exact, not approximate:
 - run 10: 25,600 trajectories = **exactly** 100 steps × 256
 - run 11: 5,120 trajectories = **exactly** 20 steps × 256
 
-Every rollout appears in exactly one packed row. This is the conservation check
-that matters — a packer that dropped or double-counted sequences would show up
-here first, and does not.
+Every rollout appears in exactly one packed row. A packer that dropped or
+double-counted sequences would change these totals; they are exact.
 
-The collapse in work per step:
+Work per step:
 
 | | maz-q35-10 | maz-q35-11 |
 | --- | --- | --- |
@@ -137,10 +135,10 @@ The collapse in work per step:
 | Padded token area, unpacked (rows × 1536) | 39,321,600 | 7,864,320 |
 | **Padding eliminated** | **2.33×** | **2.38×** |
 
-The two ratios differ because they measure different things. 6.2× is the
-reduction in *kernel invocations*; 2.33× is the reduction in *tokens the trainer
-has to push through those kernels*. The second bounds the achievable speedup;
-the first is why the fixed per-microbatch overhead falls away.
+The two ratios differ because they measure different quantities. 6.2× is the
+reduction in kernel invocations; 2.33× is the reduction in tokens processed by
+those kernels. The second bounds the achievable speedup; the first reduces the
+fixed per-microbatch overhead.
 
 ### 2.4 The trainer was given the larger budget, not just the orchestrator
 
@@ -158,8 +156,8 @@ max_target_length = max(max_prompt_length + max_response_length, max_seq_token_p
 ```
 
 Had only the orchestrator received the flag, the trainer would have been
-compiled for 1536-token rows and rejected the 4096-token packed rows outright.
-Both runs completing is therefore evidence that both sides agreed.
+compiled for 1536-token rows and rejected the 4096-token packed rows. Both runs
+completing is therefore evidence that both processes received the same value.
 
 ---
 
@@ -194,11 +192,11 @@ There is no step at which the time steps up and stays up, which is what a
 recompilation would look like. Run 11's 123.07 s at step 1 is the first
 trajectory-CSV flush, not a retrace.
 
-**Trajectory logging is free at this scale.** Run 11 wrote every rollout to GCS
-and had a *lower* median step time than run 10 (96.30 s vs 97.12 s) — the
-difference is within run-to-run noise, so the logging cost is below the
-measurement floor. It is not free beyond this scale: `maz-q35-12` hung at step 22
-inside the logger's GCS read and never recovered. See §6.
+**Trajectory logging costs nothing measurable at this scale.** Run 11 wrote every
+rollout to GCS and had a lower median step time than run 10 (96.30 s vs
+97.12 s) — the difference is within run-to-run noise, so the logging cost is
+below the measurement floor. This does not extend beyond 20 steps: `maz-q35-12`
+hung at step 22 inside the logger's GCS read and never recovered. See §6.
 
 Weight sync, run 10: 86.90 s for the initial transfer, then 52–53 s per step.
 That is over half the 97 s step time, and is the largest single target for
@@ -225,17 +223,18 @@ Two findings worth acting on, both unrelated to packing:
   completed generations scored zero. Of the 61 active groups, 44 contain a
   truncation and **31 are active only because of one**. Raising
   `MAX_RESPONSE_LENGTH` above 1024 would therefore roughly halve the active-group
-  rate, from 19.1% to about 9% — most of the current gradient signal is the model
-  being penalised for running out of room rather than for being wrong.
+  rate, from 19.1% to about 9%. Most of the current gradient signal comes from
+  truncation, not from incorrect answers.
 - At 91.8% reward 1.0, GSM8K is close to saturated for this model. A harder
   dataset would give more signal per step.
 
 ### The unpacked control: maz-q35-13
 
-Runs 10 and 11 establish that packing is active and that nothing downstream broke,
-but on their own they cannot separate "packing is harmless" from "no harm was
-noticed". `maz-q35-13` is the other arm: 20 steps, identical to `maz-q35-12` down
-to the image digest, with `MAX_SEQ_TOKEN_PER_TPU` empty. That drops
+Runs 10 and 11 establish that packing is active and that nothing downstream broke.
+Neither run has an unpacked counterpart, so neither measures how much packing
+changes the reward or the completion lengths. `maz-q35-13` supplies that
+counterpart: 20 steps, identical to `maz-q35-12` down to the image digest, with
+`MAX_SEQ_TOKEN_PER_TPU` empty. That drops
 `--max_seq_token_per_tpu` from both the orchestrator and the trainer
 (`k8s_launcher.sh:242,335`, both guarded with `:+`), selecting
 `PaddedBatchAssembler` and leaving `max_target_length` at 1536 — confirmed in the
@@ -262,9 +261,9 @@ the comparison is statistical, not exact-match.
 | Completion chars, p50 / p90 / p99 | 1803 / 2774 / 4450 | 1798 / 2770 / 4466 |
 | Whitespace words, mean / median | 303.1 / 271 | 303.2 / 271 |
 
-**Packing is worth 1.74× on wall-clock step time.** That is well below the 6.2×
+**Packing reduces wall-clock step time by 1.74×.** That is well below the 6.2×
 reduction in forward/backward passes, because generation runs in vLLM and is
-unaffected by packing; only the trainer's share of the step shrinks.
+unaffected by packing; only the trainer's portion of the step is reduced.
 
 **Generation quality is unchanged within a tight bound.** Because the arms are
 matched step by step, the reward difference is tested paired:
@@ -280,14 +279,14 @@ paired per-step reward difference (control - packed), n = 20
 
 Pairing is what makes this informative. The spread between steps is about 0.05, so
 an unpaired 20-step comparison could only have resolved differences larger than
-roughly 0.03. Matching on prompts drops the within-pair spread to 0.0117 and
+roughly 0.03. Matching on prompts reduces the within-pair spread to 0.0117 and
 tightens the bound about fourfold. **Packing changes mean reward by less than 0.8
 percentage points.** The completion-length distributions agree at every percentile
-measured, which is the more direct check on generation: packing is trainer-side
-only, so it can reach generation solely through the gradient.
+measured. That is the more direct check, because packing applies only to the
+trainer and can reach generation only through the gradient.
 
-This bounds the difference; it does not prove it is zero, and 20 steps on a
-near-saturated dataset is a limited window. The exact-equality guarantee comes from
+This bounds the difference; it does not establish that it is zero, and 20 steps on
+a near-saturated dataset is a narrow window. The exact-equality result comes from
 §4.
 
 ---
@@ -306,9 +305,9 @@ are from runs on a CPU box on 2026-09-18; all exit 0.
 JAX_PLATFORMS=cpu python3 -m pytest tests/post_training/unit/maxtext_engine_packing_test.py -q
 ```
 
-| Class | Test | What it pins down |
+| Class | Test | What it establishes |
 | --- | --- | --- |
-| `PackedVersusUnpackedLogpsTest` | `test_packed_logps_match_unpacked_per_segment` | Per-token log-probs of a packed row equal those of the same sequences run separately. This is the foundational claim; everything else is downstream. |
+| `PackedVersusUnpackedLogpsTest` | `test_packed_logps_match_unpacked_per_segment` | Per-token log-probs of a packed row equal those of the same sequences run separately. Every other test in this table depends on this one holding. |
 | | `test_segment_positions_matter_only_up_to_a_per_segment_offset` | A sequence's result does not depend on where in the row it landed. Establishes segment isolation in attention and position encoding. |
 | `PackedVersusUnpackedGradientsTest` | `test_packed_gradients_match_unpacked_over_the_whole_tree` | Gradients match across the entire parameter pytree, not just the loss scalar. |
 | | `test_packed_denominator_counts_segments_not_rows` | The loss denominator is the segment count, not the row count. Getting this wrong silently scales the learning rate by roughly 6× at our density. |
@@ -328,17 +327,18 @@ JAX_PLATFORMS=cpu python3 -m pytest tests/post_training/unit/maxtext_engine_pack
 
 The last two rows deserve emphasis. `ClosedFormPackedLossTest` is the only test
 here that does not compare one implementation against another — it compares
-against arithmetic done on paper. Its companion mutation test is what keeps it
-honest.
+against arithmetic done on paper. Its companion mutation test establishes that
+the comparison is sensitive enough to detect a wrong aggregation mode.
 
 ### 4.2 Segment IDs reach the model correctly (MaxText)
 
 `tests/post_training/unit/tunix_adapter_test.py` — **18 tests**, classes
 `TunixAdapterSegmentIdsTest` (9) and `TunixAdapterAttentionMaskTest` (9).
 
-These cover the handoff where packing most plausibly breaks quietly: whether
-`segment_ids` is synthesised, passed through, or overridden, and precedence
-between an explicit `segment_ids`, an attention mask, and `pad_id`. Notable:
+These cover the handoff where a packing error would be least likely to raise:
+whether `segment_ids` is synthesised, passed through, or overridden, and
+precedence between an explicit `segment_ids`, an attention mask, and `pad_id`.
+Notable:
 `test_segment_ids_is_named_so_the_tunix_gate_passes` (the parameter name is part
 of the contract), `test_recovery_is_exact_for_every_query_row` (mask →
 segment-ID conversion is exact, not approximate), and `test_mask_survives_jit`.
@@ -350,8 +350,8 @@ segment-ID conversion is exact, not approximate), and `test_mask_survives_jit`.
 
 The bin packer itself. `test_every_item_is_packed_only_once` is the unit-level
 version of the conservation check in §2.3. `test_pack_bin_exceeds_budget_raises`
-and `test_oversized_sequence_errors` make budget violations loud rather than
-truncating. `test_row_layout`, `test_reserve_non_action_mask_zeros` and
+and `test_oversized_sequence_errors` establish that a budget violation raises
+rather than truncating. `test_row_layout`, `test_reserve_non_action_mask_zeros` and
 `test_carried_per_token_fields_in_packed_row` verify that per-token fields —
 advantages, completion masks, logprobs — are sliced and placed with the tokens
 they belong to, which is where an off-by-one would corrupt training without
@@ -418,7 +418,7 @@ A larger end-to-end comparison harness exists at
 
 ## 5. What these runs do *not* exercise
 
-Three packing-adjacent code paths are inactive here. Stating this explicitly
+Three code paths related to packing are inactive here. Stating this explicitly
 matters, because open issues against them do not apply to these results.
 
 **Router replay is not invoked.** `router_replay_gen_model_input_fn` is defined
@@ -434,7 +434,7 @@ distributed path installs `GRPOAdapter`'s `_algo_model_input` instead
 greater than 1, and every non-data axis equal to 1. Our trainer mesh is data 1 /
 FSDP 8, failing two of the three.
 
-**The unequal-segment-length aggregation gap is closed and present in this
+**The fix for aggregation over unequal segment lengths is present in this
 image.** `sequence-mean-token-mean` and `token-mean` differ only when segments
 have unequal lengths, which packing guarantees. The segmented implementation
 dispatches automatically whenever `segment_ids` is present
@@ -507,8 +507,9 @@ MAX_SEQ_TOKEN_PER_TPU= bash docker/maz-q35/submit.sh 13 20 start
 ```
 
 Note the `-` rather than `:-` in `${MAX_SEQ_TOKEN_PER_TPU-4096}` at
-[157](docker/maz-q35/submit.sh#L157): an explicitly empty value has to survive
-instead of falling back to the default. Confirm the arm rendered correctly by
+[157](docker/maz-q35/submit.sh#L157): with `:-`, an explicitly empty value is
+replaced by the default; with `-`, it is preserved. Confirm the arm rendered
+correctly by
 checking that `--max_seq_token_per_tpu` appears zero times under `DRY_RUN=true`
 (it appears twice in the packed arm) and that the trainer logs
 `max_target_length: 1536`.
