@@ -128,16 +128,19 @@ export TRUNCATED_IMPORTANCE_SAMPLING_TYPE="${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:
 export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN="${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-${TIS_RATIO_MIN:-0.999}}"
 export TRUNCATED_IMPORTANCE_SAMPLING_RATIO="${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-${TIS_RATIO_MAX:-1.002}}"
 
-# Numerical Parity Flags (FP32 Router Gate, FP32 LM Head Logits, Ragged Dot / GDN, Router Replay)
+# Numerical Parity Flags (FP32 Router Gate, FP32 Weight Sum, FP32 LM Head Logits, GDN/Norm FP32, Router Replay)
 export FLOAT32_GATE_LOGITS="${FLOAT32_GATE_LOGITS:-true}"
+export FLOAT32_WEIGHT_SUM="${FLOAT32_WEIGHT_SUM:-true}"
+export FLOAT32_QK_PRODUCT="${FLOAT32_QK_PRODUCT:-true}"
 export FLOAT32_LOGITS="${FLOAT32_LOGITS:-true}"
 export ENABLE_ROUTER_REPLAY="${ENABLE_ROUTER_REPLAY:-1}"
 export TRAINER_MAXTEXT_ATTENTION="${TRAINER_MAXTEXT_ATTENTION:-dot_product}"
-export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-autoselected}"
+export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-vllm_rpa}"
 
 # vLLM Rollout Engine Configuration
 # Note: VLLM_ASYNC_SCHEDULING is set to "false" because enable_return_routed_experts=True
 # (required for MoE router replay) is incompatible with vLLM async scheduling.
+export VLLM_ADDITIONAL_CONFIG="${VLLM_ADDITIONAL_CONFIG:-{\"sharding\":{\"sharding_strategy\":{\"expert_parallelism\":2,\"tensor_parallelism\":1,\"enable_dp_attention\":true}},\"custom_mamba_cache_multiplier\":16,\"maxtext_config\":{\"scan_layers\":false,\"attention\":\"vllm_rpa\",\"allow_split_physical_axes\":true,\"use_multimodal\":false,\"prefuse_moe_weights\":true}}}"
 export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-32768}"
 export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}"
 export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-32}"
