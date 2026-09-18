@@ -516,7 +516,13 @@ class UtilsTest(parameterized.TestCase):
     )
 
   def test_transfer_state_with_mappings_gemma4(self):
-    """Test transfer_state_with_mappings for Gemma4."""
+    """Test transfer_state_with_mappings for Gemma4.
+
+    Targets the tpu-inference >= 0.28 pytree: separate `q_proj` / `k_proj` /
+    `v_proj` (no fused `qkv_proj`), merged `gate_up_proj`, and fused MoE
+    expert kernels. Layer 0 is a regular (kv_einsum) layer, layer 1 mimics a
+    k_eq_v GLOBAL layer that only has `k_einsum` / `k_proj`.
+    """
     from tunix.models.gemma4.mapping_vllm_jax import VLLM_JAX_MAPPING
 
     # Mock source state (Tunix style)
@@ -539,13 +545,25 @@ class UtilsTest(parameterized.TestCase):
         "layers.0.moe.linear": MockParam(
             jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
         ),
+        "layers.1.attn.q_einsum.w": MockParam(
+            jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8) + 1
+        ),
+        "layers.1.attn.k_einsum.w": MockParam(
+            jnp.arange(2 * 16 * 8, dtype=jnp.float32).reshape(2, 16, 8) + 1
+        ),
     }
     src_state = MockState(src_params)
 
     # Mock destination state (vLLM Jax backend style)
     dst_params = {
-        "language_model.layers.0.self_attn.qkv_proj.weight": MockParam(
-            jnp.zeros((16, 64), dtype=jnp.float32)
+        "language_model.layers.0.self_attn.q_proj.weight": MockParam(
+            jnp.zeros((16, 4, 8), dtype=jnp.float32)
+        ),
+        "language_model.layers.0.self_attn.k_proj.weight": MockParam(
+            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        ),
+        "language_model.layers.0.self_attn.v_proj.weight": MockParam(
+            jnp.zeros((16, 2, 8), dtype=jnp.float32)
         ),
         "language_model.layers.0.mlp.gate_up_proj.weight": MockParam(
             jnp.zeros((16, 64), dtype=jnp.float32)
@@ -556,46 +574,95 @@ class UtilsTest(parameterized.TestCase):
         "language_model.layers.0.experts.kernel_down_proj_EFD": MockParam(
             jnp.zeros((4, 16, 8), dtype=jnp.float32)
         ),
+        "language_model.layers.1.self_attn.q_proj.weight": MockParam(
+            jnp.zeros((16, 4, 8), dtype=jnp.float32)
+        ),
+        "language_model.layers.1.self_attn.k_proj.weight": MockParam(
+            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        ),
     }
     dst_state = MockState(dst_params)
 
-    # Apply preprocessing if it exists in mapping
-    if "preprocess_src_state" in VLLM_JAX_MAPPING:
-      src_state = VLLM_JAX_MAPPING["preprocess_src_state"](src_state)
+    src_state = VLLM_JAX_MAPPING["preprocess_src_state"](src_state)
+    # kv_einsum must be split; a fused qkv key must not be produced.
+    self.assertIn("layers.0.attn.k_einsum.w", src_state.params)
+    self.assertIn("layers.0.attn.v_einsum.w", src_state.params)
+    self.assertNotIn("layers.0.attn.kv_einsum.w", src_state.params)
+    self.assertNotIn("layers.0.attn.qkv_einsum.w", src_state.params)
+    self.assertNotIn("layers.1.attn.v_einsum.w", src_state.params)
+    self.assertIn("layers.0.mlp.gate_up_proj.kernel", src_state.params)
+    self.assertNotIn("layers.0.mlp.gate_proj.kernel", src_state.params)
+    self.assertNotIn("layers.0.mlp.up_proj.kernel", src_state.params)
 
     key_mappings = VLLM_JAX_MAPPING["to_hf_mappings"]
     transpose_keys = VLLM_JAX_MAPPING["to_hf_transpose_keys"]
+    hook_fns = VLLM_JAX_MAPPING["to_hf_hook_fns"]
 
+    tp_size = 2
     new_tgt_state = utils.transfer_state_with_mappings(
         src_state,
         dst_state,
         key_mappings=key_mappings,
+        key_mapping_hook_fns=hook_fns,
         transpose_keys=transpose_keys,
+        tp_size=tp_size,
     )
 
     # Assertions
-    q_val = jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
-    kv_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
-    k_val = kv_val[0]
-    v_val = kv_val[1]
-
-    q_val_t = jnp.reshape(jnp.transpose(q_val, (1, 0, 2)), (16, -1))
-    k_val_t = jnp.reshape(jnp.transpose(k_val, (1, 0, 2)), (16, -1))
-    v_val_t = jnp.reshape(jnp.transpose(v_val, (1, 0, 2)), (16, -1))
-
-    expected_qkv = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
-
-    gate_val = jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
-    up_val = jnp.arange(16 * 32, dtype=jnp.float32).reshape(16, 32)
-    expected_gate_up = jnp.concatenate([gate_val, up_val], axis=-1)
+    q_val = src_params["layers.0.attn.q_einsum.w"].value
+    kv_val = src_params["layers.0.attn.kv_einsum.w"].value
+    ndh_to_dnh = lambda x: jnp.transpose(x, (1, 0, 2))
 
     self.assertTrue(
         jnp.array_equal(
             new_tgt_state.params[
-                "language_model.layers.0.self_attn.qkv_proj.weight"
+                "language_model.layers.0.self_attn.q_proj.weight"
             ],
-            expected_qkv,
+            ndh_to_dnh(q_val),
         )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params[
+                "language_model.layers.0.self_attn.k_proj.weight"
+            ],
+            ndh_to_dnh(kv_val[0]),
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params[
+                "language_model.layers.0.self_attn.v_proj.weight"
+            ],
+            ndh_to_dnh(kv_val[1]),
+        )
+    )
+    # k_eq_v layer: q/k only.
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params[
+                "language_model.layers.1.self_attn.q_proj.weight"
+            ],
+            ndh_to_dnh(src_params["layers.1.attn.q_einsum.w"].value),
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params[
+                "language_model.layers.1.self_attn.k_proj.weight"
+            ],
+            ndh_to_dnh(src_params["layers.1.attn.k_einsum.w"].value),
+        )
+    )
+
+    # vLLM's merged gate_up_proj is TP-interleaved:
+    # [gate_shard0 | up_shard0 | gate_shard1 | up_shard1 | ...].
+    gate_val = src_params["layers.0.mlp.gate_proj.kernel"].value
+    up_val = src_params["layers.0.mlp.up_proj.kernel"].value
+    gate_chunks = jnp.split(gate_val, tp_size, axis=-1)
+    up_chunks = jnp.split(up_val, tp_size, axis=-1)
+    expected_gate_up = jnp.concatenate(
+        [c for pair in zip(gate_chunks, up_chunks) for c in pair], axis=-1
     )
     self.assertTrue(
         jnp.array_equal(
