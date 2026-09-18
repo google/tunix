@@ -109,6 +109,8 @@ export MAX_GRAD_NORM="${MAX_GRAD_NORM:-0.125}"
 export WARMUP_STEPS_FRACTION="${WARMUP_STEPS_FRACTION:-0.0}"
 export LEARNING_RATE_FINAL_FRACTION="${LEARNING_RATE_FINAL_FRACTION:-1.0}"
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
+# Freeze MoE router gate kernel weights (from atwigg/mlperf)
+export TRAINABLE_PARAMETERS_MASK="${TRAINABLE_PARAMETERS_MASK:-[\"^(?!.*routed_experts/gate/kernel).*\"]}"
 
 # GRPO / DAPO Loss & Sequence-Mask-TIS
 # NOTE: In Tunix, FORCE_ON_POLICY_RATIO="true" + USE_ROLLOUT_LOGPS="false" sets
