@@ -1,4 +1,10 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
+#
+# scripts/install_maxtext.sh rewrites the two git refs below to $MAXTEXT_REF,
+# which CI defaults to `main`. The commits pinned here are what you get from a
+# plain `pip install -r`, and what CI uses when MAXTEXT_REF=pinned. Keep the two
+# lines pointing at the same commit: the adapter and the trainer engine are the
+# two halves of one integration.
 maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@8c2e29218c01b6287ba85e8d0dc9555561f7634c
 maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@8c2e29218c01b6287ba85e8d0dc9555561f7634c#subdirectory=src/maxtext/integration/vllm
 aqtp
