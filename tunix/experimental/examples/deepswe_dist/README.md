@@ -25,6 +25,22 @@ cd tunix/experimental/examples/deepswe_dist
 USE_AGENT_SANDBOX=1 BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
 ```
 
+You can also launch components individually using `--command`:
+
+```bash
+# Terminal 1: CPU orchestrator
+./launcher.sh --command orchestrator
+
+# Terminal 2: Trainer worker
+./launcher.sh --command trainer
+
+# Terminal 3: Rollout worker
+./launcher.sh --command rollout
+
+# Stop running background workers
+./launcher.sh --command stop
+```
+
 For sandbox placement, set `SANDBOX_NAMESPACE`, `SANDBOX_NODE_SELECTOR_KEY`, and
 `SANDBOX_NODE_SELECTOR_VAL` before launching. The launcher forwards them to the
 rollout worker as the `agent_sandbox_rl` variables consumed by `SWEEnv`.
