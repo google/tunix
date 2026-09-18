@@ -319,6 +319,10 @@ class StandardRLProgram(RLProgram):
             # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
             self._in_flight_rollouts -= len(completed)
             for item in completed:
+              if getattr(item, "status", None) == "ERROR":
+                err = getattr(item, "error", None)
+                msg = getattr(err, "message", str(err)) if err else "Unknown rollout failure"
+                raise RuntimeError(f"Rollout worker returned ERROR: {msg}")
               await self.raw_q.put(item)
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
@@ -626,6 +630,7 @@ class StandardRLProgram(RLProgram):
     # --- 4. Trainer Metrics ---
     loss_val = None
     perplexity_val = None
+    trainer_scalars: dict[str, float] = {}
     if trainer_metrics is None:
       if isinstance(step_result, dict):
         trainer_metrics = step_result.get("metrics")
@@ -709,6 +714,7 @@ class StandardRLProgram(RLProgram):
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v)
         if val is not None:
+          trainer_scalars[k] = val
           metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
           self.metrics_logger.log(
               self.metrics_prefix, metric_key, val, self.mode, log_step
@@ -720,6 +726,7 @@ class StandardRLProgram(RLProgram):
           continue
         val = _extract_scalar(v)
         if val is not None:
+          trainer_scalars[k] = val
           metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
           self.metrics_logger.log(
               self.metrics_prefix, metric_key, val, self.mode, log_step
@@ -732,6 +739,7 @@ class StandardRLProgram(RLProgram):
         "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
+        "trainer_scalars": trainer_scalars,
     }
 
   async def train_stage(self) -> None:
@@ -908,15 +916,41 @@ class StandardRLProgram(RLProgram):
       loss_val = metrics_summary["loss_val"]
       perplexity_val = metrics_summary["perplexity_val"]
       if self.mode == Mode.TRAIN:
+        trainer_scalars = metrics_summary.get("trainer_scalars", {})
+        tis_info = ""
+        for diag_k, label in (
+            ("tis/is_oob_ratio", "tis_oob"),
+            ("router_replay/replayed_token_ratio", "replay_tok"),
+            ("sampler_is/seq_in_1pct", "in_1pct"),
+            ("sampler_is/seq_in_5pct", "in_5pct"),
+            ("sampler_is/would_drop_0p5_2", "would_drop_0p5_2"),
+            ("sampler_is/seq_geomean_mean", "seq_geomean"),
+            ("sampler_trainer/logp_diff_mean", "logp_diff_mean"),
+            ("sampler_trainer/logp_diff_p99", "logp_diff_p99"),
+            # Zero-filled sampler logprobs. `unfilled` is the fraction of scored
+            # tokens with no behaviour logprob (batch_assembly.py:237-240 pads
+            # with 0.0); the `_filled` pair is the same statistic over the
+            # positions that do have one. If unfilled > 0 and the filled numbers
+            # are much better, the disparity is an assembly artifact, not engine
+            # numerics.
+            ("sampler_trainer/logps_unfilled_frac", "unfilled"),
+            ("sampler_trainer/logp_diff_mean_filled", "logp_diff_mean_fil"),
+            ("sampler_trainer/seq_geomean_filled", "seq_geomean_fil"),
+            ("ppo_kl", "ppo_kl"),
+        ):
+          val = trainer_scalars.get(diag_k)
+          if val is not None:
+            tis_info += f" - {label}: {val:.4f}"
         logging.info(
             "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - perplexity: %s - step_time: %.2fs",
+            " %.4f - perplexity: %s - step_time: %.2fs%s",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
             metrics_summary["advantage_mean"],
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
+            tis_info,
         )
 
       if self.on_step_end:

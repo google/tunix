@@ -52,4 +52,4 @@ else
   gcloud container clusters get-credentials "$CLUSTER" "$LOCATION_FLAG" --project="$PROJECT" --dns-endpoint || { echo "gcloud get-credentials failed" >&2; return 1 2>/dev/null || exit 1; }
   kubectl config use-context "$CONTEXT_NAME" >/dev/null || { echo "kubectl use-context failed" >&2; return 1 2>/dev/null || exit 1; }
 fi
-kubectl config set-context --current --namespace=default >/dev/null || true
+kubectl config set-context --current --namespace=${K8S_NAMESPACE:-default} >/dev/null || true

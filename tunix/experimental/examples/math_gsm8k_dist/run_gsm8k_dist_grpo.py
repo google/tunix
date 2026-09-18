@@ -127,6 +127,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument(
+      "--epsilon_high",
+      type=float,
+      default=None,
+      help="Upper bound clipping value for GRPO loss (e.g. 0.28 for MLPerf).",
+  )
+  parser.add_argument(
+      "--loss_agg_mode",
+      type=str,
+      default="sequence-mean-token-mean",
+      choices=(
+          "token-mean",
+          "sequence-mean-token-mean",
+          "sequence-mean-token-scale",
+          "seq-mean-token-sum",
+          "sequence-mean-token-sum-norm",
+      ),
+      help="Loss aggregation mode across sequences and tokens.",
+  )
+  parser.add_argument(
       "--offpolicy",
       "--max_staleness",
       dest="max_staleness",
@@ -187,8 +206,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--wandb_project",
       type=str,
-      default=os.getenv("WANDB_PROJECT", "trellis-gsm8k"),
+      default=os.getenv("WANDB_PROJECT", "tunix"),
       help="W&B project name.",
+  )
+  parser.add_argument(
+      "--wandb_entity",
+      type=str,
+      default=os.getenv("WANDB_ENTITY", "google-trellis"),
+      help="W&B entity or team name.",
   )
   parser.add_argument(
       "--wandb_run_name",
@@ -212,6 +237,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--truncated_importance_sampling_type",
+      type=str,
+      default=None,
+      choices=(None, "seq-mask-tis"),
+      help="Truncated importance sampling type. 'seq-mask-tis' for sequence masking TIS.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min",
+      type=float,
+      default=None,
+      help="Lower bound for TIS keep-band (e.g. 0.5).",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio",
+      type=float,
+      default=None,
+      help="Upper bound for TIS keep-band (e.g. 2.0).",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help="Mask overlong completions from both loss numerator and denominator.",
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold",
+      type=float,
+      default=None,
+      help="Drop sequences whose multiplicative probability error exceeds this threshold.",
+  )
+  parser.add_argument(
+      "--return_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help="Capture MoE expert routing during rollout and replay it in trainer.",
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -223,9 +285,17 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
+      loss_agg_mode=args.loss_agg_mode,
       beta=args.beta,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
+      truncated_importance_sampling_type=args.truncated_importance_sampling_type,
+      truncated_importance_sampling_ratio_min=args.truncated_importance_sampling_ratio_min,
+      truncated_importance_sampling_ratio=args.truncated_importance_sampling_ratio,
+      overlong_loss_masking=args.overlong_loss_masking,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      sampler_is_report_bands=((0.5, 2.0),),
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -236,6 +306,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           else args.max_prompt_length + args.max_response_length
       ),
       max_response_length=args.max_response_length,
+      train_micro_batch_size=args.train_micro_batch_size,
   )
 
 
@@ -391,6 +462,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       flush_every_n_steps=args.flush_metrics_every_n_steps,
       backend_kwargs={
           "wandb": {
+              "entity": args.wandb_entity,
               "config": vars(args),
           }
       },
@@ -407,6 +479,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       top_p=args.top_p,
       top_k=None if args.top_k < 0 else args.top_k,
       return_logprobs=True,
+      return_routed_experts=args.return_routed_experts,
   )
   program = rl_program.StandardRLProgram(
       algo=algo,

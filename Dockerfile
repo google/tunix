@@ -45,8 +45,11 @@ RUN uv pip install .
 
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install --upgrade flax && \
-    uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git
+    uv pip install torchax aqtp tokamax math_verify drjax
+
+# Install MaxText locally so our MoE router replay sentinel fix is included.
+COPY maxtext_local/ /app/maxtext/
+RUN uv pip install --no-deps /app/maxtext/
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
