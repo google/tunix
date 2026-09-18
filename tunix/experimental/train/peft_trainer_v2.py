@@ -190,7 +190,11 @@ def _calculate_global_batch_size(train_example: Any) -> int:
 def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
   """Returns the array dtype of every optimizer-state variable."""
   return jax.tree_util.tree_map(
-      lambda value: value.get_value().dtype,
+      lambda value: (
+          value.get_value().dtype
+          if hasattr(value.get_value(), "dtype")
+          else None
+      ),
       nnx.state(optimizer, nnx.optimizer.OptState),
       is_leaf=lambda value: isinstance(value, nnx.Variable),
   )
@@ -202,8 +206,14 @@ def _restore_opt_state_float_dtypes(
   """Restores floating optimizer-state leaves to their pre-update dtypes."""
 
   def _restore(value, dtype):
+    if dtype is None:
+      return
     array = value.get_value()
-    if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
+    if (
+        hasattr(array, "dtype")
+        and jnp.issubdtype(array.dtype, jnp.floating)
+        and array.dtype != dtype
+    ):
       value.set_value(array.astype(dtype))
 
   jax.tree_util.tree_map(

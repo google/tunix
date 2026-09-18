@@ -43,6 +43,7 @@ export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
 export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
+export TRAINABLE_PARAMETERS_MASK='["^(?!.*routed_experts/gate/kernel).*"]'
 export TRAJECTORY_LOG_DIR="gs://deepswe-wuhao-1784153479/trajectories"
 
 # Backend configuration

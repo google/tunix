@@ -127,6 +127,7 @@ def build_maxtext_config(
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
+    trainable_parameters_mask: list[str] | str | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -387,6 +388,11 @@ def build_maxtext_config(
               f"rollout_tensor_parallelism={rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size}"
           ]
           if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
+          else []
+      ),
+      *(
+          [f"trainable_parameters_mask={trainable_parameters_mask}"]
+          if trainable_parameters_mask
           else []
       ),
   ])
