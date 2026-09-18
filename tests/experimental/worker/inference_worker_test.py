@@ -213,6 +213,38 @@ class InferenceWorkerTest(absltest.TestCase):
     worker.state = WorkerState.COMPILING
     self.assertEqual(worker.heartbeat().state, "COMPILING")
 
+  def test_execution_context_wraps_compute_logps_and_score(self):
+    events = []
+
+    class TrackingContext:
+
+      def __enter__(self):
+        events.append("enter_ctx")
+        return self
+
+      def __exit__(self, *args):
+        events.append("exit_ctx")
+
+    worker = inference_lib.InferenceWorker(
+        _StubCore(),
+        worker_id="test_worker_ctx",
+        pad_id=0,
+        eos_id=1,
+        execution_context=TrackingContext(),
+    )
+
+    worker.compute_logps(_logprobs_request(batch=2))
+    self.assertEqual(events, ["enter_ctx", "exit_ctx"])
+
+    events.clear()
+    req = datatypes.ScoreRequest(
+        request_id="s1",
+        prompt_tokens=np.ones((2, 2), dtype=np.int32),
+        completion_tokens=np.ones((2, 3), dtype=np.int32),
+    )
+    worker.score(req)
+    self.assertEqual(events, ["enter_ctx", "exit_ctx"])
+
 
 if __name__ == "__main__":
   absltest.main()

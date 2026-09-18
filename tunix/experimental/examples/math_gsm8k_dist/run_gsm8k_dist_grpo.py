@@ -421,7 +421,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       else []
   )
   generation_args = datatypes.GenerationArgs(
-      max_response_length=args.max_response_length,
       temperature=args.temperature,
       top_p=args.top_p,
       top_k=None if args.top_k < 0 else args.top_k,

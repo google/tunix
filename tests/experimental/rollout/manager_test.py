@@ -100,8 +100,9 @@ class _NoopCollector:
       agent,
       tokenizer,
       chat_parser,
+      eos_ids=None,
   ):
-    del request, sampler, agent, tokenizer, chat_parser
+    del request, sampler, agent, tokenizer, chat_parser, eos_ids
     self.traj_id = traj_id
     self.env = env_client
 
@@ -347,6 +348,54 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(result, "trajectory")
     self.assertEqual(created_configs, [{"source": "worker"}])
+
+  async def test_configured_eos_tokens_reach_the_collector(self):
+    # The collector scores truncation against this set. If it stops arriving,
+    # the collector silently falls back to the tokenizer's own EOS and
+    # clip_ratio starts counting normal terminations as truncations.
+    config = types.SimpleNamespace(eos_tokens=[151643, 151645])
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+
+      await manager._generate_one(request)
+
+    self.assertEqual(
+        collector_cls.call_args.kwargs["eos_ids"], [151643, 151645]
+    )
+
+  async def test_unset_eos_tokens_leave_the_collector_on_its_default(self):
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(return_value="trajectory")
+
+      await manager._generate_one(request)
+
+    self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
 
 
 class WeightSyncModeTest(absltest.TestCase):

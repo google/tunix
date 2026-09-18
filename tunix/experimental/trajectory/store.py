@@ -1,6 +1,7 @@
 """Protocols defining Trajectory Store interfaces."""
 
-from typing import Protocol, runtime_checkable
+import abc
+from typing import Any, ClassVar, Mapping, Protocol, runtime_checkable
 
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
@@ -125,3 +126,106 @@ class TrajectoryWriter(Protocol):
     resources earlier, e.g. for a writer created inside a loop.
     """
     ...
+
+
+# ==============================================================================
+# Base class (config <-> instance)
+# ==============================================================================
+
+
+class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
+  """Base class pairing a store implementation with its own configuration.
+
+  Every backend owns both directions of its configuration: `_from_config`
+  builds an instance from a plain dict, and `to_config` returns the dict that
+  would rebuild an equivalent one. Keeping the two next to the backend's
+  `__init__` means a new backend adds its own keys and its own validation in
+  one place, instead of growing a shared config object that has to know about
+  every backend's fields.
+
+  `TrajectoryStore.from_config` is the single construction entry point for the
+  processes that make up a run. It doubles as the on/off gate: a config of
+  None, or one whose "enabled" is false, yields None, and every store-guarded
+  call site is then a no-op.
+  """
+
+  # The value of the config's "backend" key that selects this class.
+  BACKEND: ClassVar[str]
+  _REGISTRY: ClassVar[dict[str, type["TrajectoryStore"]]] = {}
+
+  def __init_subclass__(cls, **kwargs: Any) -> None:
+    super().__init_subclass__(**kwargs)
+    backend = getattr(cls, "BACKEND", None)
+    if backend:
+      cls._REGISTRY[backend] = cls
+
+  @classmethod
+  @abc.abstractmethod
+  def _from_config(cls, config: Mapping[str, Any]) -> "TrajectoryStore":
+    """Builds an instance of this backend from `config`.
+
+    Implementations read the keys they care about and raise ValueError for a
+    config this backend cannot honour. Called only by `from_config`, which has
+    already established that `config` selects this backend.
+
+    Args:
+      config: Configuration mapping for this backend.
+
+    Returns:
+      A new store instance.
+    """
+
+  @abc.abstractmethod
+  def to_config(self) -> dict[str, Any]:
+    """Returns the config dict that rebuilds an equivalent store.
+
+    For any store constructed via `from_config`,
+    `type(store).from_config(store.to_config())` must produce a store reading
+    and writing the same data as `store`. Use it to report what a process
+    actually built — two processes in one run that log different dicts are
+    reading and writing different data.
+
+    Returns:
+      A dict accepted by `from_config`, including "backend" and "enabled".
+    """
+
+  @classmethod
+  def from_config(
+      cls, config: Mapping[str, Any] | None
+  ) -> "TrajectoryStore | None":
+    """Builds the store described by `config`, or None when it is disabled.
+
+    Call once per process and hold onto the result: the process that built a
+    store owns closing it. Calling this twice in one process builds two
+    independent stores (and, for the file backend, two background writer
+    threads); nothing prevents that, the guard is simply that callers
+    construct once.
+
+    Args:
+      config: Configuration mapping, or None. The "backend" key selects the
+        implementation; "enabled" turns the store off without removing the
+        rest of the config.
+
+    Returns:
+      A store instance, or None if `config` is None or not enabled.
+
+    Raises:
+      ValueError: If "backend" names no known implementation, or the selected
+        backend rejects the rest of the config.
+    """
+    if config is None or not config.get("enabled", False):
+      return None
+
+    # Ensure built-in backends are imported so their __init_subclass__ hooks
+    # have registered them in _REGISTRY before lookup. Imported here rather
+    # than at module level because both implementations import this module.
+    from tunix.experimental.trajectory import file_store  # pylint: disable=g-import-not-at-top,unused-import
+    from tunix.experimental.trajectory import in_memory_store  # pylint: disable=g-import-not-at-top,unused-import
+
+    backend = config.get("backend")
+    if backend not in cls._REGISTRY:
+      raise ValueError(
+          f"Unknown Trajectory Store backend {backend!r}; expected one of"
+          f" {sorted(cls._REGISTRY)}."
+      )
+    return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access

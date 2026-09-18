@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 from absl.testing import absltest
+from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 from tunix.sft import utils
 
 
@@ -148,5 +152,100 @@ class WeightedMetricTest(absltest.TestCase):
     self.assertLen(leaves, 2)
 
 
-if __name__ == '__main__':
+class TryGetLearningRateTest(absltest.TestCase):
+
+  def _get_lr(self, opt_state: Any) -> float:
+    lr = utils.try_get_learning_rate(opt_state)
+    self.assertIsNotNone(lr)
+    assert lr is not None
+    return float(lr)
+
+  def test_unchained_scalar_and_schedule(self):
+    params = {"w": jnp.ones((2,))}
+    opt_scalar = optax.inject_hyperparams(optax.adamw)(learning_rate=1e-4)
+    state_scalar = opt_scalar.init(params)
+    self.assertAlmostEqual(self._get_lr(state_scalar), 1e-4)
+
+    schedule = optax.warmup_cosine_decay_schedule(0.0, 1e-3, 10, 100)
+    opt_sched = optax.inject_hyperparams(optax.adamw)(learning_rate=schedule)
+    state_sched = opt_sched.init(params)
+    self.assertAlmostEqual(self._get_lr(state_sched), 0.0)
+
+  def test_chained_with_stateless_prefix(self):
+    params = {"w": jnp.ones((2,))}
+    opt = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.inject_hyperparams(optax.adamw)(learning_rate=2e-4),
+    )
+    state = opt.init(params)
+    self.assertAlmostEqual(self._get_lr(state), 2e-4)
+
+  def test_multisteps_wrapping_chained_optimizer(self):
+    params = {"w": jnp.ones((2,))}
+    opt = optax.MultiSteps(
+        optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.inject_hyperparams(optax.adamw)(learning_rate=3e-4),
+        ),
+        every_k_schedule=4,
+    )
+    state = opt.init(params)
+    self.assertAlmostEqual(self._get_lr(state), 3e-4)
+
+  def test_named_chain_wrapping(self):
+    params = {"w": jnp.ones((2,))}
+    opt = optax.named_chain(
+        ("clip", optax.clip_by_global_norm(1.0)),
+        ("adam", optax.inject_hyperparams(optax.adamw)(learning_rate=5e-4)),
+    )
+    state = opt.init(params)
+    self.assertAlmostEqual(self._get_lr(state), 5e-4)
+
+  def test_partition_multi_transform_and_lookahead(self):
+    params = {"w": jnp.ones((2,)), "b": jnp.zeros((2,))}
+    opt_partition = optax.multi_transform(
+        {
+            "trainable": optax.inject_hyperparams(optax.adamw)(
+                learning_rate=6e-4
+            ),
+            "frozen": optax.set_to_zero(),
+        },
+        param_labels={"w": "trainable", "b": "frozen"},
+    )
+    state_partition = opt_partition.init(params)
+    self.assertAlmostEqual(self._get_lr(state_partition), 6e-4)
+
+    opt_lookahead = optax.lookahead(
+        optax.inject_hyperparams(optax.adamw)(learning_rate=7e-4),
+        sync_period=5,
+        slow_step_size=0.5,
+    )
+    state_lookahead = opt_lookahead.init(params)
+    self.assertAlmostEqual(self._get_lr(state_lookahead), 7e-4)
+
+  def test_uninjected_optimizer_returns_none(self):
+    params = {"w": jnp.ones((2,))}
+    state = optax.adamw(1e-4).init(params)
+    self.assertIsNone(utils.try_get_learning_rate(state))
+
+  def test_multiple_injected_learning_rates_selects_last(self):
+    params = {"w": jnp.ones((2,))}
+    opt = optax.chain(
+        optax.inject_hyperparams(optax.sgd)(learning_rate=1.0),
+        optax.inject_hyperparams(optax.adamw)(learning_rate=2e-4),
+    )
+    state = opt.init(params)
+    self.assertAlmostEqual(self._get_lr(state), 2e-4)
+
+  def test_nnx_optimizer_variable_unwrapping(self):
+    model = nnx.Linear(2, 2, rngs=nnx.Rngs(0))
+    tx = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.inject_hyperparams(optax.adamw)(learning_rate=4e-4),
+    )
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    self.assertAlmostEqual(self._get_lr(optimizer.opt_state), 4e-4)
+
+
+if __name__ == "__main__":
   absltest.main()

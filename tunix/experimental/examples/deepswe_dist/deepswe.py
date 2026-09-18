@@ -153,6 +153,7 @@ def build_prompt_item(
       "prompt": problem,
       "prompt_id": prompt_id,
       "max_turns": max_turns,
+      "max_response_length": max_response_length,
       "generation_kwargs": {
           "max_generation_steps": max_response_length,
           "temperature": temperature,
@@ -222,6 +223,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
       policy_version: int = 0,
       group_id: Any = None,
       pair_index: int | None = None,
+      max_warmpool_replicas: int | None = None,
       **kwargs: Any,
   ):
     entry = dict(entry or kwargs.pop("task", {}) or {})
@@ -231,15 +233,20 @@ class DeepSWEEnv(swe_env.SWEEnv):
       group_id = prompt_id or None
     if pair_index is None:
       pair_index = group_index
+    if max_warmpool_replicas is None:
+      max_warmpool_replicas = num_generations
     if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
       logging.info(
           "Initializing DeepSWE SandboxFleet in rollout worker "
-          "(max_concurrency=%s).",
+          "(max_concurrency=%s, max_warmpool_replicas=%s).",
           num_generations,
+          max_warmpool_replicas,
       )
       kwargs["fleet"] = sandbox_utils.init_global_fleet(
           tasks=[entry],
           max_concurrency=num_generations,
+          num_generations=num_generations,
+          max_warmpool_replicas=max_warmpool_replicas,
       )
 
     super().__init__(

@@ -16,15 +16,21 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from typing import Any
 
 
-# MaxText requires enable_checkpointing=True to restore weights via load_parameters_path.
-# When checkpoint saving is disabled (save_interval_steps=0), setting an astronomically
-# large period allows restoration at initialization while preventing periodic checkpoint saves.
-_NEVER_SAVE_CHECKPOINT_PERIOD = 1_000_000_000
+@dataclasses.dataclass(frozen=True)
+class ProfilerOptions:
+  """Options for configuring the profiler."""
+  # Number of steps to skip before profiling.
+  skip_first_n_steps: int
+  # Number of steps to profile.
+  profiler_steps: int
+  # If positive, profile every N steps.
+  profiler_period: int = -1
 
 
 def maxtext_modules():
@@ -112,6 +118,7 @@ def build_maxtext_config(
     base_output_directory: str = "",
     gradient_accumulation_steps: int = 1,
     checkpointing_options: Any = None,
+    profiling_options: ProfilerOptions | None = None,
     *,
     base_num_kv_heads: int = 0,
     kv_tp_size: int = 0,
@@ -119,6 +126,7 @@ def build_maxtext_config(
     rollout_mesh_tp: int = 0,
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
+    max_seq_token_per_tpu: int | None = 0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -154,6 +162,11 @@ def build_maxtext_config(
   if rollout_mesh_tp < 0:
     raise ValueError(
         f"rollout_mesh_tp must be non-negative, got {rollout_mesh_tp}"
+    )
+  if max_seq_token_per_tpu is not None and max_seq_token_per_tpu < 0:
+    raise ValueError(
+        "max_seq_token_per_tpu must be non-negative, got"
+        f" {max_seq_token_per_tpu}"
     )
 
   if train_micro_batch_size % mesh_fsdp:
@@ -276,35 +289,68 @@ def build_maxtext_config(
         f"max_num_checkpoints_to_keep={checkpointing_options.max_to_keep}",
     ])
   elif checkpointing_options is not None:
-    if load_parameters_path:
-      # MaxText requires enable_checkpointing=True to restore weights. Set a very
-      # large checkpoint_period to allow restoring while suppressing periodic saves.
-      logging.info(
-          "checkpoint save_interval_steps=0 with load_parameters_path set; "
-          "keeping enable_checkpointing=True and setting checkpoint_period=%d.",
-          _NEVER_SAVE_CHECKPOINT_PERIOD,
-      )
-      argv.extend([
-          "enable_checkpointing=True",
-          f"checkpoint_period={_NEVER_SAVE_CHECKPOINT_PERIOD}",
-      ])
-    else:
-      logging.info(
-          "checkpoint save_interval_steps=0 and nothing to restore; "
-          "disabling checkpointing entirely."
-      )
-      argv.append("enable_checkpointing=False")
+    # `enable_checkpointing=False` still warm starts from `load_parameters_path`:
+    # MaxText restores it through its own `ocp.Checkpointer`, not the
+    # CheckpointManager that this flag gates.
+    logging.info(
+        "checkpoint save_interval_steps=0; disabling checkpoint saving "
+        "(load_parameters_path still restores)."
+    )
+    argv.append("enable_checkpointing=False")
   elif load_parameters_path:
     argv.append("enable_checkpointing=True")
   else:
     argv.append("enable_checkpointing=False")
+  # max_target_length is the row width this config declares. A packed row holds
+  # several trajectories end to end, so it is wider than any single one, and
+  # max_prompt+max_response describes one trajectory. MaxText takes its actual
+  # shapes from the batch it is handed, so a wider row still runs -- but
+  # everything MaxText derives from max_target_length is then computed for a row
+  # narrower than the ones the trainer is fed: per-device TFLOPs, and the
+  # divisibility checks MaxTextConfig runs against it (num_vocab_tiling,
+  # context parallelism, num_moe_token_chunks). Declare the real width instead.
+  max_target_length = max_prompt_length + max_response_length
+  if (
+      max_seq_token_per_tpu is not None
+      and max_seq_token_per_tpu > max_target_length
+  ):
+    logging.info(
+        "Raising max_target_length %d -> %d: with sequence packing the rows"
+        " the trainer is fed are max_seq_token_per_tpu wide.",
+        max_target_length,
+        max_seq_token_per_tpu,
+    )
+    max_target_length = max_seq_token_per_tpu
+  elif (
+      max_seq_token_per_tpu is not None
+      and 0 < max_seq_token_per_tpu < max_target_length
+  ):
+    logging.warning(
+        "max_seq_token_per_tpu=%d is smaller than max_prompt_length + "
+        "max_response_length (%d + %d = %d), which is not a legal packing "
+        "budget -- validate_packing_budget rejects it on the learner. Keeping "
+        "max_target_length=%d.",
+        max_seq_token_per_tpu,
+        max_prompt_length,
+        max_response_length,
+        max_target_length,
+        max_target_length,
+    )
+
+  if profiling_options is not None:
+    argv.extend([
+        f"profiler_steps={profiling_options.profiler_steps}",
+        f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
+        f"profile_periodically_period={profiling_options.profiler_period}",
+    ])
+
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
-      f"max_target_length={max_prompt_length + max_response_length}",
+      f"max_target_length={max_target_length}",
       "attention=dot_product",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",

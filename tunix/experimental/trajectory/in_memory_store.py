@@ -1,6 +1,7 @@
 """In-memory implementation for Trajectory Store."""
 
 import collections
+from typing import Any, ClassVar, Mapping
 
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
@@ -23,8 +24,17 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
-class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
-  """In-memory implementation satisfying TrajectoryReader and TrajectoryWriter."""
+class InMemoryTrajectoryStore(
+    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
+):
+  """In-memory implementation satisfying TrajectoryReader and TrajectoryWriter.
+
+  Process-local: the steps written here are visible only to the process that
+  wrote them. Configuring this backend for a run whose reader and writer live
+  in different processes gives the reader an empty store.
+  """
+
+  BACKEND: ClassVar[str] = "memory"
 
   def __init__(self) -> None:
     """Initializes the InMemoryTrajectoryStore."""
@@ -34,6 +44,24 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     self._steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = (
         collections.defaultdict(list)
     )
+
+  @classmethod
+  def _from_config(cls, config: Mapping[str, Any]) -> "InMemoryTrajectoryStore":
+    """Builds an in-memory store; this backend takes no configuration.
+
+    Args:
+      config: Unused beyond the keys `store.TrajectoryStore.from_config` has
+        already read.
+
+    Returns:
+      A new, empty InMemoryTrajectoryStore.
+    """
+    del config
+    return cls()
+
+  def to_config(self) -> dict[str, Any]:
+    """Returns the config dict that rebuilds an equivalent store."""
+    return {"enabled": True, "backend": self.BACKEND}
 
   def get_trajectories_metadata(
       self, trajectory_ids: list[str] | None = None

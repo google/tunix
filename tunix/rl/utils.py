@@ -339,6 +339,13 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   p_mask = np.asarray(example.prompt_mask)
   c_ids = np.asarray(example.completion_ids)
   c_mask = np.asarray(example.completion_mask)
+  # With exact token continuity the valid completion length is explicit (it
+  # may include tokens equal to the pad id), otherwise it is the loss-mask span.
+  completion_valid = getattr(example, "completion_attention_mask", None)
+  if isinstance(completion_valid, (jax.Array, np.ndarray, list, tuple)):
+    completion_valid = np.asarray(completion_valid)
+  else:
+    completion_valid = None
   adv = np.asarray(example.advantages)
   adv_is_per_token = adv.ndim == 2
 
@@ -366,7 +373,9 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
 
   for i in range(batch_size):
     p_len = int(np.sum(p_mask[i]))
-    c_len = int(np.sum(c_mask[i]))
+    c_len = int(
+        np.sum(c_mask[i] if completion_valid is None else completion_valid[i])
+    )
 
     # `policy_version` is per-row: row `i` of the input maps to scalar
     # `policy_version_np[i]`. We slice with `i:i+1` to keep a 1-D shape so that

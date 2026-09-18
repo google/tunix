@@ -14,6 +14,7 @@
 
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
+from unittest import mock
 from absl.testing import absltest
 import numpy as np
 from examples.deepswe import sandbox_utils
@@ -277,6 +278,27 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(
         rewrite("my-image:latest"), "gcr.io/rewritten/my-image:latest"
     )
+
+  def test_init_global_fleet_starts_initial_warmpools(self):
+    mock_fleet = mock.MagicMock()
+    mock_entry = mock.MagicMock()
+    mock_entry.image = "test-image:v1"
+    mock_fleet.plan_.entries = [mock_entry]
+
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+        fleet = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "test-image:v1"}],
+            num_generations=4,
+        )
+        self.assertEqual(fleet, mock_fleet)
+        mock_fleet.warm_images.assert_called_once_with(
+            ["test-image:v1"],
+            replicas_override=4,
+            wait=False,
+        )
 
 
 if __name__ == "__main__":

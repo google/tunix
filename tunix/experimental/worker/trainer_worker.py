@@ -39,14 +39,20 @@ class TrainerWorker(abstract_worker.Worker):
       trainer_factory: Callable[[], abstract_trainer.AbstractTrainer],
       *,
       worker_id: str = "trainer_worker",
+      execution_context: Any = None,
   ):
     """Initializes the TrainerWorker.
 
     Args:
       trainer_factory: A callable that returns an instantiated AbstractTrainer.
       worker_id: Unique identifier for this worker.
+      execution_context: Optional context manager or zero-arg callable returning
+        a context manager (e.g., a JAX Mesh) to enter during trainer
+        initialization and worker method execution.
     """
-    self._trainer = trainer_factory()
+    self._execution_context = execution_context
+    with self.execution_context():
+      self._trainer = trainer_factory()
     self._is_running = False
     self._worker_id = worker_id
     self._state = WorkerState.PENDING

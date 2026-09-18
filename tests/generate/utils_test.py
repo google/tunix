@@ -364,6 +364,20 @@ class UtilsTest(parameterized.TestCase):
     # Verify values are repeated correctly
     self.assertTrue(jnp.allclose(result.params[src_key].value, 1.0))
 
+  def test_unroll_layer_axis_matches_slicing(self):
+    """One jitted call returns the same per-layer slices as indexing."""
+    val = jnp.arange(2 * 3 * 4, dtype=jnp.float32).reshape(2, 3, 4)
+    for axis in range(val.ndim):
+      layers = utils._unroll_layer_axis(val, axis)
+      self.assertLen(layers, val.shape[axis])
+      for i, layer in enumerate(layers):
+        np.testing.assert_array_equal(layer, np.asarray(val).take(i, axis=axis))
+    # numpy inputs take the plain slicing path and stay numpy.
+    np_layers = utils._unroll_layer_axis(np.asarray(val), 1)
+    self.assertLen(np_layers, 3)
+    self.assertIsInstance(np_layers[0], np.ndarray)
+    np.testing.assert_array_equal(np_layers[2], np.asarray(val)[:, 2, :])
+
   def test_transfer_state_with_scanned_layers(self):
     """Comprehensive test for scanned layers covering multiple scenarios."""
     num_layers = 3
@@ -2451,6 +2465,30 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
     utils.detach_incompatible_vllm_cleanup_finalizer(None)
 
 
+class TokenIdsTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      ([0, 3],), ((0, np.int64(3)),), (np.array([0, 3], np.uint64),)
+  )
+  def test_as_token_ids_returns_owned_int32(self, value):
+    result = utils.as_token_ids(value)
+    np.testing.assert_array_equal(result, [0, 3])
+    self.assertEqual(result.dtype, np.int32)
+    if isinstance(value, np.ndarray):
+      value[0] = 9
+      self.assertEqual(result[0], 0)
+
+  def test_as_token_ids_rejects_non_vectors(self):
+    with self.assertRaises(ValueError):
+      utils.as_token_ids(np.array([[1]]))
+
+  def test_unpad_prompt_uses_explicit_length_not_pad_id(self):
+    source = np.array([0, 0, 4, 0, 5])
+    result = utils.unpad_prompt(source, 4)
+    np.testing.assert_array_equal(result, [0, 4, 0, 5])
+    source[:] = 9
+    np.testing.assert_array_equal(result, [0, 4, 0, 5])
+
+
 if __name__ == "__main__":
   absltest.main()
-

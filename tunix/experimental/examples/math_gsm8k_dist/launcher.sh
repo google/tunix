@@ -83,12 +83,6 @@ CHAT_PARSER=${CHAT_PARSER:-raw}
 # tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
 # fall back to the tokenizer's EOS token.
 EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
-# Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
-# both the trainer and the rollout, so the two cannot drift. A disagreement is
-# not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
-# against a non-MaxText rollout matches zero of them. Set it explicitly to
-# override, or empty to put the rollout back on tpu-inference's own model.
-MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
@@ -109,10 +103,13 @@ TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
 
-# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+# tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText config names are lowercase. Passed to both the trainer and the
+  # rollout, so the two cannot drift.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
   # MaxText shards the batch dimension of every loss input across the fsdp
   # axis, so the microbatch has to be a multiple of it. The trainer node
   # enforces this too.
@@ -123,6 +120,15 @@ if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
     echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
     exit 1
   fi
+elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
+  # Must stay empty on the tunix backend. A non-empty value puts the rollout on
+  # MaxText's MaxTextForCausalLM while the trainer still emits tunix/vllm_jax
+  # tensor names, and Raiden pairs tensors by exact name, so zero of them match.
+  # Export it explicitly to override.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-}
+else
+  echo "Error: Unsupported TRAINER_BACKEND='$TRAINER_BACKEND' (expected 'tunix' or 'maxtext')." >&2
+  exit 1
 fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
@@ -498,8 +504,21 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
     TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
   fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
+  fi
+
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--profiler_steps=$PROFILER_STEPS)
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--skip_first_n_profiler_steps=$SKIP_FIRST_N_PROFILER_STEPS)
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    TRAINER_CMD+=(--profiler_period=$PROFILER_PERIOD)
   fi
 
   if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
@@ -515,7 +534,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
@@ -567,7 +586,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
@@ -696,7 +715,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
     export PYTHONUNBUFFERED=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"

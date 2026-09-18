@@ -16,11 +16,14 @@
 
 import dataclasses
 import threading
-from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
+
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
@@ -40,6 +43,12 @@ class RolloutConfig(base_rollout.RolloutConfig):
     agent_name: Registered name of agent class in AGENT_REGISTRY.
     env_config: Configuration dictionary passed to environment constructor.
     agent_config: Configuration dictionary passed to agent constructor.
+    trajectory_store_config: Trajectory Store configuration for this worker
+      process, or None to run without a store. See
+      `store.TrajectoryStore.from_config`. Must match what the orchestrator
+      was given: for the file backend it is the shared root_dir and run_id
+      that will make these writes visible to the orchestrator's reads once
+      rollout step logging is wired.
   """
 
   sampler_type: str = "vanilla"
@@ -48,6 +57,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  trajectory_store_config: Mapping[str, Any] | None = None
 
 
 TrajectoryOrError = Union[
@@ -96,6 +106,27 @@ class RolloutWorker(abstract_worker.Worker):
         tokenizer=tokenizer,
         chat_parser=chat_parser,
     )
+    # Built at most once per process: this __init__ runs exactly once per
+    # RolloutWorker instance, so there is no separate guard against
+    # constructing the store twice. See store.TrajectoryStore.from_config.
+    # TODO(sizhi): Pass self._trajectory_store into RolloutManager / collector
+    # to log rollout steps in follow-up CLs.
+    self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
+        config.trajectory_store_config if config is not None else None
+    )
+    if self._trajectory_store is not None:
+      # Several workers can share one log stream, and absl log lines carry no
+      # process identity, so the worker_id is what attributes a reported
+      # config to a process.
+      logging.info(
+          "[trajectory-store] worker %s built %s",
+          worker_id,
+          self._trajectory_store.to_config(),
+      )
+
+  @property
+  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+    return self._trajectory_store
 
   @property
   def sampler(self) -> sampler_lib.Sampler:
@@ -162,7 +193,13 @@ class RolloutWorker(abstract_worker.Worker):
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
-    self.manager.cancel_all()
+    try:
+      self.manager.cancel_all()
+    finally:
+      # Runs even when cancel_all raises, so a failed stop releases the
+      # store's background writer thread instead of leaking it.
+      if self._trajectory_store is not None:
+        self._trajectory_store.close()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
@@ -216,6 +253,7 @@ class RolloutWorker(abstract_worker.Worker):
       return list(responses)
     return [responses]
 
+  # TODO(tunix-dev): can we remove the config knobs and only rely on self.config?
   async def sample_prompts(
       self,
       prompts: str | Sequence[str],
@@ -226,6 +264,7 @@ class RolloutWorker(abstract_worker.Worker):
       top_k: int | None = None,
       seed: int | None = None,
       return_logprobs: bool = True,
+      return_routed_experts: bool = False,
   ) -> base_rollout.RolloutOutput:
     """Direct single-turn prompt sampling path using the worker's Sampler."""
     if self.state == WorkerState.PENDING:
@@ -238,9 +277,14 @@ class RolloutWorker(abstract_worker.Worker):
           tokens=[],
           left_padded_prompt_tokens=np.zeros((0, 1), dtype=np.int32),
           logprobs=[] if return_logprobs else None,
+          routed_experts=[] if return_routed_experts else None,
       )
 
     config = self.config or base_rollout.RolloutConfig()
+    return_routed = (
+        return_routed_experts
+        or getattr(config, "return_routed_experts", False)
+    )
     sampling_params = sampler_lib.SamplingParams(
         max_tokens=(
             max_generation_steps
@@ -254,6 +298,7 @@ class RolloutWorker(abstract_worker.Worker):
         top_k=top_k if top_k is not None else config.top_k,
         seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
         return_logprobs=return_logprobs,
+        return_routed_experts=return_routed,
     )
     requests = [
         sampler_lib.SamplingRequest(
@@ -283,6 +328,17 @@ class RolloutWorker(abstract_worker.Worker):
         assert response.logprobs is not None
         logprobs.append(response.logprobs)
 
+    routed_experts: list[np.ndarray | None] | None = None
+    if return_routed:
+      routed_experts = [
+          (
+              np.asarray(response.routed_experts)
+              if response.routed_experts is not None
+              else None
+          )
+          for response in responses
+      ]
+
     return base_rollout.RolloutOutput(
         text=[response.text for response in responses],
         logits=None,
@@ -291,6 +347,7 @@ class RolloutWorker(abstract_worker.Worker):
             prompt_token_ids
         ),
         logprobs=logprobs,
+        routed_experts=routed_experts,
     )
 
   def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:

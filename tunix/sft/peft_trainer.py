@@ -732,17 +732,9 @@ class PeftTrainer:
     """Override this function for post processing aux data from eval step."""
     pass
 
-  def _try_get_learning_rate(self) -> float | None:
+  def _try_get_learning_rate(self) -> float | jax.Array | None:
     """Returns the learning rate from the optimizer state if available."""
-    try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"].value
-    except AttributeError:
-      for chainpart in self.optimizer.opt_state:
-        if isinstance(chainpart, optax.EmptyState):
-          break
-        if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"].value
-      return None
+    return utils.try_get_learning_rate(self.optimizer.opt_state)
 
   def _log_metrics(
       self,

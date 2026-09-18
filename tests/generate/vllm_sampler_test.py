@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+import concurrent.futures
+import itertools
 
 import os
 import tempfile
@@ -407,15 +409,17 @@ class VllmSamplerTest(absltest.TestCase):
         mock.patch.object(vl_sampler.llm, "collective_rpc"):
       vl_sampler.load_checkpoint(state)
 
-    # Mock the generate method to capture sampling_params
-    original_generate = vl_sampler.llm.generate
+    # Mock add_request on the engine to capture sampling_params
+    original_add_request = vl_sampler.llm.llm_engine.add_request
     captured_sampling_params = []
 
-    def mock_generate(prompts, sampling_params, **kwargs):
+    def mock_add_request(request_id, prompt, sampling_params, *args, **kwargs):
       captured_sampling_params.append(sampling_params)
-      return original_generate(prompts, sampling_params, **kwargs)
+      return original_add_request(
+          request_id, prompt, sampling_params, *args, **kwargs
+      )
 
-    vl_sampler.llm.generate = mock_generate
+    vl_sampler.llm.llm_engine.add_request = mock_add_request
 
     # Call with additional method kwargs
     method_sampling_kwargs = {"min_tokens": 10}
@@ -492,15 +496,17 @@ class VllmSamplerTest(absltest.TestCase):
         mock.patch.object(vl_sampler.llm, "collective_rpc"):
       vl_sampler.load_checkpoint(state)
 
-    # Mock the generate method to capture sampling_params
-    original_generate = vl_sampler.llm.generate
+    # Mock add_request on the engine to capture sampling_params
+    original_add_request = vl_sampler.llm.llm_engine.add_request
     captured_sampling_params = []
 
-    def mock_generate(prompts, sampling_params, **kwargs):
+    def mock_add_request(request_id, prompt, sampling_params, *args, **kwargs):
       captured_sampling_params.append(sampling_params)
-      return original_generate(prompts, sampling_params, **kwargs)
+      return original_add_request(
+          request_id, prompt, sampling_params, *args, **kwargs
+      )
 
-    vl_sampler.llm.generate = mock_generate
+    vl_sampler.llm.llm_engine.add_request = mock_add_request
 
     # Call with method kwargs that override config kwargs
     method_sampling_kwargs = {"frequency_penalty": 0.8}  # Override from 0.5 to 0.8
@@ -576,6 +582,138 @@ class VllmSamplerConfigTest(absltest.TestCase):
 
     rpcs = [c.args[0] for c in sampler.llm.collective_rpc.call_args_list]
     self.assertEqual(rpcs, ["delete_kv_cache", "reinitialize_kv_cache"])
+
+  def test_overlap_postprocessing_decodes_finished_requests_early(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+    sampler.llm.request_counter = itertools.count()
+    engine = sampler.llm.llm_engine
+
+    def output(rid, finished):
+      out = mock.MagicMock()
+      out.request_id = rid
+      out.finished = finished
+      sample = mock.MagicMock()
+      sample.token_ids = [int(rid), int(rid) + 1]
+      sample.logprobs = None
+      out.outputs = [sample]
+      return out
+
+    engine.has_unfinished_requests.side_effect = [True, True, False]
+    engine.step.side_effect = [
+        [output("1", True), output("0", False)],
+        [output("0", True)],
+    ]
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    outputs = sampler._generate_offline(prompts, vllm_sampler.SamplingParams())
+
+    sampler.llm.generate.assert_not_called()
+    self.assertEqual(engine.add_request.call_count, 2)
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, tokens, _ = sampler.detokenize(["a", "b"], outputs)
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[0, 1], [1, 2]])
+    # Each finished request was decoded once, in the pool, not in detokenize.
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_overlap_postprocessing_off_uses_llm_generate(self):
+    config = vllm_sampler.VllmConfig(
+        init_with_random_weights=False, overlap_postprocessing=False
+    )
+    sampler = self._make_sampler(config)
+    prompts = [{"prompt_token_ids": [1]}]
+    params = vllm_sampler.SamplingParams()
+
+    outputs = sampler._generate_offline(prompts, params)
+
+    sampler.llm.generate.assert_called_once_with(
+        prompts=prompts, sampling_params=params, use_tqdm=True
+    )
+    sampler.llm.llm_engine.add_request.assert_not_called()
+    self.assertIs(outputs, sampler.llm.generate.return_value)
+
+  def test_beam_search_keeps_llm_generate_path(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    params = vllm_sampler.BeamSearchParams(beam_width=2, max_tokens=4)
+
+    sampler._generate_offline([{"prompt_token_ids": [1]}], params)
+
+    sampler.llm.generate.assert_called_once()
+    sampler.llm.llm_engine.add_request.assert_not_called()
+
+  def test_detokenize_without_precomputed_results_decodes_inline(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.return_value = "text"
+    sample = mock.MagicMock()
+    sample.token_ids = [4, 5]
+    sample.logprobs = None
+    output = mock.MagicMock()
+    output.request_id = "7"
+    output.outputs = [sample]
+
+    texts, logprobs, tokens, _ = sampler.detokenize(["a"], [output])
+
+    self.assertEqual(texts, [["text"]])
+    self.assertEqual(logprobs, [[[]]])
+    self.assertEqual([t.tolist() for t in tokens[0]], [[4, 5]])
+    sampler.tokenizer.decode.assert_called_once_with([4, 5])
+
+  def test_server_mode_overlap_decodes_as_futures_resolve(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    sampler.tokenizer = mock.MagicMock()
+    sampler.tokenizer.decode.side_effect = lambda ids: "t" + "".join(
+        str(i) for i in ids
+    )
+
+    def request_output(rid):
+      out = mock.MagicMock(spec=vllm_sampler.RequestOutput)
+      out.request_id = rid
+      sample = mock.MagicMock()
+      sample.token_ids = [int(rid), int(rid) + 1]
+      sample.logprobs = None
+      out.outputs = [sample]
+      return out
+
+    futures = []
+    for rid in ("0", "1"):
+      future = concurrent.futures.Future()
+      future.set_result(request_output(rid))
+      futures.append(future)
+    sampler._driver = mock.MagicMock()
+    sampler._driver.submit_requests.return_value = futures
+
+    prompts = [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}]
+    outputs = sampler._generate_server_mode(
+        prompts, vllm_sampler.SamplingParams()
+    )
+
+    self.assertEqual([o.request_id for o in outputs], ["0", "1"])
+    texts, logprobs, _, _ = sampler.detokenize(["a", "b"], outputs)
+    self.assertEqual(texts, [["t01", "t12"]])
+    self.assertEqual(logprobs, [[[], []]])
+    self.assertEqual(sampler.tokenizer.decode.call_count, 2)
+
+  def test_postprocessing_threads_must_be_positive(self):
+    with self.assertRaisesRegex(ValueError, "postprocessing_threads"):
+      vllm_sampler.VllmConfig(postprocessing_threads=0)
+
+  def test_stop_shuts_down_postprocess_pool(self):
+    config = vllm_sampler.VllmConfig(init_with_random_weights=False)
+    sampler = self._make_sampler(config)
+    pool = sampler._get_postprocess_pool()
+    sampler.stop()
+    self.assertIsNone(sampler._postprocess_pool)
+    with self.assertRaises(RuntimeError):
+      pool.submit(lambda: None)
 
   def test_expert_parallel_size_plumbed_to_sharding(self):
     mesh = self._make_mock_mesh(8)
@@ -681,6 +819,122 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sharding["sharding_strategy"]["custom_param"], "foo")
     self.assertEqual(sharding["sharding_strategy"]["expert_parallelism"], 4)
     self.assertNotIn("device_indexes", sharding["sharding_strategy"])
+
+
+class VllmSamplerTokenInputTest(absltest.TestCase):
+  """Explicit token-ID prompts through the real sampler with a fake engine."""
+
+  @staticmethod
+  def _result(request_id, prompt):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from vllm.outputs import CompletionOutput, RequestOutput  # pylint: disable=g-import-not-at-top
+
+    return RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=list(prompt),
+        prompt_logprobs=None,
+        finished=True,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[7, 0],
+                cumulative_logprob=-1.0,
+                logprobs=[
+                    {7: SimpleNamespace(logprob=-0.25)},
+                    {0: SimpleNamespace(logprob=-0.75)},
+                ],
+                finish_reason="stop",
+            )
+        ],
+    )
+
+  def _sampler(self):
+    import itertools  # pylint: disable=g-import-not-at-top
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from vllm.sampling_params import SamplingParams  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(vllm_sampler.VllmSampler)
+    obj.args = {"max_model_len": 64}
+    obj._postprocessed = None  # set by __init__ upstream; fixture bypasses it
+    obj.config = SimpleNamespace(
+        return_logprobs=True,
+        return_routed_experts=False,
+        sampling_kwargs={},
+        overlap_postprocessing=False,  # upstream 323946941 added this field
+    )
+    obj._driver = None
+    obj._request_counter = itertools.count()
+    obj.tokenizer = SimpleNamespace(
+        encode=mock.Mock(side_effect=AssertionError("history was re-encoded")),
+        decode=mock.Mock(return_value="decoded"),
+        eos_id=lambda: 0,
+        bos_id=lambda: None,
+        pad_id=lambda: 0,
+        dedup_bos_ids=lambda ids: ids,
+    )
+    obj.llm = SimpleNamespace(
+        get_default_sampling_params=SamplingParams,
+        generate=mock.Mock(
+            side_effect=lambda **kw: [
+                self._result(str(i), prompt["prompt_token_ids"])
+                for i, prompt in enumerate(kw["prompts"])
+            ]
+        ),
+    )
+    return obj
+
+  def test_token_ids_are_submitted_without_re_encoding(self):
+    obj = self._sampler()
+    out = obj(
+        None, 4, max_prompt_length=5, prompt_token_ids=[[0, 3], [4, 0, 5]]
+    )
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [{"prompt_token_ids": [0, 3]}, {"prompt_token_ids": [4, 0, 5]}],
+    )
+    obj.tokenizer.encode.assert_not_called()
+    np.testing.assert_array_equal(out.prompt_lengths, [2, 3])
+    np.testing.assert_array_equal(
+        out.padded_prompt_tokens, [[0, 0, 0, 0, 3], [0, 0, 4, 0, 5]]
+    )
+    np.testing.assert_array_equal(out.logprobs, [[-0.25, -0.75]] * 2)
+
+  def test_invalid_token_inputs_fail_before_submission(self):
+    for kwargs in (
+        {"input_strings": "text", "prompt_token_ids": [[1]]},
+        {"input_strings": None},
+        {"input_strings": None, "prompt_token_ids": [[1]], "n": 2},
+        {"input_strings": None, "prompt_token_ids": [[1] * 62]},
+    ):
+      obj = self._sampler()
+      with self.assertRaises(ValueError):
+        obj(max_generation_steps=4, **kwargs)
+      obj.llm.generate.assert_not_called()
+
+  def test_engine_echo_count_and_duplicate_ids_are_checked(self):
+    for outputs, message in (
+        ([self._result("0", [2, 2]), self._result("1", [1, 1])], "prompt echo"),
+        ([self._result("0", [1, 1])], "result count"),
+        (
+            [self._result("s", [1, 1]), self._result("s", [2, 2])],
+            "duplicate request",
+        ),
+    ):
+      obj = self._sampler()
+      obj.llm.generate = mock.Mock(return_value=outputs)
+      with self.assertRaisesRegex(ValueError, message):
+        obj(None, 4, prompt_token_ids=[[1, 1], [2, 2]])
+
+  def test_text_path_still_encodes(self):
+    obj = self._sampler()
+    obj.tokenizer.encode.side_effect = None
+    obj.tokenizer.encode.return_value = [4, 0, 5]
+    out = obj("ordinary text", 4)
+    obj.tokenizer.encode.assert_called_once_with("ordinary text")
+    np.testing.assert_array_equal(out.prompt_lengths, [3])
 
 
 if __name__ == "__main__":

@@ -1005,7 +1005,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           temperature=0.7, max_generation_steps=128
       )
       req_ids = await self.engine.dispatch_rollouts(
-          [{"prompt": "p1", "prompt_id": "p1"}],
+          [{"prompt": "p1", "prompt_id": "p1", "max_response_length": 512}],
           num_generations=1,
           generation_args=gen_args,
           route_metadata={"custom_key": "custom_value"},
@@ -1019,8 +1019,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       dispatched = mock_call.kwargs["requests"][0]
       self.assertEqual(
           dispatched.generation_kwargs,
-          {"temperature": 0.7, "max_generation_steps": 128},
+          {
+              "temperature": 0.7,
+              "max_generation_steps": 128,
+          },
       )
+      self.assertEqual(dispatched.max_response_length, 512)
       # route_metadata has no fixed schema; any key is merged through verbatim.
       self.assertEqual(dispatched.metadata["custom_key"], "custom_value")
 

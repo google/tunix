@@ -32,15 +32,20 @@ from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
 
 
-class MeshBoundTrainerTest(absltest.TestCase):
+class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
     self.mock_trainer = mock.MagicMock(spec=peft_trainer_v2.PeftTrainer)
+    self.mock_trainer.policy_version = 1
     self.mock_mesh = mock.MagicMock(spec=Mesh)
-    self.mesh_trainer = run_trainer_node._MeshBoundTrainer(
-        self.mock_trainer, self.mock_mesh
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.mock_trainer,
+        worker_id="trainer-0",
+        execution_context=self.mock_mesh,
     )
+    self.worker.initialize()
+    self.mock_mesh.reset_mock()
 
   def test_save_checkpoint_runs_within_mesh_context_and_propagates_kwargs(self):
     call_order = []
@@ -55,7 +60,7 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
 
     metadata = {"step": 10, "policy_version": 2, "num_rollouts": 4}
-    self.mesh_trainer.save_checkpoint(
+    self.worker.save_checkpoint(
         metadata=metadata, force=True, save_only_lora_params=True
     )
 
@@ -66,14 +71,10 @@ class MeshBoundTrainerTest(absltest.TestCase):
         call_order, ["enter_mesh", "save_checkpoint", "exit_mesh"]
     )
 
-  def test_save_checkpoint_default_metadata(self):
-    self.mesh_trainer.save_checkpoint()
-    self.mock_trainer.save_checkpoint.assert_called_once_with(None)
-
   def test_save_checkpoint_propagates_exception_and_exits_mesh(self):
     self.mock_trainer.save_checkpoint.side_effect = RuntimeError("Disk full")
     with self.assertRaisesRegex(RuntimeError, "Disk full"):
-      self.mesh_trainer.save_checkpoint(metadata={"step": 1})
+      self.worker.save_checkpoint(metadata={"step": 1})
 
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
@@ -93,7 +94,7 @@ class MeshBoundTrainerTest(absltest.TestCase):
         or {"step": 5}
     )
 
-    result = self.mesh_trainer.restore_checkpoint(step=5)
+    result = self.worker.restore_checkpoint(step=5)
 
     self.assertEqual(result, {"step": 5})
     self.mock_trainer.restore_checkpoint.assert_called_once_with(step=5)
@@ -102,49 +103,36 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
 
   def test_fwd_bwd_runs_within_mesh(self):
-    self.mesh_trainer.fwd_bwd("payload", skip_jit=False)
+    req = mock.MagicMock(payload="payload", metadata={}, request_id="r1")
+    self.worker.fwd_bwd(req, skip_jit=False)
     self.mock_mesh.__enter__.assert_called_once()
-    self.mock_trainer.fwd_bwd.assert_called_once_with(
-        "payload", skip_jit=False
-    )
+    self.mock_trainer.fwd_bwd.assert_called_once_with("payload")
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_update_runs_within_mesh(self):
     self.mock_trainer.update.return_value = 5
-    result = self.mesh_trainer.update(custom_kw=True)
+    result = self.worker.update(custom_kw=True)
     self.assertEqual(result, 5)
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.update.assert_called_once_with(custom_kw=True)
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_eval_step_runs_within_mesh(self):
-    self.mesh_trainer.eval_step("eval_payload", arg1=1)
+    req = mock.MagicMock(payload="eval_payload", metadata={}, request_id="r2")
+    self.worker.eval_step(req, arg1=1)
     self.mock_mesh.__enter__.assert_called_once()
-    self.mock_trainer.eval_step.assert_called_once_with(
-        "eval_payload", arg1=1
-    )
-    self.mock_mesh.__exit__.assert_called_once()
-
-  def test_eval_context_runs_within_mesh(self):
-    mock_ctx = mock.MagicMock()
-    self.mock_trainer.eval_context.return_value = mock_ctx
-
-    with self.mesh_trainer.eval_context():
-      mock_ctx.__enter__.assert_called_once()
-
-    mock_ctx.__exit__.assert_called_once()
-    self.mock_mesh.__enter__.assert_called_once()
+    self.mock_trainer.eval_step.assert_called_once_with("eval_payload", arg1=1)
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_compile_runs_within_mesh(self):
-    self.mesh_trainer.compile("dummy_data")
+    self.worker.compile("dummy_data")
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.compile.assert_called_once_with("dummy_data")
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_prepare_weight_sync_runs_within_mesh(self):
     self.mock_trainer.prepare_weight_sync.return_value = {"weights": "synced"}
-    result = self.mesh_trainer.prepare_weight_sync(sync_request="req1")
+    result = self.worker.prepare_weight_sync(sync_request="req1")
     self.assertEqual(result, {"weights": "synced"})
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.prepare_weight_sync.assert_called_once_with(
@@ -152,49 +140,6 @@ class MeshBoundTrainerTest(absltest.TestCase):
     )
     self.mock_mesh.__exit__.assert_called_once()
 
-  def test_current_train_step_reads_int_not_bound_method(self):
-    """PeftTrainer exposes `train_step` as a method and `train_steps` as int.
-
-    Reading `train_step` blindly returns a bound method, which compares equal
-    to itself and would make every close() look like a duplicate save.
-    """
-
-    class _PeftLikeTrainer:
-      train_steps = 7
-
-      def train_step(self, payload=None):
-        return 1
-
-    mesh_trainer = run_trainer_node._MeshBoundTrainer(
-        _PeftLikeTrainer(), self.mock_mesh
-    )
-    self.assertEqual(mesh_trainer._current_train_step(), 7)
-
-  def test_current_train_step_reads_maxtext_property(self):
-    class _MaxTextLikeEngine:
-      train_step = 4
-
-    mesh_trainer = run_trainer_node._MeshBoundTrainer(
-        _MaxTextLikeEngine(), self.mock_mesh
-    )
-    self.assertEqual(mesh_trainer._current_train_step(), 4)
-
-  def test_final_checkpoint_not_duplicate_when_peft_step_advanced(self):
-    class _PeftLikeTrainer:
-      train_steps = 3
-
-      def train_step(self, payload=None):
-        return 1
-
-    trainer = _PeftLikeTrainer()
-    mesh_trainer = run_trainer_node._MeshBoundTrainer(trainer, self.mock_mesh)
-
-    mesh_trainer._last_saved_train_step = 3
-    self.assertTrue(mesh_trainer._final_checkpoint_would_duplicate())
-
-    # Training advanced past the last save, so close() must still write.
-    trainer.train_steps = 4
-    self.assertFalse(mesh_trainer._final_checkpoint_would_duplicate())
 
   def test_prepare_weight_sync_never_drains_checkpoint(self):
     """Checkpoint staging and the Raiden transfer must stay overlapped.
@@ -204,18 +149,15 @@ class MeshBoundTrainerTest(absltest.TestCase):
     """
     manager = mock.MagicMock()
     setattr(self.mock_trainer, "_checkpoint_manager", manager)
-    self.mesh_trainer.prepare_weight_sync()
+    self.mock_trainer.prepare_weight_sync()
     manager.wait_until_finished.assert_not_called()
 
-  def test_close_runs_within_mesh(self):
-    self.mesh_trainer.close()
+
+  def test_stop_runs_close_within_mesh(self):
+    self.worker.stop()
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.close.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
-
-  def test_getattr_delegates_to_underlying_trainer(self):
-    self.mock_trainer.custom_attr = "custom_value"
-    self.assertEqual(self.mesh_trainer.custom_attr, "custom_value")
 
 
 class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
@@ -246,7 +188,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_mesh = mock.MagicMock(spec=Mesh)
     mock_create_mesh.return_value = mock_mesh
     mock_load_actor_model.return_value = mock.MagicMock()
-    mock_create_trainer_factory.return_value = mock.MagicMock()
+    mock_create_trainer_factory.return_value = (mock.MagicMock(), mock_mesh)
     mock_trainer_worker_cls.return_value = self.mock_worker_service
     mock_grpc_server_cls.return_value = self.mock_server
 
@@ -307,6 +249,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertIn(signal.SIGINT, signal_handlers)
     self.assertIn(signal.SIGTERM, signal_handlers)
     self.mock_context.jax.initialize.assert_called_once()
+    mock_trainer_worker_cls.assert_called_once_with(
+        trainer_factory=mock.ANY,
+        worker_id="trainer-0",
+        execution_context=mock_create_mesh.return_value,
+    )
     self.mock_server.start_serving_async.assert_called_once_with(20000)
     self.mock_context.ipc.discovery.register.assert_called_once()
     self.mock_worker_service.stop.assert_called_once()
@@ -461,6 +408,54 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_create_maxtext.assert_called_once_with(args_maxtext)
     mock_create_tunix.assert_not_called()
 
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_max_seq_token_per_tpu(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--max_seq_token_per_tpu",
+        "4096",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("max_seq_token_per_tpu"), 4096
+    )
+
+  @mock.patch.object(
+      run_trainer_node,
+      "_ensure_model_dir_for_trainer",
+      return_value="/tmp/test",
+  )
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
+  def test_create_tunix_trainer_factory_ignores_max_seq_token_per_tpu(
+      self,
+      mock_training_config,
+      mock_load_model,
+      mock_create_mesh,
+      mock_ensure_dir,
+  ):
+    # The flag is for MaxText's max_target_length. Under the orchestrator the
+    # PeftTrainer never packs -- the SequencePackedBatchAssembler does, and the
+    # packing weights arrive on the payload -- so it stays off TrainingConfig.
+    args = run_trainer_node._parse_args([
+        "--max_seq_token_per_tpu",
+        "4096",
+    ])
+    run_trainer_node._create_tunix_trainer_factory(args)
+    mock_training_config.assert_called_once()
+    self.assertNotIn(
+        "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
+    )
+
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       run_trainer_node.main([], context=None)
@@ -507,6 +502,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.rollout_mesh_tp, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
+    self.assertEqual(args.max_seq_token_per_tpu, 0)
 
     custom_argv = [
         "--port",
@@ -521,6 +517,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "2",
         "--rollout_mesh_tp",
         "8",
+        "--max_seq_token_per_tpu",
+        "4096",
         "--prefuse_moe_weights=false",
         "--use_weight_converter=false",
         "--checkpoint_save_interval_steps",
@@ -558,6 +556,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.mesh_fsdp, 4)
     self.assertEqual(args_custom.mesh_tp, 2)
     self.assertEqual(args_custom.rollout_mesh_tp, 8)
+    self.assertEqual(args_custom.max_seq_token_per_tpu, 4096)
     self.assertFalse(args_custom.prefuse_moe_weights)
     self.assertFalse(args_custom.use_weight_converter)
     self.assertEqual(args_custom.checkpoint_save_interval_steps, 5)
@@ -604,6 +603,55 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         ValueError, "checkpoint_save_interval_steps must be non-negative"
     ):
       run_trainer_node._checkpointing_options(args)
+
+  def test_checkpoint_root_directory_kept_when_saving_enabled(self):
+    args = mock.Mock(
+        checkpoint_save_interval_steps=5,
+        checkpoint_root_directory="/checkpoints/test",
+    )
+    self.assertEqual(
+        run_trainer_node._checkpoint_root_directory(args),
+        "/checkpoints/test",
+    )
+
+  def test_checkpoint_root_directory_dropped_when_saving_disabled(self):
+    """Interval 0 with a root hits `step % 0` and force-saves on close."""
+    args = mock.Mock(
+        checkpoint_save_interval_steps=0,
+        checkpoint_root_directory="/checkpoints/test",
+    )
+    self.assertIsNone(run_trainer_node._checkpoint_root_directory(args))
+
+  @mock.patch.object(peft_trainer_v2, "TrainingConfig", autospec=True)
+  @mock.patch.object(run_trainer_node, "_load_actor_model", autospec=True)
+  @mock.patch.object(run_trainer_node, "_create_mesh", autospec=True)
+  @mock.patch.object(
+      run_trainer_node, "_ensure_model_dir_for_trainer", autospec=True
+  )
+  def test_tunix_trainer_factory_disables_checkpoint_root_when_interval_zero(
+      self,
+      mock_ensure_model_dir,
+      mock_create_mesh,
+      mock_load_actor_model,
+      mock_training_config,
+  ):
+    mock_ensure_model_dir.return_value = "/models/test"
+    mock_create_mesh.return_value = mock.MagicMock(spec=Mesh)
+    mock_load_actor_model.return_value = mock.MagicMock()
+    args = run_trainer_node._parse_args([
+        "--model_dir=/models/test",
+        "--mini_batch_size=2",
+        "--num_generations=4",
+        "--train_micro_batch_size=1",
+        "--checkpoint_save_interval_steps=0",
+        "--checkpoint_root_directory=/checkpoints/test",
+    ])
+
+    run_trainer_node._create_tunix_trainer_factory(args)
+
+    self.assertIsNone(
+        mock_training_config.call_args.kwargs["checkpoint_root_directory"]
+    )
 
   def test_gradient_accumulation_uses_prompt_level_mini_batch(self):
     # pylint: disable=protected-access

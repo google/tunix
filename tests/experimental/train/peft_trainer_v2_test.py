@@ -86,6 +86,13 @@ def dummy_datasets(batch_size: int, repeat: int = 1):
 global_counter = 0
 
 
+def _injected_sgd() -> optax.GradientTransformationExtraArgs:
+  """Returns an SGD whose learning rate is tracked in the optimizer state."""
+  return optax.inject_hyperparams(optax.sgd)(
+      learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+  )
+
+
 class PeftTrainerTest(parameterized.TestCase):
 
   def setUp(self):
@@ -1030,6 +1037,85 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
         TEST_LEARNING_RATE,
     )
+
+  def test_injected_params_with_chained_transformation(self):
+    """Learning rate is logged when a transformation precedes the optimizer."""
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    # `clip_by_global_norm` keeps an empty state and runs ahead of the
+    # optimizer, so the learning rate lives in the second chain part.
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.inject_hyperparams(optax.sgd)(
+            learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+        ),
+    )
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        TEST_LEARNING_RATE,
+    )
+
+  @parameterized.named_parameters(
+      ('no_chain', _injected_sgd, TEST_LEARNING_RATE),
+      (
+          'stateless_chain_part',
+          lambda: optax.chain(optax.clip_by_global_norm(1.0), _injected_sgd()),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'stateful_chain_part',
+          lambda: optax.chain(optax.scale_by_adam(), _injected_sgd()),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'injected_chain_part_without_learning_rate',
+          lambda: optax.chain(
+              optax.inject_hyperparams(optax.clip_by_global_norm)(max_norm=1.0),
+              _injected_sgd(),
+          ),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'multisteps_chain_part',
+          lambda: optax.MultiSteps(
+              optax.chain(optax.clip_by_global_norm(1.0), _injected_sgd()),
+              every_k_schedule=4,
+          ),
+          TEST_LEARNING_RATE,
+      ),
+      ('not_injected', lambda: optax.sgd(TEST_LEARNING_RATE), None),
+      ('not_injected_adam', lambda: optax.adam(TEST_LEARNING_RATE), None),
+      (
+          'injected_without_learning_rate',
+          optax.inject_hyperparams(optax.adafactor),
+          None,
+      ),
+      (
+          'not_injected_chain',
+          lambda: optax.chain(
+              optax.clip_by_global_norm(1.0), optax.sgd(TEST_LEARNING_RATE)
+          ),
+          None,
+      ),
+  )
+  def test_try_get_learning_rate(self, make_optimizer, expected):
+    """The learning rate is found in any chain part, or reported as absent."""
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, make_optimizer(), config)
+
+    learning_rate: Any = trainer._try_get_learning_rate()  # pylint: disable=protected-access
+
+    if expected is None:
+      self.assertIsNone(learning_rate)
+    else:
+      self.assertIsNotNone(learning_rate)
+      self.assertAlmostEqual(float(learning_rate), expected)
 
 
 class OptimizerMemoryTest(parameterized.TestCase):
