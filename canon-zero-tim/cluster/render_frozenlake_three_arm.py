@@ -568,6 +568,11 @@ def render_all(
         raise ValueError("P57 base jax-tpu memory limit drifted")
       main["resources"]["limits"]["memory"] = _P57_MEMORY
     job_name = document["metadata"]["name"]
+    # cluster/steps/00_env.sh refuses to start any pod whose R2E_K8S_NAMESPACE
+    # is not an admitted namespace, whatever the workload, since ad88121f9.
+    # The direct sandbox runtime places R2E Pods with the head's own namespaced
+    # ServiceAccount, so the admitted value is the JobSet's own namespace.
+    sandbox_namespace = document["metadata"]["namespace"]
     state = f"/tmp/canon-state/{job_name}"
     checkpoint_disabled = checkpoint_mode == "disabled"
     checkpoint_tag = "" if checkpoint_disabled else f"{campaign_tag}-{arm.name}"
@@ -643,6 +648,7 @@ def render_all(
             "CANON_ALIGN_REPORT": f"{state}/alignment.jsonl",
             "CANON_UPDATE_REPORT": f"{state}/updates.jsonl",
             "CANON_WANDB_RUN_NAME": job_name,
+            "R2E_K8S_NAMESPACE": sandbox_namespace,
         },
     )
     if tito_diagnostic:

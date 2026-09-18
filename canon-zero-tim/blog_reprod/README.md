@@ -56,9 +56,12 @@ python3 -c "import yaml; print(yaml.__version__)"
 git status --porcelain --untracked-files=all
 ```
 
-expected: `R2E_K8S_NAMESPACE` set (`canon-zero-tim/cluster/steps/00_env.sh` requires it and no
-renderer writes it), PyYAML importable, **no output** from `git status` — the wrappers refuse a
-dirty tree or a HEAD other than the SHA you pass. Seconds.
+expected: `R2E_K8S_NAMESPACE` set, PyYAML importable, **no output** from `git status` — the
+wrappers refuse a dirty tree or a HEAD other than the SHA you pass. Seconds.
+`canon-zero-tim/cluster/steps/00_env.sh` refuses to start any pod whose `R2E_K8S_NAMESPACE` is not
+`default` or `trellis`; step 4 now renders that variable into the JobSet env from the manifest's
+own namespace, so the export only matters if you re-verify a manifest rendered before that — the
+resolved-env preflight reads the manifest first and the shell second.
 
 ## Step 4 — render the three arms
 

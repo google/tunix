@@ -933,6 +933,49 @@ class P57RendererTest(unittest.TestCase):
             stock_only=True,
         )
 
+  def test_rendered_env_carries_the_jobset_namespace_for_the_sandbox_gate(self):
+    # 00_env.sh admits a pod only when R2E_K8S_NAMESPACE is an admitted
+    # namespace; before this was rendered the variable reached the suite from
+    # the ambient shell, so drop it here to prove the manifest carries it.
+    arms = (
+        ("is", "new", False),
+        ("zero", "disabled", True),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      for arm, checkpoint_mode, high_performance in arms:
+        with self.subTest(arm=arm):
+          path = paired.render_all(
+              base_path=BASE,
+              output_dir=root / f"ns-{arm}",
+              source_commit="a" * 40,
+              run_id=f"p57ns{arm}",
+              campaign_tag=f"p57-ns-{arm}",
+              checkpoint_mode=checkpoint_mode,
+              expected_updates=300,
+              run_kind="train",
+              arm=arm,
+              high_performance=high_performance,
+              disable_eval=high_performance,
+          )[0]
+          document = yaml.safe_load(path.read_text())
+          namespace = document["metadata"]["namespace"]
+          env = _env(document)
+          self.assertEqual(env["R2E_K8S_NAMESPACE"], namespace)
+          with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("R2E_K8S_NAMESPACE", None)
+            admitted = _run_env_preflight(env, root / f"state-ns-{arm}")
+            without = _run_env_preflight(
+                {k: v for k, v in env.items() if k != "R2E_K8S_NAMESPACE"},
+                root / f"state-no-ns-{arm}",
+            )
+          self.assertEqual(admitted.returncode, 0, admitted.stderr)
+          self.assertNotEqual(without.returncode, 0)
+          self.assertIn(
+              "requires R2E_K8S_NAMESPACE to be exactly default or trellis",
+              without.stderr,
+          )
+
   def test_canon_cpu_pool_and_large_head_limits(self):
     with tempfile.TemporaryDirectory() as tmp:
       paths = paired.render_all(

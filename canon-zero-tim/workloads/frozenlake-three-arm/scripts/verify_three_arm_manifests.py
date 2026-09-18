@@ -75,6 +75,8 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "CANON_P31_ENABLE_EVAL": "1" if evaluation_enabled else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      # 00_env.sh admits the pod only when this matches the JobSet namespace.
+      "R2E_K8S_NAMESPACE": document["metadata"]["namespace"],
   }
   if wave == "zero":
     expected.update({
