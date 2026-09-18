@@ -16,6 +16,7 @@
 
 import argparse
 import logging
+import os
 from typing import Any, Callable
 
 from tunix.experimental.distributed.runtime import context
@@ -122,6 +123,38 @@ class LocalIpcContext(context.IpcContext):
     return self._discovery
 
 
+class LocalJaxContext(context.JaxContext):
+  """JAX runtime context for local execution.
+
+  Mirrors the Pathways half of K8sProcessContext's JaxContext. When a process is
+  pointed at a Pathways proxy, pathwaysutils has to register the "proxy" backend
+  factory before anything resolves a backend; otherwise JAX fails with
+
+    Unable to initialize backend 'proxy': Backend 'proxy' is not in the list of
+    known backends: ['cpu', 'tpu']
+
+  which reads like the proxy is unreachable rather than unregistered. The base
+  JaxContext does nothing, so before this class a local Pathways run could not
+  work no matter how the daemons were configured.
+
+  Deliberately not the mcJAX branch k8s_context also carries: a local run is a
+  single process that needs no jax.distributed.initialize(), and calling it here
+  would change the behaviour of the existing non-Pathways local tests.
+  """
+
+  def initialize(self) -> None:
+    """Registers the Pathways proxy backend when this process targets one."""
+    if "proxy" not in os.environ.get("JAX_PLATFORMS", ""):
+      return
+    if not os.environ.get("JAX_BACKEND_TARGET"):
+      return
+
+    logging.info("Initializing the Pathways runtime for local execution.")
+    import pathwaysutils  # pylint: disable=g-import-not-at-top
+
+    pathwaysutils.initialize()
+
+
 class LocalProcessContext(context.ProcessContext):
   """Handles the implementation differences across platforms for local execution."""
 
@@ -131,7 +164,7 @@ class LocalProcessContext(context.ProcessContext):
     Args:
       args: Parsed command-line arguments.
     """
-    self._jax = context.JaxContext()
+    self._jax = LocalJaxContext()
     self._ipc = LocalIpcContext(args)
 
   def __enter__(self) -> "LocalProcessContext":
