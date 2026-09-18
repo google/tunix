@@ -150,16 +150,21 @@ arm, each taking `<tip-sha40> <out-dir> <run-id>` and printing the JobSet path t
 deliberately thin: they translate those three arguments into the six the wave wrappers under
 `canon-zero-tim/workloads/` expect, and change nothing about what gets rendered.
 
-## 2. Evidence boundary
+## 2. What has been verified
 
-This branch carries analysis-grade telemetry and a reproducible data-to-figure path, not a signed
-certification. The Zero-TIM run's exported `sampler_trainer/train/logp_diff_mean`,
-`sampler_trainer/train/logp_diff_max` and `canonical/train/alignment_max_differing_bytes` are
-exactly zero at every plotted step, but the receipts behind those zeros were sampled under
-warning-only admission and do not cover every step continuously, and
-`canon-zero-tim/blog_reprod/data/manifest.json` records `signed_full_run_certification: false`: a
-missing receipt is not a zero. The arms differ in more than one thing — source commit, evaluation
-schedule, TiTO setting, backward implementation — so they compare three configurations, not one
-knob, and seed 42 does not make a rerun trajectory-identical. Everything checked while assembling
-this branch was checked without TPUs, **no job was launched**, and the first 64-chip launch from a
-new tip is itself this branch's end-to-end gate (§0.3).
+Everything below was checked on this branch's current tip; a row that says "not verified" says why.
+
+| What | Status |
+|---|---|
+| Rendering the three arms | Verified 2026-09-17: the three `canon-zero-tim/recipes/frozenlake-short-horizon/` entry points exit 0 with their PASS lines, and their P45 manifests are byte-identical to the ones the older wave wrappers render for the same run ids. |
+| Pod install chain, `00_env` → `50_verify_overlay` | Verified 2026-09-18 on CPU: the real runtime image replayed `canon-zero-tim/cluster/entrypoint.sh` with the env taken from the three rendered manifests — `probe-only` and `install-only` exit 0 for all three arms, Zero-TIM reaching `all 37 files match (qwen8b_tp8)` and the stock arms `canonical_overlay=skipped observer_overlay=installed`. Steps `60_wait_workers`, `65_probe_devices`, `80_model_init` and `90_run.sh` only run on a cluster and are not covered. |
+| Image rebuild | Verified 2026-09-17: a locked rebuild took 343 s and resolved all 275 pins into the same package set as `canon-zero-tim/image/requirements.frozenlake.lock.txt`. The base image digest and apt packages are not pinned, and the `--devices` ABI check needs chips and was not run. |
+| Zero-TIM training and A = B = C on one host | Verified 2026-09-17 on one v5p-8 (real image, real chips): the overlay installed 37/37, three optimizer commits had finite gradient norms (15.51 / 6.68 / 6.51), 12 strict-alignment rows — 36 boundaries — held at zero differing bytes with a green semantic census; a second carrier at DP2×TP2 reported `strict_exact: true` over 26 boundaries with finite norms. |
+| Multi-turn exact token continuity on one host | Not verified on one host: the carrier's frozen geometry contracts (`examples/frozenlake/train_frozenlake_qwen3.py`, P28 G6 and P27) admit only a 64-token whole-episode response budget, so every one-host trajectory is single-turn and token continuity is never compared (`token_verdict: UNEXERCISED` in both 2026-09-18 runs); the 64-chip recipe (prompt 4096, response 2048, five turns) is where it is exercised |
+| Standard and TIS training | Not verified: the stock-engine arms crash in the backward pass under the one-host profile's `CANON_P66_P59_CHECK_VMA=1` — a defect on record since 2026-09-10, in the image's own attention kernel and unrelated to the 64-chip path — and the one-host classifier accepts neither arm, so no Standard or TIS update was reached. |
+| 64-chip launch | Not verified: no cluster job has been launched from this tree. Whether the API server accepts these JobSets, and everything from `60_wait_workers` on, is untested. |
+| Data → figure → spreadsheet | Verified 2026-09-17: the nine hashes in `canon-zero-tim/blog_reprod/data/manifest.json` match, the figure rebuilds byte-identically to the checked-in SVG and PNG, the spreadsheet rebuilds, and cutting the plotted columns out of the archived W&B exports reproduces all three `canon-zero-tim/blog_reprod/data/` CSVs byte for byte. Re-exporting those runs live is not verified — the credentials on the assembling host cannot see the W&B project. |
+
+This branch carries analysis-grade telemetry and a reproducible data-to-figure path, not a signed certification. The Zero-TIM run's exported `sampler_trainer/train/logp_diff_mean`, `sampler_trainer/train/logp_diff_max` and `canonical/train/alignment_max_differing_bytes` are exactly zero at every plotted step, but the receipts behind those zeros were sampled under warning-only admission and do not cover every step continuously, and `canon-zero-tim/blog_reprod/data/manifest.json` records `signed_full_run_certification: false`: a missing receipt is not a zero.
+
+The arms differ in more than one thing — source commit, evaluation schedule, TiTO setting, backward implementation — so they compare three configurations, not one knob, and seed 42 does not make a rerun trajectory-identical.
