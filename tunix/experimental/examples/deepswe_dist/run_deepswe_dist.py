@@ -44,6 +44,7 @@ from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
+from examples.deepswe import swe_env
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 
@@ -155,11 +156,33 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_turns", type=int, default=50)
   parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
   parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
+  parser.add_argument(
+      "--episode_timeout_secs",
+      type=int,
+      default=int(os.getenv("EPISODE_TIMEOUT_SECS", "5400")),
+      help="Maximum episode duration in seconds before timeout termination.",
+  )
   parser.add_argument("--env_backend", type=str, default="kubernetes")
   parser.add_argument(
-      "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
+      "--scaffold",
+      choices=("r2egym", "sweagent", "openhands"),
+      default="r2egym",
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      type=int,
+      default=None,
+      help=(
+          "Maximum replicas per SandboxWarmPool (defaults to num_generations)."
+      ),
+  )
+  parser.add_argument(
+      "--max_concurrency",
+      type=int,
+      default=128,
+      help="Maximum concurrency for SandboxFleet.",
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -359,25 +382,55 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
 
+  fleet = None
+  if args.use_agent_sandbox:
+    fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
+        tasks=dataset,
+        max_concurrency=args.max_concurrency,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        scaffold=args.scaffold,
+    )
+
+  prompt_stream = deepswe.iter_prompt_items(
+      dataset=dataset,
+      max_steps=args.max_steps,
+      batch_size=args.batch_size,
+      max_turns=args.max_turns,
+      max_response_length=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=None if args.top_k < 0 else args.top_k,
+      step_timeout_secs=args.step_timeout_secs,
+      reward_timeout_secs=args.reward_timeout_secs,
+      env_backend=args.env_backend,
+      use_agent_sandbox=args.use_agent_sandbox,
+      scaffold=args.scaffold,
+      env_verbose=args.env_verbose,
+      episode_timeout_secs=args.episode_timeout_secs,
+  )
+  if args.use_agent_sandbox:
+    prompt_stream = swe_env.PrewarmDatasetIterator(
+        prompt_stream,
+        fleet=fleet,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        scaffold=args.scaffold,
+    )
+
   program = rl_program.StandardRLProgram(
       algo=algo,
-      dataset=deepswe.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
+      dataset=prompt_stream,
+      max_steps=args.max_steps,
+      generation_args=datatypes.GenerationArgs(
           max_response_length=args.max_response_length,
           temperature=args.temperature,
           top_p=args.top_p,
           top_k=None if args.top_k < 0 else args.top_k,
-          step_timeout_secs=args.step_timeout_secs,
-          reward_timeout_secs=args.reward_timeout_secs,
-          env_backend=args.env_backend,
-          use_agent_sandbox=args.use_agent_sandbox,
-          scaffold=args.scaffold,
-          env_verbose=args.env_verbose,
+          return_logprobs=True,
       ),
-      max_steps=args.max_steps,
       reward_fns=[],
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
@@ -414,8 +467,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         num_steps=args.max_steps,
         bring_up=False,
     )
+  except Exception as e:
+    logging.exception("FATAL ERROR in orchestrator execution: %s", e)
+    raise
   finally:
     program.close()
+    if fleet is not None:
+      logging.info("Tearing down SandboxFleet on orchestrator...")
+      try:
+        fleet.teardown()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
       cluster.shutdown()
