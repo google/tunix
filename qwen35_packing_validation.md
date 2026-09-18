@@ -37,10 +37,13 @@ Both runs used the same configuration, in
 | Priority | `medium` | [37](docker/maz-q35/submit.sh#L37) |
 | `DEBUG` | 1 | [208](docker/maz-q35/submit.sh#L208) |
 
-`maz-q35-11` additionally set `TRAJECTORY_LOG_DIR` to a GCS prefix
-([236](docker/maz-q35/submit.sh#L236)) so that every rollout's response, gold
-answer and reward were written to CSV. `maz-q35-10` did not produce
-trajectories — see §6.
+Both runs set `TRAJECTORY_LOG_DIR` to a GCS prefix
+([236](docker/maz-q35/submit.sh#L236)), asking for every rollout's response,
+gold answer and reward to be written to CSV. Only `maz-q35-11` produced one:
+run 10's logger thread raised an assertion on every flush and wrote nothing.
+The two runs differ in exactly two ways — step count, and the placeholder object
+that makes that assertion hold. See §6 for the assertion and §7 for the
+workaround.
 
 Cluster: `bodaborg-v5p-nap`, `europe-west4`, namespace `trellis`, project
 **`cloud-tpu-shared-capacity`**. Note that the project holding the image and the
