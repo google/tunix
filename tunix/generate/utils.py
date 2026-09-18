@@ -18,6 +18,7 @@
 from collections import abc
 import functools
 import gc
+import inspect
 from absl import logging
 import math
 import re
@@ -541,6 +542,42 @@ def _unroll_scanned_layers(
   return unscanned_flat
 
 
+def _apply_hook(
+    val: jnp.ndarray,
+    src_key: str,
+    hook_fns: Optional[Dict[str, Callable[..., jnp.ndarray]]],
+    **kwargs,
+) -> jnp.ndarray:
+  """Apply the hook registered for `src_key`, if any.
+
+  Hook keys are either exact flat source keys or wildcard patterns
+  (`layers.*.mlp.gate_up_proj.kernel`), matched the same way as
+  `transpose_keys`. A hook declaring `**kwargs` additionally receives the
+  transfer-time metadata (`tp_size`, `num_kv_heads`, `head_dim`, ...) so it
+  can produce layouts that depend on the rollout engine's parallelism.
+  """
+  if not hook_fns:
+    return val
+
+  hook_fn = hook_fns.get(src_key)
+  if hook_fn is None:
+    for k, fn in hook_fns.items():
+      if '*' in k:
+        pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
+        if re.match(pattern, src_key):
+          hook_fn = fn
+          break
+  if hook_fn is None:
+    return val
+
+  logging.debug('Applying hook on %s', src_key)
+  accepts_kwargs = any(
+      p.kind == inspect.Parameter.VAR_KEYWORD
+      for p in inspect.signature(hook_fn).parameters.values()
+  )
+  return hook_fn(val, **kwargs) if accepts_kwargs else hook_fn(val)
+
+
 def _apply_transpose(
     val: jnp.ndarray,
     src_key: str,
@@ -911,8 +948,7 @@ def transfer_state_with_mappings(
     val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
 
     # Apply optional hook function
-    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
-      val = key_mapping_hook_fns[flat_src_key](val)
+    val = _apply_hook(val, flat_src_key, key_mapping_hook_fns, **kwargs)
 
     # Align shapes (padding/repeating as needed)
     tgt_val = tgt_param.value if hasattr(tgt_param, 'value') else tgt_param
