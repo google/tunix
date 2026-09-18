@@ -76,6 +76,8 @@ export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
 export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
+export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
+export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -123,6 +125,18 @@ export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 
+export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+export DRY_RUN=${DRY_RUN:-false}
+
+apply_manifest() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "---"
+    cat
+  else
+    kubectl apply -f -
+  fi
+}
+
 if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   echo "Error: this first DeepSWE distributed launcher only wires trainer+rollout."
   echo "Use BETA=0.0 until the reference inference worker is added."
@@ -130,7 +144,11 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
 fi
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_orchestrator() {
@@ -201,11 +219,15 @@ start_orchestrator() {
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
         ${DEBUG:+--debug} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_trainer() {
@@ -226,6 +248,12 @@ start_trainer() {
   if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
     lora_args="--use_lora"
   fi
+  local raiden_env=""
+  if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
+    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+      raiden_env+=" RAIDEN_USE_FFI=1"
+    fi
+  fi
   local opt_chain_flags=""
   if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
     opt_chain_flags="--optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\""
@@ -240,11 +268,16 @@ start_trainer() {
     ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
     ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
     ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}"} \
+    ${PATHWAYS_PROXY_MEMORY:+--pathways_proxy_memory="${PATHWAYS_PROXY_MEMORY}"} \
+    ${PATHWAYS_RM_MEMORY:+--pathways_rm_memory="${PATHWAYS_RM_MEMORY}"} \
+    ${USER_CONTAINER_MEMORY:+--user_container_memory="${USER_CONTAINER_MEMORY}"} \
+    ${USER_CONTAINER_MEMORY_LIMIT:+--user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}"} \
+    ${PATHWAYS_WORKER_MEMORY:+--pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}"} \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -272,11 +305,15 @@ start_trainer() {
         ${maxtext_args} \
         ${DEBUG:+--debug} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
 }
 
 start_rollout() {
@@ -339,14 +376,8 @@ start_rollout() {
         ${vllm_args} \
         ${DEBUG:+--debug} \
     " \
-    | kubectl apply -f -
+    | apply_manifest
 }
-
-if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
-  source tunix/experimental/examples/common/enter_kube_context.sh
-elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
-  source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh"
-fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -366,11 +397,23 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
+    --dry-run|--render)
+      DRY_RUN=true
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
+
+if [[ "$DRY_RUN" != "true" ]]; then
+  if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
+    source tunix/experimental/examples/common/enter_kube_context.sh
+  elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh"
+  fi
+fi
 
 if [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
