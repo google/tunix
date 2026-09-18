@@ -68,8 +68,8 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
   def test_three_full_manifests_match_exact_goldens_twice(self):
     expected = (
         "57bb467259e1a312d14052c2a2a8cc27fdbba42e84c29be79a128588b2db2400",
-        "60dccb879307e3018451a57a97e802378599d0ffe232e333c7b75a944a90bb2f",
-        "7c43b7b06bb2eed42587c9f20bce07be0bffc9cf14714cd3c0b78faa75b6d0ba",
+        "11e29e16148ace4f64f2b926026d485e425c70af03a22b1ee3c764d1019ea6bd",
+        "94d44d6b5b20de4faed74daad6ea7db387e935eac437ec861770cc5e5401bddf",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_three(Path(tmp) / "first")
@@ -82,8 +82,8 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_frozenlake_two_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "26481cfde65b7aff3aa593bdc1531250a5069ac4622e19894f3c4466e8138cec",
-        "2ecbacd28b3ad722082dba6e53e02631cacd3d6d7e6c4986db39b9e48846666b",
+        "a8feb8ce91570084f49668a520d4a5408388e69058f27a975d8ef813c5bfb575",
+        "604d2cff3c6a04d12e564a30d7fcd05799cbc13fc3c9165dfd0c7d710ebfec33",
     )
     with tempfile.TemporaryDirectory() as tmp:
       first = self._render_two(Path(tmp) / "first")
@@ -122,9 +122,10 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
       requests.update(previous)
 
   def test_image_receipt_profile_defaults_and_base_are_the_only_legacy_deltas(self):
-    # The TiTO provenance change added CANON_CLIENT_IMAGE to FrozenLake.
+    # The TiTO provenance change added CANON_CLIENT_IMAGE to FrozenLake, and
+    # the sandbox-namespace change added R2E_K8S_NAMESPACE to it.
     # Retain all old goldens as a reconstruction oracle: removing precisely
-    # that independently checked receipt, restoring the stream/1 entries now
+    # those independently checked receipts, restoring the stream/1 entries now
     # owned by the profile and the reviewed base fields must recover every
     # old byte hash. The original legacy hash values are not refreshed.
     legacy = {
@@ -150,7 +151,17 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
           is_frozenlake = _env(path)["CANON_PROFILE_FILE"] != THREE._GSM8K_PROFILE
           self.assertEqual(receipts, [{"name": "CANON_CLIENT_IMAGE", "value": main["image"]}]
                            if is_frozenlake else [])
-          main["env"] = [item for item in main["env"] if item["name"] != "CANON_CLIENT_IMAGE"]
+          namespaces = [item for item in main["env"]
+                        if item["name"] == "R2E_K8S_NAMESPACE"]
+          self.assertEqual(
+              namespaces,
+              [{"name": "R2E_K8S_NAMESPACE",
+                "value": document["metadata"]["namespace"]}]
+              if is_frozenlake else [],
+          )
+          main["env"] = [item for item in main["env"]
+                         if item["name"] not in
+                         ("CANON_CLIENT_IMAGE", "R2E_K8S_NAMESPACE")]
           entries = main["env"]
           for name in ("CANON_P32_KEEP_TAPE", "CANON_DP_REDUCE_ONCE"):
             self.assertTrue(all(item["name"] != name for item in entries), name)
