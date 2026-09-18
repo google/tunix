@@ -142,19 +142,21 @@ log line, a manifest, an archived run or the archive branch.
 | Recipe | Documented in | Status |
 |---|---|---|
 | Figure 4 — FrozenLake short-horizon, three arms (Qwen3-8B, 64 v5p) | `canon-zero-tim/blog_reprod/README.md` | archived runs and vendored data; reproduction verified as far as rendering — nothing was launched |
-| GSM8K 64-chip Zero-TIM | not yet documented | the archived run crashed at step 64 (prefill re-score context overrun); entry point `canon-zero-tim/workloads/full-recipes/scripts/prepare_gsm8k_full_dp16tp4.sh` |
-| FrozenLake long-horizon, Standard / TIS / Zero-TIM | not yet documented | archived runs incomplete: Standard crashed at 181/300, TIS stopped at 148/300, Zero-TIM reached 52–59 steps at ≈2550 s/step. The Figure 4 wrappers already render the long-horizon manifests next to the short-horizon ones |
-| DeepSWE-4B 128-chip Zero-TIM | not yet documented | never launched, render pending; entry point `canon-zero-tim/cluster/render_deepswe_comparison.py` |
-| DeepSWE-4B 128-chip Standard / TIS | not yet documented | the renderer has no such arm — `canon-zero-tim/cluster/render_deepswe_comparison.py` line 52 reads `_ARMS = ("native", "zero")`. Adding them is a new feature, not documentation |
+| FrozenLake long-horizon, Standard / TIS / Zero-TIM (Qwen3-8B, 64 v5p, 15 turns) | `canon-zero-tim/recipes/frozenlake-long-horizon/README.md` | four archived runs under `canon-zero-tim/results/frozenlake-long-horizon/`, none of them through the configured 300 updates: Standard 182 observations (collapsed), TIS 149, Zero-TIM 234 (99.2% peak solve rate), plus the uncorrected `mismatch` control at 149; ≈2833 s per Zero-TIM update. Rendering and the pod install chain verified; nothing launched from this tree |
+| GSM8K 64-chip Zero-TIM, with a native control (Qwen3-1.7B, DP16×TP4, 200 updates) | `canon-zero-tim/recipes/gsm8k/README.md` | the one archived run, `fmrug2iu`, crashed at update 64 in the prefill re-score length check; the fix `976c54f43` is on this tip and has not been re-run on 64 chips. Nothing exported under `canon-zero-tim/results/` yet. Rendering and the pod install chain verified for both arms |
+| DeepSWE-4B 128-chip native / Zero-TIM (Qwen3-4B-Instruct-2507, R2E-Gym sandboxes) | `canon-zero-tim/recipes/deepswe-4b/README.md` | launched several times and never finished: k34 on 2026-09-01 (22 updates), bd07 on 2026-09-15, bd10 on 2026-09-16 (5 updates at ≈1843 s each, then the sandbox pool degraded). No W&B history exists for them and nothing is exported under `canon-zero-tim/results/`; the console evidence is at archive commit `678170d29`. Rendering verified; the CPU replay of the pod chain reaches the trainer's device probe (see §2) |
+| DeepSWE-4B 128-chip Standard / TIS | not implemented | the renderer has no such arm — `canon-zero-tim/cluster/render_deepswe_comparison.py` line 52 reads `_ARMS = ("native", "zero")`. Adding them is a new feature, not documentation |
 
 Every run a recipe has evidence for is exported in full under `canon-zero-tim/results/`, one
 directory per workload and arm, and `canon-zero-tim/results/README.md` says what a run directory
 must hold and how to add one.
 
 A documented recipe keeps its entry points in `canon-zero-tim/recipes/<recipe>/`, one script per
-arm, each taking `<tip-sha40> <out-dir> <run-id>` and printing the JobSet path to apply. They are
-deliberately thin: they translate those three arguments into the six the wave wrappers under
-`canon-zero-tim/workloads/` expect, and change nothing about what gets rendered.
+arm, each taking `<tip-sha40> <out-dir> <run-id>` — the DeepSWE pair also a client-image digest and
+a worker node pool — and printing the JobSet path to apply as its last line, `MANIFEST=<path>`. They
+are deliberately thin: they translate those arguments into what the wave wrappers under
+`canon-zero-tim/workloads/` and the renderers under `canon-zero-tim/cluster/` expect, validate the
+run id up front, and change nothing about what gets rendered.
 
 ## 2. What has been verified
 
@@ -168,7 +170,9 @@ Everything below was checked on this branch's current tip; a row that says "not 
 | Zero-TIM training and A = B = C on one host | Verified 2026-09-17 on one v5p-8 (real image, real chips): the overlay installed 37/37, three optimizer commits had finite gradient norms (15.51 / 6.68 / 6.51), 12 strict-alignment rows — 36 boundaries — held at zero differing bytes with a green semantic census; a second carrier at DP2×TP2 reported `strict_exact: true` over 26 boundaries with finite norms. |
 | Multi-turn exact token continuity on one host | Not verified on one host: the carrier's frozen geometry contracts (`examples/frozenlake/train_frozenlake_qwen3.py`, P28 G6 and P27) admit only a 64-token whole-episode response budget, so every one-host trajectory is single-turn and token continuity is never compared (`token_verdict: UNEXERCISED` in both 2026-09-18 runs); the 64-chip recipe (prompt 4096, response 2048, five turns) is where it is exercised |
 | Standard and TIS training | Not verified: the stock-engine arms crash in the backward pass under the one-host profile's `CANON_P66_P59_CHECK_VMA=1` — a defect on record since 2026-09-10, in the image's own attention kernel and unrelated to the 64-chip path — and the one-host classifier accepts neither arm, so no Standard or TIS update was reached. |
-| 64-chip launch | Not verified: no cluster job has been launched from this tree. Whether the API server accepts these JobSets, and everything from `60_wait_workers` on, is untested. |
+| Pod install chain for the other recipes | Verified 2026-09-18 on CPU the same way: long-horizon Zero-TIM and Standard, and GSM8K Zero-TIM and native, each `install-only` exit 0 with the env of its own rendered manifest. The DeepSWE lane cannot be driven that way at this tip — `canon-zero-tim/cluster/steps/00_env.sh` requires the `*_ADMITTED` set, which only `CANON_MODE=run` satisfies while the profile exports three of them unconditionally — so it was replayed with `CANON_MODE=run` instead: 35 of 36 steps passed, the trainer printed its admission receipts and stopped at `jax.devices()` for want of Pathways. |
+| Test suites on the tip | `canon-zero-tim/tests/full_recipes/run_cpu.sh` (102), `canon-zero-tim/tests/gsm8k_native_full/test_renderer.py` (12) and the golden suite (5) pass inside the runtime image with `R2E_K8S_NAMESPACE` unset. `canon-zero-tim/tests/frozenlake_three_arm/run_cpu.sh` has one red test unless that variable is exported: the calibration render path still does not emit it. That path is not a documented recipe. |
+| 64-chip and 128-chip launches | Not verified: no cluster job has been launched from this tree. Whether the API server accepts these JobSets, and everything from `60_wait_workers` on, is untested. |
 | Data → figure → spreadsheet | Verified 2026-09-17: the nine hashes in `canon-zero-tim/blog_reprod/data/manifest.json` match, the figure rebuilds byte-identically to the checked-in SVG and PNG, the spreadsheet rebuilds, and cutting the plotted columns out of the archived W&B exports reproduces all three `canon-zero-tim/blog_reprod/data/` CSVs byte for byte. Re-exporting those runs live is not verified — the credentials on the assembling host cannot see the W&B project. |
 
 This branch carries analysis-grade telemetry and a reproducible data-to-figure path, not a signed certification. The Zero-TIM run's exported `sampler_trainer/train/logp_diff_mean`, `sampler_trainer/train/logp_diff_max` and `canonical/train/alignment_max_differing_bytes` are exactly zero at every plotted step, but the receipts behind those zeros were sampled under warning-only admission and do not cover every step continuously, and `canon-zero-tim/blog_reprod/data/manifest.json` records `signed_full_run_certification: false`: a missing receipt is not a zero.
