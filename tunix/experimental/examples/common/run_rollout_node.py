@@ -104,6 +104,71 @@ def _str2bool(v: str | bool) -> bool:
   raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
 
 
+def _load_json_config(value: str | dict | None) -> dict[str, Any]:
+  """Parses a dictionary from JSON string, JSON/YAML file path, or dict."""
+  if value is None:
+    return {}
+  if isinstance(value, dict):
+    return value
+  if not isinstance(value, str):
+    raise ValueError(f"Expected string or dict, got {type(value)}")
+  value = value.strip()
+  if not value:
+    return {}
+  if os.path.exists(value) and os.path.isfile(value):
+    with open(value, "r", encoding="utf-8") as f:
+      content = f.read().strip()
+    if not content:
+      return {}
+    try:
+      res = json.loads(content)
+      if isinstance(res, dict):
+        return res
+    except json.JSONDecodeError:
+      pass
+    try:
+      import yaml  # pylint: disable=g-import-not-at-top
+
+      res = yaml.safe_load(content)
+      if isinstance(res, dict):
+        return res
+    except Exception:
+      pass
+    raise ValueError(f"Unable to parse configuration file: {value}")
+  try:
+    res = json.loads(value)
+    if isinstance(res, dict):
+      return res
+  except json.JSONDecodeError:
+    pass
+  try:
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    res = yaml.safe_load(value)
+    if isinstance(res, dict):
+      return res
+  except Exception:
+    pass
+  raise ValueError(f"Unable to parse JSON configuration: {value}")
+
+
+def _deep_merge_dicts(
+    base: dict[str, Any], update: dict[str, Any]
+) -> dict[str, Any]:
+  """Recursively merges two dictionaries without mutating the inputs."""
+  result = dict(base)
+  for key, value in update.items():
+    if (
+        key in result
+        and isinstance(result[key], dict)
+        and isinstance(value, dict)
+    ):
+      result[key] = _deep_merge_dicts(result[key], value)
+    else:
+      result[key] = value
+  return result
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
   parser = argparse.ArgumentParser(description="Distributed rollout worker")
@@ -248,6 +313,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " mesh_tp)."
       ),
   )
+  parser.add_argument(
+      "--vllm_config_json",
+      type=str,
+      default=os.getenv("ROLLOUT_VLLM_CONFIG_JSON", "{}"),
+      help=(
+          "vLLM engine and sharding configurations as a JSON string or file"
+          " path."
+      ),
+  )
+
   args = parser.parse_args(argv)
   _get_tensor_parallel_size(args)
   return args
@@ -463,7 +538,14 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  vllm_overrides = dict(
+      _load_json_config(getattr(args, "vllm_config_json", None))
+  )
+  max_model_len = (
+      getattr(args, "max_model_len", None)
+      or vllm_overrides.pop("max_model_len", None)
+      or (args.max_prompt_length + args.max_response_length)
+  )
 
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
   if multihost_backend:
@@ -471,15 +553,23 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         multihost_backend != "ray" or args.mesh_tp is not None
     ), "Must set --mesh_tp when using Ray backend."
 
+  if getattr(args, "enable_prefix_caching", False):
+    enable_prefix_caching = True
+    vllm_overrides.pop("enable_prefix_caching", None)
+  else:
+    enable_prefix_caching = vllm_overrides.pop("enable_prefix_caching", False)
+
   engine_kwargs = {
       "model": vllm_model,
       "max_model_len": max_model_len,
-      "enable_prefix_caching": args.enable_prefix_caching,
+      "enable_prefix_caching": enable_prefix_caching,
   }
-  # Select MaxText's `MaxTextForCausalLM` as rollout model.
-  # `additional_config` must be set on VllmConfig (not engine_kwargs): the
-  # sampler overwrites args["additional_config"] from the VllmConfig field.
-  maxtext_additional_config = None
+
+  prefuse_moe = getattr(args, "prefuse_moe_weights", True)
+  if "prefuse_moe_weights" in vllm_overrides:
+    prefuse_moe = vllm_overrides.pop("prefuse_moe_weights")
+
+  maxtext_additional_config = {}
   if args.maxtext_model_name:
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
@@ -493,23 +583,63 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         maxtext_utils.build_vllm_maxtext_additional_config(
             args.maxtext_model_name,
             attention=args.maxtext_attention,
-            prefuse_moe_weights=args.prefuse_moe_weights,
+            prefuse_moe_weights=prefuse_moe,
         )
     )
+
+  user_additional_config = dict(
+      _load_json_config(getattr(args, "additional_config", None))
+  )
+  vllm_additional_config = vllm_overrides.pop("additional_config", None)
+  if vllm_additional_config:
+    user_additional_config = _deep_merge_dicts(
+        user_additional_config, _load_json_config(vllm_additional_config)
+    )
+  merged_additional_config = _deep_merge_dicts(
+      maxtext_additional_config, user_additional_config
+  )
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
   server_mode = True if multihost_backend else None
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
-  tp_size = _get_tensor_parallel_size(args)
+  tp_size = (
+      _get_tensor_parallel_size(args)
+      or vllm_overrides.pop("tensor_parallel_size", None)
+  )
+  dp_size = (
+      getattr(args, "data_parallel_size", None)
+      or vllm_overrides.pop("data_parallel_size", None)
+      or args.mesh_fsdp
+  )
+  ep_size = vllm_overrides.pop("expert_parallel_size", 1)
+  hbm_utilization = (
+      getattr(args, "gpu_memory_utilization", None)
+      or vllm_overrides.pop("gpu_memory_utilization", None)
+      or vllm_overrides.pop("hbm_utilization", None)
+      or 0.8
+  )
+
+  for reserved in (
+      "tensor_parallel_size",
+      "data_parallel_size",
+      "expert_parallel_size",
+      "gpu_memory_utilization",
+      "hbm_utilization",
+      "additional_config",
+      "max_model_len",
+  ):
+    vllm_overrides.pop(reserved, None)
+  engine_kwargs.update(vllm_overrides)
+
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
       vllm_model,
       rollout_mesh,
       tp_size,
-      args.mesh_fsdp,
+      dp_size,
       max_model_len,
   )
   lora_config = None
@@ -522,11 +652,13 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       server_mode=server_mode,
       mesh=rollout_mesh,
       tensor_parallel_size=tp_size,
-      data_parallel_size=args.mesh_fsdp,
+      data_parallel_size=dp_size,
+      expert_parallel_size=ep_size,
+      hbm_utilization=hbm_utilization,
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      additional_config=maxtext_additional_config,
+      additional_config=merged_additional_config or None,
       engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
@@ -538,6 +670,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
       rollout_vllm_model_version=vllm_model,
+      rollout_vllm_additional_config=merged_additional_config or None,
+      rollout_vllm_kwargs=engine_kwargs,
       **_rollout_config_kwargs(args, tokenizer),
   )
   return sampler_adapter, config
@@ -564,9 +698,28 @@ def _create_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
-  tp_size = _get_tensor_parallel_size(args)
-  dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
+  vllm_overrides = dict(
+      _load_json_config(getattr(args, "vllm_config_json", None))
+  )
+  max_model_len = (
+      getattr(args, "max_model_len", None)
+      or vllm_overrides.pop("max_model_len", None)
+      or (args.max_prompt_length + args.max_response_length)
+  )
+  tp_size = (
+      _get_tensor_parallel_size(args)
+      or vllm_overrides.pop("tensor_parallel_size", None)
+  )
+  dp_size = (
+      getattr(args, "data_parallel_size", None)
+      or vllm_overrides.pop("data_parallel_size", None)
+      or max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
+  )
+  gpu_mem_util = (
+      getattr(args, "gpu_memory_utilization", None)
+      or vllm_overrides.pop("gpu_memory_utilization", None)
+      or vllm_overrides.pop("hbm_utilization", None)
+  )
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "data_parallel_size=%d (%d chips) max_model_len=%d...",
@@ -582,6 +735,12 @@ def _create_vllm_sampler(args, tokenizer):
         f" --mesh_fsdp={dp_size} with --use_lora. Set --mesh_fsdp=1 or drop"
         " LoRA."
     )
+  if getattr(args, "enable_prefix_caching", False):
+    enable_prefix_caching = True
+    vllm_overrides.pop("enable_prefix_caching", None)
+  else:
+    enable_prefix_caching = vllm_overrides.pop("enable_prefix_caching", False)
+
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
@@ -593,8 +752,16 @@ def _create_vllm_sampler(args, tokenizer):
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
-      enable_prefix_caching=args.enable_prefix_caching,
+      enable_prefix_caching=enable_prefix_caching,
   )
+  if gpu_mem_util is not None:
+    engine_kwargs["gpu_memory_utilization"] = gpu_mem_util
+
+  prefuse_moe = getattr(args, "prefuse_moe_weights", True)
+  if "prefuse_moe_weights" in vllm_overrides:
+    prefuse_moe = vllm_overrides.pop("prefuse_moe_weights")
+
+  maxtext_additional_config = {}
   if args.maxtext_model_name:
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
@@ -604,13 +771,39 @@ def _create_vllm_sampler(args, tokenizer):
     engine_kwargs["hf_overrides"] = dict(
         maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES
     )
-    engine_kwargs["additional_config"] = (
+    maxtext_additional_config = (
         maxtext_utils.build_vllm_maxtext_additional_config(
             args.maxtext_model_name,
             attention=args.maxtext_attention,
-            prefuse_moe_weights=args.prefuse_moe_weights,
+            prefuse_moe_weights=prefuse_moe,
         )
     )
+
+  user_additional_config = dict(
+      _load_json_config(getattr(args, "additional_config", None))
+  )
+  vllm_additional_config = vllm_overrides.pop("additional_config", None)
+  if vllm_additional_config:
+    user_additional_config = _deep_merge_dicts(
+        user_additional_config, _load_json_config(vllm_additional_config)
+    )
+  merged_additional_config = _deep_merge_dicts(
+      maxtext_additional_config, user_additional_config
+  )
+  if merged_additional_config:
+    engine_kwargs["additional_config"] = merged_additional_config
+
+  for reserved in (
+      "tensor_parallel_size",
+      "data_parallel_size",
+      "gpu_memory_utilization",
+      "hbm_utilization",
+      "additional_config",
+      "max_model_len",
+  ):
+    vllm_overrides.pop(reserved, None)
+  engine_kwargs.update(vllm_overrides)
+
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
       server_id=args.worker_id,
@@ -621,6 +814,8 @@ def _create_vllm_sampler(args, tokenizer):
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
+      rollout_vllm_additional_config=merged_additional_config or None,
+      rollout_vllm_kwargs=engine_kwargs,
       **_rollout_config_kwargs(args, tokenizer),
   )
   return sampler_adapter, config
