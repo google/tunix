@@ -116,6 +116,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=1)
   parser.add_argument("--mesh_tp", type=int, default=2)
+  # Expert parallelism for the SAMPLER. The 35b convergence study found this
+  # is the axis that moves oob_ratio (78.12% -> 53.12% per-seq); trainer-side
+  # expert parallelism measured as no impact. EP is carved out of the same
+  # device budget, so mesh_fsdp * mesh_tp * mesh_ep must equal the device
+  # count.
+  parser.add_argument("--mesh_ep", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--use_lora", action="store_true")
@@ -230,6 +236,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable KV prefix caching in vLLM sampler.",
   )
   parser.add_argument(
+      "--return_routed_experts",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Record the MoE expert ids each sampled token was routed through so"
+          " training can replay them instead of re-routing (MoE router"
+          " replay). Only meaningful for MoE models."
+      ),
+  )
+  parser.add_argument(
       "--tensor_parallel_size",
       type=int,
       default=None,
@@ -272,6 +290,7 @@ def _rollout_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
       "temperature": 1.0,
       "top_p": 1.0,
       "return_logprobs": True,
+      "return_routed_experts": args.return_routed_experts,
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
@@ -283,6 +302,16 @@ def _create_rollout_mesh(args) -> Any:
   from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
   from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
 
+  # Expert parallelism is NOT an axis of *this* mesh: tpu-inference builds its
+  # own mesh from `sharding_strategy`, and this mesh only supplies the device
+  # list. But EP is a real, device-consuming axis over there --
+  # ShardingConfigManager computes
+  #     total_devices = prod(tensor, expert, sequence, data, attn_dp, ...)
+  # and asserts it equals len(device_indexes) (tpu_inference/layers/common/
+  # sharding.py:199-202). Since device_indexes is this whole mesh, the product
+  # dp * tp * ep must equal mesh_fsdp * mesh_tp. So ep > 1 only works if dp or
+  # tp is divided down -- see the `data_parallel_size=-1` below, which makes
+  # resolve_parallelism_sizes() infer dp = devices // (tp * ep).
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError(
@@ -291,9 +320,15 @@ def _create_rollout_mesh(args) -> Any:
         f"device_count={jax.device_count()}"
     )
 
+  mesh_ep = getattr(args, "mesh_ep", 1) or 1
+  if jax.device_count() % mesh_ep != 0:
+    raise ValueError(
+        f"mesh_ep={mesh_ep} must divide device_count={jax.device_count()}"
+    )
+
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   mesh = Mesh(devices, axis_names=("fsdp", "tp"))
-  logging.info("Rollout mesh: %s", mesh)
+  logging.info("Rollout mesh: %s (expert_parallelism=%d)", mesh, mesh_ep)
   return mesh
 
 
@@ -451,13 +486,22 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = _get_tensor_parallel_size(args)
+  mesh_ep = getattr(args, "mesh_ep", 1) or 1
+  # tpu-inference asserts dp * tp * ep == len(device_indexes), and
+  # device_indexes is the whole rollout mesh (mesh_fsdp * mesh_tp). Passing
+  # mesh_fsdp as dp therefore overshoots by exactly a factor of ep. Pass -1 so
+  # resolve_parallelism_sizes() infers dp = devices // (tp * ep) instead.
+  # When ep == 1 the inferred value equals mesh_fsdp, so this is a no-op there;
+  # we keep the explicit value anyway to avoid changing the ep == 1 path.
+  dp_arg = -1 if mesh_ep > 1 else args.mesh_fsdp
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d max_model_len=%d...",
+      "data_parallel_size=%s expert_parallel_size=%d max_model_len=%d...",
       vllm_model,
       rollout_mesh,
       tp_size,
-      args.mesh_fsdp,
+      "infer" if dp_arg == -1 else dp_arg,
+      mesh_ep,
       max_model_len,
   )
   lora_config = None
@@ -466,16 +510,55 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_lora_rank": args.lora_rank,
         "max_loras": 1,
     }
+  # The sampler is normally DUMMY-INITIALISED: vllm_sampler.py:333 sets
+  # load_format="dummy" whenever init_with_random_weights is true (the default),
+  # because "model weights are synced from trainer later on". So in the steady
+  # state every sampler weight arrives over Raiden, and the sampler's own
+  # checkpoint is irrelevant.
+  #
+  # That is only safe if Raiden's coverage is COMPLETE. Any tensor Raiden does
+  # not bind keeps its random initialisation, and nothing warns: the engine runs,
+  # generates plausible text, and quietly samples from a different policy than
+  # the trainer scores. The symptom we are chasing is exactly that shape --
+  # KL(sampler||trainer) ~= 0.07 nats/token at step 0, before any optimizer
+  # update, against 0.003 when one checkpoint is loaded into both engines
+  # offline. (The mean log ratio is -KL by construction, which is why
+  # seq_geomean is below 1.0 in every run and no sequence ever lands above the
+  # band.)
+  #
+  # Setting ROLLOUT_MAXTEXT_CKPT loads real weights first, which turns the
+  # question into a single-variable experiment:
+  #   seq_geomean unchanged (~0.93) -> Raiden coverage is complete; the gap is
+  #     engine numerics at production's sharding, not weight transport.
+  #   seq_geomean jumps toward 1.0  -> Raiden was leaving tensors at their random
+  #     init, and those are the tensors to go find.
+  #
+  # init_with_random_weights must be false for the checkpoint to be read at all:
+  # under load_format="dummy" the MaxText adapter force-nulls
+  # load_parameters_path (maxtext_vllm_adapter/adapter.py:97-102), which then
+  # fails MaxTextConfig's pydantic string validation.
+  #
+  # Costs a slower bootstrap (~70 GB from GCS). Unset the env to restore the
+  # fast dummy-init path exactly.
+  rollout_ckpt = os.environ.get("ROLLOUT_MAXTEXT_CKPT", "")
   vllm_config = vllm_sampler.VllmConfig(
       server_mode=server_mode,
       mesh=rollout_mesh,
       tensor_parallel_size=tp_size,
-      data_parallel_size=args.mesh_fsdp,
+      data_parallel_size=dp_arg,
+      expert_parallel_size=mesh_ep,
       return_logprobs=True,
+      return_routed_experts=args.return_routed_experts,
+      init_with_random_weights=not rollout_ckpt,
       lora_config=lora_config,
       mapping_config=mapping_config,
       additional_config=maxtext_additional_config,
       engine_kwargs=engine_kwargs,
+  )
+  logging.info(
+      "rollout sampler init_with_random_weights=%s (ROLLOUT_MAXTEXT_CKPT=%r)",
+      not rollout_ckpt,
+      rollout_ckpt,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,

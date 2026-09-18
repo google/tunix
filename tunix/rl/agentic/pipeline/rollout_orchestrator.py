@@ -28,6 +28,7 @@ import traceback
 from typing import Any, AsyncIterable, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
 from absl import logging
+import numpy as np
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -42,6 +43,34 @@ BaseTaskEnv = base_environment.BaseTaskEnv
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 TrajectoryItem = agent_types.TrajectoryItem
 GroupQueueManager = group_queue_manager.GroupQueueManager
+
+
+# Exception class names that mean "the sandbox/container for this trajectory
+# could not be provisioned". These are raised by the external agent_sandbox_rl
+# fleet client, which tunix does not depend on directly, so they are matched by
+# name over the MRO rather than by isinstance. A failure of this kind is an
+# infrastructure problem affecting one trajectory; it is not evidence that the
+# training code is wrong, so it must not take down a 256-chip job.
+ENV_PROVISIONING_ERROR_NAMES = frozenset({
+    "CapacityError",
+    "FleetError",
+    "FleetOvercommitError",
+    "NoClusterAvailableError",
+    "PoolNotFoundError",
+    "PreflightError",
+    "SandboxProvisioningError",
+    "SandboxWarmPoolNotFoundError",
+})
+
+
+def _is_env_provisioning_error(exc: BaseException) -> bool:
+  """True if `exc` is, or contains, a sandbox provisioning failure."""
+  if isinstance(exc, ExceptionGroup):  # pylint: disable=undefined-variable
+    return any(_is_env_provisioning_error(sub) for sub in exc.exceptions)
+  return any(
+      klass.__name__ in ENV_PROVISIONING_ERROR_NAMES
+      for klass in type(exc).__mro__
+  )
 
 
 class RolloutOrchestrator:
@@ -60,6 +89,7 @@ class RolloutOrchestrator:
       engine_cls: Type[TrajectoryCollectEngine] = TrajectoryCollectEngine,
       engine_kwargs: Optional[Dict[str, Any]] = None,
       max_concurrency: Optional[int] = None,
+      degrade_on_env_failure: bool = True,
   ):
     """Initializes the RolloutOrchestrator.
 
@@ -79,10 +109,16 @@ class RolloutOrchestrator:
       max_concurrency: The maximum number of agent-environment interaction
         episodes to run in parallel. This limits the number of concurrent calls
         to the underlying language model.
+      degrade_on_env_failure: If True, a trajectory whose environment could not
+        be provisioned (a sandbox/fleet infrastructure failure) is replaced by
+        an empty, fully-masked trajectory with zero reward instead of aborting
+        the run. The group still closes, so training continues on a degraded
+        batch. Any other exception still propagates.
     """
     self.engine_cls = engine_cls
     self.engine_kwargs = engine_kwargs or {}
     self.max_concurrency = max_concurrency
+    self.degrade_on_env_failure = degrade_on_env_failure
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
     self._group_queue_manager: Optional[GroupQueueManager] = None
@@ -104,6 +140,63 @@ class RolloutOrchestrator:
       return await engine.collect(mode)
     return await engine.collect()
 
+  def _make_failed_trajectory(self, env: BaseTaskEnv) -> Dict[str, Any]:
+    """Builds a zero-reward, fully-masked stand-in for an unprovisionable env.
+
+    The payload comes from `trajectory_collect_engine.token_trajectory`, the
+    same builder the real collector uses, so it is a `mode="Token"` result by
+    construction rather than by resemblance. It describes a trajectory in which
+    the agent produced no tokens, which downstream padding already handles: the
+    completion mask is empty and therefore pads to all zeros, so the trajectory
+    contributes nothing to the loss. The point is that it still enters its
+    group, so the group reaches `group_size` and the consumer does not stall
+    waiting for a trajectory that will never arrive.
+
+    Args:
+      env: The environment whose provisioning failed.
+
+    Returns:
+      A Token-mode trajectory payload.
+    """
+    task = getattr(env, "task", None) or {}
+    return trajectory_collect_engine.token_trajectory(
+        prompt_tokens=self._placeholder_prompt_tokens(),
+        policy_version=task.get("policy_version"),
+        original_input=task,
+        group_id=env.extra_kwargs.get("group_id"),
+    )
+
+  def _placeholder_prompt_tokens(self) -> np.ndarray:
+    """A one-token, non-pad prompt for a placeholder trajectory.
+
+    A prompt of length zero left-pads to a row that is entirely padding. Every
+    real sequence already contains fully-padded positions (that is what left
+    padding is), so this is very likely harmless, but a single genuine token
+    makes the placeholder structurally identical to an ordinary sequence and
+    removes the question entirely.
+
+    Returns:
+      A 1-D int32 array, empty if no tokenizer was configured or if it could
+      not produce a usable token.
+    """
+    tokenizer = self.engine_kwargs.get("tokenizer")
+    if tokenizer is None:
+      return np.array([], dtype=np.int32)
+    try:
+      pad_id = tokenizer.pad_id() if hasattr(tokenizer, "pad_id") else None
+      token_ids = [t for t in tokenizer.encode(".") if t != pad_id]
+      return np.array(token_ids[:1], dtype=np.int32)
+    except Exception as e:  # pylint: disable=broad-except
+      # Not fatal: an empty prompt still pads to a valid row. But a tokenizer
+      # that cannot encode "." is broken in a way that will bite elsewhere, so
+      # do not let it pass unrecorded.
+      logging.warning(
+          "Tokenizer could not produce a placeholder prompt token (%s);"
+          " falling back to an empty prompt.",
+          e,
+      )
+      return np.array([], dtype=np.int32)
+
   async def _run_and_queue_one_episode(
       self,
       agent: ConversationAgentBase,
@@ -115,7 +208,28 @@ class RolloutOrchestrator:
   ):
     """Collects one trajectory and queues it."""
     pair_idx = env.extra_kwargs["pair_index"]
-    traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+    try:
+      traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+    except Exception as e:  # pylint: disable=broad-except
+      # The placeholder is a Token-mode payload, so it can only stand in for a
+      # Token-mode collection; and only an infrastructure failure earns a
+      # stand-in, since a bug in the training code should still stop the run.
+      degradable = (
+          self.degrade_on_env_failure
+          and collect_mode == "Token"
+          and _is_env_provisioning_error(e)
+      )
+      if not degradable:
+        raise
+      logging.error(
+          "Sandbox provisioning failed for pair %d (group %s); degrading this"
+          " trajectory to a zero-reward, fully-masked placeholder instead of"
+          " failing the run: %s",
+          pair_idx,
+          env.extra_kwargs.get("group_id"),
+          e,
+      )
+      traj = self._make_failed_trajectory(env)
     gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
     item = TrajectoryItem(

@@ -25,6 +25,7 @@ from absl import logging
 import jax
 import jaxtyping
 import numpy as np
+from tunix.common import router_replay
 from tunix.generate import base_sampler
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
@@ -465,9 +466,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
         )
         out_logprobs[idx].append(logprobs)
-        # `[length, num_layers, top_k]`, or None when capture is disabled.
+        # vLLM reports prefill routes on the request and decode routes on the
+        # completion; the trainer needs one array in input-token order.
         out_routed_experts[idx].append(
-            getattr(single_output, "routed_experts", None)
+            router_replay.full_sequence(
+                getattr(multi_sampling_output, "prompt_routed_experts", None),
+                getattr(single_output, "routed_experts", None),
+                prompt_len=len(multi_sampling_output.prompt_token_ids or ()),
+                completion_len=len(single_output.token_ids or ()),
+            )
         )
         logging.debug(
             "Prompt: %r\n\nGenerated text: %r\n\n ",
@@ -578,12 +585,41 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # recomputation against the model's actual sampling context.
       sampling_params.include_stop_str_in_output = True
 
-      if top_p is not None:
-        sampling_params.top_p = top_p
-      if top_k is not None:
-        sampling_params.top_k = top_k
+      # Truncation is set unconditionally, exactly like `temperature` above.
+      #
+      # `sampling_params` was seeded from the model's `generation_config.json`
+      # (`get_diff_sampling_param()` at the top of this branch). For
+      # Qwen3.5-35B-A3B that file carries `top_k: 20, top_p: 0.95`. A caller
+      # that passes `top_k=None` means "no top-k", but the old code expressed
+      # that by *skipping the assignment*, which left the model default in
+      # place. The sampler then drew from a top-20 renormalised distribution
+      # while the trainer scored the token under a full-vocab log_softmax, so
+      # the importance ratio was comparing two different policies and the bias
+      # was one-directional (truncation lifts the sampler logprob, pushing
+      # trainer/sampler below 1). `top_p` happened to escape because callers
+      # pass 1.0 explicitly; `top_k` did not.
+      #
+      # Disabled sentinels: `top_p=1.0`, `top_k=-1`, `min_p=0.0`. vLLM
+      # documents -1 as "consider all tokens"; 0 has meant different things
+      # across versions, so do not use it.
+      sampling_params.top_p = 1.0 if top_p is None else top_p
+      sampling_params.top_k = -1 if top_k is None else top_k
+      # Same class of inherited-truncation bug, pre-empted.
+      sampling_params.min_p = 0.0
       if seed is not None:
         sampling_params.seed = seed
+
+      logging.log_first_n(
+          logging.INFO,
+          "vLLM sampling truncation: temperature=%s top_p=%s top_k=%s"
+          " min_p=%s (all caller-determined; model generation_config"
+          " defaults are NOT inherited).",
+          1,
+          sampling_params.temperature,
+          sampling_params.top_p,
+          sampling_params.top_k,
+          sampling_params.min_p,
+      )
 
       sampling_kwargs = self.config.sampling_kwargs.copy()
       sampling_kwargs.update(kwargs)
