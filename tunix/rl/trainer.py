@@ -52,6 +52,7 @@ class Trainer(peft_trainer.PeftTrainer):
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []
     self.custom_checkpoint_metadata_fn = custom_checkpoint_metadata_fn
+    self._checkpoint_metadata_providers: list[Callable[[], dict[str, Any]]] = []
 
   def with_rl_metrics_to_log(
       self,
@@ -64,9 +65,20 @@ class Trainer(peft_trainer.PeftTrainer):
   ) -> None:
     self.tqdm_metrics_to_display = tqdm_metrics_to_display
 
+  def with_checkpoint_metadata_provider(
+      self, provider: Callable[[], dict[str, Any]]
+  ) -> None:
+    self._checkpoint_metadata_providers.append(provider)
+
   @override
   def custom_checkpoint_metadata(self) -> dict[str, Any]:
-    return self.custom_checkpoint_metadata_fn()
+    metadata = dict(self.custom_checkpoint_metadata_fn())
+    for provider in self._checkpoint_metadata_providers:
+      metadata.update(provider())
+    return metadata
+
+  def restored_checkpoint_metadata(self) -> dict[str, Any]:
+    return dict(self._restored_custom_metadata or {})
 
   def restored_global_step(self) -> int:
     return self._restored_custom_metadata.get("global_step", 0)
