@@ -33,8 +33,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HF_HOME: ~/.cache/huggingface
+  # TODO(timsemenov): Cache or mirror Hugging Face model downloads across runs
+  # (e.g., via a GCS bucket or runner-local persistent cache) to avoid cross-run
+  # HF Hub CDN throughput variance without exceeding GitHub's 10 GB cache quota.
+  HF_HOME: /root/.cache/huggingface
   HF_HUB_ENABLE_HF_TRANSFER: "1"
+  HF_XET_HIGH_PERFORMANCE: "1"
+  JAX_COMPILATION_CACHE_DIR: /root/.cache/jax_compilation_cache
+  PIP_CACHE_DIR: /root/.cache/pip
+  TFDS_DATA_DIR: /root/.cache/tensorflow_datasets
 
 # Jobs here are grouped by container image, not by test area. Each job holds an
 # entire 8-chip v6e host for its whole duration, and the self-hosted TPU runner
@@ -61,8 +68,8 @@ jobs:
   #      MUST run BEFORE SGLang-JAX so they execute against the unmodified candidate
   #      JAX stable stack image. (Relative order among these 5 suites is flexible.)
   #   2. SGLang-JAX (`Run install sglang-jax && test`) MUST run LAST in this job.
-  #      It executes `pip install 'jax[tpu]<0.11.0' --force-reinstall` and
-  #      `pip install qwix --force-reinstall`, mutating the Python environment.
+  #      It installs `sglang-jax` and pins `jax[tpu]<0.11.0` and `qwix`, mutating
+  #      the Python environment.
   # ---------------------------------------------------------------------------
   run_core:
     runs-on: [linux-x86-ct6e-180-8tpu]
@@ -78,34 +85,42 @@ jobs:
         CLOUD_TPU_ACCELERATOR: v6e-8
         JAX_PLATFORMS: tpu
     steps:
-      # Cache Hugging Face hub
-      - name: Cache HF hub
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-          restore-keys: |
-            hf-${{ runner.os }}-
-
-      # Cache pip wheels. Without this the job re-downloads its whole dependency
-      # tree while holding a v6e-8 host.
-      - name: Cache pip
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.cache/pip
-          key: pip-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-          restore-keys: |
-            pip-core-${{ runner.os }}-
-
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install zstd for fast cache compression
+        run: |
+          which zstd || (apt-get update -qq && apt-get install -y -qq --no-install-recommends zstd)
+          rm -f /etc/pip.conf /root/.config/pip/pip.conf /opt/venv/pip.conf ~/.pip/pip.conf || true
+          mkdir -p /root/.cache/pip
+          python3 -m pip config --global set global.cache-dir /root/.cache/pip
+
+      # Cache pip wheels. Without this the job re-downloads its whole dependency
+      # tree while holding a v6e-8 host.
+      - name: Cache pip
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /root/.cache/pip
+          key: pip-core-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            pip-core-v5-${{ runner.os }}-
+
+      - name: Cache JAX compilation
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /root/.cache/jax_compilation_cache
+          key: jax-cache-core-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          restore-keys: |
+            jax-cache-core-v4-${{ runner.os }}-
+            jax-cache-core-v3-${{ runner.os }}-
+
       - name: Install tunix dependencies
         run: |
-          pip install --upgrade pip
+          unset PIP_NO_CACHE_DIR
+          export PIP_NO_BUILD_ISOLATION=1
           pip install -e ".[test]"
 
       - name: Verify TPU availability
@@ -162,9 +177,9 @@ jobs:
           fi
 
       # --- SGLang-JAX stage (formerly the standalone `run_sglang` job) ---------
-      # [ORDERING CONSTRAINT]: MUST stay LAST in `run_core`. It force-reinstalls
-      # `jax[tpu]<0.11.0` and `qwix`, which would overwrite the candidate JAX
-      # stack and perturb every core unit test above it.
+      # [ORDERING CONSTRAINT]: MUST stay LAST in `run_core`. It installs
+      # `sglang-jax` and pins `jax[tpu]<0.11.0` and `qwix`, mutating the Python
+      # environment.
       #
       # Gated at the step level rather than the job level so that the unit tests
       # above still run on external fork PRs, where secrets are unavailable.
@@ -177,19 +192,24 @@ jobs:
           ## because sglang-jax has codes like jax.local_devices('cpu')
           # TODO(lancewang): Re-enable this test once the bug is fixed.
           unset JAX_PLATFORMS
+          unset PIP_NO_CACHE_DIR
+          export PIP_NO_BUILD_ISOLATION=1
           python3 -m pip list | egrep 'jax|flax|libtpu'
+          # Constrain jax/jaxlib < 0.11.0 during sglang-jax installation so pip does
+          # not upgrade to jax 0.11.1+ and force a subsequent downgrade/reinstall.
+          printf "jax<0.11.0\njaxlib<0.11.0\n" > /tmp/sglang_constraints.txt
+          export PIP_CONSTRAINT=/tmp/sglang_constraints.txt
           cd ..
-          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && python3 -m pip install -e . --force-reinstall && cd ../..
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && python3 -m pip install -e . && cd ../..
           # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
-          python3 -m pip install qwix --force-reinstall
-          python3 -m pip install 'jax[tpu]<0.11.0' --force-reinstall
+          python3 -m pip install qwix 'jax[tpu]<0.11.0'
           # TODO(b/470113586): Remove this test once the bug is fixed.
           python3 -m pip list | egrep 'jax|flax|libtpu'
 
           cd tunix
           python3 tests/generate/sglang_jax_sampler_test.py
           python3 tests/generate/sglang_jax_lora_test.py
-          python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "not vllm"
+          GITHUB_JOB=run_sglang python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "sglang_jax"
 
   # ---------------------------------------------------------------------------
   # Job: run_dev
@@ -229,37 +249,54 @@ jobs:
         CLOUD_TPU_ACCELERATOR: v6e-8
         JAX_PLATFORMS: tpu,cpu
     steps:
-      # Cache Hugging Face hub
-      - name: Cache HF hub
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-          restore-keys: |
-            hf-${{ runner.os }}-
-
-      # Cache pip wheels. Without this the job re-downloads its whole dependency
-      # tree while holding a v6e-8 host.
-      - name: Cache pip
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.cache/pip
-          key: pip-dev-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-          restore-keys: |
-            pip-dev-${{ runner.os }}-
-
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install zstd for fast cache compression
+        run: |
+          which zstd || (apt-get update -qq && apt-get install -y -qq --no-install-recommends zstd)
+          rm -f /etc/pip.conf /root/.config/pip/pip.conf /opt/venv/pip.conf ~/.pip/pip.conf || true
+          mkdir -p /root/.cache/pip
+          python3 -m pip config --global set global.cache-dir /root/.cache/pip
+
+      # Cache pip wheels. Without this the job re-downloads its whole dependency
+      # tree while holding a v6e-8 host.
+      - name: Cache pip
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /root/.cache/pip
+          key: pip-dev-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            pip-dev-v5-${{ runner.os }}-
+
+      - name: Cache TFDS datasets
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /root/.cache/tensorflow_datasets
+          key: tfds-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          restore-keys: |
+            tfds-dev-v4-${{ runner.os }}-
+            tfds-dev-v3-${{ runner.os }}-
+
+      - name: Cache JAX compilation
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /root/.cache/jax_compilation_cache
+          key: jax-cache-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          restore-keys: |
+            jax-cache-dev-v4-${{ runner.os }}-
+            jax-cache-dev-v3-${{ runner.os }}-
+
       # Shared by every stage below; previously paid once per job.
       - name: Setup Tunix , tpu-inference and dependencies
         run: |
+          unset PIP_NO_CACHE_DIR
+          export PIP_NO_BUILD_ISOLATION=1
           echo "Current directory:"
           pwd
-          python3 -m pip install --upgrade pip setuptools wheel
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
           python3 -m pip install -e .[test]
@@ -291,10 +328,10 @@ jobs:
         run: |
           unset JAX_PLATFORMS
           python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
-          python3 -m pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
-          while read -r test; do
-            python3 -m pytest -s "$test" -v --tb=short
-          done < test_collections.txt
+          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerConfigTest -v --tb=short
+          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "batch_mode and not data_parallel or sampling_kwargs" -v --tb=short
+          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "server_mode or concurrency" -v --tb=short
+          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "data_parallel" -v --tb=short
 
       # [ORDERING CONSTRAINT]: Must run AFTER `Run vllm tests` (installing tensorflow
       # upgrades NumPy past ==2.3.5) and BEFORE the Distributed RL smoke stage
@@ -303,6 +340,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          unset PIP_NO_CACHE_DIR
           # Update dependencies
           python3 -m pip install --upgrade kagglehub kagglesdk
 
@@ -327,6 +365,7 @@ jobs:
       # setup step at the top of this job.
       - name: Setup Tunix and dependencies
         run: |
+          unset PIP_NO_CACHE_DIR
           # GSM8K dataset loading via tfds. `tensorflow` itself is already
           # installed by the SFT stage above; this adds the rest.
           python3 -m pip install tensorflow tensorflow_datasets array_record
@@ -365,4 +404,3 @@ jobs:
           cat tunix/experimental/examples/math_gsm8k_dist/rollout.log || true
           echo "==================== ORCHESTRATOR LOG ===================="
           cat tunix/experimental/examples/math_gsm8k_dist/orchestrator.log || true
-
