@@ -79,7 +79,7 @@ deterministic. Each wrapper also writes a long-horizon manifest beside the one y
 these three files:
 
 * `<OUT>/standard/short-horizon/jobset-frozenlake-short-horizon-standard-300.yaml`
-* `<OUT>/is/short-horizon/jobset-frozenlake-short-horizon-is-300.yaml`
+* `<OUT>/tis/short-horizon/jobset-frozenlake-short-horizon-is-300.yaml`
 * `<OUT>/zero/frozenlake-short-horizon/jobset-frozenlake-short-horizon-zero-300.yaml`
 
 ## Step 4 — launch one arm
