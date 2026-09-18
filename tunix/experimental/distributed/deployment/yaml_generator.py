@@ -150,7 +150,16 @@ def main() -> None:
   slice_size = None
   pw_instance_type = None
   if args.tpu_slice and args.tpu_slice != ":":
-    tpu_type, tpu_topology = args.tpu_slice.split(":")
+    _shorthand_map = {
+        "v5p-8": "tpuv5:2x2x1",
+        "v5p-16": "tpuv5:2x2x2",
+        "v5p-32": "tpuv5:2x2x4",
+        "v5p-64": "tpuv5:2x4x4",
+        "v5p-128": "tpuv5:4x4x4",
+        "v5p-256": "tpuv5:4x4x8",
+    }
+    tpu_slice_str = _shorthand_map.get(args.tpu_slice, args.tpu_slice)
+    tpu_type, tpu_topology = tpu_slice_str.split(":")
     num_chips = math.prod([int(d) for d in tpu_topology.split("x")])
     assert num_chips >= 4 and num_chips % 4 == 0
 
