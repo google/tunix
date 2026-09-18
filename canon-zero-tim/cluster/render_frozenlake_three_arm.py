@@ -53,7 +53,7 @@ _ADMITTED_CPU_NODEPOOLS = frozenset({
     "deepswe-cpu-pool-2",
     "cpu-np",
 })
-_DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
+_DEFAULT_CPU_NODEPOOL = "cpu-np"
 # Preserve the historical requests and large limits on the dedicated head
 # pool.  Raising requests to these ceilings would over-reserve the whole Pod.
 HEAD_RESOURCES = {
