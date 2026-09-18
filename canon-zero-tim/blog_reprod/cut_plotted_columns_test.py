@@ -5,8 +5,9 @@ python3 -m unittest cut_plotted_columns_test
 
 Runs the script on each archived W&B history export and asserts the SHA-256 of
 its output equals the shipped `data/<arm>.csv`.  `BLOG_REPROD_DIR` overrides
-where `runs/` and `data/` are read from; by default it is this file's directory
-when that directory holds `data/`, otherwise the checked-out worktree.
+which blog_reprod/ is used - its own `data/` and the sibling `results/` that
+runs_layout.py points at; by default it is this file's directory when that
+directory holds `data/`, otherwise the checked-out worktree.
 """
 import hashlib
 import os
@@ -23,6 +24,8 @@ ROOT = pathlib.Path(
     os.environ.get("BLOG_REPROD_DIR")
     or (_HERE if (_HERE / "data").is_dir() else _FALLBACK))
 SCRIPT = _HERE / "cut_plotted_columns.py"
+sys.path.insert(0, str(ROOT))
+import runs_layout  # noqa: E402
 
 # arm -> (archived run id, sha256 of the shipped data/<arm>.csv)
 ARMS = {
@@ -59,13 +62,14 @@ class CutPlottedColumnsTest(unittest.TestCase):
       with self.subTest(arm=arm):
         with tempfile.TemporaryDirectory() as tmp:
           out = pathlib.Path(tmp) / f"{arm}.csv"
-          done = run_script(ROOT / "runs" / run_id / "history.csv", out)
+          done = run_script(runs_layout.run_dir(arm, run_id) / "history.csv", out)
           self.assertEqual(done.returncode, 0, done.stderr)
           self.assertEqual(sha256(out), want)
 
   def test_a_truncated_history_does_not_reproduce(self):
     run_id, want = ARMS["standard"]
-    history = (ROOT / "runs" / run_id / "history.csv").read_bytes().split(b"\n")
+    history = (runs_layout.run_dir("standard", run_id) / "history.csv"
+               ).read_bytes().split(b"\n")
     with tempfile.TemporaryDirectory() as tmp:
       short = pathlib.Path(tmp) / "history.csv"
       short.write_bytes(b"\n".join(history[:101]))  # header + 100 rows

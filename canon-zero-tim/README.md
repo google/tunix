@@ -38,8 +38,10 @@ git clone --depth 1 --branch yuxzhang/canon-zero-tim https://github.com/google/t
     ├── recipes/             plain-named render entry points, one directory per recipe
     ├── image/               Dockerfile.frozenlake, build_frozenlake_image.sh,
     │                        requirements.frozenlake.lock.txt, verify_tpu_stack.py
-    ├── blog_reprod/         Figure 4, self-contained: README.md, data/ runs/ figures/,
-    │                        figure4.xlsx, both builders, the W&B exporter, their tests
+    ├── blog_reprod/         Figure 4: README.md, data/ figures/, figure4.xlsx,
+    │                        both builders, the W&B exporter, their tests
+    ├── results/             raw W&B exports, <workload>/<arm>/<run-id>/, plus RUNS.tsv
+    │                        and the checker and plotter that read them
     ├── cluster/             renderers (render_*.py), entrypoint.sh, two JobSet templates,
     │                        profiles/ (47 .env) and steps/ (00_env → 10_sync_repo →
     │                        30_install_canon → 40_overlay_engine → 90_run)
@@ -144,6 +146,10 @@ log line, a manifest, an archived run or the archive branch.
 | FrozenLake long-horizon, Standard / TIS / Zero-TIM | not yet documented | archived runs incomplete: Standard crashed at 181/300, TIS stopped at 148/300, Zero-TIM reached 52–59 steps at ≈2550 s/step. The Figure 4 wrappers already render the long-horizon manifests next to the short-horizon ones |
 | DeepSWE-4B 128-chip Zero-TIM | not yet documented | never launched, render pending; entry point `canon-zero-tim/cluster/render_deepswe_comparison.py` |
 | DeepSWE-4B 128-chip Standard / TIS | not yet documented | the renderer has no such arm — `canon-zero-tim/cluster/render_deepswe_comparison.py` line 52 reads `_ARMS = ("native", "zero")`. Adding them is a new feature, not documentation |
+
+Every run a recipe has evidence for is exported in full under `canon-zero-tim/results/`, one
+directory per workload and arm, and `canon-zero-tim/results/README.md` says what a run directory
+must hold and how to add one.
 
 A documented recipe keeps its entry points in `canon-zero-tim/recipes/<recipe>/`, one script per
 arm, each taking `<tip-sha40> <out-dir> <run-id>` and printing the JobSet path to apply. They are

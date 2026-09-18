@@ -2,7 +2,7 @@
 """Cut the five plotted columns out of a W&B history export.
 
 python3 canon-zero-tim/blog_reprod/cut_plotted_columns.py \
-  canon-zero-tim/blog_reprod/runs/<run-id>/history.csv \
+  canon-zero-tim/results/<workload>/<arm>/<run-id>/history.csv \
   canon-zero-tim/blog_reprod/data/<arm>.csv
 
 Keeps the rows whose `_step` is 0..199, sorted by `_step`, and writes exactly

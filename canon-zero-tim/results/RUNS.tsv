@@ -1,0 +1,4 @@
+workload	arm	run_id	wandb	executed_sha	steps	grade	date	note
+frozenlake-short-horizon	standard	jff877lt_canon-p57-fl-stan-r01-567c96d5	yuxzhang-google/zero-tim-p57-frozenlake-tim/jff877lt	567c96d5	301	complete	2026-09-08	Figure 4 Standard arm
+frozenlake-short-horizon	tis	8zjz4li7_canon-p57-fl-is-i45g-ccbcf572	yuxzhang-google/zero-tim-p57-frozenlake-tim/8zjz4li7	ccbcf572	301	complete	2026-08-23	Figure 4 token-level TIS arm
+frozenlake-short-horizon	zero_tim	tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9	yuxzhang-google/zero-tim-p57-frozenlake-tim/tybj4xr0	06a0fdb9	216	incomplete	2026-09-08	Figure 4 Zero-TIM arm; exported at step 215 while the job was still running

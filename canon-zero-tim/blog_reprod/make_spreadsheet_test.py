@@ -3,7 +3,7 @@
 
 Regenerates the workbook into a temporary file, reopens it with openpyxl and
 checks: sheet names and order; every W&B cell on every arm tab against the
-arm's own runs/<run_id>/history.csv at the line data/manifest.json names (200
+arm's own history.csv under results/ at the line data/manifest.json names (200
 rows x all 144/150/57 columns, iterated, not sampled); the frozen leading
 block's column order; the numeric twins against the strings they mirror; the
 derived trailing mean against the figure builder's moving_average; the README
@@ -52,9 +52,9 @@ def as_written(value: float) -> float:
     return float("%.16g" % value)
 
 
-def history_rows(entry: dict) -> tuple[list, list]:
+def history_rows(arm: str, entry: dict) -> tuple[list, list]:
     """Read the arm's W&B export independently of make_spreadsheet, by line number."""
-    path = make_spreadsheet.ROOT / "runs" / entry["run_id"] / "history.csv"
+    path = make_spreadsheet.runs_layout.run_dir(arm, entry["run_id"]) / "history.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         lines = list(csv.reader(handle))
     header = lines[0]
@@ -85,7 +85,7 @@ class SpreadsheetTest(unittest.TestCase):
         cls.book = load_workbook(cls.path)
         cls.manifest = json.loads(
             (make_spreadsheet.DATA / "manifest.json").read_text(encoding="utf-8"))
-        cls.exports = {arm: history_rows(cls.manifest["runs"][arm])
+        cls.exports = {arm: history_rows(arm, cls.manifest["runs"][arm])
                        for arm, _ in make_spreadsheet.ARMS}
 
     @classmethod

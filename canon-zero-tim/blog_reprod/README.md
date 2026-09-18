@@ -110,12 +110,13 @@ that arm is complete — let the job finish its 300 updates or delete the JobSet
 
 ```bash
 export WANDB_API_KEY=<your key>
+RUN=canon-zero-tim/results/frozenlake-short-horizon/<arm-dir>/<run-id>   # standard, tis, zero_tim
 python3 canon-zero-tim/blog_reprod/export_wandb.py --project zero-tim-p57-frozenlake-tim \
-  --run <run-id> --out canon-zero-tim/blog_reprod/runs/<run-id>    # the first three: once per arm
+  --run <run-id> --out $RUN                                       # the first three: once per arm
 python3 canon-zero-tim/blog_reprod/cut_plotted_columns.py \
-  canon-zero-tim/blog_reprod/runs/<run-id>/history.csv canon-zero-tim/blog_reprod/data/<arm>.csv
+  $RUN/history.csv canon-zero-tim/blog_reprod/data/<arm>.csv
 python3 canon-zero-tim/blog_reprod/compare_history.py \
-  canon-zero-tim/blog_reprod/runs/<run-id>/history.csv <an archived export>/history.csv
+  $RUN/history.csv <an archived export>/history.csv
 python3 canon-zero-tim/blog_reprod/make_manifest.py --source-commit "$SHA" \
   --standard <run-id> --tis <run-id> --zero <run-id>               # this one: once, at the end
 ```
@@ -124,7 +125,9 @@ expected: `WANDB_EXPORT_PASS run=<entity>/zero-tim-p57-frozenlake-tim/<run-id> h
 config_keys=… summary_keys=… out=…`, then no output from the cut, then `COMPARE_HISTORY PASS
 steps=…/… columns=…/… cells_compared=… differences=0` (that one re-checks an export you already
 have; skip it for a fresh run). `<arm>` is `standard.csv`, `importance_sampling.csv` or
-`zero_tim.csv`; add `--entity` (our runs live under `yuxzhang-google`). ≈1 min per run.
+`zero_tim.csv`; add `--entity` (our runs live under `yuxzhang-google`). ≈1 min per run. The
+exports live under `canon-zero-tim/results/`, one home for every workload's raw W&B exports —
+`canon-zero-tim/results/README.md` says how to register a run there.
 
 expected: `PASS: wrote data/manifest.json (source_commit <SHA>; 3 arms; 200 rows each)`. Each arm
 needs at least 200 training observations — steps 0 to 199 — and a `data/<arm>.csv` cut from the

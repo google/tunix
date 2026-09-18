@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Rebuild data/manifest.json from the exports in runs/ and the CSVs in data/.
+"""Rebuild data/manifest.json from the exports in results/ and the CSVs in data/.
 
     python3 canon-zero-tim/blog_reprod/make_manifest.py --source-commit <sha40> \
       --standard <run-id> --tis <run-id> --zero <run-id>
 
-Every arm needs one training observation per step 0..199 in runs/<run-id>/history.csv,
-and its data/<arm>.csv must be the cut of that history.  --source-commit is the commit
-the runs were launched from; --source-prefix only changes the recorded provenance
-strings source_history / source_config — every consumer reads runs/<run-id>/.
+Every arm needs one training observation per step 0..199 in its history.csv under
+results/frozenlake-short-horizon/<arm>/<run-id>/, and its data/<arm>.csv must be the
+cut of that history.  --source-commit is the commit the runs were launched from;
+--source-prefix only changes the recorded provenance strings source_history /
+source_config — every consumer reads the directory runs_layout.py names.
 Standard library only.
 """
 
@@ -18,6 +19,8 @@ import io
 import json
 from pathlib import Path
 import sys
+
+import runs_layout
 
 ROOT = Path(__file__).resolve().parent
 STEPS = 200
@@ -56,7 +59,7 @@ def read_config(blob):
 
 def entry(arm, run_id, prefix):
   """Returns one arm's manifest entry, hashing the three files it pins."""
-  run = ROOT / "runs" / run_id
+  run = runs_layout.run_dir(arm, run_id)
   history, config = (run / "history.csv").read_bytes(), (run / "config.yaml").read_bytes()
   plotted = (ROOT / "data" / (arm + ".csv")).read_bytes()
   selected, lines = [], []
@@ -94,8 +97,9 @@ def main(argv=None):
                       help="the 40-character commit the runs were launched from")
   for arm, flag, default in ARMS:
     parser.add_argument(flag, dest=arm, default=default, help=f"{arm} W&B run id")
-  parser.add_argument("--source-prefix", default="runs",
-                      help="directory recorded in source_history / source_config")
+  parser.add_argument("--source-prefix", default=None,
+                      help="directory recorded in source_history / source_config "
+                           "(default: each run's own directory under results/)")
   args = parser.parse_args(argv)
   commit = args.source_commit
   if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
@@ -108,7 +112,9 @@ def main(argv=None):
                  "display_step_first": 1, "display_step_last": STEPS, "count_per_arm": STEPS},
       "transformations": {"logprob_mean": "none", "solve_rate": "raw plus trailing mean",
                           "trailing_window": 10, "initial_window": "available points only"},
-      "runs": {arm: entry(arm, getattr(args, arm), args.source_prefix) for arm, _, _ in ARMS},
+      "runs": {arm: entry(arm, getattr(args, arm),
+                          args.source_prefix or runs_layout.source_prefix(arm))
+               for arm, _, _ in ARMS},
   }
   (ROOT / "data" / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n",
                                                encoding="utf-8")

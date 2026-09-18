@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build figure4.xlsx: one raw W&B tab per arm, plus a README tab with charts.
 
-Each arm tab is that arm's own W&B export, unabridged: every column of
-runs/<run_id>/history.csv, on the 200 rows data/manifest.json says Figure 4
+Each arm tab is that arm's own W&B export, unabridged: every column of the
+history.csv runs_layout.py points at, on the 200 rows data/manifest.json says Figure 4
 plotted, written as the export's own strings so a reader sees the digits that
 were drawn. Only the column order is ours - identity, then the five Figure 4
 columns, then the arm's training-dynamics namespace, then everything else
@@ -29,6 +29,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 import build_end_to_end_results_measured as figure
+import runs_layout
 # Same trailing-mean function the figure's foreground curve and endpoint labels
 # use (build_end_to_end_results_measured re-exports it from this module).
 from build_end_to_end_results_provisional import moving_average
@@ -148,9 +149,9 @@ def cell(value):
     return "null" if value is None else value
 
 
-def read_history(entry: dict) -> tuple[list, list]:
+def read_history(arm: str, entry: dict) -> tuple[list, list]:
     """Return the arm's full W&B header and the 200 rows the manifest plotted."""
-    path = ROOT / "runs" / entry["run_id"] / "history.csv"
+    path = runs_layout.run_dir(arm, entry["run_id"]) / "history.csv"
     blob = path.read_bytes()
     figure.require(figure.digest(blob) == entry["source_history_sha256"],
                    f"{path.name}: history hash does not match the manifest")
@@ -325,7 +326,7 @@ def build(output: Path) -> Path:
     readme = book.active
     readme.title = "README"
     for arm, label in ARMS:
-        header, records = read_history(manifest["runs"][arm])
+        header, records = read_history(arm, manifest["runs"][arm])
         write_arm(book, label, header, records, selected[arm], trail[arm])
     write_readme(readme, readme_blocks(manifest, trail))
     add_chart(book, readme, "Sampler-trainer mean |Δlogp|", MEAN_NUM,

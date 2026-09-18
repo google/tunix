@@ -1,0 +1,4 @@
+arm,run_id,steps,last_solve_ratio,trailing10_last,logp_diff_mean_max
+standard,jff877lt_canon-p57-fl-stan-r01-567c96d5,301,0.4921875,0.486328125,0.02343003079295158
+tis,8zjz4li7_canon-p57-fl-is-i45g-ccbcf572,301,0.73828125,0.70078125,0.02542687207460403
+zero_tim,tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9,216,0.86328125,0.866796875,0

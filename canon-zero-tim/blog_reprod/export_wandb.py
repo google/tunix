@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Re-export one Weights & Biases run into the three files vendored under runs/.
+"""Re-export one Weights & Biases run into the three files results/ keeps per run.
 
 The credentials come from the environment only; this script never takes an API
 key as an argument and never prints one:
@@ -8,13 +8,13 @@ key as an argument and never prints one:
     python3 canon-zero-tim/blog_reprod/export_wandb.py \
       --project zero-tim-p57-frozenlake-tim \
       --run jff877lt \
-      --out canon-zero-tim/blog_reprod/runs/jff877lt
+      --out canon-zero-tim/results/<workload>/<arm>/jff877lt
 
 It writes <out>/history.csv (one row per history row, columns in first-seen
 order, ascending _step), <out>/config.yaml (run.config without the _wandb
 block) and <out>/summary.json.  Cell values that are not strings are written
 with json.dumps, so ints, floats and bools keep their JSON text and a missing
-key is an empty cell.  Line endings are LF; the exports already in runs/ came
+key is an empty cell.  Line endings are LF; the exports already in results/ came
 from an older tool that wrote CRLF, so compare the parsed cells (see
 compare_history.py), not file hashes.
 """
