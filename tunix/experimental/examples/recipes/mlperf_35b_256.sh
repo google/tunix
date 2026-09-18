@@ -3,6 +3,11 @@ set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Fill these before you run.
+export WANDB_API_KEY="${WANDB_API_KEY:-}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/wuhao/trellis-35b:latest}"
+
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
 export CLUSTER="bodaborg-v5p-nap"
@@ -10,11 +15,10 @@ kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
 kubectl config set-context --current --namespace=trellis || true
 
 export K8S_NAMESPACE="trellis"
-export KUEUE_QUEUE="trellis"
-export PRIORITY_CLASS="very_high"
+export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
+export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
-export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/wuhao/trellis-35b:latest"
 
 # Pathways & Raiden Images and settings (from Google doc)
 export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260914_fix"
@@ -30,7 +34,6 @@ export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
 
 # WandB configuration
-export WANDB_API_KEY="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"
 export WANDB_ENTITY="google-trellis"
 export WANDB_PROJECT="trellis-deepswe"
 
@@ -40,7 +43,6 @@ export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
 export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
-export MAXTEXT_OUTPUT_DIR="gs://yixuannwang-maxtext-dataset/trellis/0912/maxtext"
 export TRAJECTORY_LOG_DIR="gs://deepswe-wuhao-1784153479/trajectories"
 
 # Backend configuration
@@ -66,7 +68,7 @@ export ROLLOUT_REPLICAS=16
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
 # ==============================================================================
 export VLLM_LOGGING_LEVEL="INFO"
-export VLLM_MAX_MODEL_LEN=61440
+export VLLM_MAX_MODEL_LEN=65536
 export VLLM_MAX_NUM_BATCHED_TOKENS=2048
 export VLLM_MAX_NUM_SEQS=8
 export VLLM_GPU_MEMORY_UTILIZATION="0.9"
@@ -130,8 +132,7 @@ export CHECKPOINT_MAX_TO_KEEP=10
 export BETA=0.0
 export EPSILON=0.2
 export EPSILON_HIGH=0.28
-export USE_ROLLOUT_LOGPS="true"
-export FORCE_ON_POLICY_RATIO="true"
+export USE_ROLLOUT_LOGPS="false"
 export OVERLONG_FILTER="true"
 export OVERLONG_LOSS_MASKING="true"
 export SEQ_LOGPROB_ERROR_THRESHOLD=2.0
@@ -165,7 +166,7 @@ export USE_AGENT_SANDBOX=1
 export SANDBOX_NAMESPACE="trellis"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
-export MAX_WARMPOOL_REPLICAS=8
+export MAX_WARMPOOL_REPLICAS=2
 export ROLLOUT_MAX_CONCURRENCY=256
 export MAX_CONCURRENCY=256
 export STEP_TIMEOUT_SECS=1800
@@ -173,7 +174,7 @@ export REWARD_TIMEOUT_SECS=1800
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=50
 export MAX_PROMPT_LENGTH=4096
-export MAX_RESPONSE_LENGTH=28672
+export MAX_RESPONSE_LENGTH=61440
 
 # ==============================================================================
 # Execution Dispatch
