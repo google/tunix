@@ -54,6 +54,16 @@ def main() -> None:
       default=os.environ.get("KUEUE_QUEUE_NAME", ""),
       help="Kueue local queue name for scheduling (optional).",
   )
+  parser.add_argument(
+      "--service_account",
+      default=os.environ.get("SERVICE_ACCOUNT", "xpk-sa"),
+      help="Kubernetes service account for pods.",
+  )
+  parser.add_argument(
+      "--priority_class",
+      default=os.environ.get("PRIORITY_CLASS", "medium"),
+      help="Kubernetes priority class for pods.",
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -195,6 +205,8 @@ def main() -> None:
         NAMESPACE=args.namespace,
         QUEUE_NAME=args.queue_name,
         QUEUE_LABEL=queue_label,
+        SERVICE_ACCOUNT=args.service_account,
+        PRIORITY_CLASS=args.priority_class,
         SERVER_IMAGE=args.pathways_server_image,
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,

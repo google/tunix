@@ -41,6 +41,8 @@ ${QUEUE_LABEL}spec:
               # ensure exclusive access to the node
               alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
           spec:
+            priorityClassName: ${PRIORITY_CLASS}
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never

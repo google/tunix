@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import signal
 import sys
 from typing import Any
@@ -102,6 +103,133 @@ def _str2bool(v: str | bool) -> bool:
   if v.lower() in ("no", "false", "f", "n", "0"):
     return False
   raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
+
+
+def _parse_dict_arg(value: str | dict | None) -> dict[str, Any]:
+  """Parses a dictionary argument from JSON, YAML, Python literal, or file path.
+
+  Supports:
+  - Already parsed dict instances
+  - Path to a JSON or YAML file
+  - JSON strings
+  - YAML strings (including unquoted keys, comments, tabs, missing colon spaces)
+  - Python dict literals via ast.literal_eval
+  """
+  if value is None:
+    return {}
+  if isinstance(value, dict):
+    return value
+  if not isinstance(value, str):
+    raise ValueError(f"Expected string or dict, got {type(value)}")
+  value = value.strip()
+  if not value:
+    return {}
+  if os.path.exists(value) and os.path.isfile(value):
+    with open(value, "r", encoding="utf-8") as f:
+      value = f.read().strip()
+    if not value:
+      return {}
+
+  # Sanitize tabs, inline annotations (<...>), colons without space, and unmatched trailing braces
+  clean_val = value.replace("\t", "  ")
+  clean_val = re.sub(r"<[^>]*>", "", clean_val)
+  clean_val = re.sub(r"(\b[a-zA-Z0-9_]+):(?!\/)([\S])", r"\1: \2", clean_val)
+  open_count = clean_val.count("{")
+  close_count = clean_val.count("}")
+  while close_count > open_count and clean_val.endswith("}"):
+    clean_val = clean_val[:-1].rstrip()
+    close_count -= 1
+
+  parsed_val = None
+  try:
+    parsed_val = json.loads(clean_val)
+    if isinstance(parsed_val, dict):
+      return parsed_val
+  except Exception:
+    pass
+  try:
+    import yaml  # pylint: disable=g-import-not-at-top
+    parsed_val = yaml.safe_load(clean_val)
+    if isinstance(parsed_val, dict):
+      return parsed_val
+  except Exception:
+    pass
+  try:
+    import ast  # pylint: disable=g-import-not-at-top
+    parsed_val = ast.literal_eval(clean_val)
+    if isinstance(parsed_val, dict):
+      return parsed_val
+  except Exception:
+    pass
+
+  if isinstance(parsed_val, dict):
+    return parsed_val
+  raise ValueError(
+      f"Unable to parse dictionary argument into a mapping: {value}"
+  )
+
+
+def _deep_merge_dicts(
+    base: dict[str, Any], update: dict[str, Any]
+) -> dict[str, Any]:
+  """Recursively merges two dictionaries without mutating the inputs."""
+  result = dict(base)
+  for key, value in update.items():
+    if (
+        key in result
+        and isinstance(result[key], dict)
+        and isinstance(value, dict)
+    ):
+      result[key] = _deep_merge_dicts(result[key], value)
+    else:
+      result[key] = value
+  return result
+
+
+def _infer_cli_val(val: str) -> Any:
+  """Infers boolean, integer, float, dict, or string type for unknown CLI flags."""
+  if val.lower() in ("true", "yes", "1"):
+    return True
+  if val.lower() in ("false", "no", "0"):
+    return False
+  try:
+    return int(val)
+  except ValueError:
+    pass
+  try:
+    return float(val)
+  except ValueError:
+    pass
+  if (val.startswith("{") and val.endswith("}")) or (
+      val.startswith("[") and val.endswith("]")
+  ):
+    try:
+      return _parse_dict_arg(val)
+    except Exception:
+      pass
+  return val
+
+
+def _parse_unknown_vllm_args(unknown_args: list[str]) -> dict[str, Any]:
+  """Parses unrecognized CLI flags into a dictionary of extra engine kwargs."""
+  extra = {}
+  i = 0
+  while i < len(unknown_args):
+    arg = unknown_args[i]
+    if arg.startswith("--"):
+      key_part = arg[2:]
+      if "=" in key_part:
+        key, val = key_part.split("=", 1)
+        extra[key.replace("-", "_")] = _infer_cli_val(val)
+      else:
+        key = key_part.replace("-", "_")
+        if i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
+          extra[key] = _infer_cli_val(unknown_args[i + 1])
+          i += 1
+        else:
+          extra[key] = True
+    i += 1
+  return extra
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -225,6 +353,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--prefuse_moe_weights",
+      "--prefuse-moe-weights",
       type=_str2bool,
       default=True,
       nargs="?",
@@ -233,6 +362,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--enable_prefix_caching",
+      "--enable-prefix-caching",
       type=_str2bool,
       default=False,
       nargs="?",
@@ -241,6 +371,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--tensor_parallel_size",
+      "--tensor-parallel-size",
       type=int,
       default=None,
       help=(
@@ -248,7 +379,150 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " mesh_tp)."
       ),
   )
-  args = parser.parse_args(argv)
+
+  # Extended vLLM Engine and Model Options
+  parser.add_argument(
+      "--max_model_len",
+      "--max-model-len",
+      type=int,
+      default=None,
+      help="Maximum model context length for vLLM.",
+  )
+  parser.add_argument(
+      "--max_num_batched_tokens",
+      "--max-num-batched-tokens",
+      type=int,
+      default=None,
+      help="Maximum number of batched tokens per iteration in vLLM.",
+  )
+  parser.add_argument(
+      "--max_num_seqs",
+      "--max-num-seqs",
+      type=int,
+      default=None,
+      help="Maximum number of sequences to process concurrently in vLLM.",
+  )
+  parser.add_argument(
+      "--gpu_memory_utilization",
+      "--gpu-memory-utilization",
+      type=float,
+      default=None,
+      help="The fraction of GPU/HBM memory to reserve for model and KV cache.",
+  )
+  parser.add_argument(
+      "--data_parallel_size",
+      "--data-parallel-size",
+      type=int,
+      default=None,
+      help="Data parallel size for vLLM rollout.",
+  )
+  parser.add_argument(
+      "--enable_expert_parallel",
+      "--enable-expert-parallel",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Enable expert parallelism for MoE models in vLLM.",
+  )
+  parser.add_argument(
+      "--additional_config",
+      "--additional-config",
+      type=_parse_dict_arg,
+      default=None,
+      help=(
+          "Additional vLLM / MaxText configuration as a JSON/YAML string or"
+          " file path."
+      ),
+  )
+  parser.add_argument(
+      "--prefix_cache_retention_interval",
+      "--prefix-cache-retention-interval",
+      type=int,
+      default=None,
+      help="Retention interval for prefix caching in vLLM.",
+  )
+  parser.add_argument(
+      "--kv_cache_dtype",
+      "--kv-cache-dtype",
+      type=str,
+      default=None,
+      help="Data type for kv cache storage in vLLM (e.g. bfloat16).",
+  )
+  parser.add_argument(
+      "--block_size",
+      "--block-size",
+      type=int,
+      default=None,
+      help="Token block size for contiguous chunks in vLLM KV cache.",
+  )
+  parser.add_argument(
+      "--async_scheduling",
+      "--async-scheduling",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Enable async scheduling in vLLM.",
+  )
+  parser.add_argument(
+      "--enable_chunked_prefill",
+      "--enable-chunked-prefill",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Enable chunked prefill in vLLM.",
+  )
+  parser.add_argument(
+      "--language_model_only",
+      "--language-model-only",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Enable language model only execution in vLLM.",
+  )
+  parser.add_argument(
+      "--enable_auto_tool_choice",
+      "--enable-auto-tool-choice",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Enable auto tool choice in vLLM.",
+  )
+  parser.add_argument(
+      "--tool_call_parser",
+      "--tool-call-parser",
+      type=str,
+      default=None,
+      help="Tool call parser identifier for vLLM.",
+  )
+  parser.add_argument(
+      "--reasoning_parser",
+      "--reasoning-parser",
+      type=str,
+      default=None,
+      help="Reasoning parser identifier for vLLM.",
+  )
+  parser.add_argument(
+      "--default_chat_template_kwargs",
+      "--default-chat-template-kwargs",
+      type=_parse_dict_arg,
+      default=None,
+      help="Default chat template kwargs as JSON/YAML string or file path.",
+  )
+  parser.add_argument(
+      "--limit_mm_per_prompt",
+      "--limit-mm-per-prompt",
+      type=_parse_dict_arg,
+      default=None,
+      help="Limit multi-modal items per prompt as JSON/YAML string or file path.",
+  )
+
+  args, unknown = parser.parse_known_args(argv)
+  args.extra_vllm_kwargs = _parse_unknown_vllm_args(unknown)
   _get_tensor_parallel_size(args)
   return args
 
@@ -430,6 +704,55 @@ def _create_vllm_worker(args, tokenizer):
   )
 
 
+_NON_ENGINE_KWARGS = frozenset({
+    "enable_auto_tool_choice",
+    "tool_call_parser",
+    "default_chat_template_kwargs",
+})
+
+_NON_MAXTEXT_CONFIG_KEYS = frozenset({
+    "enable_nnx",
+    "pure_nnx_decoder",
+})
+
+
+def _filter_maxtext_config(additional_config: dict[str, Any]) -> dict[str, Any]:
+  """Filters out unsupported MaxText configuration keys that crash MaxText pyconfig."""
+  if not additional_config or not isinstance(additional_config, dict):
+    return additional_config
+  if "maxtext_config" in additional_config and isinstance(
+      additional_config["maxtext_config"], dict
+  ):
+    filtered_maxtext = dict(additional_config["maxtext_config"])
+    for k in _NON_MAXTEXT_CONFIG_KEYS:
+      if k in filtered_maxtext:
+        logging.warning(
+            "Stripping unsupported MaxText config key %r from"
+            " additional_config['maxtext_config']",
+            k,
+        )
+        filtered_maxtext.pop(k, None)
+    result = dict(additional_config)
+    result["maxtext_config"] = filtered_maxtext
+    return result
+  return additional_config
+
+
+def _filter_engine_kwargs(
+    engine_kwargs: dict[str, Any], engine_cls: Any = None
+) -> dict[str, Any]:
+  """Filters kwargs to only pass parameters accepted by EngineArgs / AsyncEngineArgs."""
+  if engine_cls is not None:
+    try:
+      import dataclasses
+      if dataclasses.is_dataclass(engine_cls):
+        valid = {f.name for f in dataclasses.fields(engine_cls)}
+        return {k: v for k, v in engine_kwargs.items() if k in valid}
+    except Exception:
+      pass
+  return {k: v for k, v in engine_kwargs.items() if k not in _NON_ENGINE_KWARGS}
+
+
 def _create_inprocess_vllm_sampler(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
   vllm_sampler = _import_vllm_sampler()
@@ -463,7 +786,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  max_model_len = (
+      args.max_model_len
+      if args.max_model_len is not None
+      else (args.max_prompt_length + args.max_response_length)
+  )
 
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
   if multihost_backend:
@@ -476,10 +803,37 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "max_model_len": max_model_len,
       "enable_prefix_caching": args.enable_prefix_caching,
   }
-  # Select MaxText's `MaxTextForCausalLM` as rollout model.
-  # `additional_config` must be set on VllmConfig (not engine_kwargs): the
-  # sampler overwrites args["additional_config"] from the VllmConfig field.
-  maxtext_additional_config = None
+
+  for key in (
+      "max_num_batched_tokens",
+      "max_num_seqs",
+      "prefix_cache_retention_interval",
+      "kv_cache_dtype",
+      "block_size",
+      "async_scheduling",
+      "enable_chunked_prefill",
+      "language_model_only",
+      "reasoning_parser",
+      "limit_mm_per_prompt",
+  ):
+    val = getattr(args, key, None)
+    if val is not None:
+      engine_kwargs[key] = val
+
+  if hasattr(args, "extra_vllm_kwargs") and args.extra_vllm_kwargs:
+    for k, v in args.extra_vllm_kwargs.items():
+      if k not in (
+          "tensor_parallel_size",
+          "data_parallel_size",
+          "expert_parallel_size",
+          "gpu_memory_utilization",
+          "hbm_utilization",
+          "additional_config",
+          "max_model_len",
+      ):
+        engine_kwargs[k] = v
+
+  maxtext_additional_config = {}
   if args.maxtext_model_name:
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
@@ -497,19 +851,35 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         )
     )
 
+  user_additional_config = getattr(args, "additional_config", None) or {}
+  merged_additional_config = _deep_merge_dicts(
+      maxtext_additional_config, user_additional_config
+  )
+  merged_additional_config = _filter_maxtext_config(merged_additional_config)
+
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
   server_mode = True if multihost_backend else None
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = _get_tensor_parallel_size(args)
+  dp_size = (
+      args.data_parallel_size
+      if args.data_parallel_size is not None
+      else args.mesh_fsdp
+  )
+  hbm_utilization = (
+      args.gpu_memory_utilization
+      if args.gpu_memory_utilization is not None
+      else 0.8
+  )
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
       vllm_model,
       rollout_mesh,
       tp_size,
-      args.mesh_fsdp,
+      dp_size,
       max_model_len,
   )
   lora_config = None
@@ -518,16 +888,31 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_lora_rank": args.lora_rank,
         "max_loras": 1,
     }
+  init_with_random = os.getenv("INIT_WITH_RANDOM_WEIGHTS", "").lower()
+  if init_with_random in ("true", "1", "yes"):
+    init_with_random_weights = True
+  elif init_with_random in ("false", "0", "no"):
+    init_with_random_weights = False
+  else:
+    init_with_random_weights = (
+        args.weight_sync_mode != weight_sync_lib.WeightSyncMode.NONE
+    )
+
+  filtered_engine_kwargs = _filter_engine_kwargs(
+      engine_kwargs, getattr(vllm_sampler, "EngineArgs", None)
+  )
   vllm_config = vllm_sampler.VllmConfig(
       server_mode=server_mode,
       mesh=rollout_mesh,
       tensor_parallel_size=tp_size,
-      data_parallel_size=args.mesh_fsdp,
+      data_parallel_size=dp_size,
+      hbm_utilization=hbm_utilization,
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      additional_config=maxtext_additional_config,
-      engine_kwargs=engine_kwargs,
+      init_with_random_weights=init_with_random_weights,
+      additional_config=merged_additional_config or None,
+      engine_kwargs=filtered_engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -538,6 +923,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
       rollout_vllm_model_version=vllm_model,
+      rollout_vllm_additional_config=merged_additional_config or None,
+      rollout_vllm_kwargs=filtered_engine_kwargs,
       **_rollout_config_kwargs(args, tokenizer),
   )
   return sampler_adapter, config
@@ -564,29 +951,23 @@ def _create_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  max_model_len = (
+      args.max_model_len
+      if args.max_model_len is not None
+      else (args.max_prompt_length + args.max_response_length)
+  )
   tp_size = _get_tensor_parallel_size(args)
-  dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d (%d chips) max_model_len=%d...",
+      "max_model_len=%d...",
       vllm_model,
       tp_size,
-      dp_size,
-      tp_size * dp_size,
       max_model_len,
   )
-  if dp_size > 1 and args.use_lora:
-    raise ValueError(
-        "LoRA is not supported with rollout data parallelism:"
-        f" --mesh_fsdp={dp_size} with --use_lora. Set --mesh_fsdp=1 or drop"
-        " LoRA."
-    )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
       tensor_parallel_size=tp_size,
-      data_parallel_size=dp_size,
       max_model_len=max_model_len,
       trust_remote_code=True,
       dtype="bfloat16",
@@ -595,6 +976,40 @@ def _create_vllm_sampler(args, tokenizer):
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=args.enable_prefix_caching,
   )
+  dp_size = (
+      args.data_parallel_size
+      if args.data_parallel_size is not None
+      else getattr(args, "mesh_fsdp", None)
+  )
+  if dp_size is not None:
+    engine_kwargs["data_parallel_size"] = dp_size
+
+  if args.gpu_memory_utilization is not None:
+    engine_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+
+  for key in (
+      "max_num_batched_tokens",
+      "max_num_seqs",
+      "enable_expert_parallel",
+      "prefix_cache_retention_interval",
+      "kv_cache_dtype",
+      "block_size",
+      "async_scheduling",
+      "enable_chunked_prefill",
+      "language_model_only",
+      "reasoning_parser",
+      "limit_mm_per_prompt",
+  ):
+    val = getattr(args, key, None)
+    if val is not None:
+      engine_kwargs[key] = val
+
+  if hasattr(args, "extra_vllm_kwargs") and args.extra_vllm_kwargs:
+    for k, v in args.extra_vllm_kwargs.items():
+      if k not in ("tensor_parallel_size", "max_model_len"):
+        engine_kwargs[k] = v
+
+  maxtext_additional_config = {}
   if args.maxtext_model_name:
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
@@ -604,14 +1019,26 @@ def _create_vllm_sampler(args, tokenizer):
     engine_kwargs["hf_overrides"] = dict(
         maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES
     )
-    engine_kwargs["additional_config"] = (
+    maxtext_additional_config = (
         maxtext_utils.build_vllm_maxtext_additional_config(
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
         )
     )
-  engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
+
+  user_additional_config = getattr(args, "additional_config", None) or {}
+  merged_additional_config = _deep_merge_dicts(
+      maxtext_additional_config, user_additional_config
+  )
+  merged_additional_config = _filter_maxtext_config(merged_additional_config)
+  if merged_additional_config:
+    engine_kwargs["additional_config"] = merged_additional_config
+
+  filtered_engine_kwargs = _filter_engine_kwargs(
+      engine_kwargs, AsyncEngineArgs
+  )
+  engine_args = AsyncEngineArgs(**filtered_engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
       server_id=args.worker_id,
       engine_args=engine_args,
@@ -621,6 +1048,8 @@ def _create_vllm_sampler(args, tokenizer):
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
+      rollout_vllm_additional_config=merged_additional_config or None,
+      rollout_vllm_kwargs=filtered_engine_kwargs,
       **_rollout_config_kwargs(args, tokenizer),
   )
   return sampler_adapter, config
@@ -641,9 +1070,6 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   args = _parse_args(argv)
-  if args.debug:
-    logging.getLogger().setLevel(logging.DEBUG)
-    os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
   logging.info("Parsed args: %s", args)
 
   if REPO_ROOT not in sys.path:
