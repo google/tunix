@@ -501,6 +501,71 @@ class ThreeFullRendererTest(unittest.TestCase):
       self.assertNotEqual(rejected.returncode, 0)
       self.assertIn("GSM8K v1-hp requires", rejected.stderr)
 
+  def test_rendered_gsm8k_env_carries_the_jobset_namespace_for_the_sandbox_gate(
+      self,
+  ):
+    # 00_env.sh admits a pod only when R2E_K8S_NAMESPACE is an admitted
+    # namespace, whatever the workload; before the renderer emitted it the
+    # variable reached this suite from the ambient shell, so drop it here to
+    # prove both GSM8K manifests carry it themselves.
+    env_step = _REPO / "canon-zero-tim/cluster/steps/00_env.sh"
+    ambient = {
+        name: value
+        for name, value in os.environ.items()
+        if name != "R2E_K8S_NAMESPACE"
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      manifests = {
+          "three": self._render(root / "three")[0],
+          "p74": renderer.render_gsm8k_full(
+              source_commit="a" * 40,
+              output_dir=root / "p74",
+              run_id="g64ns",
+              base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
+          ),
+      }
+      for label, path in manifests.items():
+        with self.subTest(manifest=label):
+          document = yaml.safe_load(path.read_text(encoding="utf-8"))
+          namespace = document["metadata"]["namespace"]
+          values = _env(document)
+          self.assertEqual(values["R2E_K8S_NAMESPACE"], namespace)
+          for carried in (True, False):
+            state = root / f"state-{label}-{int(carried)}"
+            state.mkdir()
+            rendered = {
+                name: value
+                for name, value in values.items()
+                if carried or name != "R2E_K8S_NAMESPACE"
+            }
+            completed = subprocess.run(
+                ["bash", str(env_step)],
+                cwd=_REPO,
+                env={
+                    **ambient,
+                    **rendered,
+                    "CANON_PKG": str(_REPO / "canon-zero-tim"),
+                    "CANON_STATE": str(state),
+                    "JOBSET_RESTART_ATTEMPT": "0",
+                    "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if carried:
+              self.assertEqual(
+                  completed.returncode, 0, msg=completed.stderr
+              )
+            else:
+              self.assertNotEqual(completed.returncode, 0)
+              self.assertIn(
+                  "requires R2E_K8S_NAMESPACE to be exactly default or"
+                  " trellis",
+                  completed.stderr,
+              )
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -211,6 +211,7 @@ def _validate_document(
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
       "CANON_GSM8K_TRAIN": "1",
       "CANON_GSM8K_VANILLA": "1",
+      "R2E_K8S_NAMESPACE": document["metadata"]["namespace"],
       "CANON_RUN_CMD": shlex.join(p33._gsm8k_command(200)),
   }
   wrong = {
@@ -262,6 +263,13 @@ def render_native_full(
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
       "CANON_GSM8K_TRAIN": "1",
       "CANON_GSM8K_VANILLA": "1",
+      # Since ad88121f9 cluster/steps/00_env.sh refuses to start any pod whose
+      # R2E_K8S_NAMESPACE is not an admitted namespace, whatever the workload,
+      # and the stock-engine path of cluster/entrypoint.sh still runs that step.
+      # The direct sandbox runtime places R2E Pods with the head's own
+      # namespaced ServiceAccount, so the admitted value is the JobSet's own
+      # namespace, exactly as render_frozenlake_three_arm.py resolves it.
+      "R2E_K8S_NAMESPACE": document["metadata"]["namespace"],
   })
   _remove_env(document, _FORBIDDEN_ZERO_SELECTORS)
   _remove_proxy_precision_pin(document)

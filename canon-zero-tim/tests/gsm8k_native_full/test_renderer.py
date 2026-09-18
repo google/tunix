@@ -99,10 +99,13 @@ def _resolve_profile(values: dict[str, str]) -> tuple[str, str, str]:
 
 
 def _run_00_env(values: dict[str, str], state: Path) -> subprocess.CompletedProcess:
+  # R2E_K8S_NAMESPACE is dropped from the ambient environment on purpose: the
+  # CPU harness exports it, which would let the manifest omit the variable
+  # 00_env.sh demands of every pod and still pass here.
   environment = {
       key: value
       for key, value in os.environ.items()
-      if not key.startswith("CANON_")
+      if not key.startswith("CANON_") and key != "R2E_K8S_NAMESPACE"
   }
   environment.update(values)
   environment.update({
@@ -317,6 +320,31 @@ class Gsm8kNativeFullRendererTest(unittest.TestCase):
       self.assertNotEqual(completed.returncode, 0)
       self.assertIn(
           "GSM8K native caller contradictions: CANON_P32_WORKLOAD=gsm8k",
+          completed.stderr,
+      )
+
+  def test_rendered_env_carries_the_jobset_namespace_for_the_sandbox_gate(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      native_path = native.render_native_full(
+          source_commit="f" * 40,
+          output_dir=Path(tmp) / "rendered",
+          run_id="native-f",
+          base_path=_PACKAGE / "cluster/jobset-64chip.yaml",
+      )
+      document = yaml.safe_load(native_path.read_text(encoding="utf-8"))
+      values = _env(document)
+      self.assertEqual(
+          values["R2E_K8S_NAMESPACE"], document["metadata"]["namespace"]
+      )
+      stripped = {
+          name: value
+          for name, value in values.items()
+          if name != "R2E_K8S_NAMESPACE"
+      }
+      completed = _run_00_env(stripped, Path(tmp) / "state")
+      self.assertNotEqual(completed.returncode, 0)
+      self.assertIn(
+          "requires R2E_K8S_NAMESPACE to be exactly default or trellis",
           completed.stderr,
       )
 

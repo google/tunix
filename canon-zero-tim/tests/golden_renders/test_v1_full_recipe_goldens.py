@@ -74,7 +74,7 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_three_full_manifests_match_exact_goldens_twice(self):
     expected = (
-        "57bb467259e1a312d14052c2a2a8cc27fdbba42e84c29be79a128588b2db2400",
+        "91488d6fcf68a3402d4453ab23d0ef4c9ea3e5e58e2eeb3cf5db69484c15f886",
         "11e29e16148ace4f64f2b926026d485e425c70af03a22b1ee3c764d1019ea6bd",
         "94d44d6b5b20de4faed74daad6ea7db387e935eac437ec861770cc5e5401bddf",
     )
@@ -130,7 +130,8 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
 
   def test_image_receipt_profile_defaults_and_base_are_the_only_legacy_deltas(self):
     # The TiTO provenance change added CANON_CLIENT_IMAGE to FrozenLake, and
-    # the sandbox-namespace change added R2E_K8S_NAMESPACE to it.
+    # the sandbox-namespace change added R2E_K8S_NAMESPACE to FrozenLake first
+    # and then to GSM8K, so every manifest now carries the namespace.
     # Retain all old goldens as a reconstruction oracle: removing precisely
     # those independently checked receipts, restoring the stream/1 entries now
     # owned by the profile and the reviewed base fields must recover every
@@ -163,8 +164,7 @@ class V1FullRecipeGoldensTest(unittest.TestCase):
           self.assertEqual(
               namespaces,
               [{"name": "R2E_K8S_NAMESPACE",
-                "value": document["metadata"]["namespace"]}]
-              if is_frozenlake else [],
+                "value": document["metadata"]["namespace"]}],
           )
           main["env"] = [item for item in main["env"]
                          if item["name"] not in

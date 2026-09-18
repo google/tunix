@@ -123,6 +123,20 @@ def _set_env(document: dict, values: dict[str, str]) -> None:
   )
 
 
+def _set_sandbox_namespace(document: dict) -> None:
+  """Emits the namespace cluster/steps/00_env.sh admits the pod under.
+
+  Since ad88121f9 the step refuses to start any pod whose R2E_K8S_NAMESPACE is
+  not an admitted namespace, whatever the workload, because the direct sandbox
+  runtime places R2E Pods with the head's own namespaced ServiceAccount.  The
+  admitted value is therefore the JobSet's own namespace, exactly as
+  render_frozenlake_three_arm.py resolves it.
+  """
+  _set_env(
+      document, {"R2E_K8S_NAMESPACE": document["metadata"]["namespace"]}
+  )
+
+
 def _sha256(path: Path) -> str:
   digest = hashlib.sha256()
   with path.open("rb") as source:
@@ -171,6 +185,7 @@ def render_three(
       "canon.zero-tim/performance-profile": "v1-hp",
       "canon.zero-tim/full-recipe": "gsm8k",
   })
+  _set_sandbox_namespace(gsm_document)
   gsm_path = gsm_dir / "jobset-v1-hp-gsm8k-full.yaml"
   _write_yaml(gsm_path, gsm_document)
 
@@ -240,6 +255,7 @@ def render_three(
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
+        "R2E_K8S_NAMESPACE": document["metadata"]["namespace"],
         **_JAX_CACHE_ENV,
     }
     if label == "gsm8k":
@@ -335,6 +351,7 @@ def render_gsm8k_full(
       "canon.zero-tim/full-recipe": "gsm8k",
       "canon.zero-tim/p74-device-partition": "source-sha",
   })
+  _set_sandbox_namespace(document)
   _set_env(document, _optimization_additions("gsm8k"))
   path = output_dir / "jobset-v1-hp-gsm8k-dp16tp4-p74.yaml"
   _write_yaml(path, document)
@@ -352,6 +369,7 @@ def render_gsm8k_full(
       "CANON_P33_SHARED_MESH": "16,4",
       "CANON_P33_RUN_STAGE": "full",
       "CANON_P33_NO_COMMIT": "0",
+      "R2E_K8S_NAMESPACE": document["metadata"]["namespace"],
       "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
       "CANON_P38_FIXED_LM_HEAD": "1",
       "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
