@@ -139,6 +139,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
       choices=list(weight_sync.WeightSyncMode),
   )
+  parser.add_argument(
+      "--trainable_parameters_mask",
+      type=str,
+      default=None,
+      help="Trainable parameters regex mask for freezing weights.",
+  )
   parser.add_argument("--dataset_path", type=str, default="")
   parser.add_argument(
       "--dataset_name", type=str, default=deepswe.DEFAULT_DATASET_NAME
@@ -292,7 +298,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
       "mini_batch_size=%d, num_generations=%d, max_steps=%d, max_turns=%d, "
       "train_micro=%d, beta=%.4f, env_backend=%s, use_agent_sandbox=%s, "
-      "weight_sync_mode=%s.",
+      "weight_sync_mode=%s, trainable_parameters_mask=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -304,6 +310,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.env_backend,
       args.use_agent_sandbox,
       args.weight_sync_mode,
+      args.trainable_parameters_mask,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 

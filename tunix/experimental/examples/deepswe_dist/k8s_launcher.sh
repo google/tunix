@@ -63,6 +63,7 @@ export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
 export REMAT_CONFIG=${REMAT_CONFIG:-decoder}
+export TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -258,6 +259,7 @@ start_orchestrator() {
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
         ${COMPUTE_LOGPS_CHUNK_SIZE:+--compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE}} \
+        ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\"${TRAINABLE_PARAMETERS_MASK}\"} \
         ${DEBUG:+--debug} \
     " \
     | apply_manifest
@@ -348,6 +350,7 @@ start_trainer() {
         ${COMPUTE_LOGPS_CHUNK_SIZE:+--compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE}} \
         ${lora_args} \
         ${maxtext_args} \
+        ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\"${TRAINABLE_PARAMETERS_MASK}\"} \
         ${DEBUG:+--debug} \
     " \
     | apply_manifest

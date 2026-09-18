@@ -429,6 +429,27 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     )
 
   @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_trainable_parameters_mask(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--trainable_parameters_mask",
+        '["^(?!.*routed_experts/gate/kernel).*"]',
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("trainable_parameters_mask"),
+        '["^(?!.*routed_experts/gate/kernel).*"]',
+    )
+
+  @mock.patch.object(
       run_trainer_node,
       "_ensure_model_dir_for_trainer",
       return_value="/tmp/test",

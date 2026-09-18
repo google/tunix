@@ -484,6 +484,15 @@ class MaxTextUtilsTest(absltest.TestCase):
           ),
       )
 
+  def test_trainable_parameters_mask_forwarded_to_config(self):
+    mask = '["^(?!.*routed_experts/gate/kernel).*"]'
+    argv = self._build_config_argv(trainable_parameters_mask=mask)
+    self.assertIn(f"trainable_parameters_mask={mask}", argv)
+
+  def test_trainable_parameters_mask_none_not_in_config(self):
+    argv = self._build_config_argv(trainable_parameters_mask=None)
+    self.assertFalse(any("trainable_parameters_mask=" in arg for arg in argv))
+
 
 if __name__ == "__main__":
   absltest.main()
