@@ -1,0 +1,857 @@
+#!/usr/bin/env python3
+"""Render paired P57 FrozenLake training or checkpoint-evaluation arms."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import dataclasses
+from pathlib import Path
+import re
+import sys
+
+import yaml
+
+_CLUSTER_DIR = Path(__file__).resolve().parent
+if str(_CLUSTER_DIR) not in sys.path:
+  sys.path.insert(0, str(_CLUSTER_DIR))
+_REPO_ROOT = _CLUSTER_DIR.parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
+
+import render_jobsets as p33
+from v1_full_system_optimization import (
+    FULL_PROFILE_DEFAULT_NAMES,
+    full_system_optimization_render_additions,
+)
+from examples.frozenlake import p57_workloads
+from examples.frozenlake import training_geometry as fl_geometry
+
+
+_PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+_V1_HP_PROFILE = (
+    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+)
+_TITO_DIAGNOSTIC_PROFILE = (
+    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tito-diagnostic.env"
+)
+_CHECKPOINT_ROOT = (
+    "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
+)
+_TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?")
+_ALLOWED_UPDATES = (1, 3, 20, 50, 100, 150, 200, 300, 450)
+_STOCK_DISCOVERY_UPDATES = 200
+_PAIRED_ARM_UPDATES = 300
+_EVAL_EVERY_N_STEPS = 50
+_EVAL_TEST_BATCHES = 4
+_BASE_MEMORY = "200G"
+_P57_MEMORY = "350G"
+_DP_SIZE = 8
+_TP_SIZE = 8
+_ADMITTED_CPU_NODEPOOLS = frozenset({
+    "canon-cpu-pool",
+    "deepswe-cpu-pool-2",
+    "cpu-np",
+})
+_DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
+# Preserve the historical requests and large limits on the dedicated head
+# pool.  Raising requests to these ceilings would over-reserve the whole Pod.
+HEAD_RESOURCES = {
+    "pathways-proxy": {
+        "requests": {"cpu": "32", "memory": "200Gi"},
+        "limits": {"cpu": "32", "memory": "350G"},
+    },
+    "pathways-rm": {
+        "requests": {"cpu": "8", "memory": "32Gi"},
+        "limits": {"cpu": "16", "memory": "150G"},
+    },
+    "jax-tpu": {
+        "requests": {"cpu": "16", "memory": "64Gi"},
+        "limits": {"cpu": "24", "memory": "350G"},
+    },
+}
+_EVAL_GENERATIONS = p57_workloads.GENERATIONS_PER_PROMPT
+_SCRIPT_ENTRYPOINT = (
+    "python3", "-u", "examples/frozenlake/train_frozenlake_qwen3.py"
+)
+_MODULE_ENTRYPOINT = (
+    "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
+)
+_TRAIN_ARM_ENV_DIFFERENCES = {
+    "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
+    "CANON_FROZENLAKE_CKPT_TAG",
+    "CANON_P38_FIXED_LM_HEAD",
+    "CANON_P57_TIM_ARM",
+    "CANON_P57_INFERENCE_REGIME",
+    "CANON_STATE",
+    "CANON_RUN_LOG",
+    "CANON_PRE_ALIGN_REPORT",
+    "CANON_ALIGN_REPORT",
+    "CANON_UPDATE_REPORT",
+    "CANON_WANDB_RUN_NAME",
+}
+_EVAL_ARM_ENV_DIFFERENCES = (
+    _TRAIN_ARM_ENV_DIFFERENCES
+    - {"CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"}
+    | {"CANON_P57_EVAL_OUTPUT"}
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Arm:
+  name: str
+  fixed_lm_head: bool
+  warning_only: bool
+  sampler_is: str
+
+
+_ARMS = (
+    Arm("zero", fixed_lm_head=True, warning_only=False, sampler_is="none"),
+    Arm("mismatch", fixed_lm_head=False, warning_only=True, sampler_is="none"),
+)
+_IS_ARM = Arm("is", fixed_lm_head=False, warning_only=True, sampler_is="token")
+_STANDARD_ARM = Arm("standard", fixed_lm_head=False, warning_only=True, sampler_is="none")
+_ARM_BY_NAME = {arm.name: arm for arm in (*_ARMS, _IS_ARM, _STANDARD_ARM)}
+
+
+def _container(document):
+  pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+      "template"
+  ]["spec"]
+  return next(item for item in pod["containers"] if item["name"] == "jax-tpu")
+
+
+def _env(document) -> dict[str, str]:
+  return {
+      item["name"]: item["value"]
+      for item in _container(document)["env"]
+      if "value" in item
+  }
+
+
+def _replace_env(document, values: dict[str, str]) -> None:
+  env = _container(document)["env"]
+  by_name = {item["name"]: item for item in env}
+  for name, value in values.items():
+    if name in by_name:
+      by_name[name].clear()
+      by_name[name].update({"name": name, "value": value})
+    else:
+      env.append({"name": name, "value": value})
+
+
+def _replace_command_arg(
+    command: list[str], prefix: str, replacement: str
+) -> None:
+  matches = [index for index, value in enumerate(command) if value.startswith(prefix)]
+  if len(matches) != 1:
+    raise ValueError(f"P57 expected exactly one {prefix!r} command argument")
+  command[matches[0]] = replacement
+
+
+def _use_module_entrypoint(command: list[str]) -> None:
+  if tuple(command[:3]) != _SCRIPT_ENTRYPOINT:
+    raise ValueError("P57 base entrypoint drifted")
+  command[:3] = _MODULE_ENTRYPOINT
+
+
+def _validate_sampler_command(command: list[str], arm: Arm) -> None:
+  sources = [value for value in command if value.startswith("--old_logps_source")]
+  if sources != (["--old_logps_source=trainer"] if arm.name == "standard" else []):
+    raise ValueError(f"P57 {arm.name} old-logprob source drifted")
+  expected = f"--sampler_is={arm.sampler_is}"
+  if command.count(expected) != 1:
+    raise ValueError(
+        f"P57 {arm.name} arm must select {expected} exactly once"
+    )
+  unexpected = {
+      value for value in command
+      if value.startswith("--sampler_is=") and value != expected
+  }
+  if unexpected:
+    raise ValueError(
+        f"P57 {arm.name} arm has conflicting sampler modes: "
+        f"{sorted(unexpected)}"
+    )
+
+
+def _spec(
+    arm: Arm,
+    expected_updates: int,
+    *,
+    run_kind: str,
+    checkpoint_step: int | None,
+    workload_candidate: str,
+    data_split: str,
+    high_performance: bool = False,
+    disable_eval: bool = False,
+    train_geometry: str = fl_geometry.LEGACY,
+) -> p33.JobSpec:
+  geom = fl_geometry.geometry(train_geometry)
+  enable_train_evaluation = (
+      run_kind == "train" and data_split != "selection" and not disable_eval
+  )
+  command = list(
+      p33._frozenlake_command(  # pylint: disable=protected-access
+          expected_updates, dp_size=geom.dp, tp_size=geom.tp,
+          batch_size=geom.prompts, mini_batch_size=geom.prompts,
+      )
+  )
+  _use_module_entrypoint(command)
+  command.append(f"--sampler_is={arm.sampler_is}")
+  if arm.name == "standard":
+    command.append("--old_logps_source=trainer")
+  command.append("--seed=42")
+  if workload_candidate:
+    candidate = p57_workloads.candidate(workload_candidate)
+    p57_workloads.validate_split(data_split)
+    _replace_command_arg(
+        command, "--env_max_steps=", f"--env_max_steps={candidate.max_turns}"
+    )
+    command.extend((
+        f"--p57_workload_candidate={workload_candidate}",
+        f"--p57_data_split={data_split}",
+    ))
+    _replace_command_arg(
+        command, "--max_prompt_length=", "--max_prompt_length=4096"
+    )
+    _replace_command_arg(
+        command,
+        "--max_response_length=",
+        f"--max_response_length={candidate.context_hard_cap - 4096}",
+    )
+  if run_kind == "train":
+    if enable_train_evaluation:
+      command.extend((
+          f"--num_test_batches={_EVAL_TEST_BATCHES}",
+          f"--eval_every_n_steps={_EVAL_EVERY_N_STEPS}",
+      ))
+    else:
+      command.append("--eval_every_n_steps=0")
+    key_suffix = str(expected_updates)
+    job_prefix = f"canon-p57-fl-{arm.name[:4]}"
+  elif run_kind == "tito-diagnostic":
+    command.extend((
+        "--num_test_batches=1",
+        "--eval_every_n_steps=0",
+        "--evaluation_only",
+    ))
+    key_suffix = "tito-diagnostic"
+    job_prefix = (
+        "canon-p57-tito-m15"
+        if workload_candidate == "m15"
+        else "canon-p57-tito-p45"
+    )
+  elif run_kind == "eval":
+    if checkpoint_step is None:
+      raise ValueError("P57 eval spec requires a checkpoint step")
+    if _EVAL_GENERATIONS % _DP_SIZE:
+      raise ValueError(
+          "P57 eval generations must be divisible by the trainer DP axis: "
+          f"generations={_EVAL_GENERATIONS} dp={_DP_SIZE}"
+      )
+    _replace_command_arg(
+        command,
+        "--num_generations=",
+        f"--num_generations={_EVAL_GENERATIONS}",
+    )
+    _replace_command_arg(command, "--temperature=", "--temperature=0")
+    command.extend((
+        "--num_test_batches=4",
+        "--eval_every_n_steps=0",
+        "--evaluation_only",
+    ))
+    key_suffix = f"eval-{checkpoint_step}"
+    job_prefix = f"canon-p57-fl-ev-{arm.name[:4]}"
+  else:
+    raise ValueError(f"unsupported P57 run kind: {run_kind!r}")
+  _validate_sampler_command(command, arm)
+  workload_suffix = (
+      f"{workload_candidate}-{data_split}-" if workload_candidate else ""
+  )
+  if workload_candidate:
+    job_prefix = f"{job_prefix}-{workload_candidate}"
+  return p33.JobSpec(
+      key=f"p57-frozenlake-{arm.name}-{workload_suffix}{key_suffix}",
+      workload="frozenlake",
+      stage="rollout-only" if run_kind == "tito-diagnostic" else "full",
+      profile=(
+          _TITO_DIAGNOSTIC_PROFILE
+          if run_kind == "tito-diagnostic"
+          else geom.profile_file
+          if high_performance
+          else _PROFILE
+      ),
+      no_commit=run_kind == "tito-diagnostic",
+      job_prefix=job_prefix,
+      command=tuple(command),
+      enable_evaluation=enable_train_evaluation,
+      eval_every_n_steps=_EVAL_EVERY_N_STEPS,
+      dp_size=geom.dp,
+      tp_size=geom.tp,
+      optimizer_resident=True,
+      rank_parallel_backward=high_performance,
+      v1_hp_full=high_performance,
+      train_geometry=(train_geometry if train_geometry != fl_geometry.LEGACY else ""),
+  )
+
+
+def _validate_pair(
+    documents: dict[str, dict],
+    *,
+    run_kind: str,
+    extra_train_differences: frozenset[str] = frozenset(),
+) -> None:
+  zero = _env(documents["zero"])
+  mismatch = _env(documents["mismatch"])
+  differing = {
+      name
+      for name in zero.keys() | mismatch.keys()
+      if zero.get(name) != mismatch.get(name)
+  }
+  expected_differences = (
+      _TRAIN_ARM_ENV_DIFFERENCES | extra_train_differences
+      if run_kind == "train"
+      else _EVAL_ARM_ENV_DIFFERENCES
+  )
+  if differing != expected_differences:
+    raise ValueError(
+        "P57 paired intent diff changed: "
+        f"actual={sorted(differing)} expected={sorted(expected_differences)}"
+    )
+  if zero["CANON_RUN_CMD"] != mismatch["CANON_RUN_CMD"]:
+    raise ValueError("P57 arms must run the identical recipe command")
+  _validate_sampler_command(zero["CANON_RUN_CMD"].split(), _ARM_BY_NAME["zero"])
+  _validate_sampler_command(
+      mismatch["CANON_RUN_CMD"].split(), _ARM_BY_NAME["mismatch"]
+  )
+  if (zero["CANON_P38_FIXED_LM_HEAD"], mismatch["CANON_P38_FIXED_LM_HEAD"]) != (
+      "1",
+      "0",
+  ):
+    raise ValueError("P57 treatment assignment drifted")
+  print(
+      "[P57.PAIR] INTENT_DIFF_PASS "
+      f"run_kind={run_kind} allowed={','.join(sorted(expected_differences))}",
+      flush=True,
+  )
+
+
+def render_all(
+    *,
+    base_path: Path,
+    output_dir: Path,
+    source_commit: str,
+    run_id: str,
+    campaign_tag: str,
+    checkpoint_mode: str,
+    expected_updates: int,
+    run_kind: str = "train",
+    checkpoint_step: int | None = None,
+    workload_candidate: str = "",
+    data_split: str = "",
+    stock_only: bool = False,
+    arm: str = "",
+    stop_after_step: int | None = None,
+    high_performance: bool = False,
+    disable_eval: bool = False,
+    cpu_nodepool: str = "cpu-np",
+    train_geometry: str = fl_geometry.LEGACY,
+) -> tuple[Path, ...]:
+  geom = fl_geometry.geometry(train_geometry)
+  if arm == "standard" and (
+      train_geometry != fl_geometry.LEGACY
+      or run_kind not in ("train", "eval")
+      or expected_updates != 300 or high_performance or disable_eval or stock_only
+      or (workload_candidate, data_split) not in (("", ""), ("m15", "main"))
+  ):
+    raise ValueError("P57 Standard is restricted to Native64 P45/M15 300-update train/eval")
+  if train_geometry != fl_geometry.LEGACY and not (
+      high_performance and arm == "zero" and run_kind == "train"
+      and expected_updates == 300 and checkpoint_mode == "disabled"
+      and disable_eval and not stock_only
+      and (workload_candidate, data_split) in (("", ""), ("m15", "main"))
+  ):
+    raise ValueError("DP4xTP8/B128 is restricted to P45/M15 Zero-HP full training")
+  if expected_updates not in _ALLOWED_UPDATES:
+    raise ValueError(
+        f"P57 expected updates must be one of {_ALLOWED_UPDATES}, "
+        f"got {expected_updates}"
+    )
+  if cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
+    raise ValueError(
+        f"P57 requires an admitted CPU node pool ({sorted(_ADMITTED_CPU_NODEPOOLS)}), "
+        f"got {cpu_nodepool!r}"
+    )
+  if checkpoint_mode not in ("disabled", "new", "resume"):
+    raise ValueError("P57 checkpoint mode must be disabled, new, or resume")
+  if run_kind not in ("train", "eval", "tito-diagnostic"):
+    raise ValueError("P57 run kind must be train, eval, or tito-diagnostic")
+  tito_diagnostic = run_kind == "tito-diagnostic"
+  if high_performance and (
+      run_kind != "train"
+      or arm != "zero"
+      or checkpoint_mode != "disabled"
+      or expected_updates != _PAIRED_ARM_UPDATES
+  ):
+    raise ValueError(
+        "P57 v1 high-performance mode requires a checkpoint-disabled "
+        "300-update zero train"
+    )
+  if checkpoint_mode == "disabled" and not (high_performance or tito_diagnostic):
+    raise ValueError(
+        "P57 checkpoint-disabled mode is admitted only for the v1 "
+        "high-performance zero train"
+    )
+  if disable_eval and not (high_performance or tito_diagnostic):
+    raise ValueError(
+        "P57 disable-eval is admitted only for the v1 high-performance zero train"
+    )
+  if high_performance and not disable_eval:
+    raise ValueError(
+      "P57 v1 high-performance zero train requires in-process evaluation disabled"
+    )
+  if tito_diagnostic and (
+      expected_updates != 1
+      or checkpoint_mode != "disabled"
+      or arm != "zero"
+      or high_performance
+      or not disable_eval
+      or stock_only
+  ):
+    raise ValueError(
+        "P57 TiTO diagnostic requires one rollout-only zero arm with "
+        "checkpoint/evaluation disabled"
+    )
+  primary_zero_requested = (
+      not stock_only
+      and run_kind == "train"
+      and expected_updates == _PAIRED_ARM_UPDATES
+      and arm in ("", "zero")
+  )
+  if primary_zero_requested and not high_performance:
+    raise ValueError(
+        "P57 primary zero reference requires the registered v1 "
+        "high-performance path"
+    )
+  if run_kind in ("train", "tito-diagnostic") and checkpoint_step is not None:
+    raise ValueError("P57 training must not name an evaluation checkpoint")
+  if bool(workload_candidate) != bool(data_split):
+    raise ValueError("P57 workload candidate and data split must be set together")
+  if workload_candidate:
+    p57_workloads.candidate(workload_candidate)
+    p57_workloads.validate_split(data_split)
+  if stock_only and (not workload_candidate or data_split != "selection"):
+    raise ValueError("P57 stock-only training/eval requires a selection recipe")
+  if stock_only and arm:
+    raise ValueError("P57 stock-only discovery cannot also select an arm")
+  if stock_only and (
+      workload_candidate != "m15"
+      or expected_updates != _STOCK_DISCOVERY_UPDATES
+  ):
+    raise ValueError(
+        "P57 stock curve is frozen to M15 selection for "
+        f"{_STOCK_DISCOVERY_UPDATES} updates"
+    )
+  if not stock_only and workload_candidate and data_split != "main":
+    raise ValueError("P57 paired arms require the frozen main data split")
+  if arm and arm not in _ARM_BY_NAME:
+    raise ValueError(
+        f"P57 arm must be one of {tuple(_ARM_BY_NAME)}, got {arm!r}"
+    )
+  if (
+      arm
+      and not tito_diagnostic
+      and not workload_candidate
+      and expected_updates != _PAIRED_ARM_UPDATES
+  ):
+    raise ValueError(
+        "P57 original P45 workload is frozen to "
+        f"{_PAIRED_ARM_UPDATES} updates"
+    )
+  if (
+      arm
+      and not tito_diagnostic
+      and workload_candidate == "m15"
+      and expected_updates != _PAIRED_ARM_UPDATES
+  ):
+    raise ValueError(
+        f"P57 M15 workload is frozen to {_PAIRED_ARM_UPDATES} updates"
+    )
+  if run_kind == "eval":
+    expected_mode = "new" if checkpoint_step == 0 else "resume"
+    if checkpoint_mode != expected_mode:
+      raise ValueError(
+          f"P57 checkpoint step {checkpoint_step} requires mode={expected_mode}"
+      )
+    checkpoint_is_registered = (
+        checkpoint_step is not None
+        and checkpoint_step >= 0
+        and checkpoint_step <= expected_updates
+        and (
+            checkpoint_step == 0
+            or (
+                checkpoint_step == expected_updates
+                if stock_only or expected_updates == _PAIRED_ARM_UPDATES
+                else checkpoint_step % 50 == 0
+            )
+        )
+    )
+    if not checkpoint_is_registered:
+      raise ValueError(
+          "P57 evaluation checkpoint must be zero or a retained milestone "
+          "within the registered training horizon"
+      )
+  if not _TAG_RE.fullmatch(campaign_tag):
+    raise ValueError("P57 campaign tag is invalid or too long")
+  if run_kind == "train":
+    stop_after_step = (
+        expected_updates if stop_after_step is None else stop_after_step
+    )
+    if (
+        stop_after_step <= 0
+        or stop_after_step % 50
+        or stop_after_step > expected_updates
+    ):
+      raise ValueError("P57 stop-after-step must be a 50-step boundary in horizon")
+    if (
+        not stock_only
+        and expected_updates == _PAIRED_ARM_UPDATES
+        and stop_after_step != expected_updates
+    ):
+      raise ValueError(
+          "P57 primary 300-update arms must run the full horizon because the "
+          "only durable checkpoint is the final step"
+      )
+  elif tito_diagnostic:
+    stop_after_step = 1 if stop_after_step is None else stop_after_step
+    if stop_after_step != 1:
+      raise ValueError("P57 TiTO diagnostic stop boundary must be one")
+  elif stop_after_step is not None:
+    raise ValueError("P57 evaluation does not accept a training stop boundary")
+  base = p33.load_base(base_path)
+  output_dir.mkdir(parents=True, exist_ok=True)
+  documents: dict[str, dict] = {}
+  outputs = []
+  selected_arms = (
+      tuple(arm for arm in _ARMS if arm.name == "mismatch")
+      if stock_only
+      else (_ARM_BY_NAME[arm],) if arm else (*_ARMS, _IS_ARM)
+  )
+  for arm in selected_arms:
+    spec = _spec(
+        arm,
+        expected_updates,
+        run_kind=run_kind,
+        checkpoint_step=checkpoint_step,
+        workload_candidate=workload_candidate,
+        data_split=data_split,
+        high_performance=high_performance,
+        disable_eval=disable_eval,
+        train_geometry=train_geometry,
+    )
+    path = output_dir / f"jobset-{spec.key}.yaml"
+    if path.exists():
+      raise FileExistsError(f"refusing to overwrite rendered P57 JobSet: {path}")
+    document = p33.render_jobset(base, spec, source_commit, run_id)
+    head = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+    head["nodeSelector"]["cloud.google.com/gke-nodepool"] = cpu_nodepool
+    main = _container(document)
+    if cpu_nodepool == "canon-cpu-pool":
+      proxy = next(c for c in head["initContainers"] if c["name"] == "pathways-proxy")
+      rm = next(c for c in head["initContainers"] if c["name"] == "pathways-rm")
+      proxy["resources"] = copy.deepcopy(HEAD_RESOURCES["pathways-proxy"])
+      rm["resources"] = copy.deepcopy(HEAD_RESOURCES["pathways-rm"])
+      main["resources"] = copy.deepcopy(HEAD_RESOURCES["jax-tpu"])
+    else:
+      if main.get("resources", {}).get("limits", {}).get("memory") != _BASE_MEMORY:
+        raise ValueError("P57 base jax-tpu memory limit drifted")
+      main["resources"]["limits"]["memory"] = _P57_MEMORY
+    job_name = document["metadata"]["name"]
+    state = f"/tmp/canon-state/{job_name}"
+    checkpoint_disabled = checkpoint_mode == "disabled"
+    checkpoint_tag = "" if checkpoint_disabled else f"{campaign_tag}-{arm.name}"
+    # The optimized Zero concept run removes checkpoint I/O entirely. Native,
+    # IS, eval, and historical discovery carriers retain their registered
+    # checkpoint contracts.
+    checkpoint_root = "" if checkpoint_disabled else _CHECKPOINT_ROOT
+    milestone_interval = "" if checkpoint_disabled else "0"
+    checkpoint_interval = (
+        ""
+        if checkpoint_disabled
+        else (
+            "300"
+            if not stock_only and expected_updates == _PAIRED_ARM_UPDATES
+            else "10"
+        )
+    )
+    checkpoint_max_to_keep = "" if checkpoint_disabled else "1"
+    zero_ab_warning = (
+        high_performance
+        and run_kind == "train"
+        and arm.name == "zero"
+        and (
+            (not workload_candidate and not data_split)
+            or (workload_candidate == "m15" and data_split == "main")
+        )
+        and expected_updates == _PAIRED_ARM_UPDATES
+        and stop_after_step == _PAIRED_ARM_UPDATES
+        and disable_eval
+        and checkpoint_disabled
+    )
+    alignment_warning_only = (
+        run_kind == "train" and (arm.warning_only or zero_ab_warning)
+    )
+    _replace_env(
+        document,
+        {
+            "CANON_CLIENT_IMAGE": main["image"],
+            "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+                "1" if alignment_warning_only else "0"
+            ),
+            "CANON_P38_FIXED_LM_HEAD": "1" if arm.fixed_lm_head else "0",
+            "CANON_P57_TIM_ARM": arm.name,
+            "CANON_V1_HP_FULL": "1" if high_performance else "0",
+            "CANON_P57_RUN_KIND": run_kind,
+            "CANON_P57_INFERENCE_REGIME": (
+                "stock-fast" if arm.name in ("mismatch", "is", "standard") else ""
+            ),
+            "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
+            "CANON_P57_STOP_AFTER_STEP": (
+                str(stop_after_step)
+                if run_kind in ("train", "tito-diagnostic")
+                else ""
+            ),
+            "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
+            "CANON_P57_DATA_SPLIT": data_split,
+            "CANON_P57_EVAL_CHECKPOINT_STEP": (
+                str(checkpoint_step) if checkpoint_step is not None else ""
+            ),
+            "CANON_P57_EVAL_OUTPUT": (
+                f"{state}/p57_evaluation.json" if run_kind == "eval" else ""
+            ),
+            "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
+            "CANON_FROZENLAKE_CKPT_ROOT": checkpoint_root,
+            "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
+            "CANON_FROZENLAKE_CKPT_INTERVAL": checkpoint_interval,
+            "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": checkpoint_max_to_keep,
+            "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "CANON_STATE": state,
+            "CANON_RUN_LOG": f"{state}/run.log",
+            "CANON_PRE_ALIGN_REPORT": f"{state}/pre_alignment.jsonl",
+            "CANON_ALIGN_REPORT": f"{state}/alignment.jsonl",
+            "CANON_UPDATE_REPORT": f"{state}/updates.jsonl",
+            "CANON_WANDB_RUN_NAME": job_name,
+        },
+    )
+    if tito_diagnostic:
+      _replace_env(
+          document,
+          {
+              "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+              "CANON_DP_SIZE": "8",
+              "CANON_TP_SIZE": "8",
+              "CANON_P57_TOKEN_CONTINUITY": "exact",
+              "CANON_P57_TOKEN_CONTINUITY_DEBUG": "collect-64",
+              "CANON_P57_TITO_ROLLOUT_ONLY": "1",
+          },
+      )
+    if train_geometry != fl_geometry.LEGACY:
+      # Raw geometry receipts are explicit so 00_env can reject contradictions
+      # before a sourced profile has a chance to overwrite them.
+      _replace_env(document, geom.environment())
+    if high_performance:
+      _replace_env(
+          document,
+          full_system_optimization_render_additions(
+              f"frozenlake-{workload_candidate or 'p45'}"
+          ),
+      )
+    labels = document["metadata"].setdefault("labels", {})
+    labels["canon.zero-tim/tim-study"] = "p57"
+    labels["canon.zero-tim/tim-arm"] = arm.name
+    labels["canon.zero-tim/run-kind"] = run_kind
+    labels["canon.zero-tim/workload-candidate"] = (
+        workload_candidate or "readiness"
+    )
+    labels["canon.zero-tim/data-split"] = data_split or "readiness"
+    labels["canon.zero-tim/performance-profile"] = (
+        "v1-hp" if high_performance else "baseline"
+    )
+    p33.validate_jobset(
+        document,
+        spec,
+        source_commit,
+        run_id,
+        fixed_lm_head=arm.fixed_lm_head,
+        fixed_lm_head_explicit_off=not arm.fixed_lm_head,
+        alignment_warning_only=alignment_warning_only,
+    )
+    env = _env(document)
+    if high_performance:
+      for name in FULL_PROFILE_DEFAULT_NAMES:
+        if name in env:
+          raise ValueError(f"full profile must own default {name}, not raw recipe")
+    expected = {
+        "CANON_PROFILE_FILE": (
+            _TITO_DIAGNOSTIC_PROFILE
+            if tito_diagnostic
+            else geom.profile_file
+            if high_performance
+            else _PROFILE
+        ),
+        "CANON_V1_HP_FULL": "1" if high_performance else "0",
+        "CANON_P57_TIM_ARM": arm.name,
+        "CANON_P57_RUN_KIND": run_kind,
+        "CANON_P57_INFERENCE_REGIME": (
+            "stock-fast" if arm.name in ("mismatch", "is", "standard") else ""
+        ),
+        "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
+        "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
+        "CANON_P57_DATA_SPLIT": data_split,
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+            "1" if alignment_warning_only else "0"
+        ),
+        "CANON_P33_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+        "CANON_P33_DISABLE_EVAL": "0" if spec.enable_evaluation else "1",
+        "CANON_P31_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+        "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
+        "CANON_FROZENLAKE_CKPT_ROOT": checkpoint_root,
+        "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
+        "CANON_FROZENLAKE_CKPT_INTERVAL": checkpoint_interval,
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": checkpoint_max_to_keep,
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
+    }
+    if run_kind == "eval":
+      expected.update({
+          "CANON_P57_EVAL_CHECKPOINT_STEP": str(checkpoint_step),
+          "CANON_P57_EVAL_OUTPUT": f"{state}/p57_evaluation.json",
+          "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+      })
+    else:
+      expected["CANON_P57_STOP_AFTER_STEP"] = str(stop_after_step)
+    if tito_diagnostic:
+      expected.update({
+          "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+          "CANON_DP_SIZE": "8",
+          "CANON_TP_SIZE": "8",
+          "CANON_P57_TOKEN_CONTINUITY": "exact",
+          "CANON_P57_TOKEN_CONTINUITY_DEBUG": "collect-64",
+          "CANON_P57_TITO_ROLLOUT_ONLY": "1",
+          "CANON_P33_RUN_STAGE": "rollout-only",
+          "CANON_P33_NO_COMMIT": "1",
+      })
+    if "CANON_M15_TOKEN_CONTINUITY" in env:
+      raise ValueError(
+          "P57 production recipes must not render experimental M15 TITO"
+      )
+    wrong = {key: env.get(key) for key, value in expected.items() if env.get(key) != value}
+    if wrong:
+      raise ValueError(f"P57 rendered contract drifted: {wrong}")
+    expected_memory = (
+        HEAD_RESOURCES["jax-tpu"]["limits"]["memory"]
+        if cpu_nodepool == "canon-cpu-pool"
+        else _P57_MEMORY
+    )
+    if main["resources"]["limits"].get("memory") != expected_memory:
+      raise ValueError("P57 memory override was not retained")
+    documents[arm.name] = document
+    outputs.append(path)
+
+  if stock_only:
+    stock = _env(documents["mismatch"])
+    if (
+        stock.get("CANON_P38_FIXED_LM_HEAD") != "0"
+        or stock.get("CANON_P57_TIM_ARM") != "mismatch"
+        or stock.get("CANON_P57_INFERENCE_REGIME") != "stock-fast"
+        or stock.get("CANON_P57_WORKLOAD_CANDIDATE") != workload_candidate
+        or stock.get("CANON_P57_DATA_SPLIT") != data_split
+    ):
+      raise ValueError("P57 stock-only discovery intent drifted")
+    print(
+        "[P57.STOCK] INTENT_PASS "
+        f"run_kind={run_kind} candidate={workload_candidate} "
+        f"split={data_split} fixed_lm_head=0",
+        flush=True,
+    )
+  elif not arm:
+    _validate_pair(
+        documents,
+        run_kind=run_kind,
+        extra_train_differences=frozenset(),
+    )
+  for arm_entry, path in zip(selected_arms, outputs, strict=True):
+    header = (
+        "# Generated by canon-zero-tim/cluster/render_frozenlake_three_arm.py.\n"
+        "# Do not edit; change the reviewed renderer/profile.\n"
+    )
+    path.write_text(
+        header + yaml.safe_dump(documents[arm_entry.name], sort_keys=False),
+        encoding="utf-8",
+    )
+    print(f"[P57.JOBSET] RENDERED arm={arm_entry.name} path={path}")
+  return tuple(outputs)
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--source-commit", required=True)
+  parser.add_argument("--run-id", required=True)
+  parser.add_argument("--output-dir", required=True, type=Path)
+  parser.add_argument("--campaign-tag", required=True)
+  parser.add_argument(
+      "--checkpoint-mode",
+      choices=("disabled", "new", "resume"),
+      default="new",
+  )
+  parser.add_argument("--expected-updates", type=int, required=True)
+  parser.add_argument(
+      "--run-kind",
+      choices=("train", "eval", "tito-diagnostic"),
+      default="train",
+  )
+  parser.add_argument("--checkpoint-step", type=int)
+  parser.add_argument("--workload-candidate", choices=tuple(p57_workloads.CANDIDATES), default="")
+  parser.add_argument("--data-split", choices=("calibration", "selection", "main"), default="")
+  parser.add_argument("--stock-only", action="store_true")
+  parser.add_argument("--arm", choices=tuple(_ARM_BY_NAME), default="")
+  parser.add_argument("--cpu-nodepool", default=_DEFAULT_CPU_NODEPOOL, choices=tuple(sorted(_ADMITTED_CPU_NODEPOOLS)))
+  parser.add_argument("--stop-after-step", type=int)
+  parser.add_argument("--high-performance", action="store_true")
+  parser.add_argument("--disable-eval", action="store_true")
+  parser.add_argument(
+      "--base", type=Path, default=Path(__file__).with_name("jobset-64chip.yaml")
+  )
+  args = parser.parse_args()
+  outputs = render_all(
+      base_path=args.base,
+      output_dir=args.output_dir,
+      source_commit=args.source_commit,
+      run_id=args.run_id,
+      campaign_tag=args.campaign_tag,
+      checkpoint_mode=args.checkpoint_mode,
+      expected_updates=args.expected_updates,
+      run_kind=args.run_kind,
+      checkpoint_step=args.checkpoint_step,
+      workload_candidate=args.workload_candidate,
+      data_split=args.data_split,
+      stock_only=args.stock_only,
+      arm=args.arm,
+      cpu_nodepool=args.cpu_nodepool,
+      stop_after_step=args.stop_after_step,
+      high_performance=args.high_performance,
+      disable_eval=args.disable_eval,
+  )
+  print(
+      "[P57.JOBSET] VERDICT PASS "
+      f"count={len(outputs)} updates={args.expected_updates} "
+      f"checkpoint_mode={args.checkpoint_mode} run_kind={args.run_kind} "
+      f"checkpoint_step={args.checkpoint_step if args.checkpoint_step is not None else 'none'}",
+      flush=True,
+  )
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

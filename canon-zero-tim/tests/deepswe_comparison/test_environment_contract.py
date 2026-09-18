@@ -1,0 +1,798 @@
+#!/usr/bin/env python3
+"""End-to-end P58 renderer -> shell profile -> Python contract validation."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+import numpy as np
+import yaml
+
+from examples.deepswe.swe_env import SWEEnv
+
+
+ROOT = Path(__file__).resolve().parents[3]
+PKG = ROOT / "canon-zero-tim"
+CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "p58_deepswe_contract", ROOT / "tunix/rl/deepswe_contract.py"
+)
+if CONTRACT_SPEC is None or CONTRACT_SPEC.loader is None:
+  raise RuntimeError("cannot import DeepSWE contract")
+deepswe_contract = importlib.util.module_from_spec(CONTRACT_SPEC)
+sys.modules[CONTRACT_SPEC.name] = deepswe_contract
+CONTRACT_SPEC.loader.exec_module(deepswe_contract)
+DEBUG_SPEC = importlib.util.spec_from_file_location(
+    "p58_deepswe_debug", ROOT / "tunix/rl/deepswe_debug.py"
+)
+if DEBUG_SPEC is None or DEBUG_SPEC.loader is None:
+  raise RuntimeError("cannot import DeepSWE debug contract")
+deepswe_debug = importlib.util.module_from_spec(DEBUG_SPEC)
+sys.modules[DEBUG_SPEC.name] = deepswe_debug
+DEBUG_SPEC.loader.exec_module(deepswe_debug)
+ALIGNMENT_SPEC = importlib.util.spec_from_file_location(
+    "p58_environment_alignment", ROOT / "tunix/rl/alignment.py"
+)
+if ALIGNMENT_SPEC is None or ALIGNMENT_SPEC.loader is None:
+  raise RuntimeError("cannot import alignment policy")
+alignment = importlib.util.module_from_spec(ALIGNMENT_SPEC)
+sys.modules[ALIGNMENT_SPEC.name] = alignment
+ALIGNMENT_SPEC.loader.exec_module(alignment)
+sys.path.insert(0, str(PKG / "cluster"))
+SPEC = importlib.util.spec_from_file_location(
+    "p58_environment_renderer", PKG / "cluster/render_deepswe_comparison.py"
+)
+if SPEC is None or SPEC.loader is None:
+  raise RuntimeError("cannot import P58 renderer")
+renderer = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = renderer
+SPEC.loader.exec_module(renderer)
+
+
+class P58EnvironmentContractTest(unittest.TestCase):
+
+  def test_checked_vma_full_scope_is_p58_systemopt_treatment_only(self):
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text(encoding="utf-8")
+    p44_scope, p58_and_after = learner.split(
+        "exact_p58_systemopt_geometry = (", 1
+    )
+    p44_scope = p44_scope.rsplit("exact_p44_v2_geometry = (", 1)[1]
+    p58_scope = p58_and_after.split("exact_checked_vma_geometry = (", 1)[0]
+    self.assertIn('and run_stage == "three-update"', p44_scope)
+    self.assertNotIn('and run_stage == "full"', p44_scope)
+    self.assertIn(
+        'deepswe_system_optimization_arm == "treatment"', p58_scope
+    )
+    self.assertIn('and run_stage == "full"', p58_scope)
+
+  def test_swe_env_preserves_normalized_prompt_before_reset(self):
+    env = SWEEnv({
+        "problem_statement": np.array(["raw problem"]),
+        "prompts": np.array(["normalized problem"]),
+    })
+
+    self.assertEqual(env.entry["problem_statement"], "raw problem")
+    self.assertEqual(env.task, {"prompts": ["normalized problem"]})
+
+  def test_swe_env_falls_back_to_problem_statement(self):
+    env = SWEEnv({"problem_statement": np.array(["raw problem"])})
+
+    self.assertEqual(env.task, {"prompts": ["raw problem"]})
+
+  def test_swe_env_rejects_missing_prompt_source(self):
+    with self.assertRaisesRegex(ValueError, "must contain a non-empty string"):
+      SWEEnv({"docker_image": np.array(["example/image"])})
+
+  def _rendered_env(
+      self,
+      arm: str,
+      stage: str,
+      *,
+      sampler_is: bool = False,
+      high_performance: bool = False,
+      system_optimization_arm: str | None = None,
+      checked_vma_off_diagnostic: bool = False,
+      checked_vma_on_diagnostic: bool = False,
+      seam_localization: str = "",
+      topology: str = "128",
+  ) -> dict[str, str]:
+    base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
+    document = renderer.render(
+        base,
+        source_commit="1" * 40,
+        source_branch="yuxzhang/canon-zero-tim",
+        client_image="registry.example/tunix@sha256:" + "2" * 64,
+        # The longest combination here is "native-is" + "full", which leaves
+        # only six characters for the run id inside the 36-character budget.
+        run_id="envt",
+        stage=stage,
+        arm=arm,
+        cpu_nodepool="canon-cpu-pool",
+        worker_nodepool="tpu-pool",
+        model_pvc="model-pvc",
+        sampler_is=sampler_is,
+        high_performance=high_performance,
+        system_optimization_arm=system_optimization_arm,
+        checked_vma_off_diagnostic=checked_vma_off_diagnostic,
+        checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+        seam_localization=seam_localization,
+        topology=topology,
+    )
+    return dict(renderer.p34._env(document))
+
+  def _resolved(
+      self,
+      arm: str,
+      stage: str,
+      *,
+      sampler_is: bool = False,
+      high_performance: bool = False,
+      system_optimization_arm: str | None = None,
+      checked_vma_off_diagnostic: bool = False,
+      checked_vma_on_diagnostic: bool = False,
+      seam_localization: str = "",
+      topology: str = "128",
+  ) -> dict[str, str]:
+    supplied = os.environ.copy()
+    supplied.update(
+        self._rendered_env(
+            arm,
+            stage,
+            sampler_is=sampler_is,
+            high_performance=high_performance,
+            system_optimization_arm=system_optimization_arm,
+            checked_vma_off_diagnostic=checked_vma_off_diagnostic,
+            checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+            seam_localization=seam_localization,
+            topology=topology,
+        )
+    )
+    profile = supplied["CANON_PROFILE_FILE"]
+    command = (
+        "set -a; "
+        f"source {PKG / 'cluster/profiles/_canonical_engine.env'}; "
+        f"source {PKG / profile}; "
+        "env -0"
+    )
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        env=supplied,
+        check=True,
+        capture_output=True,
+    )
+    return {
+        item.split("=", 1)[0]: item.split("=", 1)[1]
+        for item in completed.stdout.decode().split("\0")
+        if "=" in item
+    }
+
+  def test_p58_64split_contract_and_real_env_are_exact(self):
+    values = self._resolved("zero", "full", topology="64split")
+    workload = deepswe_contract.active_workload(values)
+    self.assertIs(workload, deepswe_contract.P58_Q4_TIM_64SPLIT_WORKLOAD)
+    workload.validate()
+    self.assertEqual(
+        (
+            workload.contract_name,
+            workload.dp_size,
+            workload.tp_size,
+            workload.devices_per_role,
+            workload.local_trajectories,
+            workload.global_m,
+            workload.max_num_seqs_per_dp,
+        ),
+        ("p58-qwen4b-tim-64split", 4, 8, 32, 32, 1024, 32),
+    )
+    deepswe_contract.validate_environment(values)
+
+  def test_p58_systemopt_survives_shell_and_python_contracts(self):
+    for topology, profile in (
+        ("128", "qwen3-4b-dp8-tp8-deepswe-tim-systemopt"),
+        ("64split", "qwen3-4b-dp4-tp8-deepswe-tim-systemopt"),
+    ):
+      for arm, stage in (
+          ("control", "three-update"),
+          ("treatment", "three-update"),
+          ("treatment", "full"),
+      ):
+        with self.subTest(topology=topology, arm=arm, stage=stage):
+          completed, _, values = self._persisted(
+              "zero",
+              stage,
+              topology=topology,
+              system_optimization_arm=arm,
+          )
+          self.assertIn(
+              f"[P58.{('128' if topology == '128' else '64SPLIT')}"
+              f".SYSTEMOPT] arm={arm} stage={stage} topology={topology} "
+              "strict=1",
+              completed.stdout,
+          )
+          self.assertEqual(values["CANON_PROFILE"], profile)
+          self.assertEqual(values["CANON_P66_P59_CHECK_VMA"], "1")
+          self.assertEqual(
+              values.get("CANON_P32_KEEP_TAPE"),
+              "stream" if arm == "treatment" else None,
+          )
+          self.assertEqual(
+              values.get("CANON_DP_REDUCE_ONCE"),
+              "1" if arm == "treatment" else None,
+          )
+          self.assertEqual(
+              values.get("CANON_P32_LENGTH_SORT"),
+              "1" if arm == "treatment" else None,
+          )
+          self.assertEqual(
+              values.get("CANON_P78_SEGMENTED_ACTOR_LOGPS"),
+              "1" if topology == "128" and arm == "treatment" else "0",
+          )
+          deepswe_contract.validate_environment(values)
+          manifest = deepswe_debug._manifest(
+              values,
+              model_id="Qwen/Qwen3-4B-Instruct-2507",
+              output_dir=Path(values["CANON_P58_DEBUG_DIR"]),
+          )
+          self.assertEqual(manifest["system_optimization_arm"], arm)
+          self.assertEqual(
+              manifest["system_optimization_tuple"],
+              {
+                  "keep_tape": (
+                      "stream" if arm == "treatment" else None
+                  ),
+                  "dp_reduce_once": (
+                      "1" if arm == "treatment" else None
+                  ),
+                  "length_sort": (
+                      "1" if arm == "treatment" else None
+                  ),
+                  "segmented_actor_logps": (
+                      "1"
+                      if topology == "128" and arm == "treatment"
+                      else "0"
+                  ),
+              },
+          )
+
+          for key, replacement in (
+              ("CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM", "invalid"),
+              ("CANON_PROFILE", "foreign-profile"),
+              ("CANON_PROFILE_FILE", "cluster/profiles/foreign.env"),
+              ("CANON_DP_SIZE", "4" if topology == "128" else "8"),
+              (
+                  "MIN_TOKEN_BUCKET",
+                  "1024" if topology == "128" else "2048",
+              ),
+              ("CANON_P59_CHECKED_VMA", "0"),
+              ("CANON_P71_SCAN", "off"),
+              (
+                  "CANON_P32_KEEP_TAPE",
+                  "off" if arm == "treatment" else "stream",
+              ),
+              (
+                  "CANON_P32_LENGTH_SORT",
+                  "0" if arm == "treatment" else "1",
+              ),
+              (
+                  "CANON_P78_SEGMENTED_ACTOR_LOGPS",
+                  "0"
+                  if topology == "128" and arm == "treatment"
+                  else "1",
+              ),
+          ):
+            with (
+                self.subTest(topology=topology, arm=arm, key=key),
+                self.assertRaises(ValueError),
+            ):
+              deepswe_contract.validate_environment({
+                  **values,
+                  key: replacement,
+              })
+
+          if topology == "128" and arm == "treatment":
+            self.assertEqual(
+                deepswe_contract.p58_segmented_actor_logps_identity(
+                    values, dp_size=8, tp_size=8
+                ),
+                "p58-qwen4b-tim-128",
+            )
+            with self.assertRaisesRegex(ValueError, "DP8xTP8"):
+              deepswe_contract.p58_segmented_actor_logps_identity(
+                  values, dp_size=4, tp_size=8
+              )
+
+      with self.subTest(topology=topology), self.assertRaises(ValueError):
+        self._rendered_env(
+            "zero",
+            "full",
+            topology=topology,
+            system_optimization_arm="control",
+        )
+
+  def test_p58_selector_is_fail_closed_and_128_absence_is_compatible(self):
+    self.assertIs(
+        deepswe_contract.active_workload({"CANON_P58_DEEPSWE_TIM": "1"}),
+        deepswe_contract.P58_Q4_TIM_128_WORKLOAD,
+    )
+    for bad in ("", "none", "64", "64co"):
+      with self.subTest(bad=bad), self.assertRaisesRegex(
+          ValueError, "exactly 128 or 64split"
+      ):
+        deepswe_contract.active_workload({
+            "CANON_P58_DEEPSWE_TIM": "1",
+            "CANON_P58_TOPOLOGY": bad,
+        })
+    with self.assertRaisesRegex(ValueError, "requires"):
+      deepswe_contract.active_workload({"CANON_P58_TOPOLOGY": "64split"})
+
+  def _persisted(
+      self,
+      arm: str,
+      stage: str,
+      *,
+      sampler_is: bool = False,
+      high_performance: bool = False,
+      system_optimization_arm: str | None = None,
+      checked_vma_off_diagnostic: bool = False,
+      checked_vma_on_diagnostic: bool = False,
+      seam_localization: str = "",
+      topology: str = "128",
+  ):
+    supplied = os.environ.copy()
+    rendered = self._rendered_env(
+        arm,
+        stage,
+        sampler_is=sampler_is,
+        high_performance=high_performance,
+        system_optimization_arm=system_optimization_arm,
+        checked_vma_off_diagnostic=checked_vma_off_diagnostic,
+        checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+        seam_localization=seam_localization,
+        topology=topology,
+    )
+    supplied.update(rendered)
+    supplied.update({
+        "CANON_PKG": str(PKG),
+        "HF_TOKEN": "test-hf-runtime-token",
+        "WANDB_API_KEY": "test-wandb-runtime-key",
+        "INJECTED_HF_TOKEN": "test-hf-token",
+        "INJECTED_WANDB_API_KEY": "test-wandb-key",
+    })
+    with tempfile.TemporaryDirectory() as state_dir:
+      supplied["CANON_STATE"] = state_dir
+      if seam_localization:
+        rendered_state = rendered["CANON_STATE"]
+        for key, value in tuple(supplied.items()):
+          if isinstance(value, str) and value.startswith(rendered_state):
+            supplied[key] = state_dir + value[len(rendered_state):]
+        supplied["CANON_P38_GCS_PREFIX"] = (
+            "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/"
+            f"{Path(state_dir).name}/attempt-0"
+        )
+      if checked_vma_off_diagnostic or checked_vma_on_diagnostic:
+        supplied["CANON_P38_DIAGNOSTIC_ROUND_FILE"] = str(
+            Path(state_dir) / "p38_diagnostic_round"
+        )
+      completed = subprocess.run(
+          ["bash", str(PKG / "cluster/steps/00_env.sh")],
+          cwd=ROOT,
+          env=supplied,
+          check=False,
+          text=True,
+          capture_output=True,
+      )
+      if completed.returncode != 0:
+        self.fail(
+            "00_env.sh rejected the rendered contract:\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+      resolved = (Path(state_dir) / "env.sh").read_text()
+      reloaded = subprocess.run(
+          [
+              "bash",
+              "-c",
+              f"source {Path(state_dir) / 'env.sh'}; env -0",
+          ],
+          env=supplied,
+          check=True,
+          capture_output=True,
+      )
+    values = {
+        item.split("=", 1)[0]: item.split("=", 1)[1]
+        for item in reloaded.stdout.decode().split("\0")
+        if "=" in item
+    }
+    return completed, resolved, values
+
+  def test_native_renderer_environment_passes_real_00_env(self):
+    completed, resolved, values = self._persisted("native", "three-update")
+    self.assertIn("[env] P34 contract OK: DP8xTP8", completed.stdout)
+    self.assertNotIn("REFUSING TO CONTINUE", completed.stderr)
+    self.assertIn("export CANON_P32_DP_REDUCTION_ADMITTED=0", resolved)
+    self.assertIn("export CANON_FROZENLAKE_L3=0", resolved)
+    self.assertIn("export CANON_FROZENLAKE_P27=0", resolved)
+    self.assertIn(
+        "export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0", resolved
+    )
+    self.assertNotIn("test-hf-runtime-token", resolved)
+    self.assertNotIn("test-wandb-runtime-key", resolved)
+    # 00_env.sh is a child of the entrypoint. Exercise the actual reload
+    # boundary with the raw renderer environment still present, rather than
+    # merely inspecting the generated exports. This is the p58c03 regression:
+    # the native profile unset CANON_LOGPROB_M in the child, but a layered
+    # source left the renderer's CANON_LOGPROB_M=256 alive in the parent.
+    self.assertNotIn("CANON_LOGPROB_M", values)
+    self.assertNotIn("CANON_FIXED_AR", values)
+    self.assertIn("export R2E_K8S_QUEUE_NAME=default", resolved)
+    self.assertEqual(values["R2E_K8S_QUEUE_NAME"], "default")
+    self.assertEqual(values["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
+    self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
+    self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
+    deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
+
+  def test_zero_renderer_environment_survives_authoritative_reload(self):
+    _, resolved, values = self._persisted("zero", "three-update")
+    self.assertIn("export CANON_LOGPROB_M=256", resolved)
+    self.assertEqual(values["CANON_LOGPROB_M"], "256")
+    self.assertEqual(values["CANON_FIXED_AR"], "1")
+    self.assertEqual(values["NODE_SELECTOR_VAL"], "deepswe-cpu-pool-2")
+    self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
+    self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
+    deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
+
+  def test_p58_environment_rejects_checkpoint_enablement_before_launch(self):
+    supplied = os.environ.copy()
+    rendered = self._rendered_env("zero", "full")
+    rendered["CANON_RUN_CMD"] = rendered["CANON_RUN_CMD"].replace(
+        "--ckpt_dir=none", "--ckpt_dir=/tmp/p58-checkpoints"
+    )
+    supplied.update(rendered)
+    supplied.update({
+        "CANON_PKG": str(PKG),
+        "INJECTED_HF_TOKEN": "test-hf-token",
+        "INJECTED_WANDB_API_KEY": "test-wandb-key",
+    })
+    with tempfile.TemporaryDirectory() as state_dir:
+      supplied["CANON_STATE"] = state_dir
+      completed = subprocess.run(
+          ["bash", str(PKG / "cluster/steps/00_env.sh")],
+          cwd=ROOT,
+          env=supplied,
+          check=False,
+          text=True,
+          capture_output=True,
+      )
+    self.assertNotEqual(completed.returncode, 0)
+    self.assertIn(
+        "P58 precomputed-gradient training requires exact --ckpt_dir=none",
+        completed.stderr,
+    )
+
+  def test_native_is_renderer_environment_survives_authoritative_reload(self):
+    completed, resolved, values = self._persisted(
+        "native", "full", sampler_is=True
+    )
+    self.assertIn("[env] P34 contract OK: DP8xTP8", completed.stdout)
+    self.assertIn("export CANON_P34_DISABLE_SAMPLER_IS=0", resolved)
+    self.assertIn("export CANON_P34_DISABLE_TIS=0", resolved)
+    self.assertEqual(
+        deepswe_contract.p58_sampler_recipe(values), "native-is"
+    )
+    deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
+
+  def test_native_rejects_partial_sampler_tuple(self):
+    values = self._resolved("native", "full", sampler_is=True)
+    with self.assertRaisesRegex(ValueError, "sampler recipe"):
+      deepswe_contract.validate_environment({
+          **values,
+          "CANON_P34_DISABLE_TIS": "1",
+      })
+
+  def test_zero_hp_full_survives_real_env_and_python_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", high_performance=True
+    )
+    self.assertIn("P58 v1-hp Qwen3-4B TP8 fixed lm-head enabled", completed.stdout)
+    for key, expected in {
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P38_FIXED_LM_HEAD": "1",
+        "CANON_CONTINUE_DECODE": "8",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+        "CANON_DP_FINITE_FETCH": "batched-commit",
+        "CANON_P71_SCAN": "fwd",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
+    self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", resolved)
+    for key in (
+        "CANON_XPROF_DIR",
+        "CANON_XPROF_PHASE",
+        "CANON_XPROF_SKIP_STEPS",
+        "CANON_XPROF_STEPS",
+        "CANON_XPROF_PYTHON_TRACER",
+        "CANON_XPROF_HOST_TRACER",
+        "CANON_XPROF_TPU_TRACE_MODE",
+        "CANON_XPROF_LABELS",
+        "CANON_PERF_TRACE_DIR",
+        "CANON_PERF_TRACE_EXPORT_STEP",
+    ):
+      self.assertNotIn(key, values)
+      self.assertNotIn(key, resolved)
+    deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
+
+  def test_zero_hp_full_rejects_profiler_reinjection(self):
+    _, _, values = self._persisted(
+        "zero", "full", high_performance=True
+    )
+    for key, replacement in (
+        ("CANON_XPROF_DIR", "gs://example/xprof"),
+        ("CANON_XPROF_LABELS", "0"),
+        ("CANON_PERF_TRACE_DIR", "/tmp/perfetto"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_zero_hp_partial_bundle_is_rejected_by_python_contract(self):
+    _, _, values = self._persisted(
+        "zero", "full", high_performance=True
+    )
+    deepswe_contract.validate_environment(values)
+    for key, replacement in (
+        ("CANON_CONTINUE_DECODE", "0"),
+        ("CANON_P59_RANK_PARALLEL_BACKWARD", "0"),
+        ("CANON_P59_CHECKED_VMA", "0"),
+        ("CANON_P66_P59_CHECK_VMA", "0"),
+        ("CANON_P67_P66_VMA_P59_ONLY", "0"),
+        ("CANON_V1_HP_FIRST_UPDATE_GATE", "0"),
+        ("CANON_P63_OVERFLOW_SAFE_CLIP", "0"),
+        ("CANON_P38_FIXED_LM_HEAD", "0"),
+        ("CANON_VLLM_ENABLE_PREFIX_CACHING", "1"),
+        ("CANON_DP_COMPARE_MODE", "full"),
+        ("CANON_DP_DISTINCT_SCHEDULE", "every-group"),
+        ("CANON_DP_FINITE_FETCH", "sync"),
+        ("CANON_P71_SCAN", "off"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+    with self.assertRaises(ValueError):
+      deepswe_contract.validate_environment({
+          **values,
+          "CANON_DP_COLLECTIVE_REDUCE": "1",
+      })
+
+  def test_checked_vma_off_diagnostic_survives_real_env_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", checked_vma_off_diagnostic=True
+    )
+    self.assertIn(
+        "P58 checked-VMA-off precheck admitted", completed.stdout
+    )
+    for key, expected in {
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": "off",
+        "CANON_P59_CHECKED_VMA": "0",
+        "CANON_P66_P59_CHECK_VMA": "0",
+        "CANON_P67_P66_VMA_P59_ONLY": "0",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "0",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "0",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    for key in (
+        "CANON_DP_COMPARE_MODE",
+        "CANON_DP_DISTINCT_SCHEDULE",
+        "CANON_DP_FINITE_FETCH",
+        "CANON_P71_SCAN",
+        "CANON_DP_COLLECTIVE_REDUCE",
+    ):
+      self.assertNotIn(key, values)
+    deepswe_contract.validate_environment(values)
+
+  def test_checked_vma_off_diagnostic_rejects_partial_tuple(self):
+    _, _, values = self._persisted(
+        "zero", "full", checked_vma_off_diagnostic=True
+    )
+    for key, replacement in (
+        ("CANON_P59_CHECKED_VMA", "1"),
+        ("CANON_P66_P59_CHECK_VMA", "1"),
+        ("CANON_P67_P66_VMA_P59_ONLY", "1"),
+        ("CANON_V1_HP_FIRST_UPDATE_GATE", "1"),
+        ("CANON_P63_OVERFLOW_SAFE_CLIP", "1"),
+        ("CANON_P38_PRECHECK_ONLY", "0"),
+        ("CANON_P38_CONTROLLED_EXIT", "0"),
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "2"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_checked_vma_on_diagnostic_survives_real_env_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", checked_vma_on_diagnostic=True
+    )
+    self.assertIn(
+        "P58 checked-VMA-on precheck admitted", completed.stdout
+    )
+    for key, expected in {
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": "on",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "0",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "0",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    for key in (
+        "CANON_DP_COMPARE_MODE",
+        "CANON_DP_DISTINCT_SCHEDULE",
+        "CANON_DP_FINITE_FETCH",
+        "CANON_P71_SCAN",
+        "CANON_DP_COLLECTIVE_REDUCE",
+    ):
+      self.assertNotIn(key, values)
+    deepswe_contract.validate_environment(values)
+
+  def test_checked_vma_on_diagnostic_rejects_partial_tuple(self):
+    _, _, values = self._persisted(
+        "zero", "full", checked_vma_on_diagnostic=True
+    )
+    for key, replacement in (
+        ("CANON_P59_CHECKED_VMA", "0"),
+        ("CANON_P66_P59_CHECK_VMA", "0"),
+        ("CANON_P67_P66_VMA_P59_ONLY", "0"),
+        ("CANON_V1_HP_FIRST_UPDATE_GATE", "1"),
+        ("CANON_P63_OVERFLOW_SAFE_CLIP", "1"),
+        ("CANON_P38_PRECHECK_ONLY", "0"),
+        ("CANON_P38_CONTROLLED_EXIT", "0"),
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "2"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_coarse_seam_survives_real_env_and_python_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", seam_localization="coarse"
+    )
+    self.assertIn("P58 coarse seam precheck admitted", completed.stdout)
+    for key, expected in {
+        "CANON_P58_SEAM_LOCALIZATION": "coarse",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
+        "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+        "CANON_P38_SEAM_OBSERVER": "layer",
+        "CANON_P38_SEAM_MIN_POSITION": "1686",
+        "CANON_P38_SEAM_MAX_POSITION": "4096",
+        "CANON_P38_SEAM_MAX_BYTES": "4294967296",
+        "CANON_P38_TAIL_OBSERVER": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    deepswe_contract.validate_environment(values)
+
+  def test_coarse_seam_rejects_partial_tuple(self):
+    _, _, values = self._persisted(
+        "zero", "full", seam_localization="coarse"
+    )
+    for key, replacement in (
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "1"),
+        ("CANON_P38_DURABILITY_PROFILE", "full-v1"),
+        ("CANON_P38_SEAM_OBSERVER", "full"),
+        ("CANON_P38_SEAM_MAX_BYTES", "1073741824"),
+        ("CANON_P38_TAIL_OBSERVER", "0"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_p67_is_rejected_outside_zero_hp(self):
+    for arm in ("native", "zero"):
+      with self.subTest(arm=arm):
+        values = self._resolved(arm, "three-update")
+        deepswe_contract.validate_environment(values)
+        with self.assertRaises(ValueError):
+          deepswe_contract.validate_environment({
+              **values,
+              "CANON_P67_P66_VMA_P59_ONLY": "1",
+          })
+
+  def test_both_arms_resolve_to_the_signed_contract(self):
+    for arm in ("native", "zero"):
+      for stage in ("three-update", "full"):
+        with self.subTest(arm=arm, stage=stage):
+          values = self._resolved(arm, stage)
+          deepswe_contract.validate_environment(values)
+          workload = deepswe_contract.active_workload(values)
+          self.assertEqual(workload.global_trajectories, 128)
+          self.assertEqual(workload.local_trajectories, 16)
+          self.assertEqual(values["R2E_K8S_QUEUE_NAME"], "default")
+          if arm == "native":
+            self.assertNotIn("CANON_FIXED_AR", values)
+            self.assertNotIn("CANON_LOGPROB_M", values)
+            self.assertEqual(values["CANON_PROMPT_PROCESSED_LOGPROBS"], "0")
+            self.assertEqual(
+                values["CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER"], "1"
+            )
+            self.assertEqual(values["CANON_P28_BATCHED_REVERSE"], "0")
+            self.assertEqual(values["CANON_BATCHED_EVIDENCE"], "0")
+            self.assertNotIn("CANON_P59_CHECKED_VMA", values)
+            self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
+            self.assertNotIn("CANON_V1_HP_FIRST_UPDATE_GATE", values)
+            self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", values)
+          else:
+            self.assertEqual(values["CANON_FIXED_AR"], "1")
+            self.assertEqual(values["CANON_LOGPROB_M"], "256")
+            self.assertEqual(values["CANON_PROMPT_PROCESSED_LOGPROBS"], "1")
+            self.assertEqual(
+                values["CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER"], "0"
+            )
+            self.assertNotIn("CANON_P59_CHECKED_VMA", values)
+            self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
+            self.assertNotIn("CANON_V1_HP_FIRST_UPDATE_GATE", values)
+            self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", values)
+
+  def test_prompt_observer_treatments_are_mutually_exclusive(self):
+    native = self._resolved("native", "three-update")
+    zero = self._resolved("zero", "three-update")
+    for changed in (
+        {"CANON_PROMPT_PROCESSED_LOGPROBS": "1"},
+        {"CANON_ENGINE_MODULE_C": "1"},
+        {"CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "0"},
+    ):
+      with self.subTest(arm="native", changed=changed):
+        with self.assertRaises(ValueError):
+          deepswe_contract.validate_environment({**native, **changed})
+    with self.assertRaises(ValueError):
+      deepswe_contract.validate_environment({
+          **zero, "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "1"
+      })
+    with self.assertRaises(ValueError):
+      deepswe_contract.validate_environment({
+          **zero, "CANON_PROMPT_PROCESSED_LOGPROBS": "0"
+      })
+
+  def test_rendered_native_full_environment_is_alignment_admitted(self):
+    values = self._resolved("native", "full")
+    with mock.patch.dict(os.environ, values, clear=True):
+      policy = alignment.gsm8k_ab_report_policy()
+    self.assertTrue(policy["warning_only"])
+    self.assertEqual(policy["stage"], "full")
+    self.assertEqual(
+        policy["warning_boundaries"],
+        (
+            "S_decode_vs_S_prefill",
+            "S_prefill_vs_T_old",
+            "T_old_vs_T_current",
+        ),
+    )
+
+
+if __name__ == "__main__":
+  unittest.main()

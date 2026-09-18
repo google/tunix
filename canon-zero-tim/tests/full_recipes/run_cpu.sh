@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "$repo"
+
+python3 -m unittest discover \
+  -s canon-zero-tim/tests/full_recipes \
+  -p 'test_*.py' \
+  -v
+
+echo "V1_HP_THREE_FULL_CPU_PASS manifests=3 strict=1 frozenlake_ab_warning=2 xprof=3"

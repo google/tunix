@@ -29,7 +29,7 @@ from tunix.rl.agentic import agentic_rl_learner as learner
 
 _SCRIPT = (
     pathlib.Path(__file__).resolve().parents[2]
-    / "canon-zero-tim/tests/p61_backward/fp64_reference.py"
+    / "canon-zero-tim/tests/backward_oracle/fp64_reference.py"
 )
 
 

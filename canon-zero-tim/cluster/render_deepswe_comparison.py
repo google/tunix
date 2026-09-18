@@ -1,0 +1,1577 @@
+#!/usr/bin/env python3
+"""Render one arm of the paired 128-chip P58 DeepSWE TIM study."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import dataclasses
+from pathlib import Path
+import re
+import shlex
+import sys
+from typing import Any, Mapping
+
+import yaml
+
+import render_deepswe_jobset as p34
+from v1_full_system_optimization import (
+    FULL_SYSTEM_OPTIMIZATION_ENV_NAMES,
+    full_system_optimization_base_additions,
+    full_system_optimization_additions,
+)
+
+
+MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+CLEAN_WHITELIST = (
+    "canon-zero-tim/clean_data/p46_q4_learnable/"
+    "p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl"
+)
+CLEAN_WHITELIST_SHA256 = (
+    "ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973"
+)
+CLEAN_ROWS = 1012
+PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+HP_PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+SPLIT_PROFILE = "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-split.env"
+SPLIT_SYSTEMOPT_PROFILE = (
+    "cluster/profiles/qwen3-4b-dp4-tp8-deepswe-tim-systemopt.env"
+)
+SYSTEMOPT_PROFILE = (
+    "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim-systemopt.env"
+)
+TOPOLOGY = "4x4x8"
+WORKERS = 32
+ROLE_DP = 8
+ROLE_TP = 8
+GLOBAL_PROMPTS = 8
+GENERATIONS = 16
+MAX_CONCURRENCY = GLOBAL_PROMPTS * GENERATIONS
+FIXED_SEED = 42
+_STAGE_STEPS = {"three-update": 3, "full": 1000}
+_ARMS = ("native", "zero")
+# Single source of truth: p34 owns the sentinel set so that the P44 parity
+# renderer (which delegates to p34.render) and this renderer can never disagree
+# about which values mean "do not pin the worker node pool".
+_KUEUE_MANAGED_WORKER_POOLS = p34.KUEUE_MANAGED_WORKER_POOLS
+_EXCLUSIVE_TOPOLOGY_ANNOTATION = (
+    "alpha.jobset.sigs.k8s.io/exclusive-topology"
+)
+_KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+# Admission is fail-closed: only the pools listed here may be selected, and an
+# unlisted value still raises.  "cpu-np" is admitted for the bodaborg-v5p-nap
+# cluster, where neither "canon-cpu-pool" nor "deepswe-cpu-pool-2" exists and
+# workload users cannot create node pools.  Evidence for the sandbox side:
+# cpu-np has 30 nodes (25 of them effectively empty) with 1738 free vCPU and
+# 6434 GiB free memory by pod requests, which strict per-node bin-packing turns
+# into 847 concurrent 2-vCPU/4-GiB R2E sandboxes against a peak demand of 128
+# (CANON_GLOBAL_TRAJECTORIES).  It is also the built-in default of
+# examples/deepswe/r2egym_runtime_patch.py::_DEFAULT_NODE_SELECTOR_VAL.
+_ADMITTED_CPU_NODEPOOLS = frozenset({
+    "canon-cpu-pool",
+    "cpu-np",
+})
+# The sandbox side has a second, independent dimension the vCPU/memory count
+# above never measured: node disk.  R2E-Gym ships one image per task, so the
+# P58 clean whitelist is 1012 distinct images of ~0.691 GiB each -- a 699 GiB
+# corpus.  Measured 2026-09-15 on bodaborg-v5p-nap:
+#
+#   cpu-np            n2d-standard-64    94.3 GiB ephemeral capacity/node
+#                     already 20.4 GiB median / 55.9 GiB peak of cached images
+#   sandbox-cpu-pool  n2-standard-32    980.2 GiB ephemeral capacity/node
+#                     (1000 GB pd-ssd), autoscaling 20..40, no taint
+#
+# A cpu-np node holds 13% of the corpus, so a 1000-update run parks it
+# permanently between the kubelet image-GC high threshold (85%) and the hard
+# eviction threshold (90%).  cpu-np is also where every team's orchestrator and
+# Pathways head Pod lives, so that eviction lands on neighbours -- and on our
+# own long-running heads.  A sandbox-cpu-pool node holds the whole corpus.
+# Sandbox placement is independent of the head pool: render_deepswe_parity
+# overrides NODE_SELECTOR_VAL with the sandbox pool, so the head stays on
+# cpu-np.  Admission here must stay in sync with _P58_SANDBOX_NODEPOOLS in
+# examples/deepswe/r2egym_runtime_patch.py.
+_ADMITTED_SANDBOX_NODEPOOLS = frozenset({
+    "deepswe-cpu-pool-2",
+    "cpu-np",
+    "sandbox-cpu-pool",
+})
+_DEFAULT_CPU_NODEPOOL = "canon-cpu-pool"
+_DEFAULT_SANDBOX_NODEPOOL = "deepswe-cpu-pool-2"
+_CPU_NODEPOOL = _DEFAULT_CPU_NODEPOOL
+# A Kueue LocalQueue is a namespaced object, so the *namespace* -- not the queue
+# string -- is what selects the admitting ClusterQueue.  On bodaborg-v5p-nap:
+#
+#   default/default, default/multislice-queue  -> ClusterQueue "default"
+#       tpu-v5p-flavor google.com/tpu nominalQuota = 224
+#   trellis/default, trellis/multislice-queue  -> ClusterQueue "trellis"
+#       tpu-v5p-flavor google.com/tpu nominalQuota = 800
+#       plus sandbox-cpu-flavor, which `default` does not have at all
+#
+# A 64-chip P58 cannot be admitted by the `default` ClusterQueue while that
+# queue already reserves 272 chips against a 224 nominal quota, and the queue
+# has no cohort so it cannot borrow.  Running in `trellis` is therefore a
+# placement decision, not a convenience.
+_ADMITTED_JOBSET_NAMESPACES = frozenset({"default", "trellis"})
+_DEFAULT_JOBSET_NAMESPACE = "default"
+# Derived from the namespace rather than exposed as its own flag: the pair has
+# to be consistent, and a second knob is a second thing to get wrong.  Every
+# TPU JobSet that trellis actually runs uses `multislice-queue`.
+_NAMESPACE_LOCAL_QUEUE = {
+    "default": "default",
+    "trellis": "multislice-queue",
+}
+# Every TPU JobSet actually running on this cluster -- 40 of 40 at the time of
+# writing, including our own r10/r11 -- pins the reservation on the worker.
+# Nodes backed by a reservation carry this label; leaving it unset is permissive
+# rather than restrictive, but no admitted workload relies on that, so the pin
+# stays explicit and opt-in.
+_TPU_RESERVATION_LABEL = "cloud.google.com/reservation-name"
+# Keep the historical head requests and generous hard limits.  Matching every
+# request to these limits would reserve roughly 700 GB for one head Pod and can
+# make it unschedulable; the very-high PriorityClass remains the eviction lever.
+HEAD_RESOURCES = {
+    "pathways-proxy": {
+        "requests": {"cpu": "8", "memory": "16Gi"},
+        "limits": {"cpu": "32", "memory": "350G"},
+    },
+    "pathways-rm": {
+        "requests": {"cpu": "4", "memory": "16Gi"},
+        "limits": {"cpu": "16", "memory": "150G"},
+    },
+    "jax-tpu": {
+        "requests": {"cpu": "16", "memory": "180Gi"},
+        "limits": {"cpu": "24", "memory": "200G"},
+    },
+}
+_JOBSET_REPLICATEDJOB_LABEL = "jobset.sigs.k8s.io/replicatedjob-name"
+_PATHWAYS_HEAD_REPLICATEDJOB = "pathways-head"
+_HOSTNAME_TOPOLOGY_KEY = "kubernetes.io/hostname"
+_TOKEN_TRANSPORT_LABEL = "canon.zero-tim/token-transport"
+_TOKEN_TRANSPORT = "tito"
+_KUBERNETES_DNS_LABEL = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
+)
+_FILTER_STATUSES = (
+    "MAX_STEPS_REACHED",
+    "MAX_CONTEXT_LIMIT_REACHED",
+    "TIMEOUT",
+    "ENV_TIMEOUT",
+    "MODEL_TIMEOUT",
+    "REWARD_TIMEOUT",
+)
+_SEAM_LOCALIZATION_MODES = ("", "coarse")
+_SEAM_DIAGNOSTIC_ROUNDS = 3
+_SEAM_MIN_POSITION = 1686
+_SEAM_MAX_POSITION = 4096
+_SEAM_MAX_BYTES = 4 * 1024 * 1024 * 1024
+_SEAM_TAIL_MAX_BYTES = 64 * 1024 * 1024
+_SEAM_INCIDENT_MAX_BYTES = 128 * 1024 * 1024
+_SEAM_CAPTURE_BOUNDS = (1686, 2512, 3072, 3584, 4096)
+_RETIRED_DEVICE_PROBE_TRIGGER = "CANON_EXPECTED_SLICE_DEVICES"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _TopologySpec:
+  selector: str
+  instance_type: str
+  workers: int
+  role_dp: int
+  role_tp: int
+  devices_per_role: int
+  local_trajectories: int
+  global_m: int
+  max_num_seqs: int
+  profile: str
+
+
+_TOPOLOGY_SPECS = {
+    "128": _TopologySpec(
+        selector="128",
+        instance_type=TOPOLOGY,
+        workers=WORKERS,
+        role_dp=ROLE_DP,
+        role_tp=ROLE_TP,
+        devices_per_role=64,
+        local_trajectories=16,
+        global_m=2048,
+        max_num_seqs=16,
+        profile=PROFILE,
+    ),
+    "64split": _TopologySpec(
+        selector="64split",
+        instance_type="4x4x4",
+        workers=16,
+        role_dp=4,
+        role_tp=8,
+        devices_per_role=32,
+        local_trajectories=32,
+        global_m=1024,
+        max_num_seqs=32,
+        profile=SPLIT_PROFILE,
+    ),
+}
+
+_SYSTEMOPT_PROFILES = {
+    "128": SYSTEMOPT_PROFILE,
+    "64split": SPLIT_SYSTEMOPT_PROFILE,
+}
+
+# Qwen3-4B hidden size.  The P38 fixed lm_head registry is keyed on
+# (hidden, tp_size), and this is the value that appears in its rejection
+# message, e.g. `got (1024, 2560)`.
+_QWEN4B_HIDDEN = 2560
+
+
+def _p38_admitted_semantic_m(hidden: int = _QWEN4B_HIDDEN) -> tuple[int, ...]:
+  """Returns the semantic M the P38 fixed lm_head admits for one geometry.
+
+  Read out of the shim rather than copied, so a reader of this module cannot
+  drift from the registry it is quoting.  The shim keeps its jax imports inside
+  its kernels, so importing it here stays cheap and TPU-free.
+
+  This matters because a system-optimization arm forces
+  CANON_P38_FIXED_LM_HEAD=1 and the learner hands the fixed head global M rows,
+  where global M = dp * 256.  For Qwen3-4B TP8 the registry admits 2048 (DP8,
+  the "128" topology) but not 1024 (DP4, the "64split" topology), so the
+  64split systemopt lane still *renders* but aborts at update 0.  See
+  tests/deepswe_comparison/test_renderer.py::
+  test_topology_global_m_versus_the_p38_fixed_lm_head_registry.
+  """
+  shim_dir = Path(__file__).resolve().parent.parent / "src" / "engine_shims"
+  if str(shim_dir) not in sys.path:
+    sys.path.insert(0, str(shim_dir))
+  import p38_fixed_lm_head  # pylint: disable=g-import-not-at-top
+
+  geometry = p38_fixed_lm_head.resolve_geometry(hidden, ROLE_TP)
+  return p38_fixed_lm_head._semantic_m_for_geometry(geometry)  # pylint: disable=protected-access
+
+
+def _topology_spec(topology: str) -> _TopologySpec:
+  try:
+    return _TOPOLOGY_SPECS[topology]
+  except KeyError as exc:
+    raise ValueError("P58 topology must be exactly 128 or 64split") from exc
+
+
+def _service_containers(head: Mapping[str, Any]) -> list[dict[str, Any]]:
+  return list(head.get("initContainers", [])) + list(head["containers"])
+
+
+def _pathways_head_anti_affinity_term() -> dict[str, Any]:
+  return {
+      "labelSelector": {
+          "matchExpressions": [{
+              "key": _JOBSET_REPLICATEDJOB_LABEL,
+              "operator": "In",
+              "values": [_PATHWAYS_HEAD_REPLICATEDJOB],
+          }],
+      },
+      "namespaceSelector": {},
+      "topologyKey": _HOSTNAME_TOPOLOGY_KEY,
+  }
+
+
+def _remove_proxy_precision_pin(proxy: dict[str, Any]) -> None:
+  env = proxy.get("env", [])
+  proxy["env"] = [item for item in env if item.get("name") != p34.PROXY_XLA_ENV]
+
+
+def _command(
+    stage: str,
+    *,
+    run_root: str,
+    whitelist: str,
+    sampler_is: bool = False,
+    topology: str = "128",
+) -> tuple[str, ...]:
+  if stage not in _STAGE_STEPS:
+    raise ValueError("P58 admits only three-update or full")
+  spec = _topology_spec(topology)
+  args = list(
+      p34._command("three-update", run_root=run_root, whitelist=whitelist)
+  )
+  replacements = {
+      "--model_version=Qwen3-32B": "--model_version=Qwen3-4B-Instruct-2507",
+      "--num_generations=8": "--num_generations=16",
+      "--episode_timeout_secs=4800": "--episode_timeout_secs=3000",
+      "--step_timeout_secs=1800": "--step_timeout_secs=600",
+      "--reward_timeout_secs=1800": "--reward_timeout_secs=600",
+      "--rollout_batch_timeout_secs=5400": "--rollout_batch_timeout_secs=3600",
+      "--max_concurrency=64": f"--max_concurrency={MAX_CONCURRENCY}",
+      "--rollout_mesh_dp=16": f"--rollout_mesh_dp={spec.role_dp}",
+      "--train_mesh_dp=16": f"--train_mesh_dp={spec.role_dp}",
+      "--rollout_vllm_max_num_seqs=4": (
+          f"--rollout_vllm_max_num_seqs={spec.max_num_seqs}"
+      ),
+      "--max_steps=3": f"--max_steps={_STAGE_STEPS[stage]}",
+  }
+  for old, new in replacements.items():
+    if args.count(old) != 1:
+      raise ValueError(f"P34 command no longer contains exactly one {old!r}")
+    args[args.index(old)] = new
+  checkpoint_args = [
+      item for item in args if item.startswith("--ckpt_dir=")
+  ]
+  if len(checkpoint_args) != 1:
+    raise ValueError(
+        "P34 command no longer contains exactly one checkpoint directory"
+    )
+  args[args.index(checkpoint_args[0])] = "--ckpt_dir=none"
+  for prefix in ("--save_interval_steps=", "--max_to_keep="):
+    inherited = [item for item in args if item.startswith(prefix)]
+    if len(inherited) != 1:
+      raise ValueError(
+          f"P34 command no longer contains exactly one {prefix!r} argument"
+      )
+    args.remove(inherited[0])
+  args.extend((
+      f"--seed={FIXED_SEED}",
+      f"--expected_filtered_rows={CLEAN_ROWS}",
+      "--loss_scale_factor=16384",
+      "--loss_denominator_weighted_accumulation",
+      "--overlong_filter",
+      "--filter_statuses",
+      *_FILTER_STATUSES,
+  ))
+  if sampler_is:
+    args.extend((
+        "--sampler_is=token",
+        "--sampler_is_threshold=2.0",
+    ))
+  return tuple(args)
+
+
+def render(
+    base: Mapping[str, Any],
+    *,
+    source_commit: str,
+    source_branch: str,
+    client_image: str,
+    run_id: str,
+    stage: str,
+    arm: str,
+    cpu_nodepool: str,
+    worker_nodepool: str,
+    model_pvc: str,
+    sandbox_nodepool: str | None = None,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
+    jobset_namespace: str = _DEFAULT_JOBSET_NAMESPACE,
+    reservation: str | None = None,
+    topology: str = "128",
+    instance_type: str | None = None,
+    whitelist: str = CLEAN_WHITELIST,
+    whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
+    sampler_is: bool = False,
+    high_performance: bool = False,
+    system_optimization_arm: str | None = None,
+    checked_vma_off_diagnostic: bool = False,
+    checked_vma_on_diagnostic: bool = False,
+    seam_localization: str = "",
+) -> dict[str, Any]:
+  """Returns one immutable P58 native or zero JobSet."""
+  if stage not in _STAGE_STEPS:
+    raise ValueError("P58 admits only three-update or full")
+  if arm not in _ARMS:
+    raise ValueError("P58 arm must be native or zero")
+  spec = _topology_spec(topology)
+  if (
+      topology == "64split"
+      and instance_type is not None
+      and not instance_type.startswith(spec.instance_type)
+  ):
+    raise ValueError(
+        "P58 instance type must match the selected topology: "
+        f"topology={topology} expected={spec.instance_type} "
+        f"actual={instance_type}"
+    )
+  instance_type = instance_type or spec.instance_type
+  if high_performance and (arm != "zero" or stage != "full"):
+    raise ValueError("P58 high-performance is admitted only for Zero full")
+  if system_optimization_arm not in (None, "control", "treatment"):
+    raise ValueError(
+        "P58 system-optimization arm must be control or treatment"
+    )
+  if system_optimization_arm is not None and (
+      arm != "zero"
+      or (
+          stage != "three-update"
+          and not (
+              system_optimization_arm == "treatment" and stage == "full"
+          )
+      )
+      or high_performance
+      or sampler_is
+  ):
+    raise ValueError(
+        "P58 system optimization requires registered Zero three-update, or "
+        "a treatment full candidate"
+    )
+  if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
+    raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
+  if seam_localization not in _SEAM_LOCALIZATION_MODES:
+    raise ValueError("P58 seam localization must be empty or coarse")
+  checked_vma_diagnostic = (
+      "off" if checked_vma_off_diagnostic else
+      "on" if checked_vma_on_diagnostic else ""
+  )
+  if topology == "64split" and (
+      high_performance or checked_vma_diagnostic or seam_localization
+  ):
+    raise ValueError(
+        "P58 64split has no admitted high-performance or diagnostic bundle"
+    )
+  if checked_vma_diagnostic and (
+      arm != "zero" or stage != "full" or high_performance
+  ):
+    raise ValueError(
+        "P58 checked-VMA diagnostic is its own Zero/full HP selector"
+    )
+  if seam_localization and (
+      arm != "zero"
+      or stage != "full"
+      or high_performance
+      or bool(checked_vma_diagnostic)
+  ):
+    raise ValueError(
+        "P58 seam localization is its own Zero/full HP diagnostic selector"
+    )
+  if sampler_is and arm != "native":
+    raise ValueError("P58 sampler IS is admitted only for the native arm")
+  if sampler_is and high_performance:
+    raise ValueError("P58 sampler IS and Zero high-performance are disjoint")
+  if cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
+    raise ValueError(
+        f"P58 requires an admitted CPU node pool ({sorted(_ADMITTED_CPU_NODEPOOLS)}), "
+        f"got {cpu_nodepool!r}"
+    )
+  target_sandbox_nodepool = (
+      sandbox_nodepool
+      if sandbox_nodepool is not None
+      else (
+          _DEFAULT_SANDBOX_NODEPOOL
+          if cpu_nodepool == "canon-cpu-pool"
+          else cpu_nodepool
+      )
+  )
+  if target_sandbox_nodepool not in _ADMITTED_SANDBOX_NODEPOOLS:
+    raise ValueError(
+        f"P58 requires an admitted sandbox node pool ({sorted(_ADMITTED_SANDBOX_NODEPOOLS)}), "
+        f"got {target_sandbox_nodepool!r}"
+    )
+  if whitelist != CLEAN_WHITELIST or whitelist_sha256 != CLEAN_WHITELIST_SHA256:
+    raise ValueError("P58 requires the reviewed 1012-task clean whitelist")
+
+  # Use the bounded P34 render only as a structural JobSet constructor.  P58
+  # replaces its workload contract below and validates the final document.
+  document = p34.render(
+      base,
+      source_commit=source_commit,
+      source_branch=source_branch,
+      client_image=client_image,
+      run_id=run_id,
+      stage="three-update",
+      cpu_nodepool=cpu_nodepool,
+      worker_nodepool=worker_nodepool,
+      model_pvc=model_pvc,
+      whitelist=whitelist,
+      whitelist_sha256=whitelist_sha256,
+      fixed_lm_head=False,
+  )
+  # The exclusive-topology annotation deliberately stays on the worker Pod
+  # template (where jobset-64chip.yaml already carries it) instead of being
+  # hoisted to JobSet metadata.  A JobSet-scoped annotation applies to *every*
+  # replicatedJob, so the head would also be given the
+  # "no other JobSet's pods may share this node pool" anti-affinity -- against
+  # the shared cpu-np pool that hosts other tenants' orchestrator Pods and all
+  # 128 of our own R2E sandboxes.  Measured on bodaborg-v5p-nap: the only four
+  # JobSets using the JobSet-scoped form are single-replicatedJob slice jobs
+  # with no running pods, whereas all fifteen head+worker JobSets that do run
+  # (including canon-p57-fl-zero-m15-r10/r11, both head and worker
+  # ready=1 failed=0) use the Pod-template form.  See the K03 correction note
+  # in P58_DEEPSWE_TIM_RUNBOOK.md for why the earlier contract said otherwise.
+
+  hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
+      seam_localization
+  )
+  fixed_head_bundle = hp_bundle or system_optimization_arm is not None
+  zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
+  treatment = (
+      f"seam{seam_localization}"
+      if seam_localization
+      else f"vma{checked_vma_diagnostic}"
+      if checked_vma_diagnostic
+      else "zero-hp"
+      if high_performance
+      else f"zero-systemopt-{system_optimization_arm}"
+      if system_optimization_arm is not None
+      else "native-is"
+      if sampler_is
+      else arm
+  )
+  name = (
+      f"canon-p58-{treatment}-"
+      f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
+      if checked_vma_diagnostic or seam_localization
+      else f"canon-p58-ds4b-{treatment}-"
+      f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
+  )
+  if topology == "64split":
+    # Compact tokens for the 64split row.  The long form
+    # "canon-p58-ds4b-64s-zero-systemopt-treatment-three-" already exceeds
+    # the 36-character budget before the run id.  That budget is documented
+    # MAX_JOBSET_NAME_LEN documents, so this row could never be applied.
+    # Nothing identifying is lost: the model, arm and system-optimization arm
+    # are all pinned by the signed recipe and by the JobSet labels, not by the
+    # name.  "64s" = 64split; "zsoptc"/"zsoptt" identify the selected arm.
+    name = name.replace("canon-p58-ds4b-", "canon-p58-64s-", 1)
+    name = name.replace("-zero-systemopt-control-", "-zsoptc-", 1)
+    name = name.replace("-zero-systemopt-treatment-", "-zsoptt-", 1)
+  elif system_optimization_arm is not None:
+    # The explicit 128-chip systemopt row also needs a compact name; topology,
+    # model and treatment remain pinned by labels plus the signed environment.
+    name = name.replace("canon-p58-ds4b-", "canon-p58-128s-", 1)
+    name = name.replace("-zero-systemopt-control-", "-zsoptc-", 1)
+    name = name.replace("-zero-systemopt-treatment-", "-zsoptt-", 1)
+
+  if len(name) > p34.MAX_JOBSET_NAME_LEN:
+    raise ValueError(
+        "rendered P58 JobSet name exceeds "
+        f"{p34.MAX_JOBSET_NAME_LEN} characters: {name}"
+    )
+  run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
+  document["metadata"]["name"] = name
+  document["metadata"]["labels"].update({
+      "canon.zero-tim/phase": "p58-deepswe-tim",
+      "canon.zero-tim/stage": stage,
+      "canon.zero-tim/arm": arm,
+      "canon.zero-tim/topology": topology,
+      "canon.zero-tim/fixed-lm-head": "1" if fixed_head_bundle else "0",
+      _TOKEN_TRANSPORT_LABEL: _TOKEN_TRANSPORT,
+  })
+  if sampler_is:
+    document["metadata"]["labels"]["canon.zero-tim/sampler-recipe"] = (
+        "token-is"
+    )
+  if checked_vma_diagnostic:
+    document["metadata"]["labels"].update({
+        "canon.zero-tim/diagnostic": (
+            f"p58-checked-vma-{checked_vma_diagnostic}"
+        ),
+        "canon.zero-tim/diagnostic-selector": checked_vma_diagnostic,
+        "canon.zero-tim/backward": "0",
+        "canon.zero-tim/optimizer-commits": "0",
+    })
+  if seam_localization:
+    document["metadata"]["labels"].update({
+        "canon.zero-tim/diagnostic": "p58-seam-localization",
+        "canon.zero-tim/seam-observer": seam_localization,
+        "canon.zero-tim/diagnostic-rounds": str(_SEAM_DIAGNOSTIC_ROUNDS),
+        "canon.zero-tim/backward": "0",
+        "canon.zero-tim/optimizer-commits": "0",
+    })
+  # Validate what the base manifest carries *before* overwriting it.  The
+  # namespace-derived value below is drawn from a constant and is always well
+  # formed, so checking only the final value would silently retire this guard
+  # against a malformed base.
+  base_queue_name = str(
+      document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL, "")
+  )
+  if (
+      not base_queue_name
+      or len(base_queue_name) > 63
+      or not _KUBERNETES_DNS_LABEL.fullmatch(base_queue_name)
+  ):
+    raise ValueError("P58 requires an exact Kueue LocalQueue label")
+  if jobset_namespace not in _ADMITTED_JOBSET_NAMESPACES:
+    raise ValueError(
+        "P58 requires an admitted JobSet namespace "
+        f"({sorted(_ADMITTED_JOBSET_NAMESPACES)}); got {jobset_namespace!r}"
+    )
+  document["metadata"]["namespace"] = jobset_namespace
+  queue_name = _NAMESPACE_LOCAL_QUEUE[jobset_namespace]
+  document["metadata"]["labels"][_KUEUE_QUEUE_LABEL] = queue_name
+  for replicated in document["spec"]["replicatedJobs"]:
+    pod_metadata = replicated["template"]["spec"]["template"].setdefault(
+        "metadata", {}
+    )
+    pod_metadata.setdefault("labels", {})[_KUEUE_QUEUE_LABEL] = queue_name
+
+  head = p34._head(document)
+  # Pathways heads intentionally keep the proven host-network transport.  The
+  # JobSet controller labels every head Pod with its replicated-job name, so a
+  # required hostname anti-affinity term prevents two ResourceManagers from
+  # sharing ports 29000/29001 on one CPU node.  P58f08 proved that merely
+  # selecting cpu-np without this term lets Kubernetes pack a seventh head
+  # onto one of six occupied nodes and connect the worker to a foreign RM.
+  affinity = head.setdefault("affinity", {})
+  pod_anti_affinity = affinity.setdefault("podAntiAffinity", {})
+  required = pod_anti_affinity.setdefault(
+      "requiredDuringSchedulingIgnoredDuringExecution", []
+  )
+  anti_affinity_term = _pathways_head_anti_affinity_term()
+  if anti_affinity_term not in required:
+    required.append(anti_affinity_term)
+  services = _service_containers(head)
+  proxy = p34._container(services, "pathways-proxy")
+  manager = p34._container(services, "pathways-rm")
+  main = p34._container(head["containers"], "jax-tpu")
+  proxy["resources"] = copy.deepcopy(
+      HEAD_RESOURCES["pathways-proxy"]
+  )
+  manager["resources"] = copy.deepcopy(
+      HEAD_RESOURCES["pathways-rm"]
+  )
+  main["resources"] = copy.deepcopy(HEAD_RESOURCES["jax-tpu"])
+  scratch = f"gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p58/{name}"
+  p34._replace_arg(
+      proxy["args"], "--gcs_scratch_location=", f"--gcs_scratch_location={scratch}"
+  )
+  p34._replace_arg(
+      manager["args"], "--gcs_scratch_location=", f"--gcs_scratch_location={scratch}"
+  )
+  p34._replace_arg(
+      manager["args"], "--instance_type=", f"--instance_type=tpuv5:{instance_type}"
+  )
+  if arm == "native":
+    _remove_proxy_precision_pin(proxy)
+  else:
+    p34.ensure_proxy_xla_env(proxy)
+
+  # P58 is an evidence-bearing paired experiment.  A JobSet-level retry
+  # recreates the whole JobSet while retaining the same persistent run root;
+  # that can mix attempt artifacts and invalidate the arm comparison.  Keep
+  # the signed Attempt-0 contract until explicit attempt isolation exists.
+  document["spec"]["failurePolicy"] = {
+      "maxRestarts": 0,
+      "restartStrategy": "Recreate",
+  }
+  rendered_env = {
+      **p34.sandbox_runtime_environment(
+          sandbox_runtime,
+          sandbox_capacity,
+          active_trajectories=128,
+          namespace=jobset_namespace,
+      ),
+      "CANON_PROFILE_FILE": (
+          _SYSTEMOPT_PROFILES[topology]
+          if system_optimization_arm is not None
+          else HP_PROFILE if hp_bundle else spec.profile
+      ),
+      "CANON_STATE": run_root,
+      # TiTO is selected by the DeepSWE workload identity itself.  Keep the
+      # identity in the raw JobSet as well as the sourced profile so a
+      # rendered full-training YAML cannot depend on a later implicit default.
+      "CANON_P34_DEEPSWE": "1",
+      "CANON_P34_RUN_STAGE": stage,
+      "CANON_P34_NO_COMMIT": "0",
+      "CANON_P34_TRAJECTORY_CAPTURE": "0",
+      "CANON_P39_64CHIP_PILOT": "0",
+      "CANON_P39_PILOT_ADMITTED": "0",
+      "CANON_P43_DEEPSWE_DEBUG": "0",
+      "CANON_P43_DEBUG_ADMITTED": "0",
+      "CANON_P43_ROLLOUT_ONLY": "0",
+      "CANON_P44_DEEPSWE_PARITY": "0",
+      "CANON_P44_PARITY_ADMITTED": "0",
+      "CANON_P44_TOPOLOGY": "none",
+      "CANON_P44_ROLLOUT_ONLY": "0",
+      "CANON_P46_DEEPSWE_TRAIN": "0",
+      "CANON_P46_EVALUATION": "0",
+      "CANON_P46_TOPOLOGY": "none",
+      "CANON_P58_DEEPSWE_TIM": "1",
+      "CANON_P58_TIM_ADMITTED": "1",
+      "CANON_P58_TIM_ARM": arm,
+      "CANON_P34_DISABLE_SAMPLER_IS": "0" if sampler_is else "1",
+      "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
+      "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
+      "CANON_P58_DEBUG_DIR": f"{run_root}/debug",
+      "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_head_bundle else "0",
+      "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "1" if arm == "native" or zero_hp_ab_warning else "0"
+      ),
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "3600",
+      "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS": "300",
+      "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": "3000",
+      "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
+      "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
+      "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
+      "R2E_K8S_QUEUE_NAME": queue_name,
+      "NODE_SELECTOR_VAL": target_sandbox_nodepool,
+      "MIN_TOKEN_BUCKET": str(spec.global_m),
+      "CANON_RUN_CMD": shlex.join(
+          _command(
+              stage,
+              run_root=run_root,
+              whitelist=whitelist,
+              sampler_is=sampler_is,
+              topology=topology,
+          )
+      ),
+      "CANON_RUN_LOG": f"{run_root}/run.log",
+      "CANON_P34_WEIGHT_REPORT": f"{run_root}/weight_attestation.jsonl",
+      "CANON_PRE_ALIGN_REPORT": f"{run_root}/pre_alignment.jsonl",
+      "CANON_ALIGN_REPORT": f"{run_root}/alignment.jsonl",
+      "CANON_UPDATE_REPORT": f"{run_root}/updates.jsonl",
+      "CANON_WANDB_RUN_NAME": name,
+      "CANON_WANDB_PROJECT": "zero-tim-deepswe-4b-native-zero",
+      "CANON_WANDB_GROUP": (
+          f"qwen3-4b-p58-native-is-{stage}"
+          if sampler_is
+          else f"qwen3-4b-p58-{stage}"
+      ),
+      "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
+  }
+  if topology != "128" or system_optimization_arm is not None:
+    rendered_env["CANON_P58_TOPOLOGY"] = topology
+  p34._set_env(main, rendered_env)
+  if system_optimization_arm is not None:
+    systemopt = full_system_optimization_base_additions("deepswe-qwen4b")
+    systemopt.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
+    if system_optimization_arm == "treatment":
+      systemopt.update({
+          "CANON_P32_KEEP_TAPE": "stream",
+          "CANON_DP_REDUCE_ONCE": "1",
+          "CANON_P32_LENGTH_SORT": "1",
+      })
+    systemopt["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = (
+        "1"
+        if system_optimization_arm == "treatment" and topology == "128"
+        else "0"
+    )
+    p34._set_env(main, systemopt)
+  if high_performance:
+    p34._set_env(
+        main, full_system_optimization_additions("deepswe-qwen4b")
+    )
+  if checked_vma_diagnostic:
+    p34._set_env(main, {
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": checked_vma_diagnostic,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{run_root}/p38_diagnostic_round"
+        ),
+    })
+  if seam_localization:
+    capture = f"{run_root}/p38_serving_capture"
+    p34._set_env(main, {
+        "CANON_P58_SEAM_LOCALIZATION": seam_localization,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": str(_SEAM_DIAGNOSTIC_ROUNDS),
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{run_root}/p38_diagnostic_round"
+        ),
+        "CANON_P38_ROUND_SEAL_REQUEST_DIR": (
+            f"{run_root}/p38_round_seal_requests"
+        ),
+        "CANON_P38_ROUND_SEAL_ACK_DIR": (
+            f"{run_root}/p38_round_seal_acks"
+        ),
+        "CANON_P38_MISMATCH_CAPSULE": f"{run_root}/p38_mismatch_capsule.npz",
+        "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "256",
+        "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+        "CANON_P38_SERVING_CAPTURE_DIR": capture,
+        "CANON_P38_REQUEST_JOURNAL": f"{capture}/p38_request_journal.jsonl",
+        "CANON_P38_INCIDENT_LEDGER": f"{capture}/p38_incident_ledger.jsonl",
+        "CANON_P38_INCIDENT_MIN_PREFIX": str(_SEAM_MIN_POSITION),
+        "CANON_P38_INCIDENT_MAX_PREFIX": str(_SEAM_MAX_POSITION),
+        "CANON_P38_INCIDENT_MAX_BYTES": str(_SEAM_INCIDENT_MAX_BYTES),
+        "CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS": "30",
+        "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{run_root}/p38_live.stop",
+        "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": (
+            f"{run_root}/p38_live_worker.log"
+        ),
+        "CANON_P38_LIVE_COLLECT_REQUEST_FILE": (
+            f"{run_root}/p38_collect.request"
+        ),
+        "CANON_P38_LIVE_COLLECT_ACK_FILE": f"{run_root}/p38_collect.ack",
+        "CANON_P38_LIVE_COMPLETE_REQUEST_FILE": (
+            f"{run_root}/p38_complete.request"
+        ),
+        "CANON_P38_LIVE_COMPLETE_ACK_FILE": f"{run_root}/p38_complete.ack",
+        "CANON_P38_SERVING_CAPTURE_MAX_CALLS": "4",
+        "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(_SEAM_CAPTURE_BOUNDS[0]),
+        "CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS": ",".join(
+            map(str, _SEAM_CAPTURE_BOUNDS)
+        ),
+        "CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER": "5",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS": "4",
+        "CANON_P38_MIN_ACTION_KV": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SERVING_CAPTURE_CLASSIFICATION": (
+            f"{run_root}/p38_serving_capture.classification.json"
+        ),
+        "CANON_P38_SERVING_CAPTURE_ARCHIVE": (
+            f"{run_root}/p38_serving_capture.tar"
+        ),
+        "CANON_P38_GCS_PREFIX": (
+            "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/"
+            f"{name}/attempt-0"
+        ),
+        "CANON_P38_SEAM_OBSERVER": "layer",
+        "CANON_P38_SEAM_OBSERVER_DIR": capture,
+        "CANON_P38_SEAM_MIN_POSITION": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_MAX_POSITION": str(_SEAM_MAX_POSITION),
+        "CANON_P38_SEAM_MAX_BYTES": str(_SEAM_MAX_BYTES),
+        "CANON_P38_SEAM_CLASSIFICATION": (
+            f"{run_root}/p58_seam.classification.json"
+        ),
+        "CANON_P38_TAIL_OBSERVER": "1",
+        "CANON_P38_TAIL_MAX_BYTES": str(_SEAM_TAIL_MAX_BYTES),
+    })
+
+  worker = p34._worker(document)
+  worker["completions"] = spec.workers
+  worker["parallelism"] = spec.workers
+  worker_template_metadata = worker["template"].setdefault("metadata", {})
+  # Set it explicitly rather than inheriting it, so the render never silently
+  # depends on the base manifest still carrying the annotation.
+  worker_template_metadata.setdefault("annotations", {})[
+      _EXCLUSIVE_TOPOLOGY_ANNOTATION
+  ] = "cloud.google.com/gke-nodepool"
+  worker_pod = worker["template"]["spec"]
+  if worker_nodepool in _KUEUE_MANAGED_WORKER_POOLS:
+    # Node-Auto-Provisioning creates the v5p slice pool on demand with an
+    # unpredictable name, so no literal pin is possible.  The exclusive
+    # topology annotation above still keys on gke-nodepool, which is what
+    # keeps all indexed followers on the single NAP-created pool.
+    worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
+  else:
+    worker_pod["nodeSelector"][
+        "cloud.google.com/gke-nodepool"
+    ] = worker_nodepool
+  worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = (
+      spec.instance_type
+  )
+  if reservation:
+    worker_pod["nodeSelector"][_TPU_RESERVATION_LABEL] = reservation
+  worker_container = p34._container(worker_pod["containers"], "pathways-worker")
+  p34._replace_arg(
+      worker_container["args"],
+      "--instance_type=",
+      f"--instance_type=tpuv5:{instance_type}",
+  )
+  address = f"{name}-pathways-head-0-0.{name}"
+  p34._replace_arg(
+      worker_container["args"],
+      "--resource_manager_address=",
+      f"--resource_manager_address={address}:29001",
+  )
+  for item in worker_container.get("env", []):
+    if item.get("name") == "PATHWAYS_HEAD" and "value" in item:
+      item["value"] = address
+
+  validate(
+      document,
+      source_commit=source_commit,
+      client_image=client_image,
+      stage=stage,
+      arm=arm,
+      worker_nodepool=worker_nodepool,
+      cpu_nodepool=cpu_nodepool,
+      sandbox_nodepool=sandbox_nodepool,
+      sandbox_runtime=sandbox_runtime,
+      sandbox_capacity=sandbox_capacity,
+      jobset_namespace=jobset_namespace,
+      reservation=reservation,
+      topology=topology,
+      instance_type=instance_type,
+      sampler_is=sampler_is,
+      high_performance=high_performance,
+      system_optimization_arm=system_optimization_arm,
+      checked_vma_off_diagnostic=checked_vma_off_diagnostic,
+      checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+      seam_localization=seam_localization,
+  )
+  return document
+
+
+def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
+  """Returns only the fields that must be equal across the paired arms."""
+  env = p34._env(document)
+  omitted_prefixes = (
+      "--gold_whitelist=",
+      "--metric_logger_dir=",
+      "--sampler_is=",
+      "--sampler_is_threshold=",
+  )
+  command = tuple(
+      item for item in shlex.split(env["CANON_RUN_CMD"])
+      if not item.startswith(omitted_prefixes)
+  )
+  return {
+      "command": command,
+      "stage": env["CANON_P34_RUN_STAGE"],
+      "deepswe_identity": env["CANON_P34_DEEPSWE"],
+      "token_transport": document["metadata"]["labels"][
+          _TOKEN_TRANSPORT_LABEL
+      ],
+      "source_commit": env["CANON_EXPECT_COMMIT"],
+      "whitelist_sha256": env["CANON_P34_WHITELIST_SHA256"],
+      "optimizer_resident": env["CANON_OPT_STATE_RESIDENT"],
+      "optimizer_offload": env["CANON_P30_OPT_STATE_OFFLOAD"],
+      "workers": p34._worker(document)["completions"],
+      "topology": document["metadata"]["labels"][
+          "canon.zero-tim/topology"
+      ],
+  }
+
+
+def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
+  """Returns the explicitly registered numerical treatment fields."""
+  env = p34._env(document)
+  proxy = p34._container(
+      _service_containers(p34._head(document)), "pathways-proxy"
+  )
+  proxy_xla = [
+      item.get("value") for item in proxy.get("env", [])
+      if item.get("name") == p34.PROXY_XLA_ENV
+  ]
+  signature = {
+      "arm": env["CANON_P58_TIM_ARM"],
+      "alignment_warning_only": env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"],
+      "proxy_xla": proxy_xla,
+      "high_performance": env.get("CANON_V1_HP_FULL", "0"),
+      "checked_vma_diagnostic": env.get(
+          "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
+      ),
+      "seam_localization": env.get("CANON_P58_SEAM_LOCALIZATION", ""),
+      "disable_sampler_is": env["CANON_P34_DISABLE_SAMPLER_IS"],
+      "disable_tis": env["CANON_P34_DISABLE_TIS"],
+      "sampler_is": tuple(
+          item
+          for item in shlex.split(env["CANON_RUN_CMD"])
+          if item.startswith(("--sampler_is=", "--sampler_is_threshold="))
+      ),
+  }
+  if "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM" in env:
+    signature["system_optimization_arm"] = env[
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM"
+    ]
+    signature["keep_tape"] = env.get("CANON_P32_KEEP_TAPE")
+    signature["dp_reduce_once"] = env.get("CANON_DP_REDUCE_ONCE")
+    signature["length_sort"] = env.get("CANON_P32_LENGTH_SORT")
+    signature["segmented_actor_logps"] = env.get(
+        "CANON_P78_SEGMENTED_ACTOR_LOGPS"
+    )
+  return signature
+
+
+def validate(
+    document: Mapping[str, Any],
+    *,
+    source_commit: str,
+    client_image: str,
+    stage: str,
+    arm: str,
+    worker_nodepool: str,
+    cpu_nodepool: str = _DEFAULT_CPU_NODEPOOL,
+    sandbox_nodepool: str | None = None,
+    sandbox_runtime: str = "direct",
+    sandbox_capacity: int | None = None,
+    jobset_namespace: str = _DEFAULT_JOBSET_NAMESPACE,
+    reservation: str | None = None,
+    topology: str = "128",
+    instance_type: str | None = None,
+    sampler_is: bool = False,
+    high_performance: bool = False,
+    system_optimization_arm: str | None = None,
+    checked_vma_off_diagnostic: bool = False,
+    checked_vma_on_diagnostic: bool = False,
+    seam_localization: str = "",
+) -> None:
+  if stage not in _STAGE_STEPS or arm not in _ARMS:
+    raise ValueError("invalid P58 stage or arm")
+  if system_optimization_arm not in (None, "control", "treatment"):
+    raise ValueError(
+        "P58 system-optimization arm must be control or treatment"
+    )
+  if system_optimization_arm is not None and (
+      arm != "zero"
+      or (
+          stage != "three-update"
+          and not (
+              system_optimization_arm == "treatment" and stage == "full"
+          )
+      )
+      or high_performance
+      or sampler_is
+      or checked_vma_off_diagnostic
+      or checked_vma_on_diagnostic
+      or bool(seam_localization)
+  ):
+    raise ValueError(
+        "P58 system optimization requires registered Zero three-update, or "
+        "a treatment full candidate"
+    )
+  spec = _topology_spec(topology)
+  if (
+      topology == "64split"
+      and instance_type is not None
+      and not instance_type.startswith(spec.instance_type)
+  ):
+    raise ValueError("P58 instance type drifted from selected topology")
+  instance_type = instance_type or spec.instance_type
+  if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
+    raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
+  if seam_localization not in _SEAM_LOCALIZATION_MODES:
+    raise ValueError("P58 seam localization must be empty or coarse")
+  checked_vma_diagnostic = (
+      "off" if checked_vma_off_diagnostic else
+      "on" if checked_vma_on_diagnostic else ""
+  )
+  hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
+      seam_localization
+  )
+  fixed_head_bundle = hp_bundle or system_optimization_arm is not None
+  zero_hp_ab_warning = high_performance and arm == "zero" and stage == "full"
+  head = p34._head(document)
+  actual_cpu_nodepool = head.get("nodeSelector", {}).get(
+      "cloud.google.com/gke-nodepool", ""
+  )
+  target_sandbox_nodepool = (
+      sandbox_nodepool
+      if sandbox_nodepool is not None
+      else (
+          _DEFAULT_SANDBOX_NODEPOOL
+          if actual_cpu_nodepool == "canon-cpu-pool"
+          else actual_cpu_nodepool
+      )
+  )
+  worker = p34._worker(document)
+  main = p34._container(head["containers"], "jax-tpu")
+  env = p34._env(document)
+  # The head drives r2egym sandbox Pods over pods/exec, which the namespace
+  # default ServiceAccount lacks; see render_deepswe_jobset.HEAD_SERVICE_ACCOUNT.
+  if head.get("serviceAccountName") != p34.HEAD_SERVICE_ACCOUNT:
+    raise ValueError(
+        "P58 head must run as the sandbox-capable ServiceAccount "
+        f"{p34.HEAD_SERVICE_ACCOUNT!r}, got "
+        f"{head.get('serviceAccountName')!r}"
+    )
+  # Placement is the one class of defect that renders green, dry-runs green and
+  # then either never gets admitted or gets denied at rollout.  Re-derive it
+  # from the document rather than trusting the render path.
+  if jobset_namespace not in _ADMITTED_JOBSET_NAMESPACES:
+    raise ValueError(
+        "P58 requires an admitted JobSet namespace "
+        f"({sorted(_ADMITTED_JOBSET_NAMESPACES)}); got {jobset_namespace!r}"
+    )
+  actual_namespace = document["metadata"].get("namespace")
+  if actual_namespace != jobset_namespace:
+    raise ValueError(
+        "P58 JobSet namespace drifted: "
+        f"expected {jobset_namespace!r}, got {actual_namespace!r}"
+    )
+  expected_queue = _NAMESPACE_LOCAL_QUEUE[jobset_namespace]
+  actual_queue = document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL)
+  if actual_queue != expected_queue:
+    raise ValueError(
+        "P58 Kueue LocalQueue must match the namespace: "
+        f"namespace={jobset_namespace} expected={expected_queue!r} "
+        f"actual={actual_queue!r}"
+    )
+  actual_reservation = (
+      p34._worker(document)["template"]["spec"]
+      .get("nodeSelector", {})
+      .get(_TPU_RESERVATION_LABEL)
+  )
+  if actual_reservation != reservation:
+    raise ValueError(
+        "P58 worker TPU reservation drifted: "
+        f"expected {reservation!r}, got {actual_reservation!r}"
+    )
+  p34.validate_sandbox_runtime_environment(
+      env,
+      sandbox_runtime,
+      sandbox_capacity,
+      active_trajectories=128,
+      namespace=jobset_namespace,
+  )
+  if _RETIRED_DEVICE_PROBE_TRIGGER in env:
+    raise ValueError(
+        "P58 must not re-enable the retired Step 65 device probe: "
+        f"{_RETIRED_DEVICE_PROBE_TRIGGER}"
+    )
+  expected_failure_policy = {
+      "maxRestarts": 0,
+      "restartStrategy": "Recreate",
+  }
+  if document["spec"].get("failurePolicy") != expected_failure_policy:
+    raise ValueError("P58 requires exact Attempt-0 failure policy")
+  if document["metadata"]["labels"].get(
+      "canon.zero-tim/fixed-lm-head"
+  ) != ("1" if fixed_head_bundle else "0"):
+    raise ValueError("P58 fixed lm-head label drifted from the selected bundle")
+  if document["metadata"]["labels"].get(
+      _TOKEN_TRANSPORT_LABEL
+  ) != _TOKEN_TRANSPORT:
+    raise ValueError("P58 DeepSWE token transport must be TiTO")
+  if document["metadata"]["labels"].get(
+      "canon.zero-tim/topology"
+  ) != topology:
+    raise ValueError("P58 topology label drifted from the selected topology")
+  if actual_cpu_nodepool not in _ADMITTED_CPU_NODEPOOLS:
+    raise ValueError(
+        f"P58 CPU head lost an admitted CPU node pool, got {actual_cpu_nodepool!r}"
+    )
+  if target_sandbox_nodepool not in _ADMITTED_SANDBOX_NODEPOOLS:
+    raise ValueError(
+        f"P58 requires an admitted sandbox node pool ({sorted(_ADMITTED_SANDBOX_NODEPOOLS)}), "
+        f"got {target_sandbox_nodepool!r}"
+    )
+  if (
+      head.get("hostNetwork") is not True
+      or head.get("dnsPolicy") != "ClusterFirstWithHostNet"
+  ):
+    raise ValueError("P58 CPU head must retain the Pathways host network")
+  required_anti_affinity = (
+      head.get("affinity", {})
+      .get("podAntiAffinity", {})
+      .get("requiredDuringSchedulingIgnoredDuringExecution", [])
+  )
+  if _pathways_head_anti_affinity_term() not in required_anti_affinity:
+    raise ValueError("P58 CPU head lost required Pathways anti-affinity")
+  network = document["spec"].get("network", {})
+  if (
+      network.get("enableDNSHostnames") is not True
+      or network.get("publishNotReadyAddresses") is not True
+  ):
+    raise ValueError("P58 Pathways routing requires JobSet Pod DNS")
+  if (
+      worker["backoffLimit"] != 0
+      or worker["completions"] != spec.workers
+      or worker["parallelism"] != spec.workers
+  ):
+    raise ValueError(
+        f"P58 worker count does not match {spec.instance_type}"
+    )
+  if main["image"] != client_image or not p34._DIGEST_IMAGE.fullmatch(main["image"]):
+    raise ValueError("P58 client image is not digest-pinned")
+  expected = {
+      "CANON_EXPECT_COMMIT": source_commit,
+      "CANON_PROFILE_FILE": (
+          _SYSTEMOPT_PROFILES[topology]
+          if system_optimization_arm is not None
+          else HP_PROFILE if hp_bundle else spec.profile
+      ),
+      "CANON_P34_DEEPSWE": "1",
+      "CANON_P34_RUN_STAGE": stage,
+      "CANON_P34_NO_COMMIT": "0",
+      "CANON_P58_DEEPSWE_TIM": "1",
+      "CANON_P58_TIM_ADMITTED": "1",
+      "CANON_P58_TIM_ARM": arm,
+      "CANON_P34_DISABLE_SAMPLER_IS": "0" if sampler_is else "1",
+      "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
+      "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
+      "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_head_bundle else "0",
+      "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          "1" if arm == "native" or zero_hp_ab_warning else "0"
+      ),
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "MIN_TOKEN_BUCKET": str(spec.global_m),
+      "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
+      "R2E_K8S_QUEUE_NAME": document["metadata"]["labels"].get(
+          _KUEUE_QUEUE_LABEL
+      ),
+      "NODE_SELECTOR_VAL": target_sandbox_nodepool,
+  }
+  if topology == "128":
+    if system_optimization_arm is not None:
+      expected["CANON_P58_TOPOLOGY"] = "128"
+    elif "CANON_P58_TOPOLOGY" in env:
+      raise ValueError("historical P58-128 render must not add a topology flag")
+  else:
+    expected["CANON_P58_TOPOLOGY"] = topology
+  if checked_vma_diagnostic:
+    expected.update({
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": checked_vma_diagnostic,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{env['CANON_STATE']}/p38_diagnostic_round"
+        ),
+    })
+  elif "CANON_P58_CHECKED_VMA_DIAGNOSTIC" in env:
+    raise ValueError("P58 production render contains a diagnostic selector")
+  if seam_localization:
+    capture = f"{env['CANON_STATE']}/p38_serving_capture"
+    expected.update({
+        "CANON_P58_SEAM_LOCALIZATION": seam_localization,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": str(_SEAM_DIAGNOSTIC_ROUNDS),
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{env['CANON_STATE']}/p38_diagnostic_round"
+        ),
+        "CANON_P38_ROUND_SEAL_REQUEST_DIR": (
+            f"{env['CANON_STATE']}/p38_round_seal_requests"
+        ),
+        "CANON_P38_ROUND_SEAL_ACK_DIR": (
+            f"{env['CANON_STATE']}/p38_round_seal_acks"
+        ),
+        "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "256",
+        "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+        "CANON_P38_SERVING_CAPTURE_DIR": capture,
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+        "CANON_P38_MIN_ACTION_KV": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_OBSERVER": "layer",
+        "CANON_P38_SEAM_OBSERVER_DIR": capture,
+        "CANON_P38_SEAM_MIN_POSITION": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_MAX_POSITION": str(_SEAM_MAX_POSITION),
+        "CANON_P38_SEAM_MAX_BYTES": str(_SEAM_MAX_BYTES),
+        "CANON_P38_TAIL_OBSERVER": "1",
+        "CANON_P38_TAIL_MAX_BYTES": str(_SEAM_TAIL_MAX_BYTES),
+    })
+  elif "CANON_P58_SEAM_LOCALIZATION" in env:
+    raise ValueError("P58 production render contains a seam selector")
+  wrong = {
+      key: env.get(key) for key, value in expected.items()
+      if env.get(key) != value
+  }
+  if wrong:
+    raise ValueError(f"P58 rendered environment mismatch: {wrong}")
+  optimization_additions = {}
+  if high_performance:
+    optimization_additions = full_system_optimization_additions(
+        "deepswe-qwen4b"
+    )
+  elif system_optimization_arm is not None:
+    optimization_additions = full_system_optimization_base_additions(
+        "deepswe-qwen4b"
+    )
+    optimization_additions.update({
+        "CANON_DEEPSWE_SYSTEM_OPTIMIZATION_ARM": system_optimization_arm,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    })
+    if system_optimization_arm == "treatment":
+      optimization_additions.update({
+          "CANON_P32_KEEP_TAPE": "stream",
+          "CANON_DP_REDUCE_ONCE": "1",
+          "CANON_P32_LENGTH_SORT": "1",
+      })
+    optimization_additions["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = (
+        "1"
+        if system_optimization_arm == "treatment" and topology == "128"
+        else "0"
+    )
+  optimization_wrong = {
+      key: env.get(key)
+      for key, value in optimization_additions.items()
+      if env.get(key) != value
+  }
+  if optimization_wrong:
+    raise ValueError(
+        "P58 production system-optimization bundle drifted: "
+        f"{optimization_wrong}"
+    )
+  if not high_performance and system_optimization_arm is None:
+    leaked = [
+        key for key in FULL_SYSTEM_OPTIMIZATION_ENV_NAMES if key in env
+    ]
+    if leaked:
+      raise ValueError(
+          "P58 non-production arm contains system-optimization selectors: "
+          f"{leaked}"
+      )
+  if "CANON_DP_COLLECTIVE_REDUCE" in env:
+    raise ValueError("P58 contains an uncertified DP collective reducer")
+  unproven_transport_env = (
+      "PATHWAYS_HEARTBEAT_TIMEOUT_SEC",
+      "IFRT_PROXY_TIMEOUT_SECONDS",
+      "GRPC_KEEPALIVE_TIME_MS",
+      "GRPC_KEEPALIVE_TIMEOUT_MS",
+      "GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS",
+  )
+  present_transport_env = [
+      key for key in unproven_transport_env if key in env
+  ]
+  if present_transport_env:
+    raise ValueError(
+        "P58 contains unproven transport keepalive overrides: "
+        f"{present_transport_env}"
+    )
+
+  args = shlex.split(env["CANON_RUN_CMD"])
+  required = (
+      "--model_version=Qwen3-4B-Instruct-2507",
+      f"--batch_size={GLOBAL_PROMPTS}",
+      "--mini_batch_size=8",
+      "--train_micro_batch_size=8",
+      "--compute_logps_micro_batch_size=8",
+      f"--num_generations={GENERATIONS}",
+      "--max_response_length=16384",
+      "--max_turns=50",
+      "--temperature=1.0",
+      "--top_p=1.0",
+      "--top_k=0",
+      f"--seed={FIXED_SEED}",
+      f"--rollout_mesh_dp={spec.role_dp}",
+      f"--rollout_mesh_tp={spec.role_tp}",
+      f"--train_mesh_dp={spec.role_dp}",
+      f"--train_mesh_tp={spec.role_tp}",
+      f"--rollout_vllm_max_num_seqs={spec.max_num_seqs}",
+      "--max_num_batched_tokens=256",
+      f"--max_concurrency={MAX_CONCURRENCY}",
+      "--loss_agg_mode=sequence-mean-token-scale",
+      "--loss_scale_factor=16384",
+      "--loss_denominator_weighted_accumulation",
+      "--use_rollout_logps",
+      "--overlong_filter",
+      f"--expected_filtered_rows={CLEAN_ROWS}",
+      f"--max_steps={_STAGE_STEPS[stage]}",
+      "--no-optimizer-offload",
+      "--ckpt_dir=none",
+  )
+  seed_args = tuple(item for item in args if item.startswith("--seed="))
+  if seed_args != (f"--seed={FIXED_SEED}",):
+    raise ValueError(
+        "P58 command requires exactly one fixed seed: "
+        f"expected=--seed={FIXED_SEED} actual={seed_args}"
+    )
+  checkpoint_args = tuple(
+      item for item in args if item.startswith("--ckpt_dir=")
+  )
+  if checkpoint_args != ("--ckpt_dir=none",):
+    raise ValueError(
+        "P58 precomputed-gradient training requires exactly one "
+        f"--ckpt_dir=none argument: actual={checkpoint_args}"
+    )
+  checkpoint_cadence_args = tuple(
+      item for item in args
+      if item.startswith(("--save_interval_steps=", "--max_to_keep="))
+  )
+  if checkpoint_cadence_args:
+    raise ValueError(
+        "P58 checkpoint-disabled command contains checkpoint cadence: "
+        f"{checkpoint_cadence_args}"
+    )
+  missing = [item for item in required if item not in args]
+  if missing:
+    raise ValueError(f"P58 command lost signed fields: {missing}")
+  status_index = args.index("--filter_statuses")
+  if tuple(args[status_index + 1:status_index + 1 + len(_FILTER_STATUSES)]) != _FILTER_STATUSES:
+    raise ValueError("P58 compact-filter status set drifted")
+  sampler_args = tuple(
+      item
+      for item in args
+      if item.startswith(("--sampler_is=", "--sampler_is_threshold="))
+  )
+  expected_sampler_args = (
+      ("--sampler_is=token", "--sampler_is_threshold=2.0")
+      if sampler_is
+      else ()
+  )
+  if sampler_args != expected_sampler_args:
+    raise ValueError(
+        "P58 sampler-IS command drifted: "
+        f"expected={expected_sampler_args} actual={sampler_args}"
+    )
+  forbidden = ("--group_clip_filter_threshold", "--optimizer-offload")
+  if any(item == value or item.startswith(value + "=") for item in args for value in forbidden):
+    raise ValueError("P58 command enabled an optional algorithm intervention")
+  if not env.get("CANON_P58_DEBUG_DIR", "").endswith("/debug"):
+    raise ValueError("P58 trajectory journal path is missing")
+
+  services = _service_containers(head)
+  proxy = p34._container(services, "pathways-proxy")
+  proxy_pins = [
+      item for item in proxy.get("env", [])
+      if item.get("name") == p34.PROXY_XLA_ENV
+  ]
+  expected_proxy_pins = (
+      [] if arm == "native" else [{"name": p34.PROXY_XLA_ENV, "value": p34.PROXY_XLA_FLAG}]
+  )
+  if proxy_pins != expected_proxy_pins:
+    raise ValueError("P58 proxy precision treatment drifted")
+  manager = p34._container(services, "pathways-rm")
+  if f"--instance_type=tpuv5:{instance_type}" not in manager["args"]:
+    raise ValueError("P58 resource-manager topology drifted")
+  for container_name, expected_res in HEAD_RESOURCES.items():
+    if container_name == "pathways-proxy":
+      target_c = proxy
+    elif container_name == "pathways-rm":
+      target_c = manager
+    elif container_name == "jax-tpu":
+      target_c = main
+    else:
+      raise ValueError(f"unknown container name: {container_name}")
+    if target_c.get("resources") != expected_res:
+      raise ValueError(
+          f"P58 {container_name} container drifted from signed head resources: "
+          f"expected={expected_res} actual={target_c.get('resources')}"
+      )
+  worker_pod = worker["template"]["spec"]
+  worker_template_annotations = worker["template"].get(
+      "metadata", {}
+  ).get("annotations", {})
+  if worker_template_annotations.get(_EXCLUSIVE_TOPOLOGY_ANNOTATION) != (
+      "cloud.google.com/gke-nodepool"
+  ):
+    raise ValueError(
+        "P58 worker Pod template lost its exclusive-topology annotation"
+    )
+  annotations = document.get("metadata", {}).get("annotations", {})
+  if _EXCLUSIVE_TOPOLOGY_ANNOTATION in annotations:
+    # At JobSet scope the annotation also applies to pathways-head, which would
+    # demand exclusive use of the shared cpu-np pool and make the head
+    # unschedulable alongside our own R2E sandboxes.
+    raise ValueError(
+        "P58 exclusive-topology annotation must not be at JobSet scope"
+    )
+  if (
+      worker_pod.get("hostNetwork") is not True
+      or worker_pod.get("dnsPolicy") != "ClusterFirstWithHostNet"
+  ):
+    raise ValueError("P58 TPU workers must retain the host network")
+  worker_container = p34._container(
+      worker_pod["containers"], "pathways-worker"
+  )
+  name = document["metadata"]["name"]
+  address = f"{name}-pathways-head-0-0.{name}"
+  rm_arg = f"--resource_manager_address={address}:29001"
+  if rm_arg not in worker_container["args"]:
+    raise ValueError("P58 worker lost the signed resource-manager address")
+  worker_env = {
+      item["name"]: item.get("value")
+      for item in worker_container.get("env", [])
+  }
+  if worker_env.get("PATHWAYS_HEAD") != address:
+    raise ValueError("P58 worker PATHWAYS_HEAD lost the JobSet Pod DNS name")
+  if worker_pod["nodeSelector"].get(
+      "cloud.google.com/gke-tpu-topology"
+  ) != spec.instance_type:
+    raise ValueError("P58 worker topology drifted")
+  actual_worker_pool = worker_pod["nodeSelector"].get(
+      "cloud.google.com/gke-nodepool"
+  )
+  expected_worker_pool = (
+      None
+      if worker_nodepool in _KUEUE_MANAGED_WORKER_POOLS
+      else worker_nodepool
+  )
+  if actual_worker_pool != expected_worker_pool:
+    raise ValueError("P58 worker node-pool affinity drifted")
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--base", type=Path, required=True)
+  parser.add_argument("--output", type=Path, required=True)
+  parser.add_argument("--source-commit", required=True)
+  parser.add_argument("--source-branch", default=p34.DEFAULT_SOURCE_BRANCH)
+  parser.add_argument("--client-image", required=True)
+  parser.add_argument("--run-id", required=True)
+  parser.add_argument("--stage", choices=tuple(_STAGE_STEPS), required=True)
+  parser.add_argument("--arm", choices=_ARMS, required=True)
+  parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
+  parser.add_argument("--sandbox-nodepool", default=None)
+  parser.add_argument(
+      "--sandbox-runtime", choices=p34.SANDBOX_RUNTIMES, default="direct"
+  )
+  parser.add_argument("--sandbox-capacity", type=int)
+  parser.add_argument(
+      "--jobset-namespace",
+      choices=tuple(sorted(_ADMITTED_JOBSET_NAMESPACES)),
+      default=_DEFAULT_JOBSET_NAMESPACE,
+      help=(
+          "namespace that owns the JobSet.  A Kueue LocalQueue is namespaced, "
+          "so this is what selects the admitting ClusterQueue and therefore "
+          "the TPU quota; it also decides where the sandbox Pods live"
+      ),
+  )
+  parser.add_argument(
+      "--reservation",
+      default=None,
+      help=(
+          "value for the worker cloud.google.com/reservation-name selector; "
+          "every TPU JobSet currently running on bodaborg-v5p-nap sets it"
+      ),
+  )
+  parser.add_argument("--worker-nodepool", required=True)
+  parser.add_argument("--topology", choices=tuple(_TOPOLOGY_SPECS), default="128")
+  parser.add_argument("--instance-type", default=None)
+  parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
+  parser.add_argument("--whitelist", default=CLEAN_WHITELIST)
+  parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
+  parser.add_argument("--sampler-is", action="store_true")
+  parser.add_argument("--high-performance", action="store_true")
+  parser.add_argument(
+      "--system-optimization-arm", choices=("control", "treatment")
+  )
+  parser.add_argument("--checked-vma-off-diagnostic", action="store_true")
+  parser.add_argument("--checked-vma-on-diagnostic", action="store_true")
+  parser.add_argument(
+      "--seam-localization", choices=("coarse",), default=""
+  )
+  args = parser.parse_args()
+  if args.output.exists():
+    raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
+  document = render(
+      yaml.safe_load(args.base.read_text()),
+      source_commit=args.source_commit,
+      source_branch=args.source_branch,
+      client_image=args.client_image,
+      run_id=args.run_id,
+      stage=args.stage,
+      arm=args.arm,
+      cpu_nodepool=args.cpu_nodepool,
+      sandbox_nodepool=args.sandbox_nodepool,
+      sandbox_runtime=args.sandbox_runtime,
+      sandbox_capacity=args.sandbox_capacity,
+      jobset_namespace=args.jobset_namespace,
+      reservation=args.reservation,
+      worker_nodepool=args.worker_nodepool,
+      topology=args.topology,
+      instance_type=args.instance_type,
+      model_pvc=args.model_pvc,
+      whitelist=args.whitelist,
+      whitelist_sha256=args.whitelist_sha256,
+      sampler_is=args.sampler_is,
+      high_performance=args.high_performance,
+      system_optimization_arm=args.system_optimization_arm,
+      checked_vma_off_diagnostic=args.checked_vma_off_diagnostic,
+      checked_vma_on_diagnostic=args.checked_vma_on_diagnostic,
+      seam_localization=args.seam_localization,
+  )
+  args.output.write_text(p34.dump_jobset(document))
+  recipe = (
+      "zero-hp-seam-coarse"
+      if args.seam_localization
+      else "zero-hp-vmaoff-precheck"
+      if args.checked_vma_off_diagnostic
+      else "zero-hp-vmaon-precheck"
+      if args.checked_vma_on_diagnostic
+      else "native-is"
+      if args.sampler_is
+      else "zero-hp"
+      if args.high_performance
+      else f"zero-systemopt-{args.system_optimization_arm}"
+      if args.system_optimization_arm
+      else f"{args.arm}-raw"
+  )
+  print(
+      "P58_DEEPSWE_TIM_RENDER_PASS "
+      f"arm={args.arm} stage={args.stage} recipe={recipe} "
+      f"topology={args.topology} "
+      "transport=token-in-token-out "
+      f"output={args.output}"
+  )
+
+
+if __name__ == "__main__":
+  main()

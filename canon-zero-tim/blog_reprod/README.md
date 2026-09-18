@@ -90,7 +90,7 @@ Three runs need 192 chips; on 64 they go one after another. Start a persistent l
 restarted pods lose their logs.
 
 ```bash
-python3 canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/collect_jobset_logs_to_gcs.py \
+python3 canon-zero-tim/workloads/frozenlake-three-arm/scripts/collect_jobset_logs_to_gcs.py \
   --jobset "<metadata.name from the manifest>" --source-sha "$SHA" \
   --gcs-prefix "<gs://your-bucket/your-prefix>" --output-dir "<local-evidence-dir>" \
   --namespace default --expected-workers 16
@@ -100,7 +100,7 @@ kubectl apply -f "$MANIFEST"
 expected: `P57.TIM_STANDARD` — one receipt per update in the Standard arm, `[P57.TIM_STANDARD] PASS
 step=<n> rows=<n> groups=<…> old_logps=trainer tis_weights=absent rollout_logps=present
 trainer_rescore=training-input policy_version=matched`, re-checked over the whole log by
-`canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_standard_receipts.py`; a
+`canon-zero-tim/workloads/frozenlake-three-arm/scripts/classify_standard_receipts.py`; a
 legacy `[P57.TIM_PURITY]` line in a Standard run is a failure.
 
 expected: `P57.TIM_PURITY` — exactly one `… PASS sampler_is=token old_logps=trainer
@@ -222,12 +222,12 @@ byte-identically; the step-6 CSV recipe reproduces all three `data/*.csv` byte f
 `canon-zero-tim/blog_reprod/export_wandb.py` passes its unit tests and exported a real W&B run.
 
 Verified 2026-09-17 on one v5p-8 host (real image, real TPUs, this branch's tip), Zero-TIM only:
-`canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/run_perf_v2_onehost.sh` with the
+`canon-zero-tim/workloads/frozenlake-three-arm/scripts/run_perf_v2_onehost.sh` with the
 exact-token-continuity arm (`tito-on`, DP1×TP4, production dataset via `P57_PERF_V2_DATA_DIR`)
 installed the overlay (`all 37 files match (qwen8b)`), ran three optimizer commits with finite
 gradients (commit gradient norms 15.51 / 6.68 / 6.51) and held all 12 strict-alignment rows — 36
 boundaries — at zero differing bytes, with a green semantic census; and
-`canon-zero-tim/tasks/v2-frozenlake-onehost/scripts/run_frozenlake_dp2tp2_onehost.sh p45 r3 … measure`
+`canon-zero-tim/workloads/frozenlake-onehost/scripts/run_frozenlake_dp2tp2_onehost.sh p45 r3 … measure`
 (DP2×TP2, the same trainer knobs as the 64-chip profile) reported `strict_exact: true` over 26
 boundaries with finite gradient norms. Those carriers cap rollouts at two turns, so every trajectory
 was single-turn and exact token continuity itself was **not exercised** there (`token_verdict:

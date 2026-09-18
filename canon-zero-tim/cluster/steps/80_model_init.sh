@@ -26,14 +26,14 @@ REPORT="${CANON_MODEL_INIT_REPORT:-$CANON_STATE/model_init.classification.json}"
 echo "[model-init] starting structural materialization; no checkpoint, forward, backward, update, or training"
 cd "$CANON_PKG/.."
 set +e
-python3 "$CANON_PKG/tests/p32_model_init/probe_qwen8b_init.py" 2>&1 | tee "$LOG"
+python3 "$CANON_PKG/tests/model_init/probe_qwen8b_init.py" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 set -e
 if [ "$rc" -ne 0 ]; then
   echo "[model-init] probe exited $rc" >&2
   exit "$rc"
 fi
-python3 "$CANON_PKG/tests/p32_model_init/classify_model_init.py" \
+python3 "$CANON_PKG/tests/model_init/classify_model_init.py" \
   "$LOG" --output "$REPORT"
 echo "[model-init] artifact=$LOG"
 echo "[model-init] classification=$REPORT"

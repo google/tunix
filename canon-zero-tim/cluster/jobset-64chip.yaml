@@ -248,7 +248,7 @@ spec:
             labels:
               kueue.x-k8s.io/queue-name: default
           spec:
-            # Must match the head pod: render_p34_jobset.py hard-checks that
+            # Must match the head pod: render_deepswe_jobset.py hard-checks that
             # both replicated jobs carry _PRIORITY_CLASS and raises otherwise.
             priorityClassName: medium
             nodeSelector:

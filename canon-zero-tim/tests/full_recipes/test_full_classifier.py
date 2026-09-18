@@ -1,0 +1,1314 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[3]
+MODULE_PATH = ROOT / (
+    "canon-zero-tim/workloads/full-recipes/scripts/"
+    "classify_full_recipe.py"
+)
+SPEC = importlib.util.spec_from_file_location("v1_full_classifier", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+classifier = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = classifier
+SPEC.loader.exec_module(classifier)
+
+
+class FullClassifierTest(unittest.TestCase):
+
+  def setUp(self):
+    self.original_updates = classifier._RECIPES["gsm8k"]["updates"]
+    classifier._RECIPES["gsm8k"]["updates"] = 4
+
+  def tearDown(self):
+    classifier._RECIPES["gsm8k"]["updates"] = self.original_updates
+
+  def _evidence(self, root: Path, *, alignment_fail: bool = False):
+    state = root / "state"
+    state.mkdir()
+    env = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env"
+        ),
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_DP_REDUCE_ONCE": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+        "CANON_CONTINUE_DECODE": "8",
+        "CANON_FIXED_AR_GATHER": "1",
+        "CANON_PALLAS_GATHERED_LOGPROBS": "1",
+        "CANON_LOGPROB_STEP_FUSION": "1",
+        "CANON_P28_BATCHED_REPORT": "1",
+        "CANON_P28_BATCHED_REVERSE": "0",
+        "CANON_FUSED_TREE_OPS": "0",
+        "CANON_XPROF_PHASE": "update",
+        "CANON_XPROF_SKIP_STEPS": "2",
+        "CANON_XPROF_STEPS": "1",
+        "CANON_XPROF_PYTHON_TRACER": "0",
+        "CANON_XPROF_HOST_TRACER": "1",
+        "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+        "CANON_XPROF_LABELS": "1",
+        "CANON_XPROF_DIR": (
+            "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+            "state/attempt-direct/xprof-update"
+        ),
+        "CANON_PERF_TRACE_EXPORT_STEP": "2",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
+        "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
+        "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "all",
+        "CANON_GCS_CACHE_BUCKET": (
+            "gs://yuxzhang-tunix-models/cache/p33_compilation_cache"
+        ),
+        "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_BATCHED_EVIDENCE": "1",
+    }
+    (state / "env.sh").write_text(
+        "".join(f"export {name}={value}\n" for name, value in env.items()),
+        encoding="utf-8",
+    )
+    cache_profile = "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp"
+    cache_bucket = (
+        "gs://yuxzhang-tunix-models/cache/p33_compilation_cache/"
+        f"{cache_profile}"
+    )
+    for phase, status in (("restore", "hit"), ("save", "saved")):
+      (state / f"jax_cache_{phase}.receipt").write_text(
+          f"[JAX_CACHE_SYNC] phase={phase} status={status} tool=gcloud "
+          f"rc=0 entries=3 profile={cache_profile} bucket={cache_bucket} "
+          "local=/tmp/jax_compilation_cache\n",
+          encoding="utf-8",
+      )
+    updates = []
+    log = [
+        "[P57.CONTINUE_DECODE] on-device decode loop enabled max_decode_steps=8",
+        "[P56.GATHERED_LOGPROBS] installed data=16 local_m=256 continue_decode=8",
+        "[P56.LOGPROB_STEP_FUSION] active target_rows=4096 max_logprobs=1",
+        "[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at x",
+        "[CANON_XPROF_LABELS] continue-decode stage callables cached",
+        "[P59.DP16] head_cotangent_partition_ready "
+        "global_shape=(4096, 151936) local_shape=(256,37984) "
+        "placement=data,model",
+        "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
+        "semantic_M=256 fixed_M=256 K=2048 TP=4 local_N=37984 "
+        "fixed_N=38144 BM=128 BN=256 BK=256 chunks=1 "
+        "endpoint=tied_embed p59_local=1 global_M=4096 dp=16",
+        "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+        "semantic_M=4096 local_M=256 fixed_M=256 chunks=1 "
+        "accumulation=lax.scan order=ascending "
+        "tp_input_reduction=all_gather_rank_order_f32_barrier "
+        "K=2048 TP=4 local_N=37984 fixed_N=38144 endpoint=tied_embed",
+        "[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=4 local_q_heads=4 "
+        "local_kv_heads=2 cache_heads=2 packing=2",
+        "[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=gate_proj "
+        "local_width=1536 declared_width=6144 layout_shards=1 pieces=1",
+        "[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=up_proj "
+        "local_width=1536 declared_width=6144 layout_shards=1 pieces=1",
+        "[P51.XPROF] phase=update armed step=2",
+        "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
+        "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
+        "[V1.PERFETTO] captured training_step=2 timelines=3",
+        "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
+        "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
+        "nonfinite=fatal max_norm=1.0 workload=gsm8k",
+        "[V1.FIRST_UPDATE] " + json.dumps({
+            "schema": "canon-v1-first-update-precommit-v1",
+            "update": 0,
+            "workload": "gsm8k",
+            "dp": 16,
+            "tp": 4,
+            "microsteps": 16,
+            "accumulator_denominator": 16.0,
+            "stable_norm_max": 1.0e6,
+            "all_finite": True,
+            "any_nonzero": True,
+            "stable_norm": 2.0,
+        }, sort_keys=True, separators=(",", ":")),
+        "[V1.FIRST_UPDATE] " + json.dumps({
+            "schema": "canon-v1-first-update-commit-v1",
+            "update": 0,
+            "workload": "gsm8k",
+            "dp": 16,
+            "tp": 4,
+            "train_steps_before": 0,
+            "train_steps_after": 1,
+            "optimizer_transaction_valid": True,
+            "gradient_finite": True,
+            "parameter_delta_finite": True,
+            "parameter_changed_elements": 12,
+            "effective_learning_rate": 1.0e-6,
+            "outer_weight_sync_pending": True,
+        }, sort_keys=True, separators=(",", ":")),
+    ]
+    for step in range(4):
+      fallback = step == 0
+      updates.append({
+          "elapsed_seconds": 6.0,
+          "dp_rank_pullbacks_per_transaction": 16,
+          "dp_pullback_invocations_per_transaction": 1,
+          "dp_replicas_exact": True,
+          "commit_evidence": {
+              "overflow_safe_clip": {
+                  "enabled": True,
+                  "all_finite": True,
+                  "naive_norm": "inf" if fallback else 0.5,
+                  "naive_norm_finite": not fallback,
+                  "stable_norm": 2.0 if fallback else 0.5,
+                  "selected_norm": 2.0 if fallback else 0.5,
+                  "fallback_used": fallback,
+                  "clip_factor": 0.5 if fallback else 1.0,
+                  "max_norm": 1.0,
+              },
+          },
+      })
+      log.extend([
+          "[P59.CHECKED_VMA] enabled=1 workload=gsm8k dp=16 tp=4 "
+          "global_M=4096 manual_axes=data,model compatibility_alias=1",
+          "[P59.DP16] gradient_reducer_ready dp_axis=data dp_size=16 staging=parallel_table",
+          "[P63.STABLE_CLIP] "
+          f"update={step} all_finite=1 "
+          f"naive_norm={'inf' if fallback else 0.5} "
+          f"naive_norm_finite={int(not fallback)} "
+          f"stable_norm={2.0 if fallback else 0.5} "
+          f"selected_norm={2.0 if fallback else 0.5} "
+          f"fallback_used={int(fallback)} "
+          f"clip_factor={0.5 if fallback else 1.0} max_norm=1.0",
+          f"[PERF] step={step} stage=p32_vag_forward seconds=1.0",
+          f"[PERF] step={step} stage=p32_vag_reverse seconds=3.0",
+          f"[PERF] step={step} stage=segmented_value_and_grad seconds=4.0",
+          f"[PERF] step={step} stage=optimizer_transaction seconds=1.0",
+          f"[PERF] step={step} stage=weight_sync seconds=1.0",
+          f"Global step {step} completed in {80.0 if step == 2 else 8.0} seconds.",
+      ])
+    for index in range(68):
+      verdict = "FAIL" if alignment_fail and index == 0 else "PASS"
+      prefix = "CANON_ALIGN_PRE" if index % 17 == 0 else "CANON_ALIGN"
+      log.append(f"[{prefix}] step={index} verdict={verdict}")
+    run_log = state / "run.log"
+    run_log.write_text("\n".join(log) + "\n", encoding="utf-8")
+    update_report = state / "updates.jsonl"
+    update_report.write_text(
+        "".join(json.dumps(row) + "\n" for row in updates), encoding="utf-8"
+    )
+    base = {
+        "verdict": "PASS",
+        "claim_level": "strict-zero-tim",
+        "expected_updates": 4,
+        "observed_updates": 4,
+        "observed_pre_alignments": 4,
+        "observed_alignments": 64,
+        "alignment_warning_records": 0,
+        "pre_alignment_warning_records": 0,
+    }
+    base_path = state / "base.json"
+    base_path.write_text(json.dumps(base), encoding="utf-8")
+    xprof = state / "xprof-update/plugins/profile/1"
+    xprof.mkdir(parents=True)
+    (xprof / "device.xplane.pb").write_bytes(b"xplane")
+    (xprof / "device.trace.json.gz").write_bytes(b"trace")
+    (state / "xprof_gcs_restore.receipt").write_text(
+        "[P51.XPROF.GCS] phase=restore status=PASS tool=gcloud rc=0 "
+        "xplanes=1 traces=1 "
+        "remote=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+        f"state/attempt-direct/xprof-update local={state}/xprof-update\n",
+        encoding="utf-8",
+    )
+    perfetto = state / "perfetto"
+    perfetto.mkdir()
+    (perfetto / "perfetto_trace_v2_1.pb").write_bytes(b"perfetto")
+    return state, run_log, update_report, base_path
+
+  def test_green_full_contract_and_excludes_profiled_step(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "PASS", record["reasons"])
+      self.assertEqual(record["zero_tim"]["observed_pass"], 68)
+      self.assertEqual(
+          record["timing"]["steady_steps2_plus_excluding_profile_count"], 1
+      )
+      self.assertEqual(
+          record["timing"]["steady_steps2_plus_excluding_profile_mean"][
+              "wall_seconds"
+          ],
+          8.0,
+      )
+
+  def _small_frozenlake_evidence(self, root, recipe):
+    from examples.frozenlake.training_geometry import geometry, SMALL, SELECTOR
+    geom = geometry(SMALL)
+    state, run_log, update_path, base_path = self._evidence(root)
+    old_env = classifier._resolved_env(state / "env.sh")
+    contract = {**classifier._RECIPES[recipe], "profile": geom.profile_file}
+    env = {**classifier._required_recipe_env(recipe, contract), **geom.environment(),
+           SELECTOR: SMALL, "CANON_XPROF_DIR": old_env["CANON_XPROF_DIR"]}
+    (state / "env.sh").write_text("".join(f"export {key}={value}\n" for key, value in env.items()))
+    for phase in ("restore", "save"):
+      path = state / f"jax_cache_{phase}.receipt"
+      path.write_text(path.read_text().replace("qwen3-1p7b-dp16-tp4-gsm8k-v1-hp", geom.profile))
+    lines = []
+    for line in run_log.read_text().splitlines():
+      if line.startswith("[CANON_ALIGN"):
+        continue
+      if line.startswith("[V1.FIRST_UPDATE] "):
+        receipt = json.loads(line.removeprefix("[V1.FIRST_UPDATE] "))
+        receipt.update(workload=geom.workload, dp=4, tp=8)
+        if "microsteps" in receipt:
+          receipt.update(microsteps=32, accumulator_denominator=32.0)
+        line = "[V1.FIRST_UPDATE] " + json.dumps(receipt)
+      else:
+        for old, new in (
+            ("[P59.DP16]", "[P59.DP4]"), ("data=16", "data=4"),
+            ("target_rows=4096", "target_rows=1024"),
+            ("global_shape=(4096,", "global_shape=(1024,"),
+            ("37984", "18992"), ("38144", "19200"),
+            ("K=2048", "K=4096"), ("TP=4", "TP=8"), ("tp=4", "tp=8"),
+            ("endpoint=tied_embed", "endpoint=untied_lm_head"),
+            ("global_M=4096", "global_M=1024"), ("semantic_M=4096", "semantic_M=1024"),
+            ("dp=16", "dp=4"), ("dp_size=16", "dp_size=4"),
+            ("local_kv_heads=2 cache_heads=2", "local_kv_heads=1 cache_heads=1"),
+            ("declared_width=6144", "declared_width=12288"),
+            ("workload=gsm8k", "workload=" + geom.workload),
+            ("max_norm=1.0", "max_norm=100.0"),
+        ):
+          line = line.replace(old, new)
+      lines.append(line)
+    lines.extend(f"[CANON_ALIGN{'_PRE' if index % 33 == 0 else ''}] step={index} verdict=PASS" for index in range(132))
+    lines.extend((
+        "[CANON_P33_EVAL] DISABLED workload=frozenlake",
+        f"[P45.CHECKPOINT] DISABLED workload_candidate={recipe} reason=v1-hp-fast-concept",
+        "[P3_APC_CONFIG] enabled=0 workload=frozenlake reader=train_frozenlake_qwen3",
+    ))
+    run_log.write_text("\n".join(lines) + "\n")
+    updates = [json.loads(line) for line in update_path.read_text().splitlines()]
+    for update in updates:
+      update["dp_rank_pullbacks_per_transaction"] = 4
+      update["commit_evidence"]["overflow_safe_clip"]["max_norm"] = 100.0
+    update_path.write_text("".join(json.dumps(update) + "\n" for update in updates))
+    base = json.loads(base_path.read_text())
+    base.update(verdict="PASS_WITH_ALIGNMENT_WARNINGS", claim_level="convergence-only", observed_alignments=128)
+    base_path.write_text(json.dumps(base))
+    return state, run_log, update_path, base_path
+
+  def test_dp4_frozenlake_full_contract_and_shape_negatives(self):
+    for recipe in ("p45", "m15"):
+      for mutation in (None, "global", "local", "chunks", "profile", "geometry"):
+        with self.subTest(recipe=recipe, mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+          state, log, updates, base = self._small_frozenlake_evidence(Path(tmp), recipe)
+          if mutation in ("global", "local", "chunks"):
+            old, new = {"global": ("global_M=1024", "global_M=2048"),
+                        "local": ("local_M=256", "local_M=512"),
+                        "chunks": ("chunks=1", "chunks=2")}[mutation]
+            log.write_text(log.read_text().replace(old, new))
+          elif mutation in ("profile", "geometry"):
+            path = state / "env.sh"
+            old, new = (("qwen3-8b-dp4-tp8-frozenlake-v1-hp", "qwen3-8b-dp8-tp8-frozenlake-v1-hp")
+                        if mutation == "profile" else ("CANON_GLOBAL_TRAJECTORIES=128", "CANON_GLOBAL_TRAJECTORIES=256"))
+            path.write_text(path.read_text().replace(old, new))
+          with mock.patch.dict(classifier._RECIPES[recipe], updates=4):
+            result = classifier.classify(recipe=recipe, state=state, run_log=log,
+                                         update_report=updates, base_classification=base,
+                                         train_geometry="dp4-tp8-b128")
+          self.assertEqual(result["verdict"], "PASS" if mutation is None else "FAIL", result["reasons"])
+          if mutation is None:
+            self.assertEqual(result["topology"], {"dp": 4, "tp": 8})
+            self.assertEqual(result["zero_tim"]["expected_pass"], 132)
+
+  def test_frozenlake_contract_requires_eval_off(self):
+    required = classifier._required_recipe_env(
+        "p45", classifier._RECIPES["p45"]
+    )
+    m15_required = classifier._required_recipe_env(
+        "m15", classifier._RECIPES["m15"]
+    )
+    self.assertEqual(required["CANON_P33_ENABLE_EVAL"], "0")
+    self.assertEqual(required["CANON_P33_DISABLE_EVAL"], "1")
+    self.assertEqual(required["CANON_P31_ENABLE_EVAL"], "0")
+    self.assertEqual(required["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
+    self.assertEqual(required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
+    self.assertEqual(
+        m15_required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1"
+    )
+    self.assertTrue(classifier._alignment_warning_mode("p45"))
+    self.assertTrue(classifier._alignment_warning_mode("m15"))
+    self.assertFalse(classifier._alignment_warning_mode("gsm8k"))
+    self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15_required)
+    self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", required)
+    for name in (
+        "CANON_FROZENLAKE_CKPT_ROOT",
+        "CANON_FROZENLAKE_CKPT_TAG",
+        "CANON_FROZENLAKE_CKPT_INTERVAL",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
+    ):
+      self.assertEqual(required[name], "")
+
+  def test_m15_tito_defaults_off_and_accepts_explicit_exact(self):
+    digest = "a" * 64
+    exact = (
+        "[env] M15 exact TITO enabled mode=exact default=off\n"
+        "[CANON_M15_TOKEN_CONTINUITY] mode=exact turn=1 "
+        "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 expected_tokens=5 "
+        f"actual_sha256={digest} expected_sha256={digest} "
+        "first_mismatch=-1 actual_token=NA expected_token=NA\n"
+    )
+    reasons = []
+    receipts, equal = classifier._validate_m15_tito("m15", {}, "", reasons)
+    self.assertEqual(reasons, [])
+    self.assertEqual(receipts, [])
+    self.assertEqual(equal, [])
+
+    reasons = []
+    receipts, equal = classifier._validate_m15_tito(
+        "m15", {"CANON_M15_TOKEN_CONTINUITY": "exact"}, exact, reasons
+    )
+    self.assertEqual(reasons, [])
+    self.assertEqual(len(receipts), 1)
+    self.assertEqual(len(equal), 1)
+
+    reasons = []
+    classifier._validate_m15_tito(
+        "m15", {"CANON_M15_TOKEN_CONTINUITY": "exact"}, "", reasons
+    )
+    self.assertIn("m15_exact_tito_receipts_missing", reasons)
+    self.assertIn("m15_exact_tito_env_receipt_count", reasons)
+
+    reasons = []
+    different = exact.replace("TOKEN_STREAM_EQUAL", "TOKEN_STREAM_DIFFERENT")
+    classifier._validate_m15_tito(
+        "m15",
+        {"CANON_M15_TOKEN_CONTINUITY": "exact"},
+        different,
+        reasons,
+    )
+    self.assertIn("m15_exact_tito_receipt_not_equal", reasons)
+
+    reasons = []
+    classifier._validate_m15_tito(
+        "m15", {"CANON_M15_TOKEN_CONTINUITY": "verify"}, "", reasons
+    )
+    self.assertIn(
+        "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected", reasons
+    )
+
+    reasons = []
+    classifier._validate_m15_tito(
+        "m15",
+        {},
+        exact,
+        reasons,
+    )
+    self.assertIn("unexpected_m15_token_receipt", reasons)
+
+  def test_p57_tito_accepts_exact_p45_and_m15_and_rejects_cross_labels(self):
+    digest = "b" * 64
+    trajectory_id = "1" * 32
+    for recipe in ("p45", "m15"):
+      exact = (
+          f"[env] P57 exact TITO enabled workload={recipe} "
+          "mode=exact default=off\n"
+          f"[CANON_P57_TOKEN_CONTINUITY] workload={recipe} mode=exact "
+          f"trajectory_id={trajectory_id} turn=1 "
+          "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 "
+          f"expected_tokens=5 actual_sha256={digest} "
+          f"expected_sha256={digest} first_mismatch=-1 "
+          "actual_token=NA expected_token=NA\n"
+          f"[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload={recipe} "
+          f"trajectory_id={trajectory_id} steps=2 expected_later_turns=1 "
+          "receipts=1 verdict=PASS\n"
+      )
+      exact_env = {
+          "CANON_P57_TOKEN_CONTINUITY": "exact",
+          "CANON_GLOBAL_TRAJECTORIES": "1",
+          "CANON_P57_EXPECTED_UPDATES": "1",
+      }
+      reasons = []
+      receipts, equal = classifier._validate_frozenlake_tito(
+          recipe, exact_env, exact, reasons
+      )
+      self.assertEqual(reasons, [])
+      self.assertEqual(len(receipts), 1)
+      self.assertEqual(len(equal), 1)
+
+      wrong = exact.replace(f"workload={recipe}", "workload=neighbor")
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, wrong, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_receipt_workload", reasons)
+
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, "", reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_receipts_missing", reasons)
+      self.assertIn(f"{recipe}_exact_tito_env_receipt_count", reasons)
+
+      without_summary = exact.rsplit(
+          "[CANON_P57_TOKEN_CONTINUITY_SUMMARY]", 1
+      )[0]
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, without_summary, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_summary_count", reasons)
+      self.assertIn(f"{recipe}_exact_tito_receipt_completeness", reasons)
+
+      duplicate_summary = exact + exact.splitlines(keepends=True)[-1]
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, duplicate_summary, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_summary_duplicate", reasons)
+
+      missing_turn = exact.replace(" turn=1 ", " ", 1)
+      reasons = []
+      classifier._validate_frozenlake_tito(
+          recipe, exact_env, missing_turn, reasons
+      )
+      self.assertIn(f"{recipe}_exact_tito_receipt_identity", reasons)
+
+  def test_p57_tito_rejects_mixed_selectors_and_unselected_receipts(self):
+    digest = "c" * 64
+    exact = (
+        "[env] P57 exact TITO enabled workload=p45 mode=exact default=off\n"
+        "[CANON_P57_TOKEN_CONTINUITY] workload=p45 mode=exact turn=1 "
+        "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 expected_tokens=5 "
+        f"actual_sha256={digest} expected_sha256={digest} "
+        "first_mismatch=-1 actual_token=NA expected_token=NA\n"
+    )
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        {
+            "CANON_P57_TOKEN_CONTINUITY": "exact",
+            "CANON_M15_TOKEN_CONTINUITY": "exact",
+        },
+        exact,
+        reasons,
+    )
+    self.assertIn("resolved_env.token_continuity_selectors_conflict", reasons)
+    self.assertIn("unexpected_legacy_m15_selector", reasons)
+
+    reasons = []
+    classifier._validate_frozenlake_tito("p45", {}, exact, reasons)
+    self.assertIn("unexpected_m15_token_receipt", reasons)
+    self.assertIn("unexpected_p57_exact_tito_env_receipt", reasons)
+
+    reasons = []
+    classifier._validate_m15_tito(
+        "p45", {"CANON_M15_TOKEN_CONTINUITY": "exact"}, exact, reasons
+    )
+    self.assertIn(
+        "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected", reasons
+    )
+    self.assertIn("unexpected_m15_token_receipt", reasons)
+
+  def test_p57_first_diff_debug_is_armed_only_on_success_without_a_dump(self):
+    digest = "d" * 64
+    trajectory_id = "2" * 32
+    exact = (
+        "[env] P57 exact TITO enabled workload=p45 mode=exact default=off\n"
+        "[env] P57 exact TITO first-diff diagnostics armed "
+        "workload=p45 default=off\n"
+        "[CANON_P57_TOKEN_CONTINUITY] workload=p45 mode=exact turn=1 "
+        f"trajectory_id={trajectory_id} "
+        "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 expected_tokens=5 "
+        f"actual_sha256={digest} expected_sha256={digest} "
+        "first_mismatch=-1 actual_token=NA expected_token=NA\n"
+        "[CANON_P57_TOKEN_CONTINUITY_SUMMARY] workload=p45 "
+        f"trajectory_id={trajectory_id} steps=2 expected_later_turns=1 "
+        "receipts=1 verdict=PASS\n"
+    )
+    exact_env = {
+        "CANON_P57_TOKEN_CONTINUITY": "exact",
+        "CANON_P57_TOKEN_CONTINUITY_DEBUG": "first-diff",
+        "CANON_GLOBAL_TRAJECTORIES": "1",
+        "CANON_P57_EXPECTED_UPDATES": "1",
+    }
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        exact_env,
+        exact,
+        reasons,
+    )
+    self.assertEqual(reasons, [])
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        exact_env,
+        exact
+        + "[CANON_P57_TOKEN_CONTINUITY_DEBUG] {}\n"
+        + "[CANON_P57_TOKEN_CONTINUITY_DEBUG_JSON] {}\n"
+        + "[CANON_P57_TOKEN_CONTINUITY_DEBUG_CAPSULE] verdict=PASS\n",
+        reasons,
+    )
+    self.assertIn(
+        "successful_exact_run_contains_first_diff_debug", reasons
+    )
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        exact_env,
+        exact.replace(
+            "[env] P57 exact TITO first-diff diagnostics armed "
+            "workload=p45 default=off\n",
+            "",
+        ),
+        reasons,
+    )
+    self.assertIn("p45_exact_tito_debug_arm_receipt_count", reasons)
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        {"CANON_P57_TOKEN_CONTINUITY_DEBUG": "first-diff"},
+        "",
+        reasons,
+    )
+    self.assertIn(
+        "resolved_env.CANON_P57_TOKEN_CONTINUITY_DEBUG_unscoped", reasons
+    )
+
+    reasons = []
+    classifier._validate_frozenlake_tito(
+        "p45",
+        {},
+        "[CANON_P57_TOKEN_CONTINUITY_DEBUG] {}\n",
+        reasons,
+    )
+    self.assertIn("unexpected_p57_token_debug_receipt", reasons)
+  def test_p45_length_sort_requires_exact_runtime_receipts(self):
+    digest = "a" * 64
+    receipt = (
+        "[P32.LENGTH_SORT] enabled=1 rows=256 dp=8 groups=32 "
+        f"permutation_sha256={digest}\n"
+    )
+    reasons = []
+    enabled, receipts = classifier._validate_p45_length_sort(
+        "p45",
+        {},
+        "",
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertFalse(enabled)
+    self.assertEqual(receipts, [])
+    self.assertEqual(reasons, [])
+
+    reasons = []
+    enabled, receipts = classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt * 4,
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertTrue(enabled)
+    self.assertEqual(len(receipts), 4)
+    self.assertEqual(reasons, [])
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt * 3,
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("p45_length_sort_receipts=3 expected=4", reasons)
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt.replace("groups=32", "groups=31") * 4,
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("p45_length_sort_receipt_invalid", reasons)
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "gsm8k",
+        {"CANON_P32_LENGTH_SORT": "1"},
+        receipt,
+        expected_updates=4,
+        dp_size=16,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("resolved_env.CANON_P32_LENGTH_SORT_non_p45", reasons)
+    self.assertIn("unexpected_p32_length_sort_receipt", reasons)
+
+    reasons = []
+    classifier._validate_p45_length_sort(
+        "p45",
+        {"CANON_P32_LENGTH_SORT": "0"},
+        "",
+        expected_updates=4,
+        dp_size=8,
+        global_trajectories=256,
+        reasons=reasons,
+    )
+    self.assertIn("resolved_env.CANON_P32_LENGTH_SORT_invalid", reasons)
+
+  def test_any_real_alignment_fail_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(
+          Path(tmp), alignment_fail=True
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("canon_align_fail=1 expected=0", record["reasons"])
+
+  def test_gsm8k_rejects_frozenlake_p67_scope(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8")
+          + "export CANON_P67_P66_VMA_P59_ONLY=1\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "resolved_env.CANON_P67_P66_VMA_P59_ONLY_unexpected",
+          record["reasons"],
+      )
+
+  def test_missing_first_update_precommit_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          "\n".join(
+              line for line in run_log.read_text(encoding="utf-8").splitlines()
+              if "canon-v1-first-update-precommit-v1" not in line
+          ) + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k", state=state, run_log=run_log,
+          update_report=updates, base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("first_update_precommit=0 expected=1", record["reasons"])
+
+  def test_over_threshold_first_update_precommit_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          run_log.read_text(encoding="utf-8").replace(
+              '"stable_norm":2.0', '"stable_norm":1.0e+21'
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k", state=state, run_log=run_log,
+          update_report=updates, base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertTrue(any(
+          reason.startswith("first_update_precommit_invalid=")
+          for reason in record["reasons"]
+      ))
+
+  def test_missing_profile_artifact_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      (state / "xprof-update/plugins/profile/1/device.xplane.pb").unlink()
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("missing_xplane", record["reasons"])
+
+  def test_wrong_xprof_gcs_path_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "p33/state/attempt-direct/xprof-update",
+              "p33/foreign/attempt-direct/xprof-update",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("resolved_env.CANON_XPROF_DIR", record["reasons"])
+
+  def test_missing_xprof_restore_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      (state / "xprof_gcs_restore.receipt").unlink()
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("missing_xprof_gcs_restore_receipt", record["reasons"])
+
+  def test_incoherent_xprof_restore_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      receipt = state / "xprof_gcs_restore.receipt"
+      receipt.write_text(
+          receipt.read_text(encoding="utf-8").replace(
+              "status=PASS tool=gcloud rc=0 xplanes=1 traces=1",
+              "status=PASS tool=none rc=0 xplanes=0 traces=1",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("xprof_gcs_restore.tool", record["reasons"])
+      self.assertIn("xprof_gcs_restore.xplanes", record["reasons"])
+
+  def test_missing_p59_head_partition_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      text = run_log.read_text(encoding="utf-8")
+      run_log.write_text(
+          "\n".join(
+              line
+              for line in text.splitlines()
+              if "head_cotangent_partition_ready" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("marker.p59_head_partition=0", record["reasons"])
+
+  def test_wrong_p59_head_shape_is_fatal(self):
+    replacements = {
+        "global": (
+            "global_shape=(4096, 151936)",
+            "global_shape=(2048, 151936)",
+        ),
+        "local": (
+            "local_shape=(256,37984)",
+            "local_shape=(128,37984)",
+        ),
+    }
+    for label, (before, after) in replacements.items():
+      with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+        state, run_log, updates, base = self._evidence(Path(tmp))
+        run_log.write_text(
+            run_log.read_text(encoding="utf-8").replace(before, after),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertIn(
+            "p59_head_partition_shape_or_placement", record["reasons"]
+        )
+
+  def test_recipe_shape_contracts_cover_dp16_and_dp8(self):
+    expected = {
+        "gsm8k": (16, 4, 4096, 256, 6144, 37984),
+        "p45": (8, 8, 2048, 256, 12288, 18992),
+        "m15": (8, 8, 2048, 256, 12288, 18992),
+    }
+    for recipe, values in expected.items():
+      contract = classifier._RECIPES[recipe]
+      self.assertEqual(
+          (
+              contract["dp"],
+              contract["tp"],
+              contract["global_m"],
+              contract["local_m"],
+              contract["intermediate"],
+              contract["local_vocab"],
+          ),
+          values,
+      )
+    self.assertFalse(classifier._RECIPES["p45"]["apc"])
+    self.assertFalse(classifier._RECIPES["m15"]["apc"])
+    self.assertNotIn(
+        "CANON_P67_P66_VMA_P59_ONLY",
+        classifier._required_recipe_env(
+            "gsm8k", classifier._RECIPES["gsm8k"]
+        ),
+    )
+    for recipe in ("p45", "m15"):
+      self.assertEqual(
+          classifier._required_recipe_env(
+              recipe, classifier._RECIPES[recipe]
+          )["CANON_P67_P66_VMA_P59_ONLY"],
+          "1",
+      )
+
+  def test_wrong_jax_cache_bucket_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "gs://yuxzhang-tunix-models/cache/p33_compilation_cache",
+              "gs://wrong/cache",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertTrue(
+          any(reason.startswith("resolved_env=") for reason in record["reasons"])
+      )
+
+  def test_missing_jax_cache_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      (state / "jax_cache_restore.receipt").unlink()
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("missing_jax_cache_restore_receipt", record["reasons"])
+
+  def test_incoherent_jax_cache_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      receipt = state / "jax_cache_restore.receipt"
+      receipt.write_text(
+          receipt.read_text(encoding="utf-8").replace(
+              "status=hit tool=gcloud rc=0 entries=3",
+              "status=hit tool=none rc=23 entries=0",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("jax_cache_restore.status_contract", record["reasons"])
+
+  def test_wrong_profile_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
+              "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertTrue(
+          any(
+              reason.startswith("resolved_env=")
+              for reason in record["reasons"]
+          )
+      )
+
+  def test_missing_reduce_once_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "export CANON_DP_REDUCE_ONCE=1\n", ""
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "resolved_env={'CANON_DP_REDUCE_ONCE': None}", record["reasons"]
+      )
+
+  def test_missing_p63_update_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      rows = [json.loads(line) for line in updates.read_text().splitlines()]
+      del rows[0]["commit_evidence"]["overflow_safe_clip"]
+      updates.write_text(
+          "".join(json.dumps(row) + "\n" for row in rows),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("update[0].p63_missing", record["reasons"])
+
+  def test_p63_nonfinite_or_wrong_max_norm_is_fatal(self):
+    for field, value in (("all_finite", False), ("max_norm", 100.0)):
+      with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+        state, run_log, updates, base = self._evidence(Path(tmp))
+        rows = [json.loads(line) for line in updates.read_text().splitlines()]
+        rows[0]["commit_evidence"]["overflow_safe_clip"][field] = value
+        updates.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertTrue(
+            any(".p63_invalid=" in reason for reason in record["reasons"])
+        )
+
+  def test_gsm8k_requires_observed_p63_fallback(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      rows = [json.loads(line) for line in updates.read_text().splitlines()]
+      clip = rows[0]["commit_evidence"]["overflow_safe_clip"]
+      clip.update({
+          "naive_norm": 0.5,
+          "naive_norm_finite": True,
+          "stable_norm": 0.5,
+          "selected_norm": 0.5,
+          "fallback_used": False,
+          "clip_factor": 1.0,
+      })
+      updates.write_text(
+          "".join(json.dumps(row) + "\n" for row in rows),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("p63_gsm8k_fallback_not_observed", record["reasons"])
+
+  def test_apc_on_is_fatal_for_an_apc_off_recipe(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          "[P3_APC_CONFIG] enabled=1 workload=frozenlake "
+          "reader=train_frozenlake_qwen3\n"
+          + run_log.read_text(encoding="utf-8"),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("unexpected_apc_on", record["reasons"])
+
+  def test_frozenlake_apc_off_requires_exact_runtime_marker(self):
+    contract = classifier._RECIPES["gsm8k"]
+    original_workload = contract["workload"]
+    contract["workload"] = "frozenlake-dp8-tp8"
+    try:
+      with tempfile.TemporaryDirectory() as tmp:
+        state, run_log, updates, base = self._evidence(Path(tmp))
+        run_log.write_text(
+            run_log.read_text(encoding="utf-8")
+            .replace('"workload":"gsm8k"', '"workload":"frozenlake-dp8-tp8"')
+            .replace(
+                "[P59.CHECKED_VMA] enabled=1 workload=gsm8k ",
+                "[P59.CHECKED_VMA] enabled=1 workload=frozenlake-dp8-tp8 ",
+            ),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertIn("apc_runtime_marker", record["reasons"])
+
+        marker = (
+            "[P3_APC_CONFIG] enabled=0 workload=frozenlake "
+            "reader=train_frozenlake_qwen3\n"
+        )
+        run_log.write_text(
+            marker + run_log.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "PASS", record["reasons"])
+
+        run_log.write_text(
+            marker + run_log.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertIn("apc_runtime_marker", record["reasons"])
+    finally:
+      contract["workload"] = original_workload
+
+  def test_wrong_p59_local_chunks_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          run_log.read_text(encoding="utf-8").replace(
+              "fixed_M=256 chunks=1 accumulation=lax.scan",
+              "fixed_M=256 chunks=16 accumulation=lax.scan",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "p59_fixed_head_vjp_global_local_shape_chunks_or_reduction",
+          record["reasons"],
+      )
+
+  def test_missing_p59_rpa_local_kv_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          "\n".join(
+              line
+              for line in run_log.read_text(encoding="utf-8").splitlines()
+              if "P59_RPA_LOCAL_KV_READY" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("p59_rpa_local_kv_receipt_missing", record["reasons"])
+
+  def test_wrong_p59_rpa_local_kv_shape_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          run_log.read_text(encoding="utf-8").replace(
+              "local_kv_heads=2 cache_heads=2",
+              "local_kv_heads=4 cache_heads=2",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("p59_rpa_local_kv_shape_or_topology", record["reasons"])
+
+  def test_missing_p59_local_fused_linear_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      text = run_log.read_text(encoding="utf-8")
+      run_log.write_text(
+          "\n".join(
+              line
+              for line in text.splitlines()
+              if "P59_LOCAL_FUSED_LINEAR_READY" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "p59_local_fused_linear_receipt_missing", record["reasons"]
+      )
+
+  def test_wrong_p59_local_fused_linear_shape_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      text = run_log.read_text(encoding="utf-8")
+      run_log.write_text(
+          text.replace("local_width=1536", "local_width=6144"),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "p59_local_fused_linear_shape_or_topology", record["reasons"]
+      )
+
+  def test_direct_eval_cycle_timing_uses_explicit_enclosing_step(self):
+    rows = [
+        {"global_step": float(step), "wall_seconds": float(step)}
+        for step in range(300)
+    ]
+    steady, eval_steps, direct_eval_cycle_excluded = (
+        classifier._steady_timing_rows(
+        rows,
+        expected_updates=300,
+        p57_eval={
+            "steps": [0, 50, 100, 150, 200, 250, 300],
+            "cycle_receipts": [
+                {
+                    "policy_step": step,
+                    "enclosing_global_step": (
+                        None if step == 300 else step + 1
+                    ),
+                }
+                for step in range(0, 301, 50)
+            ],
+        },
+        )
+    )
+    self.assertNotIn(2, {int(row["global_step"]) for row in steady})
+    self.assertEqual(eval_steps, {1, 51, 101, 151, 201, 251})
+    training_steps = {
+        int(row["global_step"]) for row in direct_eval_cycle_excluded
+    }
+    self.assertTrue(eval_steps.isdisjoint(training_steps))
+    self.assertIn(50, training_steps)
+    self.assertIn(299, training_steps)
+
+
+if __name__ == "__main__":
+  unittest.main()

@@ -17,6 +17,6 @@ if ! [[ "$RUN_ID" =~ ^[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?$ ]]; then
   exit 2
 fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-bash "$REPO/canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh" \
+bash "$REPO/canon-zero-tim/workloads/frozenlake-three-arm/scripts/render_three_arm_wave.sh" \
   standard "$SHA" "$OUT" "$RUN_ID" "$RUN_ID-m15" "$RUN_ID-campaign"
 echo "MANIFEST=$(cd "$OUT/p45" && pwd)/jobset-p57-frozenlake-standard-300.yaml"

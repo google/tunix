@@ -30,15 +30,15 @@ WLSHA="4d7d720d3a39281cbddbf0177ea60caf610041df9ba9a17440605c91b48aacfd"
 
 # name|command with {OUT} placeholder (workdir = repo root so relative defaults resolve)
 MANIFEST=(
-  "p33|python3 $CL/render_p33_jobsets.py --source-commit $SHA_PIN --run-id $RUN_PIN --output-dir {OUT}"
-  "p35|python3 $CL/render_p35_jobset.py --source-commit $SHA_PIN --run-id $RUN_PIN --output {OUT}/p35.yaml"
-  "p36|python3 $CL/render_p36_proxy_xla_jobset.py --source-commit $SHA_PIN --run-id $RUN_PIN --output {OUT}/p36.yaml"
-  "p38aval|python3 $CL/render_p38_aval_jobset.py --source-commit $SHA_PIN --run-id $RUN_PIN --output {OUT}/p38aval.yaml"
+  "p33|python3 $CL/render_jobsets.py --source-commit $SHA_PIN --run-id $RUN_PIN --output-dir {OUT}"
+  "p35|python3 $CL/render_envelope_jobset.py --source-commit $SHA_PIN --run-id $RUN_PIN --output {OUT}/p35.yaml"
+  "p36|python3 $CL/render_proxy_xla_jobset.py --source-commit $SHA_PIN --run-id $RUN_PIN --output {OUT}/p36.yaml"
+  "p38aval|python3 $CL/render_alignment_carrier_aval.py --source-commit $SHA_PIN --run-id $RUN_PIN --output {OUT}/p38aval.yaml"
   "chip128|CANON_EXPECT_COMMIT=$SHA_PIN python3 $CL/render_128chip_jobset.py --source-commit $SHA_PIN --run-id $RUN_PIN --output-dir {OUT}"
-  "p34|python3 $CL/render_p34_jobset.py --base $BASE64C --output {OUT}/p34.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --whitelist $WL --whitelist-sha256 $WLSHA"
-  "p39|python3 $CL/render_p39_deepswe_pilot.py --base $BASE64C --output {OUT}/p39.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --cpu-nodepool golden-pool --worker-nodepool golden-workers --model-pvc golden-pvc --whitelist $WL --whitelist-sha256 $WLSHA"
-  "p43|python3 $CL/render_p43_deepswe_debug.py --base $BASE64C --output {OUT}/p43.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --cpu-nodepool golden-pool --worker-nodepool golden-workers --model-pvc golden-pvc --whitelist $WL --whitelist-sha256 $WLSHA"
-  "p44|python3 $CL/render_p44_deepswe_parity.py --base $BASE64C --output {OUT}/p44.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --topology 64 --cpu-nodepool golden-pool --worker-nodepool golden-workers --model-pvc golden-pvc --whitelist $WL --whitelist-sha256 $WLSHA"
+  "p34|python3 $CL/render_deepswe_jobset.py --base $BASE64C --output {OUT}/p34.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --whitelist $WL --whitelist-sha256 $WLSHA"
+  "p39|python3 $CL/render_deepswe_pilot.py --base $BASE64C --output {OUT}/p39.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --cpu-nodepool golden-pool --worker-nodepool golden-workers --model-pvc golden-pvc --whitelist $WL --whitelist-sha256 $WLSHA"
+  "p43|python3 $CL/render_deepswe_debug.py --base $BASE64C --output {OUT}/p43.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --cpu-nodepool golden-pool --worker-nodepool golden-workers --model-pvc golden-pvc --whitelist $WL --whitelist-sha256 $WLSHA"
+  "p44|python3 $CL/render_deepswe_parity.py --base $BASE64C --output {OUT}/p44.yaml --source-commit $SHA_PIN --client-image $IMG_PIN --run-id $RUN_PIN --stage one-update --topology 64 --cpu-nodepool golden-pool --worker-nodepool golden-workers --model-pvc golden-pvc --whitelist $WL --whitelist-sha256 $WLSHA"
 )
 
 render() { # $1 cmd-template $2 outdir -> 0 ok

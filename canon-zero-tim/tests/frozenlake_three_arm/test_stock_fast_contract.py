@@ -1,0 +1,332 @@
+"""Pinned-image gate for the P57 stock-fast resolved environment."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+from tunix.rl import dp_workloads
+
+
+ROOT = Path(__file__).resolve().parents[3]
+CLASSIFIER_PATH = (
+    ROOT
+    / "canon-zero-tim/workloads/frozenlake-three-arm/scripts/classify_stock_discovery.py"
+)
+SPEC = importlib.util.spec_from_file_location(
+    "p57_stock_fast_classifier_contract", CLASSIFIER_PATH
+)
+assert SPEC and SPEC.loader
+classifier = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = classifier
+SPEC.loader.exec_module(classifier)
+
+
+class P57StockFastContractTest(unittest.TestCase):
+
+  def test_standard_resolved_env_reload_reaches_python_admission(self):
+    sys.path.insert(0, str(ROOT / "canon-zero-tim/cluster"))
+    import render_frozenlake_three_arm as renderer
+    import yaml
+
+    for candidate, split in (("", ""), ("m15", "main")):
+      with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as tmp:
+        paths = renderer.render_all(
+            base_path=ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml",
+            output_dir=Path(tmp) / "rendered", source_commit="a" * 40,
+            run_id="stdreload", campaign_tag="standard-env-gate",
+            checkpoint_mode="new", expected_updates=300, arm="standard",
+            workload_candidate=candidate, data_split=split)
+        document = yaml.safe_load(paths[0].read_text())
+        containers = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]
+        container = next(c for c in containers if c["name"] == "jax-tpu")
+        values = {e["name"]: e["value"] for e in container["env"] if "value" in e}
+        state = Path(tmp) / "state"
+        state.mkdir()
+        result = subprocess.run(["bash", "cluster/steps/00_env.sh"],
+            cwd=ROOT / "canon-zero-tim", capture_output=True, text=True,
+            env={**os.environ, **values, "CANON_PKG": str(ROOT / "canon-zero-tim"),
+                 "CANON_STATE": str(state), "INJECTED_HF_TOKEN": "test-only",
+                 "INJECTED_WANDB_API_KEY": "test-only"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Reload the shell snapshot in a separate process, as entrypoint does.
+        code = (
+            "import os; from tunix.rl import dp_workloads as d; "
+            "from tunix.rl.agentic.agentic_grpo_learner import _validate_p57_old_logps_source_request as v; "
+            "v(os.environ, 'trainer', 'none'); "
+            "a=d.validate_p57_stock_train_environment(d.get_workload('frozenlake-dp8-tp8')); "
+            "assert a['arm']=='standard'; print('P57_STANDARD_ENV_RELOAD_PASS')")
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; exec python3 -c "$2"', "standard-reload", str(state / "env.sh"), code],
+            cwd=ROOT, capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": str(ROOT), "JAX_PLATFORMS": "cpu"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("P57_STANDARD_ENV_RELOAD_PASS", result.stdout)
+
+  def _environment(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    values = {
+        "CANON_P57_RUN_KIND": "calibration",
+        "CANON_P57_TIM_ARM": "mismatch",
+        "CANON_P57_INFERENCE_REGIME": "stock-fast",
+        "CANON_P32_WORKLOAD": workload.name,
+        "CANON_DP_SIZE": str(workload.dp_size),
+        "CANON_TP_SIZE": str(workload.tp_size),
+        "CANON_TOTAL_DEVICES": str(workload.total_devices),
+        "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+        "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
+        "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+        "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
+        "CANON_NUM_GENERATIONS": str(workload.num_generations),
+        "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+        "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+        "CANON_TARGET_M": str(workload.local_m),
+        "MIN_TOKEN_BUCKET": str(workload.global_m),
+        "XLA_FLAGS": "--xla_cpu_max_isa=AVX2",
+    }
+    values.update({
+        name: "0" for name in dp_workloads.P57_STOCK_FAST_ZERO_SWITCHES
+    })
+    return workload, values
+
+  def test_complete_bundle_is_accepted(self):
+    workload, values = self._environment()
+    attestation = dp_workloads.validate_p57_stock_fast_environment(
+        workload, values
+    )
+    self.assertEqual(attestation["regime"], "stock-fast")
+    self.assertEqual(len(attestation["absent_switches"]), 12)
+    self.assertEqual(len(attestation["zero_switches"]), 26)
+
+  def test_runtime_and_offline_classifier_attest_the_same_switches(self):
+    self.assertEqual(
+        tuple(classifier._ABSENT_SWITCHES),
+        dp_workloads.P57_STOCK_FAST_ABSENT_SWITCHES,
+    )
+    self.assertEqual(
+        tuple(classifier._ZERO_SWITCHES),
+        dp_workloads.P57_STOCK_FAST_ZERO_SWITCHES,
+    )
+
+  def test_each_switch_class_has_a_working_negative(self):
+    workload, values = self._environment()
+    for name, value in (
+        ("CANON_FIXED_AR", "1"),
+        ("CANON_ENGINE_MODULE_C", "1"),
+        ("CANON_P78_SEGMENTED_ACTOR_LOGPS", "1"),
+        ("CANON_P78_SEGMENTED_ACTOR_LOGPS", ""),
+        ("CANON_P78_SEGMENTED_ACTOR_LOGPS", "invalid"),
+        ("XLA_FLAGS", "--xla_allow_excess_precision=false"),
+    ):
+      with self.subTest(name=name):
+        with self.assertRaisesRegex(ValueError, "stock-fast environment"):
+          dp_workloads.validate_p57_stock_fast_environment(
+              workload, {**values, name: value}
+          )
+
+  def test_calibration_requires_an_explicit_p78_off_receipt(self):
+    workload, values = self._environment()
+    values.pop("CANON_P78_SEGMENTED_ACTOR_LOGPS")
+    with self.assertRaisesRegex(ValueError, "CANON_P78_SEGMENTED_ACTOR_LOGPS"):
+      dp_workloads.validate_p57_stock_fast_environment(workload, values)
+
+  def test_stock_train_and_eval_bundles_are_accepted(self):
+    workload, base = self._environment()
+    shared = {
+        **base,
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "selection",
+        "CANON_P57_EXPECTED_UPDATES": "200",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
+    }
+    train = {
+        **shared,
+        "CANON_P57_RUN_KIND": "train",
+        **{name: "0" for name in dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES},
+        **{name: "1" for name in dp_workloads.P57_STOCK_TRAIN_ONE_SWITCHES},
+    }
+    eval_values = {
+        **shared,
+        "CANON_P57_RUN_KIND": "eval",
+        **{name: "0" for name in dp_workloads.P57_STOCK_EVAL_ZERO_SWITCHES},
+        **{name: "1" for name in dp_workloads.P57_STOCK_EVAL_ONE_SWITCHES},
+    }
+    train_attestation = dp_workloads.validate_p57_stock_train_environment(
+        workload, train
+    )
+    eval_attestation = dp_workloads.validate_p57_stock_eval_environment(
+        workload, eval_values
+    )
+    self.assertEqual(train_attestation["arm"], "mismatch")
+    self.assertEqual(eval_attestation["arm"], "mismatch")
+    for validator, values in (
+        (dp_workloads.validate_p57_stock_train_environment, train),
+        (dp_workloads.validate_p57_stock_eval_environment, eval_values),
+    ):
+      for value in (None, "", "1", "invalid"):
+        with self.subTest(validator=validator.__name__, p78=value):
+          bad = dict(values)
+          bad.pop("CANON_P78_SEGMENTED_ACTOR_LOGPS")
+          if value is not None:
+            bad["CANON_P78_SEGMENTED_ACTOR_LOGPS"] = value
+          with self.assertRaisesRegex(
+              ValueError, "CANON_P78_SEGMENTED_ACTOR_LOGPS"
+          ):
+            validator(workload, bad)
+    self.assertIn(
+        "CANON_PROMPT_PROCESSED_LOGPROBS", train_attestation["one_switches"]
+    )
+    self.assertNotIn(
+        "CANON_PROMPT_PROCESSED_LOGPROBS", train_attestation["zero_switches"]
+    )
+    self.assertIn(
+        "CANON_PROMPT_PROCESSED_LOGPROBS", eval_attestation["zero_switches"]
+    )
+
+    with self.assertRaisesRegex(ValueError, "stock-train environment"):
+      dp_workloads.validate_p57_stock_train_environment(
+          workload, {**train, "CANON_P28_SEGMENTED_TRAIN": "1"}
+      )
+    with self.assertRaisesRegex(ValueError, "stock-train environment"):
+      dp_workloads.validate_p57_stock_train_environment(
+          workload, {**train, "CANON_PROMPT_PROCESSED_LOGPROBS": "0"}
+      )
+    with self.assertRaisesRegex(ValueError, "stock-eval environment"):
+      dp_workloads.validate_p57_stock_eval_environment(
+          workload, {**eval_values, "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0"}
+      )
+    with self.assertRaisesRegex(ValueError, "stock-eval environment"):
+      dp_workloads.validate_p57_stock_eval_environment(
+          workload,
+          {**eval_values, "CANON_PROMPT_PROCESSED_LOGPROBS": "1"},
+      )
+
+  def test_all_registered_stock_runtime_variants_are_accepted(self):
+    workload, base = self._environment()
+    variants = (
+        ("mismatch", "m15", "selection", "200", "m15-selection-mismatch"),
+        ("mismatch", "", "", "300", "p45-mismatch"),
+        ("is", "", "", "300", "p45-is"),
+        ("mismatch", "m15", "main", "300", "m15-main-mismatch"),
+        ("is", "m15", "main", "300", "m15-main-is"),
+        ("standard", "", "", "300", "p45-standard"),
+        ("standard", "m15", "main", "300", "m15-main-standard"),
+    )
+    for run_kind in ("train", "eval"):
+      zero_switches = (
+          dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES
+          if run_kind == "train"
+          else dp_workloads.P57_STOCK_EVAL_ZERO_SWITCHES
+      )
+      one_switches = (
+          dp_workloads.P57_STOCK_TRAIN_ONE_SWITCHES
+          if run_kind == "train"
+          else dp_workloads.P57_STOCK_EVAL_ONE_SWITCHES
+      )
+      validator = (
+          dp_workloads.validate_p57_stock_train_environment
+          if run_kind == "train"
+          else dp_workloads.validate_p57_stock_eval_environment
+      )
+      for arm, candidate, split, updates, expected_variant in variants:
+        with self.subTest(
+            run_kind=run_kind,
+            arm=arm,
+            candidate=candidate,
+            split=split,
+        ):
+          values = {
+              **base,
+              "CANON_P57_RUN_KIND": run_kind,
+              "CANON_P57_TIM_ARM": arm,
+              "CANON_P57_WORKLOAD_CANDIDATE": candidate,
+              "CANON_P57_DATA_SPLIT": split,
+              "CANON_P57_EXPECTED_UPDATES": updates,
+              "CANON_P30_OPT_STATE_OFFLOAD": "0",
+              "CANON_P33_ENABLE_EVAL": "0" if updates == "200" else "1",
+              "CANON_P33_DISABLE_EVAL": "1" if updates == "200" else "0",
+              "CANON_P31_ENABLE_EVAL": "0" if updates == "200" else "1",
+              **{name: "0" for name in zero_switches},
+              **{name: "1" for name in one_switches},
+          }
+          attestation = validator(workload, values)
+          self.assertEqual(attestation["arm"], arm)
+          self.assertEqual(attestation["workload_candidate"], candidate)
+          self.assertEqual(attestation["data_split"], split)
+          self.assertEqual(attestation["variant"], expected_variant)
+    print(
+        "P57_STOCK_RUNTIME_MATRIX_PASS variants=7 stages=train,eval",
+        flush=True,
+    )
+
+  def test_unregistered_stock_runtime_variants_are_rejected(self):
+    workload, base = self._environment()
+    values = {
+        **base,
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "is",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "selection",
+        "CANON_P57_EXPECTED_UPDATES": "200",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
+        **{
+            name: "0" for name in dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES
+        },
+        **{
+            name: "1" for name in dp_workloads.P57_STOCK_TRAIN_ONE_SWITCHES
+        },
+    }
+    with self.assertRaisesRegex(ValueError, "unregistered_variant"):
+      dp_workloads.validate_p57_stock_train_environment(workload, values)
+
+  def test_stock_observer_is_train_only_and_does_not_enable_fixed_m(self):
+    entrypoint = (ROOT / "canon-zero-tim/cluster/entrypoint.sh").read_text()
+    installer = (
+        ROOT
+        / "canon-zero-tim/cluster/steps/39_install_p57_stock_observer.sh"
+    ).read_text()
+    runner_patch = (
+        ROOT
+        / "canon-zero-tim/patches/p57_stock_observer/01-tpu-runner.patch"
+    ).read_text()
+    self.assertIn("if p57_is_stock_fast_training; then", entrypoint)
+    self.assertIn("step 39_install_p57_stock_observer.sh", entrypoint)
+    self.assertIn("observer_overlay=$p57_observer_overlay", entrypoint)
+    self.assertIn("p57_is_stock_fast_training", installer)
+    self.assertIn("stock_runner_verified=1 treatment=observer-only", installer)
+    self.assertIn("compute_processed_prompt_logprobs", runner_patch)
+    self.assertIn("CANON_PROMPT_PROCESSED_LOGPROBS", runner_patch)
+    self.assertNotIn("CANON_LOGPROB_M", runner_patch)
+    postflight = (ROOT / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
+    self.assertIn(
+        "observer=warning-only processed_b=observer-only$", postflight
+    )
+    self.assertIn('p57_stock_observer" -ne 1', postflight)
+
+  def test_stock_observer_manifest_is_exactly_runner_plus_helper(self):
+    manifest = (
+        ROOT / "canon-zero-tim/P57_STOCK_OBSERVER_MANIFEST.sha256"
+    ).read_text().splitlines()
+    self.assertEqual(len(manifest), 2)
+    self.assertEqual(
+        {line.split(maxsplit=1)[1] for line in manifest},
+        {
+            "runner/tpu_runner.py",
+            "runner/p57_stock_prompt_observer.py",
+        },
+    )
+
+
+if __name__ == "__main__":
+  unittest.main()

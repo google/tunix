@@ -130,10 +130,10 @@ def test_real_reverse_keeps_rank_selector_as_first_boundary(monkeypatch):
 
 
 @pytest.mark.parametrize("relative,count", (
-    ("v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_common.sh", 2),
-    ("v2-frozenlake-onehost/scripts/run_frozenlake_dp2tp2_onehost.sh", 1),
+    ("gsm8k-onehost-xprof/scripts/run_onehost_gsm8k_xprof_common.sh", 2),
+    ("frozenlake-onehost/scripts/run_frozenlake_dp2tp2_onehost.sh", 1),
 ))
 def test_run_identity_includes_the_new_runtime_dependency(relative, count):
   repo = Path(__file__).resolve().parents[2]
-  source = (repo / "canon-zero-tim/tasks" / relative).read_text()
+  source = (repo / "canon-zero-tim/workloads" / relative).read_text()
   assert source.count('"$repo/tunix/rl/canonical_training_config.py"') == count

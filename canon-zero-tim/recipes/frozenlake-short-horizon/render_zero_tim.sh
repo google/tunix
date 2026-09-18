@@ -17,7 +17,7 @@ if ! [[ "$RUN_ID" =~ ^[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?$ ]]; then
   exit 2
 fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-bash "$REPO/canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh" \
+bash "$REPO/canon-zero-tim/workloads/full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh" \
   "$SHA" "$OUT" "$RUN_ID-campaign" "$RUN_ID" "$RUN_ID-m15" \
   --token-continuity both-exact --token-continuity-debug-mode record-full \
   --train-geometry dp8-tp8-b256

@@ -24,7 +24,7 @@ _DEFAULT_NODE_SELECTOR_VAL = "cpu-np"
 # does not; both stay fail-closed rather than silently falling back.  It is the
 # preferred sandbox pool because it is the only one whose node disk holds the
 # whole R2E per-task image corpus -- see _ADMITTED_SANDBOX_NODEPOOLS in
-# canon-zero-tim/cluster/render_p58_deepswe_tim.py for the measurements.
+# canon-zero-tim/cluster/render_deepswe_comparison.py for the measurements.
 #
 # This mirrors _ADMITTED_SANDBOX_NODEPOOLS in that renderer; the two must stay
 # in sync, otherwise a render passes, `kubectl apply --dry-run=server` passes,

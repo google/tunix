@@ -34,7 +34,7 @@ WEIGHT_ATTESTATION_SCHEMA = "canon.p34.deepswe.weight-attestation.v1"
 # the renderer emits a name the runtime then rejects.
 _KUBERNETES_DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z")
 # Namespaces the Fleet sandbox runtime may place Pods in.  Mirrors
-# ADMITTED_SANDBOX_NAMESPACES in canon-zero-tim/cluster/render_p34_jobset.py;
+# ADMITTED_SANDBOX_NAMESPACES in canon-zero-tim/cluster/render_deepswe_jobset.py;
 # the two must stay in sync.
 _ADMITTED_SANDBOX_NAMESPACES = frozenset({"default", "trellis"})
 P44_TOPOLOGY_FIELDS = frozenset({
@@ -1333,7 +1333,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
   # with no queue to admit it into, and they stay gated forever.
   #
   # Presence is only required when this run actually creates those Pods.
-  # NODE_SELECTOR_VAL is the signal: render_p34_jobset.py emits it together
+  # NODE_SELECTOR_VAL is the signal: render_deepswe_jobset.py emits it together
   # with the queue name, while a lane that never reaches Kubernetes has
   # neither, and must not be failed for that.
   queue_name = values.get("R2E_K8S_QUEUE_NAME", "")
@@ -1351,7 +1351,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
   # server-side dry run: it would put live sandbox Pods in a namespace nobody
   # sweeps, and the run-scoped cleanup would never find them again.  Pin it to
   # the same admitted set the renderer uses.  This mirrors
-  # ADMITTED_SANDBOX_NAMESPACES in canon-zero-tim/cluster/render_p34_jobset.py
+  # ADMITTED_SANDBOX_NAMESPACES in canon-zero-tim/cluster/render_deepswe_jobset.py
   # (which lives outside this package and cannot be imported here); the two
   # must stay in sync.
   sandbox_runtime = values.get("CANON_DEEPSWE_SANDBOX_RUNTIME", "direct")

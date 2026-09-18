@@ -22,7 +22,7 @@ SPEC.loader.exec_module(admission)
 
 
 def _load_script(name: str):
-  path = REPO / "canon-zero-tim/tasks/gemma4-e4b-frozenlake/scripts" / name
+  path = REPO / "canon-zero-tim/workloads/gemma-frozenlake/scripts" / name
   spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), path)
   if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load {path}")
@@ -273,7 +273,7 @@ class P1RecipeTest(unittest.TestCase):
     )
     runner = (
         REPO
-        / "canon-zero-tim/tasks/gemma4-e4b-frozenlake/scripts/"
+        / "canon-zero-tim/workloads/gemma-frozenlake/scripts/"
         "run_p1_onehost_stock_admission.sh"
     ).read_text(encoding="utf-8")
     for name in (

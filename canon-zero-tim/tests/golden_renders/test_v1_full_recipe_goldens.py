@@ -13,7 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = (
-    ROOT / "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts"
+    ROOT / "canon-zero-tim/workloads/full-recipes/scripts"
 )
 BASE = ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml"
 

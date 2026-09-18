@@ -1,0 +1,591 @@
+#!/usr/bin/env bash
+# Matched Qwen3-1.7B GSM8K DP4xTP1 Native/Zero-HP update XProf carrier.
+set -euo pipefail
+trap '' HUP
+
+arm="${1:?usage: run_onehost_gsm8k_xprof_common.sh <native|zero-hp> <label>}"
+label="${2:?usage: run_onehost_gsm8k_xprof_common.sh <native|zero-hp> <label>}"
+case "$arm" in
+  native|zero-hp) ;;
+  *) echo "[V1.GSM8K.XPROF] invalid arm: $arm" >&2; exit 2 ;;
+esac
+case "$label" in
+  *[!a-zA-Z0-9_-]*|'')
+    echo "[V1.GSM8K.XPROF] invalid immutable label: $label" >&2
+    exit 2
+    ;;
+esac
+# CANON_P33_RUN_STAGE is the registered stage selector, so the carrier
+# reuses it instead of shadowing it with a second flag.  It admits exactly
+# the two committed update horizons: the frozen three-update capture and
+# the six-update horizon the dark-time and first-group-warmup studies
+# need.  Every other stage (full, the no-commit diagnostics) is rejected
+# here rather than 20 minutes later inside the container.
+run_stage="${CANON_P33_RUN_STAGE:-three-update}"
+case "$run_stage" in
+  three-update) max_steps=3 ;;
+  six-update) max_steps=6 ;;
+  *)
+    echo "[V1.GSM8K.XPROF] unsupported CANON_P33_RUN_STAGE: $run_stage" >&2
+    exit 2
+    ;;
+esac
+# V1_GSM8K_XPROF_GEOMETRY selects one of the two registered carrier
+# geometries on the same four chips.  The default keeps the DP4xTP1 carrier
+# byte-identical (no geometry env enters the container, the label is
+# untouched, and every derived value below renders today's literal).  The
+# dp2-tp2 variant re-cuts the identical global work (prompts 8, generations
+# 8, trajectories 64) as data=2 x model=2 so TP collectives are present.
+# Expected mesh-id orders are the topology-aware create_device_mesh results
+# on this host: (4,1) measured [0,2,1,3]; (2,2) derived offline on the
+# pinned image's jax from the unique id->coords mapping consistent with
+# that measurement -- the preflight fails closed with both lists printed if
+# the first real run disagrees.
+geometry="${V1_GSM8K_XPROF_GEOMETRY:-dp4-tp1}"
+work_receipt=prompts8_generations8_response256_concurrency1
+xprof_budget_receipt=soft:1200000000,hard:1500000000
+case "$geometry" in
+  dp4-tp1)
+    topology=DP4xTP1
+    expected_train_mesh_ids=0,2,1,3
+    zero_model_overlay=qwen1p7b_tp1
+    zero_profile=qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env
+    serial_mesh_bridge=1
+    ;;
+  dp2-tp2)
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    # A dp2 run must never be mistaken for a dp4 run: the geometry is
+    # welded into the immutable label, so the artifact root, container
+    # name, and W&B run name all carry it.
+    label="dp2tp2-${label}"
+    ;;
+  dp2-tp2-long)
+    # Long context on the same 2x2 cut: 16 trajectories of up to 4096+1024
+    # tokens (8 gradient groups), registered as its own geometry.
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-long-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    label="dp2tp2long-${label}"
+    ;;
+  dp2-tp2-long8k)
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-long8k-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    label="dp2tp2long8k-${label}"
+    ;;
+  dp2-tp2-p45)
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-p45-shape-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    label="dp2tp2p45-${label}"
+    work_receipt=prompts4_generations4_prompt4096_response2048_concurrency1
+    xprof_budget_receipt=soft:4000000000,hard:5000000000
+    ;;
+  *)
+    echo "[V1.GSM8K.XPROF] unsupported V1_GSM8K_XPROF_GEOMETRY: $geometry" >&2
+    exit 2
+    ;;
+esac
+
+# Phase-0 numerical admission reuses the standard warm three-update XProf
+# carrier.  This outer-only selector adds a complete update-zero gradient
+# capture; it is deliberately not a CANON optimization flag and cannot arm a
+# native, non-DP2, or non-three-update run.
+v2_p0_capture_full_tree="${V2_P0_CAPTURE_FULL_TREE:-0}"
+case "$v2_p0_capture_full_tree" in
+  0) ;;
+  1)
+    if [ "$arm" != zero-hp ] || [ "$geometry" != dp2-tp2 ] || \
+       [ "$run_stage" != three-update ]; then
+      echo "[V2.P0] full-tree capture requires zero-hp dp2-tp2 three-update" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "[V2.P0] V2_P0_CAPTURE_FULL_TREE must be exactly 0 or 1" >&2
+    exit 2
+    ;;
+esac
+v2_p0_negative_control="${V2_P0_NEGATIVE_CONTROL:-}"
+case "$v2_p0_negative_control" in
+  "") ;;
+  length-sort-no-inverse)
+    if [ "${CANON_P32_LENGTH_SORT:-0}" != 1 ]; then
+      echo "[V2.P0] length-sort-no-inverse requires CANON_P32_LENGTH_SORT=1" >&2
+      exit 2
+    fi
+    ;;
+  reduce-once-reassociate-tail)
+    if [ "${CANON_DP_REDUCE_ONCE:-0}" != 1 ]; then
+      echo "[V2.P0] reduce-once-reassociate-tail requires CANON_DP_REDUCE_ONCE=1" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "[V2.P0] unsupported V2_P0_NEGATIVE_CONTROL: $v2_p0_negative_control" >&2
+    exit 2
+    ;;
+esac
+if [ -n "$v2_p0_negative_control" ] && \
+   { [ "$arm" != zero-hp ] || [ "$geometry" != dp2-tp2 ] || \
+     [ "$run_stage" != three-update ] || \
+     [ "$v2_p0_capture_full_tree" != 0 ]; }; then
+  echo "[V2.P0] negative controls require zero-hp dp2-tp2 three-update without full-tree capture" >&2
+  exit 2
+fi
+v2_p0_performance_eligible=1
+if [ "$v2_p0_capture_full_tree" = 1 ] || \
+   [ -n "$v2_p0_negative_control" ]; then
+  v2_p0_performance_eligible=0
+fi
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$script_dir/finalize_gsm8k_xprof_evidence.sh"
+repo="$(git -C "$script_dir" rev-parse --show-toplevel)"
+pkg="$repo/canon-zero-tim"
+# Resolve before both Docker forwarding and host-side evidence consumers.
+# Explicit values (including empty/0), Native and signed diagnostics keep
+# their old semantics. The policy emits only the registered constant pair.
+if [ "$arm" = zero-hp ]; then
+  _canon_training_defaults="$(python3 "$pkg/cluster/v1_full_system_optimization.py" \
+    --onehost-defaults "$arm" "$geometry" "$run_stage")"
+  eval "$_canon_training_defaults"
+  unset _canon_training_defaults
+fi
+canon_env=/mnt/disks/tunix-data/claude_work/canon_env.sh
+assets=/mnt/disks/tunix-data/gsm8k_zero_tim
+model="$assets/models"
+hf_model_cache=/mnt/disks/tunix-data/hf/hub/models--Qwen--Qwen3-1.7B
+hf_snapshot_sha="$(head -n 1 "$hf_model_cache/refs/main")"
+hf_snapshot="$hf_model_cache/snapshots/$hf_snapshot_sha"
+evidence_root="${V1_GSM8K_XPROF_EVIDENCE_ROOT:-/mnt/disks/tunix-data/gsm8k-onehost-xprof}"
+root="${V1_GSM8K_XPROF_ARTIFACT_DIR:-$evidence_root/v1_${arm}_${label}}"
+image="${V1_GSM8K_XPROF_IMAGE:-tunix_frozenlake_image:vllm-tpu0.25.0}"
+expected_hostname="${V1_GSM8K_XPROF_EXPECT_HOSTNAME:-t1v-n-4a77ebd0-w-0}"
+timeout_seconds="${V1_GSM8K_XPROF_TIMEOUT_SECONDS:-7200}"
+source_sha="$(git -C "$repo" rev-parse HEAD)"
+source_diff_sha256="$(git -C "$repo" diff --binary HEAD | sha256sum | awk '{print $1}')"
+source_dirty="$(git -C "$repo" status --porcelain)"
+source_untracked="$(git -C "$repo" ls-files --others --exclude-standard)"
+sp=/usr/local/lib/python3.12/site-packages/tpu_inference
+state="$root/train"
+raw="$state/raw.log"
+driver="$root/driver.log"
+pre="$state/pre_alignment.jsonl"
+align="$state/alignment.jsonl"
+update="$state/updates.jsonl"
+xprof_dir="$state/xprof"
+perf_dir="$state/perf"
+xprof_census="$state/xprof_census.txt"
+semantic_census="$state/semantic_census.txt"
+hierarchy_census="$state/hierarchy_census.txt"
+trace_census="$state/trace_census.txt"
+size_census="$state/xprof_size_census.txt"
+size_receipt="$state/xprof_size_receipt.json"
+p74_gap_census="$state/p74_gap_census.txt"
+p74_gap_receipt="$state/p74_gap_receipt.json"
+classification="$state/classification.json"
+canon_out="$root/canon"
+container="v1_gsm8k_xprof_${arm//-/_}_${label}"
+runtime_files=(
+  "$repo/tunix/rl/agentic/agentic_rl_learner.py"
+  "$repo/tunix/rl/canonical_qwen3_adapter.py"
+  "$repo/tunix/rl/canonical_training_config.py"
+  "$pkg/cluster/v1_full_system_optimization.py"
+  "$repo/tunix/rl/dp_training.py"
+  "$repo/tunix/rl/gsm8k_xprof.py"
+  "$repo/examples/math_gsm8k/qwen3_grpo_demo.py"
+  "$repo/canon-zero-tim/cluster/profiles/$zero_profile"
+  "$script_dir/run_onehost_gsm8k_xprof_common.sh"
+  "$script_dir/run_onehost_gsm8k_xprof_inner.sh"
+  "$script_dir/finalize_gsm8k_xprof_evidence.sh"
+  "$script_dir/classify_gsm8k_xprof_arm.py"
+  "$script_dir/census_gsm8k_xprof_hierarchy.py"
+  "$script_dir/census_gsm8k_xprof_trace.py"
+  "$script_dir/census_gsm8k_xprof_size.py"
+  "$script_dir/census_gsm8k_xprof_modules.py"
+  "$script_dir/census_gsm8k_semantic_trace.py"
+  "$script_dir/census_gsm8k_p74_gap.py"
+  "$script_dir/run_onehost_xprof_backward_zero.sh"
+  "$script_dir/run_onehost_xprof_backward_p74_dp2tp2.sh"
+  "$repo/canon-zero-tim/tests/gsm8k_onehost_xprof/compare_dp2_reduce_once.py"
+)
+runtime_manifest_sha256="$(sha256sum "${runtime_files[@]}" | sha256sum | awk '{print $1}')"
+
+case "$timeout_seconds" in
+  ''|*[!0-9]*) echo "[V1.GSM8K.XPROF] timeout must be an integer" >&2; exit 2 ;;
+esac
+if [ "$timeout_seconds" -lt 1 ]; then
+  echo "[V1.GSM8K.XPROF] timeout must be positive" >&2
+  exit 2
+fi
+if [ "$root" = "${root#/}" ] || [ -e "$root" ]; then
+  echo "[V1.GSM8K.XPROF] artifact root must be a fresh absolute path: $root" >&2
+  exit 2
+fi
+if [ "$(hostname)" != "$expected_hostname" ]; then
+  echo "[V1.GSM8K.XPROF] hostname mismatch: actual=$(hostname) expected=$expected_hostname" >&2
+  exit 2
+fi
+if [ -n "$source_dirty" ] && [ "${V1_GSM8K_XPROF_ALLOW_DIRTY:-0}" != "1" ]; then
+  echo "[V1.GSM8K.XPROF] tracked tree is dirty; set V1_GSM8K_XPROF_ALLOW_DIRTY=1 only for development validation" >&2
+  exit 2
+fi
+if [ -n "$source_untracked" ] && [ "${V1_GSM8K_XPROF_ALLOW_DIRTY:-0}" != "1" ]; then
+  echo "[V1.GSM8K.XPROF] untracked files cannot enter acceptance evidence" >&2
+  exit 2
+fi
+test -s "$model/config.json"
+test -s "$model/model.safetensors.index.json"
+test -s "$assets/data/gsm8k/1.0.0/dataset_info.json"
+[[ "$hf_snapshot_sha" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "[V1.GSM8K.XPROF] invalid Qwen3-1.7B cache ref" >&2
+  exit 2
+}
+image_id="$(sudo docker image inspect --format '{{.Id}}' "$image")"
+if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "[V1.GSM8K.XPROF] image has no immutable local id: $image" >&2
+  exit 2
+fi
+
+# shellcheck disable=SC1090
+source "$canon_env"
+canon_preflight
+if [ -z "${WANDB_API_KEY:-}" ] && [ -r "${NETRC:-$HOME/.netrc}" ]; then
+  WANDB_API_KEY="$(awk '
+    $1 == "machine" { machine = $2 }
+    machine == "api.wandb.ai" {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "password" && i < NF) { print $(i + 1); exit }
+      }
+    }
+  ' "${NETRC:-$HOME/.netrc}")"
+  export WANDB_API_KEY
+fi
+if [ -z "${WANDB_API_KEY:-}" ]; then
+  echo "[V1.GSM8K.XPROF] W&B credential presence is required by the Zero-HP profile" >&2
+  exit 2
+fi
+active="$(sudo docker ps --format '{{.Names}}' | grep -E '^(p51_|p59_|v1_gsm8k_xprof_)' || true)"
+if [ -n "$active" ]; then
+  echo "[V1.GSM8K.XPROF] REFUSING: the one-host TPU lane is busy" >&2
+  printf '%s\n' "$active" >&2
+  exit 2
+fi
+
+mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
+{
+  echo "[V1.GSM8K.XPROF] source=$source_sha diff_sha256=$source_diff_sha256 runtime_manifest_sha256=$runtime_manifest_sha256 image=$image image_id=$image_id model_snapshot=$hf_snapshot_sha"
+  echo "[V1.GSM8K.XPROF] arm=$arm label=$label hostname=$expected_hostname topology=$topology"
+  echo "[V1.GSM8K.XPROF] work=$work_receipt stage=$run_stage steps=$max_steps capture=update:2->3"
+  echo "[V2.P0] full_tree_capture=$v2_p0_capture_full_tree transaction=update:0 performance_eligible=$v2_p0_performance_eligible"
+  echo "[V2.P0] negative_control=${v2_p0_negative_control:-off} expected_result=red_or_anchor_change"
+  echo "[V1.GSM8K.XPROF] tracers=host:1,python:0,tpu:TRACE_ONLY_XLA labels=1 xprof_budget=$xprof_budget_receipt,basis:logical_regular_file_bytes"
+  echo "[V1.GSM8K.XPROF] treatment=$([ "$arm" = native ] && echo stock-vanilla || echo strict-zero-hp-v1)"
+} >"$driver"
+{
+  echo "[V1.GSM8K.XPROF] RUN_BEGIN arm=$arm"
+  sha256sum \
+    "$repo/tunix/rl/agentic/agentic_rl_learner.py" \
+    "$repo/tunix/rl/canonical_qwen3_adapter.py" \
+    "$repo/tunix/rl/canonical_training_config.py" \
+    "$pkg/cluster/v1_full_system_optimization.py" \
+    "$repo/tunix/rl/dp_training.py" \
+    "$repo/tunix/rl/gsm8k_xprof.py" \
+    "$repo/examples/math_gsm8k/qwen3_grpo_demo.py" \
+    "$script_dir/run_onehost_gsm8k_xprof_inner.sh" "$0" \
+    "$model/config.json" "$model/model.safetensors.index.json"
+} >"$raw"
+
+docker_args=(
+  sudo docker run --rm --privileged --net=host --ipc=host --name "$container"
+  -v /mnt/disks/tunix-data:/mnt/disks/tunix-data
+  -v "$model":"$hf_snapshot":ro
+  -v "$repo":"$repo":ro
+  -e PYTHONDONTWRITEBYTECODE=1
+  -e HF_HOME=/mnt/disks/tunix-data/hf
+  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1
+  -e GSM8K_ARTIFACT_ROOT="$assets" -e GSM8K_LOG_DIR="$state/logs"
+  -e WANDB_API_KEY="$WANDB_API_KEY" -e WANDB_MODE=online -e WANDB_DIR="$state/wandb"
+  -e ROLLOUT_ENGINE=vllm -e NEW_MODEL_DESIGN=1
+  -e VLLM_ENABLE_V1_MULTIPROCESSING=0
+  -e V1_GSM8K_XPROF_REPO="$repo"
+  -e V1_GSM8K_XPROF_ARM="$arm"
+  -e V1_GSM8K_XPROF_LABEL="$label"
+  -e V1_GSM8K_XPROF_RUN_STAGE="$run_stage"
+  -e V1_GSM8K_XPROF_XLA_FLAGS="$XTRA_XLA"
+  -e CANON_V1_GSM8K_XPROF_ARM="$arm"
+  -e CANON_GSM8K_TRAIN=1 -e CANON_GSM8K_L3=0 -e CANON_GSM8K_GRAD_PROBE=0
+  -e CANON_OPT_STATE_RESIDENT=1 -e CANON_P30_OPT_STATE_OFFLOAD=0
+  -e CANON_VLLM_ENABLE_PREFIX_CACHING=0
+  -e CANON_P60_DETERMINISTIC_AB=1
+  -e CANON_BATCHED_EVIDENCE="${CANON_BATCHED_EVIDENCE:-}"
+  ${CANON_DP_COLLECTIVE_REDUCE:+-e CANON_DP_COLLECTIVE_REDUCE=$CANON_DP_COLLECTIVE_REDUCE}
+  -e CANON_DP_COMPARE_MODE="${CANON_DP_COMPARE_MODE:-}"
+  -e CANON_DP_DISTINCT_SCHEDULE="${CANON_DP_DISTINCT_SCHEDULE:-}"
+  -e CANON_DP_FINITE_FETCH="${CANON_DP_FINITE_FETCH:-}"
+  -e CANON_P71_SCAN="${CANON_P71_SCAN:-}"
+  -e CANON_P32_KEEP_TAPE="${CANON_P32_KEEP_TAPE:-}"
+  -e CANON_DP_REDUCE_ONCE="${CANON_DP_REDUCE_ONCE:-}"
+  ${CANON_MATMUL_VJP_PLAIN:+-e CANON_MATMUL_VJP_PLAIN=$CANON_MATMUL_VJP_PLAIN}
+  -e CANON_ALIGNMENT_AUDIT_EVERY="${CANON_ALIGNMENT_AUDIT_EVERY:-}"
+  -e V1_GSM8K_XPROF_DIAG_OVERRIDES="${V1_GSM8K_XPROF_DIAG_OVERRIDES:-}"
+  -e CANON_FUSED_TREE_OPS="${CANON_FUSED_TREE_OPS:-}"
+  -e CANON_P32_LENGTH_SORT="${CANON_P32_LENGTH_SORT:-}"
+  -e CANON_P32_CHUNK_BATCH="${CANON_P32_CHUNK_BATCH:-}"
+  -e CANON_EXPECT_TRAIN_MESH_IDS="$expected_train_mesh_ids"
+  -e CANON_XPROF_DIR="$xprof_dir"
+  -e CANON_XPROF_SKIP_STEPS=2 -e CANON_XPROF_STEPS=1
+  -e CANON_XPROF_PHASE="${CANON_XPROF_PHASE:-update}" -e CANON_XPROF_HOST_TRACER=1
+  -e CANON_XPROF_PYTHON_TRACER="${CANON_XPROF_PYTHON_TRACER:-0}" -e CANON_XPROF_TPU_TRACE_MODE="${CANON_XPROF_TPU_TRACE_MODE-TRACE_ONLY_XLA}"
+  -e CANON_XPROF_LABELS=1
+  -e CANON_PERF_TRACE_DIR="$perf_dir" -e CANON_PERF_TRACE_EXPORT_STEP=2
+  -w "$repo"
+)
+# JAX parses these variables when they are present, so an empty value is
+# not the same as unset (an empty min-compile-time is an invalid float and
+# aborts the import): add them only when a cache directory is given.
+if [ -n "${CANON_ONEHOST_JAX_CACHE_DIR:-}" ]; then
+  docker_args+=(
+    -e JAX_COMPILATION_CACHE_DIR="$CANON_ONEHOST_JAX_CACHE_DIR"
+    -e JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
+    -e JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=all
+  )
+fi
+if [ "$geometry" != dp4-tp1 ]; then
+  docker_args+=(
+    -e V1_GSM8K_XPROF_GEOMETRY="$geometry"
+    -e CANON_V1_GSM8K_XPROF_GEOMETRY="$geometry"
+  )
+fi
+
+if [ "$arm" = zero-hp ]; then
+  bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model "$zero_model_overlay" \
+    >>"$driver" 2>&1
+  docker_args+=(
+    -v "$canon_out":"$canon_out":ro
+    -v "$canon_out/attn_iface_patched.py":"$sp/layers/common/attention_interface.py":ro
+    -v "$canon_out/linear_p22xk.py":"$sp/layers/jax/linear.py":ro
+    -v "$canon_out/embed_patched.py":"$sp/layers/jax/embed.py":ro
+    -v "$canon_out/tpu_runner_p21_l30.py":"$sp/runner/tpu_runner.py":ro
+    -v "$canon_out/qwen3_p22xk.py":"$sp/models/jax/qwen3.py":ro
+    -v "$canon_out/qwen2_p22xk.py":"$sp/models/jax/qwen2.py":ro
+    -e PYTHONPATH="$canon_out:$repo"
+    -e CANON_SHIM_ROOT="$canon_out"
+    -e CANON_P32_TRAIN_ADMITTED=1
+    -e CANON_P32_DP_REDUCTION_ADMITTED=1
+    -e CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+    -e CANON_P33_RUN_STAGE="$run_stage" -e CANON_P33_NO_COMMIT=0
+    -e CANON_P59_KIND=v1 -e CANON_P59_DP4_SERIAL_MESH_BRIDGE="$serial_mesh_bridge"
+    -e CANON_P59_DP4_TAIL8=0 -e CANON_P59_RANK_PARALLEL_BACKWARD=1
+    -e CANON_GSM8K_ALIGNMENT_WARN_ONLY=0
+    -e CANON_PRE_ALIGN_REPORT="$pre" -e CANON_ALIGN_REPORT="$align"
+    -e CANON_UPDATE_REPORT="$update"
+  )
+  if [ "$v2_p0_capture_full_tree" = 1 ]; then
+    docker_args+=(
+      -e CANON_P61_BACKWARD_NUMERICAL_DIR="$state/p61_numerical"
+      -e CANON_P61_STOCK_GRADIENT="${CANON_P61_STOCK_GRADIENT:-}"
+    )
+  fi
+  if [ -n "$v2_p0_negative_control" ]; then
+    docker_args+=(
+      -e V2_P0_NEGATIVE_CONTROL="$v2_p0_negative_control"
+    )
+  fi
+  # Checked-VMA geometries need the p66 RPA kernel shim: its gated
+  # manual_axis_type annotation is what lets the pallas out_shape trace
+  # under check_vma=True.  The dp4 arm keeps its historical mount set
+  # byte-identical (standing follow-up: dp4 silently runs the stock
+  # kernel, numerically inert at flag-off).
+  if [ "$geometry" != dp4-tp1 ]; then
+    docker_args+=(
+      -v "$canon_out/rpa_kernel_p66.py":"$sp/kernels/ragged_paged_attention/v3/kernel.py":ro
+    )
+  fi
+else
+  docker_args+=(
+    -e PYTHONPATH="$repo"
+    -e CANON_GSM8K_VANILLA=1
+    -e CANON_P59_RANK_PARALLEL_BACKWARD=0
+    -e CANON_P28_G6_UPDATE=0
+  )
+fi
+
+set +e
+started="$(date +%s)"
+timeout --signal=TERM --kill-after=180s "${timeout_seconds}s" \
+  "${docker_args[@]}" "$image" \
+  bash "$script_dir/run_onehost_gsm8k_xprof_inner.sh" >>"$raw" 2>&1 &
+docker_wait_pid=$!
+(
+  while kill -0 "$docker_wait_pid" 2>/dev/null; do
+    sleep 60
+    if grep -aq '^\[rank0\]: Traceback (most recent call last)' "$raw"; then
+      sleep 180
+      if kill -0 "$docker_wait_pid" 2>/dev/null; then
+        echo "[V1.GSM8K.XPROF] crash_watchdog stopping lingering container" >>"$raw"
+        sudo docker stop "$container" >/dev/null 2>&1 || true
+      fi
+      break
+    fi
+  done
+) &
+watchdog_pid=$!
+wait "$docker_wait_pid"
+docker_rc=$?
+kill "$watchdog_pid" 2>/dev/null || true
+set -e
+if sudo docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+  sudo docker stop "$container" >/dev/null 2>&1 || true
+fi
+elapsed=$(( $(date +%s) - started ))
+echo "[V1.GSM8K.XPROF] RUN_END arm=$arm docker_exit=$docker_rc elapsed_seconds=$elapsed" >>"$raw"
+# The container entrypoint normalizes its root-owned train artifacts before it
+# exits.  This check is intentionally non-mutating: a failure means the
+# container-side durability contract regressed.
+if ! test -r "$raw" || find "$state" -type f ! -readable -print -quit | grep -q .; then
+  echo "[V1.GSM8K.XPROF] artifact readability contract failed" >>"$driver"
+  docker_rc=97
+fi
+
+xprof_census_rc=1
+semantic_census_rc=1
+hierarchy_census_rc=1
+trace_census_rc=1
+p74_gap_census_rc=1
+set +e
+python3 "$script_dir/census_gsm8k_xprof_size.py" \
+  --run-root "$root" --output "$size_receipt" --geometry "$geometry" \
+  >"$size_census" 2>&1
+size_census_rc=$?
+set -e
+# tasks/v2_dispatch Phase 7 is flagless: the census learns from the adapter
+# source whether each reverse chunk runs as one zt_tr_bwd_chunk program.
+p32_reverse_chunk=0
+if grep -q 'module_name="zt_tr_bwd_chunk"' "$repo/tunix/rl/canonical_qwen3_adapter.py"; then
+  p32_reverse_chunk=1
+fi
+if [ "$docker_rc" -eq 0 ]; then
+  set +e
+  python3 "$script_dir/census_gsm8k_xprof_modules.py" \
+    --arm "$arm" --run-root "$root" --geometry "$geometry" \
+    --p71-scan "${CANON_P71_SCAN:-}" \
+    --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
+    --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
+    --p32-chunk-batch "${CANON_P32_CHUNK_BATCH:-}" \
+    --p32-reverse-chunk "$p32_reverse_chunk" \
+    >"$xprof_census" 2>&1
+  xprof_census_rc=$?
+  sudo docker run --rm --ipc=host \
+    -v "$repo":"$repo":ro -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
+    -w "$repo" "$image" \
+    python3 "$script_dir/census_gsm8k_semantic_trace.py" \
+      --arm "$arm" --run-root "$root" --geometry "$geometry" \
+    >"$semantic_census" 2>&1
+  semantic_census_rc=$?
+  if [ "$arm" = zero-hp ]; then
+    python3 "$script_dir/census_gsm8k_xprof_hierarchy.py" \
+      --run-root "$root" --expected-update-step 2 \
+      --geometry "$geometry" \
+      --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
+      --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
+      >"$hierarchy_census" 2>&1
+    hierarchy_census_rc=$?
+    python3 "$script_dir/census_gsm8k_xprof_trace.py" \
+      --run-root "$root" --expected-update-step 2 \
+      --geometry "$geometry" \
+      --p32-keep-tape "${CANON_P32_KEEP_TAPE:-}" \
+      --dp-reduce-once "${CANON_DP_REDUCE_ONCE:-}" \
+      >"$trace_census" 2>&1
+    trace_census_rc=$?
+    if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ] || [ "$geometry" = dp2-tp2-p45 ]; then
+      python3 "$script_dir/census_gsm8k_p74_gap.py" \
+        --run-root "$root" --output "$p74_gap_receipt" --geometry "$geometry" \
+        --p32-reverse-chunk "$p32_reverse_chunk" \
+        >"$p74_gap_census" 2>&1
+      p74_gap_census_rc=$?
+    fi
+  fi
+  set -e
+fi
+
+set +e
+classifier_args=(
+  python3 "$script_dir/classify_gsm8k_xprof_arm.py"
+  --arm "$arm" --run-root "$root" --source-sha "$source_sha" \
+  --source-diff-sha256 "$source_diff_sha256" \
+  --runtime-manifest-sha256 "$runtime_manifest_sha256" \
+  --model-snapshot "$hf_snapshot_sha" --image-id "$image_id" \
+  --expected-updates "$max_steps" \
+  --geometry "$geometry" \
+  --xprof-census-rc "$xprof_census_rc" \
+  --semantic-census-rc "$semantic_census_rc" \
+  --size-census-rc "$size_census_rc" \
+  --output "$classification"
+)
+if [ "$arm" = zero-hp ]; then
+  classifier_args+=(
+    --require-hierarchy --hierarchy-census-rc "$hierarchy_census_rc"
+    --trace-census-rc "$trace_census_rc"
+  )
+  if [ "$geometry" = dp2-tp2 ] || [ "$geometry" = dp2-tp2-long ] || [ "$geometry" = dp2-tp2-long8k ] || [ "$geometry" = dp2-tp2-p45 ]; then
+    classifier_args+=(
+      --require-p74-gap --p74-gap-census-rc "$p74_gap_census_rc"
+    )
+  fi
+fi
+"${classifier_args[@]}" >>"$driver" 2>&1
+classifier_rc=$?
+set -e
+
+sha_inputs=("$raw" "$driver")
+for path in \
+    "$xprof_census" "$semantic_census" "$classification" \
+    "$hierarchy_census" "$trace_census" "$size_census" "$size_receipt" \
+    "$p74_gap_census" "$p74_gap_receipt" \
+    "$pre" "$align" "$update"; do
+  [ -e "$path" ] && sha_inputs+=("$path")
+done
+while IFS= read -r -d '' path; do
+  sha_inputs+=("$path")
+done < <(find "$xprof_dir" -type f -print0 | sort -z)
+while IFS= read -r -d '' path; do
+  sha_inputs+=("$path")
+done < <(find "$perf_dir" -type f -name 'perfetto_trace_v2_*.pb' -print0 | sort -z)
+if [ "$v2_p0_capture_full_tree" = 1 ] && [ -d "$state/p61_numerical" ]; then
+  while IFS= read -r -d '' path; do
+    sha_inputs+=("$path")
+  done < <(find "$state/p61_numerical" -type f -print0 | sort -z)
+fi
+if ! gsm8k_xprof_choose_terminal \
+    "$arm" "$root" "$docker_rc" "$classifier_rc"; then
+  echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=select root=$root" >&2
+  exit 98
+fi
+if ! gsm8k_xprof_write_terminal_manifest \
+    "$GSM8K_XPROF_TERMINAL_MARKER" "$driver" "$root/SHA256SUMS" \
+    "${sha_inputs[@]}"; then
+  echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=write root=$root" >&2
+  exit 98
+fi
+# Verification is intentionally immediate. After this point the runner may
+# write only to stdout/stderr, never to a file covered by SHA256SUMS.
+if ! gsm8k_xprof_verify_manifest "$root/SHA256SUMS"; then
+  echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=verify root=$root" >&2
+  exit 98
+fi
+echo "[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=${#sha_inputs[@]} root=$root"
+printf '%s\n' "$GSM8K_XPROF_TERMINAL_MARKER"
+exit "$GSM8K_XPROF_TERMINAL_RC"

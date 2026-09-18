@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+IMAGE="${1:-tunix_frozenlake_image:vllm-tpu0.25.0}"
+DOCKER="${DOCKER:-sudo docker}"
+
+$DOCKER image inspect "$IMAGE" --format 'P33_EXACT_IMAGE image_id={{.Id}}' >/dev/null
+$DOCKER run --rm \
+  -v "$ROOT:/workspace:ro" \
+  -w /workspace \
+  -e JAX_PLATFORMS=cpu \
+  "$IMAGE" \
+  bash -euo pipefail -c '
+    qwen1p7b_overlay="$(mktemp -d /tmp/p33-qwen1p7b.XXXXXX)"
+    qwen8b_overlay="$(mktemp -d /tmp/p33-qwen8b.XXXXXX)"
+    trap '\''rm -r "$qwen1p7b_overlay" "$qwen8b_overlay"'\'' EXIT
+    export CANON_P38_SERVING_CAPTURE_DIR=/tmp/p38-exact-image-capture
+    export CANON_P38_REQUEST_JOURNAL=/tmp/p38-exact-image-capture/p38_request_journal.jsonl
+    export CANON_P38_INCIDENT_LEDGER=/tmp/p38-exact-image-capture/p38_incident_ledger.jsonl
+    export CANON_P38_INCIDENT_MIN_PREFIX=1400
+    export CANON_P38_INCIDENT_MAX_PREFIX=3072
+    export CANON_P38_INCIDENT_MAX_BYTES=134217728
+    export CANON_LOGPROB_M=256
+    export CANON_P38_DIAGNOSTIC_ROUND_FILE=/tmp/p38-exact-image-round
+    printf "0\n" > "$CANON_P38_DIAGNOSTIC_ROUND_FILE"
+    export CANON_P38_SERVING_CAPTURE_MAX_CALLS=4
+    export CANON_P38_SERVING_CAPTURE_MIN_PREFIX=1536
+    export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
+    export CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
+    export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
+    bash canon-zero-tim/install.sh "$qwen1p7b_overlay" \
+      --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
+      --model qwen1p7b
+    grep -Fq 'CANON_KV_UNIFIED' "$qwen1p7b_overlay/attn_iface_patched.py"
+    grep -Fq 'KV_UNIFIED_two_pass' "$qwen1p7b_overlay/attn_iface_patched.py"
+    grep -Fq 'CANON_P38_SERVING_CAPTURE_DIR' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_capture_leaf' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'tokens_indices_selector' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'implementation_identity' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_request_journal' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_incident_ledger' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_aval_contract' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p57_tito_runner_prompt_witness' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'canon.p57-tito-runner-input.v1' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_kv_observer_after_standard' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-live-kv-prefix-table-v1' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_seam_after_model' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_tail_after_decode' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-tail-values-v1' "$qwen1p7b_overlay/p38_tail_capture.py"
+    grep -Fq 'p38-terminal-discriminator-v1' "$qwen1p7b_overlay/p38_terminal_capture.py"
+    grep -Fq '_p38_terminal_gather' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-seam-fingerprint-v1' "$qwen1p7b_overlay/p38_seam_capture.py"
+    grep -Fq 'CANON_P38_SEAM_OBSERVER' "$qwen1p7b_overlay/qwen3.py"
+    grep -Fq "\"layer\", \"full\"" "$qwen1p7b_overlay/qwen3.py"
+    grep -Fq 'P38_LAYER_CHECKPOINTS' "$qwen1p7b_overlay/qwen3.py"
+    grep -Fq 'P38_SEAM_CHECKPOINTS' "$qwen1p7b_overlay/qwen3.py"
+    grep -Fq 'fingerprint_tensor_rows' "$qwen1p7b_overlay/p38_kv_fingerprint.py"
+    grep -Eq program_path=.standard. "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    test -f "$qwen1p7b_overlay/p38_kv_fingerprint.py"
+    test -f "$qwen1p7b_overlay/p38_seam_capture.py"
+    test -f "$qwen1p7b_overlay/p38_fixed_lm_head.py"
+    grep -Fq "CANON_P38_FIXED_LM_HEAD" "$qwen1p7b_overlay/linear_p22xk.py"
+    python3 -m py_compile "$qwen1p7b_overlay/p38_kv_fingerprint.py"
+    python3 -m py_compile "$qwen1p7b_overlay/p38_seam_capture.py"
+    python3 -m py_compile "$qwen1p7b_overlay/p38_fixed_lm_head.py"
+    python3 -m py_compile "$qwen1p7b_overlay/p38_terminal_capture.py"
+    python3 -m py_compile "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    PYTHONPATH="$qwen1p7b_overlay" python3 \
+      canon-zero-tim/tests/alignment_carrier_serving/probe_fixed_lm_head_overlay.py \
+      --hidden-size 2048
+    python3 canon-zero-tim/tests/workloads/test_decode_logprob_chunking.py \
+      --overlay "$qwen1p7b_overlay"
+    bash canon-zero-tim/install.sh "$qwen8b_overlay" \
+      --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
+      --model qwen8b
+    grep -Fq 'CANON_KV_UNIFIED' "$qwen8b_overlay/attn_iface_patched.py"
+    grep -Fq 'KV_UNIFIED_two_pass' "$qwen8b_overlay/attn_iface_patched.py"
+    grep -Fq 'CANON_P38_SERVING_CAPTURE_DIR' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_capture_leaf' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'tokens_indices_selector' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'implementation_identity' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_request_journal' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_incident_ledger' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_aval_contract' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p57_tito_runner_prompt_witness' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'canon.p57-tito-runner-input.v1' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_kv_observer_after_standard' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-live-kv-prefix-table-v1' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_seam_after_model' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_tail_after_decode' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-tail-values-v1' "$qwen8b_overlay/p38_tail_capture.py"
+    grep -Fq 'p38-terminal-discriminator-v1' "$qwen8b_overlay/p38_terminal_capture.py"
+    grep -Fq '_p38_terminal_gather' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-seam-fingerprint-v1' "$qwen8b_overlay/p38_seam_capture.py"
+    grep -Fq 'CANON_P38_SEAM_OBSERVER' "$qwen8b_overlay/qwen3.py"
+    grep -Fq "\"layer\", \"full\"" "$qwen8b_overlay/qwen3.py"
+    grep -Fq 'P38_LAYER_CHECKPOINTS' "$qwen8b_overlay/qwen3.py"
+    grep -Fq 'P38_SEAM_CHECKPOINTS' "$qwen8b_overlay/qwen3.py"
+    grep -Fq 'fingerprint_tensor_rows' "$qwen8b_overlay/p38_kv_fingerprint.py"
+    grep -Eq program_path=.standard. "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    test -f "$qwen8b_overlay/p38_kv_fingerprint.py"
+    test -f "$qwen8b_overlay/p38_seam_capture.py"
+    test -f "$qwen8b_overlay/p38_fixed_lm_head.py"
+    grep -Fq "CANON_P38_FIXED_LM_HEAD" "$qwen8b_overlay/linear_p22xk.py"
+    python3 -m py_compile "$qwen8b_overlay/p38_kv_fingerprint.py"
+    python3 -m py_compile "$qwen8b_overlay/p38_seam_capture.py"
+    python3 -m py_compile "$qwen8b_overlay/p38_fixed_lm_head.py"
+    python3 -m py_compile "$qwen8b_overlay/p38_terminal_capture.py"
+    python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    PYTHONPATH="$qwen8b_overlay" python3 \
+      canon-zero-tim/tests/alignment_carrier_serving/probe_fixed_lm_head_overlay.py
+    python3 canon-zero-tim/tests/workloads/test_decode_logprob_chunking.py \
+      --overlay "$qwen8b_overlay"
+    python3 canon-zero-tim/tests/frozenlake_three_arm/test_tito_runner_witness_overlay.py \
+      --overlay "$qwen8b_overlay"
+    python3 \
+      canon-zero-tim/workloads/frozenlake-long-horizon-debug/scripts/probe_m15_replay_round_provenance.py \
+      "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=37 p57_tito_runner_witness=2 p57_tito_runner_execution=1 m15_round_provenance=1 overlays=2"
+  '

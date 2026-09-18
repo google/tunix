@@ -45,8 +45,8 @@ git clone --depth 1 --branch yuxzhang/canon-zero-tim https://github.com/google/t
     │                        30_install_canon → 40_overlay_engine → 90_run)
     ├── src/                 engine_shims/ (shim chain, model modules) + stock observers
     ├── patches/             tpu_inference/ (40 ordered diffs) + observer and r2egym patches
-    ├── tasks/               only <task>/scripts/: pod-side helpers 90_run.sh calls, plus
-    │                        the campaign-named render wrappers recipes/ calls
+    ├── workloads/           only <workload>/scripts/: pod-side helpers 90_run.sh calls,
+    │                        plus the render wrappers recipes/ calls
     ├── tests/               package tests; the run_cpu.sh suites are host-runnable
     └── clean_data/          DeepSWE task whitelists; renderers assert their SHA-256
 ```
@@ -119,10 +119,13 @@ absolute-path import, so a stale member silently reverts the run to stock while 
 
 ### 0.5 Codenames
 
-The code paths keep the campaign codenames; prose uses plain names, and so do the entry points
-under `canon-zero-tim/recipes/`.
+Directories, renderers and test suites are plain-named. The codenames survive only where renaming
+them would change what a run produces: environment variables (`CANON_P57_*`), profile file names,
+run ids, JobSet and W&B names, the helper scripts under `<workload>/scripts/`, and the shim and
+patch file names under `src/` and `patches/`. Read the table below when an old name turns up in a
+log line, a manifest, an archived run or the archive branch.
 
-| Code name | Plain name |
+| Historical code name | Plain name |
 |---|---|
 | P45 | FrozenLake short-horizon: grid sides 2–9, ≤5 turns, generation limit 2048 |
 | M15 | FrozenLake long-horizon: 15 turns, generation limit 8192 |
@@ -137,15 +140,15 @@ under `canon-zero-tim/recipes/`.
 | Recipe | Documented in | Status |
 |---|---|---|
 | Figure 4 — FrozenLake short-horizon, three arms (Qwen3-8B, 64 v5p) | `canon-zero-tim/blog_reprod/README.md` | archived runs and vendored data; reproduction verified as far as rendering — nothing was launched |
-| GSM8K 64-chip Zero-TIM | not yet documented | the archived run crashed at step 64 (prefill re-score context overrun); entry point `canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_gsm8k_full_dp16tp4_p74.sh` |
+| GSM8K 64-chip Zero-TIM | not yet documented | the archived run crashed at step 64 (prefill re-score context overrun); entry point `canon-zero-tim/workloads/full-recipes/scripts/prepare_gsm8k_full_dp16tp4_p74.sh` |
 | FrozenLake long-horizon, Standard / TIS / Zero-TIM | not yet documented | archived runs incomplete: Standard crashed at 181/300, TIS stopped at 148/300, Zero-TIM reached 52–59 steps at ≈2550 s/step. The Figure 4 wrappers already render the long-horizon manifests next to the short-horizon ones |
-| DeepSWE-4B 128-chip Zero-TIM | not yet documented | never launched, render pending; entry point `canon-zero-tim/cluster/render_p58_deepswe_tim.py` |
-| DeepSWE-4B 128-chip Standard / TIS | not yet documented | the renderer has no such arm — `canon-zero-tim/cluster/render_p58_deepswe_tim.py` line 52 reads `_ARMS = ("native", "zero")`. Adding them is a new feature, not documentation |
+| DeepSWE-4B 128-chip Zero-TIM | not yet documented | never launched, render pending; entry point `canon-zero-tim/cluster/render_deepswe_comparison.py` |
+| DeepSWE-4B 128-chip Standard / TIS | not yet documented | the renderer has no such arm — `canon-zero-tim/cluster/render_deepswe_comparison.py` line 52 reads `_ARMS = ("native", "zero")`. Adding them is a new feature, not documentation |
 
 A documented recipe keeps its entry points in `canon-zero-tim/recipes/<recipe>/`, one script per
 arm, each taking `<tip-sha40> <out-dir> <run-id>` and printing the JobSet path to apply. They are
-deliberately thin: they translate those three arguments into the six the campaign-named wrappers
-under `canon-zero-tim/tasks/` expect, and change nothing about what gets rendered.
+deliberately thin: they translate those three arguments into the six the wave wrappers under
+`canon-zero-tim/workloads/` expect, and change nothing about what gets rendered.
 
 ## 2. Evidence boundary
 

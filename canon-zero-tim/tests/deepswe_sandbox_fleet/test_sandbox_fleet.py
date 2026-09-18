@@ -31,7 +31,7 @@ TRAIN = ROOT / "examples" / "deepswe" / "train_deepswe_nb.py"
 SWE_ENV = ROOT / "examples" / "deepswe" / "swe_env.py"
 ONEHOST = (
     PKG
-    / "tests/p44_deepswe_qwen4b_parity/run_onehost_deepswe_v5p.sh"
+    / "tests/deepswe_parity/run_onehost_deepswe_v5p.sh"
 )
 CLUSTER = PKG / "cluster"
 
@@ -41,12 +41,12 @@ if str(CLUSTER) not in sys.path:
   sys.path.insert(0, str(CLUSTER))
 
 from examples.deepswe import sandbox_fleet  # pylint: disable=wrong-import-position
-import render_p34_jobset as p34  # pylint: disable=wrong-import-position
-import render_p39_deepswe_pilot as p39  # pylint: disable=wrong-import-position
-import render_p43_deepswe_debug as p43  # pylint: disable=wrong-import-position
-import render_p44_deepswe_parity as p44  # pylint: disable=wrong-import-position
-import render_p46_deepswe_profiles as p46  # pylint: disable=wrong-import-position
-import render_p58_deepswe_tim as p58  # pylint: disable=wrong-import-position
+import render_deepswe_jobset as p34  # pylint: disable=wrong-import-position
+import render_deepswe_pilot as p39  # pylint: disable=wrong-import-position
+import render_deepswe_debug as p43  # pylint: disable=wrong-import-position
+import render_deepswe_parity as p44  # pylint: disable=wrong-import-position
+import render_deepswe_profiles as p46  # pylint: disable=wrong-import-position
+import render_deepswe_comparison as p58  # pylint: disable=wrong-import-position
 from tunix.rl import deepswe_contract  # pylint: disable=wrong-import-position
 
 
@@ -716,12 +716,12 @@ class SandboxFleetContractTest(unittest.TestCase):
 
   def test_all_training_renderer_clis_expose_one_shared_selector_pair(self):
     renderers = (
-        "render_p34_jobset.py",
-        "render_p39_deepswe_pilot.py",
-        "render_p43_deepswe_debug.py",
-        "render_p44_deepswe_parity.py",
-        "render_p46_deepswe_profiles.py",
-        "render_p58_deepswe_tim.py",
+        "render_deepswe_jobset.py",
+        "render_deepswe_pilot.py",
+        "render_deepswe_debug.py",
+        "render_deepswe_parity.py",
+        "render_deepswe_profiles.py",
+        "render_deepswe_comparison.py",
     )
     for filename in renderers:
       with self.subTest(renderer=filename):

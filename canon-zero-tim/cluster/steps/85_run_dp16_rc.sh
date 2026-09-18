@@ -32,7 +32,7 @@ REPORT="${CANON_P32_RC_REPORT:-$CANON_STATE/p32_rc_${CANON_P32_RC_STAGE}.classif
 echo "[dp16-rc] starting stage=$CANON_P32_RC_STAGE; production training remains refused"
 cd "$CANON_PKG/.."
 set +e
-python3 "$CANON_PKG/tests/p32_release_candidate/probe_qwen8b_rc.py" \
+python3 "$CANON_PKG/tests/release_candidate/probe_qwen8b_rc.py" \
   --stage "$CANON_P32_RC_STAGE" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 set -e
@@ -40,7 +40,7 @@ if [ "$rc" -ne 0 ]; then
   echo "[dp16-rc] probe exited $rc" >&2
   exit "$rc"
 fi
-python3 "$CANON_PKG/tests/p32_release_candidate/classify_rc.py" \
+python3 "$CANON_PKG/tests/release_candidate/classify_rc.py" \
   "$LOG" --stage "$CANON_P32_RC_STAGE" --output "$REPORT"
 echo "[dp16-rc] artifact=$LOG"
 echo "[dp16-rc] classification=$REPORT"

@@ -291,7 +291,7 @@ if [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ] || \
     fi
   done
   mkdir -p "$(dirname -- "$CANON_P57_TITO_GCS_WORKER_LOG")"
-  nice -n 10 bash "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/p57_tito_gcs_worker.sh" \
+  nice -n 10 bash "$CANON_PKG/workloads/token-continuity/scripts/p57_tito_gcs_worker.sh" \
     > "$CANON_P57_TITO_GCS_WORKER_LOG" 2>&1 &
   p57_tito_gcs_pid=$!
   trap 'canon_stop_background_workers' EXIT
@@ -322,7 +322,7 @@ if [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ] || \
   echo "[P57.TITO.GCS] READY_ACKNOWLEDGED"
 fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
-  bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
+  bash "$CANON_PKG/workloads/alignment-carrier/scripts/persist_p38_gcs.sh" \
     probe || {
       echo "[run] FATAL: P38 GCS write/read preflight failed" >&2
       exit 1
@@ -351,7 +351,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   (umask 077; printf '0\n' > "$CANON_P38_DIAGNOSTIC_ROUND_FILE")
   mkdir -m 700 "$CANON_P38_ROUND_SEAL_REQUEST_DIR" \
     "$CANON_P38_ROUND_SEAL_ACK_DIR"
-  bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  bash "$CANON_PKG/workloads/alignment-carrier/scripts/p38_live_snapshot_worker.sh" \
     > "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" 2>&1 &
   p38_live_pid=$!
   trap 'canon_stop_background_workers' EXIT
@@ -599,7 +599,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     p38_join_args+=(--require-mismatch-join)
   fi
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py" \
+    python3 "$CANON_PKG/workloads/alignment-carrier/scripts/classify_p38_serving_capture.py" \
       --directory "$CANON_P38_SERVING_CAPTURE_DIR" \
       --expected-records "$CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS" \
       --expected-program-path "$CANON_P38_SERVING_CAPTURE_EXPECTED_PATH" \
@@ -627,7 +627,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       m15_apc_capsule_args+=(--mismatch-capsule "$CANON_P38_MISMATCH_CAPSULE")
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_target_run.py" \
+      python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/classify_m15_apc_target_run.py" \
         --raw "$LOG" \
         --report "$CANON_PRE_ALIGN_REPORT" \
         --capture-classification "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" \
@@ -647,7 +647,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     if [ "${m15_apc_rc:-1}" -eq 0 ] && \
        [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_first_red_replay.py" \
+        python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/package_first_red_replay.py" \
           --capsule "$CANON_P38_MISMATCH_CAPSULE" \
           --capture-classification "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" \
           --m15-classification "$m15_apc_classification" \
@@ -659,7 +659,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       fi
       if [ "${m15_replay_bundle_rc:-1}" -eq 0 ]; then
         JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-          python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_full_replay_carrier.py" \
+          python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/package_full_replay_carrier.py" \
             --producer-unit "$CANON_P38_SERVING_CAPTURE_DIR/m15_producer_unit.npz" \
             --serving-envelope "$CANON_APC_M15_REPLAY_LEDGER" \
             --first-red-dir "$m15_replay_bundle_dir" \
@@ -682,7 +682,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p38_kv_observer_rc=$?
       if [ "$p38_kv_observer_rc" -eq 0 ]; then
         JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-          python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/aggregate_m15_e0_kv_rounds.py" \
+          python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/aggregate_m15_e0_kv_rounds.py" \
             --root "$CANON_STATE/p38_m15_e0_kv_rounds" \
             --arm "$CANON_APC_M15_TARGET_DEBUG" \
             --rounds "$CANON_P38_DIAGNOSTIC_ROUNDS" \
@@ -728,7 +728,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fi
     echo "[CANON_P38_KV_OBSERVER_INPUTS] source=$p38_kv_capsule_source capsules=$((${#p38_kv_args[@]} / 2))"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py" \
+      python3 "$CANON_PKG/workloads/alignment-carrier/scripts/classify_p38_kv_observer.py" \
         --directory "$CANON_P38_KV_OBSERVER_DIR" \
         "${p38_kv_args[@]}" \
         "${p38_kv_replay_args[@]}" \
@@ -754,7 +754,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p38_seam_rc=$?
       if [ "$p38_seam_rc" -eq 0 ]; then
         JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-          python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/verify_m15_wide_round.py" \
+          python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/verify_m15_wide_round.py" \
             --round-directory "$p38_m15_round_dir" \
             --classification "$CANON_P38_SEAM_CLASSIFICATION" \
             --bundle "$CANON_APC_M15_SEAM_BUNDLE" \
@@ -782,7 +782,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p58_round_args+=(--round "$p58_round_report")
       done
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_coarse_seam_three_round.py" \
+        python3 "$CANON_PKG/workloads/deepswe-comparison/scripts/classify_p58_coarse_seam_three_round.py" \
           "${p58_round_args[@]}" \
           --run-log "$LOG" \
           --output "$CANON_P38_SEAM_CLASSIFICATION" || \
@@ -828,7 +828,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p38_m15_seam_args+=(--expected-layer "$CANON_P38_SEAM_LAYER")
       fi
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_wide_seam.py" \
+        python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/classify_m15_apc_wide_seam.py" \
           "${p38_m15_seam_args[@]}" \
           --output "$CANON_P38_SEAM_CLASSIFICATION" || \
         p38_seam_rc=$?
@@ -838,7 +838,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p38_seam_tail_args+=(--require-tail)
       fi
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py" \
+        python3 "$CANON_PKG/workloads/alignment-carrier/scripts/classify_p38_seam.py" \
           --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
           "${p38_seam_args[@]}" \
           --mode "$CANON_P38_SEAM_OBSERVER" \
@@ -858,7 +858,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
        [ "${p38_seam_rc:-1}" -eq 0 ]; then
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_m15_apc_wide_seam.py" \
+        python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/package_m15_apc_wide_seam.py" \
           --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
           --classification "$CANON_P38_SEAM_CLASSIFICATION" \
           --alignment-report "$CANON_PRE_ALIGN_REPORT" \
@@ -880,7 +880,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_terminal_rc=0
   if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ]; then
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_terminal_discriminator.py" \
+      python3 "$CANON_PKG/workloads/alignment-carrier/scripts/classify_p38_terminal_discriminator.py" \
         --input "$CANON_P38_SEAM_OBSERVER_DIR" \
         "${p38_seam_args[@]}" \
         --require-red-join \
@@ -1012,7 +1012,7 @@ if [ "${CANON_P57_RUN_KIND:-}" = "train" ]; then
   case "${CANON_P57_TIM_ARM:-}" in
     standard)
       PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" python3 \
-        "$CANON_PKG/tasks/p57-frozenlake-tim-causal-study/scripts/classify_standard_receipts.py" \
+        "$CANON_PKG/workloads/frozenlake-three-arm/scripts/classify_standard_receipts.py" \
         --run-log "$LOG" --expected-updates "$CANON_P57_EXPECTED_UPDATES" \
         --output "$CANON_STATE/p57_standard_source.classification.json" || exit 1
       ;;
@@ -1308,7 +1308,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
     p38_fixed_receipt_args+=(--require-vjp)
   fi
   if ! JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_fixed_lm_head_receipts.py" \
+      python3 "$CANON_PKG/workloads/alignment-carrier/scripts/classify_p38_fixed_lm_head_receipts.py" \
         "${p38_fixed_receipt_args[@]}"; then
     echo "[run] FATAL: fixed lm-head executable receipt contract failed" >&2
     exit 1
@@ -1439,7 +1439,7 @@ if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
   p64_classification="$CANON_STATE/p64_p45_numeric.classification.json"
   p64_classifier_rc=0
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_p64_p45_numeric_debug.py" \
+    python3 "$CANON_PKG/workloads/full-recipes/scripts/classify_p64_p45_numeric_debug.py" \
       "$LOG" --output "$p64_classification" || p64_classifier_rc=$?
   if [ ! -s "$p64_classification" ]; then
     echo "[run] FATAL: P64 classifier did not persist its result" >&2
@@ -1483,7 +1483,7 @@ elif [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
   p62_classification="$CANON_STATE/p62_backward_numeric.classification.json"
   p62_classifier_rc=0
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_attempt7_numeric_debug.py" \
+    python3 "$CANON_PKG/workloads/full-recipes/scripts/classify_attempt7_numeric_debug.py" \
       "$LOG" --output "$p62_classification" || p62_classifier_rc=$?
   if [ ! -s "$p62_classification" ]; then
     echo "[run] FATAL: P62 classifier did not persist its result" >&2
@@ -1538,13 +1538,13 @@ elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
       exit 1
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p35_envelope/classify_envelope.py" \
+      python3 "$CANON_PKG/tests/envelope/classify_envelope.py" \
         --report "$CANON_P35_PRE_REPLAY_REPORT" \
         --output "$CANON_P35_CLASSIFICATION" || exit 1
     stage_class_rc=1
     if [ -e "$CANON_P35_REPLAY_STAGE_REPORT" ]; then
       if JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tests/p35_envelope/classify_stage_probe.py" \
+        python3 "$CANON_PKG/tests/envelope/classify_stage_probe.py" \
           --report "$CANON_P35_REPLAY_STAGE_REPORT" \
           --output "$CANON_P35_REPLAY_STAGE_CLASSIFICATION"; then
         stage_class_rc=0
@@ -1585,7 +1585,7 @@ elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
       exit 1
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p35_envelope/classify_envelope.py" \
+      python3 "$CANON_PKG/tests/envelope/classify_envelope.py" \
         --report "$CANON_P35_ENVELOPE_REPORT" \
         --output "$CANON_P35_CLASSIFICATION" || exit 1
     if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ]; then
@@ -1606,7 +1606,7 @@ elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
         exit 1
       fi
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tests/p35_envelope/classify_exact_replay.py" \
+        python3 "$CANON_PKG/tests/envelope/classify_exact_replay.py" \
           --report "$CANON_P35_EXACT_REPLAY_REPORT" \
           --output "$CANON_P35_EXACT_REPLAY_CLASSIFICATION" || exit 1
       for evidence_path in \
@@ -1639,7 +1639,7 @@ elif [ -n "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ]; then
   fi
   p58_vma_classification="$CANON_STATE/p58_checked_vma_${CANON_P58_CHECKED_VMA_DIAGNOSTIC}.classification.json"
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_checked_vma_diagnostic.py" \
+    python3 "$CANON_PKG/workloads/deepswe-comparison/scripts/classify_p58_checked_vma_diagnostic.py" \
       --run-log "$LOG" \
       --pre-alignment "$CANON_PRE_ALIGN_REPORT" \
       --debug-dir "$CANON_P58_DEBUG_DIR" \
@@ -1662,7 +1662,7 @@ elif [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "p66-off" ] || \
   fi
   v1_fl_tp8_ab_workload="${CANON_P57_WORKLOAD_CANDIDATE:-p45}"
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_fl_tp8_ab_diagnostic.py" \
+    python3 "$CANON_PKG/workloads/full-recipes/scripts/classify_fl_tp8_ab_diagnostic.py" \
       --raw "$LOG" \
       --pre-alignment "$CANON_PRE_ALIGN_REPORT" \
       --workload "$v1_fl_tp8_ab_workload" \
@@ -1725,7 +1725,7 @@ PY
       exit 1
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_debug_tito.py" \
+      python3 "$CANON_PKG/workloads/frozenlake-long-horizon-debug/scripts/classify_m15_apc_debug_tito.py" \
         --run-log "$LOG" \
         --arm "$CANON_APC_M15_TARGET_DEBUG" \
         --expected-rounds 3 \
@@ -1759,7 +1759,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       )
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p58_deepswe_native_zero/classify_run.py" \
+      python3 "$CANON_PKG/tests/deepswe_comparison/classify_run.py" \
         --arm "$CANON_P58_TIM_ARM" \
         --stage "$CANON_P34_RUN_STAGE" \
         --topology "${CANON_P58_TOPOLOGY:-128}" \
@@ -1775,7 +1775,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
          "64split:three-update:zero" ]; then
       p58_64split_accounting="$CANON_STATE/p58_deepswe_64split_accounting.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/account_64split_pilot.py" \
+        python3 "$CANON_PKG/workloads/deepswe-comparison/scripts/account_64split_pilot.py" \
           --classification "$classification" \
           --run-log "$LOG" \
           --debug-dir "$CANON_P58_DEBUG_DIR" \
@@ -1787,7 +1787,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
       p58_hp_classification="$CANON_STATE/p58_zero_hp_full.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_zero_hp_full.py" \
+        python3 "$CANON_PKG/workloads/deepswe-comparison/scripts/classify_zero_hp_full.py" \
           --state "$CANON_STATE" \
           --run-log "$LOG" \
           --update-report "$CANON_UPDATE_REPORT" \
@@ -1797,7 +1797,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   elif [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "1" ]; then
     classification="$CANON_STATE/p46_deepswe_q32_${CANON_P46_TOPOLOGY}_full.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
+      python3 "$CANON_PKG/tests/deepswe/classify_run.py" \
         --p46-profile \
         --topology "$CANON_P46_TOPOLOGY" \
         --stage full \
@@ -1818,7 +1818,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       )
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p44_deepswe_qwen4b_parity/classify_run.py" \
+      python3 "$CANON_PKG/tests/deepswe_parity/classify_run.py" \
         --topology "$CANON_P44_TOPOLOGY" \
         --stage "$CANON_P34_RUN_STAGE" \
         "${p44_classifier_arm_args[@]}" \
@@ -1833,7 +1833,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   elif [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
     classification="$CANON_STATE/p43_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p43_deepswe_debug/classify_run.py" \
+      python3 "$CANON_PKG/tests/deepswe_debug/classify_run.py" \
         --stage "$CANON_P34_RUN_STAGE" \
         --run-log "$LOG" \
         --debug-dir "$CANON_P43_DEBUG_DIR" \
@@ -1845,7 +1845,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   elif [ "${CANON_P39_64CHIP_PILOT:-0}" = "1" ]; then
     classification="$CANON_STATE/p39_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p39_deepswe_pilot/classify_run.py" \
+      python3 "$CANON_PKG/tests/deepswe_pilot/classify_run.py" \
         --stage "$CANON_P34_RUN_STAGE" \
         --run-log "$LOG" \
         --weight-report "$CANON_P34_WEIGHT_REPORT" \
@@ -1856,7 +1856,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
   else
     classification="$CANON_STATE/p34_deepswe_${CANON_P34_RUN_STAGE}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \
+      python3 "$CANON_PKG/tests/deepswe/classify_run.py" \
         --stage "$CANON_P34_RUN_STAGE" \
         --run-log "$LOG" \
         --debug-dir "$CANON_P34_DEBUG_DIR" \
@@ -1870,7 +1870,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
   if [ "${CANON_P57_RUN_KIND:-}" = "tito-diagnostic" ]; then
     classification="$CANON_STATE/p57_tito_collection.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/classify_tito_collection.py" \
+      python3 "$CANON_PKG/workloads/token-continuity/scripts/classify_tito_collection.py" \
         --state "$CANON_STATE" \
         --output "$classification" || exit 1
     class_sha="$(sha256sum "$classification" | awk '{print $1}')"
@@ -1891,7 +1891,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
      [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
     classification="$CANON_STATE/p57_${CANON_P57_TIM_ARM}_eval_${CANON_P57_EVAL_CHECKPOINT_STEP}.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/p57-frozenlake-tim-causal-study/scripts/classify_checkpoint_eval.py" \
+      python3 "$CANON_PKG/workloads/frozenlake-three-arm/scripts/classify_checkpoint_eval.py" \
         --evaluation "$CANON_P57_EVAL_OUTPUT" \
         --run-log "$LOG" \
         --arm "$CANON_P57_TIM_ARM" \
@@ -1919,7 +1919,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
        [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
       p57_eval_classification="$CANON_STATE/p57_inprocess_eval.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/p57-frozenlake-tim-causal-study/scripts/classify_inprocess_eval.py" \
+        python3 "$CANON_PKG/workloads/frozenlake-three-arm/scripts/classify_inprocess_eval.py" \
           --run-log "$LOG" \
           --expected-updates "$CANON_P57_EXPECTED_UPDATES" \
           --interval 50 \
@@ -1952,7 +1952,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       )
     fi
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tests/p33_workloads/classify_run.py" \
+      python3 "$CANON_PKG/tests/workloads/classify_run.py" \
         --workload "$CANON_P32_WORKLOAD" \
         --dp-size "$CANON_DP_SIZE" \
         --tp-size "$CANON_TP_SIZE" \
@@ -1975,7 +1975,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       esac
       v1_classification="$CANON_STATE/v1_hp_${v1_recipe}_full.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-        python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py" \
+        python3 "$CANON_PKG/workloads/full-recipes/scripts/classify_full_recipe.py" \
           --recipe "$v1_recipe" \
           --train-geometry "${CANON_P57_TRAIN_GEOMETRY:-dp8-tp8-b256}" \
           --state "$CANON_STATE" \
@@ -1988,7 +1988,7 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       if [ "${CANON_P57_TOKEN_CONTINUITY_DEBUG:-}" = "record-full" ]; then
         p57_tito_full_classification="$CANON_STATE/p57_tito_full_record.classification.json"
         JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-          python3 "$CANON_PKG/tasks/multiturn-tito-cross-workload/scripts/classify_tito_full_record.py" \
+          python3 "$CANON_PKG/workloads/token-continuity/scripts/classify_tito_full_record.py" \
             --state "$CANON_STATE" \
             --recipe "$v1_recipe" \
           --train-geometry "${CANON_P57_TRAIN_GEOMETRY:-dp8-tp8-b256}" \
