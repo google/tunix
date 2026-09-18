@@ -510,10 +510,27 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
 def _create_mesh(args) -> Mesh:
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
-    raise ValueError(
-        "Trainer mesh dimensions must multiply to visible JAX device count. "
-        f"Got shape={shape}, devices={jax.device_count()}."
-    )
+    if (
+        args.mesh_fsdp == 1
+        and jax.device_count() > 0
+        and jax.device_count() % args.mesh_tp == 0
+    ):
+      logging.info(
+          "Auto-adjusting trainer mesh_tp from %d to %d to match visible JAX"
+          " device count %d (mesh_fsdp=%d, %d devices/chip).",
+          args.mesh_tp,
+          jax.device_count(),
+          jax.device_count(),
+          args.mesh_fsdp,
+          jax.device_count() // args.mesh_tp,
+      )
+      args.mesh_tp = jax.device_count()
+      shape = (args.mesh_fsdp, args.mesh_tp)
+    else:
+      raise ValueError(
+          "Trainer mesh dimensions must multiply to visible JAX device count. "
+          f"Got shape={shape}, devices={jax.device_count()}."
+      )
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   return Mesh(devices, axis_names=("fsdp", "tp"))
 

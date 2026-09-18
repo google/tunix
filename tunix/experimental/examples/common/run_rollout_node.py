@@ -257,7 +257,23 @@ def _get_tensor_parallel_size(args: argparse.Namespace) -> int:
   """Derives tensor_parallel_size from mesh_tp if not explicitly set."""
   tp = getattr(args, "tensor_parallel_size", None)
   if tp is None:
+    import jax  # pylint: disable=g-import-not-at-top
     tp = getattr(args, "sampler_mesh_tp", None) or getattr(args, "mesh_tp", 1)
+    if (
+        jax.device_count() > 0
+        and jax.device_count() % tp == 0
+        and getattr(args, "mesh_fsdp", 1) == 1
+    ):
+      if tp != jax.device_count():
+        logging.info(
+            "Auto-adjusting rollout mesh_tp / tensor_parallel_size from %d to"
+            " %d to match visible JAX device count %d.",
+            tp,
+            jax.device_count(),
+            jax.device_count(),
+        )
+        tp = jax.device_count()
+        args.mesh_tp = tp
     args.tensor_parallel_size = tp
     if tp > 1:
       logging.info("Auto-derived tensor_parallel_size=%d from mesh_tp", tp)
@@ -337,11 +353,28 @@ def _create_rollout_mesh(args) -> Any:
 
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
-    raise ValueError(
-        "Rollout mesh dimensions must match visible device count: "
-        f"mesh_fsdp={args.mesh_fsdp} mesh_tp={args.mesh_tp} "
-        f"device_count={jax.device_count()}"
-    )
+    if (
+        args.mesh_fsdp == 1
+        and jax.device_count() > 0
+        and jax.device_count() % args.mesh_tp == 0
+    ):
+      logging.info(
+          "Auto-adjusting rollout mesh_tp from %d to %d to match visible JAX"
+          " device count %d (mesh_fsdp=%d, %d devices/chip).",
+          args.mesh_tp,
+          jax.device_count(),
+          jax.device_count(),
+          args.mesh_fsdp,
+          jax.device_count() // args.mesh_tp,
+      )
+      args.mesh_tp = jax.device_count()
+      shape = (args.mesh_fsdp, args.mesh_tp)
+    else:
+      raise ValueError(
+          "Rollout mesh dimensions must match visible device count: "
+          f"mesh_fsdp={args.mesh_fsdp} mesh_tp={args.mesh_tp} "
+          f"device_count={jax.device_count()}"
+      )
 
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   mesh = Mesh(devices, axis_names=("fsdp", "tp"))
