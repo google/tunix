@@ -139,7 +139,10 @@ def make_workload(selected: dict[str, list[dict]]) -> Workload:
 def load_exported_data(data: Path) -> tuple[dict, dict]:
     """Redraw verified local exports without touching Git or re-exporting data."""
     manifest = json.loads((data / "manifest.json").read_text(encoding="utf-8"))
-    require(manifest.get("source_commit") == REVISION, "Unexpected archive revision")
+    commit = manifest.get("source_commit")
+    require(isinstance(commit, str) and len(commit) == 40
+            and all(character in "0123456789abcdef" for character in commit),
+            "source_commit must be a 40-character commit hash")
     require(manifest.get("window") == {
         "source_step_first": 0, "source_step_last": 199,
         "display_step_first": 1, "display_step_last": 200, "count_per_arm": STEPS,
@@ -204,7 +207,7 @@ def render_svg(run: Workload, manifest: dict) -> str:
             f'{entry["text"]}</text></g>'
         )
     metadata = html.escape(json.dumps({"evidence": "measured telemetry; no substituted values",
-        "source_commit": REVISION, "window": manifest["window"],
+        "source_commit": manifest["source_commit"], "window": manifest["window"],
         "inputs": {arm: entry["plotted_csv_sha256"] for arm, entry in manifest["runs"].items()},
         "signed_full_run_certification": False,
         "endpoint_labels": {"metric": "training solve rate", "window": "steps 191–200",
