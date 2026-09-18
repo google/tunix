@@ -235,10 +235,19 @@ class DefaultChatTemplateParser(BaseChatTemplateParser):
 class QwenChatTemplateParser(BaseChatTemplateParser):
   """Parser for Qwen models."""
 
+  _DEFAULT_SYSTEM_PROMPT = (
+      "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+  )
+
+  def __init__(self, tokenizer: Any = None, enable_thinking: bool = True):
+    super().__init__(tokenizer, enable_thinking=enable_thinking)
+
   def _init_tokens(self) -> TokenConfig:
+    bos_token = getattr(self.tokenizer, "bos_token", "") or ""
+    eos_token = getattr(self.tokenizer, "eos_token", "") or ""
     return TokenConfig(
-        bos_token=self.tokenizer.bos_token,
-        eos_token=self.tokenizer.eos_token,
+        bos_token=bos_token,
+        eos_token=eos_token,
         eot_token="<|im_end|>",
         system_token="<|im_start|>system\n",
         user_token="<|im_start|>user\n",
@@ -259,13 +268,31 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
   def _init_generation_prompt(self) -> str:
     return self.tokens.assistant_token
 
+  def _parse_system(self, content: str) -> str:
+    return super()._parse_system(content or self._DEFAULT_SYSTEM_PROMPT)
+
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
     """Add default system message if first message is not system."""
-    if messages[0]["role"] != "system":
-      return self._parse_system(
-          "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-      )
+    if not messages or messages[0]["role"] != "system":
+      return self._parse_system(self._DEFAULT_SYSTEM_PROMPT)
     return ""
+
+
+class QwenVtcChatTemplateParser(QwenChatTemplateParser):
+  """Qwen chat template parser with assistant reasoning prefill for VTC."""
+
+  def _init_generation_prompt(self) -> str:
+    return self.tokens.assistant_token + "<reasoning>\n"
+
+  def _parse_assistant(self, content: str) -> str:
+    if content.lstrip().startswith("<reasoning>"):
+      return self.tokens.assistant_token + content + self.tokens.eot_token
+    return (
+        self.tokens.assistant_token
+        + "<reasoning>\n"
+        + content
+        + self.tokens.eot_token
+    )
 
 
 class LlamaChatTemplateParser(BaseChatTemplateParser):

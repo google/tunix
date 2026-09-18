@@ -102,6 +102,66 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     self.assertEqual(result, expected)
 
 
+class QwenVtcChatTemplateParserTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mock_tokenizer = mock.Mock()
+    self.mock_tokenizer.bos_token = '<bos>'
+    self.mock_tokenizer.eos_token = '<eos>'
+
+  def test_parse_inserts_system_and_assistant_reasoning_prefill(self):
+    p = parser.QwenVtcChatTemplateParser(self.mock_tokenizer)
+    messages = [
+        {'role': 'system', 'content': ''},
+        {'role': 'user', 'content': 'Problem: 2+2'},
+    ]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<|im_start|>system\n'
+        'You are Qwen, created by Alibaba Cloud. You are a helpful'
+        ' assistant.<|im_end|>\n'
+        '<|im_start|>user\nProblem: 2+2<|im_end|>\n'
+        '<|im_start|>assistant\n<reasoning>\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_with_custom_system_and_disable_thinking(self):
+    p = parser.QwenVtcChatTemplateParser(
+        self.mock_tokenizer, enable_thinking=False
+    )
+    messages = [
+        {'role': 'system', 'content': 'Custom system'},
+        {'role': 'user', 'content': 'Problem: 2+2'},
+    ]
+    result = p.parse(messages, is_first_msg=True, add_generation_prompt=True)
+    expected = (
+        '<|im_start|>system\nCustom system<|im_end|>\n'
+        '<|im_start|>user\nProblem: 2+2<|im_end|>\n'
+        '<|im_start|>assistant\n<think>\n\n</think>\n\n<reasoning>\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_parse_assistant_turn_preserves_single_reasoning_prefix(self):
+    p = parser.QwenVtcChatTemplateParser(self.mock_tokenizer)
+    msg_without_open = [
+        {'role': 'assistant', 'content': '2+2=4</reasoning><answer>4</answer>'}
+    ]
+    self.assertEqual(
+        p.parse(msg_without_open),
+        '\n<|im_start|>assistant\n<reasoning>\n2+2=4</reasoning><answer>4</answer><|im_end|>',
+    )
+    msg_with_open = [{
+        'role': 'assistant',
+        'content': '<reasoning>\n2+2=4</reasoning><answer>4</answer>',
+    }]
+    self.assertEqual(
+        p.parse(msg_with_open),
+        '\n<|im_start|>assistant\n<reasoning>\n2+2=4</reasoning><answer>4</answer><|im_end|>',
+    )
+
+
+
 class LlamaChatTemplateParserTest(absltest.TestCase):
 
   def setUp(self):

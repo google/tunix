@@ -78,7 +78,7 @@ TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
-CHAT_PARSER=${CHAT_PARSER:-raw}
+CHAT_PARSER=${CHAT_PARSER:-vtc}
 # Qwen3 chat models close each turn with `<|im_end|>` rather than the
 # tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
 # fall back to the tokenizer's EOS token.
