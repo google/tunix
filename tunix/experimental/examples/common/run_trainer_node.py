@@ -229,6 +229,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--optimizer_b1",
       "--adam_b1",
+      "--b1",
       dest="optimizer_b1",
       type=float,
       default=0.9,
@@ -236,6 +237,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--optimizer_b2",
       "--adam_b2",
+      "--b2",
       dest="optimizer_b2",
       type=float,
       default=0.999,
@@ -246,6 +248,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       dest="optimizer_weight_decay",
       type=float,
       default=0.0,
+  )
+  parser.add_argument(
+      "--max_grad_norm",
+      type=float,
+      default=float(os.getenv("MAX_GRAD_NORM", "0.125")),
+      help="Gradient clipping threshold (L2 norm).",
+  )
+  parser.add_argument(
+      "--learning_rate_final_fraction",
+      type=float,
+      default=float(os.getenv("LEARNING_RATE_FINAL_FRACTION", "1.0")),
+      help="Final learning rate fraction for MaxText schedule (1.0 = constant).",
+  )
+  parser.add_argument(
+      "--remat_policy",
+      type=str,
+      default=os.getenv("REMAT_POLICY", "full"),
+      help="MaxText rematerialization policy (e.g., full, decoder, minimal).",
+  )
+  parser.add_argument(
+      "--float32_gate_logits",
+      type=_str2bool,
+      default=True,
+      nargs="?",
+      const=True,
+      help="Compute MoE router gate logits in float32.",
+  )
+  parser.add_argument(
+      "--maxtext_attention",
+      type=str,
+      default=os.getenv("TRAINER_MAXTEXT_ATTENTION", "dot_product"),
+      help="MaxText attention kernel (e.g., dot_product, flash).",
   )
   parser.add_argument(
       "--optimizer_eps",
@@ -331,6 +365,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--sampler_type",
+      "--sampler",
+      dest="sampler_type",
       type=str,
       choices=("inprocess_vllm", "vllm", "vanilla"),
       default="inprocess_vllm",
@@ -371,6 +407,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--maxtext_warmup_steps_fraction",
+      "--warmup_steps_fraction",
+      dest="maxtext_warmup_steps_fraction",
       type=float,
       default=0.0,
       help=(
@@ -586,9 +624,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       args.model_id, args.tokenizer_path, args.model_dir
   )
   checkpointing_options = _checkpointing_options(args)
-  grad_accumulation_steps = max(
-      1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
-  )
+  grad_accumulation_steps = _gradient_accumulation_steps(args)
   if args.optimizer_schedule_type:
     logging.warning(
         "--optimizer_schedule_type=%s is ignored by the maxtext backend, which"
@@ -627,6 +663,14 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      adam_b1=args.optimizer_b1,
+      adam_b2=args.optimizer_b2,
+      adam_eps=args.optimizer_eps,
+      adam_weight_decay=args.optimizer_weight_decay,
+      gradient_clipping_threshold=args.max_grad_norm,
+      learning_rate_final_fraction=args.learning_rate_final_fraction,
+      remat_policy=args.remat_policy,
+      attention=args.maxtext_attention,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

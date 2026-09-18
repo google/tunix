@@ -93,6 +93,12 @@ def build_vllm_maxtext_additional_config(
       "allow_split_physical_axes": True,
       "log_config": False,
       "weight_dtype": "bfloat16",
+      "float32_logits": True,
+      "float32_gate_logits": True,
+      "float32_weight_sum": True,
+      "float32_qk_product": True,
+      "logits_dot_in_fp32": True,
+      "cast_logits_to_fp32": True,
   }
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
@@ -127,6 +133,14 @@ def build_maxtext_config(
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
+    adam_b1: float = 0.9,
+    adam_b2: float = 0.999,
+    adam_eps: float = 1e-8,
+    adam_weight_decay: float = 0.0,
+    gradient_clipping_threshold: float = 0.125,
+    learning_rate_final_fraction: float = 1.0,
+    remat_policy: str = "full",
+    attention: str = "dot_product",
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -351,7 +365,8 @@ def build_maxtext_config(
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
-      "attention=dot_product",
+      f"attention={attention or 'dot_product'}",
+      f"remat_policy={remat_policy or 'full'}",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
@@ -374,9 +389,27 @@ def build_maxtext_config(
       f"ici_expert_parallelism={mesh_expert}",
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
+      f"cosine_learning_rate_final_fraction={learning_rate_final_fraction}",
+      f"adam_b1={adam_b1}",
+      f"adam_b2={adam_b2}",
+      f"adam_eps={adam_eps}",
+      f"adam_weight_decay={adam_weight_decay}",
+      f"gradient_clipping_threshold={gradient_clipping_threshold}",
+      "mu_dtype=float32",
       "dtype=bfloat16",
       "weight_dtype=bfloat16",
       "grad_dtype=float32",
+      "float32_logits=True",
+      "float32_gate_logits=True",
+      "float32_weight_sum=True",
+      "float32_qk_product=True",
+      "logits_dot_in_fp32=True",
+      "cast_logits_to_fp32=True",
+      *(
+          ["enable_router_replay=True"]
+          if os.environ.get("ENABLE_ROUTER_REPLAY", "1") != "0"
+          else []
+      ),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",

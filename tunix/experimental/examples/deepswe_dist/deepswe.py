@@ -167,6 +167,7 @@ def build_prompt_item(
           "top_p": top_p,
           "top_k": top_k,
           "return_logprobs": True,
+          "return_routed_experts": os.environ.get("ENABLE_ROUTER_REPLAY", "1") != "0",
       },
       "metadata": {
           "instance_id": prompt_id,

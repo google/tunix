@@ -803,6 +803,9 @@ def _create_vllm_sampler(args, tokenizer):
   ):
     vllm_overrides.pop(reserved, None)
   engine_kwargs.update(vllm_overrides)
+  if os.environ.get("ENABLE_ROUTER_REPLAY", "1") != "0":
+    engine_kwargs["enable_return_routed_experts"] = True
+    engine_kwargs["async_scheduling"] = False
 
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]

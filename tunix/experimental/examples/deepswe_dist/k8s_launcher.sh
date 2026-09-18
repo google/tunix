@@ -48,16 +48,29 @@ export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
+export NUM_ITERATIONS=${NUM_ITERATIONS:-1}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
-export LEARNING_RATE=${LEARNING_RATE:-1e-6}
+export LEARNING_RATE=${LEARNING_RATE:-3e-6}
+export TEMPERATURE=${TEMPERATURE:-1.0}
+export TOP_P=${TOP_P:-0.95}
+export TOP_K=${TOP_K:-20}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
+export EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-grpo_no_std}
+export LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
+export SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-2.0}
+export TRUNCATED_IMPORTANCE_SAMPLING_TYPE=${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-${TIS_TYPE:-seq-mask-tis}}
+export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-${TIS_RATIO_MIN:-0.999}}
+export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-${TIS_RATIO_MAX:-1.002}}
+export OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-true}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
 export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
-export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+export FORCE_ON_POLICY_RATIO=${FORCE_ON_POLICY_RATIO:-true}
+export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
@@ -205,6 +218,7 @@ start_orchestrator() {
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       ROLLOUT_WORKERS=\"${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}\" \
       EPISODE_TIMEOUT_SECS=\"${EPISODE_TIMEOUT_SECS:-5400}\" \
+      ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
@@ -216,12 +230,17 @@ start_orchestrator() {
         --model_id=${MODEL_ID} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --batch_size=${BATCH_SIZE} \
+        --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
+        --num_iterations=${NUM_ITERATIONS:-1} \
         --max_steps=${MAX_STEPS} \
         --max_turns=${MAX_TURNS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --temperature=${TEMPERATURE} \
+        --top_p=${TOP_P} \
+        --top_k=${TOP_K} \
         --beta=${BETA} \
         --epsilon=${EPSILON} \
         ${EPSILON_HIGH:+--epsilon_high=${EPSILON_HIGH}} \
@@ -242,6 +261,7 @@ start_orchestrator() {
         --step_timeout_secs=${STEP_TIMEOUT_SECS} \
         --reward_timeout_secs=${REWARD_TIMEOUT_SECS} \
         ${EPISODE_TIMEOUT_SECS:+--episode_timeout_secs=${EPISODE_TIMEOUT_SECS}} \
+        ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
@@ -299,6 +319,7 @@ start_trainer() {
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       ${BOOTSTRAP_CMD} \
+      RAIDEN_USE_FFI=${RAIDEN_USE_FFI:-1} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
       PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \

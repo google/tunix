@@ -69,6 +69,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument("--num_generations", type=int, default=2)
+  parser.add_argument("--num_iterations", type=int, default=1)
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
@@ -115,6 +116,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--top_k", type=int, default=-1)
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
+  parser.add_argument("--epsilon_high", type=float, default=None)
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
@@ -125,6 +127,54 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " non-experimental GRPOConfig; pass --no-use_rollout_logps for"
           " on-policy ratio=1."
       ),
+  )
+  parser.add_argument(
+      "--force_on_policy_ratio",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help="Force on-policy ratio=1 (sets use_rollout_logps=False).",
+  )
+  parser.add_argument(
+      "--advantage_estimator",
+      type=str,
+      default="grpo_no_std",
+      help="Advantage estimator mode (e.g., grpo, grpo_no_std).",
+  )
+  parser.add_argument(
+      "--loss_agg_mode",
+      type=str,
+      default="token-mean",
+      help="Loss aggregation mode (e.g., token-mean, sequence-mean-token-mean).",
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold",
+      type=float,
+      default=None,
+      help="Drop sequences whose mean_t exp|log p_trainer - log q_sampler| exceeds this threshold.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_type",
+      type=str,
+      default=None,
+      help="Sequence-level sampler IS type (e.g., 'seq-mask-tis' or None).",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min",
+      type=float,
+      default=None,
+      help="Lower edge of seq-mask-tis geometric-mean ratio keep-band.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio",
+      type=float,
+      default=None,
+      help="Upper edge of seq-mask-tis geometric-mean ratio keep-band.",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help="Mask out sequences truncated at max_response_length / max_turns.",
   )
   parser.add_argument(
       "--offpolicy",
@@ -225,12 +275,36 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  use_rollout_logps = (
+      False if args.force_on_policy_ratio else args.use_rollout_logps
+  )
+  tis_type = args.truncated_importance_sampling_type
+  if isinstance(tis_type, str) and tis_type.strip().lower() in (
+      "",
+      "none",
+      "null",
+  ):
+    tis_type = None
+
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
+      num_iterations=args.num_iterations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta=args.beta,
       temperature=args.temperature,
-      use_rollout_logps=args.use_rollout_logps,
+      advantage_estimator=args.advantage_estimator,
+      loss_agg_mode=args.loss_agg_mode,
+      use_rollout_logps=use_rollout_logps,
+      overlong_loss_masking=args.overlong_loss_masking,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      truncated_importance_sampling_type=tis_type,
+      truncated_importance_sampling_ratio_min=(
+          args.truncated_importance_sampling_ratio_min
+      ),
+      truncated_importance_sampling_ratio=(
+          args.truncated_importance_sampling_ratio
+      ),
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,

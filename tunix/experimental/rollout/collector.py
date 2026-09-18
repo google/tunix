@@ -214,7 +214,8 @@ class TrajectoryCollectorEngine:
           seed=seed,
           return_logprobs=generation_kwargs.get("return_logprobs", False),
           return_routed_experts=generation_kwargs.get(
-              "return_routed_experts", False
+              "return_routed_experts",
+              os.environ.get("ENABLE_ROUTER_REPLAY", "1") != "0",
           ),
           routed_experts_prompt_start=generation_kwargs.get(
               "routed_experts_prompt_start", 0

@@ -159,7 +159,7 @@ class RLVllmSampler:
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
     # explicit `None`, so `.get(key, default)` returns `None` rather than
     # the default, defeating it before `_get_val` can coalesce.
-    return VllmSamplingParams(
+    vllm_sp = VllmSamplingParams(
             temperature=_get_val(sparams, "temperature",
                                  _get_val(kwargs, "temperature", 0.7)),
             top_p=_get_val(sparams, "top_p", _get_val(kwargs, "top_p", 0.95)),
@@ -168,10 +168,28 @@ class RLVllmSampler:
                                 _get_val(kwargs, "max_tokens", 128)),
             stop=_get_val(sparams, "stop_sequences")
             or _get_val(sparams, "stop") or kwargs.get("stop"),
+            include_stop_str_in_output=True,
             logprobs=1
             if _get_val(sparams, "return_logprobs",
                         kwargs.get("return_logprobs", False)) else None,
         )
+    return_routed = _get_val(
+        sparams,
+        "return_routed_experts",
+        _get_val(
+            kwargs,
+            "return_routed_experts",
+            getattr(self.engine_args, "enable_return_routed_experts", False),
+        ),
+    )
+    if return_routed:
+      prompt_start = _get_val(
+          sparams,
+          "routed_experts_prompt_start",
+          _get_val(kwargs, "routed_experts_prompt_start", 0),
+      )
+      setattr(vllm_sp, "routed_experts_prompt_start", prompt_start)
+    return vllm_sp
 
   async def _process_request_output(
         self,
