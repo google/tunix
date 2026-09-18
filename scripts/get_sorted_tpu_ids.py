@@ -12,7 +12,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Map TPU VFIO IDs sorted by PCI address.
+r"""Map TPU VFIO IDs sorted by PCI address.
+
+Background:
+    To slice a single TPU VM into several independent workers (e.g. a trainer
+    and one or more rollout workers in GRPO), we restrict each process to a
+    subset of the chips on the host:
+
+        TPU_VISIBLE_DEVICES=0,1,2,3 \
+        TPU_CHIPS_PER_PROCESS_BOUNDS=1,4,1 \
+        TPU_PROCESS_BOUNDS=1,1,1 \
+        python -c 'import jax; print(jax.devices())'
+
+    The catch is that `TPU_VISIBLE_DEVICES` takes VFIO device IDs (the numeric
+    nodes under `/dev/vfio`), and those IDs are *not* guaranteed to follow the
+    physical chip topology. The kernel hands out IOMMU group / VFIO IDs in an
+    arbitrary order, so on some hosts a naive `0,1,2,3` picks four chips that
+    are not topologically adjacent. JAX then fails to build a valid mesh for
+    the requested process bounds and the workers crash at startup.
+
+    The physical ordering is recoverable from the PCI address of each device,
+    which *is* topology-ordered. This script walks `/dev/vfio`, resolves each
+    VFIO ID back to its PCI address via `/sys/kernel/iommu_groups/<id>/devices`,
+    and prints the VFIO IDs sorted by PCI address. Feeding that sorted list
+    (or a `--begin`/`--count` slice of it) into `TPU_VISIBLE_DEVICES` yields a
+    contiguous, valid set of chips per worker.
+
+    Example on a v5e-8 where the IDs are shuffled:
+
+        PCI Address        -> VFIO ID
+        --------------------------------
+        0000:00:0c.0       -> 3
+        0000:00:0d.0       -> 2
+        0000:00:0e.0       -> 4
+        0000:00:0f.0       -> 7
+        0000:80:00.0       -> 1
+        0000:80:01.0       -> 5
+        0000:80:02.0       -> 6
+        0000:80:03.0       -> 0
+
+        Sorted VFIO IDs (by PCI order):
+        [3, 2, 4, 7, 1, 5, 6, 0]
+
+    So the first 4-chip worker should use `TPU_VISIBLE_DEVICES=3,2,4,7` rather
+    than `0,1,2,3`. This applies to single-host slices such as v5e-8 and v6e-8.
 
 Usage:
     python get_sorted_tpu_ids.py [-H] [--begin BEGIN] [--count COUNT]
