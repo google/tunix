@@ -57,6 +57,20 @@ MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 
+def _reduce_weighted_metrics(items: Iterable[Any]) -> utils.WeightedMetric:
+  """Sums numerators and denominators of WeightedMetrics across micro-batches."""
+  items = list(items)
+  if not items:
+    return utils.WeightedMetric(0.0, 0.0)
+  first = items[0]
+  total_sum = sum(float(np.sum(np.asarray(x.unreduced_sum))) for x in items)
+  total_denom = sum(float(np.sum(np.asarray(x.denominator))) for x in items)
+  min_denom = getattr(first, "min_denom", None)
+  if min_denom is not None:
+    return utils.WeightedMetric(total_sum, total_denom, min_denom=min_denom)
+  return utils.WeightedMetric(total_sum, total_denom)
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class TrainingConfig:
   """Configuration for the trainer."""
@@ -873,13 +887,36 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """Override this function for additional input preparation."""
     return input_data
 
+  def _buffer_aux_metrics(
+      self, aux: Any, metrics_buffer: MetricsBuffer | None
+  ) -> None:
+    """Buffers scalar and WeightedMetric entries from loss aux dictionary."""
+    if not isinstance(aux, dict) or metrics_buffer is None:
+      return
+    metrics = metrics_buffer.additional_metrics
+    for k, v in aux.items():
+      if isinstance(v, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+        op = _reduce_weighted_metrics
+      elif isinstance(v, (jax.Array, np.ndarray)):
+        if v.ndim > 0:
+          continue
+        op = np.mean
+      elif isinstance(v, (int, float, np.number)):
+        op = np.mean
+      else:
+        continue
+      if k not in metrics:
+        metrics[k] = ([v], op)
+      else:
+        metrics[k][0].append(v)
+
   def _post_process_train_step(self, aux: Any) -> None:
     """Override this function for post processing aux data from train step."""
-    pass
+    self._buffer_aux_metrics(aux, self._buffered_train_metrics)
 
   def _post_process_eval_step(self, aux: Any) -> None:
     """Override this function for post processing aux data from eval step."""
-    pass
+    self._buffer_aux_metrics(aux, self._buffered_eval_metrics)
 
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
@@ -923,7 +960,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      if isinstance(v, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+        v = sft_metrics_logger.extract_scalar(v)
+      if v is not None:
+        self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
@@ -1256,6 +1296,18 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:
+    if (
+        self._written_metrics is None
+        and self._prev_buffered_train_metrics is not None
+    ):
+      self._prev_buffered_train_metrics.step += 1
+      self._write_metrics(self._prev_buffered_train_metrics)
+      self._may_update_pbar(
+          self._tqdm_train_metrics,
+          step=self._prev_buffered_train_metrics.step,
+          loss=self._prev_buffered_train_metrics.loss,
+      )
+      self._prev_buffered_train_metrics = None
     if self._written_metrics is None:
       return exp_metrics.MetricsBuffer(id=-1)
     ret = self._written_metrics

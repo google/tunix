@@ -21,7 +21,6 @@ import ast
 import asyncio
 import contextlib
 import logging
-import math
 import os
 from pathlib import Path
 import pickle
@@ -386,6 +385,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--kv_tp_size",
+      type=int,
+      default=0,
+      help=(
+          "Number of KV heads the rollout replicates to; must equal the"
+          " rollout's tp * ep. The vLLM rollout replicates KV heads up to"
+          " tp*ep when the model has fewer, and Raiden weight sync pairs"
+          " tensors by name, so the trainer has to build the same shape or"
+          " preflight fails with a global-shape mismatch on"
+          " decoder.layers.N.attention.attention.key.kernel. Leave 0 to fall"
+          " back to --rollout_mesh_tp, which is only correct when the rollout"
+          " runs ep=1."
+      ),
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -589,9 +603,21 @@ def _create_maxtext_trainer_factory(args) -> Any:
       args.model_id, args.tokenizer_path, args.model_dir
   )
   checkpointing_options = _checkpointing_options(args)
-  grad_accumulation_steps = max(
-      1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
-  )
+  # Was: ceil(mini_batch_size / train_micro_batch_size), which omits
+  # num_generations entirely. The orchestrator streams
+  # mini_batch_size * num_generations trajectories per update, so dropping the
+  # factor makes the optimizer fire num_generations times per intended step --
+  # effective batch 1/num_generations of configured, LR schedule that much too
+  # fast, and nothing raises. At our config (mini_batch 8, num_generations 4,
+  # micro_batch 8) this computed 1 instead of 4.
+  #
+  # This is the MaxText instance of bug A in the dense-GRPO bringup
+  # (docs/bringup/2026-09-15-dense-grpo on jfacevedo/trellis-mlperf), which that
+  # report fixed for the Tunix backend and explicitly flagged as untested on
+  # MaxText. We are the ones exercising MaxText. `_gradient_accumulation_steps`
+  # is the same helper the Tunix path already uses, and it fails closed on a
+  # non-divisible batch rather than silently truncating.
+  grad_accumulation_steps = _gradient_accumulation_steps(args)
   if args.optimizer_schedule_type:
     logging.warning(
         "--optimizer_schedule_type=%s is ignored by the maxtext backend, which"
@@ -604,6 +630,7 @@ def _create_maxtext_trainer_factory(args) -> Any:
   sig = inspect.signature(maxtext_utils.build_maxtext_config)
   for k, v in [
       ("rollout_mesh_tp", args.rollout_mesh_tp),
+      ("kv_tp_size", args.kv_tp_size),
       ("prefuse_moe_weights", args.prefuse_moe_weights),
       ("use_weight_converter", args.use_weight_converter),
   ]:

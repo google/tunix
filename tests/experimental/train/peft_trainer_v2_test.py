@@ -954,6 +954,50 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIn('grad_norm', train_metrics.scalar_metrics)
     self.assertGreater(train_metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
 
+  def test_default_post_process_train_step_and_step0_get_metrics(self):
+    def custom_loss_fn(model, input_tokens, input_mask, positions, attention_mask):
+      del model, input_tokens, input_mask, positions, attention_mask
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(jnp.array(2.0), jnp.array(1.0)),
+          aux_metrics={
+              'tis/is_oob_ratio': sft_utils.WeightedMetric(
+                  jnp.array(3.0), jnp.array(10.0)
+              ),
+              'sampler_is/token_logdiff_absmean': jnp.array(0.05),
+              'unreduced_pg_loss': jnp.ones((4, 16)),
+          },
+      )
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2, max_steps=10, gradient_accumulation_steps=2
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    mb0 = self.train_ds[0]
+    mb1 = self.train_ds[1]
+    trainer.fwd_bwd(mb0)
+    trainer.fwd_bwd(mb1)
+    trainer.update()
+
+    metrics = trainer.get_metrics()
+    self.assertEqual(metrics.id, 1)
+    self.assertIn('tis/is_oob_ratio', metrics.weighted_metrics)
+    oob_wm = metrics.weighted_metrics['tis/is_oob_ratio']
+    self.assertAlmostEqual(float(oob_wm.unreduced_sum), 6.0)
+    self.assertAlmostEqual(float(oob_wm.denominator), 20.0)
+    self.assertIn('sampler_is/token_logdiff_absmean', metrics.scalar_metrics)
+    self.assertAlmostEqual(
+        float(metrics.scalar_metrics['sampler_is/token_logdiff_absmean']),
+        0.05,
+        places=5,
+    )
+    self.assertNotIn('unreduced_pg_loss', metrics.scalar_metrics)
+    self.assertNotIn('unreduced_pg_loss', metrics.weighted_metrics)
+
   def test_injected_params(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
