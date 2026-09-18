@@ -18,14 +18,17 @@ updates requested, the first 200 plotted.
 
 | | Standard | Token-level TIS | Zero-TIM |
 |---|---|---|---|
-| Old-policy logprobs | trainer re-score (`old_logps_source: trainer`) | trainer re-score | the rollout logprobs themselves — identical to the trainer's by construction |
-| Sampler correction | none (`sampler_is: none`) | token-level TIS, threshold 2.0, set in `examples/frozenlake/train_frozenlake_qwen3.py`, not by a flag | none |
-| Token handling and evaluation | evaluation every 50 updates | evaluation every 50 updates | exact token-in-token-out both directions (`--token-continuity both-exact`, debug `record-full`); evaluation off (`eval_every_n_steps: 0`) |
-| Engine path | stock vllm-tpu plus observer (`CANON_P57_INFERENCE_REGIME=stock-fast`) | same as Standard | canonical overlay: 40 patches plus the shim chain, verified against `canon-zero-tim/MANIFEST.sha256` |
+| Old-policy logprobs | trainer re-score (`old_logps_source: trainer`) | trainer re-score | the rollout logprobs themselves, bit-identical to the trainer's |
+| Sampler correction | none (`sampler_is: none`) | token-level TIS, threshold 2.0 | none |
 | Render script | `canon-zero-tim/recipes/frozenlake-short-horizon/render_standard.sh` | `canon-zero-tim/recipes/frozenlake-short-horizon/render_tis.sh` | `canon-zero-tim/recipes/frozenlake-short-horizon/render_zero_tim.sh` |
-| Archived W&B run | `jff877lt_canon-p57-fl-stan-r01-567c96d5` | `8zjz4li7_canon-p57-fl-is-i45g-ccbcf572` | `tybj4xr0_canon-p57-fl-zero-r10a-06a0fdb9` |
 | Reference endpoint (trailing-10 solve rate at display step 200) | 0.6265625 → 62.7% | 0.66875 → 66.9% | 0.882421875 → 88.2% |
-| Observed wall clock | 301 steps in 12.65 h (136.9 s/step) | not recorded | step 216 after 38.06 h (609.7 s/step) |
+
+Zero-TIM additionally runs the canonical engine overlay with exact token-in-token-out and evaluation
+off; Standard and TIS run the stock vllm-tpu engine with evaluation every 50 updates. All three are
+configured for 300 updates; Figure 4 uses the first 200 observations (W&B `_step` 0–199).
+
+Before launching, have these five in hand: the branch tip SHA you cloned; the runtime image pinned
+by digest in your registry; the JobSet namespace (`default`); a GCS scratch prefix; a W&B API key.
 
 ## Step 1 — environment
 
@@ -98,6 +101,10 @@ kubectl apply -f "$MANIFEST"
 | Zero-TIM | exactly one `[P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout tis_weights=absent trainer_rescore=observer-only`, plus `[PATHTRACE]` lines in the log and, in W&B, `sampler_trainer/train/logp_diff_mean` == 0 and `canonical/train/alignment_max_differing_bytes` == 0 at every step | a clean exit with no `[PATHTRACE]` line: the overlay never installed |
 
 Three runs need 192 chips; on 64 chips run them one after another.
+
+Stop condition: once W&B shows the row `_step = 199` (the 200th observation) the Figure 4 data for
+that arm is complete — let the job finish its 300 updates or delete the JobSet; step 5 takes only
+`_step` 0–199 and refuses a run that has fewer.
 
 ## Step 5 — export the runs from W&B
 
