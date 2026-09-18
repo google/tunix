@@ -675,148 +675,162 @@ def create_maxtext_engine(
   return engine
 
 
-_SLOT_GROUP_HELPER = '''def _routed_experts_slot_layout(runner):
-    """Returns ``(kv_cache_group_id, block_size)`` keying the routed-experts
-    slot buffer.
+_SLOT_GROUP_HELPER = '''_ROUTED_EXPERTS_ATTN_GID_LOGGED = False
 
-    This MUST agree with vLLM's ``RoutedExpertsManager``, which keys its buffer
-    by the FULL-ATTENTION group (``get_routed_experts_attn_gid``) and by that
-    group's ``block_size`` -- not by group 0, and not by the global
-    ``cache_config.block_size``.
 
-    A hybrid model has more than one KV-cache group and the full-attention
-    group is not necessarily group 0. Qwen3.5-35B-A3B is such a model: its
-    Gated Delta Network layers form their own group. If the write side keys off
-    group 0 while the manager reads off ``attn_gid``, writes and reads address
-    disjoint slot spaces and the read returns zero-initialised memory. That
-    never raises -- expert id 0 is in range -- so it decodes as "every token
-    routed to expert 0", and it damages only the PROMPT, because the decode
-    path reads the step's fresh routing tensor and never consults the buffer.
+def _routed_experts_attn_gid_for(runner):
+    """Returns the KV-cache group whose block IDs key the routed-experts buffer.
+
+    vLLM's ``RoutedExpertsManager`` READS a finished prefill's routing back
+    through the FULL-ATTENTION group's block IDs; it picks that group with
+    ``get_routed_experts_attn_gid``. Groups follow model layer order, so on a
+    hybrid model group 0 is not that group. Qwen3.5-35B-A3B
+    (``full_attention_interval=4``, so layer 0 is linear attention) lays out
+    ``[linear, linear, linear, full]``.
+
+    Writing slots keyed off group 0 therefore aims at a slot space the reader
+    never inspects, and the prompt reads back zero-filled. Nothing rejects it:
+    ``num_experts=256`` exactly saturates uint8, so 0 is a legal expert id and
+    the trainer is simply handed "every prompt token routed to expert 0 in all
+    40 layers". Generated tokens are unaffected -- the scheduler slices those
+    straight out of the step's routing tensor without consulting the buffer.
 
     Resolution is delegated to vLLM's own helper so the two sides cannot drift.
+    A missing config or a failed import raises instead of falling back to 0,
+    because falling back reinstates exactly the bug this removes, and it is
+    invisible in the output.
     """
-    global _ROUTED_EXPERTS_SLOT_LAYOUT_LOGGED
+    global _ROUTED_EXPERTS_ATTN_GID_LOGGED
 
-    default_block_size = getattr(runner, "block_size", 0)
     kv_cache_config = getattr(runner, "kv_cache_config", None)
     if kv_cache_config is None:
-        return 0, default_block_size
+        raise RuntimeError(
+            "[routed-experts] runner has no kv_cache_config, so the attention "
+            "KV-cache group cannot be resolved; defaulting to group 0 would "
+            "silently zero-fill prompt routing")
 
-    try:
-        from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_routed_experts_attn_gid
-        gid = get_routed_experts_attn_gid(kv_cache_config)
-    except Exception:
-        return 0, default_block_size
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_routed_experts_attn_gid
+    gid = get_routed_experts_attn_gid(kv_cache_config)
 
-    groups = kv_cache_config.kv_cache_groups
-    block_size = getattr(groups[gid].kv_cache_spec, "block_size",
-                         default_block_size) or default_block_size
-
-    if not _ROUTED_EXPERTS_SLOT_LAYOUT_LOGGED:
-        _ROUTED_EXPERTS_SLOT_LAYOUT_LOGGED = True
-        logger.info(
-            "[routed-experts] slot layout: attn_gid=%d of %d KV group(s), "
-            "block_size=%d (global cache block_size=%d). Writes previously "
-            "hardcoded group 0; a mismatch here silently zero-fills prompt "
-            "routing.", gid, len(groups), block_size, default_block_size)
-
-    return gid, block_size
+    if not _ROUTED_EXPERTS_ATTN_GID_LOGGED:
+        _ROUTED_EXPERTS_ATTN_GID_LOGGED = True
+        print(
+            "[routed-experts] slot writes keyed off attn_gid=%d of %d KV "
+            "cache group(s); upstream hardcoded group 0" %
+            (gid, len(kv_cache_config.kv_cache_groups)),
+            flush=True)
+    return gid
 
 
-_ROUTED_EXPERTS_SLOT_LAYOUT_LOGGED = False
+def _routed_experts_block_ids(req_state, kv_group_id):
+    """Block IDs of ``kv_group_id`` for one request.
+
+    Asserts rather than clamping: a group mismatch produces plausible-looking
+    output (zero-filled routing, or another request's routing once block IDs
+    are recycled between groups), so it has to fail where it happens.
+    """
+    if not req_state.block_ids:
+        return []
+    assert 0 <= kv_group_id < len(req_state.block_ids), (
+        f"[routed-experts] kv_group_id={kv_group_id} is out of range for a "
+        f"request with {len(req_state.block_ids)} KV-cache group(s)")
+    return req_state.block_ids[kv_group_id]
 
 
 '''
 
 _SLOT_GROUP_PATCHES = [
     (
-        "slot_layout_helper",
-        "_routed_experts_slot_layout",
-        (
-            "def _reconstruct_slots_for_request(\n"
-            "    req_state: CachedRequestState,\n"
-            "    num_tokens: int,\n"
-            "    block_size: int,\n"
-            "    start_pos: int,\n"
-            ") -> np.ndarray:"
-        ),
-        (
-            _SLOT_GROUP_HELPER
-            + "def _reconstruct_slots_for_request(\n"
-            "    req_state: CachedRequestState,\n"
-            "    num_tokens: int,\n"
-            "    block_size: int,\n"
-            "    start_pos: int,\n"
-            "    kv_group_id: int = 0,\n"
-            ") -> np.ndarray:"
-        ),
+        # Anchored on _snapshot_block_ids rather than on
+        # _reconstruct_slots_for_request: the image's copy already takes a
+        # plain block-id list (it carries the snapshot refactor), so the
+        # signature this fix used to rewrite no longer exists.
+        "slot_group_helper",
+        "_routed_experts_attn_gid_for",
+        "def _snapshot_block_ids(runner,\n",
+        _SLOT_GROUP_HELPER + "def _snapshot_block_ids(runner,\n",
     ),
     (
-        "slot_group_select",
-        "kv_group_id < len(req_state.block_ids)",
-        "    block_ids = req_state.block_ids[0] if req_state.block_ids else []",
+        # The prefill path. This is the one that was actually broken: routing
+        # captured for the prompt was written against linear-attention blocks.
+        "snapshot_group_select",
+        "_routed_experts_block_ids(req_state, _attn_gid)",
         (
-            "    # Index the group the reader reads, not group 0. On a hybrid\n"
-            "    # model those differ, and keying off the wrong one points\n"
-            "    # writes at a slot space the reader never looks at.\n"
-            "    if req_state.block_ids and kv_group_id < len(req_state.block_ids):\n"
-            "        block_ids = req_state.block_ids[kv_group_id]\n"
-            "    else:\n"
-            "        block_ids = []"
+            "            snapshot[req_id] = list(\n"
+            "                req_state.block_ids[0] if req_state.block_ids else [])\n"
+        ),
+        (
+            "            snapshot[req_id] = list(\n"
+            "                _routed_experts_block_ids(req_state, _attn_gid))\n"
         ),
     ),
     (
-        "reconstruct_layout",
-        "kv_group_id, block_size = _routed_experts_slot_layout(runner)",
-        "    block_size = runner.block_size",
-        "    kv_group_id, block_size = _routed_experts_slot_layout(runner)",
-    ),
-    (
-        "reconstruct_callsite",
-        "start_pos=chunk_start[req_id],",
-        "                        start_pos=chunk_start[req_id])",
+        # Resolve the group once per snapshot rather than once per request, and
+        # after the empty-batch early-out so a no-op snapshot cannot raise.
+        "snapshot_gid_resolve",
+        "_attn_gid = _routed_experts_attn_gid_for(runner)",
         (
-            "                        start_pos=chunk_start[req_id],\n"
-            "                        kv_group_id=kv_group_id)"
+            "      Mapping of request id to a copy of its block ids for KV group 0.\n"
+            '    """\n'
+            "    snapshot: Dict[str, List[int]] = {}\n"
+            "    if not req_ids_dp:\n"
+            "        return snapshot\n"
+        ),
+        (
+            "      Mapping of request id to a copy of its block ids for the KV cache\n"
+            "      group the routed-experts buffer is keyed by, which is the\n"
+            "      full-attention group and is not group 0 on a hybrid model.\n"
+            '    """\n'
+            "    snapshot: Dict[str, List[int]] = {}\n"
+            "    if not req_ids_dp:\n"
+            "        return snapshot\n"
+            "    _attn_gid = _routed_experts_attn_gid_for(runner)\n"
         ),
     ),
     (
-        # Anchored on the following parameter, because the helper inserted by
-        # slot_layout_helper also contains "kv_group_id: int = 0," and a bare
-        # sentinel matches it, silently skipping this patch and leaving
-        # kv_group_id undefined in this function.
         "decode_param",
-        "    kv_group_id: int = 0,\n    scheduler_output:",
+        "    routed_experts_attn_gid: int = -1,",
         "    block_size: int = 0,\n    scheduler_output:",
-        "    block_size: int = 0,\n    kv_group_id: int = 0,\n    scheduler_output:",
+        (
+            "    block_size: int = 0,\n"
+            # -1, not 0: an unpatched caller then trips the assert in
+            # _routed_experts_block_ids instead of quietly writing group 0.
+            "    routed_experts_attn_gid: int = -1,\n"
+            "    scheduler_output:"
+        ),
     ),
     (
-        "decode_callsite",
-        "start_pos=req_state.num_computed_tokens,",
-        "                    start_pos=req_state.num_computed_tokens)",
+        "decode_group_select",
+        # Matches the wrapped form emitted below, not a single-line call; a
+        # sentinel that never matches makes a second pass abort the rollout.
+        "req_state, routed_experts_attn_gid),",
         (
-            "                    start_pos=req_state.num_computed_tokens,\n"
-            "                    kv_group_id=kv_group_id)"
+            "                slots_arr = _reconstruct_slots_for_request(\n"
+            "                    req_state.block_ids[0] if req_state.block_ids else [],\n"
+        ),
+        (
+            "                slots_arr = _reconstruct_slots_for_request(\n"
+            "                    _routed_experts_block_ids(\n"
+            "                        req_state, routed_experts_attn_gid),\n"
         ),
     ),
     (
         "async_caller",
-        "kv_group_id=(_routed_experts_slot_layout(self._runner)[0]",
-        '            block_size=getattr(self._runner, "block_size", 0),',
+        "routed_experts_attn_gid=(_routed_experts_attn_gid_for(self._runner)",
+        '            block_size=getattr(self._runner, "block_size", 0),\n',
         (
-            "            block_size=(_routed_experts_slot_layout(self._runner)[1]\n"
-            "                        if self._runner else 0),\n"
-            "            kv_group_id=(_routed_experts_slot_layout(self._runner)[0]\n"
-            "                         if self._runner else 0),"
+            '            block_size=getattr(self._runner, "block_size", 0),\n'
+            "            routed_experts_attn_gid=(_routed_experts_attn_gid_for(self._runner)\n"
+            "                                     if self._runner else -1),\n"
         ),
     ),
     (
         "sync_caller",
-        "kv_group_id=_routed_experts_slot_layout(self)[0],",
-        "            block_size=self.block_size,",
+        "routed_experts_attn_gid=_routed_experts_attn_gid_for(self),",
+        "            block_size=self.block_size,\n",
         (
-            "            block_size=_routed_experts_slot_layout(self)[1],\n"
-            "            kv_group_id=_routed_experts_slot_layout(self)[0],"
+            "            block_size=self.block_size,\n"
+            "            routed_experts_attn_gid=_routed_experts_attn_gid_for(self),\n"
         ),
     ),
 ]
@@ -826,15 +840,17 @@ def apply_routed_experts_slot_group_fix(path: str | None = None) -> None:
   """Keys routed-experts slot writes off the full-attention KV cache group.
 
   WHAT IT FIXES. tpu-inference derives the slot mapping it WRITES from
-  ``req_state.block_ids[0]`` and the global ``cache_config.block_size``, while
-  vLLM's ``RoutedExpertsManager`` READS that buffer using the full-attention
-  group's block IDs and that group's block size. On a hybrid model --
-  Qwen3.5-35B-A3B carries a Gated Delta Network group alongside its attention
-  group -- those are different groups, so the routing captured for the PROMPT
-  is written to slots nobody reads and the prompt reads back as all zeros.
-  Expert id 0 is a legal expert (num_experts=256 exactly saturates uint8), so
-  nothing downstream rejects it: the trainer is handed "every prompt token
-  routed to expert 0 in all 40 layers".
+  ``req_state.block_ids[0]``, while vLLM's ``RoutedExpertsManager`` READS that
+  buffer using the FULL-ATTENTION group's block IDs (it picks the group with
+  ``get_routed_experts_attn_gid``). KV-cache groups follow model layer order,
+  so group 0 is the full-attention group only on a non-hybrid model.
+  Qwen3.5-35B-A3B is hybrid -- 30 Gated Delta Network layers and 10
+  full-attention layers, laid out ``[linear, linear, linear, full]`` -- so the
+  routing captured for the PROMPT is written to slots nobody reads and the
+  prompt reads back as all zeros. Expert id 0 is a legal expert
+  (num_experts=256 exactly saturates uint8), so nothing downstream rejects it:
+  the trainer is handed "every prompt token routed to expert 0 in all 40
+  layers".
 
   Only the prompt is affected, because the decode path reads the step's fresh
   routing tensor and never consults the slot buffer.
@@ -842,6 +858,21 @@ def apply_routed_experts_slot_group_fix(path: str | None = None) -> None:
   Measured cost of not fixing it: replay ON is worse than replay OFF
   (seq_geomean 0.88-0.94 vs 0.997-0.999), and before the routes were screened
   for corruption it collapsed to NaN at step 3.
+
+  ``block_size`` is deliberately left alone. An earlier version of this patch
+  also swapped in the group's own block size; upstream's fix
+  (tpu-inference ``21eae2cf2``, wenxindong@) does not, and the two sides agree
+  on ``runner.block_size`` today.
+
+  WHICH SOURCE THIS IS WRITTEN AGAINST. The anchors target the tpu_runner.py
+  that is actually inside the deployed image, which is neither the pinned SHA
+  in requirements/special_requirements.txt nor any revision in the
+  tpu-inference history. It already carries the block-id *snapshot* refactor
+  (``_snapshot_block_ids``; ``_reconstruct_slots_for_request`` takes a plain
+  list), so the earlier anchors -- which expected the function to take a
+  ``CachedRequestState`` -- matched zero times and aborted the r16 launch. Verify
+  with scratch/check_r16_anchors.py against a fresh dump before trusting this on
+  a rebuilt image.
 
   WHY A TEXT PATCH RATHER THAN FILE INJECTION. tpu_runner.py is ~160KB; gzipped
   and base64'd it is ~47KB, and the rollout startup command already carries
