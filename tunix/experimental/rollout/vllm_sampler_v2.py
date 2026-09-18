@@ -398,6 +398,17 @@ class RLVllmSampler:
     await self._call_worker_method("bind_raiden_sync", worker_index,
                                        parallelism, job_name)
 
+  async def load_gcs_weights(self, checkpoint_path: str) -> None:
+    """Loads weights from GCS checkpoint directly into TPU workers."""
+    logger.info(
+        "Dispatching load_gcs_weights(%s) across TPU workers...",
+        checkpoint_path,
+    )
+    await self._call_worker_method("load_gcs_weights", checkpoint_path)
+
+  # Alias for backward compatibility
+  load_filesystem_weights = load_gcs_weights
+
   async def refresh_model_state_leaves(self) -> None:
     """Re-points each worker's dispatch view after an h2d weight update."""
     await self._call_worker_method("refresh_model_state_leaves")
@@ -415,7 +426,6 @@ class RLVllmSampler:
     Returns each worker's checksums dict (empty unless VERIFY_WEIGHTS=true).
     """
     return await self._call_worker_method("raiden_h2d", uuid=uuid)
-
   async def raiden_metrics(self) -> list[dict]:
     return await self._call_worker_method("raiden_metrics")
 

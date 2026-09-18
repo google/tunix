@@ -594,6 +594,9 @@ def _create_vllm_sampler(args, tokenizer):
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=args.enable_prefix_caching,
+      gpu_memory_utilization=float(
+          os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.7")
+      ),
   )
   if args.maxtext_model_name:
     logging.info(
@@ -645,6 +648,17 @@ def main(argv: list[str], context: Any = None) -> None:
     logging.getLogger().setLevel(logging.DEBUG)
     os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
   logging.info("Parsed args: %s", args)
+
+  if args.weight_sync_mode in (
+      weight_sync_lib.WeightSyncMode.GCS,
+      getattr(weight_sync_lib.WeightSyncMode, "FILESYSTEM", None),
+  ):
+    try:
+      from tunix.experimental.weight_sync import gcs_weight_sync
+
+      gcs_weight_sync.patch_tpu_worker_gcs_sync()
+    except Exception as e:
+      logging.debug("Could not patch TPUWorker GCS sync at startup: %s", e)
 
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)

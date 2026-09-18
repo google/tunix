@@ -1845,5 +1845,96 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     self.assertEqual(slow_source.release_calls, 1)
 
 
+class GcsCoordinatorTest(CoordinatorTestBase):
+
+  def test_gcs_weight_sync_round_succeeds(self):
+    class FakeGcsSource:
+      def __init__(self, name: str):
+        self._name = name
+        self.released = False
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id=self._name, roles=frozenset({datatypes.Role.ACTOR.value})
+        )
+
+      async def prepare_weight_sync(self, sync_request=None, **kwargs):
+        return [
+            weight_sync.WorkUnitMetadata(
+                unit=weight_sync.WorkUnitId(job_name=self._name),
+                control_plane_rpc_address="/gcs/bucket/ckpt_1",
+            )
+        ]
+
+      async def release_weight_sync(self, sync_request=None, **kwargs):
+        self.released = True
+
+    class FakeGcsDestination:
+      def __init__(self, name: str):
+        self._name = name
+        self.tracker = weight_sync_coordinator.WorkerRoundTracker()
+        self.received_ckpt = None
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id=self._name, roles=frozenset({datatypes.Role.ROLLOUT.value})
+        )
+
+      async def bind_weight_sync(self, sync_request=None, **kwargs):
+        return None
+
+      async def get_weight_sync_metadata(self, **kwargs):
+        return [
+            weight_sync.WorkUnitMetadata(
+                unit=weight_sync.WorkUnitId(job_name=self._name)
+            )
+        ]
+
+      async def pre_weight_sync(self, sync_request=None, **kwargs):
+        if not self.tracker.admit(sync_request, "prepared"):
+          return
+        self.tracker.complete(sync_request, "prepared")
+
+      async def weight_sync(self, sync_request=None, **kwargs):
+        if not self.tracker.admit(sync_request, "h2d_done"):
+          return
+        self.received_ckpt = sync_request.extra_config.get("checkpoint_path")
+        self.tracker.complete(sync_request, "h2d_done")
+
+      async def post_weight_sync(self, sync_request=None, **kwargs):
+        if not self.tracker.admit(sync_request, "committed"):
+          return
+        self.tracker.complete(sync_request, "committed")
+
+      async def abort_weight_sync(self, sync_request=None, **kwargs):
+        if not self.tracker.admit(sync_request, "aborted"):
+          return
+        self.tracker.complete(sync_request, "aborted")
+
+      async def get_weight_sync_status(self):
+        return self.tracker.report()
+
+    src = FakeGcsSource("trainer")
+    dst = FakeGcsDestination("sampler")
+    registry = worker_registry.WorkerRegistry()
+    registry.register(src)
+    registry.register(dst)
+
+    from tunix.experimental.weight_sync import gcs_weight_sync
+    handler = gcs_weight_sync.GcsSyncHandler()
+
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=registry,
+        handler=handler,
+        timeouts=FAST_TIMEOUTS,
+    )
+
+    result = asyncio.run(coordinator.sync(1))
+    self.assertTrue(result.success)
+    self.assertEqual(result.state, weight_sync_coordinator.RoundState.COMMITTED)
+    self.assertEqual(dst.received_ckpt, "/gcs/bucket/ckpt_1")
+    self.assertTrue(src.released)
+
+
 if __name__ == "__main__":
   absltest.main()

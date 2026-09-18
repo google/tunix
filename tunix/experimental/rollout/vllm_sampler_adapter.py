@@ -224,7 +224,18 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
-    if not self.enable_raiden:
+    self.enable_gcs = (
+        self.weight_sync_mode == weight_sync.WeightSyncMode.GCS
+    )
+    self.enable_filesystem = self.enable_gcs
+    if self.enable_gcs:
+      try:
+        from tunix.experimental.weight_sync import gcs_weight_sync
+
+        gcs_weight_sync.patch_tpu_worker_gcs_sync()
+      except Exception as e:
+        logger.debug("Failed to patch TPUWorker GCS sync: %s", e)
+    elif not self.enable_raiden:
       logger.info(
           "VllmSamplerAdapter [%s] weight_sync_mode=%s; Raiden weight sync is"
           " disabled.",
@@ -391,6 +402,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   ) -> Sequence[weight_sync.WorkUnitMetadata] | Any:
     """Returns transport metadata with Raiden endpoints and TensorMetadata."""
     del kwargs
+    if self.enable_gcs or self.enable_filesystem:
+      return [
+          weight_sync.WorkUnitMetadata(
+              unit=weight_sync.WorkUnitId(job_name=self.raiden_job_name)
+          )
+      ]
     if not self.enable_raiden:
       raise NotImplementedError(
           f"VllmSamplerAdapter [{self.server_id}] does not support"
@@ -408,7 +425,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       self, sync_request: Any = None, **kwargs: Any
   ) -> Any:
     """Quiesces intake, drains pending requests, resets prefix cache, and drops KV cache."""
-    if not self.enable_raiden:
+    if not (self.enable_raiden or self.enable_gcs or self.enable_filesystem):
       return True
     sampler = self._require_sampler()
     async with self._sync_lock:
@@ -425,12 +442,46 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       return True
 
   async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
-    """Flushes/awaits H2D transfers and refreshes state_leaves."""
-    if not self.enable_raiden:
+    """Flushes/awaits transfers and refreshes state_leaves."""
+    if self.enable_gcs or self.enable_filesystem:
+      checkpoint_path = None
+      if sync_request and hasattr(sync_request, "extra_config"):
+        checkpoint_path = sync_request.extra_config.get("checkpoint_path")
+      if not checkpoint_path and sync_request and hasattr(sync_request, "source_metadata"):
+        for m in (sync_request.source_metadata or []):
+          if getattr(m, "control_plane_rpc_address", None):
+            checkpoint_path = m.control_plane_rpc_address
+            break
+      if not checkpoint_path:
+        raise ValueError(
+            f"VllmSamplerAdapter [{self.server_id}] checkpoint_path missing from sync_request"
+        )
+      sampler = self._require_sampler()
+      async with self._sync_lock:
+        if not self._tracker.admit(sync_request, "h2d_done"):
+          return True
+
+        logger.info(
+            "VllmSamplerAdapter [%s] loading GCS weights from %s...",
+            self.server_id,
+            checkpoint_path,
+        )
+        if hasattr(sampler, "load_gcs_weights"):
+          await sampler.load_gcs_weights(checkpoint_path)
+        elif hasattr(sampler, "load_filesystem_weights"):
+          await sampler.load_filesystem_weights(checkpoint_path)
+        else:
+          raise NotImplementedError(
+              f"Sampler {type(sampler).__name__} does not implement load_gcs_weights"
+          )
+
+        self._tracker.complete(sync_request, "h2d_done")
+        return True
+    elif not self.enable_raiden:
       # RLVllmSampler owns its weight buffers, so there is no host-side
       # update_params fallback equivalent to the in-process adapter's.
       raise RuntimeError(
-          f"VllmSamplerAdapter [{self.server_id}] supports Raiden weight sync"
+          f"VllmSamplerAdapter [{self.server_id}] supports Raiden or GCS weight sync"
           " only; no fallback path exists"
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
@@ -466,7 +517,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       self, sync_request: Any = None, **kwargs: Any
   ) -> Any:
     """Reinitializes KV cache, restores request intake, and bumps active policy version."""
-    if not self.enable_raiden:
+    if not (self.enable_raiden or self.enable_gcs or self.enable_filesystem):
       return True
     sampler = self._require_sampler()
     async with self._sync_lock:
@@ -487,8 +538,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       else:
         self._policy_version += 1
 
-      if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true" and hasattr(
-          sampler, "raiden_metrics"
+      if (
+          self.enable_raiden
+          and os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+          and hasattr(sampler, "raiden_metrics")
       ):
         logger.info(
             "Raiden transfer metrics: %s", await sampler.raiden_metrics()
@@ -501,7 +554,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       self, sync_request: Any = None, **kwargs: Any
   ) -> Any:
     """Safely rolls back to serving previous policy version without publishing staging."""
-    if not self.enable_raiden:
+    if not (self.enable_raiden or self.enable_gcs or self.enable_filesystem):
       return True
     sampler = self._require_sampler()
     async with self._sync_lock:
