@@ -2,12 +2,15 @@
 
 Written 2026-09-18. Packing is confirmed active and correct on two completed
 GRPO runs: `maz-q35-10` (100 steps) and `maz-q35-11` (20 steps), both 2026-09-17.
+A matched unpacked control, `maz-q35-13` (20 steps, 2026-09-18), bounds its effect
+on generation quality.
 
-This document answers three questions:
+This document answers four questions:
 
 1. Is sequence packing actually on in these runs, and how would you check that yourself?
 2. What did it cost or save?
-3. Which tests establish that the packed arithmetic equals the unpacked arithmetic?
+3. Does it change what the model generates?
+4. Which tests establish that the packed arithmetic equals the unpacked arithmetic?
 
 Everything below is measured, not estimated. Every number was re-derived from
 Cloud Logging while writing this document; the log links reproduce the raw
@@ -30,7 +33,7 @@ Both runs used the same configuration, in
 | `MINI_BATCH_SIZE` | 256 — one optimizer step per rollout batch | [151](docker/maz-q35/submit.sh#L151) |
 | `TRAIN_MICRO_BATCH_SIZE` | 8 — one packed row per FSDP shard | [152](docker/maz-q35/submit.sh#L152) |
 | `MAX_PROMPT_LENGTH` / `MAX_RESPONSE_LENGTH` | 512 / 1024 (unpacked row = 1536) | [147-148](docker/maz-q35/submit.sh#L147-L148) |
-| **`MAX_SEQ_TOKEN_PER_TPU`** | **4096** — the packing budget | [157](docker/maz-q35/submit.sh#L157) |
+| **`MAX_SEQ_TOKEN_PER_TPU`** | **4096** — the packing budget; empty in the `maz-q35-13` control | [157](docker/maz-q35/submit.sh#L157) |
 | `BETA` (KL coefficient) | 0 (launcher default, not overridden) | [k8s_launcher.sh:64](tunix/experimental/examples/math_gsm8k_dist/k8s_launcher.sh#L64) |
 | `loss_agg_mode` | `sequence-mean-token-mean` (GRPOConfig default) | [algorithm_config.py:165](tunix/rl/algorithm_config.py#L165) |
 | Checkpointing | disabled (`CHECKPOINT_SAVE_INTERVAL_STEPS=0`) | [174](docker/maz-q35/submit.sh#L174) |
@@ -194,9 +197,8 @@ trajectory-CSV flush, not a retrace.
 **Trajectory logging is free at this scale.** Run 11 wrote every rollout to GCS
 and had a *lower* median step time than run 10 (96.30 s vs 97.12 s) — the
 difference is within run-to-run noise, so the logging cost is below the
-measurement floor. Note that the GCS writer re-reads and re-uploads the whole
-CSV on each flush (`tunix/utils/trajectory_logger.py:122-142`), so this cost is
-quadratic in step count and will not stay negligible for much longer runs.
+measurement floor. It is not free beyond this scale: `maz-q35-12` hung at step 22
+inside the logger's GCS read and never recovered. See §6.
 
 Weight sync, run 10: 86.90 s for the initial transfer, then 52–53 s per step.
 That is over half the 97 s step time, and is the largest single target for
@@ -227,6 +229,66 @@ Two findings worth acting on, both unrelated to packing:
   being penalised for running out of room rather than for being wrong.
 - At 91.8% reward 1.0, GSM8K is close to saturated for this model. A harder
   dataset would give more signal per step.
+
+### The unpacked control: maz-q35-13
+
+Runs 10 and 11 establish that packing is active and that nothing downstream broke,
+but on their own they cannot separate "packing is harmless" from "no harm was
+noticed". `maz-q35-13` is the other arm: 20 steps, identical to `maz-q35-12` down
+to the image digest, with `MAX_SEQ_TOKEN_PER_TPU` empty. That drops
+`--max_seq_token_per_tpu` from both the orchestrator and the trainer
+(`k8s_launcher.sh:242,335`, both guarded with `:+`), selecting
+`PaddedBatchAssembler` and leaving `max_target_length` at 1536 — confirmed in the
+trainer log.
+
+The comparison is legitimate because both arms see the same data. `--seed`
+defaults to 42 and `--shuffle` to True (`run_gsm8k_dist_grpo.py:182,184`) and
+neither `submit.sh` nor `k8s_launcher.sh` overrides them. This is verified rather
+than assumed: on all 20 steps the two runs' prompt-id sets and question sets are
+identical. Generation is still stochastic (`--temperature` defaults to 1.0), so
+the comparison is statistical, not exact-match.
+
+| | packed (`maz-q35-12`) | unpacked (`maz-q35-13`) |
+| --- | --- | --- |
+| Microbatches per step | 5.16 | **32** |
+| Trajectories per microbatch | ~51 | **8** |
+| `max_target_length` | 4096 | 1536 |
+| Step 0 | 442.98 s | 512.88 s |
+| Steps ≥ 1: mean | **98.48 s** | **171.74 s** |
+| Steps ≥ 1: min / max | 89.21 / 112.60 s | 162.21 / 179.70 s |
+| Steps ≥ 1: stdev | 5.65 s | 3.89 s |
+| Mean reward, steps 0–19 | 0.9208 | 0.9232 |
+| Fraction at reward 1.0 | 0.9172 | 0.9193 |
+| Completion chars, p50 / p90 / p99 | 1803 / 2774 / 4450 | 1798 / 2770 / 4466 |
+| Whitespace words, mean / median | 303.1 / 271 | 303.2 / 271 |
+
+**Packing is worth 1.74× on wall-clock step time.** That is well below the 6.2×
+reduction in forward/backward passes, because generation runs in vLLM and is
+unaffected by packing; only the trainer's share of the step shrinks.
+
+**Generation quality is unchanged within a tight bound.** Because the arms are
+matched step by step, the reward difference is tested paired:
+
+```
+paired per-step reward difference (control - packed), n = 20
+  mean   +0.0024
+  stdev   0.0117
+  t      +0.93  (df 19)
+  95% CI [-0.0031, +0.0079]
+  control higher in 12 of 20 steps
+```
+
+Pairing is what makes this informative. The spread between steps is about 0.05, so
+an unpaired 20-step comparison could only have resolved differences larger than
+roughly 0.03. Matching on prompts drops the within-pair spread to 0.0117 and
+tightens the bound about fourfold. **Packing changes mean reward by less than 0.8
+percentage points.** The completion-length distributions agree at every percentile
+measured, which is the more direct check on generation: packing is trainer-side
+only, so it can reach generation solely through the gradient.
+
+This bounds the difference; it does not prove it is zero, and 20 steps on a
+near-saturated dataset is a limited window. The exact-equality guarantee comes from
+§4.
 
 ---
 
@@ -407,9 +469,20 @@ object under the prefix before launch; the fix belongs in the logger.
 ```
 
 ```
-TODO(tunix): trajectory_logger.py:122-142 re-reads, concatenates and re-uploads
-the entire CSV on every flush. Cost is quadratic in step count. Unmeasurable at
-20 steps; will not stay that way.
+TODO(tunix): trajectory_logger.py hangs the job. maz-q35-12 stopped at step 22
+inside pd.read_csv on the GCS handle at offset 105226240 of a 138462753-byte
+object, and never returned or raised; the orchestrator sat at 5 millicores for
+105 minutes. Two defects, both from the code alone. (1) The read has no deadline:
+the `except Exception` at :122-131 covers a read that fails, not one that never
+returns. (2) stop() calls queue.join() with no timeout, and the blocked worker
+never reaches its `finally: task_done()`, so the join never returns and the
+timeout=10 on the next line is never evaluated -- and since atexit and
+_handle_signal both call stop(), SIGTERM hangs too. Separately the write path is
+quadratic: each flush re-reads, concatenates and re-uploads the whole CSV. That
+was not the cause here (the logger was caught up, at exactly 5,376 rows = 21.00
+steps, and parsing 132 MiB takes 1.3 s against a 98 s step), but maz-q35-13's
+final stop() still took 68 s to drain. Raised separately with the logger's
+authors.
 ```
 
 ---
@@ -426,6 +499,19 @@ bash docker/maz-q35/submit.sh 12 100 stop   # teardown
 single carrier of every deviation from the stock launcher — each one is
 commented in place. Set `DRY_RUN=true` to render the manifests without
 submitting.
+
+To run the unpacked control arm, pass an empty packing budget:
+
+```bash
+MAX_SEQ_TOKEN_PER_TPU= bash docker/maz-q35/submit.sh 13 20 start
+```
+
+Note the `-` rather than `:-` in `${MAX_SEQ_TOKEN_PER_TPU-4096}` at
+[157](docker/maz-q35/submit.sh#L157): an explicitly empty value has to survive
+instead of falling back to the default. Confirm the arm rendered correctly by
+checking that `--max_seq_token_per_tpu` appears zero times under `DRY_RUN=true`
+(it appears twice in the packed arm) and that the trainer logs
+`max_target_length: 1536`.
 
 Rendered manifests under `/tmp` contain the live `WANDB_API_KEY`. Do not share
 them.
@@ -478,8 +564,10 @@ so the CSV must be copied down first.
 | Packing is active | `Using SequencePackedBatchAssembler … pack_size: 8` in both runs |
 | Rows hold ~6.4 sequences | 516 and 101 microbatch records; median 6.38 and 6.50 segments per row |
 | Nothing is lost | 25,600 = 100 × 256 and 5,120 = 20 × 256, exactly |
-| 6.2× fewer forward/backward passes | 5.16 microbatches per step against 32 unpacked |
+| 6.2× fewer forward/backward passes | 5.16 microbatches per step against 32 measured in the unpacked control |
 | 2.33× less padding | 16.9M padded token slots against 39.3M |
+| 1.74× faster steps | 98.48 s packed against 171.74 s unpacked, same data, same image |
 | No recompilation after step 1 | 99 warm steps, median 97.12 s, stdev 4.48 s, no sustained step-up |
 | Packed arithmetic equals unpacked | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
+| Generation quality is unchanged | paired 20-step A/B, reward difference 95% CI [-0.0031, +0.0079]; completion lengths agree at every percentile |
 | Rewards are the ones the trainer used | CSV per-step means match orchestrator `reward_mean` exactly |
