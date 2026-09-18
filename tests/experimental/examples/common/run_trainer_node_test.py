@@ -497,6 +497,10 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.port, 20000)
     self.assertEqual(args.worker_id, "trainer-0")
     self.assertEqual(args.model_name, "Qwen3-1.7B")
+    self.assertEqual(args.model_parameter_dtype, "bfloat16")
+    self.assertEqual(args.remat_config, "none")
+    self.assertFalse(args.use_flash_attention)
+    self.assertIsNone(args.flash_attention_block_size)
     self.assertEqual(args.mesh_fsdp, 2)
     self.assertEqual(args.mesh_tp, 1)
     self.assertEqual(args.checkpoint_save_interval_steps, 1)
@@ -522,6 +526,13 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "trainer-1",
         "--model_name",
         "Qwen3-32B",
+        "--model_parameter_dtype",
+        "float32",
+        "--remat_config",
+        "decoder",
+        "--use_flash_attention",
+        "--flash_attention_block_size",
+        "256",
         "--mesh_fsdp",
         "4",
         "--mesh_tp",
@@ -564,6 +575,10 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.port, 20050)
     self.assertEqual(args_custom.worker_id, "trainer-1")
     self.assertEqual(args_custom.model_name, "Qwen3-32B")
+    self.assertEqual(args_custom.model_parameter_dtype, "float32")
+    self.assertEqual(args_custom.remat_config, "decoder")
+    self.assertTrue(args_custom.use_flash_attention)
+    self.assertEqual(args_custom.flash_attention_block_size, 256)
     self.assertEqual(args_custom.mesh_fsdp, 4)
     self.assertEqual(args_custom.mesh_tp, 2)
     self.assertEqual(args_custom.rollout_mesh_tp, 8)

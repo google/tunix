@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from jax import numpy as jnp
 from jax.sharding import Mesh
+from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 from tunix.models.gemma import model as gemma_model_lib
 from tunix.models.gemma import params_safetensors as gemma_params_lib
 from tunix.models.qwen3 import model as qwen3_model_lib
@@ -37,7 +38,25 @@ def _gemma_config(model_name: str) -> gemma_model_lib.ModelConfig:
   raise ValueError(f"Unsupported gemma model_name: {model_name!r}")
 
 
-def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
+def _qwen3_config(
+    model_name: str,
+    *,
+    remat_config: str = "none",
+    use_flash_attention: bool = False,
+    flash_attention_block_size: int | None = None,
+) -> qwen3_model_lib.ModelConfig:
+  """Builds a Qwen3 config.
+
+  Args:
+    model_name: Demo model selector, e.g. "Qwen3-1.7B".
+    remat_config: Rematerialization mode (none, block, or decoder).
+    use_flash_attention: Whether to use splash/flash attention.
+    flash_attention_block_size: Flash-attention block size. `None` keeps the
+      default defined by `qwen3_model_lib.ModelConfig`.
+
+  Returns:
+    The Qwen3 model config.
+  """
   normalized = model_name.lower().replace("_", "-")
   if "0.6b" in normalized or "0p6b" in normalized:
     config = qwen3_model_lib.ModelConfig.qwen3_0p6b()
@@ -52,16 +71,34 @@ def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
   config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
+  config.remat_config = qwen3_model_lib.RematConfig[remat_config.upper()]
+  config.use_flash_attention = use_flash_attention
+  if flash_attention_block_size is not None:
+    config.flash_attention_block_size = flash_attention_block_size
   return config
 
 
-def create_model(model_name: str, model_dir: str, mesh: Mesh):
+def create_model(
+    model_name: str,
+    model_dir: str,
+    mesh: Mesh,
+    *,
+    parameter_dtype: DTypeLike = jnp.bfloat16,
+    remat_config: str = "none",
+    use_flash_attention: bool = False,
+    flash_attention_block_size: int | None = None,
+):
   """Builds the demo model on the given mesh.
 
   Args:
     model_name: Demo model selector, e.g. "gemma-2-2b" or "Qwen3-1.7B".
     model_dir: Directory holding the safetensors shards.
     mesh: Device mesh the parameters are sharded over.
+    parameter_dtype: Storage dtype used when loading trainable parameters.
+    remat_config: Qwen rematerialization mode (none, block, or decoder).
+    use_flash_attention: Whether Qwen uses splash/flash attention.
+    flash_attention_block_size: Qwen flash-attention block size. `None` keeps
+      the default defined by `qwen3_model_lib.ModelConfig`.
 
   Returns:
     An nnx module ready for training or serving.
@@ -73,6 +110,14 @@ def create_model(model_name: str, model_dir: str, mesh: Mesh):
     )
   if "qwen3" in normalized:
     return qwen3_params_lib.create_model_from_safe_tensors(
-        model_dir, _qwen3_config(model_name), mesh, dtype=jnp.bfloat16  # pyrefly: ignore[bad-argument-type]
+        model_dir,
+        _qwen3_config(
+            model_name,
+            remat_config=remat_config,
+            use_flash_attention=use_flash_attention,
+            flash_attention_block_size=flash_attention_block_size,
+        ),
+        mesh,
+        dtype=parameter_dtype,  # pyrefly: ignore[bad-argument-type]
     )
   raise ValueError(f"Unsupported demo model_name: {model_name!r}")

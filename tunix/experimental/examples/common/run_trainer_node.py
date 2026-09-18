@@ -168,6 +168,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument("--tokenizer_path", type=str, default="")
+  parser.add_argument(
+      "--model_parameter_dtype",
+      choices=("bfloat16", "float32"),
+      default="bfloat16",
+      help="Storage dtype used when loading Tunix trainer parameters.",
+  )
+  parser.add_argument(
+      "--remat_config",
+      choices=("none", "block", "decoder"),
+      default="none",
+      help="Qwen rematerialization mode used by the Tunix trainer.",
+  )
+  parser.add_argument(
+      "--use_flash_attention",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+  )
+  parser.add_argument(
+      "--flash_attention_block_size",
+      type=int,
+      default=None,
+      help=(
+          "Qwen flash-attention block size. Defaults to the value defined by"
+          " the Qwen3 ModelConfig when unset."
+      ),
+  )
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--mesh_expert", type=int, default=1)
@@ -528,7 +554,19 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
         " --model_dir=/path/to/local/safetensors."
     )
-  model = models.create_model(args.model_name, args.model_dir, mesh)
+  parameter_dtype = {
+      "bfloat16": jnp.bfloat16,
+      "float32": jnp.float32,
+  }[args.model_parameter_dtype]
+  model = models.create_model(
+      args.model_name,
+      args.model_dir,
+      mesh,
+      parameter_dtype=parameter_dtype,
+      remat_config=args.remat_config,
+      use_flash_attention=args.use_flash_attention,
+      flash_attention_block_size=args.flash_attention_block_size,
+  )
   if not lora:
     return model
   lora_config = {
