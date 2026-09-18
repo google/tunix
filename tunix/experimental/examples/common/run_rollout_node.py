@@ -239,6 +239,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       const=True,
       help="Enable KV prefix caching in vLLM sampler.",
   )
+  parser.add_argument("--vllm_hbm_utilization", type=float, default=0.5)
+  parser.add_argument(
+      "--vllm_init_with_random_weights",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+  )
+  parser.add_argument(
+      "--vllm_server_mode",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+  )
+  parser.add_argument(
+      "--vllm_async_scheduling",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+  )
+  parser.add_argument("--vllm_max_num_seqs", type=int, default=None)
+  parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None)
+  parser.add_argument("--vllm_max_model_len", type=int, default=None)
+  parser.add_argument("--vllm_dtype", type=str, default="")
   parser.add_argument(
       "--tensor_parallel_size",
       type=int,
@@ -463,7 +483,9 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  max_model_len = args.vllm_max_model_len or (
+      args.max_prompt_length + args.max_response_length
+  )
 
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
   if multihost_backend:
@@ -475,7 +497,14 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "model": vllm_model,
       "max_model_len": max_model_len,
       "enable_prefix_caching": args.enable_prefix_caching,
+      "async_scheduling": args.vllm_async_scheduling,
   }
+  if args.vllm_max_num_seqs is not None:
+    engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
+  if args.vllm_max_num_batched_tokens is not None:
+    engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
+  if args.vllm_dtype:
+    engine_kwargs["dtype"] = args.vllm_dtype
   # Select MaxText's `MaxTextForCausalLM` as rollout model.
   # `additional_config` must be set on VllmConfig (not engine_kwargs): the
   # sampler overwrites args["additional_config"] from the VllmConfig field.
@@ -499,7 +528,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  server_mode = True if multihost_backend else None
+  server_mode = (
+      args.vllm_server_mode
+      if args.vllm_server_mode is not None
+      else (True if multihost_backend else None)
+  )
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = _get_tensor_parallel_size(args)
@@ -524,6 +557,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tensor_parallel_size=tp_size,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
+      init_with_random_weights=args.vllm_init_with_random_weights,
+      hbm_utilization=args.vllm_hbm_utilization,
       lora_config=lora_config,
       mapping_config=mapping_config,
       additional_config=maxtext_additional_config,
@@ -564,7 +599,9 @@ def _create_vllm_sampler(args, tokenizer):
       )
       else args.model_id
   )
-  max_model_len = args.max_prompt_length + args.max_response_length
+  max_model_len = args.vllm_max_model_len or (
+      args.max_prompt_length + args.max_response_length
+  )
   tp_size = _get_tensor_parallel_size(args)
   dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
   logging.info(
@@ -589,12 +626,17 @@ def _create_vllm_sampler(args, tokenizer):
       data_parallel_size=dp_size,
       max_model_len=max_model_len,
       trust_remote_code=True,
-      dtype="bfloat16",
+      dtype=args.vllm_dtype or "bfloat16",
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=args.enable_prefix_caching,
+      async_scheduling=args.vllm_async_scheduling,
   )
+  if args.vllm_max_num_seqs is not None:
+    engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
+  if args.vllm_max_num_batched_tokens is not None:
+    engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
   if args.maxtext_model_name:
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
