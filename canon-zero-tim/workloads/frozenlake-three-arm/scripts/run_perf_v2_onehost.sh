@@ -26,6 +26,7 @@ model_cache=/mnt/disks/tunix-data/hf/hub/models--Qwen--Qwen3-8B
 model_sha="$(head -n 1 "$model_cache/refs/main")"
 model="$model_cache/snapshots/$model_sha"
 data="${P57_PERF_V2_DATA_DIR:-/mnt/disks/tunix-data/frozenlake/data}"
+env_max_steps="${P57_PERF_V2_ENV_MAX_STEPS:-2}"
 deps=/mnt/disks/tunix-data/frozenlake/deps
 image=tunix_frozenlake_image:vllm-tpu0.25.0
 image_id="$(sudo docker image inspect "$image" --format '{{.Id}}')"
@@ -117,7 +118,7 @@ if [ "$neutrality_arm" != standard ]; then
 fi
 
 {
-  echo "[P57.PERF_V2.ONEHOST] source=$source_sha diff_sha256=$diff_sha neutrality_arm=$neutrality_arm data=$data"
+  echo "[P57.PERF_V2.ONEHOST] source=$source_sha diff_sha256=$diff_sha neutrality_arm=$neutrality_arm data=$data env_max_steps=$env_max_steps"
   echo "[P57.PERF_V2.ONEHOST] image_id=$image_id"
   echo "[P57.PERF_V2.ONEHOST] topology=DP1xTP4 model=Qwen3-8B trajectories=8 microbatches=4 updates=3 concurrency=2"
   echo "[P57.PERF_V2.ONEHOST] perf_target_step=2 strict_alignment=1 placement=device-resident timeout_seconds=$timeout_seconds"
@@ -214,7 +215,7 @@ PY
       --num_generations=2 --max_prompt_length=2048 \\
       --max_response_length=64 --max_concurrency=2 \\
       --vllm_max_num_seqs=2 --vllm_max_num_batched_tokens=256 \\
-      --env_max_steps=2 --beta=0 --temperature=0.7 --top_k=0 --top_p=1.0 \\
+      --env_max_steps=$env_max_steps --beta=0 --temperature=0.7 --top_k=0 --top_p=1.0 \\
       "${tito_cli[@]}"
   " >>"$raw" 2>&1 &
 docker_wait_pid=$!
