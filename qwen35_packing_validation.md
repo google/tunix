@@ -244,8 +244,8 @@ The comparison is legitimate because both arms see the same data. `--seed`
 defaults to 42 and `--shuffle` to True (`run_gsm8k_dist_grpo.py:182,184`) and
 neither `submit.sh` nor `k8s_launcher.sh` overrides them. This is verified rather
 than assumed: on all 20 steps the two runs' prompt-id sets and question sets are
-identical. Generation is still stochastic (`--temperature` defaults to 1.0), so
-the comparison is statistical, not exact-match.
+identical. Generation is still stochastic (`--temperature` defaults to 1.0) and
+unseeded, so the comparison is statistical, not exact-match.
 
 | | packed (`maz-q35-12`) | unpacked (`maz-q35-13`) |
 | --- | --- | --- |
@@ -258,8 +258,8 @@ the comparison is statistical, not exact-match.
 | Steps ≥ 1: stdev | 5.65 s | 3.89 s |
 | Mean reward, steps 0–19 | 0.9208 | 0.9232 |
 | Fraction at reward 1.0 | 0.9172 | 0.9193 |
-| Completion chars, p50 / p90 / p99 | 1803 / 2774 / 4450 | 1798 / 2770 / 4466 |
-| Whitespace words, mean / median | 303.1 / 271 | 303.2 / 271 |
+| Generated chars, p50 / p90 / p99 | 1156 / 2017 / 3757 | 1149 / 2028 / 3775 |
+| Whitespace words, mean / median | 228.2 / 196 | 228.4 / 195 |
 
 **Packing reduces wall-clock step time by 1.74×.** That is well below the 6.2×
 reduction in forward/backward passes, because generation runs in vLLM and is
@@ -278,14 +278,14 @@ comparison below is paired on the same question at the same step:
 
 | paired per-prompt, control − packed, n = 320 | difference | 95% CI | p |
 | --- | --- | --- | --- |
-| Completion length, chars | −1.45 | [−12.5, +9.6] | 0.798 |
+| Generated length, chars | −1.22 | [−12.1, +9.7] | 0.825 |
 | Reward | +0.0024 | [−0.0038, +0.0086] | 0.444 |
 | Truncation rate | −0.0010 | [−0.0063, +0.0043] | 0.717 |
 
 **The test resolves an effect roughly twelve times smaller than the one training
-itself produces.** Over the same 20 steps mean completion length falls by 134
-chars in the packed arm and 129 in the control (KS D = 0.095, p = 1.8e-5), against
-a paired CI half-width of 11.1 chars.
+itself produces.** Over the same 20 steps mean generated length falls by 132 chars
+in the packed arm and 127 in the control (KS D = 0.110 and 0.119, p = 3.5e-7 and
+2.8e-8), against a paired CI half-width of 10.9 chars.
 
 A defect in packed training has to appear as divergence that grows with step
 index, because generation precedes the first gradient update: at step 0 both arms
@@ -294,35 +294,77 @@ hold the identical base policy, so step 0 measures sampling noise alone.
 ```
 step 0, identical policy
   reward difference   +0.0059
-  completion length   KS D = 0.0703, p = 0.552
+  generated length    KS D = 0.0625, p = 0.700
 
 slope of the paired gap against step index
   reward          +0.00008/step   p = 0.870
   truncation      +0.00054/step   p = 0.124
-  length            +0.71/step    p = 0.385
+  length            +0.70/step    p = 0.384
 
-per-step KS on completion length, steps 1-19
-  D mean 0.0516, min 0.0273, max 0.0898   (step 0 floor: D = 0.0703)
+per-step KS on generated length, steps 1-19
+  D mean 0.0518, min 0.0312, max 0.0781   (step 0 floor: D = 0.0625)
   steps with p < 0.05: 0 of 20            (about 1 expected by chance)
-  D against step index: slope -0.00023, p = 0.655
 ```
 
 Divergence after training is at or below the step-0 noise floor, and no metric
-trends with step index. Pooled by window, the between-arm KS on length is 0.0203
-over the first five steps and 0.0227 over the last five, against the 0.095
-within-arm shift over the same span. The truncation channel agrees independently:
-non-truncated accuracy is 0.9698 packed against 0.9711 control, and packed
-truncation falls slightly faster over the run (difference of differences −0.0078,
-0.62σ).
+trends with step index. The truncation channel agrees independently: non-truncated
+accuracy is 0.9698 packed against 0.9711 control, and packed truncation falls
+slightly faster over the run (difference of differences −0.0078, 0.62σ).
 
-Exact trajectory matching is not possible. `--temperature` defaults to 1.0
-(`run_gsm8k_dist_grpo.py:116`) and vLLM is not seeded per request, so the two arms
-draw different completions from an identical policy. Pairing on `prompt_id`, with
-step 0 as the calibration, is the substitute.
+### Comparing the generated text directly
+
+The tests above compare summary statistics. The completions can also be compared
+as text, against the baseline of what "no difference" looks like: two draws from
+the *same* arm for the same prompt. Each prompt has 16 generations per arm, giving
+a cross-arm class (packed against unpacked) and two within-arm classes, all on the
+same prompt at the same step.
+
+| same prompt and step | exact match | shared prefix | 5-gram Jaccard |
+| --- | --- | --- | --- |
+| cross-arm | 0.0009 | 52.7 chars | 0.1291 |
+| within-packed | 0.0004 | 49.5 chars | 0.1242 |
+| within-unpacked | 0.0002 | 49.8 chars | 0.1264 |
+
+**A packed completion resembles an unpacked completion slightly more than it
+resembles another packed completion.** Paired across the 320 groups, cross-arm
+minus within-arm is +0.0038 in Jaccard (95% CI [+0.0016, +0.0060]) and +3.1 chars
+of shared prefix (95% CI [+1.5, +4.7]). The gap does not trend with step index
+(slope −0.0001, p = 0.777). Whatever separates the two arms is smaller than what
+separates two samples drawn from one arm.
+
+The absolute numbers also show why exact matching was never available: within a
+single arm, two generations for the same prompt match exactly about once in 2,500
+and share only 12% of their 5-grams and 50 characters of prefix.
+
+Generation is unseeded for two independent reasons. `--seed 42` reaches only the
+dataset shuffle (`run_gsm8k_dist_grpo.py:296` passes it to
+`load_gsm8k_dataset`); nothing routes it to sampling. And under `SAMPLER=vllm`,
+`vllm_sampler_v2._build_vllm_params:162` constructs `VllmSamplingParams` from
+temperature, top_p, top_k, max_tokens, stop and logprobs, omitting `seed`, so the
+`seed` field that `rollout_worker.py:256` populates is dropped before it reaches
+vLLM. Pairing on `prompt_id`, with step 0 as the calibration, is the substitute.
 
 Two limits. This compares policies after 19 updates, so a defect that accumulates
 slowly needs a longer run. And it detects only a defect whose effect depends on
 packing, not one identical in both arms. The exact-equality result comes from §4.
+
+TODO(tunix): the `seed` field on `rollout/sampler.py:52` is documented as "Random
+seed for reproducible generation" and is populated by `rollout_worker.py:256`, but
+`vllm_sampler_v2._build_vllm_params:162` never forwards it. `vllm_sampler.py:521`
+separately notes that the vLLM Jax backend does not support a per-request seed, so
+forwarding it may not be sufficient on its own.
+
+TODO(tunix): cross-arm similarity exceeding within-arm similarity by 3% relative
+(p = 0.001) is unexplained. The direction is away from divergence, so it does not
+affect the conclusion here.
+
+All lengths above are of the assistant turn alone. The CSV's `completion` column
+holds the entire conversation — a Python repr of `[{'role': 'system', ...},
+{'role': 'user', ...}, {'role': 'assistant', ...}]` — in all 5,120 rows of both
+runs, so measuring that column directly adds roughly 650 characters of prompt to
+every row. `qwen35_paired_ab.py` parses out the assistant turn. Paired differences
+are unaffected either way, since the prompt is identical within a group and
+cancels, but absolute lengths and the KS distributions are not.
 
 TODO(tunix): length is measured in characters because `completion_tokens` is null
 in all 5,120 rows of both runs. `rl_program.py:414` reads it with
@@ -606,9 +648,10 @@ python3 qwen35_paired_ab.py /tmp/packed.csv /tmp/unpacked.csv 20
 This one needs `pandas` and `scipy`. It inner-joins on `(global_step, prompt_id)`,
 so runs that saw different data silently produce fewer pairs rather than an error;
 check that the printed pair count equals `steps × BATCH_SIZE`, which is 320 here.
-Output is the paired difference table, the
-trend of that difference against step index, the per-step KS distances with step 0
-as the noise floor, and the power check against training's own effect.
+Output is the paired difference table, the trend of that difference against step
+index, the per-step KS distances with step 0 as the noise floor, the power check
+against training's own effect, and the cross-arm against within-arm text
+comparison.
 
 ---
 
@@ -624,7 +667,8 @@ as the noise floor, and the power check against training's own effect.
 | 1.74× faster steps | 98.48 s packed against 171.74 s unpacked, same data, same image |
 | No recompilation after step 1 | 99 warm steps, median 97.12 s, stdev 4.48 s, no sustained step-up |
 | Packed arithmetic equals unpacked | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
-| Generation quality is unchanged | paired on all 320 prompts: completion length −1.45 chars, 95% CI [−12.5, +9.6]; reward +0.0024, 95% CI [−0.0038, +0.0086] |
-| The comparison has power | resolves an effect 12× smaller than training's own 134-char shift over the same 20 steps |
+| Generation quality is unchanged | paired on all 320 prompts: generated length −1.22 chars, 95% CI [−12.1, +9.7]; reward +0.0024, 95% CI [−0.0038, +0.0086] |
+| The comparison has power | resolves an effect 12× smaller than training's own 132-char shift over the same 20 steps |
 | The difference does not grow with training | post-step-0 divergence at or below the step-0 sampling-noise floor; all trend slopes p ≥ 0.124 |
+| The generated text is indistinguishable | cross-arm 5-gram Jaccard 0.1291 against a within-arm same-policy baseline of 0.1242 and 0.1264 |
 | Rewards are the ones the trainer used | CSV per-step means match orchestrator `reward_mean` exactly |
