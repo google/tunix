@@ -27,6 +27,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from absl import logging
 import numpy as np
+from tunix.common import router_replay
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -38,6 +39,91 @@ from tunix.rl.rollout import base_rollout
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
+
+
+def token_trajectory(**fields: Any) -> Dict[str, Any]:
+  """The one definition of the `mode="Token"` payload.
+
+  The defaults describe a trajectory in which the agent produced nothing: no
+  tokens, an empty mask, zero reward, status FAILED. `collect` overrides them
+  with what actually happened; `RolloutOrchestrator` keeps them as they are
+  when a sandbox could not be provisioned and it has to substitute a
+  placeholder.
+
+  There is one definition because there are two producers. Both feed
+  `AsyncTrajectoryLogger`, which takes CSV column order from the first payload
+  it sees and then appends without re-checking, so a field present in one
+  producer and missing from the other shifts every later column in the rows
+  that lack it. Building through this function makes that impossible.
+
+  Args:
+    **fields: Payload fields to override.
+
+  Returns:
+    The payload, with every key present and in a fixed order.
+
+  Raises:
+    KeyError: On a field that is not part of the payload. A typo'd override
+      would otherwise be dropped silently, leaving the default in place.
+  """
+  payload = {
+      "conversation_text": [],
+      "prompt_tokens": [],
+      "conversation_tokens": np.array([], dtype=np.int32),
+      "conversation_masks": np.array([], dtype=np.int32),
+      "status": agent_types.TrajectoryStatus.FAILED.name,
+      "trajectory_reward": 0.0,
+      "env_time": {},
+      "reward_time": {},
+      "old_logprobs": None,
+      "routed_experts": None,
+      "policy_version": None,
+      "original_input": None,
+      "group_id": None,
+  }
+  unknown = set(fields) - set(payload)
+  if unknown:
+    raise KeyError(f"not Token-mode payload fields: {sorted(unknown)}")
+  payload.update(fields)
+  return payload
+
+
+def _routes_or_missing(
+    routes: np.ndarray | None,
+    num_tokens: int,
+    trailing: tuple[int, ...],
+) -> np.ndarray:
+  """Returns exactly `num_tokens` routing rows, padding with MISSING_ROUTE.
+
+  Router replay is positional: row `i` is the expert set for token `i`. A span
+  that is short by even one row shifts every route after it onto the wrong
+  token, which the trainer cannot detect -- the shapes still line up. So a span
+  that does not match its token count is discarded whole and re-routed by the
+  trainer, which is merely wasteful.
+
+  Args:
+    routes: `[n, *trailing]` capture for this span, or None if there is none.
+    num_tokens: How many tokens the span covers.
+    trailing: The `(num_layers, top_k)` shape every row must have.
+
+  Returns:
+    `[num_tokens, *trailing]` in `router_replay.ROUTE_DTYPE`.
+  """
+  if routes is not None:
+    routes = np.asarray(routes, dtype=router_replay.ROUTE_DTYPE)
+    if routes.shape == (num_tokens,) + trailing:
+      return routes
+    logging.warning(
+        "Discarding a %s routing span that should have been %s; those tokens"
+        " fall back to the trainer's own router.",
+        routes.shape,
+        (num_tokens,) + trailing,
+    )
+  return np.full(
+      (num_tokens,) + trailing,
+      router_replay.MISSING_ROUTE,
+      dtype=router_replay.ROUTE_DTYPE,
+  )
 
 
 class TrajectoryCollectEngine:
@@ -108,6 +194,11 @@ class TrajectoryCollectEngine:
     self.max_response_length = max_response_length
     self._response_token_count = 0
     self.timeout = timeout
+    # Router replay rows for the current trajectory, one per token. The prompt
+    # half is captured once on the first turn; the completion half is replaced
+    # on every turn.
+    self._prompt_routed_experts = None
+    self._turn_routed_experts = None
 
     # Tokenizer utilities for stepwise tokenization
     self.tokenizer = tokenizer
@@ -260,6 +351,12 @@ class TrajectoryCollectEngine:
       # flatten all steps into single batch dict
       conversation_tokens, conversation_masks, logprobs = [], [], []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
+      # Router replay travels in lockstep with `conversation_tokens`: one row
+      # per token, or the whole thing is dropped. A routing array that is
+      # shorter than the tokens it describes does not fail, it attaches the
+      # wrong experts to every token after the gap.
+      prompt_routes = getattr(self, "_prompt_routed_experts", None)
+      step_routes = [] if prompt_routes is not None else None
 
       for step in self.agent.trajectory.steps:
         # Keep tokens/masks/logprobs appended in lockstep. A step with
@@ -280,10 +377,26 @@ class TrajectoryCollectEngine:
             logprobs.append(step_logprobs)
           else:
             logprobs.append(np.zeros(len(assistant_tokens)))
+          if step_routes is not None:
+            step_routes.append(
+                _routes_or_missing(
+                    getattr(step, "routed_experts", None),
+                    len(assistant_tokens),
+                    prompt_routes.shape[1:],
+                )
+            )
         if env_tokens is not None:
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
           logprobs.append(np.zeros(len(env_tokens)))
+          if step_routes is not None:
+            # Environment text was never sampled, so it has no route. It is
+            # still a real token the trainer must run the MoE block for.
+            step_routes.append(
+                _routes_or_missing(
+                    None, len(env_tokens), prompt_routes.shape[1:]
+                )
+            )
 
       conversation_tokens = [
           np.asarray(tokens)
@@ -314,22 +427,43 @@ class TrajectoryCollectEngine:
           else conversation_masks
       )
 
-      return {
-          "conversation_text": self.agent.chat_completions,
-          "prompt_tokens": prompt_tokens,
-          "conversation_tokens": conversation_tokens,
-          "conversation_masks": final_masks,
-          "status": self.agent.trajectory.status.name,
-          "trajectory_reward": self.agent.trajectory.reward,
-          "env_time": self.env_time,
-          "reward_time": self.reward_time,
-          "old_logprobs": (
+      routed_experts = None
+      if step_routes is not None:
+        routed_experts = np.concatenate(
+            [prompt_routes] + step_routes, axis=0
+        )
+        expected = len(prompt_tokens) + len(conversation_tokens)
+        if len(routed_experts) != expected:
+          # One row per token or nothing. A partial array is worse than none:
+          # the trainer would replay experts belonging to other positions,
+          # which trains a policy neither side ever ran.
+          logging.warning(
+              "Dropping router replay for this trajectory: assembled %d"
+              " routing rows for %d tokens (%d prompt + %d conversation).",
+              len(routed_experts),
+              expected,
+              len(prompt_tokens),
+              len(conversation_tokens),
+          )
+          routed_experts = None
+
+      return token_trajectory(
+          conversation_text=self.agent.chat_completions,
+          prompt_tokens=prompt_tokens,
+          conversation_tokens=conversation_tokens,
+          conversation_masks=final_masks,
+          status=self.agent.trajectory.status.name,
+          trajectory_reward=self.agent.trajectory.reward,
+          env_time=self.env_time,
+          reward_time=self.reward_time,
+          old_logprobs=(
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
-          "policy_version": self.env.task.get("policy_version"),
-          "original_input": self.agent.trajectory.task,
-          "group_id": self.env.extra_kwargs.get("group_id"),
-      }
+          routed_experts=routed_experts,
+          policy_version=self.env.task.get("policy_version"),
+          original_input=self.agent.trajectory.task,
+          group_id=self.env.extra_kwargs.get("group_id"),
+      )
     elif mode == "Conversation":
       # return raw conversation history
       return self.agent.chat_completions
@@ -551,6 +685,61 @@ class TrajectoryCollectEngine:
           rollout_output.left_padded_prompt_tokens[0]
       )
 
+    # Router replay. The sampler reports one routing row per token of
+    # `[prompt | completion]`; the trainer consumes `[padded prompt |
+    # conversation]`. Split here, while both halves are still identifiable:
+    # once the turns are concatenated there is no way to tell which rows were
+    # prompt.
+    self._turn_routed_experts = None
+    first_turn = not self.agent.trajectory.steps
+    if first_turn:
+      # Reset before the sampler's answer is known. This engine is reused
+      # across trajectories, so a trajectory whose first turn returns no
+      # routing must not inherit the previous trajectory's prompt rows.
+      self._prompt_routed_experts = None
+    routed_rows = (
+        rollout_output.routed_experts[0]
+        if rollout_output.routed_experts
+        else None
+    )
+    if routed_rows is not None:
+      routed_rows = np.asarray(routed_rows, dtype=router_replay.ROUTE_DTYPE)
+      completion_len = (
+          len(rollout_output.tokens[0]) if rollout_output.tokens else 0
+      )
+      prompt_rows = routed_rows[: len(routed_rows) - completion_len]
+      self._turn_routed_experts = routed_rows[len(routed_rows) - completion_len :]
+      if first_turn:
+        # `router_replay.full_sequence` guarantees one row per token of
+        # `[unpadded prompt | completion]`, already MISSING_ROUTE wherever the
+        # sampler captured nothing. So `prompt_rows` is exactly the unpadded
+        # prompt, and the only thing left to do is left-pad it to the width the
+        # trainer sees.
+        padded_len = len(self.agent.trajectory.prompt_tokens)  # pyrefly: ignore[missing-attribute]
+        if len(prompt_rows) > padded_len:
+          # More prompt routing than there is prompt. The two sides disagree
+          # about the request, so every row is suspect; truncating to fit would
+          # just hide that behind a plausible-looking array.
+          logging.warning(
+              "Dropping router replay: sampler reported %d prompt routing rows"
+              " but the trajectory prompt is %d tokens.",
+              len(prompt_rows),
+              padded_len,
+          )
+          self._turn_routed_experts = None
+        else:
+          # PADDING_ROUTE, not MISSING_ROUTE: no token sits in the left-pad
+          # slots, and asking the trainer to route them burns expert capacity
+          # real tokens need and skews load balance.
+          prompt_full = np.full(
+              (padded_len,) + prompt_rows.shape[1:],
+              router_replay.PADDING_ROUTE,
+              dtype=router_replay.ROUTE_DTYPE,
+          )
+          if len(prompt_rows):
+            prompt_full[padded_len - len(prompt_rows) :] = prompt_rows
+          self._prompt_routed_experts = prompt_full
+
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
 
@@ -653,6 +842,23 @@ class TrajectoryCollectEngine:
         if cur_step.logprobs is not None:
           cur_step.logprobs = np.concatenate(
               [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
+          )
+        turn_routes = getattr(self, "_turn_routed_experts", None)
+        if turn_routes is not None:
+          # The chat parser appends end-of-turn tokens the sampler never fed
+          # through a forward, so they have no route. MISSING_ROUTE, not
+          # PADDING_ROUTE: these are real tokens, and the trainer must route
+          # them with its own router rather than skip them.
+          cur_step.routed_experts = np.concatenate(
+              [
+                  turn_routes,
+                  np.full(
+                      (n_append,) + turn_routes.shape[1:],
+                      router_replay.MISSING_ROUTE,
+                      dtype=router_replay.ROUTE_DTYPE,
+                  ),
+              ],
+              axis=0,
           )
 
       # Environment tokens/masks

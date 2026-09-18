@@ -28,6 +28,7 @@ import uuid
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.common import datatypes as common_datatypes
+from tunix.common import router_replay
 from tunix.rl.agentic.agents import agent_types
 
 ##### Worker-internal datatypes #####
@@ -40,9 +41,13 @@ TrajectoryItem = agent_types.TrajectoryItem
 format_traj_id = agent_types.format_traj_id
 Role = common_datatypes.Role
 
-# Marks a router-replay slot the trainer must not replay, so the model falls
-# back to its own gate there. Matches what MaxText's replay path expects.
-UNSET_ROUTED_EXPERT = -1
+# Router-replay sentinels, re-exported so this path cannot drift from the
+# colocated one. They are NOT interchangeable -- see `router_replay`'s module
+# docstring. `-1` means "a token is here but no route was captured", so the
+# model runs its own gate; `-2` means "no token is here at all", so the model
+# must not route it and burn expert capacity a real token needs.
+UNSET_ROUTED_EXPERT = router_replay.MISSING_ROUTE
+PADDING_ROUTED_EXPERT = router_replay.PADDING_ROUTE
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -211,6 +216,7 @@ class GenerationArgs:
   top_k: int | None = None
   seed: int | None = None
   return_logprobs: bool | None = None
+  return_routed_experts: bool | None = None
 
   def as_kwargs(self) -> dict[str, Any]:
     return {
@@ -438,13 +444,23 @@ class RLTrainerPayload(TrainerPayload):
     segment_positions: Optional [B, T] or [B, C] position indices within each
       segment.
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
-    old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
+    old_per_token_logps: Optional [B, C] behavior policy log-probabilities. This
+      is what the surrogate ratio actually divides by, so it is None whenever the
+      loss is configured to pin the ratio to 1.
+    sampler_per_token_logps: Optional [B, C] log-probabilities as reported by the
+      rollout sampler. Diagnostics only -- never read by the loss. Kept separate
+      from `old_per_token_logps` so that pinning the ratio changes the objective
+      without also blinding the sampler-vs-trainer measurement.
     sampler_is_weights: Optional [B, C] importance sampling weights.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert ids captured
       during rollout. When set, a training engine that supports router replay
       forces these experts instead of re-running its own gate, so the training
-      forward pass matches the routing the rollout actually used. `-1` marks a
-      padded or unused slot.
+      forward pass matches the routing the rollout actually used. Two sentinels,
+      both defined in `tunix.common.router_replay`: `MISSING_ROUTE` (-1) is a
+      real token whose route was not captured, and the layer's own gate decides;
+      `PADDING_ROUTE` (-2) is not a token at all and zeroes the MoE block.
+      Marking a live token -2 silently deletes its FFN block, so when in doubt
+      use -1.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
@@ -461,6 +477,7 @@ class RLTrainerPayload(TrainerPayload):
   segment_positions: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
+  sampler_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
   routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None

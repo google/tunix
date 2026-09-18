@@ -17,6 +17,7 @@
 import dataclasses
 import threading
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
@@ -254,6 +255,7 @@ class RolloutWorker(abstract_worker.Worker):
         top_k=top_k if top_k is not None else config.top_k,
         seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
         return_logprobs=return_logprobs,
+        return_routed_experts=config.return_routed_experts,
     )
     requests = [
         sampler_lib.SamplingRequest(
@@ -283,6 +285,27 @@ class RolloutWorker(abstract_worker.Worker):
         assert response.logprobs is not None
         logprobs.append(response.logprobs)
 
+    # Router replay. The sampler captured these; dropping them here is what
+    # makes the trainer re-run its own router and the PPO ratio disagree with
+    # the rollout on every MoE layer. `None` entries are fine -- downstream
+    # treats a batch as replayable only when every row carries routing.
+    routed_experts: list[np.ndarray | None] | None = None
+    if sampling_params.return_routed_experts:
+      routed_experts = [
+          getattr(response, "routed_experts", None) for response in responses
+      ]
+      if all(route is None for route in routed_experts):
+        # Asked for, not delivered. Silence here reads downstream exactly like
+        # a dense model, so say it out loud once per call.
+        logging.warning(
+            "RolloutWorker[%s]: return_routed_experts is set but the sampler"
+            " returned no routing for any of the %d response(s); the trainer"
+            " will re-run its own router.",
+            self.worker_id,
+            len(responses),
+        )
+        routed_experts = None
+
     return base_rollout.RolloutOutput(
         text=[response.text for response in responses],
         logits=None,
@@ -291,6 +314,7 @@ class RolloutWorker(abstract_worker.Worker):
             prompt_token_ids
         ),
         logprobs=logprobs,
+        routed_experts=routed_experts,
     )
 
   def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:

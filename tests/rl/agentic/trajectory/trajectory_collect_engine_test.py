@@ -19,6 +19,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import router_replay
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -403,6 +404,128 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         token_data['conversation_masks'], np.array([], dtype=np.int32)
     )
     self.assertIsNone(token_data['old_logprobs'])
+
+  def _rollout_output_with_routes(self, text, tokens, routes):
+    return RolloutOutput(
+        text=[text],
+        logits=[jnp.zeros_like(tokens)],
+        tokens=[tokens],
+        # [batch, padded_prompt_len]: two pad slots then the real token.
+        left_padded_prompt_tokens=np.array([[0, 0, 101]]),
+        logprobs=[np.ones_like(tokens)],
+        routed_experts=[routes],
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_collect_token_mode_routed_experts_one_row_per_token(
+      self, mock_convert
+  ):
+    """Router replay must emit exactly one row per token, in token order."""
+    mock_convert.side_effect = [
+        ([0, 0, 101], [0, 0, 1]),  # prompt tokens (left-padded)
+        ([301, 302], [1, 1]),  # env tokens 1
+        ([303, 304], [1, 1]),  # env tokens 2
+    ]
+    # The sampler reports `[unpadded_prompt | completion]`. Here the unpadded
+    # prompt is 1 token and each completion is 2, so each capture is 3 rows of
+    # (num_layers=2, top_k=2). Distinct values per call let us assert ordering.
+    turn1 = np.arange(3 * 2 * 2).reshape(3, 2, 2)
+    turn2 = turn1 + 100
+    self.mock_model_call.side_effect = [
+        self._rollout_output_with_routes(
+            'response1', np.array([201, 202]), turn1
+        ),
+        self._rollout_output_with_routes(
+            'response2', np.array([203, 204]), turn2
+        ),
+    ]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_response_length=1024,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    # conversation = [201 202 | 301 302 | 203 204], prompt = [0 0 101].
+    np.testing.assert_array_equal(
+        token_data['conversation_tokens'],
+        np.array([201, 202, 301, 302, 203, 204]),
+    )
+    routes = token_data['routed_experts']
+    self.assertIsNotNone(routes)
+    self.assertEqual(routes.dtype, router_replay.ROUTE_DTYPE)
+    self.assertEqual(
+        len(routes),
+        len(token_data['prompt_tokens'])
+        + len(token_data['conversation_tokens']),
+    )
+
+    pad = np.full((2, 2), router_replay.PADDING_ROUTE)
+    missing = np.full((2, 2), router_replay.MISSING_ROUTE)
+    # Prompt is LEFT-padded, so its two empty slots carry PADDING_ROUTE and the
+    # single real prompt token carries the sampler's last prompt row.
+    np.testing.assert_array_equal(routes[0], pad)
+    np.testing.assert_array_equal(routes[1], pad)
+    np.testing.assert_array_equal(routes[2], turn1[0])
+    # First completion.
+    np.testing.assert_array_equal(routes[3], turn1[1])
+    np.testing.assert_array_equal(routes[4], turn1[2])
+    # Environment text was never sampled: real tokens, but no route.
+    np.testing.assert_array_equal(routes[5], missing)
+    np.testing.assert_array_equal(routes[6], missing)
+    # Second completion uses the second capture, not the first.
+    np.testing.assert_array_equal(routes[7], turn2[1])
+    np.testing.assert_array_equal(routes[8], turn2[2])
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_collect_token_mode_routing_not_reused_across_trajectories(
+      self, mock_convert
+  ):
+    """A trajectory with no routing must not inherit the previous one's."""
+    mock_convert.side_effect = [
+        ([0, 0, 101], [0, 0, 1]),  # prompt, collect #1
+        ([301, 302], [1, 1]),
+        ([0, 0, 101], [0, 0, 1]),  # prompt, collect #2
+        ([301, 302], [1, 1]),
+    ]
+    turn1 = np.arange(3 * 2 * 2).reshape(3, 2, 2)
+
+    def _no_routes(text, tokens):
+      out = self._rollout_output_with_routes(text, tokens, turn1)
+      out.routed_experts = None
+      return out
+
+    self.mock_model_call.side_effect = [
+        # First trajectory: routing present, single step (env says done).
+        self._rollout_output_with_routes(
+            'response1', np.array([201, 202]), turn1
+        ),
+        # Second trajectory: the sampler returned nothing.
+        _no_routes('response2', np.array([203, 204])),
+    ]
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, True, {}),
+        ('obs2', 2.0, True, {}),
+    ]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_response_length=1024,
+    )
+    first = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertIsNotNone(first['routed_experts'])
+
+    second = asyncio.run(self._run_collect(engine, mode='Token'))
+    # Replay is off for this trajectory, not silently backfilled with stale
+    # prompt rows that belong to a different request.
+    self.assertIsNone(second['routed_experts'])
+
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_incomplete_tokenizer_config_skips_tokenization(

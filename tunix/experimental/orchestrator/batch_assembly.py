@@ -30,6 +30,7 @@ import dataclasses
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
 import numpy as np
+from tunix.common import router_replay
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.rl import packing
@@ -174,7 +175,7 @@ def _routed_experts_aligned(
   Returns:
     `[max_prompt_length + max_response_length, num_layers, top_k]`.
   """
-  routed = np.asarray(routed, dtype=np.int32)
+  routed = np.asarray(routed, dtype=router_replay.ROUTE_DTYPE)
   # Prompts are left-padded, so an over-long one keeps its tail; completions are
   # right-padded, so an over-long one keeps its head.
   kept_prompt_start = max(prompt_len - max_prompt_length, 0)
@@ -182,10 +183,13 @@ def _routed_experts_aligned(
   prompt_part = routed[kept_prompt_start:prompt_len]
   completion_part = routed[prompt_len:kept_completion_end]
 
+  # Padding, not "route unknown": no token sits in these slots, so the trainer
+  # must not route them. Routing them would burn expert capacity real tokens
+  # need and skew load-balance statistics.
   out = np.full(
       (max_prompt_length + max_response_length,) + routed.shape[1:],
-      datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int32,
+      datatypes.PADDING_ROUTED_EXPERT,
+      dtype=router_replay.ROUTE_DTYPE,
   )
   prompt_end = max_prompt_length
   out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
@@ -773,6 +777,7 @@ class PaddedBatchAssembler:
     optional_fields = (
         "ref_per_token_logps",
         "old_per_token_logps",
+        "sampler_per_token_logps",
         "returns",
         "old_values",
         "sampler_is_weights",
@@ -912,8 +917,11 @@ class PaddedBatchAssembler:
       for rows in optional_rows.values():
         rows.append(np.zeros(self.max_response_length, dtype=np.float32))
       if routed_experts_rows:
+        # A filler row holds no tokens at all, so every slot is padding.
         routed_experts_rows.append(
-            np.full_like(routed_experts_rows[0], datatypes.UNSET_ROUTED_EXPERT)
+            np.full_like(
+                routed_experts_rows[0], datatypes.PADDING_ROUTED_EXPERT
+            )
         )
 
     batched_prompt_ids = np.stack(prompt_ids)
@@ -949,6 +957,9 @@ class PaddedBatchAssembler:
         completion_mask=batched_completion_mask,
         ref_per_token_logps=stacked_optional.get("ref_per_token_logps"),
         old_per_token_logps=stacked_optional.get("old_per_token_logps"),
+        sampler_per_token_logps=stacked_optional.get(
+            "sampler_per_token_logps"
+        ),
         returns=stacked_optional.get("returns"),
         old_values=stacked_optional.get("old_values"),
         sampler_is_weights=stacked_optional.get("sampler_is_weights"),

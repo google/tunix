@@ -1651,6 +1651,7 @@ class SequencePackedConversionTest(absltest.TestCase):
 _ROUTING_LAYERS = 2
 _ROUTING_TOP_K = 2
 _UNSET = datatypes.UNSET_ROUTED_EXPERT
+_PAD = datatypes.PADDING_ROUTED_EXPERT
 
 
 def _routing(length, fill):
@@ -1681,14 +1682,14 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
     self.assertEqual(
         out.shape, (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K)
     )
-    # Prompt window: leading pad unset, prompt routing flush against the end.
-    np.testing.assert_array_equal(out[: max_prompt - prompt_len], _UNSET)
+    # Prompt window: leading pad holds no token, prompt routing flush to the end.
+    np.testing.assert_array_equal(out[: max_prompt - prompt_len], _PAD)
     np.testing.assert_array_equal(out[max_prompt - prompt_len : max_prompt], 7)
-    # Response window: completion routing first, trailing pad unset.
+    # Response window: completion routing first, trailing pad holds no token.
     np.testing.assert_array_equal(
         out[max_prompt : max_prompt + completion_len], 9
     )
-    np.testing.assert_array_equal(out[max_prompt + completion_len :], _UNSET)
+    np.testing.assert_array_equal(out[max_prompt + completion_len :], _PAD)
 
   def test_overlong_prompt_keeps_the_tail(self):
     """`_left_pad` keeps the last tokens, so routing must keep its last rows."""
@@ -1763,12 +1764,12 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     )
     self.assertIsNone(packed[0].routed_experts)
 
-  def test_short_batch_pads_rows_as_unset(self):
-    """Filler rows must not replay a real expert id."""
+  def test_short_batch_pads_rows_as_padding(self):
+    """A filler row holds no tokens, so it must not be routed at all."""
     packed = self._assembler(batch_size=2).pack([self._payload(1)])
     routed = packed[0].routed_experts
     self.assertEqual(routed.shape[0], 2)
-    np.testing.assert_array_equal(routed[1], _UNSET)
+    np.testing.assert_array_equal(routed[1], _PAD)
 
 
   def _make_streaming_payload(
