@@ -200,7 +200,22 @@ parser.add_argument(
     dest="max_warmpool_replicas",
     type=int,
     default=None,
-    help="Max warmpool replicas per task/image. Defaults to num_generations.",
+    help=(
+        "Max warmpool replicas per task/image. Defaults to num_generations."
+        " All num_generations rollouts of a prompt share one image and"
+        " therefore one pool, so setting this below num_generations forces the"
+        " remainder to pay a cold start."
+    ),
+)
+parser.add_argument(
+    "--sandbox_ready_timeout_secs",
+    type=int,
+    default=None,  # Resolved from swe_env, which owns the default.
+    help=(
+        "Seconds to wait for a sandbox warm pool to report ready replicas"
+        " before failing. Fail fast: a pod that has not started in ~2 min will"
+        " not start."
+    ),
 )
 parser.add_argument(
     "--use_agent_sandbox",
@@ -773,6 +788,11 @@ if USE_AGENT_SANDBOX:
       batch_size=MINI_BATCH_SIZE,
       max_warmpool_replicas=args.max_warmpool_replicas,
       scaffold=args.scaffold,
+      ready_timeout=(
+          args.sandbox_ready_timeout_secs
+          if args.sandbox_ready_timeout_secs is not None
+          else swe_env.DEFAULT_SANDBOX_READY_TIMEOUT_SECS
+      ),
   )
   train_dataset = swe_env.PrewarmDatasetIterator(
       train_dataset,

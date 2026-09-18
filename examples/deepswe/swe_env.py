@@ -111,6 +111,31 @@ def _normalize_tasks_for_fleet(
   return normalized
 
 
+# Seconds to wait for a warm pool to report ready replicas. The upstream
+# default is 900s, which meant a batch whose pools had gone away burned
+# 3 x 900s = 45 minutes before failing. A sandbox pod that has not started
+# within ~2 minutes is not going to, so fail fast and let the retry/degrade
+# path take over.
+DEFAULT_SANDBOX_READY_TIMEOUT_SECS = 120
+
+
+def _effective_warmpool_size(
+    max_warmpool_replicas: int | None, num_generations: int
+) -> int:
+  """Pool depth per task image. One definition, two callers.
+
+  `warm_per_task=True` gives one pool per task image, and all `num_generations`
+  rollouts of a prompt share that image, so the default has to be
+  `num_generations`: a warm pod is consumed by a claim, not borrowed.
+
+  `is None`, not truthiness -- an explicit `--max_warmpool_size 0` means "no
+  warm pool", which is a legitimate (if slow) request, not "use the default".
+  """
+  if max_warmpool_replicas is None:
+    return num_generations
+  return max_warmpool_replicas
+
+
 def _init_global_fleet(
     tasks: list[Any],
     max_concurrency: int = 128,
@@ -119,6 +144,7 @@ def _init_global_fleet(
     max_warmpool_replicas: int | None = None,
     scaffold: str = "r2egym",
     image_rewrite: Any | None = None,
+    ready_timeout: int = DEFAULT_SANDBOX_READY_TIMEOUT_SECS,
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -154,6 +180,25 @@ def _init_global_fleet(
 
     template = template_mod.get_template(scaffold, node_sel)
 
+    effective_warmpool_size = _effective_warmpool_size(
+        max_warmpool_replicas, num_generations
+    )
+    if effective_warmpool_size < num_generations:
+      # A pool of depth D serves only the first D claims warm; the remaining
+      # `num_generations - D` wait for the controller to create a fresh pod and
+      # pull the image (~65s observed).
+      logging.warning(
+          "[SandboxFleet] max_warmpool_size=%d is smaller than"
+          " num_generations=%d. Only %d of every %d trajectories will get a"
+          " warm sandbox; the other %d will each pay a cold start. Set"
+          " --max_warmpool_size >= --num_generations (or omit the flag).",
+          effective_warmpool_size,
+          num_generations,
+          effective_warmpool_size,
+          num_generations,
+          num_generations - effective_warmpool_size,
+      )
+
     fleet_kwargs: dict[str, Any] = {
         "clusters": [
             ClusterConfig(
@@ -165,11 +210,8 @@ def _init_global_fleet(
         ],
         "max_concurrent": effective_max_concurrent,
         "window_size": batch_size,
-        "max_warmpool_size": (
-            max_warmpool_replicas
-            if max_warmpool_replicas is not None
-            else num_generations
-        ),
+        "max_warmpool_size": effective_warmpool_size,
+        "ready_timeout": ready_timeout,
         "warm_per_task": True,
     }
     if template is not None:
@@ -191,6 +233,7 @@ def _init_global_fleet(
         f" (max_concurrent={effective_max_concurrent},"
         f" window_size={batch_size},"
         f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
+        f" ready_timeout={ready_timeout}s,"
         " warm_per_task=True)..."
     )
     logging.info(msg)
@@ -290,21 +333,44 @@ class PrewarmDatasetIterator:
 
   def _warm_batch(self, batch: Any, wait: bool = False):
     images = self._extract_images(batch)
-    if images and self.fleet:
-      target_replicas = self.max_warmpool_replicas or self.num_generations
-      try:
-        self.fleet.warm_images(
-            images, replicas_override=target_replicas, wait=wait
-        )
-        logging.info(
-            "[PrewarmDatasetIterator] Pre-warming %d image(s) (%d replicas"
-            " each) on K8s: %s",
-            len(images),
-            target_replicas,
+    if not images or not self.fleet:
+      return
+    target_replicas = _effective_warmpool_size(
+        self.max_warmpool_replicas, self.num_generations
+    )
+    try:
+      self.fleet.warm_images(
+          images, replicas_override=target_replicas, wait=wait
+      )
+      logging.info(
+          "[PrewarmDatasetIterator] Pre-warming %d image(s) (%d replicas"
+          " each) on K8s: %s",
+          len(images),
+          target_replicas,
+          images[:3],
+      )
+    except Exception as e:  # pylint: disable=broad-except
+      if not wait:
+        # Speculative lookahead for a batch we will not hand out for another
+        # step. The blocking warm before that handoff is the one that matters.
+        logging.warning(
+            "[PrewarmDatasetIterator] Background pre-warm failed for %s: %s",
             images[:3],
+            e,
         )
-      except Exception as e:
-        logging.warning("[PrewarmDatasetIterator] Warm note: %s", e)
+        return
+      # A blocking warm is a precondition, not a hint: the batch is about to be
+      # handed to the rollout and every claim against these pools is now
+      # likely to fail. Do not fail the step here -- the orchestrator's degrade
+      # path turns individual claim failures into masked trajectories -- but do
+      # not let this look routine either.
+      logging.error(
+          "[PrewarmDatasetIterator] Could not confirm warm pools for the batch"
+          " about to be dispatched (%s): %s. Trajectories in this batch will"
+          " cold-start or fail to claim a sandbox.",
+          images[:3],
+          e,
+      )
 
   def _unwarm_batch(self, images: list[str]):
     if images and self.fleet:
@@ -353,6 +419,20 @@ class PrewarmDatasetIterator:
       self._warm_batch(self.next_batch, wait=False)
     except StopIteration:
       self.next_batch = None
+
+    # 6. Re-assert the pools for the batch we are about to hand out.
+    #
+    # The pre-warm for this batch was issued one step ago with wait=False. A
+    # single step can run for hours, and a pool that sits idle long enough
+    # disappears: in the v8 run, pools idle for 23 min and 73 min survived, but
+    # a pool idle for 213 min was gone, and the resulting 256 failed claims
+    # killed the job. `create_warmpool` is idempotent (a 409 patches
+    # spec.replicas to converge), so this is a cheap no-op when the pool is
+    # healthy and a recreate when it has gone away.
+    #
+    # This blocks the producer, which is the correct place to block: the
+    # rollout should not start until its sandboxes exist.
+    self._warm_batch(batch_to_return, wait=True)
 
     return batch_to_return
 

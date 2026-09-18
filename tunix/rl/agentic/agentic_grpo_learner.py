@@ -267,11 +267,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = (  # pyrefly: ignore[missing-attribute]
-        self.rl_engine.get_rollout_config(
-            mode=rl_engine_lib.Mode.TRAIN
-        ).temperature
+    rollout_config = self.rl_engine.get_rollout_config(
+        mode=rl_engine_lib.Mode.TRAIN
     )
+    self.algo_config.temperature = rollout_config.temperature  # pyrefly: ignore[missing-attribute]
+
+    if rollout_config.return_routed_experts:
+      raise RuntimeError(
+          "Agentic GRPO is currently incompatible with router replay "
+          "(return_routed_experts). Multi-turn episode stitching for routes "
+          "is not yet implemented. Refusing to start over silently compiling "
+          "a native-routed graph."
+      )
 
     # Workaround to pass loss fn with algorithm flag
     policy_loss_fn = function_registry.get_policy_loss_fn(
