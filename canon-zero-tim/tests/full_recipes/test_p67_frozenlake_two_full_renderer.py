@@ -16,7 +16,7 @@ _REPO = Path(__file__).resolve().parents[3]
 _SCRIPT = (
     _REPO
     / "canon-zero-tim/workloads/full-recipes/scripts"
-    / "render_p67_frozenlake_two_full_recipes.py"
+    / "render_frozenlake_full_recipes.py"
 )
 _PREPARE = (
     _REPO

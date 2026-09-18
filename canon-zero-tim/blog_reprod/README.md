@@ -78,9 +78,9 @@ Each script ends with `MANIFEST=<path>`. Seconds per arm, nothing is launched, a
 deterministic. Each wrapper also writes a long-horizon manifest beside the one you want — apply only
 these three files:
 
-* `<OUT>/standard/p45/jobset-p57-frozenlake-standard-300.yaml`
-* `<OUT>/is/p45/jobset-p57-frozenlake-is-300.yaml`
-* `<OUT>/zero/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml`
+* `<OUT>/standard/short-horizon/jobset-frozenlake-short-horizon-standard-300.yaml`
+* `<OUT>/is/short-horizon/jobset-frozenlake-short-horizon-is-300.yaml`
+* `<OUT>/zero/frozenlake-short-horizon/jobset-frozenlake-short-horizon-zero-300.yaml`
 
 ## Step 4 — launch one arm
 

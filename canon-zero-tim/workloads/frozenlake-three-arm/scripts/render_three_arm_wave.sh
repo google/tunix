@@ -53,7 +53,7 @@ mkdir -p "$output_root"
 python3 "$renderer" \
   --source-commit "$source_sha" \
   --run-id "$p45_run_id" \
-  --output-dir "$output_root/p45" \
+  --output-dir "$output_root/short-horizon" \
   --campaign-tag "${campaign_root}-p45" \
   --checkpoint-mode "$checkpoint_mode" \
   --expected-updates "$expected_updates" \
@@ -64,7 +64,7 @@ python3 "$renderer" \
 python3 "$renderer" \
   --source-commit "$source_sha" \
   --run-id "$m15_run_id" \
-  --output-dir "$output_root/m15" \
+  --output-dir "$output_root/long-horizon" \
   --campaign-tag "${campaign_root}-m15" \
   --checkpoint-mode "$checkpoint_mode" \
   --expected-updates "$expected_updates" \
@@ -74,8 +74,8 @@ python3 "$renderer" \
   --arm "$arm" \
   "${renderer_mode[@]}"
 
-p45_manifest="$(find "$output_root/p45" -maxdepth 1 -name 'jobset-*.yaml' -print)"
-m15_manifest="$(find "$output_root/m15" -maxdepth 1 -name 'jobset-*.yaml' -print)"
+p45_manifest="$(find "$output_root/short-horizon" -maxdepth 1 -name 'jobset-*.yaml' -print)"
+m15_manifest="$(find "$output_root/long-horizon" -maxdepth 1 -name 'jobset-*.yaml' -print)"
 [ -n "$p45_manifest" ] && [ -n "$m15_manifest" ] || {
   echo "render did not produce both manifests" >&2
   exit 1

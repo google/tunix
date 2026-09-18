@@ -76,5 +76,5 @@ printf '%s\n' \
   "V1_HP_CHECKED_VMA_WAVE_READY manifests=3 source=$SOURCE_SHA output=$OUTPUT_DIR p45_length_sort=$P45_LENGTH_SORT_MODE launch=not-executed" \
   "Review manifest-index.json, verify the pushed SHA by read-back, and obtain launch approval." \
   "kubectl apply -f $OUTPUT_DIR/gsm8k/jobset-v1-hp-gsm8k-full.yaml" \
-  "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml" \
-  "kubectl apply -f $OUTPUT_DIR/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml"
+  "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-frozenlake-short-horizon-zero-300.yaml" \
+  "kubectl apply -f $OUTPUT_DIR/frozenlake-m15/jobset-frozenlake-long-horizon-zero-300.yaml"

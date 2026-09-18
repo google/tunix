@@ -27,7 +27,7 @@ _PREPARE = (
 _PREPARE_GSM8K_P74 = (
     _REPO
     / "canon-zero-tim/workloads/full-recipes/scripts"
-    / "prepare_gsm8k_full_dp16tp4_p74.sh"
+    / "prepare_gsm8k_full_dp16tp4.sh"
 )
 _SPEC = importlib.util.spec_from_file_location("v1_phase4_renderer", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None

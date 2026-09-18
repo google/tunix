@@ -41,10 +41,13 @@ def _env(document: dict) -> dict[str, str]:
 
 
 def _manifest(root: Path, workload: str, step: int, arm: str) -> Path:
-  suffix = f"{arm}-eval-{step}"
-  if workload == "m15":
-    suffix = f"{arm}-m15-main-eval-{step}"
-  return root / workload / f"step-{step}" / f"jobset-p57-frozenlake-{suffix}.yaml"
+  horizon = "long-horizon" if workload == "m15" else "short-horizon"
+  return (
+      root
+      / workload
+      / f"step-{step}"
+      / f"jobset-frozenlake-{horizon}-{arm}-eval-{step}.yaml"
+  )
 
 
 def verify_manifest(

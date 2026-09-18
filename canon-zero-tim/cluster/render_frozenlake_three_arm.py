@@ -54,6 +54,10 @@ _ADMITTED_CPU_NODEPOOLS = frozenset({
     "cpu-np",
 })
 _DEFAULT_CPU_NODEPOOL = "cpu-np"
+# Rendered manifest file names are keyed on the training horizon, not on the
+# campaign codename.  The JobSet metadata.name, its labels and its env keep
+# their P57/P45/M15 identities: those are runtime identifiers.
+_HORIZONS = {("", ""): "short-horizon", ("m15", "main"): "long-horizon"}
 # Preserve the historical requests and large limits on the dedicated head
 # pool.  Raising requests to these ceilings would over-reserve the whole Pod.
 HEAD_RESOURCES = {
@@ -175,6 +179,19 @@ def _validate_sampler_command(command: list[str], arm: Arm) -> None:
     )
 
 
+def _horizon(workload_candidate: str, data_split: str) -> str:
+  """Names the horizon a rendered recipe trains, for the manifest file name.
+
+  The two paired study workloads are the only ones that get a horizon name:
+  the original P45 dataset (no materialized candidate) is the short horizon
+  and the materialized M15 main split is the long one.  Every other
+  candidate/split pair keeps its own identity so the file name stays unique.
+  """
+  return _HORIZONS.get(
+      (workload_candidate, data_split), f"{workload_candidate}-{data_split}"
+  )
+
+
 def _spec(
     arm: Arm,
     expected_updates: int,
@@ -266,13 +283,13 @@ def _spec(
   else:
     raise ValueError(f"unsupported P57 run kind: {run_kind!r}")
   _validate_sampler_command(command, arm)
-  workload_suffix = (
-      f"{workload_candidate}-{data_split}-" if workload_candidate else ""
-  )
   if workload_candidate:
     job_prefix = f"{job_prefix}-{workload_candidate}"
   return p33.JobSpec(
-      key=f"p57-frozenlake-{arm.name}-{workload_suffix}{key_suffix}",
+      key=(
+          f"frozenlake-{_horizon(workload_candidate, data_split)}"
+          f"-{arm.name}-{key_suffix}"
+      ),
       workload="frozenlake",
       stage="rollout-only" if run_kind == "tito-diagnostic" else "full",
       profile=(

@@ -142,7 +142,7 @@ log line, a manifest, an archived run or the archive branch.
 | Recipe | Documented in | Status |
 |---|---|---|
 | Figure 4 — FrozenLake short-horizon, three arms (Qwen3-8B, 64 v5p) | `canon-zero-tim/blog_reprod/README.md` | archived runs and vendored data; reproduction verified as far as rendering — nothing was launched |
-| GSM8K 64-chip Zero-TIM | not yet documented | the archived run crashed at step 64 (prefill re-score context overrun); entry point `canon-zero-tim/workloads/full-recipes/scripts/prepare_gsm8k_full_dp16tp4_p74.sh` |
+| GSM8K 64-chip Zero-TIM | not yet documented | the archived run crashed at step 64 (prefill re-score context overrun); entry point `canon-zero-tim/workloads/full-recipes/scripts/prepare_gsm8k_full_dp16tp4.sh` |
 | FrozenLake long-horizon, Standard / TIS / Zero-TIM | not yet documented | archived runs incomplete: Standard crashed at 181/300, TIS stopped at 148/300, Zero-TIM reached 52–59 steps at ≈2550 s/step. The Figure 4 wrappers already render the long-horizon manifests next to the short-horizon ones |
 | DeepSWE-4B 128-chip Zero-TIM | not yet documented | never launched, render pending; entry point `canon-zero-tim/cluster/render_deepswe_comparison.py` |
 | DeepSWE-4B 128-chip Standard / TIS | not yet documented | the renderer has no such arm — `canon-zero-tim/cluster/render_deepswe_comparison.py` line 52 reads `_ARMS = ("native", "zero")`. Adding them is a new feature, not documentation |

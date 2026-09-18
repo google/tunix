@@ -21,4 +21,4 @@ bash "$REPO/canon-zero-tim/workloads/full-recipes/scripts/prepare_p67_frozenlake
   "$SHA" "$OUT" "$RUN_ID-campaign" "$RUN_ID" "$RUN_ID-m15" \
   --token-continuity both-exact --token-continuity-debug-mode record-full \
   --train-geometry dp8-tp8-b256
-echo "MANIFEST=$(cd "$OUT/frozenlake-p45" && pwd)/jobset-p57-frozenlake-zero-300.yaml"
+echo "MANIFEST=$(cd "$OUT/frozenlake-short-horizon" && pwd)/jobset-frozenlake-short-horizon-zero-300.yaml"

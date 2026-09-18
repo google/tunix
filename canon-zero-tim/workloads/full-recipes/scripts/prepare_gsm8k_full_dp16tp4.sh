@@ -12,7 +12,7 @@ OUTPUT_DIR="$2"
 RUN_ID="$3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-RENDERER="$SCRIPT_DIR/render_gsm8k_full_dp16tp4_p74.py"
+RENDERER="$SCRIPT_DIR/render_gsm8k_full_dp16tp4.py"
 
 if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   echo "source SHA must be exactly 40 lowercase hexadecimal characters" >&2

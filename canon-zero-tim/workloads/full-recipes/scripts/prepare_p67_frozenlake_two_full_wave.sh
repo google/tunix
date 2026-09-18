@@ -122,7 +122,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-RENDERER="$SCRIPT_DIR/render_p67_frozenlake_two_full_recipes.py"
+RENDERER="$SCRIPT_DIR/render_frozenlake_full_recipes.py"
 
 if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   echo "source SHA must be exactly 40 lowercase hexadecimal characters" >&2
@@ -174,5 +174,5 @@ sha256sum "$INDEX"
 printf '%s\n' \
   "V1_P67_FROZENLAKE_WAVE_READY manifests=2 source=$SOURCE_SHA output=$OUTPUT_DIR token_continuity=$TOKEN_CONTINUITY_MODE token_continuity_debug=$TOKEN_CONTINUITY_DEBUG p45_length_sort=$P45_LENGTH_SORT_MODE launch=not-executed" \
   "Review manifest-index.json and verify the pushed SHA by remote read-back before launch." \
-  "kubectl apply -f $OUTPUT_DIR/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml" \
-  "kubectl apply -f $OUTPUT_DIR/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml"
+  "kubectl apply -f $OUTPUT_DIR/frozenlake-short-horizon/jobset-frozenlake-short-horizon-zero-300.yaml" \
+  "kubectl apply -f $OUTPUT_DIR/frozenlake-long-horizon/jobset-frozenlake-long-horizon-zero-300.yaml"
