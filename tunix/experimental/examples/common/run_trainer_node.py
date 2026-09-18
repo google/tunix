@@ -767,6 +767,8 @@ def main(argv: list[str], context: Any = None) -> None:
   worker_service = trainer_worker.TrainerWorker(
       trainer_factory=trainer_factory,
       worker_id=args.worker_id,
+      logps_chunk_size=args.compute_logps_chunk_size,
+      logps_micro_batch_size=args.compute_logps_micro_batch_size,
       execution_context=mesh,
   )
 

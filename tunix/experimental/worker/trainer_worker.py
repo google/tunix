@@ -17,11 +17,14 @@
 import contextlib
 from typing import Any, Callable, ContextManager, cast
 
+from flax import nnx
+import jax.numpy as jnp
 import numpy as np
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
+from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
 
@@ -39,6 +42,8 @@ class TrainerWorker(abstract_worker.Worker):
       trainer_factory: Callable[[], abstract_trainer.AbstractTrainer],
       *,
       worker_id: str = "trainer_worker",
+      logps_chunk_size: int = 0,
+      logps_micro_batch_size: int | None = None,
       execution_context: Any = None,
   ):
     """Initializes the TrainerWorker.
@@ -49,10 +54,15 @@ class TrainerWorker(abstract_worker.Worker):
       execution_context: Optional context manager or zero-arg callable returning
         a context manager (e.g., a JAX Mesh) to enter during trainer
         initialization and worker method execution.
+      logps_chunk_size: Optionally chunk the vocab (final-logits) computation.
+      logps_micro_batch_size: Row chunk size for `per_token_logps`.
+        If `None`, the whole request is scored in one forward.
     """
     self._execution_context = execution_context
     with self.execution_context():
       self._trainer = trainer_factory()
+    self._logps_chunk_size = logps_chunk_size
+    self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
@@ -254,6 +264,14 @@ class TrainerWorker(abstract_worker.Worker):
     current (actor) parameters, but it must not mutate trainer state. Accepts a
     ``LogprobsRequest`` composed by the orchestrator; the actor path sets
     ``pad_id``/``eos_id`` (and any packing fields) explicitly.
+
+    Args:
+      items: The log-probabilities request payload containing token sequences.
+      **kwargs: Unused keyword arguments accepted for forwarding parity.
+
+    Returns:
+      A LogprobsResponse containing per-token log-probabilities and model
+      version.
     """
     del kwargs  # Accepted for engine-forwarding parity; unused.
     self._ensure_ready()
@@ -263,19 +281,55 @@ class TrainerWorker(abstract_worker.Worker):
           "on the LogprobsRequest; the actor scoring path must compose them."
       )
     try:
-      result = self._trainer.per_token_logps(
-          prompt_tokens=items.prompt_tokens,
-          completion_tokens=items.completion_tokens,
-          pad_id=items.pad_id,
-          eos_id=items.eos_id,
-          temperature=items.temperature,
-          segment_ids=items.segment_ids,
-          segment_positions=items.segment_positions,
+      prompt = np.asarray(items.prompt_tokens, dtype=np.int32)
+      completion = np.asarray(items.completion_tokens, dtype=np.int32)
+      batch_size = prompt.shape[0]
+      if batch_size == 0:
+        raise ValueError("per_token_logps requires a non-empty batch.")
+      temperature = (
+          1.0 if items.temperature is None else float(items.temperature)
       )
+      seg_ids = (
+          None
+          if items.segment_ids is None
+          else np.asarray(items.segment_ids, dtype=np.int32)
+      )
+      seg_pos = (
+          None
+          if items.segment_positions is None
+          else np.asarray(items.segment_positions, dtype=np.int32)
+      )
+      micro_batch_size = self._logps_micro_batch_size or batch_size
+      outs = []
+      for start in range(0, batch_size, micro_batch_size):
+        sl = slice(start, start + micro_batch_size)
+        with self._trainer.model_scope(
+            prompt[sl],
+            completion[sl],
+            pad_id=items.pad_id,
+            eos_id=items.eos_id,
+            temperature=temperature,
+            chunk_size=self._logps_chunk_size,
+            segment_ids=None if seg_ids is None else seg_ids[sl],
+            segment_positions=None if seg_pos is None else seg_pos[sl],
+        ) as (model, scoped_args, scoped_kwargs):
+          # Split per call, never once in __init__: the optimizer writes new
+          # arrays every step, and a cached State would pin the old ones.
+          graphdef, state = nnx.split(model)
+          outs.append(
+              rl_common.compute_per_token_logps(
+                  graphdef,
+                  state,
+                  *scoped_args,
+                  stop_gradient=True,
+                  **scoped_kwargs,
+              )
+          )
+      result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(
           request_id=items.request_id,
-          per_token_logps=np.asarray(result, dtype=np.float32),
+          per_token_logps=result,
           model_version=self._policy_version(),
       )
     except Exception as exc:
