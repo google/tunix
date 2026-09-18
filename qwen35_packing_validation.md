@@ -2,8 +2,8 @@
 
 Written 2026-09-18. Packing is confirmed active and correct on two completed
 GRPO runs: `maz-q35-10` (100 steps) and `maz-q35-11` (20 steps), both 2026-09-17.
-A matched unpacked control, `maz-q35-13` (20 steps, 2026-09-18), bounds its effect
-on generation quality.
+A matched unpacked control, `maz-q35-13` (20 steps, 2026-09-18), supplies a
+prompt-paired measurement of its effect on generation quality.
 
 This document answers four questions:
 
@@ -265,29 +265,69 @@ the comparison is statistical, not exact-match.
 reduction in forward/backward passes, because generation runs in vLLM and is
 unaffected by packing; only the trainer's portion of the step is reduced.
 
-**Generation quality is unchanged within a tight bound.** Because the arms are
-matched step by step, the reward difference is tested paired:
+### Does packed training produce a different policy?
+
+Reward is a weak instrument for this question. With 91.8% of rollouts at reward
+1.0 and 5.4% truncated, both channels sit near their ceiling, so a defect in
+packed training could leave the mean reward unmoved. Completion length is not
+saturated and is the channel a corrupted gradient would move, so the tests below
+lead with it.
+
+All 320 prompts — 20 steps × 16 prompts — match across the two arms, so every
+comparison below is paired on the same question at the same step:
+
+| paired per-prompt, control − packed, n = 320 | difference | 95% CI | p |
+| --- | --- | --- | --- |
+| Completion length, chars | −1.45 | [−12.5, +9.6] | 0.798 |
+| Reward | +0.0024 | [−0.0038, +0.0086] | 0.444 |
+| Truncation rate | −0.0010 | [−0.0063, +0.0043] | 0.717 |
+
+**The test resolves an effect roughly twelve times smaller than the one training
+itself produces.** Over the same 20 steps mean completion length falls by 134
+chars in the packed arm and 129 in the control (KS D = 0.095, p = 1.8e-5), against
+a paired CI half-width of 11.1 chars.
+
+A defect in packed training has to appear as divergence that grows with step
+index, because generation precedes the first gradient update: at step 0 both arms
+hold the identical base policy, so step 0 measures sampling noise alone.
 
 ```
-paired per-step reward difference (control - packed), n = 20
-  mean   +0.0024
-  stdev   0.0117
-  t      +0.93  (df 19)
-  95% CI [-0.0031, +0.0079]
-  control higher in 12 of 20 steps
+step 0, identical policy
+  reward difference   +0.0059
+  completion length   KS D = 0.0703, p = 0.552
+
+slope of the paired gap against step index
+  reward          +0.00008/step   p = 0.870
+  truncation      +0.00054/step   p = 0.124
+  length            +0.71/step    p = 0.385
+
+per-step KS on completion length, steps 1-19
+  D mean 0.0516, min 0.0273, max 0.0898   (step 0 floor: D = 0.0703)
+  steps with p < 0.05: 0 of 20            (about 1 expected by chance)
+  D against step index: slope -0.00023, p = 0.655
 ```
 
-Pairing is what makes this informative. The spread between steps is about 0.05, so
-an unpaired 20-step comparison could only have resolved differences larger than
-roughly 0.03. Matching on prompts reduces the within-pair spread to 0.0117 and
-tightens the bound about fourfold. **Packing changes mean reward by less than 0.8
-percentage points.** The completion-length distributions agree at every percentile
-measured. That is the more direct check, because packing applies only to the
-trainer and can reach generation only through the gradient.
+Divergence after training is at or below the step-0 noise floor, and no metric
+trends with step index. Pooled by window, the between-arm KS on length is 0.0203
+over the first five steps and 0.0227 over the last five, against the 0.095
+within-arm shift over the same span. The truncation channel agrees independently:
+non-truncated accuracy is 0.9698 packed against 0.9711 control, and packed
+truncation falls slightly faster over the run (difference of differences −0.0078,
+0.62σ).
 
-This bounds the difference; it does not establish that it is zero, and 20 steps on
-a near-saturated dataset is a narrow window. The exact-equality result comes from
-§4.
+Exact trajectory matching is not possible. `--temperature` defaults to 1.0
+(`run_gsm8k_dist_grpo.py:116`) and vLLM is not seeded per request, so the two arms
+draw different completions from an identical policy. Pairing on `prompt_id`, with
+step 0 as the calibration, is the substitute.
+
+Two limits. This compares policies after 19 updates, so a defect that accumulates
+slowly needs a longer run. And it detects only a defect whose effect depends on
+packing, not one identical in both arms. The exact-equality result comes from §4.
+
+TODO(tunix): length is measured in characters because `completion_tokens` is null
+in all 5,120 rows of both runs. `rl_program.py:414` reads it with
+`getattr(src_item, "completion_tokens", None)` and the attribute is absent on the
+sampler's item, so the column is written empty.
 
 ---
 
@@ -556,6 +596,20 @@ python3 tunix/experimental/examples/common/analyze_trajectories.py /tmp/traj.csv
 The script is pure standard library — no pandas — but it reads local paths only,
 so the CSV must be copied down first.
 
+To reproduce the paired packed-against-unpacked comparison in §3, with both CSVs
+copied down:
+
+```bash
+python3 qwen35_paired_ab.py /tmp/packed.csv /tmp/unpacked.csv 20
+```
+
+This one needs `pandas` and `scipy`. It inner-joins on `(global_step, prompt_id)`,
+so runs that saw different data silently produce fewer pairs rather than an error;
+check that the printed pair count equals `steps × BATCH_SIZE`, which is 320 here.
+Output is the paired difference table, the
+trend of that difference against step index, the per-step KS distances with step 0
+as the noise floor, and the power check against training's own effect.
+
 ---
 
 ## 8. Summary
@@ -570,5 +624,7 @@ so the CSV must be copied down first.
 | 1.74× faster steps | 98.48 s packed against 171.74 s unpacked, same data, same image |
 | No recompilation after step 1 | 99 warm steps, median 97.12 s, stdev 4.48 s, no sustained step-up |
 | Packed arithmetic equals unpacked | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
-| Generation quality is unchanged | paired 20-step A/B, reward difference 95% CI [-0.0031, +0.0079]; completion lengths agree at every percentile |
+| Generation quality is unchanged | paired on all 320 prompts: completion length −1.45 chars, 95% CI [−12.5, +9.6]; reward +0.0024, 95% CI [−0.0038, +0.0086] |
+| The comparison has power | resolves an effect 12× smaller than training's own 134-char shift over the same 20 steps |
+| The difference does not grow with training | post-step-0 divergence at or below the step-0 sampling-noise floor; all trend slopes p ≥ 0.124 |
 | Rewards are the ones the trainer used | CSV per-step means match orchestrator `reward_mean` exactly |
