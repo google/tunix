@@ -154,7 +154,13 @@ export TRAIN_MICRO_BATCH_SIZE=8     # = TRAINER_MESH_FSDP: one packed row per FS
 # 2 sequences share a row in the worst case and the 256 sequences need at least 128 rows,
 # or 16 micro-batches of 8. Short completions pack denser and cut that count.
 # max_segments_per_packed_row is left unset so that max_packed_len alone bounds the row.
-export MAX_SEQ_TOKEN_PER_TPU=4096
+#
+# Overridable so that an unpacked control arm can be run against the same seed and data
+# order: MAX_SEQ_TOKEN_PER_TPU= bash submit.sh <n> <steps> start. k8s_launcher.sh omits
+# --max_seq_token_per_tpu when this is empty, which selects PaddedBatchAssembler and
+# leaves max_target_length at MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH. Note the `-`
+# rather than `:-`: an explicitly empty value has to survive, not fall back to 4096.
+export MAX_SEQ_TOKEN_PER_TPU="${MAX_SEQ_TOKEN_PER_TPU-4096}"
 
 export MAX_STEPS="${STEPS}"
 
@@ -251,7 +257,11 @@ echo "    image      ${TUNIX_IMAGE}"
 echo "    trainer    ${TRAINER_TPU_SLICE} fsdp=${TRAINER_MESH_FSDP}"
 echo "    rollout    ${ROLLOUT_REPLICAS} x ${ROLLOUT_TPU_SLICE} dp=${ROLLOUT_MESH_FSDP} tp=${ROLLOUT_MESH_TP} sampler=${SAMPLER}"
 echo "    batch      ${BATCH_SIZE} prompts x ${NUM_GENERATIONS} gens = ${MINI_BATCH_SIZE}/step, resp<=${MAX_RESPONSE_LENGTH}"
-echo "    packing    ${MAX_SEQ_TOKEN_PER_TPU} tok/row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
+if [[ -n "${MAX_SEQ_TOKEN_PER_TPU}" ]]; then
+  echo "    packing    ${MAX_SEQ_TOKEN_PER_TPU} tok/row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
+else
+  echo "    packing    OFF -- unpacked control, one sequence per $((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))-token row, micro-batch ${TRAIN_MICRO_BATCH_SIZE}"
+fi
 echo "    raiden     ${ORCHESTRATOR_EXTRA_ENV:-RAIDEN_BROADCAST_K unset (direct push)}"
 echo "    reward     mode=${REWARD_MODE} debug=${DEBUG}"
 echo "    traj csv   ${TRAJECTORY_LOG_DIR}"
