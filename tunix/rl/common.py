@@ -23,6 +23,7 @@ import jax
 from jax import numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
+from tunix.common import router_replay
 from tunix.sft import utils
 
 make_causal_attn_mask = utils.make_causal_attn_mask
@@ -123,6 +124,13 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # Per-token log-probabilities the rollout engine reported for the tokens it
+  # generated -- the *behaviour* policy. Distinct from ``old_per_token_logps``,
+  # which is whatever policy the surrogate ratio is taken against.
+  rollout_per_token_logps: ArrayType | None = None
+  # `[B]`, 1.0 where the rollout engine exhausted the response budget without
+  # emitting an end-of-sequence token.
+  overlong: ArrayType | None = None
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
@@ -205,7 +213,7 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
       .astype(jnp.float32)
   )
   normalizer = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
-  return target_logits - normalizer
+  return jnp.minimum(target_logits - normalizer, 0.0)
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
@@ -297,8 +305,9 @@ def process_ids(
 
 
 # Marks a router-replay slot the trainer must leave to the model's own router.
-# `-1` and not `0`, because expert 0 is a real expert.
-UNSET_ROUTED_EXPERT = -1
+# `-1` and not `0`, because expert 0 is a real expert. See
+# `tunix/common/router_replay.py` for how this differs from padding (`-2`).
+UNSET_ROUTED_EXPERT = router_replay.MISSING_ROUTE
 
 
 def align_routed_experts(
@@ -338,7 +347,7 @@ def align_routed_experts(
 
   rows = []
   for routed, completion_len in zip(routed_experts, completion_lengths):
-    routed = np.asarray(routed, dtype=np.int32)
+    routed = np.asarray(routed, dtype=router_replay.ROUTE_DTYPE)
     if routed.ndim != 3:
       raise ValueError(
           "routed_experts must be [length, num_layers, top_k]; got shape"
@@ -351,10 +360,13 @@ def align_routed_experts(
     kept_completion_end = split + min(routed.shape[0] - split, completion_width)
     prompt_part = routed[kept_prompt_start:split]
     completion_part = routed[split:kept_completion_end]
+    # Padding, not "route unknown": these slots hold no token, so the trainer
+    # must not route them. Real tokens whose route the sampler did not capture
+    # arrive already marked `-1` and keep that meaning.
     row = np.full(
         (prompt_width + completion_width,) + routed.shape[1:],
-        UNSET_ROUTED_EXPERT,
-        dtype=np.int32,
+        router_replay.PADDING_ROUTE,
+        dtype=router_replay.ROUTE_DTYPE,
     )
     row[prompt_width - prompt_part.shape[0] : prompt_width] = prompt_part
     row[prompt_width : prompt_width + completion_part.shape[0]] = (

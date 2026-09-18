@@ -27,6 +27,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import router_replay
 from tunix.experimental.common import datatypes
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
@@ -70,10 +71,11 @@ def _routed_experts_for(
     seq_len: Length of the prompt+completion sequence in the payload.
 
   Returns:
-    `[seq_len, num_layers, top_k]`, or None when nothing was captured. Rows
-    beyond what the rollout reported are left `UNSET_ROUTED_EXPERT` so the
-    model falls back to its own gate there rather than replaying a wrong
-    expert.
+    `[seq_len, num_layers, top_k]`, or None when nothing was captured.
+
+  Raises:
+    ValueError: if the capture does not cover exactly `seq_len` tokens, which
+      means it is misaligned rather than merely incomplete.
   """
   routed = getattr(item, "routed_experts", None)
   if routed is None and isinstance(item.traj, dict):
@@ -82,20 +84,25 @@ def _routed_experts_for(
     routed = item.metadata.get("routed_experts")
   if routed is None:
     return None
-  routed_arr = np.asarray(routed, dtype=np.int32)
+  routed_arr = np.asarray(routed, dtype=router_replay.ROUTE_DTYPE)
   if routed_arr.ndim != 3:
     raise ValueError(
         "routed_experts must be [length, num_layers, top_k]; got shape"
         f" {routed_arr.shape}"
     )
-  if routed_arr.shape[0] >= seq_len:
-    return routed_arr[:seq_len]
-  pad = np.full(
-      (seq_len - routed_arr.shape[0],) + routed_arr.shape[1:],
-      datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int32,
-  )
-  return np.concatenate([routed_arr, pad], axis=0)
+  if routed_arr.shape[0] != seq_len:
+    # Do NOT pad to fit. Routing is positional: a sampler that reports only
+    # completion routes yields `completion_len` rows, and padding those out to
+    # `seq_len` would park completion routes on prompt positions and replay a
+    # wrong expert for every token -- silently, since the shapes still line up
+    # downstream. The sampler must emit one row per prompt+completion token
+    # (see `router_replay.full_sequence`).
+    raise ValueError(
+        f"routed_experts has {routed_arr.shape[0]} rows but the sequence has"
+        f" {seq_len} tokens; routing must cover prompt+completion exactly."
+        " A completion-only capture is misalignment, not a short tail."
+    )
+  return routed_arr
 
 
 def _extract_old_logps(
@@ -250,11 +257,13 @@ class GRPOAdapter(AlgorithmAdapter):
           else np.zeros(0, dtype=np.int32)
       )
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
-      old_lp = (
-          _extract_old_logps(item, len(c_arr))
-          if self.use_rollout_logps
-          else None
-      )
+      # Extract once, use twice. The sampler always reports log-probs
+      # (`return_logprobs=True` is not conditional), so measuring the
+      # sampler-vs-trainer disparity costs nothing -- but only the loss
+      # denominator is allowed to depend on `use_rollout_logps`. Conflating the
+      # two is how pinning the ratio to 1 used to also delete the measurement.
+      sampler_lp = _extract_old_logps(item, len(c_arr))
+      old_lp = sampler_lp if self.use_rollout_logps else None
       payload = datatypes.RLTrainerPayload(
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
@@ -262,6 +271,7 @@ class GRPOAdapter(AlgorithmAdapter):
           completion_mask=act_arr,
           advantages=seq_adv,
           old_per_token_logps=old_lp,
+          sampler_per_token_logps=sampler_lp,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,

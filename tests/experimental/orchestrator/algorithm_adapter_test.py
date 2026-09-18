@@ -581,12 +581,23 @@ class RoutedExpertsForItemTest(absltest.TestCase):
   def test_returns_none_without_capture(self):
     self.assertIsNone(self._align(None))
 
-  def test_short_capture_is_padded_as_unset(self):
-    """Missing tail rows must fall back to the gate, not replay expert 0."""
-    out = self._align(_routing(5, 3))
+  def test_exact_length_capture_passes_through(self):
+    out = self._align(_routing(8, 3))
     self.assertEqual(out.shape, (8, _ROUTING_LAYERS, _ROUTING_TOP_K))
-    np.testing.assert_array_equal(out[:5], 3)
-    np.testing.assert_array_equal(out[5:], datatypes.UNSET_ROUTED_EXPERT)
+    np.testing.assert_array_equal(out, 3)
+
+  def test_short_capture_is_rejected(self):
+    """A completion-only capture is misaligned, not merely incomplete.
+
+    Padding it out to the sequence length would park completion routes on
+    prompt positions and replay a wrong expert for every token, silently.
+    """
+    with self.assertRaisesRegex(ValueError, "prompt\\+completion exactly"):
+      self._align(_routing(5, 3))
+
+  def test_long_capture_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "prompt\\+completion exactly"):
+      self._align(_routing(9, 3))
 
   def test_wrong_rank_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "length, num_layers, top_k"):

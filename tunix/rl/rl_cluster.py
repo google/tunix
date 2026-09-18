@@ -633,7 +633,11 @@ class RLEngine:
           metric_name,
           agg_value,  # pyrefly: ignore[bad-argument-type]
           metrics_buffer.mode,
-          metrics_buffer.global_steps,
+          (
+              getattr(self._actor_trainer, "step", metrics_buffer.global_steps)
+              if hasattr(self, "_actor_trainer")
+              else metrics_buffer.global_steps
+          ),
       )
 
     if self._external_metrics_logger is not None:
@@ -1059,6 +1063,7 @@ class RLEngine:
       temperature: float | None = None,
       segment_ids: jax.Array | None = None,
       segment_positions: jax.Array | None = None,
+      routed_experts: jax.Array | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1067,6 +1072,11 @@ class RLEngine:
     so the actor's recomputed logps match the temperature scaling used at
     sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
     yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
+
+    `routed_experts` must carry whatever routing the differentiable forward
+    will replay. These logps become the PPO ratio's denominator, so replaying
+    in one forward but not the other leaves the ratio off unity even before the
+    first optimizer step — a bias that no amount of clipping removes.
     """
     if temperature is None:
       temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
@@ -1103,6 +1113,16 @@ class RLEngine:
           if segment_positions is None
           else sharding_utils.shard_input(
               segment_positions,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+      # Routing is `[B, T, num_layers, top_k]`, but the data sharding axis only
+      # names the batch axis, so the same spec shards it correctly.
+      dest_routed_experts = (
+          None
+          if routed_experts is None
+          else sharding_utils.shard_input(
+              routed_experts,
               self.cluster_config.training_config.data_sharding_axis,
           )
       )
@@ -1150,6 +1170,11 @@ class RLEngine:
                     None
                     if dest_segment_positions is None
                     else dest_segment_positions[batch_slice]
+                ),
+                routed_experts=(
+                    None
+                    if dest_routed_experts is None
+                    else dest_routed_experts[batch_slice]
                 ),
             )
         )

@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tunix.common import router_replay
 from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
@@ -97,9 +98,16 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+    rollout_config = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
         mode=rl_engine_lib.Mode.TRAIN
-    ).temperature
+    )
+    self.algo_config.temperature = rollout_config.temperature
+
+    # Replay hands MaxText raw expert ids, so the two sides have to agree on
+    # what a negative id means before we spend a rollout finding out.
+    self._validate_next_routed_experts = rollout_config.return_routed_experts
+    if rollout_config.return_routed_experts:
+      router_replay.require_maxtext_support()
 
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -196,6 +204,22 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         prompt_width=prompt_ids.shape[-1],
         completion_width=rollout_config.max_tokens_to_generate,
     )
+    if rollout_config.return_routed_experts and routed_experts is None:
+      # Replay is all-or-nothing, so a single generation without routing turns
+      # it off for the whole batch. Failing here beats discovering weeks later
+      # that the run trained on the native router the whole time.
+      raise RuntimeError(
+          "return_routed_experts=True, but the sampler omitted routing for at"
+          " least one generation. Refusing to silently train with the native"
+          " trainer router."
+      )
+
+    if self._validate_next_routed_experts and routed_experts is not None:
+      # MaxText reads element 0 of each top-k row and trusts the host for the
+      # rest, so a half-filled row is undetectable downstream. Pay the full
+      # scan once, on the first batch a producer ever emits.
+      self._validate_next_routed_experts = False
+      router_replay.validate(routed_experts)
 
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
@@ -233,10 +257,12 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     trainer_per_token_logps = None
     old_per_token_logps = None
     sampler_is_weights = None
-    if (
-        self.algo_config.use_rollout_logps
-        and rollout_output.logprobs is not None
-    ):
+    # Computed whenever the sampler returned log-probs, NOT gated on
+    # use_rollout_logps. Only the loss denominator is allowed to depend on that
+    # flag; conflating the two is how pinning the ratio to 1 also deleted the
+    # sampler-vs-trainer measurement. Mirrors
+    # `orchestrator/algorithm_adapter.py`'s split of sampler_lp from old_lp.
+    if rollout_output.logprobs is not None:
       rollout_per_token_logps = jnp.asarray([
           utils.pad_to_length(
               np.asarray(logprobs),
@@ -246,7 +272,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           )[: rollout_config.max_tokens_to_generate]
           for logprobs in rollout_output.logprobs
       ])
-      old_per_token_logps = rollout_per_token_logps
+      if self.algo_config.use_rollout_logps:
+        old_per_token_logps = rollout_per_token_logps
     needs_trainer_logps = (
         not self.algo_config.use_rollout_logps
         or self.algo_config.sampler_is == "token"
@@ -264,6 +291,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=compute_logps_micro_batch_size,
+            routed_experts=routed_experts,
         )
         interval.device_end([trainer_per_token_logps])
         interval_v2.async_end([trainer_per_token_logps])
@@ -423,6 +451,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ref_per_token_logps=ref_per_token_logps,
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
+        # Distinct from old_per_token_logps on purpose: that one is the PPO
+        # ratio's denominator and is None under --no-use_rollout_logps, while
+        # this one is the measurement channel and must survive that flag.
+        rollout_per_token_logps=rollout_per_token_logps,
         sampler_is_weights=sampler_is_weights,
         routed_experts=(
             None if routed_experts is None else jax.device_put(routed_experts)

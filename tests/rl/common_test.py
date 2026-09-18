@@ -18,6 +18,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import router_replay
 from tunix.rl import common
 from tunix.sft import utils
 from tunix.tests import test_common as tc
@@ -106,6 +107,12 @@ class CommonTest(parameterized.TestCase):
     np.testing.assert_allclose(
         per_token_logps, jitted_per_token_logps, rtol=1e-05, atol=1e-05
     )
+    self.assertTrue(bool(jnp.all(per_token_logps <= 0.0)))
+    # Test extreme dominated logit where un-clamped logsumexp could yield > 0.0
+    dominated_logits = jnp.array([[[100.0, -100.0, -100.0]]], dtype=jnp.bfloat16)
+    target_id = jnp.array([[0]], dtype=jnp.int32)
+    clamped_logp = common.selective_log_softmax(dominated_logits, target_id)
+    self.assertLessEqual(float(clamped_logp[0, 0]), 0.0)
 
   def test_get_per_token_logps(self):
     rng = jax.random.PRNGKey(0)
@@ -1017,6 +1024,7 @@ class CommonTest(parameterized.TestCase):
 _ROUTING_LAYERS = 2
 _ROUTING_TOP_K = 2
 _UNSET = common.UNSET_ROUTED_EXPERT
+_PADDING = router_replay.PADDING_ROUTE
 
 
 def _routing(length, fill):
@@ -1052,14 +1060,31 @@ class AlignRoutedExpertsTest(parameterized.TestCase):
         (1, prompt_width + completion_width, _ROUTING_LAYERS, _ROUTING_TOP_K),
     )
     row = out[0]
-    np.testing.assert_array_equal(row[: prompt_width - prompt_len], _UNSET)
+    np.testing.assert_array_equal(row[: prompt_width - prompt_len], _PADDING)
     np.testing.assert_array_equal(
         row[prompt_width - prompt_len : prompt_width], 7
     )
     np.testing.assert_array_equal(
         row[prompt_width : prompt_width + completion_len], 9
     )
-    np.testing.assert_array_equal(row[prompt_width + completion_len :], _UNSET)
+    np.testing.assert_array_equal(row[prompt_width + completion_len :], _PADDING)
+
+  def test_uncaptured_routes_stay_missing_not_padding(self):
+    """The two sentinels drive different trainer behaviour, so they must not mix.
+
+    A padded slot holds no token and must not be routed at all; a real token
+    whose route was never captured must be routed by the model itself.
+    """
+    routed = np.concatenate([_routing(1, _UNSET), _routing(1, 9)], axis=0)
+
+    row = common.align_routed_experts(
+        [routed], completion_lengths=[1], prompt_width=2, completion_width=1
+    )[0]
+
+    np.testing.assert_array_equal(row[0], _PADDING)  # no token here
+    np.testing.assert_array_equal(row[1], _UNSET)  # token, but no route
+    np.testing.assert_array_equal(row[2], 9)
+
 
   def test_batches_rows_in_order(self):
     """Row i's routing must stay on row i, or rows train on each other's."""

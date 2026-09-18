@@ -365,9 +365,14 @@ class GRPOLearnerTest(parameterized.TestCase):
     rl_engine, _, _ = setup({'rollout_micro_batch_size': 1})
     actor_logps_calls = []
     def fake_get_actor_per_token_logps(
-        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+        prompt_tokens,
+        completion_tokens,
+        pad_id,
+        eos_id,
+        micro_batch_size,
+        routed_experts=None,
     ):
-      del pad_id, eos_id, micro_batch_size
+      del pad_id, eos_id, micro_batch_size, routed_experts
       actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
       return jnp.full(completion_tokens.shape, -7.0, dtype=jnp.float32)
     rl_engine.get_actor_per_token_logps = fake_get_actor_per_token_logps
@@ -400,9 +405,14 @@ class GRPOLearnerTest(parameterized.TestCase):
     actor_logps_calls = []
 
     def fake_get_actor_per_token_logps(
-        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+        prompt_tokens,
+        completion_tokens,
+        pad_id,
+        eos_id,
+        micro_batch_size,
+        routed_experts=None,
     ):
-      del pad_id, eos_id, micro_batch_size
+      del pad_id, eos_id, micro_batch_size, routed_experts
       actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
       return jnp.full(completion_tokens.shape, -3.0, dtype=jnp.float32)
 
@@ -433,15 +443,39 @@ class GRPOLearnerTest(parameterized.TestCase):
         train_example.completion_ids.shape,
     )
 
-  def test_recompute_ignores_returned_rollout_logps_like_agentic(self):
+  def test_recompute_anchors_on_trainer_but_keeps_sampler_correction(self):
+    """`use_rollout_logps` picks the anchor; `sampler_is` picks the correction.
+
+    These are independent knobs. `use_rollout_logps=False` says "anchor the PPO
+    ratio on the trainer's own forward", and `sampler_is='token'` says "weight
+    by the trainer-vs-sampler ratio". Pairing them is the whole point of
+    forcing the ratio on-policy: the anchor makes the ratio unit, the weight
+    puts the sampler correction back.
+
+    This previously asserted `sampler_is_weights is None` -- the rollout
+    log-probs were gated on `use_rollout_logps`, so the requested correction
+    silently did not happen. `grpo_learner.py`'s own `needs_trainer_logps`
+    already treats `sampler_is == 'token'` as an independent reason to run the
+    trainer forward, and `orchestrator/algorithm_adapter.py` keeps
+    `sampler_per_token_logps` unconditional. The coupling was an oversight.
+
+    NOTE: `agentic_grpo_learner.py` still has the old coupling (its
+    `use_rollout_logps=False` branch never populates
+    `rollout_per_token_logps`), so the two paths disagree here.
+    """
     rl_engine, _, _ = setup(
         {'return_logprobs': True, 'rollout_micro_batch_size': 1}
     )
     actor_logps_calls = []
     def fake_get_actor_per_token_logps(
-        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+        prompt_tokens,
+        completion_tokens,
+        pad_id,
+        eos_id,
+        micro_batch_size,
+        routed_experts=None,
     ):
-      del pad_id, eos_id, micro_batch_size
+      del pad_id, eos_id, micro_batch_size, routed_experts
       actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
       return jnp.full(completion_tokens.shape, -5.0, dtype=jnp.float32)
     rl_engine.get_actor_per_token_logps = fake_get_actor_per_token_logps
@@ -461,12 +495,20 @@ class GRPOLearnerTest(parameterized.TestCase):
         'prompts': np.array(['input string', 'input string']),
         'answer': np.array(['answer', 'answer']),
     })
+    # One trainer forward, and the anchor is its output, not the sampler's.
     self.assertLen(actor_logps_calls, 1)
     np.testing.assert_allclose(
         np.asarray(train_example.old_per_token_logps),
         np.full(train_example.completion_ids.shape, -5.0, dtype=np.float32),
     )
-    self.assertIsNone(train_example.sampler_is_weights)
+    # The requested correction was actually applied.
+    self.assertIsNotNone(train_example.sampler_is_weights)
+    self.assertEqual(
+        train_example.sampler_is_weights.shape,
+        train_example.completion_ids.shape,
+    )
+    # And the measurement survived the flag, which is the point of the split.
+    self.assertIsNotNone(train_example.rollout_per_token_logps)
 
   def test_vllm_missing_rollout_logps_does_not_recompute_on_rollout(self):
     rl_engine, _, _ = setup(

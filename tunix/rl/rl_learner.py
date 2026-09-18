@@ -758,6 +758,18 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.max_seq_token_per_tpu,
           pack_size,
       )
+
+      rollout_config = self.rl_engine.get_rollout_config(
+          mode=rl_engine_lib.Mode.TRAIN
+      )
+      if rollout_config.return_routed_experts:
+        raise RuntimeError(
+            "Sequence packing is incompatible with router replay "
+            "(return_routed_experts) in its current form. "
+            "The packed layout destroys the [prompt | completion] boundaries "
+            "that the routing alignment relies on."
+        )
+
       # Update boundary in sequences (mini-batch semantics): packing is
       # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
