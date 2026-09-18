@@ -74,6 +74,11 @@ def _get_item_name(item: Any) -> str | None:
   return None
 
 
+def _is_gcs_path(path: Any) -> bool:
+  """Returns True if `path` points to Google Cloud Storage."""
+  return str(path).startswith('gs://')
+
+
 def log_item(
     log_path: str, item: dict[str, Any] | Any, suffix: str | None = None
 ):
@@ -104,7 +109,12 @@ def log_item(
   log_path = epath.Path(log_path)  # pyrefly: ignore[bad-assignment]
   log_path.mkdir(parents=True, exist_ok=True)  # pyrefly: ignore[missing-attribute]
 
-  assert log_path.is_dir(), f'log_path `{log_path}` must be a directory.'  # pyrefly: ignore[missing-attribute]
+  # GCS has no real directories: `mkdir()` is a no-op and `is_dir()` stays
+  # False until an object exists under the prefix, so only enforce the
+  # directory check on filesystems that model directories.
+  assert (
+      _is_gcs_path(log_path) or log_path.is_dir()  # pyrefly: ignore[missing-attribute]
+  ), f'log_path `{log_path}` must be a directory.'
 
   if isinstance(item, list):
     item_name = _get_item_name(item[0])
@@ -120,7 +130,7 @@ def log_item(
   df = pd.DataFrame(
       serialized_item if isinstance(item, list) else [serialized_item]
   )
-  if str(file_path).startswith('gs://'):
+  if _is_gcs_path(file_path):
     if file_path.exists():
       old_df = None
       try:
