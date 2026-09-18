@@ -35,12 +35,16 @@ TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 BATCH_SIZE=${BATCH_SIZE:-64}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
-MAX_STEPS=${MAX_STEPS:-450}
+NUM_BATCHES=${NUM_BATCHES:-150}
+NUM_ITERATIONS=${NUM_ITERATIONS:-1}
+NUM_EPOCHS=${NUM_EPOCHS:-3}
+MAX_STEPS=${MAX_STEPS:-$((NUM_BATCHES * NUM_ITERATIONS * NUM_EPOCHS))}
 MAX_TURNS=${MAX_TURNS:-8}
 DATASET_SIZE=${DATASET_SIZE:-10000}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
-TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-4}
+# Distributed workers count trajectories, while agentic counts prompt groups.
+TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$((4 * NUM_GENERATIONS))}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 ADAM_B1=${ADAM_B1:-0.9}
 ADAM_B2=${ADAM_B2:-0.95}
@@ -64,28 +68,38 @@ SHUFFLE=${SHUFFLE:-1}
 IS_SLIPPERY=${IS_SLIPPERY:-0}
 USE_MULTISTEP_PROMPT=${USE_MULTISTEP_PROMPT:-1}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-1}
+SAMPLER_IS=${SAMPLER_IS:-token}
+SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-2.0}
 ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-256}
 SAMPLER=${SAMPLER:-inprocess_vllm}
-WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.20}
+VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-64}
+VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}
+VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256))}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1000000000}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-1}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints/frozenlake"}
-WANDB_PROJECT=${WANDB_PROJECT:-trellis-frozenlake}
+WANDB_PROJECT=${WANDB_PROJECT:-tunix-frozenlake}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 DEBUG=${DEBUG:-0}
 
-# Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
-TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
+# Default to a 4-chip host split evenly between trainer and rollout.
+TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
-TRAINER_TP=${TRAINER_TP:-4}
-ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-4,5,6,7}
+TRAINER_TP=${TRAINER_TP:-2}
+ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
-ROLLOUT_TP=${ROLLOUT_TP:-4}
-TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
+TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
+# Trainer and rollout load libtpu concurrently in separate processes on the
+# same host. Without this opt-in, the second runtime may terminate natively
+# while importing vLLM instead of raising a Python exception.
+export ALLOW_MULTIPLE_LIBTPU_LOAD="${ALLOW_MULTIPLE_LIBTPU_LOAD:-1}"
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 SHUTDOWN_GRACE_SECS=${SHUTDOWN_GRACE_SECS:-30}
@@ -219,6 +233,10 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --model_parameter_dtype=float32
+    --remat_config=decoder
+    --use_flash_attention
+    --flash_attention_block_size=256
     --learning_rate="$LEARNING_RATE"
     --adam_b1="$ADAM_B1"
     --adam_b2="$ADAM_B2"
@@ -266,8 +284,20 @@ TRAINER_PID=$!
     --env_name=frozenlake_env
     --agent_name=frozenlake_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
+    --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
+    --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
+    --vllm_max_model_len="$VLLM_MAX_MODEL_LEN"
+    --vllm_dtype=bfloat16
+    --vllm_server_mode
+    --no-vllm_async_scheduling
     --no-enable_thinking
   )
+  if [[ "$WEIGHT_SYNC_MODE" == "none" ]]; then
+    cmd+=(--no-vllm_init_with_random_weights)
+  else
+    cmd+=(--vllm_init_with_random_weights)
+  fi
   is_true "$DEBUG" && cmd+=(--debug)
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
@@ -294,6 +324,9 @@ cmd=(
   --batch_size="$BATCH_SIZE"
   --mini_batch_size="$MINI_BATCH_SIZE"
   --num_generations="$NUM_GENERATIONS"
+  --num_batches="$NUM_BATCHES"
+  --num_iterations="$NUM_ITERATIONS"
+  --num_epochs="$NUM_EPOCHS"
   --max_steps="$MAX_STEPS"
   --max_turns="$MAX_TURNS"
   --dataset_size="$DATASET_SIZE"
@@ -312,6 +345,8 @@ cmd=(
   --advantage_estimator="$ADVANTAGE_ESTIMATOR"
   --max_staleness="$OFF_POLICY_STEPS"
   --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
+  --sampler_is="$SAMPLER_IS"
+  --sampler_is_threshold="$SAMPLER_IS_THRESHOLD"
   --seed="$SEED"
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
   --trainer_fsdp="$TRAINER_FSDP"
