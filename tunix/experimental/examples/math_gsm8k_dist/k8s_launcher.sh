@@ -37,10 +37,9 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-# Qwen3 chat models close each turn with `<|im_end|>` rather than the
-# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
-# fall back to the tokenizer's EOS token.
-export EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+export EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
