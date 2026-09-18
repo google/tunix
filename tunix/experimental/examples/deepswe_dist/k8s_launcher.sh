@@ -636,9 +636,9 @@ fi
 
 if [[ "$COMMAND" == "start" ]]; then
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    echo "Ensuring RBAC permissions for default:xpk-sa in namespace '${SANDBOX_NAMESPACE:-trellis}'..."
-    kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
-    kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
+    echo "Ensuring RBAC permissions for ${K8S_NAMESPACE:-trellis}:${SERVICE_ACCOUNT:-xpk-sa} in namespace '${SANDBOX_NAMESPACE:-trellis}'..."
+    kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount="${K8S_NAMESPACE:-trellis}:${SERVICE_ACCOUNT:-xpk-sa}" --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - 2>/dev/null || true
+    kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount="${K8S_NAMESPACE:-trellis}:${SERVICE_ACCOUNT:-xpk-sa}" --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - 2>/dev/null || true
   fi
   stop_orchestrator
   stop_trainer
