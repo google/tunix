@@ -224,17 +224,37 @@ same 275-package set; the nine data hashes match; figure and spreadsheet rebuild
 byte-identically; the step-6 CSV recipe reproduces all three `data/*.csv` byte for byte; and
 `canon-zero-tim/blog_reprod/export_wandb.py` passes its unit tests and exported a real W&B run.
 
-Verified 2026-09-17 on one v5p-8 host (real image, real TPUs, this branch's tip), Zero-TIM only:
+Verified 2026-09-17 and re-run 2026-09-18 on one v5p-8 host (real image, real TPUs, this branch's
+tip), Zero-TIM only:
 `canon-zero-tim/workloads/frozenlake-three-arm/scripts/run_perf_v2_onehost.sh` with the
 exact-token-continuity arm (`tito-on`, DP1×TP4, production dataset via `P57_PERF_V2_DATA_DIR`)
 installed the overlay (`all 37 files match (qwen8b)`), ran three optimizer commits with finite
-gradients (commit gradient norms 15.51 / 6.68 / 6.51) and held all 12 strict-alignment rows — 36
-boundaries — at zero differing bytes, with a green semantic census; and
+gradients and held all 12 strict-alignment rows — 36 boundaries — at zero differing bytes, with a
+green semantic census (one 2026-09-18 commit had an exactly zero gradient — both generations of
+every prompt scored alike, so GRPO's group-relative advantage vanished; zero is not the same as
+non-finite); and
 `canon-zero-tim/workloads/frozenlake-onehost/scripts/run_frozenlake_dp2tp2_onehost.sh p45 r3 … measure`
 (DP2×TP2, the same trainer knobs as the 64-chip profile) reported `strict_exact: true` over 26
-boundaries with finite gradient norms. Those carriers cap rollouts at two turns, so every trajectory
-was single-turn and exact token continuity itself was **not exercised** there (`token_verdict:
-UNEXERCISED`); the 64-chip recipe's five-turn rollouts are where it is exercised.
+boundaries with finite gradient norms (micro 21.45 / 12.77 / 13.71, update 14.70).
+
+Exact token continuity is still **not exercised** on one host, and the reason is not the turn cap.
+Raising the carrier's FrozenLake cap to five turns (`P57_PERF_V2_ENV_MAX_STEPS=5`, 2026-09-18) left
+all 24 trajectories single-turn and the witness at `token_verdict: UNEXERCISED`: that carrier also
+pins `--max_response_length=64`, which is a whole-episode response budget, so the first turn spends
+it and the second is clipped as `MAX_CONTEXT_LIMIT_REACHED`. The 64-chip recipe gives P45 2048
+response tokens across five turns, so the arm you launch from step 4 is still the first thing that
+exercises exact token continuity.
+
+Verified 2026-09-18 without a cluster, on the tree you are reading: the pod's own chain runs. Each
+arm's freshly rendered manifest environment was replayed into the real image and
+`canon-zero-tim/cluster/entrypoint.sh` was driven to `probe-only` (Zero) and to `install-only`
+(Zero, Standard, TIS); all four exited 0. `canon-zero-tim/cluster/steps/00_env.sh` admitted every
+arm with nothing injected by hand, the Zero arm reached `all 37 files match (qwen8b_tp8)` and
+`50_verify_overlay.sh ok`, the Standard and TIS arms reached
+`canonical_overlay=skipped observer_overlay=installed`, and every run ended at
+`chain installed and verified`. What that does not cover is everything after installation — worker
+rendezvous, device probe, model init and `canon-zero-tim/cluster/steps/90_run.sh` — which only runs
+on a real launch.
 
 Not verified: **no cluster job was launched** — no 64-chip run of these manifests, no `--devices` ABI
 check; the Standard and TIS arms have no one-host coverage (the host driver's stock-engine arms crash
