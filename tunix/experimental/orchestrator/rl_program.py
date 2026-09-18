@@ -336,6 +336,18 @@ class StandardRLProgram(RLProgram):
           f"batch_size={self.full_batch_size}, "
           f"mini_batch_size={self.mini_batch_size}."
       )
+    use_rollout_logps = getattr(
+        algo,
+        "use_rollout_logps",
+        getattr(getattr(algo, "algo_config", None), "use_rollout_logps", True),
+    )
+    if not use_rollout_logps and self.full_batch_size != self.mini_batch_size:
+      raise ValueError(
+          "use_rollout_logps=False requires batch_size == mini_batch_size "
+          "(exactly one optimizer update per rollout batch); got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
     self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(

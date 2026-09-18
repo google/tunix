@@ -218,6 +218,20 @@ class RolloutLogprobRequestTest(absltest.TestCase):
         )
     )
 
+  def test_use_rollout_logps_false_requires_batch_size_equal_to_mini_batch_size(
+      self,
+  ):
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=_recipe_config(), mini_batch_size=2
+    )
+    with self.assertRaisesRegex(
+        ValueError, "use_rollout_logps=False requires batch_size == mini_batch_size"
+    ):
+      rl_program.StandardRLProgram(algo=adapter, batch_size=4)
+    program = rl_program.StandardRLProgram(algo=adapter, batch_size=2)
+    self.assertEqual(program.full_batch_size, 2)
+    self.assertEqual(program.mini_batch_size, 2)
+
   def test_requested_for_the_gates_alone(self):
     # A recipe may recompute the PPO denominator on the trainer and still gate
     # on the sampler-vs-trainer comparison.
