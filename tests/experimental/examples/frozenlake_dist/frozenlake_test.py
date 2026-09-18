@@ -34,7 +34,9 @@ except ImportError:
   raise unittest.SkipTest("gymnasium is not installed")  # pylint: disable=raise-missing-from
 
 # pylint: disable=g-import-not-at-top
+from datasets import Dataset
 from examples.frozenlake import agent as frozenlake_agent
+from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
 from tunix.experimental.examples.common import models
 from tunix.experimental.examples.frozenlake_dist import frozenlake
@@ -61,6 +63,7 @@ class FrozenLakeDistTest(absltest.TestCase):
     package_dir = Path(frozenlake.__file__).parent
     source = Path(frozenlake.__file__).read_text(encoding="utf-8")
     self.assertIn("from examples.frozenlake import agent", source)
+    self.assertIn("from examples.frozenlake import data", source)
     self.assertIn("from examples.frozenlake import env", source)
     self.assertNotIn("class FrozenLakeAgent", source)
     self.assertNotIn("class FrozenLakeEnv", source)
@@ -76,6 +79,24 @@ class FrozenLakeDistTest(absltest.TestCase):
       self.assertBetween(entry["size"], 2, 9)
       self.assertGreaterEqual(entry["p"], 0.6)
       self.assertLess(entry["p"], 0.85)
+
+  def test_dataset_generation_and_shuffle_match_reference(self):
+    seeds, sizes, probabilities = frozenlake_data.generate_dataset_parameters(
+        32, random_seed=42
+    )
+    reference = [
+        frozenlake_data.get_frozenlake_dict(
+            env_seed, sizes[index], probabilities[index]
+        )
+        for index, env_seed in enumerate(seeds)
+    ]
+    expected = Dataset.from_list(reference).shuffle(seed=42).to_list()[:12]
+
+    actual = frozenlake.create_dataset(
+        size=32, seed=42, shuffle_seed=42, limit=12
+    )
+
+    self.assertEqual(actual, expected)
 
   def test_generated_map_is_reproducible_and_reachable(self):
     previous_max_steps = frozenlake_env.MAX_STEPS
@@ -171,16 +192,35 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(args.batch_size, 64)
     self.assertEqual(args.mini_batch_size, 64)
     self.assertEqual(args.num_generations, 8)
+    self.assertEqual(args.num_batches, 150)
+    self.assertEqual(args.num_iterations, 1)
+    self.assertEqual(args.num_epochs, 3)
+    self.assertEqual(args.max_steps, 450)
     self.assertEqual(args.max_turns, 8)
     self.assertEqual(args.epsilon, 0.003)
     self.assertEqual(args.epsilon_high, 0.005)
     self.assertEqual(args.loss_algo, "gspo-token")
     self.assertEqual(args.advantage_estimator, "rloo")
+    self.assertEqual(args.sampler_is, "token")
+    self.assertEqual(args.sampler_is_threshold, 2.0)
+    self.assertEqual(args.wandb_project, "tunix-frozenlake")
+
+    algo = run_frozenlake_dist._build_algo(args)
+    self.assertEqual(algo.algo_config.sampler_is, "token")
+    self.assertEqual(algo.algo_config.sampler_is_threshold, 2.0)
 
   def test_qwen3_8b_supported_by_distributed_workers(self):
-    config = models._qwen3_config("Qwen3-8B")
+    config = models._qwen3_config(
+        "Qwen3-8B",
+        remat_config="decoder",
+        use_flash_attention=True,
+        flash_attention_block_size=256,
+    )
     self.assertEqual(config.embed_dim, 4096)
     self.assertEqual(config.num_layers, 36)
+    self.assertEqual(config.remat_config.name, "DECODER")
+    self.assertTrue(config.use_flash_attention)
+    self.assertEqual(config.flash_attention_block_size, 256)
 
   def test_launcher_uses_frozenlake_registry(self):
     launcher = (Path(frozenlake.__file__).parent / "launcher.sh").read_text(
@@ -194,6 +234,13 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertIn("--agent_name=frozenlake_agent", launcher)
     self.assertEqual(launcher.count('--mini_batch_size="$MINI_BATCH_SIZE"'), 2)
     self.assertEqual(launcher.count('--num_generations="$NUM_GENERATIONS"'), 2)
+    self.assertIn("WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", launcher)
+    self.assertIn("--model_parameter_dtype=float32", launcher)
+    self.assertIn(
+        '--compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"',
+        launcher,
+    )
+    self.assertIn('--sampler_is="$SAMPLER_IS"', launcher)
 
 
 if __name__ == "__main__":

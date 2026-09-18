@@ -15,13 +15,27 @@ without ``wandb`` (which is how CI has always run), the default
 backend. Tests that exercise wandb do so explicitly: the OpenTelemetry
 exporter tests pass an offline ``wandb.init`` run object directly and never
 touch the Metrax backend.
+
+This module also parses absl flags so that ``absltest`` helpers work under
+bare ``pytest`` (see below).
 """
 
 import os
+import sys
 
+from absl import flags
+from absl.testing import absltest  # pylint: disable=unused-import
 import pytest
 
 os.environ.setdefault("WANDB_MODE", "disabled")
+
+# ``absltest.TestCase.create_tempdir()`` reads the ``--test_tmpdir`` flag, but
+# under ``pytest`` nothing ever calls ``absltest.main()`` / ``app.run()``, so
+# absl flags stay unparsed and any access raises ``UnparsedFlagAccessError``.
+# Parse them once here (argv[:1] means "defaults only", ``known_only`` ignores
+# pytest's own arguments) so tests can use ``create_tempdir()`` directly.
+if not flags.FLAGS.is_parsed():
+  flags.FLAGS(sys.argv[:1], known_only=True)
 
 
 class _WandbBackendUnavailable:
