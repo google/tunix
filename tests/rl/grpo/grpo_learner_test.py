@@ -848,7 +848,11 @@ class GRPOLearnerTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       grpo_learner.train(train_ds, None)
 
-  def test_resume_training(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='no_shuffle', data_shuffle_seed=None),
+      dict(testcase_name='shuffle', data_shuffle_seed=0),
+  )
+  def test_resume_training(self, data_shuffle_seed):
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
@@ -890,6 +894,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         rl_engine=rl_engine,
         reward_fns=reward_1,
         algo_config=grpo_config,
+        data_shuffle_seed=data_shuffle_seed,
     )
     self.assertEqual(grpo_learner.rl_engine.global_steps, 0)
     train_ds_full = _dummy_dataset(batch_size=2)
@@ -936,8 +941,10 @@ class GRPOLearnerTest(parameterized.TestCase):
         rl_engine=rl_engine2,
         reward_fns=reward_1,
         algo_config=grpo_config,
+        data_shuffle_seed=data_shuffle_seed,
     )
     grpo_learner2.train(train_ds_full[0:1], None)
+    shuffle_state_at_checkpoint = grpo_learner2._data_shuffle_seed
     rl_engine2 = rl_engine_lib.RLEngine(
         actor=model2,
         reference=ref_model,
@@ -948,9 +955,14 @@ class GRPOLearnerTest(parameterized.TestCase):
         rl_engine=rl_engine2,
         reward_fns=reward_1,
         algo_config=grpo_config,
+        data_shuffle_seed=data_shuffle_seed,
     )
     self.assertEqual(grpo_learner2.rl_engine.global_steps, 1)
     assert grpo_learner2._last_iter_step == 1
+    if data_shuffle_seed is not None:
+      np.testing.assert_array_equal(
+          grpo_learner2._data_shuffle_seed, shuffle_state_at_checkpoint
+      )
     grpo_learner2.train(train_ds_full, None)
     self.assertEqual(grpo_learner2.rl_engine.global_steps, 2)
     variables1 = nnx.state(model, nnx.Param)
