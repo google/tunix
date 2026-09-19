@@ -55,6 +55,12 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     prompt_id = metadata.get("prompt_id", "")
     group_index = metadata.get("group_index", 0)
     metadata["error"] = str(resp.error)
+    logging.warning(
+        "[TrajectoryError] Rollout failed for prompt_id=%s, group_index=%s: %s",
+        prompt_id,
+        group_index,
+        resp.error,
+    )
     return datatypes.TrajectoryItem(
         prompt_id=prompt_id,
         group_index=group_index,

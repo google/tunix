@@ -363,9 +363,18 @@ class ClusterOrchestrator:
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
     _wake_code_str = """
-import gc
+import gc, sys
 from tunix.experimental.common import datatypes as _dt
 from tunix.experimental.worker import abstract_worker as _aw
+try:
+  for _k in list(sys.modules.keys()):
+    if _k.startswith(("r2egym", "swebench", "agent_sandbox_rl.adapters.r2egym")):
+      sys.modules.pop(_k, None)
+  from agent_sandbox_rl.adapters import r2egym as _r2e_adapter
+  _r2e_adapter._CLASSES = None
+  _r2e_adapter._import_r2egym()
+except Exception:
+  pass
 try:
   from maxtext.layers import nnx_decoders as _nd
   _orig_get_remat = _nd.Decoder.get_remat_policy

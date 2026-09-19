@@ -331,18 +331,19 @@ def init_global_fleet(
       entries = (
           getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []
       )
-      images = [e.image for e in entries]
+      images = [e.image for e in entries][:max(1, batch_size)]
       if images and hasattr(fleet_inst, "warm_images"):
         target_replicas = fleet_kwargs["max_warmpool_size"]
-        fleet_inst.warm_images(
-            images, replicas_override=target_replicas, wait=False
-        )
-        logging.info(
-            "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
-            " replicas each).",
-            len(images),
-            target_replicas,
-        )
+        if target_replicas and target_replicas > 0:
+          fleet_inst.warm_images(
+              images, replicas_override=target_replicas, wait=False
+          )
+          logging.info(
+              "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
+              " replicas each).",
+              len(images),
+              target_replicas,
+          )
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
