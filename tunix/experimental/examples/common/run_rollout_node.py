@@ -22,6 +22,8 @@ import importlib
 import json
 import logging
 import os
+if not os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING"):
+  os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 import pickle
 import signal
 import sys
@@ -856,7 +858,8 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
-  os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+  if not os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING"):
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
   if args.maxtext_model_name:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
 

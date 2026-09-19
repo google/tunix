@@ -361,6 +361,7 @@ def build_maxtext_config(
 
   argv.extend([
       "scan_layers=True",
+      "allow_split_physical_axes=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
       f"per_device_batch_size={per_device_batch_size}",
