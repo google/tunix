@@ -16,7 +16,8 @@ RUN python3 -c "import r2egym, agent_sandbox_rl" 2>/dev/null || ( \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py \
-    )
+    ) && \
+    sed -i 's/_runtime_version.ValidateProtobufRuntimeVersion/if False: _runtime_version.ValidateProtobufRuntimeVersion/g' /app/tunix/experimental/distributed/runtime/discovery/*_pb2.py /opt/venv/lib/python3.12/site-packages/tunix/experimental/distributed/runtime/discovery/*_pb2.py 2>/dev/null || true
 
 # 1. Overlay MaxText (FP32 router/norm/GDN/LM-head casts, float32_weight_sum HIGHEST, frozen router mask, Router Replay)
 COPY maxtext/src/maxtext /app/maxtext/src/maxtext
