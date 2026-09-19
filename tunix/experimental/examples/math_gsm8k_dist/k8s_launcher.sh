@@ -144,11 +144,25 @@ export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-48G}
 export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
 export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-100G}
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# Extra `KEY=VALUE` pairs prefixed to the rollout worker command, mirroring
+# TRAINER_EXTRA_ENV. Space separated.
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
+# Extra env for the orchestrator container, space separated. The H2D weight-sync
+# timeout lives here: the orchestrator drives the transfer, and its default
+# (300-600 s) is too short for a 739 GiB 397B model.
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
+# Expert parallelism for the rollout. Required, not optional, for fully-MoE
+# models whose per-expert intermediate dim cannot absorb the tensor-parallel
+# degree -- see --mesh_expert in run_rollout_node.py. ROLLOUT_MESH_TP *
+# ROLLOUT_MESH_EXPERT must divide the model's head counts, because tpu-inference
+# derives the attention/GDN head divisor from the product of the
+# ('model', 'expert', 'dcp') axes.
+export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
 
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
@@ -196,6 +210,7 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV}} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -206,6 +221,7 @@ start_orchestrator() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --max_steps=${MAX_STEPS} \
+        ${RPC_TIMEOUT_S:+--rpc_timeout_s=${RPC_TIMEOUT_S}} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
@@ -221,6 +237,7 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        ${TRAINER_MESH_EXPERT:+--trainer_expert=${TRAINER_MESH_EXPERT}} \
         ${debug_flag} \
     " \
     | apply_manifest
@@ -276,6 +293,7 @@ start_trainer() {
       --mesh_tp=${TRAINER_MESH_TP} \
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
+      ${ROLLOUT_MESH_EXPERT:+--rollout_mesh_expert=${ROLLOUT_MESH_EXPERT}} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
       ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     "
@@ -283,7 +301,11 @@ start_trainer() {
 
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
-    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    # Any Pathways trainer template, not just the default one: model-specific
+    # variants such as jobset.pathways.qwen3.5-397b.yaml are equally on
+    # Pathways, and an exact-name test silently drops them to the TCP
+    # transport.
+    if [[ "${TRAINER_JOBSET_YAML}" == jobset.pathways*.yaml ]]; then
       raiden_env+=" RAIDEN_USE_FFI=1"
     fi
   fi
@@ -425,7 +447,7 @@ start_rollout_instance() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
@@ -433,6 +455,7 @@ start_rollout_instance() {
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
+        --mesh_expert=${ROLLOUT_MESH_EXPERT} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
