@@ -61,6 +61,10 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         traj={
             "status": datatypes.TrajectoryStatus.FAILED,
             "trajectory_reward": 0.0,
+            "prompt_tokens": [0],
+            "conversation_tokens": [0],
+            "conversation_masks": [0.0],
+            "old_logprobs": [0.0],
         },
         metadata=metadata,
     )
@@ -614,8 +618,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     await self._maybe_configure_trainer_target_state(role)
 
-    if not sync_weights:
-      return None
+    import os
+    if not sync_weights or os.environ.get("SKIP_INITIAL_WEIGHT_SYNC") == "1":
+      logging.info(
+          "Skipping initial step-0 weight sync (rollout workers already synced"
+          " to policy_version=%d).",
+          self._policy_version,
+      )
+      return self._policy_version
     target_policy_version = (
         self._policy_version if policy_version is None else policy_version
     )

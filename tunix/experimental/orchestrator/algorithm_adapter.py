@@ -54,10 +54,20 @@ def _extract_tokens_and_masks(
     item: datatypes.TrajectoryItem,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
+  traj = item.traj if isinstance(item.traj, dict) else {}
+  p_toks = traj.get("prompt_tokens")
+  c_toks = traj.get("conversation_tokens")
+  c_masks = traj.get("conversation_masks")
+  if p_toks is None:
+    p_toks = [0]
+  if c_toks is None:
+    c_toks = [0]
+  if c_masks is None:
+    c_masks = [0.0] * len(c_toks)
   return (
-      np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1),
-      np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
-      np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
+      np.asarray(p_toks, dtype=np.int32).reshape(-1),
+      np.asarray(c_toks, dtype=np.int32).reshape(-1),
+      np.asarray(c_masks, dtype=np.float32).reshape(-1),
   )
 
 
@@ -123,12 +133,15 @@ def _extract_overlong(item: datatypes.TrajectoryItem) -> np.ndarray | None:
     reports none leaves the field absent rather than claiming every sequence
     finished cleanly.
   """
-  status = item.traj.get("status")
+  status = item.traj.get("status") if isinstance(item.traj, dict) else None
   if status is None:
     return None
   name = getattr(status, "name", status)
-  overlong = (
-      name == agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name
+  overlong = name in (
+      agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name,
+      agent_types.TrajectoryStatus.FAILED.name,
+      agent_types.TrajectoryStatus.TIMEOUT.name,
+      agent_types.TrajectoryStatus.ENV_TIMEOUT.name,
   )
   return np.asarray(1.0 if overlong else 0.0, dtype=np.float32)
 

@@ -634,9 +634,12 @@ class PaddedBatchAssembler:
       raise ValueError(
           f"mini_batch_size must be positive, got {mini_batch_size}."
       )
+    import os
+    trainer_max_p = int(os.environ.get("TRAINER_MAX_PROMPT_LENGTH", "1024"))
+    trainer_max_r = int(os.environ.get("TRAINER_MAX_RESPONSE_LENGTH", "3072"))
     self.batch_size = batch_size
-    self.max_prompt_length = max_prompt_length
-    self.max_response_length = max_response_length
+    self.max_prompt_length = min(max_prompt_length, trainer_max_p)
+    self.max_response_length = min(max_response_length, trainer_max_r)
     self.pad_id = pad_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
