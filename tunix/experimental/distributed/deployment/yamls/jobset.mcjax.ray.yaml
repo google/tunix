@@ -42,11 +42,11 @@ ${QUEUE_LABEL}spec:
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure
+            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
             affinity:
               # place on nodes in the same nodepool
               podAffinity:
@@ -98,8 +98,28 @@ ${QUEUE_LABEL}spec:
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
+                  # Ray bootstrap. One sampler spans every pod of this JobSet:
+                  # pod 0 runs the head and the workload, the rest join and block.
+                  # JobSet's headless service makes pod 0 resolvable at a stable
+                  # name, which is the only thing the LeaderWorkerSet variant
+                  # (leaderworkerset.mcjax.ray.yaml) gets from LWS_LEADER_ADDRESS.
+                  RAY_HEAD="$${JOBSET_NAME}-$${REPLICATED_JOB_NAME}-$${JOB_INDEX}-0.$${JOBSET_NAME}"
+                  echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
+
                   (
-                    ${STARTUP_COMMAND}
+                    if [ "$${POD_INDEX}" = "0" ]; then
+                      echo "Starting Ray head..."
+                      ray start --head --port=6379
+                      sleep 5; until ray status; do sleep 5; done
+
+                      ${STARTUP_COMMAND}
+                    else
+                      # The head may not be up yet; JobSet gives no ordering.
+                      until ray start --address=$${RAY_HEAD}:6379 --block; do
+                        echo "Ray head $${RAY_HEAD} not ready, retrying in 5s..."
+                        sleep 5
+                      done
+                    fi
                   ) & PID=$$!
 
                   while kill -0 $$PID 2>/dev/null; do
@@ -132,17 +152,36 @@ ${QUEUE_LABEL}spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+              # Empty so vLLM's Ray executor owns device placement, matching
+              # leaderworkerset.mcjax.ray.yaml.
               - name: JAX_PLATFORMS
-                value: "tpu,cpu"
+                value: ""
+              # Selects the Ray distributed executor in tpu-inference/vLLM. Also
+              # what makes tpu_inference.utils.hbm_usage_bytes tolerate devices
+              # that are not addressable from this process.
+              - name: TPU_MULTIHOST_BACKEND
+                value: ray
+              - name: TPU_NODE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
               - name: VLLM_ENABLE_V1_MULTIPROCESSING
                 value: "0"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
               volumeMounts:
+              # vLLM's Ray executor allocates a shared-memory ring buffer for
+              # its RPC broadcast; the 64 MiB default /dev/shm is not enough
+              # ("Insufficient space in /dev/shm: 160 MiB required").
+              - name: dshm
+                mountPath: /dev/shm
               - mountPath: /tmp
                 name: shared-tmp
             volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
             - name: shared-tmp
               hostPath:
                 path: /tmp

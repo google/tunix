@@ -40,10 +40,17 @@ ${QUEUE_LABEL}spec:
             annotations:
               # ensure exclusive access to the node
               alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+              # The orchestrator is idle for long stretches -- it blocks on one
+              # train_step RPC that can run for an hour at 397B -- so the cluster
+              # autoscaler sees an underused CPU node and reclaims it. The pod then
+              # disappears with no error and no restart count, JobSet recreates it,
+              # and the new orchestrator waits for workers that are still bound to
+              # the old one. Do not let the autoscaler move it.
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: Never
+            restartPolicy: Never${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               node.kubernetes.io/instance-type: ${CPU_MACHINE}
