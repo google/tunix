@@ -53,13 +53,22 @@ verify_install() {
 }
 
 compile_protos() {
-  echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
-
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
     proto_dir="${ROOT_DIR}/../tunix/experimental/distributed"
   fi
+  # The Docker build installs Raiden before `COPY . .`, so the source tree -- and
+  # with it the .proto files -- is not there yet. Skip rather than die: the
+  # Dockerfile compiles the same protos itself once the source is copied. Without
+  # this the build fails at `cd: .../../..: No such file or directory`, because
+  # the fallback path is resolved even when neither directory exists.
+  if [[ ! -d "${proto_dir}" ]]; then
+    echo "No .proto sources at ${proto_dir}; skipping proto compilation."
+    return 0
+  fi
+
+  echo "Compiling distributed runtime gRPC protobuf definitions..."
+  python3 -m pip install grpcio-tools
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
 
