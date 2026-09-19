@@ -112,6 +112,8 @@ export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export MAX_CONCURRENCY=${MAX_CONCURRENCY:-${ROLLOUT_MAX_CONCURRENCY}}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 export MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-4}
+export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
+export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-4b}
@@ -184,24 +186,40 @@ export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 export KUEUE_QUEUE=${KUEUE_QUEUE:-}
 export K8S_NAMESPACE=${K8S_NAMESPACE:-default}
 
+export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+export DRY_RUN=${DRY_RUN:-false}
+
+apply_manifest() {
+  local priority_sed="s/priorityClassName: [a-zA-Z0-9_-]\+/priorityClassName: ${PRIORITY_CLASS:-medium}/g"
+  local filter
+  if [[ -n "${KUEUE_QUEUE}" ]]; then
+    filter=(sed -e "${priority_sed}" -e "s|^metadata:|metadata:\n  labels:\n    kueue.x-k8s.io/queue-name: ${KUEUE_QUEUE}|")
+  else
+    filter=(sed -e "${priority_sed}")
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "---"
+    "${filter[@]}"
+  else
+    "${filter[@]}" | kubectl apply -f -
+  fi
+}
+
 if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   echo "Error: this first DeepSWE distributed launcher only wires trainer+rollout."
   echo "Use BETA=0.0 until the reference inference worker is added."
   exit 1
 fi
 
-apply_manifest() {
-  local priority_sed="s/priorityClassName: [a-zA-Z0-9_-]\+/priorityClassName: ${PRIORITY_CLASS:-medium}/g"
-  if [[ -n "${KUEUE_QUEUE}" ]]; then
-    sed -e "${priority_sed}" -e "s|^metadata:|metadata:\n  labels:\n    kueue.x-k8s.io/queue-name: ${KUEUE_QUEUE}|" | kubectl apply -f -
-  else
-    sed -e "${priority_sed}" | kubectl apply -f -
-  fi
-}
-
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-  kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+  fi
 }
 
 start_orchestrator() {
@@ -307,8 +325,13 @@ start_orchestrator() {
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-  kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+  fi
 }
 
 start_trainer() {
@@ -339,21 +362,37 @@ start_trainer() {
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_arg="--debug"
   fi
+  local raiden_env=""
+  if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
+    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+      raiden_env+=" RAIDEN_USE_FFI=1"
+    fi
+  fi
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
+    ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
+    ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
+    ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}"} \
+    ${PATHWAYS_PROXY_MEMORY:+--pathways_proxy_memory="${PATHWAYS_PROXY_MEMORY}"} \
+    ${PATHWAYS_RM_MEMORY:+--pathways_rm_memory="${PATHWAYS_RM_MEMORY}"} \
+    ${USER_CONTAINER_MEMORY:+--user_container_memory="${USER_CONTAINER_MEMORY}"} \
+    ${USER_CONTAINER_MEMORY_LIMIT:+--user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}"} \
+    ${PATHWAYS_WORKER_MEMORY:+--pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}"} \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
-    ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image=${PATHWAYS_SERVER_IMAGE}} \
-    ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image=${PATHWAYS_PROXY_IMAGE}} \
-    ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit=${PATHWAYS_PROXY_MEMORY_LIMIT}} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       ${BOOTSTRAP_CMD} \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
+      ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
+      ${CKPT_D2H_CONCURRENT_GB:+CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}} \
+      ${raiden_env} \
+      ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
       PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
@@ -414,13 +453,24 @@ start_trainer() {
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-  kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-    kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}-${i}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    done
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${K8S_NAMESPACE}"
+      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
+        echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}-${i} -n ${K8S_NAMESPACE}"
+      done
+    fi
+  else
+    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
+        kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}-${i}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+      done
+    fi
   fi
 }
 
@@ -615,21 +665,6 @@ start_mock_rollout() {
     | apply_manifest
 }
 
-if [[ -z "${KUBECONFIG:-}" ]]; then
-  if [[ -f "$HOME/.kube/config" ]]; then
-    export KUBECONFIG="$HOME/.kube/config"
-  else
-    export KUBECONFIG="$HOME/.kube/config.cloud-tpu-multipod-dev.us-central1.trellis-demo-0810"
-  fi
-fi
-if ! kubectl get nodes &>/dev/null; then
-  if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
-    source tunix/experimental/examples/common/enter_kube_context.sh || true
-  elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
-    source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" || true
-  fi
-fi
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --command)
@@ -646,6 +681,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image=*)
       TUNIX_IMAGE="${1#*=}"
+      shift
+      ;;
+    --dry-run|--render)
+      DRY_RUN=true
       shift
       ;;
     --vllm_config_json)
@@ -665,6 +704,23 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$DRY_RUN" != "true" ]]; then
+  if [[ -z "${KUBECONFIG:-}" ]]; then
+    if [[ -f "$HOME/.kube/config" ]]; then
+      export KUBECONFIG="$HOME/.kube/config"
+    else
+      export KUBECONFIG="$HOME/.kube/config.cloud-tpu-multipod-dev.us-central1.trellis-demo-0810"
+    fi
+  fi
+  if ! kubectl get nodes &>/dev/null; then
+    if [[ -f tunix/experimental/examples/common/enter_kube_context.sh ]]; then
+      source tunix/experimental/examples/common/enter_kube_context.sh || true
+    elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" ]]; then
+      source "$(dirname "${BASH_SOURCE[0]}")/../common/enter_kube_context.sh" || true
+    fi
+  fi
+fi
 
 if [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \

@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from examples.frozenlake import agent as frozenlake_agent
+from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
 import numpy as np
 from tunix.experimental.rl.agentic import registry
@@ -34,31 +35,52 @@ def _python_scalar(value: Any) -> Any:
   return value
 
 
-def generate_dataset_parameters(
-    size: int, random_seed: int = 42
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-  """Samples the seed, grid size, and frozen-tile probability distribution."""
+def create_dataset(
+    size: int,
+    seed: int,
+    *,
+    shuffle_seed: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+  """Builds the same generated and shuffled dataset as the agentic recipe.
+
+  Args:
+    size: Number of environment configurations to generate. Required so the
+      caller (e.g. the `--dataset_size` flag) stays the single source of truth.
+    seed: Seed for the environment parameter generator. Required so a run's
+      data is never generated from an implicit, hidden default.
+    shuffle_seed: If set, shuffles the dataset with this seed, matching
+      `datasets.Dataset.shuffle(seed=...)` ordering.
+    limit: If set, truncates the dataset to this many entries after shuffling.
+
+  Returns:
+    The list of serializable FrozenLake environment configurations.
+
+  Raises:
+    ValueError: If `size` or `limit` is not positive.
+  """
   if size <= 0:
     raise ValueError("dataset size must be positive.")
-  random_state = np.random.RandomState(random_seed)
-  seeds = random_state.randint(0, 100000, size=size)
-  sizes = random_state.randint(2, 10, size=size)
-  probabilities = random_state.uniform(0.6, 0.85, size=size)
-  return seeds, sizes, probabilities
-
-
-def create_dataset(size: int = 10000, seed: int = 42) -> list[dict[str, Any]]:
-  """Builds the recipe dataset in memory without Grain or Parquet."""
-  seeds, sizes, probabilities = generate_dataset_parameters(size, seed)
-  return [
-      {
-          "env_name": "frozenlake",
-          "seed": int(env_seed),
-          "size": int(sizes[index]),
-          "p": float(probabilities[index]),
-      }
+  seeds, sizes, probabilities = frozenlake_data.generate_dataset_parameters(
+      size, random_seed=seed
+  )
+  dataset = [
+      frozenlake_data.get_frozenlake_dict(
+          env_seed, sizes[index], probabilities[index]
+      )
       for index, env_seed in enumerate(seeds)
   ]
+  if shuffle_seed is not None:
+    # Hugging Face Dataset.shuffle(seed=...) uses default_rng(seed).permutation.
+    # Reproduce that order without materializing Arrow/Grain in the
+    # orchestrator process.
+    order = np.random.default_rng(shuffle_seed).permutation(len(dataset))
+    dataset = [dataset[index] for index in order]
+  if limit is not None:
+    if limit <= 0:
+      raise ValueError("dataset limit must be positive.")
+    dataset = dataset[:limit]
+  return dataset
 
 
 def build_prompt_item(

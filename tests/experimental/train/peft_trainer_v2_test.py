@@ -32,7 +32,6 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.experimental.train import peft_trainer_v2
-from tunix.rl import common as rl_common
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
@@ -176,65 +175,85 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
-  def test_per_token_logps_matches_direct_compute(self):
+  def test_model_scope_yields_live_model_and_shards_arrays(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    tokens = np.arange(8, dtype=np.int32).reshape(2, 4)
+    empty = np.zeros((2, 0), dtype=np.int32)
 
-    batch, prompt_len, completion_len = 2, 3, 4
-    prompt_tokens = np.arange(
-        1, 1 + batch * prompt_len, dtype=np.int32
-    ).reshape(batch, prompt_len)
-    completion_tokens = np.arange(
-        1, 1 + batch * completion_len, dtype=np.int32
-    ).reshape(batch, completion_len)
+    with self.mesh:
+      with trainer.model_scope(tokens, y=empty, pad_id=0, opt=None) as (
+          scoped_model,
+          scoped_args,
+          scoped_kwargs,
+      ):
+        (scoped_x,) = scoped_args
 
-    out = trainer.per_token_logps(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        pad_id=0,
-        eos_id=0,
-        temperature=1.0,
+    # The trainer model itself is yielded (no copy, no split).
+    self.assertIs(scoped_model, model)
+    # Array leaves become sharded device arrays; scalars / None pass through.
+    self.assertIsInstance(scoped_x, jax.Array)
+    np.testing.assert_array_equal(np.asarray(scoped_x), tokens)
+    self.assertIsInstance(scoped_x.sharding, shd.NamedSharding)
+    self.assertEqual(
+        scoped_x.sharding.spec,  # pyrefly: ignore[missing-attribute]
+        shd.PartitionSpec(config.data_sharding_axis),
     )
-    # Scoring one row per forward must give identical values.
-    out_micro = trainer.per_token_logps(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        pad_id=0,
-        eos_id=0,
-        temperature=1.0,
-        micro_batch_size=1,
-    )
-    # Reference: the frozen scorer on the same (live) params.
-    graphdef, state = nnx.split(model)
-    expected = rl_common.compute_per_token_logps(
-        graphdef,
-        state,
-        prompt_tokens=jnp.asarray(prompt_tokens),
-        completion_tokens=jnp.asarray(completion_tokens),
-        pad_id=0,
-        eos_id=0,
-        stop_gradient=True,
-        temperature=1.0,
-        chunk_size=0,
-    )
+    self.assertEqual(scoped_kwargs['y'].shape, (2, 0))
+    self.assertEqual(scoped_kwargs['pad_id'], 0)
+    self.assertIsNone(scoped_kwargs['opt'])
 
-    self.assertEqual(out.shape, (batch, completion_len))
-    self.assertEqual(out.dtype, np.float32)
-    np.testing.assert_allclose(out, np.asarray(expected), rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(out, out_micro, rtol=1e-4, atol=1e-4)
-
-  def test_per_token_logps_empty_batch_raises(self):
+  def test_model_scope_runs_jitted_scorer_read_only(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    with self.assertRaises(ValueError):
-      trainer.per_token_logps(
-          prompt_tokens=np.zeros((0, 3), dtype=np.int32),
-          completion_tokens=np.zeros((0, 4), dtype=np.int32),
-          pad_id=0,
-          eos_id=0,
+    before = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
+
+    @nnx.jit
+    def logits_sum(m, tokens):
+      logits, _ = m(
+          tokens,
+          positions=jnp.arange(tokens.shape[1])[None, :],
+          attention_mask=jnp.ones((1, 4, 4), dtype=jnp.bool_),
+          cache=None,
       )
+      return logits.sum()
+
+    with trainer.model_scope(np.arange(1, 5, dtype=np.int32)[None]) as (
+        scoped_model,
+        scoped_args,
+        _,
+    ):
+      out = logits_sum(scoped_model, *scoped_args)
+
+    self.assertTrue(np.isfinite(float(out)))
+    after = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
+    jax.tree.map(np.testing.assert_array_equal, before, after)
+
+  def test_model_scope_propagates_exceptions_from_body(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    with self.assertRaisesRegex(ValueError, 'boom'):
+      with trainer.model_scope(np.zeros((1, 4), dtype=np.int32)):
+        raise ValueError('boom')
+
+    # The scope is reusable afterwards: the failure left nothing half-entered.
+    with trainer.model_scope(np.zeros((1, 4), dtype=np.int32)) as (m, _, _):
+      self.assertIs(m, model)
+
+  def test_model_scope_reads_model_at_yield_time(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    replacement = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(1))
+
+    trainer.model = replacement
+
+    with trainer.model_scope(np.zeros((1, 4), dtype=np.int32)) as (m, _, _):
+      self.assertIs(m, replacement)
 
   @parameterized.named_parameters(
       ('lora_disabled_distributed', False, True),

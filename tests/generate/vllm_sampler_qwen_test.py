@@ -42,6 +42,10 @@ from tunix.models.qwen3 import model as qwen3_model
 from tunix.models.qwen3 import params as qwen3_params
 from tunix.tests import test_common as tc
 
+# Skip eager XLA precompilation: this test only verifies weight-key mapping via
+# `load_checkpoint` and never executes autoregressive decoding.
+os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+
 
 class VllmSamplerQwenTest(absltest.TestCase):
 
@@ -89,6 +93,9 @@ class VllmSamplerQwenTest(absltest.TestCase):
         engine_kwargs={
             "model": self.model_path,
             "max_model_len": 128,
+            # Match Tunix's 1-layer actor model above so vLLM does not
+            # instantiate and precompile 28 layers for a 1-layer mapping check.
+            "hf_overrides": {"num_hidden_layers": 1},
         },
     )
 

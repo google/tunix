@@ -1,11 +1,14 @@
 """File-based implementation for Trajectory Store."""
 
+import dataclasses
 import functools
 import re
 import types
 from typing import Any, ClassVar, Final, Mapping
 
+from absl import logging
 from etils import epath
+import pydantic
 from tunix.experimental.trajectory import async_writer
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
@@ -50,6 +53,127 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
+def _dump_json(model: pydantic.BaseModel) -> str:
+  """Serializes a Pydantic model to indented JSON excluding None values."""
+  return model.model_dump_json(indent=2, exclude_none=True)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _FileWriteTask(async_writer.WriteTask):
+  """File-specific write task containing filesystem destination paths."""
+
+  traj_dir: epath.Path
+  meta_path: epath.Path
+  step_path: epath.Path | None = None
+
+
+class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
+  """Asynchronously writes trajectory metadata and step files to disk."""
+
+  def __init__(self):
+    """Initializes _AsyncFileWriter without starting the background worker."""
+    super().__init__()
+    # In-memory cache mapping trajectory_id to the hash of its last written
+    # metadata JSON. Used by the worker thread to skip redundant metadata.json
+    # disk writes across steps.
+    self._metadata_hash_by_trajectory_id: dict[str, int] = {}
+
+  def enqueue_write(
+      self,
+      *,
+      traj_dir: epath.Path,
+      meta_path: epath.Path,
+      metadata: trajectory_lib.TrajectoryMetadata,
+      step_path: epath.Path | None = None,
+      step: trajectory_lib.Step | None = None,
+  ) -> None:
+    """Enqueues a step and/or trajectory metadata for asynchronous writing.
+
+    This operation is non-blocking and returns on the caller thread without
+    waiting for any disk I/O. The worker thread is lazily spawned on the first
+    invocation if not already running.
+
+    `metadata` and `step` are deep copied by `WriteTask`, so what lands
+    on disk is exactly what the caller passed in. Serialization happens on the
+    worker thread, possibly long after this call returns, and callers routinely
+    keep mutating the objects they hand over (a rollout worker appending tokens
+    to the step it just logged, or flipping trajectory status from RUNNING to
+    COMPLETED). Without the copy, those later mutations would leak into the
+    already enqueued write, producing files that never matched any state the
+    trajectory actually had. The copy makes the caller-side cost proportional
+    to the payload size rather than O(1), which is a deliberate trade for
+    correctness; the expensive part, serialization and I/O, remains off the
+    caller thread.
+
+    Args:
+      traj_dir: Directory path for the trajectory.
+      meta_path: File path for the trajectory metadata.json.
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+      step_path: Optional file path for the step JSON.
+      step: Optional Step object to write.
+
+    Raises:
+      RuntimeError: If the writer has already been closed.
+    """
+    task = _FileWriteTask(
+        traj_dir=traj_dir,
+        meta_path=meta_path,
+        metadata=metadata,
+        step_path=step_path,
+        step=step,
+    )
+    self._enqueue(task)
+
+  def _process_task(self, task: _FileWriteTask) -> None:
+    """Processes a single write task by writing metadata and step files.
+
+    Optimizations:
+      - Directory Creation: `mkdir` is executed only once per trajectory on the
+        first step, tracked by `_metadata_hash_by_trajectory_id`.
+      - Metadata Caching: `metadata.json` is only written when its serialized
+        content changes, minimizing redundant writes across multi-step turns.
+
+    Args:
+      task: Container holding directory paths, metadata, and step payload.
+    """
+    traj_id = task.trajectory_id
+
+    # Create directory on first step of this trajectory.
+    if traj_id not in self._metadata_hash_by_trajectory_id:
+      task.traj_dir.mkdir(parents=True, exist_ok=True)
+
+    # Only write metadata.json if metadata content has changed.
+    meta_json = _dump_json(task.metadata)
+    meta_hash = hash(meta_json)
+    if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
+      task.meta_path.write_text(meta_json)
+      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
+
+    # Write step file if provided.
+    if task.step_path is not None and task.step is not None:
+      task.step_path.write_text(_dump_json(task.step))
+
+  def _log_task_error(self, task: _FileWriteTask) -> None:
+    """Logs detailed task error with trajectory and filesystem path context.
+
+    Args:
+      task: The write task that failed to process.
+    """
+    step_info = (
+        f"step {task.step.step_id}" if task.step is not None else "metadata"
+    )
+    target_path = (
+        task.step_path if task.step_path is not None else task.meta_path
+    )
+    logging.exception(
+        "%s failed to write trajectory %s (trajectory_id=%s) to %s.",
+        self._thread_name,
+        step_info,
+        task.trajectory_id,
+        target_path,
+    )
+
+
 class FileTrajectoryStore(
     store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
 ):
@@ -61,11 +185,11 @@ class FileTrajectoryStore(
     2. Frontend input validation (trajectory ID format and presence).
     3. Synchronous trajectory reading and metadata queries (`get_trajectories`,
        `get_trajectories_metadata`).
-    4. Forwarding step write tasks and flush barriers to `AsyncFileWriter`.
+    4. Forwarding step write tasks and flush barriers to `_AsyncFileWriter`.
 
     All asynchronous queuing, background worker thread lifecycle, error
     suppression for rollout resilience, and physical disk I/O are handled
-    by `AsyncFileWriter`.
+    by `_AsyncFileWriter`.
 
   Directory Structure:
     <root_dir>/[<run_id>/]/
@@ -109,7 +233,7 @@ class FileTrajectoryStore(
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = async_writer.AsyncFileWriter()
+    self._writer = _AsyncFileWriter()
 
   @classmethod
   def _from_config(cls, config: Mapping[str, Any]) -> "FileTrajectoryStore":
@@ -274,7 +398,7 @@ class FileTrajectoryStore(
     Performs synchronous frontend validation of the trajectory ID on the
     calling thread so invalid IDs fail fast with actionable errors, then
     delegates asynchronous queuing and non-blocking background I/O to the
-    `AsyncFileWriter`.
+    `_AsyncFileWriter`.
 
     Args:
       step: Step object to log.
@@ -291,12 +415,12 @@ class FileTrajectoryStore(
       metadata: trajectory_lib.TrajectoryMetadata,
       step: trajectory_lib.Step | None = None,
   ) -> None:
-    """Updates (or creates) trajectory metadata asynchronously, optionally writing a step.
+    """Updates or creates trajectory metadata asynchronously.
 
     Performs synchronous frontend validation of the trajectory ID on the
     calling thread so invalid IDs fail fast with actionable errors, then
     delegates asynchronous queuing and non-blocking background I/O to the
-    `AsyncFileWriter`.
+    `_AsyncFileWriter`.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -310,11 +434,11 @@ class FileTrajectoryStore(
     traj_dir = self.get_trajectory_dir(traj_id)
     meta_path = self.get_trajectory_metadata_path(traj_id)
     step_path = self.get_step_path(traj_id, step.step_id) if step else None
-    self._writer.write_step(
+    self._writer.enqueue_write(
         traj_dir=traj_dir,
         meta_path=meta_path,
-        step_path=step_path,
         metadata=metadata,
+        step_path=step_path,
         step=step,
     )
 
@@ -324,19 +448,24 @@ class FileTrajectoryStore(
     Users do not need to call `flush()` in normal usage; it is primarily for
     testing.
 
-    Delegates directly to `AsyncFileWriter.flush()` to provide strict barrier
-    synchronization.
+    Delegates directly to `_AsyncFileWriter.flush()` to provide strict barrier
+    synchronization. The barrier does not apply to a closed store, for which
+    this is a no-op.
     """
     self._writer.flush()
 
   def close(self) -> None:
     """Flushes pending writes and shuts down the background writer thread.
 
-    Calling `close()` is optional: the underlying `AsyncFileWriter` also drains
+    Calling `close()` is optional: the underlying `_AsyncFileWriter` also drains
     itself at interpreter exit. It is worth calling explicitly for a store that
     becomes garbage well before the process ends, so its worker thread is
     released promptly. Closing is idempotent, but the store must not be written
     to afterwards; reads remain available.
+
+    The writer is given a bounded window to drain (see `AsyncWriter.close`); any
+    writes still queued when that window expires are discarded and the affected
+    trajectory IDs are logged.
     """
     self._writer.close()
 

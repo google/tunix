@@ -18,10 +18,8 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, ContextManager
 
-import numpy as np
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
 
@@ -141,37 +139,29 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def per_token_logps(
-      self,
-      *,
-      prompt_tokens: ArrayLike,
-      completion_tokens: ArrayLike,
-      pad_id: int,
-      eos_id: int,
-      temperature: float | None = None,
-      segment_ids: ArrayLike | None = None,
-      segment_positions: ArrayLike | None = None,
-      micro_batch_size: int | None = None,
-  ) -> np.ndarray:
-    """Scores per-token log-probabilities of completions under live weights.
+  def model_scope(
+      self, *args: Any, **kwargs: Any
+  ) -> ContextManager[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
+    """Read-only, scoped access to the live model under the trainer's placement.
 
-    Unlike a frozen reference scorer, this uses the trainer's current (actor)
-    parameters, so callers can measure sampler-vs-trainer agreement. Must not
-    mutate trainer state (no gradient accumulation, no optimizer update).
+    Yields `(model, args, kwargs)`, where the inputs have been committed to the
+    shardings this trainer would use for a step. The caller owns the
+    computation -- including any `jax.jit` -- and must not mutate the model.
+
+    Everything the caller traces must happen inside the `with` block.
+    Implementations may hold a mesh or logical-axis-rule context open for its
+    duration, and `jax.jit` is lazy: a call traced after the block exits sees
+    an empty rule set and gets partitioned by guesswork.
+
     Args:
-      prompt_tokens: [B, P] token ids, LEFT-padded (or [B, 0] in packed mode).
-      completion_tokens: [B, C] token ids, RIGHT-padded; results align to these.
-      pad_id: Pad token id.
-      eos_id: End-of-sequence token id.
-      temperature: Softmax temperature to score under; defaults to 1.0 when None.
-      segment_ids: Optional packing segment ids (sequence packing).
-      segment_positions: Optional packing local position indices.
-      micro_batch_size: Optional row chunk size to bound peak memory.
+      *args: Positional inputs to place before yielding.
+      **kwargs: Keyword inputs to place before yielding.
+
     Returns:
-      [B, C] per-token log-probabilities aligned to `completion_tokens`.
+      A context manager yielding `(model, placed_args, placed_kwargs)`.
     """
     raise NotImplementedError(
-        f"{type(self).__name__} does not implement per_token_logps."
+        f"{type(self).__name__} does not implement model_scope."
     )
 
   @abc.abstractmethod

@@ -23,6 +23,10 @@ on:
     branches:
       - main
     types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
   schedule:
     # Run the job every 16 hours

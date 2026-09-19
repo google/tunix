@@ -37,10 +37,9 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-# Qwen3 chat models close each turn with `<|im_end|>` rather than the
-# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
-# fall back to the tokenizer's EOS token.
-export EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+export EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
@@ -82,6 +81,7 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
+export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -312,7 +312,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \

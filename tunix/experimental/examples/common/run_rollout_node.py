@@ -660,6 +660,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       mapping_config=mapping_config,
       additional_config=merged_additional_config or None,
       engine_kwargs=engine_kwargs,
+      eos_tokens=_eos_token_ids(args, tokenizer),
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,

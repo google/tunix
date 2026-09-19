@@ -242,7 +242,16 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
     with self._patch_signal_handlers(mock_add_signal_handler):
       run_trainer_node.main(
-          ["--port", "20000", "--worker_id", "trainer-0"],
+          [
+              "--port",
+              "20000",
+              "--worker_id",
+              "trainer-0",
+              "--compute_logps_chunk_size",
+              "128",
+              "--compute_logps_micro_batch_size",
+              "2",
+          ],
           context=self.mock_context,
       )
 
@@ -252,6 +261,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_trainer_worker_cls.assert_called_once_with(
         trainer_factory=mock.ANY,
         worker_id="trainer-0",
+        logps_chunk_size=128,
+        logps_micro_batch_size=2,
         execution_context=mock_create_mesh.return_value,
     )
     self.mock_server.start_serving_async.assert_called_once_with(20000)

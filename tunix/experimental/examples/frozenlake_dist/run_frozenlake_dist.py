@@ -20,7 +20,6 @@ import argparse
 import functools
 import logging
 import os
-import random
 import sys
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -65,7 +64,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Number of prompt groups per optimizer update.",
   )
   parser.add_argument("--num_generations", type=int, default=8)
-  parser.add_argument("--max_steps", type=int, default=450)
+  parser.add_argument("--num_batches", type=int, default=150)
+  parser.add_argument("--num_iterations", type=int, default=1)
+  parser.add_argument("--num_epochs", type=int, default=3)
+  parser.add_argument("--max_steps", type=int, default=None)
   parser.add_argument("--max_turns", type=int, default=8)
   parser.add_argument("--dataset_size", type=int, default=10000)
   parser.add_argument("--max_prompt_length", type=int, default=2048)
@@ -121,6 +123,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=True,
   )
   parser.add_argument(
+      "--sampler_is", choices=("none", "token"), default="token"
+  )
+  parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
+  parser.add_argument(
       "--max_seq_token_per_tpu",
       type=int,
       default=None,
@@ -158,7 +164,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
-  return parser.parse_args(argv)
+  args = parser.parse_args(argv)
+  if args.max_steps is None:
+    args.max_steps = args.num_batches * args.num_iterations * args.num_epochs
+  return args
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -180,6 +189,13 @@ def _validate_args(args: argparse.Namespace) -> None:
     )
   if args.max_steps <= 0 or args.max_turns <= 0:
     raise ValueError("max_steps and max_turns must be positive.")
+  if args.num_batches <= 0 or args.num_epochs <= 0:
+    raise ValueError("num_batches and num_epochs must be positive.")
+  if args.num_iterations != 1:
+    raise ValueError(
+        "The distributed FrozenLake recipe currently supports exactly one "
+        "optimizer iteration per rollout batch."
+    )
   if args.dataset_size <= 0:
     raise ValueError("dataset_size must be positive.")
   if args.max_staleness < 0:
@@ -190,6 +206,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     raise ValueError("loss_algo must be either grpo or gspo-token.")
   if args.episode_timeout_secs <= 0:
     raise ValueError("episode_timeout_secs must be positive.")
+  if args.sampler_is_threshold <= 0:
+    raise ValueError("sampler_is_threshold must be positive.")
   if args.weight_sync_mode == weight_sync.WeightSyncMode.FALLBACK:
     raise ValueError(
         "weight_sync_mode=fallback does not transfer weights; use none for a "
@@ -200,6 +218,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
+      num_iterations=args.num_iterations,
       epsilon=args.epsilon,
       epsilon_high=args.epsilon_high,
       beta=args.beta,
@@ -210,6 +229,8 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       loss_agg_mode=args.loss_agg_mode,
       kl_loss_mode=args.kl_loss_mode,
       use_rollout_logps=args.use_rollout_logps,
+      sampler_is=None if args.sampler_is == "none" else args.sampler_is,
+      sampler_is_threshold=args.sampler_is_threshold,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -277,11 +298,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
   )
 
-  dataset = frozenlake.create_dataset(size=args.dataset_size, seed=args.seed)
-  if args.shuffle:
-    random.Random(args.seed).shuffle(dataset)
+  dataset = frozenlake.create_dataset(
+      size=args.dataset_size,
+      seed=args.seed,
+      shuffle_seed=args.seed if args.shuffle else None,
+      limit=args.num_batches * args.batch_size,
+  )
   logging.info(
-      "Generated %d FrozenLake configurations in memory.", len(dataset)
+      "Prepared %d FrozenLake configurations; the prompt iterator repeats "
+      "them for %d epochs.",
+      len(dataset),
+      args.num_epochs,
   )
 
   cluster = orchestrator.ClusterOrchestrator(

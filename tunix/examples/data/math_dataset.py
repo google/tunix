@@ -198,7 +198,11 @@ def create_dataset(
     ds = get_huggingface_dataset(dataset_name=dataset, split=split)
   # tfds dataset
   elif data_source == "tfds" and dataset in ["gsm8k"]:
-    data_dir = os.path.join("./data", split) if tfds_download else None
+    data_dir = (
+        os.environ.get("TFDS_DATA_DIR") or os.path.join("./data", split)
+        if tfds_download
+        else None
+    )
     ds = get_tfds_dataset(
         dataset_name=dataset,
         data_dir=data_dir,
