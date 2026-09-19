@@ -54,7 +54,7 @@ export WEIGHT_SYNC_MODE="raiden"
 # Topologies (64 chips Trainer 4x4x4, 16x 4-chip Rollout slices)
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
 export TRAINER_TPU_SLICE="tpuv5:2x4x4"
-export TRAINER_MESH_FSDP=1
+export TRAINER_MESH_FSDP=4
 export TRAINER_MESH_TP=4
 export TRAINER_MESH_EXPERT=2
 export TRAINER_BASE_NUM_KV_HEADS=4
