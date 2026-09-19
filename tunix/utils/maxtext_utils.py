@@ -349,6 +349,7 @@ def build_maxtext_config(
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
+      "allow_split_physical_axes=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
@@ -367,7 +368,10 @@ def build_maxtext_config(
       # rollout instead, which avoids the replication entirely; this is the
       # fallback when that is not available.
       *(
-          [f"base_num_kv_heads={effective_kv_heads}"]
+          [
+              f"base_num_kv_heads={effective_kv_heads}",
+              "override_model_config=true",
+          ]
           if effective_kv_heads
           else []
       ),
@@ -417,6 +421,9 @@ def build_maxtext_config(
         _d2h_gb,
     )
     argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+
+  if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
+    argv.append("override_model_config=true")
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)

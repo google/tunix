@@ -15,6 +15,9 @@
 """In-process vLLM Sampler adapter integrating with Tunix VllmSampler."""
 
 import abc
+import asyncio
+from concurrent import futures
+import functools
 import numbers
 from typing import Any, List, Sequence
 from absl import logging
@@ -49,6 +52,7 @@ class InprocessVllmSamplerAdapter(
       model_name: str = "",
       raiden_sync_delegate: Any = None,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
+      max_concurrency: int = 256,
       **kwargs,
   ):
     self.server_id = server_id
@@ -57,6 +61,11 @@ class InprocessVllmSamplerAdapter(
     self.model_name = model_name or kwargs.get("model", "")
     self.vllm_sampler = None
     self.raiden_sync_delegate = raiden_sync_delegate
+    self.max_concurrency = max_concurrency
+    self._executor = futures.ThreadPoolExecutor(
+        max_workers=self.max_concurrency,
+        thread_name_prefix=f"{self.server_id}_vllm_worker",
+    )
     if weight_sync_mode is None:
       weight_sync_mode = getattr(config, "weight_sync_mode", None)
     if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
@@ -93,6 +102,14 @@ class InprocessVllmSamplerAdapter(
       )
 
     if self.tokenizer is not None and self.config is not None:
+      # `sample()` dispatches concurrent requests across `self._executor` worker
+      # threads. Force `server_mode=True` so `VllmSampler` uses
+      # `VLLMInProcessDriver` (where a single background engine thread drains a
+      # thread-safe request queue for continuous batching) instead of
+      # `_generate_offline()`, which calls `engine.step()` directly from caller
+      # threads and races on donated JAX KV-cache buffers (`Array has been
+      # deleted`).
+      self.config.server_mode = True
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(
           tokenizer=self.tokenizer, config=self.config
@@ -106,7 +123,8 @@ class InprocessVllmSamplerAdapter(
 
       self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
       self.config = tunix_vllm_sampler.VllmConfig(
-          engine_kwargs={"model": self.model_name}
+          server_mode=True,
+          engine_kwargs={"model": self.model_name},
       )
 
     if (
@@ -114,6 +132,9 @@ class InprocessVllmSamplerAdapter(
         and self.tokenizer is not None
         and self.config is not None
     ):
+      # Required for thread-safe continuous batching across `self._executor`
+      # worker threads; see comment in `__init__`.
+      self.config.server_mode = True
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(
           tokenizer=self.tokenizer, config=self.config
@@ -168,6 +189,8 @@ class InprocessVllmSamplerAdapter(
   async def stop(self, **kwargs) -> str | None | Any:
     """Terminates sampler execution and closes local connections."""
     del kwargs
+    if self._executor is not None:
+      self._executor.shutdown(wait=False, cancel_futures=True)
     if self.vllm_sampler and hasattr(self.vllm_sampler, "stop"):
       self.vllm_sampler.stop()
     return True
@@ -284,15 +307,20 @@ class InprocessVllmSamplerAdapter(
           self.server_id,
       )
 
-    sampler_output = self.vllm_sampler(
-        input_strings=prompts,
-        max_generation_steps=max_generation_steps,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        seed=seed,
-        return_logprobs=return_logprobs,
-        routed_experts_prompt_start=routed_experts_prompt_start,
+    loop = asyncio.get_running_loop()
+    sampler_output = await loop.run_in_executor(
+        self._executor,
+        functools.partial(
+            self.vllm_sampler,
+            input_strings=prompts,
+            max_generation_steps=max_generation_steps,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed,
+            return_logprobs=return_logprobs,
+            routed_experts_prompt_start=routed_experts_prompt_start,
+        ),
     )
 
     responses = []
