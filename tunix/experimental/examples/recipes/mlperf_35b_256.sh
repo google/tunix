@@ -62,7 +62,7 @@ export TRAINER_MESH_EXPERT=2
 export TRAINER_BASE_NUM_KV_HEADS=4
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
-export ROLLOUT_TPU_SLICE="tpuv5:2x2x2"
+export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_WORKERS=16
@@ -82,7 +82,7 @@ export VLLM_DATA_PARALLEL_SIZE=1
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 # Note: enable_nnx and pure_nnx_decoder are internal to MaxTextForCausalLM and are
 # not accepted by MaxText pyconfig HyperParameters.
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":8,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="true"
@@ -171,6 +171,7 @@ export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=1
 
 # DeepSWE Environment & Agent Sandbox
+export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SANDBOX_NAMESPACE="trellis"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
