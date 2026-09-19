@@ -146,9 +146,6 @@ def _normalize_entry(
   return normalized
 
 
-normalize_entry = _normalize_entry
-
-
 class SWEEnv(BaseTaskEnv):
   """Software Engineering Environment for code-related tasks."""
 
