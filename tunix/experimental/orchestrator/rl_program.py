@@ -296,9 +296,22 @@ class StandardRLProgram(RLProgram):
     if gen_temp is not None:
       self.algo.algo_config.temperature = gen_temp
 
+    # The sampler's per-token log-probabilities are the PPO ratio's
+    # denominator, and separately the sampler side of every sequence-level gate
+    # and sampler-vs-trainer diagnostic. A recipe may recompute the denominator
+    # on the trainer and still want those, so ask the rollout for the
+    # log-probabilities when any of them does.
     self.generation_args = dataclasses.replace(
         self.generation_args,
-        return_logprobs=self.algo.algo_config.use_rollout_logps,
+        return_logprobs=(
+            getattr(algo_config, "use_rollout_logps", True)
+            or getattr(algo_config, "truncated_importance_sampling_type", None)
+            is not None
+            or getattr(algo_config, "seq_logprob_error_threshold", None)
+            is not None
+            or getattr(algo_config, "sampler_is_length_buckets", None)
+            is not None
+        ),
     )
     self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
     self.sampler_is_threshold = getattr(
@@ -320,6 +333,18 @@ class StandardRLProgram(RLProgram):
     if self.full_batch_size % self.mini_batch_size != 0:
       raise ValueError(
           "batch_size must be divisible by mini_batch_size; got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
+    use_rollout_logps = getattr(
+        algo,
+        "use_rollout_logps",
+        getattr(getattr(algo, "algo_config", None), "use_rollout_logps", True),
+    )
+    if not use_rollout_logps and self.full_batch_size != self.mini_batch_size:
+      raise ValueError(
+          "use_rollout_logps=False requires batch_size == mini_batch_size "
+          "(exactly one optimizer update per rollout batch); got "
           f"batch_size={self.full_batch_size}, "
           f"mini_batch_size={self.mini_batch_size}."
       )
@@ -823,6 +848,7 @@ class StandardRLProgram(RLProgram):
     # --- 4. Trainer Metrics ---
     loss_val = None
     perplexity_val = None
+    grad_norm_val = None
     if trainer_metrics is None:
       if isinstance(step_result, dict):
         trainer_metrics = step_result.get("metrics")
@@ -893,6 +919,7 @@ class StandardRLProgram(RLProgram):
           "grad_norm", scalar_metrics.pop("trainer/grad_norm", None)
       )
       gn_val = _extract_scalar(raw_gn)
+      grad_norm_val = gn_val
       if gn_val is not None:
         self.metrics_logger.log(
             self.metrics_prefix,
@@ -945,6 +972,7 @@ class StandardRLProgram(RLProgram):
         "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
+        "grad_norm_val": grad_norm_val,
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1244,14 +1272,16 @@ class StandardRLProgram(RLProgram):
 
       loss_val = metrics_summary["loss_val"]
       perplexity_val = metrics_summary["perplexity_val"]
+      grad_norm_val = metrics_summary["grad_norm_val"]
       if self.mode == Mode.TRAIN:
         logging.info(
             "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - perplexity: %s - step_time: %.2fs",
+            " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
             metrics_summary["advantage_mean"],
+            f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
         )

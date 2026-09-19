@@ -28,6 +28,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl import algo_core as _  # Registers policy loss functions.
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
@@ -97,6 +98,39 @@ def _routed_experts_for(
       dtype=np.int16,
   )
   return np.concatenate([routed_arr, pad], axis=0)
+
+
+def _extract_overlong(item: datatypes.TrajectoryItem) -> np.ndarray | None:
+  """Reads the rollout's truncation verdict off a trajectory.
+
+  "Overlong" means generation stopped at `max_response_length` without an
+  end-of-sequence token, so the completion is a prefix rather than a finished
+  answer. `GRPOConfig.overlong_loss_masking` drops those sequences.
+
+  The verdict comes from the collector's own `status`, which reaches this point
+  either as a `TrajectoryStatus` member or as its name: the agentic collector
+  serialises `status.name`, while the orchestrator's critique stage resolves
+  that string back to the enum. Both are compared by name, since
+  `TrajectoryStatus` uses `auto()` and `.value` is an opaque int.
+
+  Args:
+    item: Trajectory item, whose `traj["status"]` (if any) is a
+      `TrajectoryStatus` member or the name of one.
+
+  Returns:
+    A scalar 1.0 when the rollout was truncated and 0.0 when it was not, or
+    None when the trajectory carries no status -- a rollout source that
+    reports none leaves the field absent rather than claiming every sequence
+    finished cleanly.
+  """
+  status = item.traj.get("status")
+  if status is None:
+    return None
+  name = getattr(status, "name", status)
+  overlong = (
+      name == agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name
+  )
+  return np.asarray(1.0 if overlong else 0.0, dtype=np.float32)
 
 
 def _extract_old_logps(
@@ -259,12 +293,18 @@ class GRPOAdapter(AlgorithmAdapter):
           else np.zeros(0, dtype=np.int32)
       )
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
-      old_lp = (
-          _extract_old_logps(item, len(c_arr))
-          if self.use_rollout_logps
-          else None
-      )
+      # The rollout's log-probabilities are carried in two separate fields
+      # because they serve two purposes that recipes configure independently.
+      # `old_per_token_logps` is the PPO ratio's denominator, and leaving it
+      # None makes the trainer recompute it, which pins the ratio to 1.
+      # `rollout_per_token_logps` is the sampler side of the sequence gates,
+      # which still need it when the denominator is recomputed.
+      rollout_lp = _extract_old_logps(item, len(c_arr))
+      old_lp = rollout_lp if self.use_rollout_logps else None
+      overlong = _extract_overlong(item)
       payload = datatypes.RLTrainerPayload(
+          rollout_per_token_logps=rollout_lp,
+          overlong=overlong,
           prompt_ids=p_arr,
           prompt_mask=np.ones(len(p_arr), dtype=np.float32),
           completion_ids=c_arr,
