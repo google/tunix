@@ -15,15 +15,19 @@
 """Logging utilities for trajectory data, saving as CSV."""
 
 import atexit
+from collections.abc import Callable
 import dataclasses
 import os
+import pathlib
 import queue
+import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 import types
-from typing import Any
+from typing import Any, TypeVar
 
 from absl import logging
 from etils import epath
@@ -31,6 +35,93 @@ from google.protobuf import json_format
 from google.protobuf import message
 import numpy as np
 import pandas as pd
+
+_T = TypeVar('_T')
+
+_DEFAULT_GCS_TIMEOUT_SEC = 10.0
+_DEFAULT_STOP_TIMEOUT_SEC = 15.0
+_DEFAULT_MAX_QUEUE_SIZE = 1000
+
+
+class _AbandonedOperationError(TimeoutError):
+  """Raised when a timed-out worker thread may still be running."""
+
+
+def _run_with_timeout(
+    fn: Callable[[], _T],
+    timeout_sec: float | None,
+    operation_name: str = 'GCS I/O operation',
+) -> _T:
+  """Runs `fn` in a daemon thread and raises TimeoutError if deadline expires."""
+  if timeout_sec is None or timeout_sec <= 0:
+    return fn()
+
+  result_box: list[_T] = []
+  error_box: list[BaseException] = []
+
+  def _target():
+    try:
+      result_box.append(fn())
+    except BaseException as exc:  # pylint: disable=broad-except
+      error_box.append(exc)
+
+  worker = threading.Thread(target=_target, daemon=True)
+  worker.start()
+  worker.join(timeout=timeout_sec)
+  if worker.is_alive():
+    raise _AbandonedOperationError(
+        f'{operation_name} timed out after {timeout_sec:.1f}s.'
+    )
+  if error_box:
+    raise error_box[0]
+  return result_box[0]
+
+
+def _read_gcs_csv(
+    file_path: Any, gcs_timeout_sec: float | None
+) -> pd.DataFrame | None:
+  """Reads an existing CSV from GCS with a timeout."""
+
+  def _do_read() -> pd.DataFrame:
+    with file_path.open('r') as f:
+      try:
+        return pd.read_csv(f)
+      except pd.errors.ParserError:
+        f.seek(0)
+        return pd.read_csv(f, engine='python')
+
+  try:
+    return _run_with_timeout(
+        _do_read, gcs_timeout_sec, f'GCS read({file_path})'
+    )
+  except TimeoutError:
+    raise
+  except Exception as e:  # pylint: disable=broad-except
+    logging.warning(
+        'Could not read existing GCS file (possibly partial write): %s',
+        e,
+    )
+    return None
+
+
+def _cleanup_tmp_gcs_file(
+    tmp_file_path: Any, gcs_timeout_sec: float | None
+) -> None:
+  """Attempts best-effort cleanup of a temporary GCS file with a timeout."""
+
+  def _do_cleanup():
+    if tmp_file_path.exists():
+      tmp_file_path.unlink()
+
+  try:
+    _run_with_timeout(
+        _do_cleanup, gcs_timeout_sec, f'GCS cleanup({tmp_file_path})'
+    )
+  except Exception as e:  # pylint: disable=broad-except
+    logging.warning(
+        'Failed to clean up temporary GCS file %s: %s', tmp_file_path, e
+    )
+
 
 def _make_serializable(item: Any) -> Any:
   """Makes an object serializable."""
@@ -80,7 +171,12 @@ def _is_gcs_path(path: Any) -> bool:
 
 
 def log_item(
-    log_path: str, item: dict[str, Any] | Any, suffix: str | None = None
+    log_path: str,
+    item: dict[str, Any] | Any,
+    suffix: str | None = None,
+    *,
+    gcs_timeout_sec: float | None = _DEFAULT_GCS_TIMEOUT_SEC,
+    local_staging_dir: str | os.PathLike[str] | None = None,
 ):
   """Logs a dictionary, dataclass or list to a csv file.
 
@@ -92,6 +188,9 @@ def log_item(
     log_path: Directory to log to.
     item: Item to log.
     suffix: Optional suffix to add to filename before `.csv`.
+    gcs_timeout_sec: Timeout in seconds for GCS read/write operations.
+    local_staging_dir: Optional local directory used to stage incremental CSV
+      appends before uploading to GCS, avoiding quadratic re-reads from GCS.
   """
 
   if log_path is None:
@@ -125,38 +224,158 @@ def log_item(
   filename = f'{file_stem}_{suffix}.csv' if suffix else f'{file_stem}.csv'
   file_path = log_path / filename  # pyrefly: ignore[unsupported-operation]
   logging.log_first_n(logging.INFO, f'Logging item to {file_path}', 1)
-  write_header = not file_path.exists()
 
   df = pd.DataFrame(
       serialized_item if isinstance(item, list) else [serialized_item]
   )
   if _is_gcs_path(file_path):
-    if file_path.exists():
-      old_df = None
+    tmp_file_path = (
+        file_path.parent / f'{file_path.name}.{time.time_ns()}.tmp'
+    )
+    if local_staging_dir is not None:
+      staging_file = pathlib.Path(local_staging_dir) / filename
+      staging_file.parent.mkdir(parents=True, exist_ok=True)
+      if not staging_file.exists():
+        try:
+          remote_exists = _run_with_timeout(
+              file_path.exists, gcs_timeout_sec, f'GCS exists({file_path})'
+          )
+        except TimeoutError as e:
+          logging.warning(
+              'Timed out checking existing GCS file %s; skipping flush to avoid'
+              ' overwriting remote state: %s',
+              file_path,
+              e,
+          )
+          return
+        except Exception as e:  # pylint: disable=broad-except
+          logging.warning(
+              'Could not check existing GCS file %s: %s', file_path, e
+          )
+          remote_exists = False
+        if remote_exists:
+          try:
+            old_df = _read_gcs_csv(file_path, gcs_timeout_sec)
+          except TimeoutError as e:
+            logging.warning(
+                'Timed out reading existing GCS file %s; skipping flush to'
+                ' avoid overwriting remote state: %s',
+                file_path,
+                e,
+            )
+            return
+          if old_df is not None:
+            df = pd.concat([old_df, df], ignore_index=True)
+        with staging_file.open('w', encoding='utf-8', newline='') as f:
+          df.to_csv(f, header=True, index=False)
+      else:
+        existing_cols = pd.read_csv(
+            staging_file, nrows=0, encoding='utf-8'
+        ).columns.tolist()
+        if list(df.columns) == existing_cols:
+          with staging_file.open('a', encoding='utf-8', newline='') as f:
+            df.to_csv(f, header=False, index=False)
+        elif set(df.columns).issubset(set(existing_cols)):
+          df = df.reindex(columns=existing_cols)
+          with staging_file.open('a', encoding='utf-8', newline='') as f:
+            df.to_csv(f, header=False, index=False)
+        else:
+          staged_df = pd.read_csv(staging_file, encoding='utf-8')
+          combined_df = pd.concat([staged_df, df], ignore_index=True)
+          with staging_file.open('w', encoding='utf-8', newline='') as f:
+            combined_df.to_csv(f, header=True, index=False)
+
+      aborted = threading.Event()
+
+      def _upload_staged_to_gcs():
+        with (
+            staging_file.open('r', encoding='utf-8') as src,
+            tmp_file_path.open('w') as dst,
+        ):
+          shutil.copyfileobj(src, dst)
+        if aborted.is_set():
+          return
+        tmp_file_path.replace(file_path)
+
       try:
-        with file_path.open('r') as f:
-          old_df = pd.read_csv(f, engine='python')
+        _run_with_timeout(
+            _upload_staged_to_gcs, gcs_timeout_sec, f'GCS write({file_path})'
+        )
+      except _AbandonedOperationError as e:
+        aborted.set()
+        # Writer may still be live; unlinking now would race it.
+        logging.error(
+            'Timed out finalizing write to %s; leaving %s for lifecycle'
+            ' cleanup: %s',
+            file_path,
+            tmp_file_path,
+            e,
+        )
+      except Exception as e:  # pylint: disable=broad-except
+        logging.error('Failed to finalize write to %s: %s', file_path, e)
+        _cleanup_tmp_gcs_file(tmp_file_path, gcs_timeout_sec)
+    else:
+      try:
+        remote_exists = _run_with_timeout(
+            file_path.exists, gcs_timeout_sec, f'GCS exists({file_path})'
+        )
+      except TimeoutError as e:
+        logging.warning(
+            'Timed out checking existing GCS file %s; skipping flush to avoid'
+            ' overwriting remote state: %s',
+            file_path,
+            e,
+        )
+        return
       except Exception as e:  # pylint: disable=broad-except
         logging.warning(
-            'Could not read existing GCS file (possibly partial write): %s', e
+            'Could not check existing GCS file %s: %s', file_path, e
         )
-      if old_df is not None:
-        df = pd.concat([old_df, df], ignore_index=True)
+        remote_exists = False
 
-    tmp_file_path = (
-        file_path.parent
-        / f'{file_path.name}.{pd.Timestamp.now().nanosecond}.tmp'
-    )
-    try:
-      with tmp_file_path.open('w') as f:
-        df.to_csv(f, header=True, index=False)
-      # epath.Path.replace() handles the GCS 'rename' (copy + delete)
-      tmp_file_path.replace(file_path)
-    except Exception as e:  # pylint: disable=broad-except
-      logging.error('Failed to finalize write to %s: %s', file_path, e)
-      if tmp_file_path.exists():
-        tmp_file_path.unlink()  # Cleanup
+      if remote_exists:
+        try:
+          old_df = _read_gcs_csv(file_path, gcs_timeout_sec)
+        except TimeoutError as e:
+          logging.warning(
+              'Timed out reading existing GCS file %s; skipping flush to avoid'
+              ' overwriting remote state: %s',
+              file_path,
+              e,
+          )
+          return
+        if old_df is not None:
+          df = pd.concat([old_df, df], ignore_index=True)
+
+      aborted = threading.Event()
+
+      def _write_and_replace():
+        with tmp_file_path.open('w') as f:
+          df.to_csv(f, header=True, index=False)
+        if aborted.is_set():
+          return
+        # epath.Path.replace() handles the GCS 'rename' (copy + delete)
+        tmp_file_path.replace(file_path)
+
+      try:
+        _run_with_timeout(
+            _write_and_replace, gcs_timeout_sec, f'GCS write({file_path})'
+        )
+      except _AbandonedOperationError as e:
+        aborted.set()
+        # Writer may still be live; unlinking now would race it.
+        logging.error(
+            'Timed out finalizing write to %s; leaving %s for lifecycle'
+            ' cleanup: %s',
+            file_path,
+            tmp_file_path,
+            e,
+        )
+      except Exception as e:  # pylint: disable=broad-except
+        logging.error('Failed to finalize write to %s: %s', file_path, e)
+        _cleanup_tmp_gcs_file(tmp_file_path, gcs_timeout_sec)
   else:
+    write_header = not file_path.exists()
     with file_path.open('a') as f:
       df.to_csv(f, header=write_header, index=False)
 
@@ -164,15 +383,37 @@ def log_item(
 class AsyncTrajectoryLogger:
   """A logger that logs trajectories asynchronously in a background thread."""
 
-  def __init__(self, log_dir: str):
+  def __init__(
+      self,
+      log_dir: str,
+      *,
+      max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE,
+      stop_timeout_sec: float = _DEFAULT_STOP_TIMEOUT_SEC,
+      gcs_timeout_sec: float | None = _DEFAULT_GCS_TIMEOUT_SEC,
+  ):
     self._log_dir = log_dir
     self._file_suffix = str(int(time.time()))
-    self._logging_queue = queue.Queue()
+    self._stop_timeout_sec = stop_timeout_sec
+    self._gcs_timeout_sec = gcs_timeout_sec
+    self._logging_queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue_size)
     self._stopped = False
+    self._stop_event = threading.Event()
+    self._stop_lock = threading.RLock()
+    self._staging_tempdir = (
+        tempfile.TemporaryDirectory(prefix='tunix_traj_stage_')
+        if _is_gcs_path(log_dir)
+        else None
+    )
 
     def _worker():
       while True:
-        item = self._logging_queue.get()
+        try:
+          item = self._logging_queue.get(timeout=0.5)
+        except queue.Empty:
+          if self._stop_event.is_set():
+            break
+          continue
+
         if item is None:  # Sentinel for stopping
           self._logging_queue.task_done()
           break
@@ -184,7 +425,7 @@ class AsyncTrajectoryLogger:
           try:
             next_item = self._logging_queue.get_nowait()
             if next_item is None:
-              # Acknowledge the sentinel and terminate after logging current 
+              # Acknowledge the sentinel and terminate after logging current
               # batch.
               self._logging_queue.task_done()
               stop_received = True
@@ -194,13 +435,25 @@ class AsyncTrajectoryLogger:
             break
 
         try:
-          log_item(self._log_dir, items, self._file_suffix)
+          log_item(
+              self._log_dir,
+              items,
+              self._file_suffix,
+              gcs_timeout_sec=self._gcs_timeout_sec,
+              local_staging_dir=(
+                  self._staging_tempdir.name
+                  if self._staging_tempdir is not None
+                  else None
+              ),
+          )
         except Exception:  # pylint: disable=broad-except
           logging.exception('Failed to log trajectories.')
         finally:
           for _ in range(len(items)):
             self._logging_queue.task_done()
-        if stop_received:
+        if stop_received or (
+            self._stop_event.is_set() and self._logging_queue.empty()
+        ):
           break
 
     self._logging_thread = threading.Thread(target=_worker, daemon=True)
@@ -234,19 +487,52 @@ class AsyncTrajectoryLogger:
     self.stop()
 
   def stop(self):
-    """Stops the background logging thread gracefully."""
-    if self._stopped:
-      return
+    """Stops the background logging thread gracefully with a bounded timeout."""
+    with self._stop_lock:
+      if self._stopped:
+        return
+      self._stopped = True
+      self._stop_event.set()
+
     logging.info('Stopping trajectory logging thread...')
-    self._logging_queue.put(None)
-    self._logging_queue.join()
-    self._logging_thread.join(timeout=10)
-    self._stopped = True
-    logging.info('Stopped trajectory logging thread.')
+    try:
+      self._logging_queue.put_nowait(None)
+    except queue.Full:
+      logging.warning(
+          'Trajectory logging queue is full during shutdown; signaling stop'
+          ' event without blocking.'
+      )
+
+    self._logging_thread.join(timeout=self._stop_timeout_sec)
+    if self._logging_thread.is_alive():
+      logging.warning(
+          'Trajectory logging thread did not terminate within %.1fs; proceeding'
+          ' with shutdown to avoid deadlock.',
+          self._stop_timeout_sec,
+      )
+    else:
+      if self._staging_tempdir is not None:
+        try:
+          self._staging_tempdir.cleanup()
+        except Exception:  # pylint: disable=broad-except
+          pass
+      logging.info('Stopped trajectory logging thread.')
 
   def log_item_async(self, item: dict[str, Any] | Any):
     """Adds an item to the logging queue to be logged asynchronously."""
     if self._stopped:
       logging.warning('Trajectory logger already stopped.')
       return
-    self._logging_queue.put(item)
+    if not self._logging_thread.is_alive():
+      logging.warning(
+          'Trajectory logging background thread is not alive; dropping item.'
+      )
+      return
+    try:
+      self._logging_queue.put_nowait(item)
+    except queue.Full:
+      logging.warning(
+          'Trajectory logging queue is full (maxsize=%d); dropping trajectory'
+          ' item to avoid blocking caller.',
+          self._logging_queue.maxsize,
+      )
