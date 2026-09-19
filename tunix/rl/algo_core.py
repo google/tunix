@@ -788,7 +788,9 @@ def ppo_policy_loss_fn(
   advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
 
-  seq_importance_ratio = jnp.exp(per_token_logps - old_per_token_logps)
+  seq_importance_ratio = jnp.exp(
+      jnp.where(completion_mask > 0, per_token_logps - old_per_token_logps, 0.0)
+  )
 
   # Compute pg_clipfrac
   pg_losses_1 = -seq_importance_ratio * advantages
@@ -812,13 +814,14 @@ def ppo_policy_loss_fn(
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   pg_losses = jnp.where(advantages < 0.0, pg_loss_clipped_dual, per_token_loss)
+  pg_losses = jnp.where(completion_mask > 0, pg_losses, 0.0)
 
   denominator = jnp.sum(completion_mask)
   unreduced_pg_clipfrac = jnp.sum(
       jnp.greater(pg_losses_2, pg_losses_1).astype(jnp.float32)
       * completion_mask
   )
-  unreduced_policy_loss = jnp.sum(pg_losses * completion_mask)
+  unreduced_policy_loss = jnp.sum(pg_losses)
 
   aux = {
       "pg_clipfrac": sft_utils.WeightedMetric(
@@ -1120,7 +1123,9 @@ def grpo_loss_fn(
         train_example.old_per_token_logps, jnp.float32
     )
 
-  seq_importance_ratio = per_token_logps - old_per_token_logps
+  seq_importance_ratio = jnp.where(
+      completion_mask > 0, per_token_logps - old_per_token_logps, 0.0
+  )
   # Record KL divergence before clipping.
   token_denom = jnp.sum(loss_mask)
   unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * loss_mask)
@@ -1211,6 +1216,8 @@ def grpo_loss_fn(
         log_is, completion_mask, segment_ids, num_segments
     )
 
+  # Use jnp.where (XLA Select) rather than multiplicative masking so masked/pad
+  # tokens sever reverse-mode autodiff instead of evaluating 0.0 * Inf = NaN.
   sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
   # Computed here rather than upstream: the trainer log-probabilities the
   # weights need are the ones this forward pass just produced, so there is no
@@ -1226,7 +1233,13 @@ def grpo_loss_fn(
         band_max=tis_band_max,
     )
   if sampler_is_weights is not None:
-    per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
+    per_token_loss = jnp.where(
+        (loss_mask > 0) & (sampler_is_weights != 0),
+        per_token_loss * sampler_is_weights.astype(jnp.float32),
+        0.0,
+    )
+  else:
+    per_token_loss = jnp.where(loss_mask > 0, per_token_loss, 0.0)
 
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
