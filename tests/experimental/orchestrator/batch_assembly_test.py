@@ -1958,6 +1958,32 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(assembler.num_generations, 2)
     self.assertEqual(assembler.mini_batch_size, 2)
 
+  def test_create_sequence_packed_assembler_pack_size_includes_expert(self):
+    assembler = batch_assembly.create_batch_assembler(
+        num_generations=2,
+        mini_batch_size=2,
+        train_micro_batch_size=1,
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=42,
+            max_prompt_length=256,
+            max_response_length=256,
+            max_seq_token_per_tpu=1024,
+            max_segments_per_packed_row=8,
+            trainer_fsdp=2,
+            trainer_dp=4,
+            trainer_expert=2,
+        ),
+    )
+    self.assertIsInstance(
+        assembler, batch_assembly.SequencePackedBatchAssembler
+    )
+    self.assertEqual(assembler.batch_size, 16)
+    self.assertEqual(assembler.max_packed_len, 1024)
+    self.assertEqual(assembler.pad_id, 42)
+    self.assertEqual(assembler.max_segments_per_packed_row, 8)
+    self.assertEqual(assembler.num_generations, 2)
+    self.assertEqual(assembler.mini_batch_size, 2)
+
   def test_create_sequence_packed_assembler_defaults_pack_size(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=4,

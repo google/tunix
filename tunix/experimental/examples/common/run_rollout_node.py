@@ -116,6 +116,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=1)
   parser.add_argument("--mesh_tp", type=int, default=2)
+  parser.add_argument(
+      "--mesh_expert",
+      type=int,
+      default=1,
+      help=(
+          "Expert-parallel degree for the rollout. Required for fully-MoE"
+          " models whose per-expert intermediate dim cannot absorb the"
+          " tensor-parallel degree: GMM_v2's per-expert tile floor"
+          " (2 * num_lanes) pads moe_mlp_dim up by the same factor that TP"
+          " shards it down, so per-chip MoE weights are constant in TP and no"
+          " TP value fits. Note tpu-inference derives the attention/GDN head"
+          " divisor from the product of the ('model', 'expert', 'dcp') axes,"
+          " so mesh_tp * mesh_expert must divide the model's head counts."
+      ),
+  )
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument(
@@ -204,7 +219,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--max_concurrency",
       type=int,
-      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "256")),
+      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "64")),
       help="Maximum concurrent trajectory collections inside this worker.",
   )
   parser.add_argument(
@@ -499,11 +514,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
-  # multi-host TPUs so concurrent `InprocessVllmSamplerAdapter.sample()` worker
-  # threads submit into a single engine loop for continuous batching without
-  # racing on donated JAX KV-cache buffers.
-  server_mode = True
+  server_mode = True if multihost_backend else None
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = _get_tensor_parallel_size(args)
@@ -527,6 +538,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       mesh=rollout_mesh,
       tensor_parallel_size=tp_size,
       data_parallel_size=args.mesh_fsdp,
+      expert_parallel_size=args.mesh_expert,
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,
@@ -539,7 +551,6 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tokenizer=tokenizer,
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
-      max_concurrency=args.max_concurrency,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
@@ -616,6 +627,23 @@ def _create_vllm_sampler(args, tokenizer):
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
         )
+    )
+  # The `vllm` sampler builds AsyncEngineArgs directly rather than going through
+  # VllmConfig, so the expert-parallel degree has to be placed on
+  # additional_config here. Mirrors VllmConfig._build_args() in
+  # tunix/generate/vllm_sampler.py, which does the same for the in-process path.
+  if args.mesh_expert > 1:
+    additional_config = dict(engine_kwargs.get("additional_config") or {})
+    sharding = dict(additional_config.get("sharding") or {})
+    strategy = dict(sharding.get("sharding_strategy") or {})
+    strategy.setdefault("expert_parallelism", args.mesh_expert)
+    sharding["sharding_strategy"] = strategy
+    additional_config["sharding"] = sharding
+    engine_kwargs["additional_config"] = additional_config
+    logging.info(
+        "Rollout sharding: tensor_parallel_size=%s expert_parallelism=%d",
+        engine_kwargs.get("tensor_parallel_size"),
+        args.mesh_expert,
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]

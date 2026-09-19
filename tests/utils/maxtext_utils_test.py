@@ -345,11 +345,82 @@ class MaxTextUtilsTest(absltest.TestCase):
       # Assert overrides were logged
       log_text = "\n".join(logs.output)
       self.assertIn(
-          "Overriding kv_tp_size from 0 to rollout_mesh_tp=4", log_text
+          "Overriding kv_tp_size from 0 to rollout_mesh_tp * "
+          "rollout_mesh_expert = 4 * 1 = 4",
+          log_text,
       )
       self.assertIn(
           "Overriding moe_mlp_tp_size from 0 to rollout_mesh_tp=4", log_text
       )
+
+  def test_rollout_expert_parallelism_widens_kv_heads(self):
+    # A rollout on tp=2 x ep=2 shards KV over 4 ways and pads
+    # base_num_kv_heads up to 4. Deriving kv_tp_size from tp alone leaves the
+    # trainer at 2 and weight sync fails preflight on the KV projections.
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True), mock.patch(
+        "builtins.open",
+        mock.mock_open(
+            read_data="base_num_kv_heads: 2\nbase_moe_mlp_dim: 512\n"
+        ),
+    ), mock.patch.dict(
+        "sys.modules",
+        {
+            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
+                compute_padded_moe_mlp_dim=mock.MagicMock(return_value=512)
+            )
+        },
+    ):
+      maxtext_utils.build_maxtext_config(
+          model_name="moe-test",
+          rollout_mesh_tp=2,
+          rollout_mesh_expert=2,
+      )
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("base_num_kv_heads=4", argv)
+      # MaxText refuses a model-config key overridden to a different value
+      # unless the override is declared.
+      self.assertIn("override_model_config=True", argv)
+
+  def test_matching_kv_heads_does_not_override_model_config(self):
+    # tp * ep == the model's own KV head count: nothing is widened, so the
+    # guard must stay armed.
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True), mock.patch(
+        "builtins.open",
+        mock.mock_open(
+            read_data="base_num_kv_heads: 4\nbase_moe_mlp_dim: 512\n"
+        ),
+    ), mock.patch.dict(
+        "sys.modules",
+        {
+            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
+                compute_padded_moe_mlp_dim=mock.MagicMock(return_value=512)
+            )
+        },
+    ):
+      maxtext_utils.build_maxtext_config(
+          model_name="moe-test",
+          rollout_mesh_tp=2,
+          rollout_mesh_expert=2,
+      )
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("base_num_kv_heads=4", argv)
+      self.assertNotIn("override_model_config=True", argv)
 
   def test_auto_padding_import_error_logs_warning(self):
     mock_pyconfig = mock.MagicMock()

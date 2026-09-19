@@ -64,6 +64,14 @@ class BatchConfig:
       packing is enabled.
     trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
     trainer_dp: Trainer DP mesh dimension size for sequence packing.
+    trainer_expert: Trainer expert-parallel mesh dimension size.
+    trainer_fsdp_transpose: Trainer fsdp_transpose mesh dimension size.
+
+      MaxText's default logical axis rules bind the activation batch axis to
+      ['data', 'fsdp', 'fsdp_transpose', 'expert'] (configs/base.yml,
+      activation_batch / activation_batch_moe), so the packed row count must be
+      divisible by the product of all four, not just fsdp * dp. A user with
+      custom logical_axis_rules will need a different product.
   """
 
   pad_id: int = 0
@@ -73,6 +81,8 @@ class BatchConfig:
   max_segments_per_packed_row: int | None = None
   trainer_fsdp: int | None = None
   trainer_dp: int | None = None
+  trainer_expert: int | None = None
+  trainer_fsdp_transpose: int | None = None
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -992,17 +1002,41 @@ def create_batch_assembler(
     A BatchAssembler instance.
   """
   if batch_config.max_seq_token_per_tpu is not None:
-    if batch_config.trainer_fsdp is None and batch_config.trainer_dp is None:
+    if (
+        batch_config.trainer_fsdp is None
+        and batch_config.trainer_dp is None
+        and batch_config.trainer_expert is None
+        and batch_config.trainer_fsdp_transpose is None
+    ):
       logging.warning(
-          "trainer_fsdp and trainer_dp are not set, defaulting pack_size to "
+          "no trainer mesh dimensions are set, defaulting pack_size to "
           "train_micro_batch_size=%d.",
           train_micro_batch_size,
       )
       pack_size = train_micro_batch_size
     else:
-      pack_size = (batch_config.trainer_fsdp or 1) * (
-          batch_config.trainer_dp or 1
+      # Every mesh axis the activation batch is sharded over has to divide the
+      # row count. MaxText's default rules bind it to
+      # ['data', 'fsdp', 'fsdp_transpose', 'expert']; omitting any of them makes
+      # the MoE shard_map reject the batch with "axis sizes that are not evenly
+      # divisible by the corresponding mesh axis sizes". Invisible while expert
+      # and fsdp_transpose are 1, which is every run that predates expert
+      # parallelism on the trainer.
+      pack_size = (
+          (batch_config.trainer_fsdp or 1)
+          * (batch_config.trainer_dp or 1)
+          * (batch_config.trainer_fsdp_transpose or 1)
+          * (batch_config.trainer_expert or 1)
       )
+      if (batch_config.trainer_expert or 1) > 1:
+        # Worth shouting about: this multiplies the effective global batch, so a
+        # run that switches expert parallelism on is not training the same thing.
+        logging.warning(
+            "trainer_expert=%d multiplies pack_size to %d (fsdp=%s dp=%s "
+            "fsdp_transpose=%s); the effective global batch scales with it.",
+            batch_config.trainer_expert, pack_size, batch_config.trainer_fsdp,
+            batch_config.trainer_dp, batch_config.trainer_fsdp_transpose,
+        )
 
     if (
         batch_config.max_prompt_length is not None

@@ -124,6 +124,7 @@ def build_maxtext_config(
     kv_tp_size: int = 0,
     moe_mlp_tp_size: int = 0,
     rollout_mesh_tp: int = 0,
+    rollout_mesh_expert: int = 0,
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
@@ -134,10 +135,20 @@ def build_maxtext_config(
   # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
   if rollout_mesh_tp > 0:
     if kv_tp_size == 0:
+      # The rollout shards KV over tensor AND expert parallelism -- its adapter
+      # computes `kv_tp_size = tp * ep` and pads `base_num_kv_heads` up to it.
+      # Deriving from tp alone leaves the trainer building fewer KV heads than
+      # the rollout expects, and weight sync then fails preflight on the KV
+      # projections with a global shape mismatch.
+      rollout_kv_tp = rollout_mesh_tp * max(rollout_mesh_expert, 1)
       logging.info(
-          "Overriding kv_tp_size from 0 to rollout_mesh_tp=%d", rollout_mesh_tp
+          "Overriding kv_tp_size from 0 to rollout_mesh_tp * "
+          "rollout_mesh_expert = %d * %d = %d",
+          rollout_mesh_tp,
+          max(rollout_mesh_expert, 1),
+          rollout_kv_tp,
       )
-      kv_tp_size = rollout_mesh_tp
+      kv_tp_size = rollout_kv_tp
     if moe_mlp_tp_size == 0:
       logging.info(
           "Overriding moe_mlp_tp_size from 0 to rollout_mesh_tp=%d",
@@ -223,13 +234,26 @@ def build_maxtext_config(
           " Please specify --base_num_kv_heads."
       )
 
+  # Widening KV heads past what the model's own yml declares is exactly what
+  # MaxText's `validate_no_keys_overridden_twice` refuses by default, so the
+  # override has to be declared as deliberate or pyconfig raises:
+  #   Keys ['base_num_kv_heads'] are overridden by both model config and
+  #   CLI/kwargs with different values.
+  widened_kv_heads = False
   if effective_kv_heads > 0 and kv_tp_size > effective_kv_heads:
     if kv_tp_size % effective_kv_heads != 0:
       raise ValueError(
           f"kv_tp_size ({kv_tp_size}) must be cleanly divisible by "
           f"base_num_kv_heads ({effective_kv_heads})."
       )
+    logging.info(
+        "Widening base_num_kv_heads from %d to kv_tp_size=%d so the trainer"
+        " builds the KV projections the rollout expects.",
+        effective_kv_heads,
+        kv_tp_size,
+    )
     effective_kv_heads = kv_tp_size
+    widened_kv_heads = True
 
   # 2. Resolve padded MoE MLP dimension before pyconfig initialization:
   if not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0:
@@ -370,8 +394,18 @@ def build_maxtext_config(
           if effective_kv_heads
           else []
       ),
+      # Only when the value above genuinely differs from the model yml; MaxText
+      # rejects a silent disagreement, and leaving this on unconditionally would
+      # disarm the same guard for every other model key.
+      *(["override_model_config=True"] if widened_kv_heads else []),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
+      # The (fsdp, tp, expert) mesh requested here is rarely factorable onto the
+      # physical torus without splitting one of its axes: fsdp=64 x tp=2 on a
+      # 4x4x8 slice needs the 8 split as 4x2, and jax.mesh_utils refuses by
+      # default with "Failed to find assignment for logical_axis_index ...".
+      # The rollout's MaxText config already sets this for the same reason.
+      "allow_split_physical_axes=True",
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",

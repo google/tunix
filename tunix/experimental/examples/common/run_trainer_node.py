@@ -389,6 +389,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--rollout_mesh_expert",
+      type=int,
+      default=0,
+      help=(
+          "Rollout EP degree. The rollout shards KV heads over tp*ep, so this"
+          " is needed alongside --rollout_mesh_tp to align KV head counts."
+      ),
+  )
+  parser.add_argument(
       "--max_seq_token_per_tpu",
       type=int,
       default=0,
@@ -628,6 +637,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       checkpointing_options=checkpointing_options,
       profiling_options=profiling_options,
       rollout_mesh_tp=args.rollout_mesh_tp,
+      rollout_mesh_expert=args.rollout_mesh_expert,
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,

@@ -195,6 +195,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       model_name: str = "",
       sampler_instance: Any = None,
       worker_index: int = 0,
+      # This adapter's value is the one that reaches the worker: bind_weight_sync
+      # passes `parallelism=self._parallelism` down to bind_raiden_sync. Raise it
+      # per-run via RAIDEN_PARALLELISM rather than changing this default, which is
+      # topology-specific (one stream per chip).
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       **kwargs,
