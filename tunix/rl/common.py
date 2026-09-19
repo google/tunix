@@ -296,8 +296,14 @@ def process_ids(
     return prompt_completion_ids, segment_positions, attn_mask, None
 
   if token_mask is None:
-    prompt_mask = prompt_tokens != pad_id
-    completion_mask = completion_tokens != pad_id
+    prompt_mask = jnp.cumsum(prompt_tokens != pad_id, axis=-1) > 0
+    is_before_pad = (
+        jnp.cumsum((completion_tokens != pad_id)[..., ::-1], axis=-1)[..., ::-1]
+        > 0
+    )
+    completion_mask = is_before_pad | jnp.pad(
+        is_before_pad[..., :-1], ((0, 0), (1, 0)), constant_values=False
+    )
     prompt_completion_mask = jnp.concatenate(
         [prompt_mask, completion_mask], axis=-1
     )

@@ -277,7 +277,11 @@ class SWEEnv(BaseTaskEnv):
 
     if not action_obj.function_name:
       return EnvStepResult(
-          observation="",
+          observation=(
+              "No valid tool call detected. Please output exactly one tool call"
+              " using the XML format: <function=execute_bash><parameter=command>"
+              "your_command</parameter></function> or <function=finish></function>."
+          ),
           reward=0,
           done=False,
           info={"max_steps": self.max_steps},

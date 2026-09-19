@@ -931,7 +931,14 @@ class StandardRLProgram(RLProgram):
 
       # Grad Norm
       raw_gn = scalar_metrics.pop(
-          "grad_norm", scalar_metrics.pop("trainer/grad_norm", None)
+          "grad_norm",
+          scalar_metrics.pop(
+              "trainer/grad_norm",
+              scalar_metrics.pop(
+                  "gradient_norm",
+                  scalar_metrics.pop("trainer/gradient_norm", None),
+              ),
+          ),
       )
       gn_val = _extract_scalar(raw_gn)
       grad_norm_val = gn_val

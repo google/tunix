@@ -363,7 +363,7 @@ class ClusterOrchestrator:
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
     _wake_code_str = """
-import gc, sys
+import gc, sys, importlib
 from tunix.experimental.common import datatypes as _dt
 from tunix.experimental.worker import abstract_worker as _aw
 try:
@@ -373,6 +373,9 @@ try:
   from agent_sandbox_rl.adapters import r2egym as _r2e_adapter
   _r2e_adapter._CLASSES = None
   _r2e_adapter._import_r2egym()
+  for _mod_name in ("examples.deepswe.sandbox_utils", "examples.deepswe.swe_agent", "examples.deepswe.swe_env", "tunix.experimental.examples.deepswe_dist.deepswe"):
+    if _mod_name in sys.modules:
+      importlib.reload(sys.modules[_mod_name])
 except Exception:
   pass
 try:
@@ -387,6 +390,9 @@ except Exception:
   pass
 for obj in gc.get_objects():
   try:
+    if hasattr(obj, "enable_thinking") and hasattr(obj, "tokens") and hasattr(obj.tokens, "assistant_token"):
+      obj.enable_thinking = True
+      obj.tokens.assistant_token = "<|im_start|>assistant\\n"
     if isinstance(obj, _aw.Worker):
       if getattr(obj, "_state", None) != _dt.WorkerState.PENDING:
         obj._state = _dt.WorkerState.READY

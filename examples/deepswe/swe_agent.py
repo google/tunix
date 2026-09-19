@@ -58,27 +58,37 @@ def parse_oai_response(response: Any):
 def parse_xml_response(response_text: str) -> tuple[str, Any]:
   """Extracts:
 
-  - thought: everything before the first <function=...> block
+  - thought: everything before the first <function=...> or <tool_call> block
   - action: the entire first <function=...></function> block
   Returns (thought, action).
   """
-  # Regex to match (non-greedily) from `<function=` up to the first `</function>`
   pattern = re.compile(r"(?s)(<function=.*?</function>)")
   match = pattern.search(response_text)
 
   if match:
-    action = match.group(1)  # The entire <function=...></function> block
-    thought = response_text[: match.start()]  # Everything before the block
+    action = match.group(1)
+    thought = response_text[: match.start()]
   else:
-    # If no match, treat entire text as "thought"
-    thought = response_text
-    action = ""
+    tc_match = re.search(r"(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>", response_text)
+    if tc_match:
+      thought = response_text[: tc_match.start()]
+      try:
+        tc_json = json.loads(tc_match.group(1))
+        fn_name = tc_json.get("name", "")
+        args = tc_json.get("arguments", {}) or {}
+        if isinstance(args, str):
+          args = json.loads(args)
+        params_xml = "".join(f"<parameter={k}>{v}</parameter>" for k, v in args.items())
+        action = f"<function={fn_name}>{params_xml}</function>"
+      except Exception:
+        action = ""
+    else:
+      thought = response_text
+      action = ""
 
-  # Strip leading/trailing whitespace
   thought = thought.strip()
   action = action.strip()
 
-  # convert action to Action object
   action = SWEAction.from_string(action)
 
   return thought, action
