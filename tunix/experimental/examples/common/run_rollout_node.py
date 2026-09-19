@@ -269,7 +269,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--max_concurrency",
       type=int,
-      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "64")),
+      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "256")),
       help="Maximum concurrent trajectory collections inside this worker.",
   )
   parser.add_argument(
@@ -601,7 +601,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  server_mode = True if multihost_backend else None
+  # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
+  # multi-host TPUs so concurrent `InprocessVllmSamplerAdapter.sample()` worker
+  # threads submit into a single engine loop for continuous batching without
+  # racing on donated JAX KV-cache buffers.
+  server_mode = True
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = (
@@ -667,6 +671,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tokenizer=tokenizer,
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
+      max_concurrency=args.max_concurrency,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
