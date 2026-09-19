@@ -132,6 +132,11 @@ export TRAIN_MICRO_BATCH_SIZE=32
 export CHECKPOINT_SAVE_INTERVAL_STEPS=2
 export CHECKPOINT_MAX_TO_KEEP=10
 
+# Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
+export TEMPERATURE="1.0"
+export TOP_P="1.0"
+export TOP_K="-1"
+
 # Algorithmic & Loss Hyperparameters
 export BETA=0.0
 export EPSILON=0.2
