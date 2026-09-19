@@ -72,6 +72,9 @@ export USE_LORA=${USE_LORA:-0}
 export TEMPERATURE=${TEMPERATURE:-1.0}
 export TOP_P=${TOP_P:-1.0}
 export TOP_K=${TOP_K:--1}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+export EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
@@ -608,6 +611,7 @@ if cfg:
           --mesh_tp=${ROLLOUT_MESH_TP} \
           --max_prompt_length=${MAX_PROMPT_LENGTH} \
           --max_response_length=${MAX_RESPONSE_LENGTH} \
+          ${EOS_TOKENS:+--eos_tokens=\"${EOS_TOKENS}\"} \
           --sampler=${SAMPLER} \
           --lora_rank=${LORA_RANK} \
           --lora_alpha=${LORA_ALPHA} \
