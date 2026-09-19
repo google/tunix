@@ -275,6 +275,12 @@ def init_global_fleet(
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
+    fleet_inst.config.labels["app.kubernetes.io/managed-by"] = "sanbao-oh-eval"
+    for _c in fleet_inst.registry:
+      try:
+        _c.resources.labels["app.kubernetes.io/managed-by"] = "sanbao-oh-eval"
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
 
     image_rewrite_fn = get_image_rewrite_fn(image_rewrite)
     fleet_inst._image_rewrite_fn = image_rewrite_fn
@@ -323,6 +329,81 @@ def init_global_fleet(
             len(images),
             target_replicas,
         )
+    orig_acquire = fleet_inst.acquire
+
+    def resilient_acquire(task):
+      import time as _time
+
+      target_reps = fleet_kwargs.get("max_warmpool_size", 1) or 1
+      for attempt in range(10):
+        try:
+          return orig_acquire(task)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          exc_str = str(exc)
+          if "SandboxWarmPool" in exc_str or "not found" in exc_str.lower():
+            logging.warning(
+                "[ResilientAcquire] Warmpool missing for %s (attempt %d/10):"
+                " %s; recreating...",
+                task.image,
+                attempt + 1,
+                exc,
+            )
+            try:
+              entry = (
+                  fleet_inst.plan_.for_image(task.image)
+                  if fleet_inst.plan_
+                  else None
+              )
+              cluster = fleet_inst.registry.get(
+                  entry.cluster if entry else "default"
+              )
+              fleet_inst._ensure_pool(cluster, task.image, target_reps)
+            except Exception as ce:  # pylint: disable=broad-exception-caught
+              logging.warning(
+                  "[ResilientAcquire] Pool recreation error: %s", ce
+              )
+            _time.sleep(5)
+          else:
+            raise
+      return orig_acquire(task)
+
+    fleet_inst.acquire = resilient_acquire
+
+    def safe_teardown(*args, **kwargs):
+      del args, kwargs
+      logging.info(
+          "[SandboxFleet] Safely tearing down ONLY our own warmpools and"
+          " templates (oh-img-* / pool-oh-img-*)..."
+      )
+      try:
+        fleet_inst.release_all()
+        for c in fleet_inst.registry:
+          try:
+            pools = c.resources.list_warmpools(label_selector=None)
+            for p in pools:
+              if p.startswith("pool-oh-img-"):
+                try:
+                  c.resources.delete_warmpool(p)
+                except Exception:  # pylint: disable=broad-exception-caught
+                  pass
+          except Exception as pe:  # pylint: disable=broad-exception-caught
+            logging.warning("Error cleaning up warmpools: %s", pe)
+          try:
+            tmpls = c.resources.list_templates(label_selector=None)
+            for t in tmpls:
+              if t.startswith("oh-img-"):
+                try:
+                  c.resources.delete_template(t)
+                except Exception:  # pylint: disable=broad-exception-caught
+                  pass
+          except Exception as te:  # pylint: disable=broad-exception-caught
+            logging.warning("Error cleaning up templates: %s", te)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Error during safe teardown: %s", e)
+
+    fleet_inst.teardown = safe_teardown
+    fleet_inst._teardown = safe_teardown
+
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET

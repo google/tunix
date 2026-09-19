@@ -74,9 +74,7 @@ from transformers import AutoTokenizer
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
 from tunix.models.qwen3 import params as params_lib
-from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.sft import utils as sft_utils
 
 # ========================== Configuration ==========================
@@ -191,10 +189,10 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
 devices = jax.devices()
-# Force pure tensor parallelism for eval: DP=1, TP=8.
+# Force pure tensor parallelism for eval: DP=1, TP=min(8, len(devices)).
 # Qwen3-32B has tensors such as (5120, 8, 128), so TP must not exceed 8 for
 # shardings that partition that dimension on the tp axis.
-TP_SIZE = 8
+TP_SIZE = min(int(os.getenv("TP_SIZE", "8")), len(devices))
 mesh_devices = np.array(devices[:TP_SIZE]).reshape(1, TP_SIZE)
 mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
 logger.info(
@@ -324,7 +322,7 @@ model_call = eval_utils.create_model_call(
     tokenizer=tokenizer,
     chat_parser=chat_parser,
     max_response_length=MAX_RESPONSE_LENGTH,
-    max_context_limit=MAX_MODEL_LEN,
+    max_context_limit=MAX_CONTEXT_LIMIT,
     sampler_kwargs={"eos_tokens": qwen_eos_tokens},
     sampler_lock=sampler_lock,
     logger=logger,
@@ -334,40 +332,10 @@ model_call = eval_utils.create_model_call(
 # ========================== Evaluation ==========================
 
 
-class EvalTrajectoryCollectEngine(
-    trajectory_collect_engine.TrajectoryCollectEngine
-):
-  """Trajectory engine that converts prompt overflows into per-trajectory termination."""
+class EvalTrajectoryCollectEngine(eval_utils.EvalTrajectoryCollectEngine):
+  """Trajectory engine that skips final reward grading on prompt overflow."""
 
-  async def _one_step(self) -> bool:
-    try:
-      return await super()._one_step()
-    except eval_utils.PromptTooLongError as exc:
-      logger.warning(
-          "[pair=%s instance=%s] terminating trajectory due to prompt"
-          " overflow: %s",
-          self.env.extra_kwargs.get("pair_index"),
-          self.env.entry.get("instance_id", "unknown"),
-          exc,
-      )
-      self.agent.trajectory.status = (
-          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
-      )
-      self._skip_final_reward = True
-      if self.agent.trajectory.steps:
-        self.agent.trajectory.steps[-1].done = True
-      return True
-
-  async def _append_final_reward(self):
-    if getattr(self, "_skip_final_reward", False):
-      return
-    await super()._append_final_reward()
-
-  def compute_trajectory_reward(self):
-    if getattr(self, "_skip_final_reward", False):
-      self.agent.trajectory.reward = 0.0
-      return self.agent.trajectory
-    return super().compute_trajectory_reward()
+  skip_final_reward_on_overflow: bool = True
 
 
 def pairs_generator():

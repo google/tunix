@@ -27,9 +27,7 @@ import swe_env
 from swe_agent import SWEAgent
 
 from tunix.generate import tokenizer_adapter as tok_adapter
-from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
 str2bool = deepswe_utils.str2bool
 
@@ -457,17 +455,16 @@ if USE_AGENT_SANDBOX:
 # ========================== Model & Mesh ==========================
 
 # Tokenizer Setup
-tokenizer_path = MODEL_PATH
-local_files_only = True
-if MODEL_PATH.startswith("gs://"):
-  if MODEL_VERSION.startswith("Qwen/"):
-    tokenizer_path = MODEL_VERSION
-  else:
-    tokenizer_path = f"Qwen/{MODEL_VERSION}"
+if not MODEL_PATH.startswith("gs://") and os.path.isdir(MODEL_PATH):
+  tokenizer_path = MODEL_PATH
+  local_files_only = True
+  logger.info("Loading tokenizer from local directory: %s", tokenizer_path)
+else:
+  tokenizer_path = (
+      MODEL_VERSION if "/" in MODEL_VERSION else f"Qwen/{MODEL_VERSION}"
+  )
   local_files_only = False
   logger.info("Loading tokenizer from HF Hub: %s", tokenizer_path)
-else:
-  logger.error("Model path %s must start with gs://", MODEL_PATH)
 
 tokenizer = AutoTokenizer.from_pretrained(
     tokenizer_path, local_files_only=local_files_only, trust_remote_code=True
@@ -510,6 +507,336 @@ deepswe_utils.configure_orbax_ocdbt_handler(MODEL_PATH, logger=logger)
 # ========================== Sampler ==========================
 
 logger.info("Creating VllmSampler ...")
+
+try:
+  import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa_v3_kernel
+
+  _orig_get_default_block_sizes = rpa_v3_kernel.get_default_block_sizes
+
+  def _safe_get_default_block_sizes(*args, **kwargs):
+    res = _orig_get_default_block_sizes(*args, **kwargs)
+    if isinstance(res, dict):
+      if "bkv_sz" in res and res["bkv_sz"] > 1024:
+        res["bkv_sz"] = 1024
+      if "bkv_csz" in res and res["bkv_csz"] > 512:
+        res["bkv_csz"] = 512
+    return res
+
+  rpa_v3_kernel.get_default_block_sizes = _safe_get_default_block_sizes
+  logger.info(
+      "Patched tpu_inference RPA v3 get_default_block_sizes: capped"
+      " bkv_sz<=1024, bkv_csz<=512 to prevent TensorCoreSequencer overflow."
+  )
+except Exception as e:
+  logger.warning("Could not patch RPA v3 get_default_block_sizes: %s", e)
+
+# Patch tpu_inference GDN v3 wrapper.fused_conv1d_gdn:
+# Replace Stage 1 (`config.GDNMode.BATCHED`, which compiles to `HLO: fused_conv1d_gdn_batched.1`
+# and halts TensorCoreSequencer at 0x2d9f because `seq_tile_size=4, window_size=1` causes
+# `wait_in`/`wait_out` in `memory_ref.py` to slice `vmem_ref.at[0, pl.ds(0, dma_size)]` by up to 4x
+# across axis 1 of size 1) with a 100% pure-JAX XLA vectorized einsum decode step (`_pure_jax_gdn_batched_stage`),
+# while preserving Stage 2 (`config.GDNMode.PER_SEQ`, where `seq_tile_size=1` so `dma_size` never
+# exceeds axis 1 and chunked MXU matmul runs prefill at >44,000 tokens/s).
+try:
+  import functools
+  import jax.numpy as jnp
+  from jax.experimental import pallas as pl
+  from jax.experimental.pallas import tpu as pltpu
+  from tpu_inference.kernels.gdn.v3 import config as gdn_v3_config
+  from tpu_inference.kernels.gdn.v3 import memory_ref as gdn_v3_memory_ref
+  from tpu_inference.kernels.gdn.v3 import metadata as gdn_v3_metadata
+  from tpu_inference.kernels.gdn.v3 import wrapper as gdn_v3_wrapper
+
+  def _pure_jax_gdn_batched_stage(
+      qkv_2d: jax.Array,          # [batch_size, dim] float32
+      b_2d: jax.Array,            # [batch_size, n_v] float32
+      a_2d: jax.Array,            # [batch_size, n_v] float32
+      conv_state_3d: jax.Array,   # [num_blocks, kernel_size - 1, dim] float32
+      recurrent_state: jax.Array, # [num_blocks, n_v, d_k, d_v]
+      conv_weight_raw: jax.Array, # [dim, 1, kernel_size]
+      conv_bias_1d: jax.Array | None, # [dim] or None
+      a_log: jax.Array,           # [n_v]
+      dt_bias: jax.Array,         # [n_v]
+      distribution: jax.Array,    # [3]
+      seq_lens: jax.Array,        # [num_seqs]
+      state_indices: jax.Array,   # [num_seqs]
+      read_state_indices: jax.Array, # [num_seqs]
+      padded_batch_size: int,
+      act_out_dtype: jnp.dtype,
+      n_kq: int,
+      n_v: int,
+      d_k: int,
+      d_v: int,
+      kernel_size: int,
+  ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Pure-JAX vectorized Stage 1 (BATCHED 1-token decode for sequences 0..distribution[0])."""
+    max_decode = min(qkv_2d.shape[0], state_indices.shape[0])
+    dim = qkv_2d.shape[1]
+    k_minus_1 = kernel_size - 1
+    num_decode = distribution[0]
+    seq_arange = jnp.arange(max_decode, dtype=jnp.int32)
+    seq_lens_d = seq_lens[:max_decode]
+    state_indices_d = state_indices[:max_decode]
+    read_state_indices_d = read_state_indices[:max_decode]
+    valid_mask = (seq_arange < num_decode) & (seq_lens_d > 0)
+    has_init = valid_mask & (seq_lens_d > 1)
+
+    safe_read_idx = jnp.clip(read_state_indices_d, 0, conv_state_3d.shape[0] - 1)
+    # 1. Gather conv_state: [max_decode, k_minus_1, dim]
+    init_conv = conv_state_3d[safe_read_idx]
+    init_conv = jnp.where(has_init[:, None, None], init_conv, 0.0)
+
+    # Gather the `max_decode` decode tokens from the front of `qkv_2d`: [max_decode, 1, dim]
+    x_decode = qkv_2d[:max_decode, None, :]
+    window = jnp.concatenate([init_conv, x_decode], axis=1)  # [num_seqs, kernel_size, dim]
+
+    # Depthwise conv1d + SiLU
+    w = jnp.squeeze(conv_weight_raw, axis=1).astype(jnp.float32)  # [dim, kernel_size]
+    conv_out = jnp.einsum("skd,dk->sd", window, w, precision=jax.lax.Precision.HIGHEST)
+    if conv_bias_1d is not None:
+      conv_out = conv_out + conv_bias_1d.astype(jnp.float32)[None, :]
+    conv_activated = jax.nn.silu(conv_out)  # [num_seqs, dim]
+
+    # Scatter updated conv_state (`window[:, 1:, :]`) for valid decode slots
+    new_conv_per_seq = window[:, 1:, :]  # [max_decode, k_minus_1, dim]
+    write_indices = jnp.where(valid_mask, state_indices_d, -1)
+    out_conv_3d = conv_state_3d.at[write_indices].set(
+        new_conv_per_seq,
+        mode="drop",
+        wrap_negative_indices=False,
+    )
+
+    # 2. Vectorized 1-token Gated Delta Rule over `max_decode` decode tokens
+    key_dim = n_kq * d_k
+    q_all, k_all, v_all = jnp.split(conv_activated, [key_dim, 2 * key_dim], axis=-1)
+    q_s = q_all.reshape(max_decode, n_kq, d_k)
+    k_s = k_all.reshape(max_decode, n_kq, d_k)
+    v_s = v_all.reshape(max_decode, n_v, d_v)
+
+    if n_v != n_kq:
+      repeats = n_v // n_kq
+      q_s = jnp.repeat(q_s, repeats, axis=1)
+      k_s = jnp.repeat(k_s, repeats, axis=1)
+
+    q_s = q_s * jax.lax.rsqrt(jnp.sum(q_s * q_s, axis=-1, keepdims=True) + 1e-6) * (d_k ** -0.5)
+    k_s = k_s * jax.lax.rsqrt(jnp.sum(k_s * k_s, axis=-1, keepdims=True) + 1e-6)
+
+    a_s = a_2d[:max_decode].astype(jnp.float32)
+    b_s = b_2d[:max_decode].astype(jnp.float32)
+    g_s = -jnp.exp(a_log.astype(jnp.float32))[None, :] * jax.nn.softplus(
+        a_s + dt_bias.astype(jnp.float32)[None, :]
+    )
+    beta_s = jax.nn.sigmoid(b_s)
+
+    init_rec = recurrent_state[safe_read_idx].astype(jnp.float32)  # [num_seqs, n_v, d_k, d_v]
+    init_rec = jnp.where(has_init[:, None, None, None], init_rec, 0.0)
+
+    s_decayed = init_rec * jnp.exp(g_s)[:, :, None, None]
+    kv_mem = jnp.einsum("shkv,shk->shv", s_decayed, k_s, precision=jax.lax.Precision.HIGHEST)
+    delta = (v_s - kv_mem) * beta_s[:, :, None]
+    new_rec = s_decayed + jnp.einsum("shk,shv->shkv", k_s, delta, precision=jax.lax.Precision.HIGHEST)
+    out_s = jnp.einsum("shkv,shk->shv", new_rec, q_s, precision=jax.lax.Precision.HIGHEST)
+    out_s = jnp.where(valid_mask[:, None, None], out_s, 0.0).astype(act_out_dtype)
+
+    out_recurrent_state = recurrent_state.at[write_indices].set(
+        new_rec.astype(recurrent_state.dtype),
+        mode="drop",
+        wrap_negative_indices=False,
+    )
+
+    # Construct `out_act` of shape `(padded_batch_size, n_v, d_v)` for Stage 2 (`PER_SEQ`)
+    out_act = jnp.zeros((padded_batch_size, n_v, d_v), dtype=act_out_dtype)
+    out_act = out_act.at[:max_decode].set(out_s)
+    out_conv_4d = out_conv_3d.reshape(-1, k_minus_1, 1, dim)
+    return out_act, out_conv_4d, out_recurrent_state
+
+  @functools.partial(
+      jax.jit,
+      donate_argnames=("conv_state", "recurrent_state"),
+      static_argnames=(
+          "n_kq",
+          "n_v",
+          "d_k",
+          "d_v",
+          "kernel_size",
+          "num_spec_tokens",
+          "decode_tile_size",
+          "mixed_tile_size",
+          "zero_initialize_out",
+          "compute_precision",
+      ),
+  )
+  def _hybrid_fused_conv1d_gdn(
+      qkv: jax.Array,
+      b: jax.Array,
+      a: jax.Array,
+      conv_state: jax.Array,
+      recurrent_state: jax.Array,
+      conv_weight: jax.Array,
+      conv_bias: jax.Array | None,
+      a_log: jax.Array,
+      dt_bias: jax.Array,
+      query_start_loc: jax.Array,
+      state_indices: jax.Array,
+      distribution: jax.Array,
+      seq_lens: jax.Array,
+      read_state_indices: jax.Array,
+      read_offsets: jax.Array | None = None,
+      *,
+      n_kq: int,
+      n_v: int,
+      d_k: int,
+      d_v: int,
+      kernel_size: int,
+      num_spec_tokens: int = 0,
+      zero_initialize_out: bool = True,
+      compute_precision: jnp.dtype = jnp.float32.dtype,
+      decode_tile_size: int = 4,
+      mixed_tile_size: int = 64,
+  ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
+    act_out_dtype = qkv.dtype
+    conv_out_dtype = conv_state.dtype
+    recurrent_out_dtype = recurrent_state.dtype
+
+    qkv_f32 = qkv.astype(jnp.float32)
+    b_f32 = b.astype(jnp.float32)
+    a_f32 = a.astype(jnp.float32)
+    conv_state_f32 = conv_state.astype(jnp.float32)
+
+    del read_offsets, num_spec_tokens, zero_initialize_out, decode_tile_size
+    batch_size, dim = qkv_f32.shape
+    read_state_indices = read_state_indices.astype(state_indices.dtype)
+    act_in_dtype = qkv_f32.dtype
+
+    num_lanes = pltpu.get_tpu_info().num_lanes
+    packing = 4 // act_in_dtype.itemsize
+    padded_batch_size = pl.cdiv(batch_size, packing) * packing
+    mixed_tile_size = min(mixed_tile_size, batch_size)
+    aligned_num_v_heads = pl.cdiv(n_v, num_lanes) * num_lanes
+
+    # Stage 1: Pure-JAX vectorized decode for sequences 0..distribution[0]
+    out_act, out_conv_state, out_recurrent_state = _pure_jax_gdn_batched_stage(
+        qkv_2d=qkv_f32,
+        b_2d=b_f32,
+        a_2d=a_f32,
+        conv_state_3d=conv_state_f32,
+        recurrent_state=recurrent_state,
+        conv_weight_raw=conv_weight,
+        conv_bias_1d=conv_bias,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        distribution=distribution,
+        seq_lens=seq_lens,
+        state_indices=state_indices,
+        read_state_indices=read_state_indices,
+        padded_batch_size=padded_batch_size,
+        act_out_dtype=act_out_dtype,
+        n_kq=n_kq,
+        n_v=n_v,
+        d_k=d_k,
+        d_v=d_v,
+        kernel_size=kernel_size,
+    )
+
+    # Stage 2: Pallas PER_SEQ chunked-matmul for prefill sequences distribution[0]..distribution[-1]
+    batch_padding_size = padded_batch_size - batch_size
+    num_v_padding_size = aligned_num_v_heads - n_v
+    qkv_pad = jnp.pad(qkv_f32, ((0, batch_padding_size), (0, 0))).reshape(padded_batch_size, 1, -1)
+    b_pad = jnp.pad(b_f32, ((0, batch_padding_size), (0, num_v_padding_size))).reshape(padded_batch_size, 1, -1)
+    a_pad = jnp.pad(a_f32, ((0, batch_padding_size), (0, num_v_padding_size))).reshape(padded_batch_size, 1, -1)
+
+    conv_state_shape = conv_state.shape
+    conv_weight_swapped = conv_weight.swapaxes(0, 2).astype(jnp.float32)
+    conv_bias_f32 = conv_bias.astype(jnp.float32) if conv_bias is not None else None
+
+    conv_weights = gdn_v3_memory_ref.ConvWeightsRef(weight=conv_weight_swapped, bias=conv_bias_f32)
+    gdn_weights = gdn_v3_memory_ref.GDNWeightsRef(a_log=a_log, dt_bias=dt_bias)
+    weights = gdn_v3_memory_ref.WeightRefs(conv=conv_weights, gdn=gdn_weights)
+
+    smem_spec = pl.BlockSpec(memory_space=pltpu.SMEM)
+    vmem_spec = pl.BlockSpec(memory_space=pltpu.VMEM)
+    hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+    weights_spec = jax.tree.map(lambda _: vmem_spec, weights)
+
+    cfg = gdn_v3_config.GDNConfig(
+        mode=gdn_v3_config.GDNMode.PER_SEQ,
+        batch_size=padded_batch_size,
+        kernel_size=kernel_size,
+        tile_size=mixed_tile_size,
+        window_size=1,
+        dim_size=dim,
+        num_kq_heads=n_kq,
+        num_v_heads=n_v,
+        kq_head_dim=d_k,
+        v_head_dim=d_v,
+        dtypes=gdn_v3_config.Dtypes(
+            act_in=act_in_dtype,
+            act_out=act_out_dtype,
+            compute=compute_precision,
+            recurrent_state=out_recurrent_state.dtype,
+            conv_state=out_conv_state.dtype,
+        ),
+    )
+    metadata_obj = gdn_v3_metadata.compute_per_seq_metadata(
+        cfg=cfg,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        state_indices=state_indices,
+        start_seq=distribution[0],
+        end_seq=distribution[-1],
+        read_indices=read_state_indices,
+    )
+    metadata_spec = jax.tree.map(lambda _: smem_spec, metadata_obj)
+    input_output_aliases = {
+        len(metadata_obj) + 3: 1,
+        len(metadata_obj) + 4: 2,
+        len(metadata_obj) + 5: 0,
+    }
+    out_act, out_conv_state, out_recurrent_state = pl.pallas_call(
+        functools.partial(gdn_v3_wrapper.outer_kernel, cfg=cfg),
+        out_shape=(out_act, out_conv_state, out_recurrent_state),
+        in_specs=(
+            metadata_spec,
+            hbm_spec,
+            hbm_spec,
+            hbm_spec,
+            hbm_spec,
+            hbm_spec,
+            hbm_spec,
+            weights_spec,
+        ),
+        out_specs=(hbm_spec, hbm_spec, hbm_spec),
+        scratch_shapes=cfg.get_scratch_shape_dict(),
+        input_output_aliases=input_output_aliases,
+        compiler_params=pltpu.CompilerParams(
+            disable_bounds_checks=True,
+            vmem_limit_bytes=cfg.get_vmem_limit_bytes(),
+        ),
+        name=cfg.get_kernel_name(),
+        metadata=cfg.get_metadata(),
+    )(
+        metadata_obj,
+        qkv_pad,
+        b_pad,
+        a_pad,
+        out_conv_state,
+        out_recurrent_state,
+        out_act,
+        weights,
+    )
+
+    out_act = out_act.reshape(padded_batch_size, -1)[:batch_size]
+    out_conv_state = out_conv_state.astype(conv_out_dtype).reshape(conv_state_shape)
+    out_recurrent_state = out_recurrent_state.astype(recurrent_out_dtype)
+    return (out_conv_state, out_recurrent_state), out_act
+
+  gdn_v3_wrapper.fused_conv1d_gdn = _hybrid_fused_conv1d_gdn
+  logger.info(
+      "Patched tpu_inference GDN v3 wrapper.fused_conv1d_gdn with hybrid"
+      " pure-JAX Stage-1 BATCHED decode + Pallas Stage-2 PER_SEQ prefill."
+  )
+except Exception as e:
+  logger.warning("Could not patch GDN v3 fused_conv1d_gdn: %s", e)
 
 from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
@@ -683,75 +1010,7 @@ model_call = eval_utils.create_model_call(
 
 # ========================== Evaluation ==========================
 
-
-class EvalTrajectoryCollectEngine(
-    trajectory_collect_engine.TrajectoryCollectEngine
-):
-  """Trajectory engine that converts prompt overflows into per-trajectory termination and always grades working tree."""
-
-  async def collect(self, mode: str = "Conversation"):
-    try:
-      return await super().collect(mode=mode)
-    except Exception as exc:
-      logger.exception(
-          "[pair=%s instance=%s] unexpected fatal error in collect(), returning"
-          " partial trajectory: %s",
-          self.env.extra_kwargs.get("pair_index"),
-          self.env.entry.get("instance_id", "unknown"),
-          exc,
-      )
-      return self.agent.trajectory
-
-  async def _one_step(self) -> bool:
-    try:
-      return await super()._one_step()
-    except eval_utils.PromptTooLongError as exc:
-      logger.warning(
-          "[pair=%s instance=%s] terminating trajectory due to prompt"
-          " overflow: %s",
-          self.env.extra_kwargs.get("pair_index"),
-          self.env.entry.get("instance_id", "unknown"),
-          exc,
-      )
-      self.agent.trajectory.status = (
-          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
-      )
-      if self.agent.trajectory.steps:
-        self.agent.trajectory.steps[-1].done = True
-      return True
-    except Exception as exc:
-      logger.exception(
-          "[pair=%s instance=%s] unexpected exception in _one_step, terminating"
-          " trajectory gracefully: %s",
-          self.env.extra_kwargs.get("pair_index"),
-          self.env.entry.get("instance_id", "unknown"),
-          exc,
-      )
-    if self.agent.trajectory.steps:
-      self.agent.trajectory.steps[-1].done = True
-    return True
-
-  async def _append_final_reward(self):
-    pair_index = self.env.extra_kwargs.get("pair_index")
-    instance_id = self.env.entry.get("instance_id", "unknown")
-    logger.info(
-        "[pair=%s instance=%s] final_reward_fn start (steps=%d status=%s)",
-        pair_index,
-        instance_id,
-        len(self.agent.trajectory.steps),
-        getattr(self.agent.trajectory, "status", "UNKNOWN"),
-    )
-    t0 = time.time()
-    await super()._append_final_reward()
-    last_step = self.agent.get_current_step()
-    rew = last_step.reward if last_step is not None else 0.0
-    logger.info(
-        "[pair=%s instance=%s] final_reward_fn end reward=%.1f (%.1fs)",
-        pair_index,
-        instance_id,
-        rew,
-        time.time() - t0,
-    )
+EvalTrajectoryCollectEngine = eval_utils.EvalTrajectoryCollectEngine
 
 
 def pairs_generator():

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import concurrent.futures
+import contextlib
 import json
 import logging
 import math
@@ -40,6 +41,7 @@ except ImportError:
   from examples.deepswe import swe_env
 
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
@@ -59,8 +61,7 @@ def _is_prompt_overflow_error(exc: Exception) -> bool:
       "maximum input length" in message
       or "context length is only" in message
       or "Prompt too long before sampler call" in message
-      or "input_tokens" in message
-      and "max_model_len" in message
+      or ("input_tokens" in message and "max_model_len" in message)
   )
 
 
@@ -85,7 +86,7 @@ def create_model_call(
       **kwargs: Any,
   ) -> Any:
     """Model inference via tunix sampler."""
-    max_gen_steps = max_generation_steps or max_response_length
+    max_gen_steps = min(max_generation_steps or max_response_length, 4096)
     pair_index = None
     instance_id = "unknown"
     if env is not None:
@@ -107,12 +108,14 @@ def create_model_call(
         prompt_token_count,
         max_context_limit,
     )
-    if prompt_token_count >= max_context_limit:
+    remaining_context = max_context_limit - prompt_token_count
+    if remaining_context <= 0:
       raise PromptTooLongError(
           "Prompt too long before sampler call:"
           f" prompt_tokens={prompt_token_count},"
           f" max_context_limit={max_context_limit}"
       )
+    max_gen_steps = min(max_gen_steps, remaining_context)
     t0 = time.time()
     try:
       if sampler_lock is None:
@@ -244,6 +247,94 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, guarded_swe_env.GuardedSWEEnv):
   pass
 
 
+class EvalTrajectoryCollectEngine(
+    trajectory_collect_engine.TrajectoryCollectEngine
+):
+  """Trajectory engine that converts prompt overflows and env errors into per-trajectory termination."""
+
+  skip_final_reward_on_overflow: bool = False
+
+  async def _reset(self):
+    log = logging.getLogger("deepswe_eval")
+    try:
+      await super()._reset()
+    except Exception as exc:
+      log.exception(
+          "[pair=%s instance=%s] unexpected exception in _reset, terminating"
+          " trajectory gracefully: %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
+      )
+      self._reset_failed = True
+      self._skip_final_reward = True
+
+  async def _one_step(self) -> bool:
+    log = logging.getLogger("deepswe_eval")
+    if getattr(self, "_reset_failed", False):
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      return True
+    try:
+      return await super()._one_step()
+    except PromptTooLongError as exc:
+      log.warning(
+          "[pair=%s instance=%s] terminating trajectory due to prompt"
+          " overflow: %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
+      )
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+      )
+      self._skip_final_reward = self.skip_final_reward_on_overflow
+      if self.agent.trajectory.steps:
+        self.agent.trajectory.steps[-1].done = True
+      return True
+    except Exception as exc:
+      log.exception(
+          "[pair=%s instance=%s] unexpected exception in _one_step, terminating"
+          " trajectory gracefully: %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
+      )
+      if self.agent.trajectory.steps:
+        self.agent.trajectory.steps[-1].done = True
+      return True
+
+  async def _append_final_reward(self):
+    if getattr(self, "_skip_final_reward", False):
+      return
+    log = logging.getLogger("deepswe_eval")
+    pair_index = self.env.extra_kwargs.get("pair_index")
+    instance_id = self.env.entry.get("instance_id", "unknown")
+    log.info(
+        "[pair=%s instance=%s] final_reward_fn start (steps=%d status=%s)",
+        pair_index,
+        instance_id,
+        len(self.agent.trajectory.steps),
+        getattr(self.agent.trajectory, "status", "UNKNOWN"),
+    )
+    t0 = time.time()
+    await super()._append_final_reward()
+    last_step = self.agent.get_current_step()
+    rew = last_step.reward if last_step is not None else 0.0
+    log.info(
+        "[pair=%s instance=%s] final_reward_fn end reward=%.1f (%.1fs)",
+        pair_index,
+        instance_id,
+        rew,
+        time.time() - t0,
+    )
+
+  def compute_trajectory_reward(self):
+    if getattr(self, "_skip_final_reward", False):
+      self.agent.trajectory.reward = 0.0
+      return self.agent.trajectory
+    return super().compute_trajectory_reward()
+
+
 async def run_evaluation(
     entries: list[dict[str, Any]],
     pairs_stream: Any,
@@ -253,17 +344,19 @@ async def run_evaluation(
     timeout: float,
     max_concurrent: int,
     output_dir: str,
-    engine_cls: type[trajectory_collect_engine.TrajectoryCollectEngine],
-    logger: logging.Logger,
+    engine_cls: type[
+        trajectory_collect_engine.TrajectoryCollectEngine
+    ] = EvalTrajectoryCollectEngine,
+    logger: Optional[logging.Logger] = None,
     num_rollouts_per_instance: int = 1,
     max_response_length: Optional[int] = None,
     use_custom_executor: bool = True,
 ) -> list[dict[str, Any]]:
   """Runs evaluation with orchestrator-managed task-level parallelism."""
+  log = logger or logging.getLogger("deepswe_eval")
   if not output_dir.startswith("gs://"):
     os.makedirs(output_dir, exist_ok=True)
 
-  executor = None
   if use_custom_executor:
     loop = asyncio.get_running_loop()
     executor = concurrent.futures.ThreadPoolExecutor(
@@ -302,63 +395,65 @@ async def run_evaluation(
 
   await asyncio.sleep(0)
 
-  async for batch in orchestrator.yield_batches(batch_size=1):
-    for item in batch:
-      traj = item.traj
-      entry_index = item.group_index // num_rollouts_per_instance
-      entry = entries[entry_index]
-      step_actions = [
-          getattr(step, "action", "").split("\n", 1)[0][:80]
-          for step in traj.steps
-      ]
-      guard_reasons = sorted({
-          (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
-          for step in traj.steps
-          if (getattr(step, "info", {}) or {}).get("guard_blocked")
-      })
-      guard_blocked_steps = sum(
-          1
-          for step in traj.steps
-          if (getattr(step, "info", {}) or {}).get("guard_blocked")
-      )
-      result = {
-          "pair_index": item.group_index,
-          "entry_index": entry_index,
-          "instance_id": entry.get("instance_id", entry_index),
-          "reward": float(traj.reward),
-          "num_steps": len(traj.steps),
-          "status": getattr(traj.status, "name", str(traj.status)),
-          "step_actions": step_actions,
-          "guard_blocked_steps": guard_blocked_steps,
-          "guard_reasons": guard_reasons,
-      }
-      results.append(result)
-      elapsed = time.time() - start_time
-      logger.info(
-          "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs"
-          " elapsed)",
-          len(results),
-          len(entries) * num_rollouts_per_instance,
-          result["instance_id"],
-          result["reward"],
-          result["num_steps"],
-          result["status"],
-          elapsed,
-      )
-      logger.info(
-          "%s[%s] FINAL TRAJECTORY REWARD=%.1f%s",
-          ANSI_RED,
-          result["instance_id"],
-          result["reward"],
-          ANSI_RESET,
-      )
-
   try:
+    async for batch in orchestrator.yield_batches(batch_size=1):
+      for item in batch:
+        traj = item.traj
+        entry_index = item.group_index // num_rollouts_per_instance
+        entry = entries[entry_index]
+        step_actions = [
+            getattr(step, "action", "").split("\n", 1)[0][:80]
+            for step in traj.steps
+        ]
+        guard_reasons = sorted({
+            (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
+            for step in traj.steps
+            if (getattr(step, "info", {}) or {}).get("guard_blocked")
+        })
+        guard_blocked_steps = sum(
+            1
+            for step in traj.steps
+            if (getattr(step, "info", {}) or {}).get("guard_blocked")
+        )
+        result = {
+            "pair_index": item.group_index,
+            "entry_index": entry_index,
+            "instance_id": entry.get("instance_id", entry_index),
+            "reward": float(traj.reward),
+            "num_steps": len(traj.steps),
+            "status": getattr(traj.status, "name", str(traj.status)),
+            "step_actions": step_actions,
+            "guard_blocked_steps": guard_blocked_steps,
+            "guard_reasons": guard_reasons,
+        }
+        results.append(result)
+        elapsed = time.time() - start_time
+        log.info(
+            "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs"
+            " elapsed)",
+            len(results),
+            len(entries) * num_rollouts_per_instance,
+            result["instance_id"],
+            result["reward"],
+            result["num_steps"],
+            result["status"],
+            elapsed,
+        )
+        log.info(
+            "%s[%s] FINAL TRAJECTORY REWARD=%.1f%s",
+            ANSI_RED,
+            result["instance_id"],
+            result["reward"],
+            ANSI_RESET,
+        )
+
     await producer
     return results
   finally:
-    if executor is not None:
-      executor.shutdown(wait=False)
+    if not producer.done():
+      producer.cancel()
+      with contextlib.suppress(asyncio.CancelledError):
+        await producer
 
 
 def _estimate_pass_at_k(n: int, c: int, k: int) -> Optional[float]:
@@ -392,6 +487,13 @@ def compute_pass_at_k(
   for r in results:
     instance_groups[r["instance_id"]].append(r)
 
+  num_instances = len(instance_groups)
+  resolved_instances = sum(
+      1
+      for inst_results in instance_groups.values()
+      if any(r["reward"] > 0 for r in inst_results)
+  )
+
   pass_at_k_metrics = {}
   for k in ks:
     scores = []
@@ -409,8 +511,12 @@ def compute_pass_at_k(
   log.info("=" * 50)
   log.info("Evaluation Results")
   log.info("=" * 50)
-  log.info("Total instances:  %d", total)
-  log.info("Resolved:         %d", correct)
+  if total != num_instances:
+    log.info("Total instances:  %d (rollouts: %d)", num_instances, total)
+    log.info("Resolved:         %d (rollouts: %d)", resolved_instances, correct)
+  else:
+    log.info("Total instances:  %d", num_instances)
+    log.info("Resolved:         %d", resolved_instances)
   for k in ks:
     if k == 1:
       val = (

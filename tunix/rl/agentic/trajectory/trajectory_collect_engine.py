@@ -701,35 +701,22 @@ class TrajectoryCollectEngine:
       )
     logging.debug("%s model_call done", self._debug_prefix)
 
-    prompt_tokens = getattr(
-        rollout_output, "left_padded_prompt_tokens", None
-    )
-    if prompt_tokens is None:
-      prompt_tokens = getattr(rollout_output, "padded_prompt_tokens", None)
     if self.exact_token_continuity:
       if not self.agent.trajectory.steps:
         # The owned first-turn prompt; later turns replay exactly these ids.
         self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
-            prompt_tokens[0]
+            rollout_output.left_padded_prompt_tokens[0]
         )
         self.agent.trajectory.prompt_length = int(
             rollout_output.prompt_lengths[0]
         )
       else:
         echoed = generate_utils.unpad_prompt(
-            prompt_tokens[0],
+            rollout_output.left_padded_prompt_tokens[0],
             rollout_output.prompt_lengths[0],
         )
         if not np.array_equal(echoed, call_kwargs["prompt_token_ids"]):
           raise ValueError("later-turn prompt differs from recorded history")
-    elif (
-        not self.agent.trajectory.steps
-        and prompt_tokens is not None
-        and not len(getattr(self.agent.trajectory, "prompt_tokens", []))
-    ):
-      self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
-          prompt_tokens[0]
-      )
 
     self._current_step_initial_routed_experts = None
     if (

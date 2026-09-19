@@ -41,6 +41,8 @@ TOKEN_WARNING_THRESHOLD = 28000
 
 
 def parse_oai_response(response: Any):
+  if not getattr(response, "choices", None):
+    return "", SWEAction(function_name="", parameters={})
   thought = response.choices[0].message.content
   if not thought:
     thought = ""

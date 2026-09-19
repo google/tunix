@@ -55,10 +55,6 @@ class SamplerOutput:
   # Valid prompt length per row, before left padding (not a pad-ID count).
   prompt_lengths: np.ndarray | None = None
 
-  @property
-  def left_padded_prompt_tokens(self) -> np.ndarray:
-    return self.padded_prompt_tokens
-
 
 class BaseSampler(ABC):
   """Base class for samplers."""
