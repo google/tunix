@@ -385,6 +385,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--base_num_kv_heads",
+      type=int,
+      default=0,
+      help=(
+          "Explicit base_num_kv_heads override for MaxText trainer. If 0,"
+          " uses the model config default or replicates for rollout_mesh_tp."
+      ),
+  )
+  parser.add_argument(
       "--max_seq_token_per_tpu",
       type=int,
       default=0,
@@ -634,6 +643,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
       trainable_parameters_mask=args.trainable_parameters_mask,
+      base_num_kv_heads=args.base_num_kv_heads,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
