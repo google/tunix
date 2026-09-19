@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Fill these before you run.
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-}"
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/wuhao/trellis-35b:latest}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-niting}/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
@@ -25,6 +25,7 @@ export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways
 export PATHWAYS_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260914"
 export PATHWAYS_PROXY_MEMORY_LIMIT="160G"
 export USER_CONTAINER_MEMORY="260G"
+export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-260G}"
 export RAIDEN_DEVICES_PER_HOST=4
 export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
@@ -44,7 +45,8 @@ export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
 export TRAINABLE_PARAMETERS_MASK='["^(?!.*routed_experts/gate/kernel).*"]'
-export TRAJECTORY_LOG_DIR="gs://deepswe-wuhao-1784153479/trajectories"
+export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://deepswe-wuhao-1784153479/trajectories}"
 
 # Backend configuration
 export TRAINER_BACKEND="maxtext"
@@ -181,7 +183,9 @@ export MAX_RESPONSE_LENGTH=61440
 # ==============================================================================
 # Execution Dispatch
 # ==============================================================================
-if [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
+if [ -f "${DIR}/../deepswe_dist/k8s_launcher.sh" ]; then
+  LAUNCHER="${DIR}/../deepswe_dist/k8s_launcher.sh"
+elif [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
   LAUNCHER="${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
 elif [ -f "${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
   LAUNCHER="${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"

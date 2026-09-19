@@ -44,9 +44,9 @@ RUN mkdir /app/tunix && touch /app/tunix/__init__.py
 RUN uv pip install .
 
 # Install SFT/MaxText dependencies (unconditional)
-RUN uv pip install --upgrade flax && \
+RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git
+    uv pip install --no-deps git+https://github.com/google/maxtext.git@atwigg/mlperf
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -98,8 +98,8 @@ RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
       RAIDEN_WHEEL_DIR="$RAIDEN_WHEEL_DIR" bash /app/scripts/install_raiden.sh; \
     fi
 
-# Force install numpy version to avoid version conflicts.
-RUN uv pip install numpy==2.3.5
+# Force install numpy, jax, and flax versions to avoid version conflicts and API breakage.
+RUN uv pip install numpy==2.3.5 'jax==0.11.0' 'flax==0.12.7'
 
 # Copy the rest of the project files
 COPY . .

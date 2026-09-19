@@ -53,13 +53,18 @@ verify_install() {
 }
 
 compile_protos() {
-  echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
-
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
     proto_dir="${ROOT_DIR}/../tunix/experimental/distributed"
   fi
+  if [[ ! -d "${proto_dir}" ]]; then
+    echo "Proto directory not found, skipping proto compilation (handled in full build)."
+    return 0
+  fi
+
+  echo "Compiling distributed runtime gRPC protobuf definitions..."
+  python3 -m pip install grpcio-tools
+
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
 
