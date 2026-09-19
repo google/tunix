@@ -1,52 +1,41 @@
-# Overlay Dockerfile on top of Yixuan's verified Raiden 35B stack image:
-#   gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0917head-v19
-#
-# Preserves the exact tpu_sync_jax wheel, JAX 0.11.0 / libtpu 0.0.44, and vLLM 51da0ca66,
-# while overlaying our 3 parity branches (jfacevedo/k8s-deploy-35b-parity) into both
-# /app (on PYTHONPATH) and /opt/venv/lib/python3.12/site-packages/:
-#   1. maxtext (GDN left-padding fix + Router Replay + NVIDIA FP32 surgical casts)
-#   2. tpu_inference_ref / tpu-inference (attn_gid=3 FullAttentionSpec slot tie-break fix)
-#   3. tunix (seq-mask-tis + grpo-loo + distributed vLLM/MaxText Router Replay & FP32 casts)
-#
-# Build from the parent directory containing maxtext/, tunix/, and tpu_inference_ref/ (or tpu-inference/):
-#   docker build --platform linux/amd64 -f Dockerfile.parity_overlay \
-#     -t gcr.io/cloud-tpu-multipod-dev/${USER}/tunix_raiden_35b_parity:0918_v1 .
-
-FROM gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0917head-v19
+# ==============================================================================
+# Dockerfile.parity_overlay — 35B Multi-Host Trellis Stack + Parity Fixes + DeepSWE Deps
+# Base image: Yixuan's Raiden + Pathways + vLLM image (or wuhao/trellis-35b:latest)
+# ==============================================================================
+ARG BASE_IMAGE=gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-e2e-0917head-v19
+FROM ${BASE_IMAGE}
 
 ARG TPU_INF_DIR=tpu_inference_ref
 
-WORKDIR /app
+# 0. Ensure DeepSWE / R2E-Gym / Agent-Sandbox dependencies are installed
+RUN python3 -c "import r2egym, agent_sandbox_rl" 2>/dev/null || ( \
+      uv pip install kubernetes gym swebench==3.0.2 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands && \
+      uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
+      sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
+      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py \
+    )
 
-# 1. Overlay MaxText into /app/maxtext and /opt/venv/lib/python3.12/site-packages/
-COPY maxtext /app/maxtext
-RUN pip install --no-deps -e /app/maxtext && \
-    (pip install --no-deps -e /app/maxtext/src/maxtext/integration/vllm 2>/dev/null || true) && \
-    mkdir -p /app/maxtext/maxtext && ln -sf /app/maxtext/src /app/maxtext/maxtext/src && \
-    cp -rf /app/maxtext/src/maxtext /opt/venv/lib/python3.12/site-packages/
+# 1. Overlay MaxText (FP32 router/norm/GDN/LM-head casts, float32_weight_sum HIGHEST, frozen router mask, Router Replay)
+COPY maxtext/src/maxtext /app/maxtext/src/maxtext
+COPY maxtext/src/maxtext /opt/venv/lib/python3.12/site-packages/maxtext
 
-# 2. Overlay Tunix into /app/tunix and /opt/venv/lib/python3.12/site-packages/
+# 2. Overlay tpu-inference (FusedMoE FP32 topk_weights + Qwen3.5 hybrid attn_gid=3 slot fix)
+COPY ${TPU_INF_DIR}/tpu_inference /app/tpu-inference/tpu_inference
+COPY ${TPU_INF_DIR}/tpu_inference /opt/venv/lib/python3.12/site-packages/tpu_inference
+
+# 3. Overlay Tunix (Router Replay plumbing + seq-mask-tis + trainable_parameters_mask + DeepSWE K8s launcher)
 COPY tunix/tunix /app/tunix
-COPY tunix/pyproject.toml /app/pyproject.toml
-RUN (cd /app/tunix && ln -sf . tunix) && \
-    pip install --no-deps -e /app && \
-    python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. tunix/experimental/distributed/runtime/discovery/discovery_service.proto 2>/dev/null || true && \
-    cp -rf /app/tunix /opt/venv/lib/python3.12/site-packages/
+COPY tunix/examples /app/examples
+COPY tunix/tunix /opt/venv/lib/python3.12/site-packages/tunix
 
-# 3. Overlay TPU-Inference into /app/tpu-inference and /opt/venv/lib/python3.12/site-packages/
-COPY ${TPU_INF_DIR} /app/tpu-inference
-RUN cp -rf /app/tpu-inference/tpu_inference /opt/venv/lib/python3.12/site-packages/
-
-ENV PYTHONPATH="/app/maxtext/src:/app:${PYTHONPATH:-}"
-ENV ENABLE_ROUTER_REPLAY=1
-
-# Verify vLLM + tpu-inference + tunix + maxtext import compatibility at build time
-RUN python3 -c "\
-import vllm.model_executor.layers.quantization.modelopt as m; \
-import tpu_inference.layers.vllm.quantization.nvfp4; \
-import tunix.rl.algo_core; \
-import tunix.utils.maxtext_utils; \
-print('BUILD CHECK OK: parity overlay installed successfully')"
-
-WORKDIR /app
-CMD ["bash"]
+# 4. Default environment variables for 35B numerical parity & Raiden weight sync
+ENV FLOAT32_GATE_LOGITS="true" \
+    FLOAT32_WEIGHT_SUM="true" \
+    FLOAT32_QK_PRODUCT="true" \
+    FLOAT32_LOGITS="true" \
+    ENABLE_ROUTER_REPLAY="1" \
+    RAIDEN_DEVICES_PER_HOST="4" \
+    USE_WEIGHT_CONVERTER="true"

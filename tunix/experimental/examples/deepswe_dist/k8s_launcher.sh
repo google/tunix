@@ -25,7 +25,8 @@ fi
 YAML_GENERATOR="${YAML_GENERATOR:-${TUNIX_ROOT}/experimental/distributed/deployment/yaml_generator.py}"
 YAML_DIR="${YAML_DIR:-${TUNIX_ROOT}/experimental/distributed/deployment/yamls}"
 
-BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
+DEFAULT_DEEPSWE_BOOTSTRAP="python3 -c 'import r2egym' 2>/dev/null || (uv pip install kubernetes gym swebench==3.0.2 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx && uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py);"
+BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-${DEFAULT_DEEPSWE_BOOTSTRAP}}"
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-4B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-4B}
