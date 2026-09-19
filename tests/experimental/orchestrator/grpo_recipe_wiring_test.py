@@ -20,6 +20,7 @@ from absl.testing import absltest
 import numpy as np
 import tunix
 from tunix.experimental.common import datatypes
+from tunix.experimental.examples.deepswe_dist import run_deepswe_dist
 from tunix.experimental.examples.math_gsm8k_dist import run_gsm8k_dist_grpo
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
@@ -29,15 +30,32 @@ from tunix.rl import algorithm_config
 from tunix.rl.agentic.agents import agent_types
 
 
-def _launcher_orchestrator_cmd() -> str:
+def _launcher_orchestrator_cmd(example_dir: str = "math_gsm8k_dist") -> str:
   path = os.path.join(
       os.path.dirname(os.path.abspath(tunix.__file__)),
-      "experimental", "examples", "math_gsm8k_dist", "launcher.sh",
+      "experimental",
+      "examples",
+      example_dir,
+      "launcher.sh",
   )
   with open(path) as f:
     text = f.read()
   start = text.index("ORCHESTRATOR_CMD=(")
   return text[start : text.index("\n  export JAX_PLATFORMS", start)]
+
+
+def _deepswe_k8s_orchestrator_block() -> str:
+  path = os.path.join(
+      os.path.dirname(os.path.abspath(tunix.__file__)),
+      "experimental",
+      "examples",
+      "deepswe_dist",
+      "k8s_launcher.sh",
+  )
+  with open(path) as f:
+    text = f.read()
+  start = text.index("start_orchestrator() {")
+  return text[start : text.index("\n}\n", start)]
 
 
 def _recipe_config(**overrides) -> algorithm_config.GRPOConfig:
@@ -414,6 +432,80 @@ class ExampleCommandLineTest(absltest.TestCase):
         "--sampler_is_length_buckets=",
     ):
       self.assertIn(flag, block, f"launcher does not pass {flag}")
+
+
+class DeepSWEExampleCommandLineTest(absltest.TestCase):
+  """Tests for the deepswe_dist example's flags for the sequence-level options."""
+
+  def _config(self, argv):
+    args = run_deepswe_dist._parse_args(argv)  # pylint: disable=protected-access
+    return run_deepswe_dist._build_algo(args).algo_config  # pylint: disable=protected-access
+
+  def test_defaults_leave_every_option_off(self):
+    cfg = self._config([])
+    self.assertFalse(cfg.overlong_loss_masking)
+    self.assertIsNone(cfg.seq_logprob_error_threshold)
+    self.assertIsNone(cfg.truncated_importance_sampling_type)
+    self.assertEqual(cfg.advantage_estimator, "grpo")
+    self.assertIsNone(cfg.sampler_is_length_buckets)
+
+  def test_flags_reach_the_config(self):
+    cfg = self._config([
+        "--no-use_rollout_logps",
+        "--epsilon_high=0.28",
+        "--loss_agg_mode=token-mean",
+        "--overlong_loss_masking",
+        "--seq_logprob_error_threshold=2.0",
+        "--truncated_importance_sampling_type=seq-mask-tis",
+        "--truncated_importance_sampling_ratio_min=0.999",
+        "--truncated_importance_sampling_ratio=1.002",
+        "--advantage_estimator=grpo-loo",
+        "--sampler_is_length_buckets=512,2048",
+    ])
+    self.assertEqual(cfg.epsilon_high, 0.28)
+    self.assertEqual(cfg.loss_agg_mode, "token-mean")
+    self.assertTrue(cfg.overlong_loss_masking)
+    self.assertEqual(cfg.seq_logprob_error_threshold, 2.0)
+    self.assertEqual(cfg.truncated_importance_sampling_type, "seq-mask-tis")
+    self.assertEqual(cfg.truncated_importance_sampling_ratio_min, 0.999)
+    self.assertEqual(cfg.truncated_importance_sampling_ratio, 1.002)
+    self.assertEqual(cfg.advantage_estimator, "grpo-loo")
+    self.assertFalse(cfg.use_rollout_logps)
+    self.assertEqual(cfg.sampler_is_length_buckets, (512, 2048))
+
+  def test_launcher_passes_every_option_it_exposes(self):
+    block = _launcher_orchestrator_cmd("deepswe_dist")
+    for flag in (
+        "--epsilon_high=",
+        "--loss_agg_mode=",
+        "--advantage_estimator=",
+        "--overlong_loss_masking",
+        "--seq_logprob_error_threshold=",
+        "--truncated_importance_sampling_type=",
+        "--truncated_importance_sampling_ratio_min=",
+        "--truncated_importance_sampling_ratio=",
+        "--sampler_is_length_buckets=",
+    ):
+      self.assertIn(flag, block, f"deepswe launcher does not pass {flag}")
+
+  def test_k8s_launcher_passes_every_option_it_exposes(self):
+    block = _deepswe_k8s_orchestrator_block()
+    for flag in (
+        "--mini_batch_size=",
+        "--temperature=",
+        "--top_p=",
+        "--top_k=",
+        "--epsilon_high=",
+        "--loss_agg_mode=",
+        "--advantage_estimator=",
+        "--overlong_loss_masking",
+        "--seq_logprob_error_threshold=",
+        "--truncated_importance_sampling_type=",
+        "--truncated_importance_sampling_ratio_min=",
+        "--truncated_importance_sampling_ratio=",
+        "--sampler_is_length_buckets=",
+    ):
+      self.assertIn(flag, block, f"deepswe k8s_launcher does not pass {flag}")
 
 
 class AuxMetricForwardingTest(absltest.TestCase):
