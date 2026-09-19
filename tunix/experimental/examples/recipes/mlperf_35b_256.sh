@@ -57,9 +57,9 @@ export WEIGHT_SYNC_MODE="raiden"
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
 export TRAINER_TPU_SLICE="tpuv5:4x4x4"
 export TRAINER_MESH_FSDP=8
-export TRAINER_MESH_TP=4
-export TRAINER_MESH_EXPERT=2
-export TRAINER_BASE_NUM_KV_HEADS=4
+export TRAINER_MESH_TP=2
+export TRAINER_MESH_EXPERT=4
+export TRAINER_BASE_NUM_KV_HEADS=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
 export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
