@@ -349,6 +349,7 @@ def build_maxtext_config(
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
+      "allow_split_physical_axes=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
