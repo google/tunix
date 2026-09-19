@@ -450,6 +450,26 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     )
 
   @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_base_num_kv_heads(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--base_num_kv_heads",
+        "4",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("base_num_kv_heads"), 4
+    )
+
+  @mock.patch.object(
       run_trainer_node,
       "_ensure_model_dir_for_trainer",
       return_value="/tmp/test",
@@ -521,6 +541,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.optimizer_chain_kwargs, {})
     self.assertFalse(args.use_lora)
     self.assertEqual(args.rollout_mesh_tp, 0)
+    self.assertEqual(args.base_num_kv_heads, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
     self.assertEqual(args.max_seq_token_per_tpu, 0)
@@ -538,6 +559,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "2",
         "--rollout_mesh_tp",
         "8",
+        "--base_num_kv_heads",
+        "4",
         "--max_seq_token_per_tpu",
         "4096",
         "--prefuse_moe_weights=false",
@@ -577,6 +600,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.mesh_fsdp, 4)
     self.assertEqual(args_custom.mesh_tp, 2)
     self.assertEqual(args_custom.rollout_mesh_tp, 8)
+    self.assertEqual(args_custom.base_num_kv_heads, 4)
     self.assertEqual(args_custom.max_seq_token_per_tpu, 4096)
     self.assertFalse(args_custom.prefuse_moe_weights)
     self.assertFalse(args_custom.use_weight_converter)
