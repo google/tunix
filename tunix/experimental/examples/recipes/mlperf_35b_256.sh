@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Fill these before you run.
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-}"
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/wuhao/trellis-35b:latest}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-niting}/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
@@ -25,6 +25,7 @@ export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways
 export PATHWAYS_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260914"
 export PATHWAYS_PROXY_MEMORY_LIMIT="160G"
 export USER_CONTAINER_MEMORY="260G"
+export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-260G}"
 export RAIDEN_DEVICES_PER_HOST=4
 export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
@@ -44,7 +45,8 @@ export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
 export TRAINABLE_PARAMETERS_MASK='["^(?!.*routed_experts/gate/kernel).*"]'
-export TRAJECTORY_LOG_DIR="gs://deepswe-wuhao-1784153479/trajectories"
+export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://deepswe-wuhao-1784153479/trajectories}"
 
 # Backend configuration
 export TRAINER_BACKEND="maxtext"
@@ -55,12 +57,12 @@ export WEIGHT_SYNC_MODE="raiden"
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
 export TRAINER_TPU_SLICE="tpuv5:4x4x4"
 export TRAINER_MESH_FSDP=8
-export TRAINER_MESH_TP=4
-export TRAINER_MESH_EXPERT=2
-export TRAINER_BASE_NUM_KV_HEADS=4
+export TRAINER_MESH_TP=2
+export TRAINER_MESH_EXPERT=4
+export TRAINER_BASE_NUM_KV_HEADS=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
-export ROLLOUT_TPU_SLICE="tpuv5:2x2x2"
+export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_WORKERS=16
@@ -80,7 +82,7 @@ export VLLM_DATA_PARALLEL_SIZE=1
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 # Note: enable_nnx and pure_nnx_decoder are internal to MaxTextForCausalLM and are
 # not accepted by MaxText pyconfig HyperParameters.
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":8,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="true"
@@ -126,9 +128,14 @@ export MAX_STEPS=${MAX_STEPS:-100}
 export BATCH_SIZE=16
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
-export TRAIN_MICRO_BATCH_SIZE=32
+export TRAIN_MICRO_BATCH_SIZE=8
 export CHECKPOINT_SAVE_INTERVAL_STEPS=2
 export CHECKPOINT_MAX_TO_KEEP=10
+
+# Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
+export TEMPERATURE="1.0"
+export TOP_P="1.0"
+export TOP_K="-1"
 
 # Algorithmic & Loss Hyperparameters
 export BETA=0.0
@@ -164,6 +171,7 @@ export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=1
 
 # DeepSWE Environment & Agent Sandbox
+export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SANDBOX_NAMESPACE="trellis"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
@@ -181,7 +189,9 @@ export MAX_RESPONSE_LENGTH=61440
 # ==============================================================================
 # Execution Dispatch
 # ==============================================================================
-if [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
+if [ -f "${DIR}/../deepswe_dist/k8s_launcher.sh" ]; then
+  LAUNCHER="${DIR}/../deepswe_dist/k8s_launcher.sh"
+elif [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
   LAUNCHER="${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
 elif [ -f "${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
   LAUNCHER="${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"

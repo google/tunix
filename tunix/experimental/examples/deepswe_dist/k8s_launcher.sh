@@ -144,6 +144,7 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+export EOS_TOKENS=${EOS_TOKENS:-}
 
 # Rollout Worker environment flags
 export NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS:-}
@@ -318,7 +319,7 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
-        ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\"${TRAINABLE_PARAMETERS_MASK}\"} \
+        ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\'${TRAINABLE_PARAMETERS_MASK}\'} \
         ${debug_arg} \
     " \
     | apply_manifest
@@ -446,7 +447,7 @@ start_trainer() {
         ${opt_chain_args} \
         ${lora_args} \
         ${maxtext_args} \
-        ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\"${TRAINABLE_PARAMETERS_MASK}\"} \
+        ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\'${TRAINABLE_PARAMETERS_MASK}\'} \
         ${debug_arg} \
     " \
     | apply_manifest
@@ -608,6 +609,7 @@ if cfg:
           --mesh_tp=${ROLLOUT_MESH_TP} \
           --max_prompt_length=${MAX_PROMPT_LENGTH} \
           --max_response_length=${MAX_RESPONSE_LENGTH} \
+          ${EOS_TOKENS:+--eos_tokens=\"${EOS_TOKENS}\"} \
           --sampler=${SAMPLER} \
           --lora_rank=${LORA_RANK} \
           --lora_alpha=${LORA_ALPHA} \
