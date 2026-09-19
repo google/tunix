@@ -373,9 +373,12 @@ try:
   from agent_sandbox_rl.adapters import r2egym as _r2e_adapter
   _r2e_adapter._CLASSES = None
   _r2e_adapter._import_r2egym()
-  for _mod_name in ("examples.deepswe.sandbox_utils", "examples.deepswe.swe_agent", "examples.deepswe.swe_env", "tunix.experimental.examples.deepswe_dist.deepswe"):
+  for _mod_name in ("tunix.rl.common", "tunix.experimental.rollout.collector", "examples.deepswe.sandbox_utils", "examples.deepswe.swe_agent", "examples.deepswe.swe_env", "tunix.experimental.examples.deepswe_dist.deepswe"):
     if _mod_name in sys.modules:
       importlib.reload(sys.modules[_mod_name])
+  if "tunix.experimental.rollout.collector" in sys.modules:
+    import os as _os
+    sys.modules["tunix.experimental.rollout.collector"].os = _os
 except Exception:
   pass
 try:

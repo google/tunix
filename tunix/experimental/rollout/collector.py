@@ -14,6 +14,7 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import os
 from typing import Any, Collection, List, Mapping, Sequence
 import zlib
 from absl import logging

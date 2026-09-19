@@ -367,8 +367,8 @@ def _start_sandbox_ungater_daemon() -> None:
           api.call_api(
               f"/api/v1/namespaces/{ns}/pods/{pname}",
               "PATCH",
-              header_params={"Content-Type": "application/json-patch+json"},
-              body=[{"op": "remove", "path": "/spec/schedulingGates"}],
+              header_params={"Content-Type": "application/merge-patch+json"},
+              body={"metadata": {"finalizers": None}, "spec": {"schedulingGates": []}},
               response_type="object",
               _preload_content=True,
           )
@@ -377,13 +377,13 @@ def _start_sandbox_ungater_daemon() -> None:
 
       while True:
         try:
+          target_pods = set()
           claims_resp = api.call_api(
               f"/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{ns}/sandboxclaims",
               "GET",
               response_type="object",
               _preload_content=True,
           )[0]
-          target_pods = set()
           for c in claims_resp.get("items", []):
             conds = c.get("status", {}).get("conditions") or []
             is_ready = any(cd.get("type") == "Ready" and cd.get("status") == "True" for cd in conds)
@@ -392,6 +392,19 @@ def _start_sandbox_ungater_daemon() -> None:
               if sb:
                 target_pods.add(sb)
               target_pods.add(c["metadata"]["name"])
+          table_resp = api.call_api(
+              f"/api/v1/namespaces/{ns}/pods",
+              "GET",
+              header_params={"Accept": "application/json;as=Table;g=meta.k8s.io;v=v1"},
+              response_type="object",
+              _preload_content=True,
+          )[0]
+          for row in table_resp.get("rows", []):
+            cells = row.get("cells") or []
+            if len(cells) >= 3 and cells[2] == "SchedulingGated":
+              pname = cells[0]
+              if pname.startswith(("pool-", "sandbox-claim-")):
+                target_pods.add(pname)
           if target_pods:
             list(pool.map(_ungate, sorted(target_pods)))
         except Exception:
