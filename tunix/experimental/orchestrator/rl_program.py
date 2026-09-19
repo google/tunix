@@ -551,6 +551,21 @@ class StandardRLProgram(RLProgram):
         trainer_payloads = self.algo.create_trainer_payloads(
             group, rewards=rewards
         )
+        try:
+          _grp_pid = getattr(group[0], "prompt_id", "unknown") if group else "unknown"
+          _pass_cnt = sum(1 for r in rewards if r > 0.0)
+          logging.info(
+              "[CritiqueStage] Group %s (n=%d): reward_mean=%.4f, reward_std=%.4f, pass=%d/%d (%.1f%%)",
+              _grp_pid,
+              len(rewards),
+              float(np.mean(rewards)) if rewards else 0.0,
+              float(np.std(rewards)) if rewards else 0.0,
+              _pass_cnt,
+              len(rewards),
+              100.0 * _pass_cnt / max(len(rewards), 1),
+          )
+        except Exception:
+          pass
         for idx, payload in enumerate(trainer_payloads):
           reward_val = rewards[idx] if idx < len(rewards) else 0.0
           src_item = group[idx] if idx < len(group) else None
@@ -949,6 +964,12 @@ class StandardRLProgram(RLProgram):
               self.metrics_prefix, metric_key, val, self.mode, log_step
           )
 
+      try:
+        _all_m = {k: _extract_scalar(v) for k, v in {**weighted_metrics, **scalar_metrics}.items()}
+        logging.info("[StepMetrics step=%d] trainer_metrics=%s", log_step, _all_m)
+      except Exception:
+        pass
+
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
     # the shared helper; reduce each metric's per-microbatch values with the
@@ -1104,6 +1125,10 @@ class StandardRLProgram(RLProgram):
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
+        import os
+        if os.environ.get("ENABLE_ORBAX_CHECKPOINT", "0") != "1":
+          checkpoint_saved = True
+          return
         optimizer_step = self.step + 1
         if (
             isinstance(step_result, dict)
@@ -1220,21 +1245,9 @@ class StandardRLProgram(RLProgram):
         )
         break
 
-      if self.sync_weights:
-        new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
-        self.policy_version = (
-            new_version if new_version is not None else self.policy_version + 1
-        )
-
       # Before `commit()`, which will eventually take ownership of the groups.
       generation_metrics = _generation_metrics(uncommitted_groups)
       self.scored_q.commit(current_step, groups=uncommitted_groups)
-
-      assert (
-          self._dispatch_capacity is not None
-      ), "run_async must initialize capacity."
-      for _ in range(groups_consumed):
-        self._dispatch_capacity.release()
 
       step_time_sec = time.monotonic() - step_start_time
 
@@ -1258,18 +1271,6 @@ class StandardRLProgram(RLProgram):
           consumed_policy_version=consumed_policy_version,
       )
 
-      self.last_step_result = RLStepResult(
-          step=current_step,
-          policy_version=self.policy_version,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
-          reward_mean=metrics_summary["reward_mean"],
-          reward_std=metrics_summary["reward_std"],
-          advantage_mean=metrics_summary["advantage_mean"],
-          advantage_std=metrics_summary["advantage_std"],
-          train_result=step_result,
-      )
-
       loss_val = metrics_summary["loss_val"]
       perplexity_val = metrics_summary["perplexity_val"]
       grad_norm_val = metrics_summary["grad_norm_val"]
@@ -1285,6 +1286,30 @@ class StandardRLProgram(RLProgram):
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
         )
+
+      if self.sync_weights:
+        new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+        self.policy_version = (
+            new_version if new_version is not None else self.policy_version + 1
+        )
+
+      assert (
+          self._dispatch_capacity is not None
+      ), "run_async must initialize capacity."
+      for _ in range(groups_consumed):
+        self._dispatch_capacity.release()
+
+      self.last_step_result = RLStepResult(
+          step=current_step,
+          policy_version=self.policy_version,
+          num_rollouts=num_rollouts,
+          num_microbatches=num_microbatches,
+          reward_mean=metrics_summary["reward_mean"],
+          reward_std=metrics_summary["reward_std"],
+          advantage_mean=metrics_summary["advantage_mean"],
+          advantage_std=metrics_summary["advantage_std"],
+          train_result=step_result,
+      )
 
       if self.on_step_end:
         self.on_step_end(current_step, step_result)
