@@ -24,6 +24,7 @@ from concurrent import futures
 import contextlib
 import os
 import pickle
+import socket
 import time
 from typing import Any, Mapping
 
@@ -237,36 +238,42 @@ class ClusterOrchestrator:
       TimeoutError: If the required worker counts are not met within timeout.
     """
     start_time = time.monotonic()
-    if os.environ.get("AUTO_DISCOVER_K8S_WORKERS", "1") == "1":
-      for i in range(int(os.environ.get("NUM_ROLLOUT_WORKERS", "16"))):
-        wid = f"jfacevedo-roll-{i}"
-        if wid not in self._remote_worker_infos:
+    while True:
+      if os.environ.get("AUTO_DISCOVER_K8S_WORKERS", "1") == "1":
+        for i in range(int(os.environ.get("NUM_ROLLOUT_WORKERS", "16"))):
+          wid = f"jfacevedo-roll-{i}"
+          if wid not in self._remote_worker_infos:
+            host = f"jfacevedo-roll-{i}-proc-0-0.jfacevedo-roll-{i}"
+            try:
+              with socket.create_connection((host, 20001), timeout=1.5):
+                pass
+              self.register_worker_from_hostname(
+                  host,
+                  0,
+                  pickle.dumps({
+                      "service_type": "rollout",
+                      "service_port": 20001,
+                      "worker_id": wid,
+                  }),
+              )
+            except Exception:
+              pass
+        if "jfacevedo-train" not in self._remote_worker_infos:
+          host = "jfacevedo-train-proc-0-0.jfacevedo-train"
           try:
+            with socket.create_connection((host, 20002), timeout=1.5):
+              pass
             self.register_worker_from_hostname(
-                f"jfacevedo-roll-{i}-proc-0-0.jfacevedo-roll-{i}",
+                host,
                 0,
                 pickle.dumps({
-                    "service_type": "rollout",
-                    "service_port": 20001,
-                    "worker_id": wid,
+                    "service_type": "trainer",
+                    "service_port": 20002,
+                    "worker_id": "jfacevedo-train",
                 }),
             )
           except Exception:
             pass
-      if "jfacevedo-train" not in self._remote_worker_infos:
-        try:
-          self.register_worker_from_hostname(
-              "jfacevedo-train-proc-0-0.jfacevedo-train",
-              0,
-              pickle.dumps({
-                  "service_type": "trainer",
-                  "service_port": 20002,
-                  "worker_id": "jfacevedo-train",
-              }),
-          )
-        except Exception:
-          pass
-    while True:
       current_counts = {
           role: len(self.worker_handles(role)) for role in min_workers
       }
